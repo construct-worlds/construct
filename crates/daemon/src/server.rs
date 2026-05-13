@@ -4,10 +4,11 @@
 use crate::session::{BroadcastMsg, SessionManager};
 use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
-    ipc_method, ipc_notif, transport, CreateSessionParams, ErrorObject, Notification, PingResult,
-    Request, Response, SessionIdParams, SessionInputParams, SessionMoveParams,
-    SessionPtyInputParams, SessionPtyResizeParams, SessionSetPinnedParams, SessionSetTitleParams,
-    SubscribeParams, TranscriptParams, IPC_VERSION,
+    ipc_method, ipc_notif, transport, CreateSessionParams, ErrorObject, GroupCreateParams,
+    GroupCreateResult, GroupIdParams, GroupMoveParams, GroupRenameParams, GroupSetCollapsedParams,
+    Notification, PingResult, Request, Response, SessionIdParams, SessionInputParams,
+    SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams, SessionSetPinnedParams,
+    SessionSetTitleParams, SubscribeParams, TranscriptParams, IPC_VERSION,
 };
 use anyhow::Result;
 use serde_json::json;
@@ -151,6 +152,8 @@ async fn forward_broadcast(
             BroadcastMsg::Event(e) => e.session_id == *f,
             BroadcastMsg::State(s) => s.session.id == *f,
             BroadcastMsg::Deleted(d) => d.session_id == *f,
+            // Group notifications aren't session-specific; always forward.
+            BroadcastMsg::GroupState(_) | BroadcastMsg::GroupDeleted(_) => true,
         };
         if !matches {
             return;
@@ -177,6 +180,20 @@ async fn forward_broadcast(
                 Err(_) => return,
             };
             Notification::new(ipc_notif::DELETED, Some(p))
+        }
+        BroadcastMsg::GroupState(g) => {
+            let p = match serde_json::to_value(&g) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            Notification::new(ipc_notif::GROUP_STATE, Some(p))
+        }
+        BroadcastMsg::GroupDeleted(g) => {
+            let p = match serde_json::to_value(&g) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            Notification::new(ipc_notif::GROUP_DELETED, Some(p))
         }
     };
     let v = match serde_json::to_value(&notif) {
@@ -314,6 +331,42 @@ async fn dispatch(
         m if m == ipc_method::SESSION_MOVE => {
             let p = params!(SessionMoveParams);
             match manager.move_session(&p.session_id, p.direction).await {
+                Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
+                Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
+            }
+        }
+        m if m == ipc_method::GROUP_LIST => ok!(&manager.list_groups().await),
+        m if m == ipc_method::GROUP_CREATE => {
+            let p = params!(GroupCreateParams);
+            match manager.create_group(p.name).await {
+                Ok(gid) => ok!(&GroupCreateResult { group_id: gid }),
+                Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
+            }
+        }
+        m if m == ipc_method::GROUP_RENAME => {
+            let p = params!(GroupRenameParams);
+            match manager.rename_group(&p.group_id, p.name).await {
+                Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
+                Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
+            }
+        }
+        m if m == ipc_method::GROUP_DELETE => {
+            let p = params!(GroupIdParams);
+            match manager.delete_group(&p.group_id).await {
+                Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
+                Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
+            }
+        }
+        m if m == ipc_method::GROUP_SET_COLLAPSED => {
+            let p = params!(GroupSetCollapsedParams);
+            match manager.set_group_collapsed(&p.group_id, p.collapsed).await {
+                Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
+                Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
+            }
+        }
+        m if m == ipc_method::GROUP_MOVE => {
+            let p = params!(GroupMoveParams);
+            match manager.move_group(&p.group_id, p.direction).await {
                 Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
                 Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
             }

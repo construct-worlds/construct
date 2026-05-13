@@ -2,9 +2,10 @@
 
 use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
-    ipc_method, transport, CreateSessionParams, DiffResult, ErrorObject, HarnessInfo,
-    MoveDirection, Notification, PingResult, PtyReplayResult, Request, Response, SessionDetail,
-    SessionIdParams, SessionInputParams, SessionMoveParams, SessionPtyInputParams,
+    ipc_method, transport, CreateSessionParams, DiffResult, ErrorObject, GroupCreateParams,
+    GroupIdParams, GroupMoveParams, GroupRenameParams, GroupSetCollapsedParams, GroupSummary,
+    HarnessInfo, MoveDirection, Notification, PingResult, PtyReplayResult, Request, Response,
+    SessionDetail, SessionIdParams, SessionInputParams, SessionMoveParams, SessionPtyInputParams,
     SessionPtyResizeParams, SessionSetPinnedParams, SessionSetTitleParams, SessionSummary,
     SubscribeParams, TranscriptParams, TranscriptResult,
 };
@@ -256,6 +257,53 @@ impl Client {
                     session_id: id.to_string(),
                     direction,
                 },
+            )
+            .await?;
+        Ok(())
+    }
+    pub async fn list_groups(&self) -> Result<Vec<GroupSummary>> {
+        self.request(ipc_method::GROUP_LIST, &serde_json::Value::Null).await
+    }
+    pub async fn create_group(&self, name: &str) -> Result<String> {
+        #[derive(serde::Deserialize)]
+        struct R { group_id: String }
+        let r: R = self
+            .request(ipc_method::GROUP_CREATE, &GroupCreateParams { name: name.to_string() })
+            .await?;
+        Ok(r.group_id)
+    }
+    pub async fn rename_group(&self, id: &str, name: &str) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::GROUP_RENAME,
+                &GroupRenameParams { group_id: id.to_string(), name: name.to_string() },
+            )
+            .await?;
+        Ok(())
+    }
+    pub async fn delete_group(&self, id: &str) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::GROUP_DELETE,
+                &GroupIdParams { group_id: id.to_string() },
+            )
+            .await?;
+        Ok(())
+    }
+    pub async fn set_group_collapsed(&self, id: &str, collapsed: bool) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::GROUP_SET_COLLAPSED,
+                &GroupSetCollapsedParams { group_id: id.to_string(), collapsed },
+            )
+            .await?;
+        Ok(())
+    }
+    pub async fn move_group(&self, id: &str, direction: MoveDirection) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::GROUP_MOVE,
+                &GroupMoveParams { group_id: id.to_string(), direction },
             )
             .await?;
         Ok(())

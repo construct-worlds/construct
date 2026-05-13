@@ -6,7 +6,8 @@ use crate::storage::Storage;
 use crate::worktree;
 use agentd_protocol::{
     ahp_method, CreateSessionParams, DeletedNotificationPayload, EventNotificationPayload,
-    HarnessInfo, MessageRole, MoveDirection, PtyReplayResult, PtySize, SessionDetail, SessionEvent,
+    GroupDeletedNotificationPayload, GroupStateNotificationPayload, GroupSummary, HarnessInfo,
+    MessageRole, MoveDirection, PtyReplayResult, PtySize, SessionDetail, SessionEvent,
     SessionStartParams, SessionState, SessionSummary, StateNotificationPayload, TimestampedEvent,
     TranscriptResult,
 };
@@ -24,11 +25,48 @@ const ADAPTER_DRAIN_CAP: usize = 256;
 /// Per-session PTY history kept in memory for late-attach replay.
 const PTY_RING_CAP: usize = 256 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionEdge {
+    Top,
+    Bottom,
+}
+
+/// Returns the `group_id` of the region immediately above the given region
+/// in display order. `Some(None)` = ungrouped; `Some(Some(id))` = group N-1.
+/// `None` = there is nothing above (ungrouped is already at the top).
+fn region_above(region: Option<&str>, groups: &[GroupSummary]) -> Option<Option<String>> {
+    match region {
+        None => None,
+        Some(id) => {
+            let idx = groups.iter().position(|g| g.id == id)?;
+            if idx == 0 {
+                Some(None)
+            } else {
+                Some(Some(groups[idx - 1].id.clone()))
+            }
+        }
+    }
+}
+
+/// Returns the `group_id` of the region immediately below the given region
+/// in display order. `Some(Some(id))` = next group. `None` = nothing below.
+fn region_below(region: Option<&str>, groups: &[GroupSummary]) -> Option<Option<String>> {
+    match region {
+        None => groups.first().map(|g| Some(g.id.clone())),
+        Some(id) => {
+            let idx = groups.iter().position(|g| g.id == id)?;
+            groups.get(idx + 1).map(|g| Some(g.id.clone()))
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum BroadcastMsg {
     Event(EventNotificationPayload),
     State(StateNotificationPayload),
     Deleted(DeletedNotificationPayload),
+    GroupState(GroupStateNotificationPayload),
+    GroupDeleted(GroupDeletedNotificationPayload),
 }
 
 pub struct SessionEntry {
@@ -84,10 +122,21 @@ impl SessionEntry {
     }
 }
 
+pub struct GroupEntry {
+    summary: RwLock<GroupSummary>,
+}
+
+impl GroupEntry {
+    pub async fn summary(&self) -> GroupSummary {
+        self.summary.read().await.clone()
+    }
+}
+
 pub struct SessionManager {
     storage: Arc<Storage>,
     config: Arc<Config>,
     sessions: RwLock<HashMap<String, Arc<SessionEntry>>>,
+    groups: RwLock<HashMap<String, Arc<GroupEntry>>>,
     broadcast: broadcast::Sender<BroadcastMsg>,
 }
 
@@ -137,11 +186,28 @@ impl SessionManager {
             };
             sessions.insert(s.id.clone(), Arc::new(entry));
         }
+        // Load persisted groups.
+        let mut groups: HashMap<String, Arc<GroupEntry>> = HashMap::new();
+        match storage.load_groups() {
+            Ok(list) => {
+                for g in list {
+                    groups.insert(
+                        g.id.clone(),
+                        Arc::new(GroupEntry {
+                            summary: RwLock::new(g),
+                        }),
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(error = ?e, "load_groups failed"),
+        }
+
         let (broadcast, _) = broadcast::channel(BROADCAST_CAP);
         Ok(Self {
             storage,
             config,
             sessions: RwLock::new(sessions),
+            groups: RwLock::new(groups),
             broadcast,
         })
     }
@@ -289,6 +355,7 @@ impl SessionManager {
             pinned: false,
             // Negative timestamp so newer sessions sort to the top by default.
             position: -now.timestamp_millis(),
+            group_id: None,
         };
         self.storage.save_summary(&summary)?;
 
@@ -694,45 +761,73 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Swap the `position` of `id` with that of its neighbor in the sort
-    /// direction (up = the entry just above it in the list; down = the entry
-    /// just below). Persists both summaries and broadcasts state for both.
-    /// Returns Ok even if there is no neighbor in the requested direction
-    /// (no-op at the edges).
+    /// Move a session by one slot in the list view.
+    ///
+    /// Within a single region (ungrouped or one group), this swaps positions
+    /// with the neighbor. At a region boundary, the session either *enters*
+    /// the adjacent group or *exits* its current group:
+    ///
+    /// - Move-down past the bottom of a region → enter the next region as
+    ///   its first child (top of next group).
+    /// - Move-up past the top of a region → enter the previous region as
+    ///   its last child (bottom of previous group, or end of ungrouped).
+    ///
+    /// No-op at the absolute top (ungrouped session #0) or bottom (last
+    /// member of last group).
     pub async fn move_session(&self, id: &str, dir: MoveDirection) -> Result<()> {
-        let summaries = self.list().await; // already sorted
-        let idx = summaries
+        let all_sessions: Vec<SessionSummary> = self.list().await;
+        let all_groups: Vec<GroupSummary> = self.list_groups().await;
+        let me = all_sessions
             .iter()
-            .position(|s| s.id == id)
+            .find(|s| s.id == id)
+            .cloned()
             .ok_or_else(|| anyhow!("session not found: {}", id))?;
-        let neighbor_idx = match dir {
+
+        // Find neighbors in `me`'s region (same group_id), sorted by position.
+        let region: Vec<&SessionSummary> = all_sessions
+            .iter()
+            .filter(|s| s.group_id == me.group_id)
+            .collect();
+        let pos_in_region = region.iter().position(|s| s.id == id).unwrap();
+
+        match dir {
             MoveDirection::Up => {
-                if idx == 0 {
-                    return Ok(());
+                if pos_in_region > 0 {
+                    // Same-region swap.
+                    let other = region[pos_in_region - 1];
+                    return self.swap_session_positions(&me.id, &other.id).await;
                 }
-                idx - 1
+                // At top of region — try to exit into the previous region.
+                let prev = region_above(me.group_id.as_deref(), &all_groups);
+                let Some(prev_region) = prev else { return Ok(()); };
+                self.move_session_into_region(&me.id, &prev_region, RegionEdge::Bottom, &all_sessions)
+                    .await
             }
             MoveDirection::Down => {
-                if idx + 1 >= summaries.len() {
-                    return Ok(());
+                if pos_in_region + 1 < region.len() {
+                    let other = region[pos_in_region + 1];
+                    return self.swap_session_positions(&me.id, &other.id).await;
                 }
-                idx + 1
+                // At bottom of region — try to enter the next region.
+                let next = region_below(me.group_id.as_deref(), &all_groups);
+                let Some(next_region) = next else { return Ok(()); };
+                self.move_session_into_region(&me.id, &next_region, RegionEdge::Top, &all_sessions)
+                    .await
             }
-        };
-        let a_id = summaries[idx].id.clone();
-        let b_id = summaries[neighbor_idx].id.clone();
-        let a_pos = summaries[idx].position;
-        let b_pos = summaries[neighbor_idx].position;
+        }
+    }
 
+    async fn swap_session_positions(&self, a_id: &str, b_id: &str) -> Result<()> {
         let entry_a = self
-            .get_entry(&a_id)
+            .get_entry(a_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", a_id))?;
         let entry_b = self
-            .get_entry(&b_id)
+            .get_entry(b_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", b_id))?;
-
+        let a_pos = entry_a.summary.read().await.position;
+        let b_pos = entry_b.summary.read().await.position;
         let snap_a = {
             let mut s = entry_a.summary.write().await;
             s.position = b_pos;
@@ -750,6 +845,232 @@ impl SessionManager {
         ));
         let _ = self.broadcast.send(BroadcastMsg::State(
             StateNotificationPayload { session: snap_b },
+        ));
+        Ok(())
+    }
+
+    /// Re-tag a session into a new region (group_id) and set its position
+    /// so it lands at the top or bottom of that region.
+    async fn move_session_into_region(
+        &self,
+        session_id: &str,
+        new_group_id: &Option<String>,
+        edge: RegionEdge,
+        all_sessions: &[SessionSummary],
+    ) -> Result<()> {
+        // Pick a position that puts us at the requested edge of the region.
+        let region_positions: Vec<i64> = all_sessions
+            .iter()
+            .filter(|s| s.id != session_id && s.group_id == *new_group_id)
+            .map(|s| s.position)
+            .collect();
+        let new_pos = match edge {
+            RegionEdge::Top => {
+                let min = region_positions.iter().min().copied().unwrap_or(0);
+                min - 1
+            }
+            RegionEdge::Bottom => {
+                let max = region_positions.iter().max().copied().unwrap_or(0);
+                max + 1
+            }
+        };
+
+        let entry = self
+            .get_entry(session_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", session_id))?;
+        let snapshot = {
+            let mut s = entry.summary.write().await;
+            s.group_id = new_group_id.clone();
+            s.position = new_pos;
+            s.clone()
+        };
+        self.storage.save_summary(&snapshot)?;
+        let _ = self.broadcast.send(BroadcastMsg::State(
+            StateNotificationPayload { session: snapshot },
+        ));
+        Ok(())
+    }
+
+    // ----- Groups -----
+
+    pub async fn list_groups(&self) -> Vec<GroupSummary> {
+        let guard = self.groups.read().await;
+        let mut out = Vec::with_capacity(guard.len());
+        for entry in guard.values() {
+            out.push(entry.summary().await);
+        }
+        out.sort_by_key(|g| g.position);
+        out
+    }
+
+    pub async fn create_group(&self, name: String) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("group name is empty"));
+        }
+        let id = format!("g{}", uuid::Uuid::new_v4().simple());
+        let now = Utc::now();
+        let summary = GroupSummary {
+            id: id.clone(),
+            name: name.to_string(),
+            created_at: now,
+            position: -now.timestamp_millis(),
+            collapsed: false,
+        };
+        self.storage.save_group(&summary)?;
+        self.groups.write().await.insert(
+            id.clone(),
+            Arc::new(GroupEntry {
+                summary: RwLock::new(summary.clone()),
+            }),
+        );
+        let _ = self.broadcast.send(BroadcastMsg::GroupState(
+            GroupStateNotificationPayload { group: summary },
+        ));
+        Ok(id)
+    }
+
+    pub async fn rename_group(&self, id: &str, name: String) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("group name is empty"));
+        }
+        let entry = self
+            .groups
+            .read()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("group not found: {}", id))?;
+        let snapshot = {
+            let mut s = entry.summary.write().await;
+            s.name = name.to_string();
+            s.clone()
+        };
+        self.storage.save_group(&snapshot)?;
+        let _ = self.broadcast.send(BroadcastMsg::GroupState(
+            GroupStateNotificationPayload { group: snapshot },
+        ));
+        Ok(())
+    }
+
+    pub async fn set_group_collapsed(&self, id: &str, collapsed: bool) -> Result<()> {
+        let entry = self
+            .groups
+            .read()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("group not found: {}", id))?;
+        let snapshot = {
+            let mut s = entry.summary.write().await;
+            s.collapsed = collapsed;
+            s.clone()
+        };
+        self.storage.save_group(&snapshot)?;
+        let _ = self.broadcast.send(BroadcastMsg::GroupState(
+            GroupStateNotificationPayload { group: snapshot },
+        ));
+        Ok(())
+    }
+
+    /// Delete a group. Member sessions are orphaned (group_id set to None);
+    /// they survive the group deletion.
+    pub async fn delete_group(&self, id: &str) -> Result<()> {
+        let entry = self.groups.write().await.remove(id);
+        if entry.is_none() {
+            return Err(anyhow!("group not found: {}", id));
+        }
+        // Orphan members: scan sessions, anything with this group_id becomes None.
+        let session_ids: Vec<String> = self.sessions.read().await.keys().cloned().collect();
+        for sid in session_ids {
+            let Some(s_entry) = self.sessions.read().await.get(&sid).cloned() else {
+                continue;
+            };
+            let needs_update = {
+                let s = s_entry.summary.read().await;
+                s.group_id.as_deref() == Some(id)
+            };
+            if !needs_update {
+                continue;
+            }
+            let snapshot = {
+                let mut s = s_entry.summary.write().await;
+                s.group_id = None;
+                s.clone()
+            };
+            let _ = self.storage.save_summary(&snapshot);
+            let _ = self.broadcast.send(BroadcastMsg::State(
+                StateNotificationPayload { session: snapshot },
+            ));
+        }
+        let _ = self.storage.remove_group(id);
+        let _ = self.broadcast.send(BroadcastMsg::GroupDeleted(
+            GroupDeletedNotificationPayload {
+                group_id: id.to_string(),
+            },
+        ));
+        Ok(())
+    }
+
+    /// Swap a group's position with its neighbor in the requested direction.
+    /// No-op at the edges.
+    pub async fn move_group(&self, id: &str, dir: MoveDirection) -> Result<()> {
+        let groups = self.list_groups().await; // sorted by position
+        let idx = groups
+            .iter()
+            .position(|g| g.id == id)
+            .ok_or_else(|| anyhow!("group not found: {}", id))?;
+        let neighbor_idx = match dir {
+            MoveDirection::Up => {
+                if idx == 0 {
+                    return Ok(());
+                }
+                idx - 1
+            }
+            MoveDirection::Down => {
+                if idx + 1 >= groups.len() {
+                    return Ok(());
+                }
+                idx + 1
+            }
+        };
+        let a_id = groups[idx].id.clone();
+        let b_id = groups[neighbor_idx].id.clone();
+        let a_pos = groups[idx].position;
+        let b_pos = groups[neighbor_idx].position;
+        let entry_a = self
+            .groups
+            .read()
+            .await
+            .get(&a_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("group missing"))?;
+        let entry_b = self
+            .groups
+            .read()
+            .await
+            .get(&b_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("group missing"))?;
+        let snap_a = {
+            let mut s = entry_a.summary.write().await;
+            s.position = b_pos;
+            s.clone()
+        };
+        let snap_b = {
+            let mut s = entry_b.summary.write().await;
+            s.position = a_pos;
+            s.clone()
+        };
+        self.storage.save_group(&snap_a)?;
+        self.storage.save_group(&snap_b)?;
+        let _ = self.broadcast.send(BroadcastMsg::GroupState(
+            GroupStateNotificationPayload { group: snap_a },
+        ));
+        let _ = self.broadcast.send(BroadcastMsg::GroupState(
+            GroupStateNotificationPayload { group: snap_b },
         ));
         Ok(())
     }

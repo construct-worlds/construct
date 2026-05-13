@@ -9,7 +9,7 @@
 //!     worktree/          # optional git worktree
 //! ```
 
-use agentd_protocol::{SessionSummary, TimestampedEvent, TranscriptResult};
+use agentd_protocol::{GroupSummary, SessionSummary, TimestampedEvent, TranscriptResult};
 use anyhow::{Context, Result};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -22,7 +22,58 @@ impl Storage {
     pub fn new(data_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(data_dir.join("sessions"))
             .with_context(|| format!("create {}", data_dir.display()))?;
+        std::fs::create_dir_all(data_dir.join("groups"))
+            .with_context(|| format!("create {}", data_dir.join("groups").display()))?;
         Ok(Self { data_dir })
+    }
+
+    pub fn groups_root(&self) -> PathBuf {
+        self.data_dir.join("groups")
+    }
+
+    pub fn group_path(&self, id: &str) -> PathBuf {
+        self.groups_root().join(format!("{id}.json"))
+    }
+
+    pub fn save_group(&self, g: &GroupSummary) -> Result<()> {
+        std::fs::create_dir_all(self.groups_root())?;
+        let path = self.group_path(&g.id);
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_string_pretty(g)?;
+        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
+        Ok(())
+    }
+
+    pub fn load_groups(&self) -> Result<Vec<GroupSummary>> {
+        let mut out = Vec::new();
+        let root = self.groups_root();
+        if !root.exists() {
+            return Ok(out);
+        }
+        for entry in std::fs::read_dir(&root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            match std::fs::read(&path)
+                .and_then(|b| serde_json::from_slice::<GroupSummary>(&b).map_err(Into::into))
+            {
+                Ok(g) => out.push(g),
+                Err(e) => tracing::warn!(path = %path.display(), error = %e, "skip unreadable group"),
+            }
+        }
+        out.sort_by_key(|g| g.position);
+        Ok(out)
+    }
+
+    pub fn remove_group(&self, id: &str) -> Result<()> {
+        let p = self.group_path(id);
+        if p.exists() {
+            std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
+        }
+        Ok(())
     }
 
     pub fn sessions_root(&self) -> PathBuf {

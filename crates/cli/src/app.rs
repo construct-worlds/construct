@@ -4,8 +4,8 @@ use crate::client::Client;
 use crate::keymap::{self, ChordState, KeyAction, Keymap, KeymapResult, Profile};
 use crate::ui;
 use agentd_protocol::{
-    EventNotificationPayload, HarnessInfo, SessionEvent, SessionSummary, StateNotificationPayload,
-    TimestampedEvent,
+    EventNotificationPayload, GroupSummary, HarnessInfo, SessionEvent, SessionSummary,
+    StateNotificationPayload, TimestampedEvent,
 };
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -30,6 +30,42 @@ use std::time::{Duration, Instant};
 /// up to this many lines into history.
 pub const SCROLLBACK_MAX: usize = 5_000;
 
+/// A row in the rendered list view. Sessions and group headers share the
+/// list; key dispatch and selection are typed.
+#[derive(Debug, Clone)]
+pub enum ListItem {
+    Session { summary: SessionSummary, indented: bool },
+    GroupHeader { group: GroupSummary, member_count: usize },
+}
+
+impl ListItem {
+    pub fn matches(&self, sel: &Selection) -> bool {
+        match (self, sel) {
+            (ListItem::Session { summary, .. }, Selection::Session(id)) => summary.id == *id,
+            (ListItem::GroupHeader { group, .. }, Selection::Group(id)) => group.id == *id,
+            _ => false,
+        }
+    }
+}
+
+/// What's currently focused in the list pane.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Selection {
+    #[default]
+    None,
+    Session(String),
+    Group(String),
+}
+
+impl Selection {
+    pub fn session_id(&self) -> Option<&str> {
+        if let Self::Session(id) = self { Some(id) } else { None }
+    }
+    pub fn group_id(&self) -> Option<&str> {
+        if let Self::Group(id) = self { Some(id) } else { None }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneFocus {
     List,
@@ -49,8 +85,13 @@ pub enum ViewMode {
 pub enum MinibufferIntent {
     SendInput { session_id: String },
     NewSessionHarness,
+    /// Second stage of the new-session wizard when the user typed `group`:
+    /// asks for the group's name.
+    NewGroupName,
     DeleteConfirm { session_id: String },
     Rename { session_id: String },
+    GroupDeleteConfirm { group_id: String },
+    GroupRename { group_id: String },
     CommandPalette,
 }
 
@@ -68,7 +109,8 @@ pub struct Minibuffer {
 pub struct App {
     pub client: Arc<Client>,
     pub sessions: Vec<SessionSummary>,
-    pub selected: usize,
+    pub groups: Vec<GroupSummary>,
+    pub selection: Selection,
     pub focus: PaneFocus,
     pub transcript: Vec<TimestampedEvent>,
     pub transcript_session: Option<String>,
@@ -105,12 +147,18 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
 
     // Initial fetches.
     let sessions = client.list().await.unwrap_or_default();
+    let groups = client.list_groups().await.unwrap_or_default();
     let harnesses = client.harnesses().await.unwrap_or_default();
+    let initial_sel = sessions
+        .first()
+        .map(|s| Selection::Session(s.id.clone()))
+        .unwrap_or(Selection::None);
 
     let mut app = App {
         client: client.clone(),
         sessions,
-        selected: 0,
+        groups,
+        selection: initial_sel,
         // Start focused on the list so navigation keys (Up/Down, C-n/C-p)
         // work immediately on first launch. User reaches the view with
         // `C-x o` or `Tab`.
@@ -229,11 +277,67 @@ impl App {
     }
 
     pub fn selected_session(&self) -> Option<&SessionSummary> {
-        self.sessions.get(self.selected)
+        let id = self.selection.session_id()?;
+        self.sessions.iter().find(|s| s.id == id)
+    }
+
+    pub fn selected_group(&self) -> Option<&GroupSummary> {
+        let id = self.selection.group_id()?;
+        self.groups.iter().find(|g| g.id == id)
     }
 
     pub fn selected_id(&self) -> Option<String> {
         self.selected_session().map(|s| s.id.clone())
+    }
+
+    /// Materialize the rendered list: ungrouped sessions (sorted by
+    /// position) on top, then groups in position order with each group's
+    /// members indented underneath (skipped entirely when the group is
+    /// collapsed).
+    pub fn list_items(&self) -> Vec<ListItem> {
+        let mut out: Vec<ListItem> = Vec::new();
+
+        let mut ungrouped: Vec<&SessionSummary> = self
+            .sessions
+            .iter()
+            .filter(|s| s.group_id.is_none())
+            .collect();
+        ungrouped.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
+        for s in ungrouped {
+            out.push(ListItem::Session { summary: s.clone(), indented: false });
+        }
+
+        let mut groups: Vec<&GroupSummary> = self.groups.iter().collect();
+        groups.sort_by_key(|g| g.position);
+        for g in groups {
+            let mut members: Vec<&SessionSummary> = self
+                .sessions
+                .iter()
+                .filter(|s| s.group_id.as_deref() == Some(g.id.as_str()))
+                .collect();
+            members.sort_by_key(|s| s.position);
+            out.push(ListItem::GroupHeader {
+                group: g.clone(),
+                member_count: members.len(),
+            });
+            if !g.collapsed {
+                for s in members {
+                    out.push(ListItem::Session { summary: s.clone(), indented: true });
+                }
+            }
+        }
+        out
+    }
+
+    /// Find the index of the currently-selected item in the materialized
+    /// list. Returns `None` if there is no selection or the item went away.
+    pub fn selected_list_index(&self) -> Option<usize> {
+        let items = self.list_items();
+        items.iter().position(|it| it.matches(&self.selection))
     }
 
     async fn refresh_selected_transcript(&mut self) {
@@ -308,60 +412,127 @@ impl App {
         let _ = self.client.pty_resize(id, cols, rows).await;
     }
 
+    async fn toggle_pin_on_selection(&mut self) {
+        match self.selection.clone() {
+            Selection::Session(id) => {
+                let s = match self.sessions.iter().find(|s| s.id == id) {
+                    Some(s) => s.clone(),
+                    None => return,
+                };
+                let want = !s.pinned;
+                if let Err(e) = self.client.set_pinned(&id, want).await {
+                    self.set_status(format!("set_pinned failed: {e}"));
+                    return;
+                }
+                if let Some(i) = self.sessions.iter().position(|x| x.id == id) {
+                    self.sessions[i].pinned = want;
+                }
+                if want && s.has_pty {
+                    self.bootstrap_terminal(&id).await;
+                }
+                self.set_status(if want { "pinned" } else { "unpinned" }.into());
+            }
+            Selection::Group(group_id) => {
+                let members: Vec<SessionSummary> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| s.group_id.as_deref() == Some(group_id.as_str()))
+                    .cloned()
+                    .collect();
+                if members.is_empty() {
+                    self.set_status("group has no members".into());
+                    return;
+                }
+                let all_pinned = members.iter().all(|s| s.pinned);
+                let want = !all_pinned;
+                for s in &members {
+                    if s.pinned == want {
+                        continue;
+                    }
+                    if let Err(e) = self.client.set_pinned(&s.id, want).await {
+                        self.set_status(format!("set_pinned {}: {}", short_id(&s.id), e));
+                    }
+                }
+                self.set_status(
+                    if want {
+                        format!("pinned {} member(s)", members.len())
+                    } else {
+                        format!("unpinned {} member(s)", members.len())
+                    },
+                );
+            }
+            Selection::None => {
+                self.set_status("nothing selected".into());
+            }
+        }
+    }
+
     async fn move_selected(&mut self, up: bool) {
-        let Some(idx) = (if self.sessions.is_empty() {
-            None
-        } else {
-            Some(self.selected.min(self.sessions.len() - 1))
-        }) else {
-            return;
-        };
-        let neighbor_idx = if up {
-            if idx == 0 {
-                self.set_status("already at top".into());
-                return;
-            }
-            idx - 1
-        } else {
-            if idx + 1 >= self.sessions.len() {
-                self.set_status("already at bottom".into());
-                return;
-            }
-            idx + 1
-        };
-        let id = self.sessions[idx].id.clone();
         let dir = if up {
             agentd_protocol::MoveDirection::Up
         } else {
             agentd_protocol::MoveDirection::Down
         };
-        match self.client.move_session(&id, dir).await {
-            Ok(()) => {
-                // Optimistically swap rows so the cursor follows the moved
-                // session immediately. The daemon's state broadcast will
-                // reconcile the position fields on the swapped summaries.
-                self.sessions.swap(idx, neighbor_idx);
-                self.selected = neighbor_idx;
+        match self.selection.clone() {
+            Selection::Session(id) => {
+                if let Err(e) = self.client.move_session(&id, dir).await {
+                    self.set_status(format!("move failed: {e}"));
+                }
+                // Daemon broadcasts will reconcile positions/groups.
             }
-            Err(e) => self.set_status(format!("move failed: {e}")),
+            Selection::Group(id) => {
+                if let Err(e) = self.client.move_group(&id, dir).await {
+                    self.set_status(format!("move failed: {e}"));
+                }
+            }
+            Selection::None => self.set_status("nothing selected".into()),
         }
     }
 
     async fn refresh_sessions(&mut self) {
         match self.client.list().await {
-            Ok(list) => {
-                let prev_id = self.selected_id();
-                self.sessions = list;
-                if let Some(pid) = prev_id {
-                    if let Some(i) = self.sessions.iter().position(|s| s.id == pid) {
-                        self.selected = i;
-                    } else if self.selected >= self.sessions.len() {
-                        self.selected = self.sessions.len().saturating_sub(1);
-                    }
-                }
-            }
+            Ok(list) => self.sessions = list,
             Err(e) => self.set_status(format!("list failed: {e}")),
         }
+        match self.client.list_groups().await {
+            Ok(list) => self.groups = list,
+            Err(e) => self.set_status(format!("group list failed: {e}")),
+        }
+        self.ensure_selection_valid();
+    }
+
+    /// Move the selection up or down by one row in the materialized list,
+    /// wrapping at the ends. No-op if the list is empty.
+    async fn step_selection(&mut self, delta: i32) {
+        let items = self.list_items();
+        if items.is_empty() {
+            return;
+        }
+        let cur = items
+            .iter()
+            .position(|it| it.matches(&self.selection))
+            .unwrap_or(0);
+        let n = items.len() as i32;
+        let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
+        self.selection = match &items[next] {
+            ListItem::Session { summary, .. } => Selection::Session(summary.id.clone()),
+            ListItem::GroupHeader { group, .. } => Selection::Group(group.id.clone()),
+        };
+        self.refresh_selected_transcript().await;
+    }
+
+    /// After any list mutation, make sure `self.selection` still refers to
+    /// an item we know about. Fall back to the first list item if not.
+    fn ensure_selection_valid(&mut self) {
+        let items = self.list_items();
+        if items.iter().any(|it| it.matches(&self.selection)) {
+            return;
+        }
+        self.selection = match items.first() {
+            Some(ListItem::Session { summary, .. }) => Selection::Session(summary.id.clone()),
+            Some(ListItem::GroupHeader { group, .. }) => Selection::Group(group.id.clone()),
+            None => Selection::None,
+        };
     }
 
     async fn on_notification(&mut self, n: agentd_protocol::Notification) {
@@ -433,29 +604,56 @@ impl App {
                     }
                 }
             }
+            m if m == agentd_protocol::ipc_notif::GROUP_STATE => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        agentd_protocol::GroupStateNotificationPayload,
+                    >(p)
+                    {
+                        self.on_group_state(payload.group).await;
+                    }
+                }
+            }
+            m if m == agentd_protocol::ipc_notif::GROUP_DELETED => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        agentd_protocol::GroupDeletedNotificationPayload,
+                    >(p)
+                    {
+                        self.on_group_deleted(&payload.group_id).await;
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     async fn on_session_deleted(&mut self, id: &str) {
-        // Drop from list.
         if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
             self.sessions.remove(i);
-            // Keep `selected` in range.
-            if self.selected >= self.sessions.len() && !self.sessions.is_empty() {
-                self.selected = self.sessions.len() - 1;
-            } else if self.sessions.is_empty() {
-                self.selected = 0;
-            }
         }
-        // Drop cached transcript / terminal state for this session.
         if self.transcript_session.as_deref() == Some(id) {
             self.transcript.clear();
             self.transcript_session = None;
         }
         self.terminals.remove(id);
-        // Refresh the right pane for whatever's now selected.
+        self.ensure_selection_valid();
         self.refresh_selected_transcript().await;
+    }
+
+    async fn on_group_state(&mut self, g: GroupSummary) {
+        if let Some(i) = self.groups.iter().position(|x| x.id == g.id) {
+            self.groups[i] = g;
+        } else {
+            self.groups.push(g);
+            self.groups.sort_by_key(|g| g.position);
+        }
+        self.ensure_selection_valid();
+    }
+
+    async fn on_group_deleted(&mut self, id: &str) {
+        self.groups.retain(|g| g.id != id);
+        self.ensure_selection_valid();
     }
 
     async fn on_term_event(&mut self, ev: CtEvent) {
@@ -591,22 +789,8 @@ impl App {
         use KeyAction::*;
         match action {
             Quit => self.should_quit = true,
-            NextSession => {
-                if !self.sessions.is_empty() {
-                    self.selected = (self.selected + 1) % self.sessions.len();
-                    self.refresh_selected_transcript().await;
-                }
-            }
-            PrevSession => {
-                if !self.sessions.is_empty() {
-                    if self.selected == 0 {
-                        self.selected = self.sessions.len() - 1;
-                    } else {
-                        self.selected -= 1;
-                    }
-                    self.refresh_selected_transcript().await;
-                }
-            }
+            NextSession => self.step_selection(1).await,
+            PrevSession => self.step_selection(-1).await,
             Refresh => {
                 self.refresh_sessions().await;
                 self.transcript_session = None;
@@ -629,13 +813,16 @@ impl App {
                 if self.harnesses.is_empty() {
                     self.harnesses = self.client.harnesses().await.unwrap_or_default();
                 }
-                let hint = self
+                let mut names: Vec<&str> = self
                     .harnesses
                     .iter()
                     .filter(|h| h.available)
                     .map(|h| h.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("|");
+                    .collect();
+                // `group` is a synthetic option that creates a group instead
+                // of a session — surfaced in the same wizard for discovery.
+                names.push("group");
+                let hint = names.join("|");
                 self.minibuffer = Some(Minibuffer {
                     prompt: format!("Harness [{hint}] (Tab completes): "),
                     input: String::new(),
@@ -644,24 +831,39 @@ impl App {
                     error: None,
                 });
             }
-            OpenRename => {
-                let Some(s) = self.selected_session() else {
-                    self.set_status("no session selected".into());
-                    return;
-                };
-                let id = s.id.clone();
-                let current = s.title.clone().unwrap_or_default();
-                let cursor = current.chars().count();
-                self.minibuffer = Some(Minibuffer {
-                    prompt: format!("Rename {} to: ", short_id(&id)),
-                    input: current,
-                    cursor,
-                    intent: MinibufferIntent::Rename { session_id: id },
-                    error: None,
-                });
-            }
-            OpenDeleteConfirm => {
-                if let Some(id) = self.selected_id() {
+            OpenRename => match self.selection.clone() {
+                Selection::Session(id) => {
+                    let Some(s) = self.sessions.iter().find(|s| s.id == id) else {
+                        return;
+                    };
+                    let current = s.title.clone().unwrap_or_default();
+                    let cursor = current.chars().count();
+                    self.minibuffer = Some(Minibuffer {
+                        prompt: format!("Rename {} to: ", short_id(&id)),
+                        input: current,
+                        cursor,
+                        intent: MinibufferIntent::Rename { session_id: id },
+                        error: None,
+                    });
+                }
+                Selection::Group(id) => {
+                    let Some(g) = self.groups.iter().find(|g| g.id == id) else {
+                        return;
+                    };
+                    let current = g.name.clone();
+                    let cursor = current.chars().count();
+                    self.minibuffer = Some(Minibuffer {
+                        prompt: "Rename group to: ".to_string(),
+                        input: current,
+                        cursor,
+                        intent: MinibufferIntent::GroupRename { group_id: id },
+                        error: None,
+                    });
+                }
+                Selection::None => self.set_status("nothing selected".into()),
+            },
+            OpenDeleteConfirm => match self.selection.clone() {
+                Selection::Session(id) => {
                     self.minibuffer = Some(Minibuffer {
                         prompt: format!(
                             "Delete {} (kill if running, drop transcript + worktree)? (y/N): ",
@@ -673,7 +875,26 @@ impl App {
                         error: None,
                     });
                 }
-            }
+                Selection::Group(id) => {
+                    let name = self
+                        .groups
+                        .iter()
+                        .find(|g| g.id == id)
+                        .map(|g| g.name.clone())
+                        .unwrap_or_default();
+                    self.minibuffer = Some(Minibuffer {
+                        prompt: format!(
+                            "Delete group '{}' (members will be orphaned)? (y/N): ",
+                            name
+                        ),
+                        input: String::new(),
+                        cursor: 0,
+                        intent: MinibufferIntent::GroupDeleteConfirm { group_id: id },
+                        error: None,
+                    });
+                }
+                Selection::None => {}
+            },
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
                     match self.client.diff(&id).await {
@@ -754,40 +975,22 @@ impl App {
             MoveSelectedUp => self.move_selected(true).await,
             MoveSelectedDown => self.move_selected(false).await,
             TogglePin => {
-                let Some(s) = self.selected_session() else {
-                    self.set_status("no session selected".into());
-                    return;
-                };
-                let id = s.id.clone();
-                let was_pinned = s.pinned;
-                let want = !was_pinned;
-                match self.client.set_pinned(&id, want).await {
-                    Ok(()) => {
-                        // Optimistically update the local list so the UI
-                        // reflects the change immediately; the daemon's
-                        // State broadcast will reconcile.
-                        if let Some(i) =
-                            self.sessions.iter().position(|s| s.id == id)
-                        {
-                            self.sessions[i].pinned = want;
-                        }
-                        // Bootstrap a parser for the pinned session so the
-                        // tail starts rendering before the next event.
-                        if want
-                            && self
-                                .sessions
-                                .iter()
-                                .find(|s| s.id == id)
-                                .map(|s| s.has_pty)
-                                .unwrap_or(false)
-                        {
-                            self.bootstrap_terminal(&id).await;
-                        }
-                        self.set_status(
-                            if want { "pinned" } else { "unpinned" }.into(),
-                        );
+                self.toggle_pin_on_selection().await;
+            }
+            ExpandGroup => {
+                if let Some(g) = self.selected_group() {
+                    let id = g.id.clone();
+                    if let Err(e) = self.client.set_group_collapsed(&id, false).await {
+                        self.set_status(format!("expand failed: {e}"));
                     }
-                    Err(e) => self.set_status(format!("set_pinned failed: {e}")),
+                }
+            }
+            CollapseGroup => {
+                if let Some(g) = self.selected_group() {
+                    let id = g.id.clone();
+                    if let Err(e) = self.client.set_group_collapsed(&id, true).await {
+                        self.set_status(format!("collapse failed: {e}"));
+                    }
                 }
             }
             ScrollUp => {
@@ -832,11 +1035,14 @@ impl App {
             Some(MinibufferIntent::NewSessionHarness)
         );
         let available_harnesses: Vec<String> = if is_new_harness {
-            self.harnesses
+            let mut v: Vec<String> = self
+                .harnesses
                 .iter()
                 .filter(|h| h.available)
                 .map(|h| h.name.clone())
-                .collect()
+                .collect();
+            v.push("group".to_string());
+            v
         } else {
             Vec::new()
         };
@@ -955,6 +1161,18 @@ impl App {
                 if harness.is_empty() {
                     return;
                 }
+                // 'group' is a synthetic option in the harness picker that
+                // redirects to the group-create flow.
+                if harness == "group" {
+                    self.minibuffer = Some(Minibuffer {
+                        prompt: "Group name: ".to_string(),
+                        input: String::new(),
+                        cursor: 0,
+                        intent: MinibufferIntent::NewGroupName,
+                        error: None,
+                    });
+                    return;
+                }
                 let cwd = std::env::current_dir()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| ".".to_string());
@@ -977,15 +1195,55 @@ impl App {
                     Ok(id) => {
                         self.set_status(format!("created {}", short_id(&id)));
                         self.refresh_sessions().await;
-                        if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
-                            self.selected = i;
-                            self.refresh_selected_transcript().await;
-                            // Drop focus into the new session's pane so the
-                            // user can start typing immediately.
-                            self.focus = PaneFocus::View;
-                        }
+                        self.selection = Selection::Session(id);
+                        self.refresh_selected_transcript().await;
+                        self.focus = PaneFocus::View;
                     }
                     Err(e) => self.set_status(format!("create failed: {e}")),
+                }
+            }
+            MinibufferIntent::GroupDeleteConfirm { group_id } => {
+                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                if !yes {
+                    self.set_status("group delete cancelled".to_string());
+                    return;
+                }
+                match self.client.delete_group(&group_id).await {
+                    Ok(()) => self.set_status("group deleted".into()),
+                    Err(e) => self.set_status(format!("group delete failed: {e}")),
+                }
+            }
+            MinibufferIntent::GroupRename { group_id } => {
+                let trimmed = input.trim().to_string();
+                if trimmed.is_empty() {
+                    self.set_status("group rename cancelled (empty)".into());
+                    return;
+                }
+                match self.client.rename_group(&group_id, &trimmed).await {
+                    Ok(()) => {
+                        if let Some(g) =
+                            self.groups.iter_mut().find(|g| g.id == group_id)
+                        {
+                            g.name = trimmed.clone();
+                        }
+                        self.set_status(format!("renamed group → {trimmed}"));
+                    }
+                    Err(e) => self.set_status(format!("group rename failed: {e}")),
+                }
+            }
+            MinibufferIntent::NewGroupName => {
+                let trimmed = input.trim().to_string();
+                if trimmed.is_empty() {
+                    self.set_status("group name empty".into());
+                    return;
+                }
+                match self.client.create_group(&trimmed).await {
+                    Ok(id) => {
+                        self.set_status(format!("created group '{trimmed}'"));
+                        self.refresh_sessions().await; // also refreshes groups
+                        self.selection = Selection::Group(id);
+                    }
+                    Err(e) => self.set_status(format!("group create failed: {e}")),
                 }
             }
             MinibufferIntent::Rename { session_id } => {

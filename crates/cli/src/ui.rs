@@ -1,6 +1,6 @@
 //! Ratatui rendering for the TUI.
 
-use crate::app::{App, PaneFocus, ViewMode};
+use crate::app::{App, ListItem as AppListItem, PaneFocus, Selection, ViewMode};
 use agentd_protocol::{MessageRole, SessionEvent, SessionState, TimestampedEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -136,31 +136,60 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(pane_border_style(focused))
         .title(" sessions ");
-    let items: Vec<ListItem> = app
-        .sessions
+
+    let app_items = app.list_items();
+    let mut selected_idx: Option<usize> = None;
+    let items: Vec<ListItem> = app_items
         .iter()
-        .map(|s| {
-            let glyph = s.state.glyph();
-            let pin_glyph = if s.pinned { "*" } else { " " };
-            let label = primary_label(s);
-            let secondary = s.last_prompt.clone().unwrap_or_default();
-            let secondary = shorten(&secondary, 32);
-            let line = Line::from(vec![
-                Span::styled(
-                    pin_glyph.to_string(),
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::styled(format!(" {} ", glyph), state_style(s.state)),
-                Span::styled(label, Style::default().fg(Color::White)),
-                Span::raw("  "),
-                Span::styled(
-                    format!("{:<7}", s.harness),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::raw(" "),
-                Span::styled(secondary, Style::default().fg(Color::Gray)),
-            ]);
-            ListItem::new(line)
+        .enumerate()
+        .map(|(i, item)| {
+            if item.matches(&app.selection) {
+                selected_idx = Some(i);
+            }
+            match item {
+                AppListItem::Session { summary: s, indented } => {
+                    let pin_glyph = if s.pinned { "*" } else { " " };
+                    let indent_prefix = if *indented { "  " } else { "" };
+                    let secondary = s.last_prompt.clone().unwrap_or_default();
+                    let secondary = shorten(&secondary, 28);
+                    ListItem::new(Line::from(vec![
+                        Span::raw(indent_prefix.to_string()),
+                        Span::styled(
+                            pin_glyph.to_string(),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::styled(format!(" {} ", s.state.glyph()), state_style(s.state)),
+                        Span::styled(primary_label(s), Style::default().fg(Color::White)),
+                        Span::raw("  "),
+                        Span::styled(
+                            format!("{:<7}", s.harness),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(secondary, Style::default().fg(Color::Gray)),
+                    ]))
+                }
+                AppListItem::GroupHeader { group, member_count } => {
+                    let glyph = if group.collapsed { "▶" } else { "▼" };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{glyph} "),
+                            Style::default().fg(Color::Magenta),
+                        ),
+                        Span::styled(
+                            group.name.clone(),
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("  "),
+                        Span::styled(
+                            format!("({member_count})"),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]))
+                }
+            }
         })
         .collect();
 
@@ -175,10 +204,10 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &App) {
             .fg(Color::White)
     };
     let mut state = ListState::default();
-    state.select(if app.sessions.is_empty() {
+    state.select(if matches!(app.selection, Selection::None) {
         None
     } else {
-        Some(app.selected.min(app.sessions.len() - 1))
+        selected_idx
     });
     let list = List::new(items).block(block).highlight_style(highlight_style);
     f.render_stateful_widget(list, area, &mut state);
@@ -198,15 +227,16 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let summary = app.selected_session();
-    let title_inner = match summary {
-        Some(s) => format!(
+    let title_inner = match (summary, app.selected_group()) {
+        (Some(s), _) => format!(
             " {} {}  {}  {} ",
             s.state.glyph(),
             primary_label(s),
             s.harness,
             s.state.label()
         ),
-        None => " no session ".to_string(),
+        (None, Some(g)) => format!(" group: {} ", g.name),
+        (None, None) => " no session ".to_string(),
     };
     let view_label = match app.view {
         ViewMode::Terminal => "[terminal]",
@@ -220,10 +250,59 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    if let Some(g) = app.selected_group() {
+        render_group_overview(f, inner, app, g);
+        return;
+    }
     match app.view {
         ViewMode::Terminal => render_terminal(f, inner, app),
         ViewMode::Transcript => render_transcript(f, inner, app),
     }
+}
+
+fn render_group_overview(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    group: &agentd_protocol::GroupSummary,
+) {
+    let members: Vec<&agentd_protocol::SessionSummary> = app
+        .sessions
+        .iter()
+        .filter(|s| s.group_id.as_deref() == Some(group.id.as_str()))
+        .collect();
+    let mut lines: Vec<Line> = Vec::with_capacity(members.len() + 3);
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("Group: {}", group.name),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(format!(
+        "  {} member(s){}",
+        members.len(),
+        if group.collapsed { ", collapsed" } else { "" }
+    )));
+    lines.push(Line::from(""));
+    if members.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (empty — move sessions into this group)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for s in &members {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", s.state.glyph()), state_style(s.state)),
+                Span::raw(primary_label(s)),
+                Span::raw("  "),
+                Span::styled(s.harness.clone(), Style::default().fg(Color::Cyan)),
+            ]));
+        }
+    }
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(para, area);
 }
 
 fn render_terminal(f: &mut Frame, area: Rect, app: &App) {

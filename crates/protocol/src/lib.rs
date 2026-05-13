@@ -307,6 +307,12 @@ pub mod ipc_method {
     pub const SESSION_SET_PINNED: &str = "session.set_pinned";
     pub const SESSION_SET_TITLE: &str = "session.set_title";
     pub const SESSION_MOVE: &str = "session.move";
+    pub const GROUP_LIST: &str = "group.list";
+    pub const GROUP_CREATE: &str = "group.create";
+    pub const GROUP_RENAME: &str = "group.rename";
+    pub const GROUP_DELETE: &str = "group.delete";
+    pub const GROUP_SET_COLLAPSED: &str = "group.set_collapsed";
+    pub const GROUP_MOVE: &str = "group.move";
     pub const SESSION_DIFF: &str = "session.diff";
     pub const SESSION_TRANSCRIPT: &str = "session.transcript";
     pub const SUBSCRIBE_EVENTS: &str = "subscribe.events";
@@ -317,6 +323,8 @@ pub mod ipc_notif {
     pub const EVENT: &str = "session/event";
     pub const STATE: &str = "session/state";
     pub const DELETED: &str = "session/deleted";
+    pub const GROUP_STATE: &str = "group/state";
+    pub const GROUP_DELETED: &str = "group/deleted";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,8 +377,14 @@ pub struct SessionSummary {
     /// Sort key for the list view. Sessions are ordered by `position`
     /// ascending; the daemon assigns `-created_at_ms` at creation so newer
     /// sessions appear at the top, and reorder operations swap the values.
+    /// For a grouped session this is the position *within* its group.
     #[serde(default)]
     pub position: i64,
+    /// Group membership. `None` = ungrouped (rendered at the top of the
+    /// list); `Some(id)` = belongs to that group (rendered indented under
+    /// the group's header, below the ungrouped region).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,6 +509,67 @@ pub struct StateNotificationPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeletedNotificationPayload {
     pub session_id: String,
+}
+
+/// A user-created group used to organize sessions in the list view.
+/// Sessions can belong to at most one group; ungrouped sessions render at
+/// the top of the list, groups render below them in `position` order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupSummary {
+    pub id: String,
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Sort key among groups (smaller = nearer the top of the groups
+    /// region). Groups never sort above ungrouped sessions.
+    #[serde(default)]
+    pub position: i64,
+    /// When true, the group's members are hidden from the list view —
+    /// only the header is shown. Toggled by `Space` in the TUI.
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupCreateParams {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupCreateResult {
+    pub group_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupIdParams {
+    pub group_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupRenameParams {
+    pub group_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupSetCollapsedParams {
+    pub group_id: String,
+    pub collapsed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMoveParams {
+    pub group_id: String,
+    pub direction: MoveDirection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupStateNotificationPayload {
+    pub group: GroupSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupDeletedNotificationPayload {
+    pub group_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -27,8 +27,14 @@ pub enum KeyAction {
     SwitchFocus,
     ToggleView,
     /// Pin / unpin the currently-selected session so it stays in the pin
-    /// strip below the main view.
+    /// strip below the main view. On a group selection: pin or unpin all
+    /// members at once (binary toggle: if all are pinned, unpin all;
+    /// otherwise pin all).
     TogglePin,
+    /// Right arrow on a group selection → expand it.
+    ExpandGroup,
+    /// Left arrow on a group selection → collapse it.
+    CollapseGroup,
     /// Reorder: move the selected session up one slot in the list.
     MoveSelectedUp,
     /// Reorder: move the selected session down one slot in the list.
@@ -184,9 +190,12 @@ fn emacs() -> Keymap {
         // Refresh moved to the command palette (M-x refresh) — it's rarely
         // needed since the daemon pushes state changes automatically.
         (Chord(vec![ctrl('x'), ch('r')]), OpenRename),
-        // Pin / unpin selected session
+        // Pin / unpin selected session (or all members of a selected group)
         (Chord(vec![ctrl('x'), ch('p')]), TogglePin),
         (Chord(vec![ch(' ')]), TogglePin),
+        // Expand / collapse on a group selection
+        (Chord(vec![key(KeyCode::Right)]), ExpandGroup),
+        (Chord(vec![key(KeyCode::Left)]), CollapseGroup),
         // Reorder selected session in the list. macOS Terminal.app doesn't
         // pass Shift through with arrow keys, so the C-x-prefixed bindings
         // are the reliable path — Shift+arrow stays as an alias for
@@ -234,6 +243,8 @@ fn vim() -> Keymap {
         (Chord(vec![ch('z')]), ToggleZoom),
         (Chord(vec![ch(' ')]), TogglePin),
         (Chord(vec![ch('p')]), TogglePin),
+        (Chord(vec![key(KeyCode::Right)]), ExpandGroup),
+        (Chord(vec![key(KeyCode::Left)]), CollapseGroup),
         // Reorder selected session in the list. Shift-K/J already taken
         // (Shift-K = delete confirm), so we use Shift+arrows in vim too,
         // with C-x-prefixed Meta-free fallback for terminals that strip
