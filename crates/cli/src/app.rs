@@ -448,11 +448,18 @@ impl App {
     }
 
     /// True when keystrokes should be forwarded to the session's PTY by
-    /// default (view focused, terminal mode, session has a PTY).
+    /// default (view focused, terminal mode, session has a *live* PTY).
+    /// Once the session reaches a terminal state the PTY is gone, so the
+    /// view turns read-only and keys fall back to the regular keymap.
     fn is_pty_captured(&self) -> bool {
+        let live = self
+            .selected_session()
+            .map(|s| !s.state.is_terminal())
+            .unwrap_or(false);
         self.focus == PaneFocus::View
             && self.view == ViewMode::Terminal
             && self.in_pty_session()
+            && live
     }
 
     async fn run_action(&mut self, action: KeyAction) {
