@@ -71,8 +71,9 @@ pub async fn run_session(spec: PtySpec, ctx: AdapterContext) -> i32 {
     let child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
         Err(e) => {
+            let io_err = std::io::Error::other(e.to_string());
             emit.emit(SessionEvent::Error {
-                message: format!("spawn {}: {e}", spec.bin),
+                message: super::missing_bin_hint(&spec.bin, &io_err),
             });
             emit.emit(SessionEvent::Done { exit_code: 127 });
             return 127;

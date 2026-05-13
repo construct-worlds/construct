@@ -96,13 +96,10 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     env.push(("AGENTD_SESSION_ID".into(), ctx.session_id.clone()));
-    // Spawn through the user's login shell so PATH includes nvm-managed
-    // npm-installed binaries (`codex` under nvm is the motivating case).
     let label = bin.clone();
-    let (spawn_bin, spawn_args) = agentd_protocol::adapter::login_shell_wrap(bin, args);
     let spec = PtySpec {
-        bin: spawn_bin,
-        args: spawn_args,
+        bin,
+        args,
         cwd: std::path::PathBuf::from(&params.cwd),
         env,
         size: params.pty_size.unwrap_or(PtySize { cols: 100, rows: 30 }),
@@ -160,8 +157,6 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
             detail: None,
         });
 
-        // Build codex args first, then wrap through a login shell so
-        // nvm-managed installs are reachable.
         let mut child_args: Vec<String> = Vec::new();
         child_args.push("exec".into());
         if let (Some(flag), Some(sid)) = (resume_flag.as_ref(), codex_session_id.as_ref()) {
@@ -176,10 +171,8 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
             child_args.push(a.clone());
         }
         child_args.push(user_text.clone());
-        let (spawn_bin, spawn_args) =
-            agentd_protocol::adapter::login_shell_wrap(bin.clone(), child_args);
-        let mut command = Command::new(&spawn_bin);
-        for a in &spawn_args {
+        let mut command = Command::new(&bin);
+        for a in &child_args {
             command.arg(a);
         }
         command
@@ -196,7 +189,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
             Ok(c) => c,
             Err(e) => {
                 emit.emit(SessionEvent::Error {
-                    message: format!("spawn {bin}: {e}"),
+                    message: agentd_protocol::adapter::missing_bin_hint(&bin, &e),
                 });
                 break 127;
             }
