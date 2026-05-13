@@ -261,6 +261,45 @@ impl App {
         let _ = self.client.pty_resize(id, cols, rows).await;
     }
 
+    async fn move_selected(&mut self, up: bool) {
+        let Some(idx) = (if self.sessions.is_empty() {
+            None
+        } else {
+            Some(self.selected.min(self.sessions.len() - 1))
+        }) else {
+            return;
+        };
+        let neighbor_idx = if up {
+            if idx == 0 {
+                self.set_status("already at top".into());
+                return;
+            }
+            idx - 1
+        } else {
+            if idx + 1 >= self.sessions.len() {
+                self.set_status("already at bottom".into());
+                return;
+            }
+            idx + 1
+        };
+        let id = self.sessions[idx].id.clone();
+        let dir = if up {
+            agentd_protocol::MoveDirection::Up
+        } else {
+            agentd_protocol::MoveDirection::Down
+        };
+        match self.client.move_session(&id, dir).await {
+            Ok(()) => {
+                // Optimistically swap rows so the cursor follows the moved
+                // session immediately. The daemon's state broadcast will
+                // reconcile the position fields on the swapped summaries.
+                self.sessions.swap(idx, neighbor_idx);
+                self.selected = neighbor_idx;
+            }
+            Err(e) => self.set_status(format!("move failed: {e}")),
+        }
+    }
+
     async fn refresh_sessions(&mut self) {
         match self.client.list().await {
             Ok(list) => {
@@ -594,6 +633,8 @@ impl App {
                     _ => ViewMode::Transcript,
                 };
             }
+            MoveSelectedUp => self.move_selected(true).await,
+            MoveSelectedDown => self.move_selected(false).await,
             TogglePin => {
                 let Some(s) = self.selected_session() else {
                     self.set_status("no session selected".into());

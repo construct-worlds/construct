@@ -305,6 +305,7 @@ pub mod ipc_method {
     pub const SESSION_KILL: &str = "session.kill";
     pub const SESSION_DELETE: &str = "session.delete";
     pub const SESSION_SET_PINNED: &str = "session.set_pinned";
+    pub const SESSION_MOVE: &str = "session.move";
     pub const SESSION_DIFF: &str = "session.diff";
     pub const SESSION_TRANSCRIPT: &str = "session.transcript";
     pub const SUBSCRIBE_EVENTS: &str = "subscribe.events";
@@ -364,6 +365,24 @@ pub struct SessionSummary {
     /// the TUI's pin strip, regardless of which session is currently selected?
     #[serde(default)]
     pub pinned: bool,
+    /// Sort key for the list view. Sessions are ordered by `position`
+    /// ascending; the daemon assigns `-created_at_ms` at creation so newer
+    /// sessions appear at the top, and reorder operations swap the values.
+    #[serde(default)]
+    pub position: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMoveParams {
+    pub session_id: String,
+    pub direction: MoveDirection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

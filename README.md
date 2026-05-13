@@ -117,6 +117,7 @@ default — `C-x` is the escape prefix back to agentd commands.
 | `?` | toggle help |
 | `C-x C-c` / `q` | quit |
 | `Space` / `C-x p` | toggle pin on selected session (live tail tile in the pin strip below the main view) |
+| `Shift-↑` / `Shift-↓` | reorder: move selected session up / down in the list |
 
 **In PTY-captured mode** (view focused on a PTY session), all keys pass
 through to the child *except* `C-x`, which starts a chord. So everything in

@@ -6,7 +6,7 @@ use crate::storage::Storage;
 use crate::worktree;
 use agentd_protocol::{
     ahp_method, CreateSessionParams, DeletedNotificationPayload, EventNotificationPayload,
-    HarnessInfo, MessageRole, PtyReplayResult, PtySize, SessionDetail, SessionEvent,
+    HarnessInfo, MessageRole, MoveDirection, PtyReplayResult, PtySize, SessionDetail, SessionEvent,
     SessionStartParams, SessionState, SessionSummary, StateNotificationPayload, TimestampedEvent,
     TranscriptResult,
 };
@@ -166,7 +166,12 @@ impl SessionManager {
         for entry in guard.values() {
             out.push(entry.summary().await);
         }
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        // Primary: user-controlled position ASC. Tiebreaker: newer first.
+        out.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
         out
     }
 
@@ -274,6 +279,8 @@ impl SessionManager {
             has_pty: false,
             mode: params.mode.clone(),
             pinned: false,
+            // Negative timestamp so newer sessions sort to the top by default.
+            position: -now.timestamp_millis(),
         };
         self.storage.save_summary(&summary)?;
 
@@ -668,6 +675,66 @@ impl SessionManager {
             .send(BroadcastMsg::Deleted(DeletedNotificationPayload {
                 session_id: id.to_string(),
             }));
+        Ok(())
+    }
+
+    /// Swap the `position` of `id` with that of its neighbor in the sort
+    /// direction (up = the entry just above it in the list; down = the entry
+    /// just below). Persists both summaries and broadcasts state for both.
+    /// Returns Ok even if there is no neighbor in the requested direction
+    /// (no-op at the edges).
+    pub async fn move_session(&self, id: &str, dir: MoveDirection) -> Result<()> {
+        let summaries = self.list().await; // already sorted
+        let idx = summaries
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or_else(|| anyhow!("session not found: {}", id))?;
+        let neighbor_idx = match dir {
+            MoveDirection::Up => {
+                if idx == 0 {
+                    return Ok(());
+                }
+                idx - 1
+            }
+            MoveDirection::Down => {
+                if idx + 1 >= summaries.len() {
+                    return Ok(());
+                }
+                idx + 1
+            }
+        };
+        let a_id = summaries[idx].id.clone();
+        let b_id = summaries[neighbor_idx].id.clone();
+        let a_pos = summaries[idx].position;
+        let b_pos = summaries[neighbor_idx].position;
+
+        let entry_a = self
+            .get_entry(&a_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", a_id))?;
+        let entry_b = self
+            .get_entry(&b_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", b_id))?;
+
+        let snap_a = {
+            let mut s = entry_a.summary.write().await;
+            s.position = b_pos;
+            s.clone()
+        };
+        let snap_b = {
+            let mut s = entry_b.summary.write().await;
+            s.position = a_pos;
+            s.clone()
+        };
+        self.storage.save_summary(&snap_a)?;
+        self.storage.save_summary(&snap_b)?;
+        let _ = self.broadcast.send(BroadcastMsg::State(
+            StateNotificationPayload { session: snap_a },
+        ));
+        let _ = self.broadcast.send(BroadcastMsg::State(
+            StateNotificationPayload { session: snap_b },
+        ));
         Ok(())
     }
 

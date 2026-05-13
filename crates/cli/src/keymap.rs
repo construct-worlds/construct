@@ -23,6 +23,10 @@ pub enum KeyAction {
     /// Pin / unpin the currently-selected session so it stays in the pin
     /// strip below the main view.
     TogglePin,
+    /// Reorder: move the selected session up one slot in the list.
+    MoveSelectedUp,
+    /// Reorder: move the selected session down one slot in the list.
+    MoveSelectedDown,
     ScrollUp,
     ScrollDown,
     ScrollPageUp,
@@ -138,6 +142,9 @@ fn ch(c: char) -> KeyEvent {
 fn shift(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
 }
+fn shift_key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::SHIFT)
+}
 
 pub fn default_for(profile: Profile) -> Keymap {
     match profile {
@@ -170,6 +177,9 @@ fn emacs() -> Keymap {
         // Pin / unpin selected session
         (Chord(vec![ctrl('x'), ch('p')]), TogglePin),
         (Chord(vec![ch(' ')]), TogglePin),
+        // Reorder selected session in the list
+        (Chord(vec![shift_key(KeyCode::Up)]), MoveSelectedUp),
+        (Chord(vec![shift_key(KeyCode::Down)]), MoveSelectedDown),
         // Interrupt the running adapter (emacs comint convention)
         (Chord(vec![ctrl('c'), ctrl('c')]), Interrupt),
         // Command palette — `M-x` is the canonical emacs binding; `C-x x` is
@@ -207,6 +217,10 @@ fn vim() -> Keymap {
         (Chord(vec![ch('v')]), ToggleView),
         (Chord(vec![ch(' ')]), TogglePin),
         (Chord(vec![ch('p')]), TogglePin),
+        // Reorder selected session in the list. Shift-K/J are already taken
+        // (Shift-K = delete confirm), so we use Shift+arrows in vim too.
+        (Chord(vec![shift_key(KeyCode::Up)]), MoveSelectedUp),
+        (Chord(vec![shift_key(KeyCode::Down)]), MoveSelectedDown),
         (Chord(vec![ch(':')]), OpenCommandPalette),
         (Chord(vec![key(KeyCode::Tab)]), SwitchFocus),
         // PTY-mode escape: C-x is the universal prefix here too, so `C-x o`

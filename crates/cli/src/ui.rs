@@ -321,6 +321,10 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
   pinning (live tile in the pin strip below the main view)
     Space / C-x p   toggle pin on selected session
 
+  reorder list
+    Shift-up        move selected session up
+    Shift-down      move selected session down
+
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
     ?               toggle this help
