@@ -34,11 +34,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let right_area = cols[1];
 
     // Split the right area into main + pin strip if any sessions are pinned.
+    // Walk the materialized list so the pin strip's order matches what the
+    // user sees in the left list (including groups and within-group order).
     let pinned_ids: Vec<String> = app
-        .sessions
-        .iter()
-        .filter(|s| s.pinned)
-        .map(|s| s.id.clone())
+        .list_items()
+        .into_iter()
+        .filter_map(|it| match it {
+            AppListItem::Session { summary, .. } if summary.pinned => Some(summary.id),
+            _ => None,
+        })
         .collect();
     let (detail_area, pin_strip_area) = if pinned_ids.is_empty() {
         (right_area, None)
