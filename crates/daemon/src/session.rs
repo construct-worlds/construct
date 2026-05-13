@@ -119,12 +119,20 @@ impl SessionManager {
             } else {
                 0
             };
+            // Rehydrate the in-memory PTY ring from the on-disk tail so
+            // scrollback survives daemon restarts.
+            let mut pty_state = PtyState::default();
+            match storage.read_pty_tail(&s.id, PTY_RING_CAP) {
+                Ok(bytes) if !bytes.is_empty() => pty_state.push(&bytes),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(id = %s.id, error = ?e, "pty_log tail read failed"),
+            }
             let entry = SessionEntry {
                 id: s.id.clone(),
                 summary: RwLock::new(s.clone()),
                 transcript_count: AtomicU64::new(count),
                 adapter: tokio::sync::Mutex::new(None),
-                pty: tokio::sync::Mutex::new(PtyState::default()),
+                pty: tokio::sync::Mutex::new(pty_state),
                 deleted: AtomicBool::new(false),
             };
             sessions.insert(s.id.clone(), Arc::new(entry));
@@ -420,11 +428,19 @@ impl SessionManager {
         if entry.is_deleted() {
             return;
         }
-        // PTY events take a fast path: they go to the in-memory ring + a live
-        // broadcast, but they don't bloat the structured transcript.
+        // PTY events take a fast path: they go to the in-memory ring +
+        // append to the on-disk pty.log + a live broadcast, but they don't
+        // bloat the structured transcript.
         if let SessionEvent::Pty { .. } = &event {
             if let Some(bytes) = event.pty_bytes() {
                 entry.pty.lock().await.push(&bytes);
+                if let Err(e) = self.storage.append_pty_bytes(&entry.id, &bytes) {
+                    tracing::warn!(
+                        session = %entry.id,
+                        error = ?e,
+                        "pty_log append failed",
+                    );
+                }
             }
             let now = Utc::now();
             // Latest seq for ordering only; not persisted.

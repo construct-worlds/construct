@@ -41,6 +41,10 @@ impl Storage {
         self.session_dir(id).join("transcript.jsonl")
     }
 
+    pub fn pty_log_path(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("pty.log")
+    }
+
     pub fn worktree_path(&self, id: &str) -> PathBuf {
         self.session_dir(id).join("worktree")
     }
@@ -149,6 +153,48 @@ impl Storage {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// Append raw PTY bytes to the session's `pty.log`. Best-effort; this
+    /// gets called on every Pty event so it has to stay cheap. Append-only,
+    /// no rotation — operators can truncate / rotate externally if needed.
+    pub fn append_pty_bytes(&self, id: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.ensure_session_dir(id)?;
+        use std::io::Write;
+        let path = self.pty_log_path(id);
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        f.write_all(bytes)?;
+        Ok(())
+    }
+
+    /// Read the last `max_bytes` of the session's `pty.log`. Returns an
+    /// empty buffer if the file doesn't exist. Used to rehydrate the
+    /// in-memory ring buffer on daemon startup so scrollback survives
+    /// restarts.
+    pub fn read_pty_tail(&self, id: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        let path = self.pty_log_path(id);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let mut f = std::fs::File::open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        let len = f.metadata()?.len() as usize;
+        let offset = len.saturating_sub(max_bytes);
+        if offset > 0 {
+            use std::io::Seek;
+            f.seek(std::io::SeekFrom::Start(offset as u64))?;
+        }
+        use std::io::Read;
+        let mut buf = Vec::with_capacity(len - offset);
+        f.read_to_end(&mut buf)?;
+        Ok(buf)
     }
 
     /// Remove the entire session directory (meta + transcript + worktree).
