@@ -177,7 +177,12 @@ fn emacs() -> Keymap {
         // Pin / unpin selected session
         (Chord(vec![ctrl('x'), ch('p')]), TogglePin),
         (Chord(vec![ch(' ')]), TogglePin),
-        // Reorder selected session in the list
+        // Reorder selected session in the list. macOS Terminal.app doesn't
+        // pass Shift through with arrow keys, so the C-x-prefixed bindings
+        // are the reliable path — Shift+arrow stays as an alias for
+        // terminals that *do* forward the modifier (iTerm2, WezTerm, etc).
+        (Chord(vec![ctrl('x'), ctrl('p')]), MoveSelectedUp),
+        (Chord(vec![ctrl('x'), ctrl('n')]), MoveSelectedDown),
         (Chord(vec![shift_key(KeyCode::Up)]), MoveSelectedUp),
         (Chord(vec![shift_key(KeyCode::Down)]), MoveSelectedDown),
         // Interrupt the running adapter (emacs comint convention)
@@ -217,8 +222,12 @@ fn vim() -> Keymap {
         (Chord(vec![ch('v')]), ToggleView),
         (Chord(vec![ch(' ')]), TogglePin),
         (Chord(vec![ch('p')]), TogglePin),
-        // Reorder selected session in the list. Shift-K/J are already taken
-        // (Shift-K = delete confirm), so we use Shift+arrows in vim too.
+        // Reorder selected session in the list. Shift-K/J already taken
+        // (Shift-K = delete confirm), so we use Shift+arrows in vim too,
+        // with C-x-prefixed Meta-free fallback for terminals that strip
+        // the Shift modifier from arrow keys (macOS Terminal.app default).
+        (Chord(vec![ctrl('x'), ctrl('p')]), MoveSelectedUp),
+        (Chord(vec![ctrl('x'), ctrl('n')]), MoveSelectedDown),
         (Chord(vec![shift_key(KeyCode::Up)]), MoveSelectedUp),
         (Chord(vec![shift_key(KeyCode::Down)]), MoveSelectedDown),
         (Chord(vec![ch(':')]), OpenCommandPalette),

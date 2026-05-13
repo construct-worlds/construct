@@ -117,7 +117,8 @@ default — `C-x` is the escape prefix back to agentd commands.
 | `?` | toggle help |
 | `C-x C-c` / `q` | quit |
 | `Space` / `C-x p` | toggle pin on selected session (live tail tile in the pin strip below the main view) |
-| `Shift-↑` / `Shift-↓` | reorder: move selected session up / down in the list |
+| `C-x C-p` / `C-x C-n` | reorder: move selected session up / down in the list (Meta-free; works in every terminal) |
+| `Shift-↑` / `Shift-↓` | same, in terminals that forward Shift with arrows (iTerm2, WezTerm, Alacritty, Kitty — **not** macOS Terminal.app default) |
 
 **In PTY-captured mode** (view focused on a PTY session), all keys pass
 through to the child *except* `C-x`, which starts a chord. So everything in

@@ -322,8 +322,10 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
     Space / C-x p   toggle pin on selected session
 
   reorder list
-    Shift-up        move selected session up
-    Shift-down      move selected session down
+    C-x C-p         move selected session up   (Meta-free, works everywhere)
+    C-x C-n         move selected session down
+    Shift-up/down   same, in terminals that pass Shift to arrows
+                    (iTerm2/WezTerm/Alacritty yes; macOS Terminal.app no)
 
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
