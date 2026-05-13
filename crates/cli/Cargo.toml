@@ -1,0 +1,29 @@
+[package]
+name = "agentd-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "agent: TUI client for agentd"
+
+[[bin]]
+name = "agent"
+path = "src/main.rs"
+
+[dependencies]
+agentd-protocol = { workspace = true }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ratatui.workspace = true
+crossterm = { workspace = true, features = ["event-stream"] }
+clap.workspace = true
+chrono.workspace = true
+futures.workspace = true
+unicode-width.workspace = true

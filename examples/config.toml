@@ -1,0 +1,28 @@
+# Example agentd config.
+#
+# Drop this at $AGENTD_CONFIG_DIR/config.toml (default
+# ~/.config/agentd/config.toml). All adapter entries here are optional —
+# `shell`, `claude`, and `codex` are registered automatically. Override the
+# binary path when the adapter binary is not on $PATH and not next to the
+# `agentd` binary.
+
+# [adapters.shell]
+# binary = "agentd-adapter-shell"
+# description = "Generic shell command runner"
+
+# [adapters.claude]
+# binary = "/opt/agentd/agentd-adapter-claude"
+# description = "Claude Code"
+
+# Add a custom adapter — just point to any binary that speaks the AHP
+# protocol. See `crates/protocol/src/adapter.rs` for the SDK helper.
+#
+# [adapters.aider]
+# binary = "agentd-adapter-aider"
+# description = "Aider (community adapter)"
+
+[defaults]
+# When true, every new session whose cwd is a git repo gets its own
+# `git worktree add`-style isolated copy. Override per-session with
+# `agent new ... --worktree`.
+worktree = false

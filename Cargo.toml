@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/daemon",
+    "crates/cli",
+    "crates/adapter-shell",
+    "crates/adapter-claude",
+    "crates/adapter-codex",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["agentd contributors"]
+repository = "https://github.com/Leemoonsoo/agentd"
+description = "Cross-harness agent fleet TUI and daemon"
+rust-version = "1.75"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4", features = ["derive"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+directories = "5"
+toml = "0.8"
+nix = { version = "0.29", features = ["signal", "process"] }
+which = "6"
+futures = "0.3"
+unicode-width = "0.2"
+
+agentd-protocol = { path = "crates/protocol" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

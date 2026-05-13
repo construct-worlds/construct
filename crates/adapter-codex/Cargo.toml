@@ -1,0 +1,20 @@
+[package]
+name = "agentd-adapter-codex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "OpenAI Codex adapter for agentd (wraps the `codex` CLI)"
+
+[[bin]]
+name = "agentd-adapter-codex"
+path = "src/main.rs"
+
+[dependencies]
+agentd-protocol = { workspace = true }
+tokio.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

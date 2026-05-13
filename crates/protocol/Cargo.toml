@@ -1,0 +1,21 @@
+[package]
+name = "agentd-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Wire protocol types for agentd: AHP (daemon-adapter) and IPC (client-daemon)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }

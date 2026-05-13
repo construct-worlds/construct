@@ -1,0 +1,31 @@
+[package]
+name = "agentd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "agentd daemon: supervises agent sessions across harnesses"
+
+[[bin]]
+name = "agentd"
+path = "src/main.rs"
+
+[dependencies]
+agentd-protocol = { workspace = true }
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+toml.workspace = true
+nix.workspace = true
+which.workspace = true
+futures.workspace = true

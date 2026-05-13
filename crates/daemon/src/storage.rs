@@ -1,0 +1,153 @@
+//! File-based session storage.
+//!
+//! Layout under the data dir:
+//!
+//! ```text
+//! sessions/<id>/
+//!     meta.json          # SessionSummary (JSON)
+//!     transcript.jsonl   # one TimestampedEvent per line
+//!     worktree/          # optional git worktree
+//! ```
+
+use agentd_protocol::{SessionSummary, TimestampedEvent, TranscriptResult};
+use anyhow::{Context, Result};
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
+
+pub struct Storage {
+    data_dir: PathBuf,
+}
+
+impl Storage {
+    pub fn new(data_dir: PathBuf) -> Result<Self> {
+        std::fs::create_dir_all(data_dir.join("sessions"))
+            .with_context(|| format!("create {}", data_dir.display()))?;
+        Ok(Self { data_dir })
+    }
+
+    pub fn sessions_root(&self) -> PathBuf {
+        self.data_dir.join("sessions")
+    }
+
+    pub fn session_dir(&self, id: &str) -> PathBuf {
+        self.sessions_root().join(id)
+    }
+
+    pub fn meta_path(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("meta.json")
+    }
+
+    pub fn transcript_path(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("transcript.jsonl")
+    }
+
+    pub fn worktree_path(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("worktree")
+    }
+
+    pub fn ensure_session_dir(&self, id: &str) -> Result<()> {
+        let dir = self.session_dir(id);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create {}", dir.display()))
+    }
+
+    pub fn save_summary(&self, s: &SessionSummary) -> Result<()> {
+        self.ensure_session_dir(&s.id)?;
+        let path = self.meta_path(&s.id);
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_string_pretty(s)?;
+        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
+        Ok(())
+    }
+
+    pub fn load_summary(&self, id: &str) -> Result<SessionSummary> {
+        let path = self.meta_path(id);
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let s: SessionSummary = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse {}", path.display()))?;
+        Ok(s)
+    }
+
+    pub fn list_summaries(&self) -> Result<Vec<SessionSummary>> {
+        let mut out = Vec::new();
+        let root = self.sessions_root();
+        if !root.exists() {
+            return Ok(out);
+        }
+        for entry in std::fs::read_dir(&root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            match self.load_summary(&id) {
+                Ok(s) => out.push(s),
+                Err(e) => tracing::warn!(%id, error = ?e, "skipping unreadable session"),
+            }
+        }
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(out)
+    }
+
+    pub fn append_event(&self, id: &str, ev: &TimestampedEvent) -> Result<()> {
+        self.ensure_session_dir(id)?;
+        let path = self.transcript_path(id);
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        let line = serde_json::to_string(ev)?;
+        f.write_all(line.as_bytes())?;
+        f.write_all(b"\n")?;
+        Ok(())
+    }
+
+    pub fn read_transcript(
+        &self,
+        id: &str,
+        from: u64,
+        limit: Option<usize>,
+    ) -> Result<TranscriptResult> {
+        let path = self.transcript_path(id);
+        if !path.exists() {
+            return Ok(TranscriptResult {
+                events: Vec::new(),
+                total: 0,
+            });
+        }
+        let f = std::fs::File::open(&path)?;
+        let reader = std::io::BufReader::new(f);
+        let mut events: Vec<TimestampedEvent> = Vec::new();
+        let mut total: u64 = 0;
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            total += 1;
+            let ev: TimestampedEvent = match serde_json::from_str(&line) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(%id, error = %e, "skip bad transcript line");
+                    continue;
+                }
+            };
+            if ev.seq < from {
+                continue;
+            }
+            events.push(ev);
+            if let Some(lim) = limit {
+                if events.len() >= lim {
+                    break;
+                }
+            }
+        }
+        Ok(TranscriptResult { events, total })
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+}
