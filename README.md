@@ -107,7 +107,7 @@ default — `C-x` is the escape prefix back to agentd commands.
 | `C-p` / `↑` | prev session |
 | `C-x C-f` | new session (wizard) |
 | `C-x i` | send input to selected session |
-| `C-x k` | kill selected session (confirms) |
+| `C-x k` | delete selected session (confirms; kills if running, drops transcript + worktree) |
 | `C-x d` | show diff |
 | `C-x r` | refresh |
 | `C-c C-c` | interrupt |

@@ -53,11 +53,17 @@ pub async fn create_worktree(
     Ok(worktree_dir.to_path_buf())
 }
 
-/// Remove a worktree that was created with [`create_worktree`].
-pub async fn remove_worktree(repo_dir: &Path, worktree_dir: &Path) -> Result<()> {
-    let _ = Command::new("git")
+/// Remove a worktree that was created with [`create_worktree`]. Tries
+/// `git worktree remove` first (so the linked repo's worktree registry is
+/// kept clean); falls back to a plain recursive delete if git can't help.
+/// Idempotent: missing directory is not an error.
+pub async fn remove_worktree(worktree_dir: &Path) -> Result<()> {
+    if !worktree_dir.exists() {
+        return Ok(());
+    }
+    let attempted = Command::new("git")
         .arg("-C")
-        .arg(repo_dir)
+        .arg(worktree_dir)
         .arg("worktree")
         .arg("remove")
         .arg("--force")
@@ -67,6 +73,17 @@ pub async fn remove_worktree(repo_dir: &Path, worktree_dir: &Path) -> Result<()>
         .stderr(Stdio::null())
         .status()
         .await;
+    if matches!(&attempted, Ok(s) if s.success()) && !worktree_dir.exists() {
+        return Ok(());
+    }
+    // Fallback — git refused (e.g. the worktree drifted, the linked repo is
+    // gone, etc.). Drop the directory directly. The linked repo will still
+    // know about a stale worktree entry; users can `git worktree prune` later.
+    if worktree_dir.exists() {
+        tokio::fs::remove_dir_all(worktree_dir)
+            .await
+            .context("remove_dir_all worktree")?;
+    }
     Ok(())
 }
 

@@ -149,6 +149,7 @@ async fn forward_broadcast(
         let matches = match &msg {
             BroadcastMsg::Event(e) => e.session_id == *f,
             BroadcastMsg::State(s) => s.session.id == *f,
+            BroadcastMsg::Deleted(d) => d.session_id == *f,
         };
         if !matches {
             return;
@@ -168,6 +169,13 @@ async fn forward_broadcast(
                 Err(_) => return,
             };
             Notification::new(ipc_notif::STATE, Some(p))
+        }
+        BroadcastMsg::Deleted(d) => {
+            let p = match serde_json::to_value(&d) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            Notification::new(ipc_notif::DELETED, Some(p))
         }
     };
     let v = match serde_json::to_value(&notif) {
@@ -277,6 +285,13 @@ async fn dispatch(
         m if m == ipc_method::SESSION_KILL => {
             let p = params!(SessionIdParams);
             match manager.kill(&p.session_id).await {
+                Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
+                Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
+            }
+        }
+        m if m == ipc_method::SESSION_DELETE => {
+            let p = params!(SessionIdParams);
+            match manager.delete(&p.session_id).await {
                 Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
                 Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
             }

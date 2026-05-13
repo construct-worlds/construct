@@ -43,7 +43,7 @@ pub enum MinibufferIntent {
     SendInput { session_id: String },
     NewSessionHarness,
     NewSessionPrompt { harness: String, cwd: String },
-    KillConfirm { session_id: String },
+    DeleteConfirm { session_id: String },
     CommandPalette,
 }
 
@@ -321,8 +321,39 @@ impl App {
                     }
                 }
             }
+            m if m == agentd_protocol::ipc_notif::DELETED => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        agentd_protocol::DeletedNotificationPayload,
+                    >(p)
+                    {
+                        self.on_session_deleted(&payload.session_id).await;
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    async fn on_session_deleted(&mut self, id: &str) {
+        // Drop from list.
+        if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
+            self.sessions.remove(i);
+            // Keep `selected` in range.
+            if self.selected >= self.sessions.len() && !self.sessions.is_empty() {
+                self.selected = self.sessions.len() - 1;
+            } else if self.sessions.is_empty() {
+                self.selected = 0;
+            }
+        }
+        // Drop cached transcript / terminal state for this session.
+        if self.transcript_session.as_deref() == Some(id) {
+            self.transcript.clear();
+            self.transcript_session = None;
+        }
+        self.terminals.remove(id);
+        // Refresh the right pane for whatever's now selected.
+        self.refresh_selected_transcript().await;
     }
 
     async fn on_term_event(&mut self, ev: CtEvent) {
@@ -477,13 +508,16 @@ impl App {
                     intent: MinibufferIntent::NewSessionHarness,
                 });
             }
-            OpenKillConfirm => {
+            OpenDeleteConfirm => {
                 if let Some(id) = self.selected_id() {
                     self.minibuffer = Some(Minibuffer {
-                        prompt: format!("Kill {}? (y/N): ", short_id(&id)),
+                        prompt: format!(
+                            "Delete {} (kill if running, drop transcript + worktree)? (y/N): ",
+                            short_id(&id)
+                        ),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::KillConfirm { session_id: id },
+                        intent: MinibufferIntent::DeleteConfirm { session_id: id },
                     });
                 }
             }
@@ -675,15 +709,15 @@ impl App {
                     Err(e) => self.set_status(format!("create failed: {e}")),
                 }
             }
-            MinibufferIntent::KillConfirm { session_id } => {
+            MinibufferIntent::DeleteConfirm { session_id } => {
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
                 if !yes {
-                    self.set_status("kill cancelled".to_string());
+                    self.set_status("delete cancelled".to_string());
                     return;
                 }
-                match self.client.kill(&session_id).await {
-                    Ok(()) => self.set_status(format!("killed {}", short_id(&session_id))),
-                    Err(e) => self.set_status(format!("kill failed: {e}")),
+                match self.client.delete(&session_id).await {
+                    Ok(()) => self.set_status(format!("deleted {}", short_id(&session_id))),
+                    Err(e) => self.set_status(format!("delete failed: {e}")),
                 }
             }
             MinibufferIntent::CommandPalette => {
@@ -705,7 +739,7 @@ impl App {
             }
             "new" | "new-session" => self.run_action(KeyAction::OpenNewSession).await,
             "send" | "send-input" => self.run_action(KeyAction::OpenSendInput).await,
-            "kill" => self.run_action(KeyAction::OpenKillConfirm).await,
+            "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "diff" => self.run_action(KeyAction::OpenDiff).await,
             "interrupt" => self.run_action(KeyAction::Interrupt).await,
             "help" | "?" => self.help_visible = true,

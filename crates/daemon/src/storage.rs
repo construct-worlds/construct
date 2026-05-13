@@ -150,4 +150,15 @@ impl Storage {
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
+
+    /// Remove the entire session directory (meta + transcript + worktree).
+    /// Idempotent: missing directory is not an error.
+    pub fn remove_session(&self, id: &str) -> Result<()> {
+        let dir = self.session_dir(id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)
+                .with_context(|| format!("remove {}", dir.display()))?;
+        }
+        Ok(())
+    }
 }

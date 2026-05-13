@@ -63,8 +63,11 @@ enum Command {
     },
     /// Stop a session cleanly.
     Stop { session_id: String },
-    /// Force-kill a session.
+    /// Force-kill a session (SIGKILL the adapter; keeps the record errored).
     Kill { session_id: String },
+    /// Delete a session entirely (kill if running, remove transcript + worktree).
+    #[command(visible_alias = "rm")]
+    Delete { session_id: String },
     /// Show diff of session's working tree.
     Diff { session_id: String },
     /// Show session detail + transcript.
@@ -133,6 +136,7 @@ async fn main() -> Result<()> {
                     cwd = s.cwd,
                     title = s
                         .title
+                        .as_ref()
                         .map(|t| format!("  — {t}"))
                         .unwrap_or_default(),
                 );
@@ -183,6 +187,11 @@ async fn main() -> Result<()> {
         Command::Kill { session_id } => {
             let c = connect(&socket).await?;
             c.kill(&session_id).await?;
+            Ok(())
+        }
+        Command::Delete { session_id } => {
+            let c = connect(&socket).await?;
+            c.delete(&session_id).await?;
             Ok(())
         }
         Command::Diff { session_id } => {

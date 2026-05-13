@@ -5,15 +5,16 @@ use crate::config::Config;
 use crate::storage::Storage;
 use crate::worktree;
 use agentd_protocol::{
-    ahp_method, CreateSessionParams, EventNotificationPayload, HarnessInfo, MessageRole,
-    PtyReplayResult, PtySize, SessionDetail, SessionEvent, SessionStartParams, SessionState,
-    SessionSummary, StateNotificationPayload, TimestampedEvent, TranscriptResult,
+    ahp_method, CreateSessionParams, DeletedNotificationPayload, EventNotificationPayload,
+    HarnessInfo, MessageRole, PtyReplayResult, PtySize, SessionDetail, SessionEvent,
+    SessionStartParams, SessionState, SessionSummary, StateNotificationPayload, TimestampedEvent,
+    TranscriptResult,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, RwLock};
@@ -27,6 +28,7 @@ const PTY_RING_CAP: usize = 256 * 1024;
 pub enum BroadcastMsg {
     Event(EventNotificationPayload),
     State(StateNotificationPayload),
+    Deleted(DeletedNotificationPayload),
 }
 
 pub struct SessionEntry {
@@ -35,6 +37,16 @@ pub struct SessionEntry {
     transcript_count: AtomicU64,
     adapter: tokio::sync::Mutex<Option<Arc<Adapter>>>,
     pty: tokio::sync::Mutex<PtyState>,
+    /// Set by [`SessionManager::delete`] before tearing down the adapter so
+    /// the drain task and event handler stop writing storage after the
+    /// session has been removed.
+    deleted: AtomicBool,
+}
+
+impl SessionEntry {
+    pub fn is_deleted(&self) -> bool {
+        self.deleted.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Default)]
@@ -113,6 +125,7 @@ impl SessionManager {
                 transcript_count: AtomicU64::new(count),
                 adapter: tokio::sync::Mutex::new(None),
                 pty: tokio::sync::Mutex::new(PtyState::default()),
+                deleted: AtomicBool::new(false),
             };
             sessions.insert(s.id.clone(), Arc::new(entry));
         }
@@ -310,6 +323,7 @@ impl SessionManager {
                 ring: VecDeque::new(),
                 size: params.pty_size,
             }),
+            deleted: AtomicBool::new(false),
         });
 
         // Record the user's initial prompt as the first transcript event so
@@ -364,6 +378,12 @@ impl SessionManager {
                     tracing::info!(session = %entry.id, "adapter: {line}");
                 }
                 AdapterMessage::Closed { exit_code } => {
+                    if entry.is_deleted() {
+                        // Session was deleted out from under us — don't
+                        // resurrect storage or broadcast a stale state.
+                        *entry.adapter.lock().await = None;
+                        break;
+                    }
                     let mut summary = entry.summary.write().await;
                     if !summary.state.is_terminal() {
                         summary.state = if exit_code.unwrap_or(0) == 0 {
@@ -387,6 +407,11 @@ impl SessionManager {
     }
 
     async fn handle_event(&self, entry: &SessionEntry, event: SessionEvent) {
+        // Skip everything once the session has been deleted — the drain task
+        // and the adapter can still feed us events for a beat.
+        if entry.is_deleted() {
+            return;
+        }
         // PTY events take a fast path: they go to the in-memory ring + a live
         // broadcast, but they don't bloat the structured transcript.
         if let SessionEvent::Pty { .. } = &event {
@@ -594,6 +619,54 @@ impl SessionManager {
         )
         .await;
         let _ = tokio::time::timeout(Duration::from_secs(3), adapter.shutdown()).await;
+        Ok(())
+    }
+
+    /// Delete a session entirely: kill the adapter if still alive, remove the
+    /// worktree (best effort), drop the on-disk record, evict from the live
+    /// map, and broadcast a `session/deleted` notification.
+    pub async fn delete(&self, id: &str) -> Result<()> {
+        // Pull out the entry so the in-memory map releases the Arc; the
+        // entry itself stays alive via our local Arc until the function ends.
+        let entry = {
+            let mut map = self.sessions.write().await;
+            map.remove(id)
+                .ok_or_else(|| anyhow!("session not found: {}", id))?
+        };
+
+        // Tell the drain task and event handler not to write storage anymore
+        // before we tear the adapter down (killing the adapter triggers a
+        // Closed event that the drain task would otherwise persist).
+        entry.deleted.store(true, Ordering::SeqCst);
+
+        // Kill the adapter if it's still running.
+        if let Some(adapter) = entry.adapter.lock().await.take() {
+            adapter.kill();
+        }
+
+        // Give the drain task a moment to observe the Closed event and exit
+        // cleanly. With is_deleted set, it won't touch storage either way.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Remove the worktree if there is one. Best effort.
+        let summary = entry.summary.read().await.clone();
+        if let Some(wt) = summary.worktree.as_deref() {
+            let wt_path = PathBuf::from(wt);
+            if let Err(e) = worktree::remove_worktree(&wt_path).await {
+                tracing::warn!(%id, error = %e, "remove_worktree failed");
+            }
+        }
+
+        // Drop the on-disk record. Best effort.
+        if let Err(e) = self.storage.remove_session(id) {
+            tracing::warn!(%id, error = ?e, "remove_session failed");
+        }
+
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::Deleted(DeletedNotificationPayload {
+                session_id: id.to_string(),
+            }));
         Ok(())
     }
 

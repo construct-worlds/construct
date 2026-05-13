@@ -303,6 +303,7 @@ pub mod ipc_method {
     pub const SESSION_INTERRUPT: &str = "session.interrupt";
     pub const SESSION_STOP: &str = "session.stop";
     pub const SESSION_KILL: &str = "session.kill";
+    pub const SESSION_DELETE: &str = "session.delete";
     pub const SESSION_DIFF: &str = "session.diff";
     pub const SESSION_TRANSCRIPT: &str = "session.transcript";
     pub const SUBSCRIBE_EVENTS: &str = "subscribe.events";
@@ -312,6 +313,7 @@ pub mod ipc_method {
 pub mod ipc_notif {
     pub const EVENT: &str = "session/event";
     pub const STATE: &str = "session/state";
+    pub const DELETED: &str = "session/deleted";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,6 +451,11 @@ pub struct EventNotificationPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateNotificationPayload {
     pub session: SessionSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletedNotificationPayload {
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

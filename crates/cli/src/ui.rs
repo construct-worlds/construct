@@ -267,7 +267,7 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
   session actions
     C-x C-f         new session
     C-x i           send input to selected session
-    C-x k           kill selected session (confirms)
+    C-x k           delete selected session (confirms; kills if running)
     C-x d           show diff
     C-x r           refresh
     C-c C-c         interrupt

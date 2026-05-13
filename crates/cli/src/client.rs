@@ -214,6 +214,15 @@ impl Client {
             .await?;
         Ok(())
     }
+    pub async fn delete(&self, id: &str) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::SESSION_DELETE,
+                &SessionIdParams { session_id: id.to_string() },
+            )
+            .await?;
+        Ok(())
+    }
     pub async fn diff(&self, id: &str) -> Result<DiffResult> {
         self.request(
             ipc_method::SESSION_DIFF,
