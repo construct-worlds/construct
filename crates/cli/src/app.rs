@@ -124,6 +124,11 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
     }
     // Load transcript for the first session if any.
     app.refresh_selected_transcript().await;
+    // Bootstrap parsers for every pinned PTY session so the pin strip has
+    // content from frame 0 — without this, tiles render "(no data yet)"
+    // until the user focuses each one and the daemon's ring buffer is
+    // pulled via pty_replay.
+    app.ensure_pinned_parsers().await;
 
     // Terminal setup.
     enable_raw_mode().context("enable raw mode")?;
@@ -234,6 +239,22 @@ impl App {
             self.bootstrap_terminal(&id).await;
         } else {
             self.view = ViewMode::Transcript;
+        }
+    }
+
+    /// Bootstrap a vt100 parser for every pinned PTY-backed session that
+    /// doesn't have one yet. Called at startup and whenever a session is
+    /// freshly pinned (so the pin strip never shows a blank tile for a
+    /// session that has had output).
+    pub async fn ensure_pinned_parsers(&mut self) {
+        let ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|s| s.pinned && s.has_pty && !self.terminals.contains_key(&s.id))
+            .map(|s| s.id.clone())
+            .collect();
+        for id in ids {
+            self.bootstrap_terminal(&id).await;
         }
     }
 
@@ -353,11 +374,25 @@ impl App {
                 if let Some(p) = n.params {
                     if let Ok(payload) = serde_json::from_value::<StateNotificationPayload>(p) {
                         let id = payload.session.id.clone();
+                        let was_pinned = self
+                            .sessions
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| s.pinned)
+                            .unwrap_or(false);
+                        let now_pinned = payload.session.pinned;
+                        let has_pty = payload.session.has_pty;
                         if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
                             self.sessions[i] = payload.session;
                         } else {
                             self.sessions.push(payload.session);
                             self.sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                        }
+                        // Newly pinned PTY session: bootstrap so its tile
+                        // populates immediately, even when the pin came from
+                        // outside this TUI process.
+                        if has_pty && now_pinned && !was_pinned {
+                            self.bootstrap_terminal(&id).await;
                         }
                     }
                 }
