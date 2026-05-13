@@ -103,6 +103,7 @@ default — `C-x` is the escape prefix back to agentd commands.
 |---|---|
 | `C-x o` / `Tab` | switch focus (list ↔ view) — `other-window` |
 | `C-x t` | toggle transcript ↔ terminal view |
+| `C-x z` | zoom: fill the screen with the session view (matches tmux `prefix z`) |
 | `C-n` / `↓` | next session |
 | `C-p` / `↑` | prev session |
 | `C-x C-f` | new session (wizard) |

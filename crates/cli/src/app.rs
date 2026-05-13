@@ -81,6 +81,10 @@ pub struct App {
     pub view: ViewMode,
     pub terminals: HashMap<String, vt100::Parser>,
     pub terminal_pane_size: (u16, u16), // (cols, rows) of the right pane.
+    /// Zoom: hide list / pin strip / modeline; the session view fills the
+    /// screen except for the minibuffer line at the bottom. Toggled with
+    /// `C-x z` (emacs) / `z` (vim), matching tmux's prefix-z.
+    pub zoomed: bool,
 }
 
 pub async fn run(client: Arc<Client>) -> Result<()> {
@@ -113,6 +117,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         view: ViewMode::Transcript,
         terminals: HashMap::new(),
         terminal_pane_size: (100, 30),
+        zoomed: false,
     };
     // Default to Terminal view when the currently-selected session has a PTY.
     if app.selected_session().map(|s| s.has_pty).unwrap_or(false) {
@@ -672,6 +677,22 @@ impl App {
                 };
                 self.set_status(label.into());
             }
+            ToggleZoom => {
+                self.zoomed = !self.zoomed;
+                if self.zoomed {
+                    // The list is hidden when zoomed — focus must move to
+                    // the view so PTY capture takes over naturally.
+                    self.focus = PaneFocus::View;
+                }
+                self.set_status(
+                    if self.zoomed {
+                        "zoomed — C-x z to unzoom"
+                    } else {
+                        "zoom off"
+                    }
+                    .into(),
+                );
+            }
             ToggleView => {
                 let has_pty = self.in_pty_session();
                 self.view = match (self.view, has_pty) {
@@ -979,6 +1000,7 @@ impl App {
             "send" | "send-input" => self.run_action(KeyAction::OpenSendInput).await,
             "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "rename" => self.run_action(KeyAction::OpenRename).await,
+            "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
             "diff" => self.run_action(KeyAction::OpenDiff).await,
             "interrupt" => self.run_action(KeyAction::Interrupt).await,
             "help" | "?" => self.help_visible = true,

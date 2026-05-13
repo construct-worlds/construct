@@ -14,6 +14,11 @@ pub enum KeyAction {
     OpenNewSession,
     OpenDeleteConfirm,
     OpenRename,
+    /// Zoom: the session view fills the screen (list / pin strip / modeline
+    /// all hidden; only the minibuffer stays). Toggling again restores the
+    /// default layout. Bound to `C-x z` (emacs) / `z` (vim), matching
+    /// tmux's `prefix z` (zoom-pane).
+    ToggleZoom,
     OpenDiff,
     Interrupt,
     OpenCommandPalette,
@@ -169,6 +174,7 @@ fn emacs() -> Keymap {
         (Chord(vec![ctrl('x'), ch('o')]), SwitchFocus),
         (Chord(vec![key(KeyCode::Tab)]), SwitchFocus),
         (Chord(vec![ctrl('x'), ch('t')]), ToggleView),
+        (Chord(vec![ctrl('x'), ch('z')]), ToggleZoom),
         // Session actions
         (Chord(vec![ctrl('x'), ctrl('f')]), OpenNewSession),
         (Chord(vec![ctrl('x'), ch('k')]), OpenDeleteConfirm),
@@ -225,6 +231,7 @@ fn vim() -> Keymap {
         // `r` opens the rename minibuffer; refresh moved to M-x refresh.
         (Chord(vec![ch('r')]), OpenRename),
         (Chord(vec![ch('v')]), ToggleView),
+        (Chord(vec![ch('z')]), ToggleZoom),
         (Chord(vec![ch(' ')]), TogglePin),
         (Chord(vec![ch('p')]), TogglePin),
         // Reorder selected session in the list. Shift-K/J already taken

@@ -11,6 +11,10 @@ use unicode_width::UnicodeWidthStr;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    if app.zoomed {
+        render_zoomed(f, area, app);
+        return;
+    }
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -67,6 +71,36 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
 fn pin_strip_height(total_h: u16) -> u16 {
     (total_h / 3).clamp(7, 18)
+}
+
+/// Zoom layout: the session view takes the entire screen except for the
+/// minibuffer line at the bottom. No list, no pin strip, no modeline, no
+/// borders — edge-to-edge so the underlying TUI (vim / claude / htop /
+/// whatever is running) gets the most real estate possible. Matches
+/// tmux's `prefix z` zoomed-pane behavior.
+fn render_zoomed(f: &mut Frame, area: Rect, app: &mut App) {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+    let main_area = vertical[0];
+    let minibuffer_area = vertical[1];
+
+    app.terminal_pane_size = (main_area.width, main_area.height);
+
+    if let Some(diff) = &app.last_diff {
+        let para = Paragraph::new(diff.clone()).wrap(Wrap { trim: false });
+        f.render_widget(para, main_area);
+    } else {
+        match app.view {
+            ViewMode::Terminal => render_terminal(f, main_area, app),
+            ViewMode::Transcript => render_transcript(f, main_area, app),
+        }
+    }
+    render_minibuffer(f, minibuffer_area, app);
+    if app.help_visible {
+        render_help(f, area);
+    }
 }
 
 fn render_sessions(f: &mut Frame, area: Rect, app: &App) {
@@ -257,11 +291,13 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &App) {
         // Help hint — when the PTY has the keys, all chords need C-x first.
         let hint = if app.help_visible {
             String::new()
+        } else if app.zoomed {
+            "zoomed — C-x z to unzoom   C-x x palette   ? help".to_string()
         } else if matches!(app.focus, PaneFocus::View)
             && app.view == ViewMode::Terminal
             && app.selected_session().map(|s| s.has_pty).unwrap_or(false)
         {
-            "C-x o focus list   C-x x palette   C-x t transcript   ? help".to_string()
+            "C-x o focus list   C-x z zoom   C-x x palette   ? help".to_string()
         } else {
             "? for help   M-x or C-x x for commands   C-x o other-window".to_string()
         };
@@ -297,6 +333,7 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
   focus + view
     C-x o / Tab     switch focus (list ↔ view)
     C-x t           toggle transcript ↔ terminal view
+    C-x z           zoom: fill the screen with the session view
     C-n / down      next session
     C-p / up        prev session
 
@@ -324,7 +361,7 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
                     palette commands: new send delete rename diff
-                                      interrupt refresh harnesses help
+                                      zoom interrupt refresh harnesses help
     ?               toggle this help
     C-x C-c / q     quit
 
