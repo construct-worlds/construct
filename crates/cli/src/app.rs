@@ -641,12 +641,15 @@ impl App {
         };
 
         let Some(mb) = self.minibuffer.as_mut() else { return; };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
         match key.code {
             KeyCode::Esc => {
                 self.minibuffer = None;
                 return;
             }
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('g') if ctrl => {
                 self.minibuffer = None;
                 return;
             }
@@ -677,16 +680,14 @@ impl App {
                 return;
             }
             KeyCode::Backspace => {
-                if mb.cursor > 0 {
-                    let prev = mb.cursor - 1;
-                    mb.input.remove(prev);
-                    mb.cursor = prev;
-                }
-                mb.error = None;
+                delete_back_char(mb);
             }
-            KeyCode::Left => {
-                mb.cursor = mb.cursor.saturating_sub(1);
+            KeyCode::Delete => {
+                delete_forward_char(mb);
             }
+            KeyCode::Left if alt => mb.cursor = word_back(&mb.input, mb.cursor),
+            KeyCode::Right if alt => mb.cursor = word_forward(&mb.input, mb.cursor),
+            KeyCode::Left => mb.cursor = mb.cursor.saturating_sub(1),
             KeyCode::Right => {
                 if mb.cursor < mb.input.chars().count() {
                     mb.cursor += 1;
@@ -694,7 +695,40 @@ impl App {
             }
             KeyCode::Home => mb.cursor = 0,
             KeyCode::End => mb.cursor = mb.input.chars().count(),
-            KeyCode::Char(c) => {
+
+            // Emacs editing chords on Ctrl.
+            KeyCode::Char('a') if ctrl => mb.cursor = 0,
+            KeyCode::Char('e') if ctrl => mb.cursor = mb.input.chars().count(),
+            KeyCode::Char('b') if ctrl => mb.cursor = mb.cursor.saturating_sub(1),
+            KeyCode::Char('f') if ctrl => {
+                if mb.cursor < mb.input.chars().count() {
+                    mb.cursor += 1;
+                }
+            }
+            KeyCode::Char('d') if ctrl => delete_forward_char(mb),
+            KeyCode::Char('h') if ctrl => delete_back_char(mb),
+            KeyCode::Char('k') if ctrl => {
+                let pos = byte_pos(&mb.input, mb.cursor);
+                mb.input.truncate(pos);
+                mb.error = None;
+            }
+            KeyCode::Char('u') if ctrl => {
+                let pos = byte_pos(&mb.input, mb.cursor);
+                mb.input.replace_range(..pos, "");
+                mb.cursor = 0;
+                mb.error = None;
+            }
+            KeyCode::Char('w') if ctrl => kill_word_back(mb),
+
+            // Emacs editing chords on Meta.
+            KeyCode::Char('b') if alt => mb.cursor = word_back(&mb.input, mb.cursor),
+            KeyCode::Char('f') if alt => mb.cursor = word_forward(&mb.input, mb.cursor),
+            KeyCode::Char('d') if alt => kill_word_forward(mb),
+
+            // Plain printable insertion. Ignore anything with Ctrl/Alt that
+            // wasn't handled above so stray modifier combos don't pollute
+            // the input.
+            KeyCode::Char(c) if !ctrl && !alt => {
                 let pos = byte_pos(&mb.input, mb.cursor);
                 mb.input.insert(pos, c);
                 mb.cursor += 1;
@@ -811,6 +845,65 @@ pub fn short_id(id: &str) -> &str {
 
 fn byte_pos(s: &str, char_idx: usize) -> usize {
     s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+fn delete_back_char(mb: &mut Minibuffer) {
+    if mb.cursor > 0 {
+        let prev = mb.cursor - 1;
+        let pos = byte_pos(&mb.input, prev);
+        mb.input.remove(pos);
+        mb.cursor = prev;
+        mb.error = None;
+    }
+}
+
+fn delete_forward_char(mb: &mut Minibuffer) {
+    if mb.cursor < mb.input.chars().count() {
+        let pos = byte_pos(&mb.input, mb.cursor);
+        mb.input.remove(pos);
+        mb.error = None;
+    }
+}
+
+fn word_back(s: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = s.chars().collect();
+    let mut c = cursor.min(chars.len());
+    while c > 0 && !chars[c - 1].is_alphanumeric() {
+        c -= 1;
+    }
+    while c > 0 && chars[c - 1].is_alphanumeric() {
+        c -= 1;
+    }
+    c
+}
+
+fn word_forward(s: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = s.chars().collect();
+    let mut c = cursor.min(chars.len());
+    while c < chars.len() && !chars[c].is_alphanumeric() {
+        c += 1;
+    }
+    while c < chars.len() && chars[c].is_alphanumeric() {
+        c += 1;
+    }
+    c
+}
+
+fn kill_word_back(mb: &mut Minibuffer) {
+    let start = word_back(&mb.input, mb.cursor);
+    let start_b = byte_pos(&mb.input, start);
+    let end_b = byte_pos(&mb.input, mb.cursor);
+    mb.input.drain(start_b..end_b);
+    mb.cursor = start;
+    mb.error = None;
+}
+
+fn kill_word_forward(mb: &mut Minibuffer) {
+    let end = word_forward(&mb.input, mb.cursor);
+    let start_b = byte_pos(&mb.input, mb.cursor);
+    let end_b = byte_pos(&mb.input, end);
+    mb.input.drain(start_b..end_b);
+    mb.error = None;
 }
 
 /// Bash-style Tab completion for the harness-picker minibuffer. Completes
