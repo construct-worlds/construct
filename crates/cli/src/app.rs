@@ -8,7 +8,10 @@ use agentd_protocol::{
     TimestampedEvent,
 };
 use anyhow::{Context, Result};
-use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyEvent,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use futures::StreamExt;
@@ -23,6 +26,10 @@ use std::time::{Duration, Instant};
 /// and the terminal renderer — when the view shows a PTY-backed session and
 /// View has focus, keystrokes are captured by the PTY (with `C-x` as the
 /// escape prefix back to agentd commands).
+/// Max scrollback rows kept by each [`vt100::Parser`]. Mouse-wheel can scroll
+/// up to this many lines into history.
+pub const SCROLLBACK_MAX: usize = 5_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneFocus {
     List,
@@ -85,6 +92,11 @@ pub struct App {
     /// screen except for the minibuffer line at the bottom. Toggled with
     /// `C-x z` (emacs) / `z` (vim), matching tmux's prefix-z.
     pub zoomed: bool,
+    /// Scrollback offset (in rows) applied to the *focused* session's PTY
+    /// parser when rendering. 0 = live view. Increased by mouse-wheel up,
+    /// decreased by mouse-wheel down. Reset to 0 on user keystroke into
+    /// the PTY or on session change.
+    pub view_scrollback: usize,
 }
 
 pub async fn run(client: Arc<Client>) -> Result<()> {
@@ -121,6 +133,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         terminals: HashMap::new(),
         terminal_pane_size: (100, 30),
         zoomed: false,
+        view_scrollback: 0,
     };
     // Default to Terminal view when the currently-selected session has a PTY.
     if app.selected_session().map(|s| s.has_pty).unwrap_or(false) {
@@ -142,7 +155,8 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
     // Terminal setup.
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("enter alternate screen / enable mouse")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
@@ -150,7 +164,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
 
     // Teardown — best effort.
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
     terminal.show_cursor().ok();
     result
 }
@@ -231,6 +245,8 @@ impl App {
         if self.transcript_session.as_deref() == Some(&id) {
             return;
         }
+        // Switching sessions snaps to live for the new one.
+        self.view_scrollback = 0;
         match self.client.transcript(&id, 0, None).await {
             Ok(t) => {
                 self.transcript = t.events;
@@ -272,7 +288,8 @@ impl App {
             return;
         }
         let (cols, rows) = self.terminal_pane_size;
-        let mut parser = vt100::Parser::new(rows.max(1), cols.max(1), 5_000);
+        let mut parser =
+            vt100::Parser::new(rows.max(1), cols.max(1), SCROLLBACK_MAX);
         match self.client.pty_replay(id).await {
             Ok(snap) => {
                 use base64::Engine;
@@ -360,7 +377,7 @@ impl App {
                                     .entry(payload.session_id.clone())
                                     .or_insert_with(|| {
                                         let (cols, rows) = self.terminal_pane_size;
-                                        vt100::Parser::new(rows.max(1), cols.max(1), 5_000)
+                                        vt100::Parser::new(rows.max(1), cols.max(1), SCROLLBACK_MAX)
                                     });
                                 parser.process(&bytes);
                             }
@@ -444,12 +461,34 @@ impl App {
     async fn on_term_event(&mut self, ev: CtEvent) {
         match ev {
             CtEvent::Key(k) => self.on_key(k).await,
+            CtEvent::Mouse(m) => self.on_mouse(m).await,
             CtEvent::Resize(_, _) => {
                 // The TUI re-derives the pane size on next render; we trigger
                 // an explicit resize for the current PTY there.
             }
             _ => {}
         }
+    }
+
+    async fn on_mouse(&mut self, ev: MouseEvent) {
+        const STEP: i32 = 3;
+        match ev.kind {
+            MouseEventKind::ScrollUp => self.adjust_scrollback(STEP),
+            MouseEventKind::ScrollDown => self.adjust_scrollback(-STEP),
+            _ => {}
+        }
+    }
+
+    /// Adjust the focused session's scrollback offset. Positive `delta` =
+    /// scroll up (older); negative = scroll down (newer). No-op unless the
+    /// view is on a PTY-backed session in terminal mode.
+    fn adjust_scrollback(&mut self, delta: i32) {
+        if self.view != ViewMode::Terminal || !self.in_pty_session() {
+            return;
+        }
+        let cur = self.view_scrollback as i32;
+        let next = (cur + delta).max(0).min(SCROLLBACK_MAX as i32);
+        self.view_scrollback = next as usize;
     }
 
     /// Tell every relevant PTY child about the new pane geometry. The actual
@@ -502,6 +541,9 @@ impl App {
                 return;
             }
             if self.chord_state.is_empty() && !is_ctrl_x {
+                // Typing snaps the view back to live: it's confusing to
+                // type "into the past" while reading scrollback.
+                self.view_scrollback = 0;
                 if let Some(bytes) = encode_key_to_bytes(key) {
                     if let Some(id) = self.selected_id() {
                         if let Err(e) = self.client.pty_input(&id, bytes).await {

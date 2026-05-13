@@ -62,6 +62,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     for parser in app.terminals.values_mut() {
         parser.set_size(inner_rows.max(1), inner_cols.max(1));
     }
+    apply_focused_scrollback(app);
 
     render_sessions(f, cols[0], app);
     render_detail(f, detail_area, app);
@@ -77,6 +78,17 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
 fn pin_strip_height(total_h: u16) -> u16 {
     (total_h / 3).clamp(7, 18)
+}
+
+/// Apply the user's scrollback offset to the currently-focused session's
+/// vt100 parser so the rendered view shows older content when the user
+/// has scrolled up with the mouse wheel.
+fn apply_focused_scrollback(app: &mut App) {
+    let Some(id) = app.selected_id() else { return; };
+    let offset = app.view_scrollback;
+    if let Some(parser) = app.terminals.get_mut(&id) {
+        parser.set_scrollback(offset);
+    }
 }
 
 /// Zoom layout: the session view takes the entire screen except for the
@@ -98,6 +110,7 @@ fn render_zoomed(f: &mut Frame, area: Rect, app: &mut App) {
     for parser in app.terminals.values_mut() {
         parser.set_size(main_area.height.max(1), main_area.width.max(1));
     }
+    apply_focused_scrollback(app);
 
     if let Some(diff) = &app.last_diff {
         let para = Paragraph::new(diff.clone()).wrap(Wrap { trim: false });
@@ -246,10 +259,16 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
         PaneFocus::List => "list",
         PaneFocus::View => "view",
     };
+    let scrollback_label = if app.view_scrollback > 0 {
+        format!("scrollback:{}  ", app.view_scrollback)
+    } else {
+        String::new()
+    };
     let modeline = format!(
-        " agentd  [{profile}]  focus:{focus}  {sel}  {state}  {model}  {chord}{status}{conn} ",
+        " agentd  [{profile}]  focus:{focus}  {sel}  {state}  {model}  {scrollback}{chord}{status}{conn} ",
         profile = app.profile.label(),
         focus = focus_label,
+        scrollback = scrollback_label,
         sel = match s {
             Some(s) => primary_label(s),
             None => "-".into(),
