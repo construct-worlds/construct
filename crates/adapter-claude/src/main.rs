@@ -1,20 +1,30 @@
-//! Claude Code adapter.
+//! Claude Code adapter — multi-turn.
 //!
-//! Wraps the `claude` CLI in single-shot mode with `--output-format stream-json`.
-//! Best-effort: the stream-json shape may evolve; unknown event types are
-//! forwarded as adapter log lines instead of dropping them silently.
+//! Each conversational turn spawns a fresh `claude -p` process with
+//! `--input-format stream-json --output-format stream-json --verbose`. The
+//! initial turn has no session id; subsequent turns pass `--resume <id>`
+//! so the underlying CLI threads the conversation together.
 //!
-//! Honors `AGENTD_CLAUDE_BIN` if set to override the binary; otherwise
-//! requires `claude` to be on `PATH`.
+//! Honors `AGENTD_CLAUDE_BIN` for the binary path.
+//!
+//! Adapter inbox semantics while a turn is running:
+//!   - `Input` → queued for the next turn (echoed as a log line)
+//!   - `Interrupt` → kill current child; loop back to await/run next input
+//!   - `Stop` → kill current child; emit Done and exit
+//!
+//! `Input` arriving while we're already awaiting input is consumed immediately
+//! and dispatched as the next turn's prompt.
 
-use agentd_protocol::adapter::{run, AdapterInboxMsg, EventEmitter};
+use agentd_protocol::adapter::{run, AdapterContext, AdapterInboxMsg, EventEmitter};
 use agentd_protocol::{
-    Capabilities, InitializeResult, MessageRole, SessionEvent, SessionState,
+    Capabilities, InitializeResult, MessageRole, SessionEvent, SessionStartParams, SessionState,
 };
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -24,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         name: "claude".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         capabilities: Capabilities {
-            supports_input: false,
+            supports_input: true,
             supports_interrupt: true,
             supports_diff: false,
             supports_cost: true,
@@ -32,99 +42,202 @@ async fn main() -> anyhow::Result<()> {
         },
     };
     run(metadata, |params, ctx| async move {
-        let prompt = params.prompt.clone().unwrap_or_default();
-        if prompt.trim().is_empty() {
-            ctx.emit.emit(SessionEvent::Error {
-                message: "claude adapter: no prompt provided".into(),
-            });
-            ctx.emit.emit(SessionEvent::Done { exit_code: 64 });
-            return;
-        }
-
-        let bin = std::env::var("AGENTD_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
-        let cwd = PathBuf::from(&params.cwd);
-        let mut command = Command::new(&bin);
-        command
-            .arg("-p")
-            .arg(&prompt)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose");
-        if let Some(model) = &params.model {
-            command.arg("--model").arg(model);
-        }
-        for extra in &params.args {
-            command.arg(extra);
-        }
-        command
-            .current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        for (k, v) in &params.env {
-            command.env(k, v);
-        }
-
-        ctx.emit.emit(SessionEvent::Status {
-            state: SessionState::Running,
-            detail: Some(format!("{} -p ...", bin)),
-        });
-
-        let mut child = match command.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                ctx.emit.emit(SessionEvent::Error {
-                    message: format!("spawn {bin}: {e}"),
-                });
-                ctx.emit.emit(SessionEvent::Done { exit_code: 127 });
-                return;
-            }
-        };
-
-        let stdout = child.stdout.take().expect("piped");
-        let stderr = child.stderr.take().expect("piped");
-        let parse_task = spawn_stream_parser(stdout, ctx.emit.clone());
-        let err_task = spawn_stderr_log(stderr, ctx.emit.clone());
-
-        let mut inbox = ctx.inbox;
-        let status = loop {
-            tokio::select! {
-                biased;
-                msg = wait_stop(&mut inbox) => {
-                    if msg {
-                        let _ = child.start_kill();
-                        break child.wait().await.ok();
-                    }
-                }
-                s = child.wait() => {
-                    break s.ok();
-                }
-            }
-        };
-
-        let _ = parse_task.await;
-        let _ = err_task.await;
-
-        let exit_code = status.and_then(|s| s.code()).unwrap_or(-1);
-        ctx.emit.emit(SessionEvent::Done { exit_code });
+        run_session(params, ctx).await;
     })
     .await
 }
 
-async fn wait_stop(inbox: &mut mpsc::Receiver<AdapterInboxMsg>) -> bool {
-    while let Some(msg) = inbox.recv().await {
-        match msg {
-            AdapterInboxMsg::Interrupt | AdapterInboxMsg::Stop => return true,
-            AdapterInboxMsg::Input(_) => {
-                // single-shot mode doesn't accept additional input
+async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
+    let AdapterContext {
+        session_id: _,
+        emit,
+        mut inbox,
+    } = ctx;
+
+    let bin = std::env::var("AGENTD_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let cwd = PathBuf::from(&params.cwd);
+    let model = params.model.clone();
+    let extra_args = params.args.clone();
+    let env = params.env.clone();
+
+    let mut session_id: Option<String> = None;
+    let mut pending: VecDeque<String> = VecDeque::new();
+    if let Some(p) = params.prompt.clone() {
+        if !p.trim().is_empty() {
+            pending.push_back(p);
+        }
+    }
+
+    let exit_code = loop {
+        // Pick next user message, or wait for one.
+        let user_text = match pending.pop_front() {
+            Some(t) => t,
+            None => {
+                emit.emit(SessionEvent::Status {
+                    state: SessionState::AwaitingInput,
+                    detail: None,
+                });
+                match inbox.recv().await {
+                    None => break 0,
+                    Some(AdapterInboxMsg::Input(t)) => t,
+                    Some(AdapterInboxMsg::Interrupt) => continue,
+                    Some(AdapterInboxMsg::Stop) => break 0,
+                }
+            }
+        };
+        if user_text.trim().is_empty() {
+            continue;
+        }
+
+        emit.emit(SessionEvent::Status {
+            state: SessionState::Running,
+            detail: None,
+        });
+
+        // Build the per-turn child command.
+        let mut command = Command::new(&bin);
+        command
+            .arg("-p")
+            .arg("--input-format")
+            .arg("stream-json")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose");
+        if let Some(sid) = &session_id {
+            command.arg("--resume").arg(sid);
+        }
+        if let Some(m) = &model {
+            command.arg("--model").arg(m);
+        }
+        for a in &extra_args {
+            command.arg(a);
+        }
+        command
+            .current_dir(&cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        for (k, v) in &env {
+            command.env(k, v);
+        }
+
+        let mut child = match command.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                emit.emit(SessionEvent::Error {
+                    message: format!("spawn {bin}: {e}"),
+                });
+                break 127;
+            }
+        };
+
+        let child_stdin = child.stdin.take().expect("piped");
+        let child_stdout = child.stdout.take().expect("piped");
+        let child_stderr = child.stderr.take().expect("piped");
+
+        // Write the user message, then close stdin so claude knows we're done.
+        let writer_task = spawn_writer(child_stdin, user_text.clone());
+        let stderr_task = spawn_stderr_log(child_stderr, emit.clone());
+        let captured_sid = Arc::new(StdMutex::new(None::<String>));
+        let parser_task =
+            spawn_parser(child_stdout, emit.clone(), captured_sid.clone());
+
+        // Drive the child: queue mid-turn inputs, honor stop/interrupt.
+        let outcome = drive_turn(&mut child, &mut inbox, &emit, &mut pending).await;
+
+        let _ = writer_task.await;
+        let _ = parser_task.await;
+        let _ = stderr_task.await;
+        // Make sure the child is fully reaped.
+        let _ = child.wait().await;
+
+        if session_id.is_none() {
+            session_id = captured_sid.lock().unwrap().clone();
+        }
+
+        match outcome {
+            TurnOutcome::Completed => continue,
+            TurnOutcome::Interrupted => {
+                emit.log("turn interrupted; awaiting next input");
+                continue;
+            }
+            TurnOutcome::Stopped => break 0,
+        }
+    };
+
+    emit.emit(SessionEvent::Done { exit_code });
+}
+
+#[derive(Debug)]
+enum TurnOutcome {
+    Completed,
+    Interrupted,
+    Stopped,
+}
+
+async fn drive_turn(
+    child: &mut tokio::process::Child,
+    inbox: &mut mpsc::Receiver<AdapterInboxMsg>,
+    emit: &EventEmitter,
+    pending: &mut VecDeque<String>,
+) -> TurnOutcome {
+    loop {
+        tokio::select! {
+            biased;
+            msg = inbox.recv() => {
+                match msg {
+                    None => {
+                        // daemon channel closed
+                        let _ = child.start_kill();
+                        return TurnOutcome::Stopped;
+                    }
+                    Some(AdapterInboxMsg::Stop) => {
+                        let _ = child.start_kill();
+                        return TurnOutcome::Stopped;
+                    }
+                    Some(AdapterInboxMsg::Interrupt) => {
+                        let _ = child.start_kill();
+                        return TurnOutcome::Interrupted;
+                    }
+                    Some(AdapterInboxMsg::Input(t)) => {
+                        emit.log(format!("queued input for next turn: {}", short(&t, 60)));
+                        pending.push_back(t);
+                    }
+                }
+            }
+            _ = child.wait() => {
+                return TurnOutcome::Completed;
             }
         }
     }
-    false
 }
 
-fn spawn_stream_parser<R>(reader: R, emit: EventEmitter) -> tokio::task::JoinHandle<()>
+fn spawn_writer(mut stdin: tokio::process::ChildStdin, user_text: String) -> tokio::task::JoinHandle<()> {
+    let msg = serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{ "type": "text", "text": user_text }]
+        }
+    });
+    tokio::spawn(async move {
+        let line = match serde_json::to_string(&msg) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let _ = stdin.write_all(line.as_bytes()).await;
+        let _ = stdin.write_all(b"\n").await;
+        let _ = stdin.flush().await;
+        let _ = stdin.shutdown().await;
+    })
+}
+
+fn spawn_parser<R>(
+    reader: R,
+    emit: EventEmitter,
+    captured_sid: Arc<StdMutex<Option<String>>>,
+) -> tokio::task::JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
@@ -135,7 +248,15 @@ where
                 continue;
             }
             match serde_json::from_str::<Value>(&line) {
-                Ok(v) => emit_event_from_json(&emit, v),
+                Ok(v) => {
+                    if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
+                        let mut g = captured_sid.lock().unwrap();
+                        if g.is_none() {
+                            *g = Some(sid.to_string());
+                        }
+                    }
+                    emit_event_from_json(&emit, v);
+                }
                 Err(_) => emit.emit(SessionEvent::Message {
                     role: MessageRole::Assistant,
                     text: line,
@@ -171,13 +292,8 @@ fn emit_event_from_json(emit: &EventEmitter, v: Value) {
             forward_tool_uses(emit, v.get("message"));
         }
         "user" => {
-            let text = extract_message_text(v.get("message"));
-            if !text.is_empty() {
-                emit.emit(SessionEvent::Message {
-                    role: MessageRole::User,
-                    text,
-                });
-            }
+            // The CLI echoes tool_result blocks here. The actual user text is
+            // already in the transcript (daemon emits it when sending input).
             forward_tool_results(emit, v.get("message"));
         }
         "result" => {
@@ -202,16 +318,17 @@ fn emit_event_from_json(emit: &EventEmitter, v: Value) {
                     tokens_out: tout,
                 });
             }
-            if let Some(s) = v.get("result").and_then(|r| r.as_str()) {
-                emit.emit(SessionEvent::Message {
-                    role: MessageRole::Assistant,
-                    text: s.to_string(),
-                });
-            }
+            // The `result` text duplicates the assistant's final message; skip it.
         }
         "system" => {
             emit.log(format!(
                 "system: {}",
+                serde_json::to_string(&v).unwrap_or_default()
+            ));
+        }
+        "rate_limit_event" => {
+            emit.log(format!(
+                "rate_limit: {}",
                 serde_json::to_string(&v).unwrap_or_default()
             ));
         }
@@ -225,7 +342,9 @@ fn emit_event_from_json(emit: &EventEmitter, v: Value) {
 }
 
 fn extract_message_text(msg: Option<&Value>) -> String {
-    let Some(m) = msg else { return String::new(); };
+    let Some(m) = msg else {
+        return String::new();
+    };
     if let Some(s) = m.get("content").and_then(|c| c.as_str()) {
         return s.to_string();
     }
@@ -247,7 +366,9 @@ fn extract_message_text(msg: Option<&Value>) -> String {
 }
 
 fn forward_tool_uses(emit: &EventEmitter, msg: Option<&Value>) {
-    let Some(arr) = msg.and_then(|m| m.get("content")).and_then(|c| c.as_array()) else { return; };
+    let Some(arr) = msg.and_then(|m| m.get("content")).and_then(|c| c.as_array()) else {
+        return;
+    };
     for block in arr {
         if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
             let name = block
@@ -265,7 +386,9 @@ fn forward_tool_uses(emit: &EventEmitter, msg: Option<&Value>) {
 }
 
 fn forward_tool_results(emit: &EventEmitter, msg: Option<&Value>) {
-    let Some(arr) = msg.and_then(|m| m.get("content")).and_then(|c| c.as_array()) else { return; };
+    let Some(arr) = msg.and_then(|m| m.get("content")).and_then(|c| c.as_array()) else {
+        return;
+    };
     for block in arr {
         if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
             let tool = block
@@ -284,5 +407,13 @@ fn forward_tool_results(emit: &EventEmitter, msg: Option<&Value>) {
             };
             emit.emit(SessionEvent::ToolResult { tool, ok, output });
         }
+    }
+}
+
+fn short(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect::<String>() + "..."
     }
 }

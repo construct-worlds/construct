@@ -259,14 +259,6 @@ impl SessionManager {
             env: params.env.clone(),
             args: params.args.clone(),
         };
-        adapter
-            .request(
-                ahp_method::SESSION_START,
-                serde_json::to_value(&start_params)?,
-            )
-            .await
-            .context("adapter session.start failed")?;
-
         // Reflect Pending → Running on start (the adapter may also emit a status).
         summary.state = SessionState::Running;
         self.storage.save_summary(&summary)?;
@@ -277,6 +269,28 @@ impl SessionManager {
             transcript_count: AtomicU64::new(0),
             adapter: tokio::sync::Mutex::new(Some(adapter.clone())),
         });
+
+        // Record the user's initial prompt as the first transcript event so
+        // the transcript reads coherently (user → assistant) for every adapter.
+        if let Some(p) = params.prompt.as_ref().filter(|s| !s.trim().is_empty()) {
+            self.handle_event(
+                &entry,
+                SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: p.clone(),
+                },
+            )
+            .await;
+        }
+
+        adapter
+            .request(
+                ahp_method::SESSION_START,
+                serde_json::to_value(&start_params)?,
+            )
+            .await
+            .context("adapter session.start failed")?;
+
         self.sessions.write().await.insert(id.clone(), entry.clone());
 
         // Spawn drain task for adapter messages.

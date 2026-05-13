@@ -158,9 +158,11 @@ Implemented:
 
 - [x] Session lifecycle (create, list, get, send input, interrupt, stop, kill)
 - [x] Multi-harness adapters: `shell`, `claude`, `codex`
+- [x] **Multi-turn** for `claude` (via `--resume <session_id>`) and `codex`
+      (per-turn re-spawn; opt-in resume via `AGENTD_CODEX_RESUME_FLAG`)
 - [x] Live transcript view (streaming, structural rendering)
 - [x] Session list with status glyphs
-- [x] Send input to selected session
+- [x] Send input to selected session; mid-turn inputs queue for the next turn
 - [x] Diff panel (uses `git diff` against the session cwd / worktree)
 - [x] Git worktree isolation (`--worktree`)
 - [x] Command palette (`M-x`)
@@ -168,11 +170,28 @@ Implemented:
 - [x] Config file (`~/.config/agentd/config.toml`)
 - [x] Daemon + client process split (Unix socket)
 
+### Multi-turn semantics
+
+Each adapter exposes the same surface to the daemon: a session stays alive
+across many user turns until you `stop` or `kill` it. After the assistant
+finishes a turn, the session enters `awaiting_input`; the next `agent send`
+starts the next turn. Inputs sent while a turn is still in flight queue and
+run in order.
+
+- **`shell`** — true interactive: pipes input straight into the child's stdin.
+- **`claude`** — per-turn `claude -p` process; subsequent turns pass
+  `--resume <session_id>` (captured from the first turn's init event), so the
+  Claude CLI threads the conversation server-side. Cost events come from the
+  `result` payload.
+- **`codex`** — per-turn `codex exec` process. By default each turn starts
+  fresh (no context carry-over) — set `AGENTD_CODEX_RESUME_FLAG=--session-id`
+  (or whichever resume flag your codex build supports) to pass a captured
+  `session_id` field back in on each turn.
+
 Deferred to later milestones:
 
 - Custom user keymap file (today: choose `AGENTD_KEYMAP=emacs|vim`)
-- True multi-turn for `claude` / `codex` adapters (today: single-shot)
-- Cost/token dashboards
+- Cost/token dashboards across sessions
 - Notifications (desktop / Slack)
 - Web UI on the same IPC
 
