@@ -47,6 +47,73 @@ Be concise. When you finish a turn, emit a short summary of what you did; the us
 /// model. Full output always goes to the transcript.
 const TOOL_OUTPUT_BUDGET: usize = 8_000;
 
+/// Build a fresh [`ToolCtx`] that shares the daemon `Client` with `src`
+/// when one has already been opened. Used to fan a turn's Safe tool
+/// calls into parallel tasks without each one re-connecting.
+pub(crate) fn clone_tool_ctx(src: &ToolCtx) -> ToolCtx {
+    let new_ctx = ToolCtx {
+        cwd: src.cwd.clone(),
+        session_id: src.session_id.clone(),
+        client: tokio::sync::OnceCell::new(),
+    };
+    if let Some(c) = src.client.get() {
+        let _ = new_ctx.client.set(c.clone());
+    }
+    new_ctx
+}
+
+/// Run one Safe tool call without going through the approval gate or
+/// touching the inbox. Emits the same `ToolUse` / `ToolResult` events
+/// `run_one_tool` does so the transcript reads the same. Used by the
+/// parallel-safe batch path.
+pub(crate) async fn run_safe_call(
+    call: provider::ToolCall,
+    registry: &ToolRegistry,
+    ctx: &ToolCtx,
+    emit: &EventEmitter,
+) -> std::result::Result<ToolOutcome, String> {
+    let tool = match registry.get(&call.name) {
+        Some(t) => t,
+        None => {
+            emit.emit(SessionEvent::ToolUse {
+                tool: call.name.clone(),
+                args: call.input.clone(),
+            });
+            let msg = format!("unknown tool: {}", call.name);
+            emit.emit(SessionEvent::ToolResult {
+                tool: call.id.clone(),
+                ok: false,
+                output: msg.clone(),
+            });
+            return Ok(ToolOutcome {
+                ok: false,
+                output: msg,
+            });
+        }
+    };
+    emit.emit(SessionEvent::ToolUse {
+        tool: call.name.clone(),
+        args: call.input.clone(),
+    });
+    let outcome = tool
+        .run(call.input.clone(), ctx)
+        .await
+        .map_err(|e| format!("tool error: {e}"));
+    match &outcome {
+        Ok(o) => emit.emit(SessionEvent::ToolResult {
+            tool: call.id.clone(),
+            ok: o.ok,
+            output: o.output.clone(),
+        }),
+        Err(reason) => emit.emit(SessionEvent::ToolResult {
+            tool: call.id.clone(),
+            ok: false,
+            output: format!("({reason})"),
+        }),
+    }
+    outcome
+}
+
 /// Push a `Message` to the in-memory vec and persist the same message
 /// (best-effort) to `zarvis.jsonl` so a daemon restart can hydrate it.
 macro_rules! push_msg {
@@ -67,7 +134,7 @@ pub async fn run(
 ) -> Result<()> {
     let AdapterContext { session_id, emit, mut inbox } = ctx;
     let cwd = PathBuf::from(&params.cwd);
-    let registry = ToolRegistry::with_defaults();
+    let registry = Arc::new(ToolRegistry::with_defaults());
     let specs = registry.specs();
 
     let provider_name = spec.provider_name();
@@ -191,22 +258,109 @@ pub async fn run(
                 },
             });
 
-            // Run each call (gated by approval), append the result.
-            for call in turn.tool_calls.iter() {
-                let outcome = run_one_tool(
-                    call,
-                    &registry,
-                    &tool_ctx,
-                    &emit,
-                    &mut inbox,
-                    &mut automode,
-                )
-                .await;
-                let outcome = match outcome {
-                    Ok(o) => o,
+            // Partition into Safe (fan out in parallel) and Risky
+            // (serialize through the approval gate). Results are merged
+            // by original index before being appended so the
+            // tool_call_id ↔ tool_result pairing the model expects is
+            // preserved.
+            let mut safe_idx: Vec<usize> = Vec::new();
+            let mut risky_idx: Vec<usize> = Vec::new();
+            for (i, c) in turn.tool_calls.iter().enumerate() {
+                let r = registry.get(&c.name).map(|t| t.risk()).unwrap_or(ToolRisk::Risky);
+                if matches!(r, ToolRisk::Safe) {
+                    safe_idx.push(i);
+                } else {
+                    risky_idx.push(i);
+                }
+            }
+
+            let mut outcomes: std::collections::BTreeMap<usize, std::result::Result<ToolOutcome, String>> =
+                std::collections::BTreeMap::new();
+            let mut early_stop = false;
+
+            if !safe_idx.is_empty() {
+                let registry_arc = registry.clone();
+                let emit_for_safe = emit.clone();
+                let tool_ctx_ref = &tool_ctx;
+                let tasks: Vec<_> = safe_idx
+                    .iter()
+                    .map(|&i| {
+                        let call = turn.tool_calls[i].clone();
+                        let reg = registry_arc.clone();
+                        let emit_c = emit_for_safe.clone();
+                        let ctx_c = clone_tool_ctx(tool_ctx_ref);
+                        async move { (i, run_safe_call(call, &reg, &ctx_c, &emit_c).await) }
+                    })
+                    .collect();
+                let join_fut = futures::future::join_all(tasks);
+                let results: Vec<(usize, std::result::Result<ToolOutcome, String>)> =
+                    tokio::select! {
+                        biased;
+                        kind = wait_for_interrupt_or_stop(&mut inbox) => {
+                            // Drop the batch (cancels all in-flight Safe tasks)
+                            // and synthesize a uniform "interrupted" outcome.
+                            let reason = match kind {
+                                InterruptKind::Stop => {
+                                    early_stop = true;
+                                    "stop"
+                                }
+                                _ => "interrupt",
+                            };
+                            safe_idx.iter().map(|&i| (i, Err(reason.to_string()))).collect()
+                        }
+                        r = join_fut => r,
+                    };
+                for (i, outcome) in results {
+                    outcomes.insert(i, outcome);
+                }
+            }
+
+            if !early_stop {
+                for &i in &risky_idx {
+                    let call = &turn.tool_calls[i];
+                    let outcome = run_one_tool(
+                        call,
+                        &registry,
+                        &tool_ctx,
+                        &emit,
+                        &mut inbox,
+                        &mut automode,
+                    )
+                    .await;
+                    let stop_now = matches!(outcome.as_ref(), Err(r) if r == "stop");
+                    outcomes.insert(i, outcome);
+                    if stop_now {
+                        early_stop = true;
+                        break;
+                    }
+                }
+            }
+
+            // Append messages in the model-expected order.
+            for i in 0..turn.tool_calls.len() {
+                let call = &turn.tool_calls[i];
+                let outcome = match outcomes.remove(&i) {
+                    Some(o) => o,
+                    None => {
+                        // This call never ran (e.g. early stop before its
+                        // serial slot). Synthesize an aborted result so
+                        // the tool_call_id is still answered.
+                        Err("turn aborted before this tool ran".to_string())
+                    }
+                };
+                match outcome {
+                    Ok(o) => {
+                        let truncated = truncate_for_model(&o.output, TOOL_OUTPUT_BUDGET);
+                        push_msg!(messages, persist, Message {
+                            role: Role::Tool,
+                            content: Content::ToolResult {
+                                call_id: call.id.clone(),
+                                output: truncated,
+                                is_error: !o.ok,
+                            },
+                        });
+                    }
                     Err(reason) => {
-                        // Stop / interrupt during approval — synthesize an
-                        // error result, abandon the turn.
                         push_msg!(messages, persist, Message {
                             role: Role::Tool,
                             content: Content::ToolResult {
@@ -215,21 +369,11 @@ pub async fn run(
                                 is_error: true,
                             },
                         });
-                        if reason == "stop" {
-                            return Ok(());
-                        }
-                        break;
                     }
-                };
-                let truncated = truncate_for_model(&outcome.output, TOOL_OUTPUT_BUDGET);
-                push_msg!(messages, persist, Message {
-                    role: Role::Tool,
-                    content: Content::ToolResult {
-                        call_id: call.id.clone(),
-                        output: truncated,
-                        is_error: !outcome.ok,
-                    },
-                });
+                }
+            }
+            if early_stop {
+                return Ok(());
             }
 
             // If the provider explicitly said max_tokens, drop back to user.

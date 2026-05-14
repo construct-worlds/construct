@@ -13,7 +13,7 @@
 use crate::agent::{push_msg, ResolvedModel, SYSTEM_PROMPT};
 use crate::context;
 use crate::persist::{self, Persist};
-use crate::provider::{Content, Message, Role, StopReason, TextSink, ToolCall};
+use crate::provider::{self, Content, Message, Role, StopReason, TextSink, ToolCall};
 use crate::tools::{truncate_for_model, ToolCtx, ToolOutcome, ToolRegistry};
 use agentd_protocol::adapter::{AdapterContext, AdapterInboxMsg, EventEmitter};
 use agentd_protocol::{SessionEvent, SessionStartParams, SessionState, ToolRisk};
@@ -723,7 +723,7 @@ pub async fn run(
     let model = spec.model.clone();
     let provider = spec.provider;
     let cwd = PathBuf::from(&params.cwd);
-    let registry = ToolRegistry::with_defaults();
+    let registry = std::sync::Arc::new(ToolRegistry::with_defaults());
     let specs = registry.specs();
     let mut automode = std::env::var("AGENTD_ZARVIS_AUTOMODE").as_deref() == Ok("1");
 
@@ -864,19 +864,94 @@ pub async fn run(
                     calls: turn.tool_calls.clone(),
                 },
             });
-            for call in turn.tool_calls.iter() {
-                let outcome = run_one_tool(
-                    call,
-                    &registry,
-                    &tool_ctx,
-                    &emit,
-                    &term,
-                    &mut inbox,
-                    &mut automode,
-                )
-                .await;
-                let outcome = match outcome {
-                    Ok(o) => o,
+            // Partition by risk: Safe in parallel, Risky serial through
+            // the approval gate. See agent::run for the matching logic.
+            let mut safe_idx: Vec<usize> = Vec::new();
+            let mut risky_idx: Vec<usize> = Vec::new();
+            for (i, c) in turn.tool_calls.iter().enumerate() {
+                let r = registry.get(&c.name).map(|t| t.risk()).unwrap_or(ToolRisk::Risky);
+                if matches!(r, ToolRisk::Safe) {
+                    safe_idx.push(i);
+                } else {
+                    risky_idx.push(i);
+                }
+            }
+
+            let mut outcomes: std::collections::BTreeMap<usize, std::result::Result<ToolOutcome, String>> =
+                std::collections::BTreeMap::new();
+            let mut early_stop = false;
+
+            if !safe_idx.is_empty() {
+                let tasks: Vec<_> = safe_idx
+                    .iter()
+                    .map(|&i| {
+                        let call = turn.tool_calls[i].clone();
+                        let reg = registry.clone();
+                        let emit_c = emit.clone();
+                        let ctx_c = crate::agent::clone_tool_ctx(&tool_ctx);
+                        async move {
+                            (i, run_safe_call_pty(call, &reg, &ctx_c, &emit_c).await)
+                        }
+                    })
+                    .collect();
+                let join_fut = futures::future::join_all(tasks);
+                let results: Vec<(usize, std::result::Result<ToolOutcome, String>)> =
+                    tokio::select! {
+                        biased;
+                        kind = wait_for_interrupt(&mut inbox) => {
+                            let reason = match kind {
+                                InterruptKind::Stop => { early_stop = true; "stop" }
+                                _ => "interrupt",
+                            };
+                            safe_idx.iter().map(|&i| (i, Err(reason.to_string()))).collect()
+                        }
+                        r = join_fut => r,
+                    };
+                for (i, outcome) in results {
+                    outcomes.insert(i, outcome);
+                }
+            }
+
+            if !early_stop {
+                for &i in &risky_idx {
+                    let call = &turn.tool_calls[i];
+                    let outcome = run_one_tool(
+                        call,
+                        &registry,
+                        &tool_ctx,
+                        &emit,
+                        &term,
+                        &mut inbox,
+                        &mut automode,
+                    )
+                    .await;
+                    let stop_now = matches!(outcome.as_ref(), Err(r) if r == "stop");
+                    outcomes.insert(i, outcome);
+                    if stop_now {
+                        early_stop = true;
+                        break;
+                    }
+                }
+            }
+
+            // Append messages in model-expected order.
+            for i in 0..turn.tool_calls.len() {
+                let call = &turn.tool_calls[i];
+                let outcome = outcomes
+                    .remove(&i)
+                    .unwrap_or_else(|| Err("turn aborted before this tool ran".to_string()));
+                match outcome {
+                    Ok(o) => {
+                        let truncated = truncate_for_model(&o.output, TOOL_OUTPUT_BUDGET);
+                        push_msg!(messages, persist, Message {
+                            role: Role::Tool,
+                            content: Content::ToolResult {
+                                call_id: call.id.clone(),
+                                output: truncated,
+                                is_error: !o.ok,
+                            },
+                        });
+                    }
                     Err(reason) => {
                         push_msg!(messages, persist, Message {
                             role: Role::Tool,
@@ -886,21 +961,11 @@ pub async fn run(
                                 is_error: true,
                             },
                         });
-                        if reason == "stop" {
-                            return Ok(());
-                        }
-                        break;
                     }
-                };
-                let truncated = truncate_for_model(&outcome.output, TOOL_OUTPUT_BUDGET);
-                push_msg!(messages, persist, Message {
-                    role: Role::Tool,
-                    content: Content::ToolResult {
-                        call_id: call.id.clone(),
-                        output: truncated,
-                        is_error: !outcome.ok,
-                    },
-                });
+                }
+            }
+            if early_stop {
+                return Ok(());
             }
             if matches!(turn.stop_reason, StopReason::MaxTokens) {
                 break;
@@ -1112,6 +1177,70 @@ async fn wait_for_approval(
             Some(_) => {}
         }
     }
+}
+
+/// PTY-rendering counterpart of `agent::run_safe_call`: emits the same
+/// `ToolUse` / `ToolResult` events AND the colored inline blocks that
+/// interactive mode draws into the PTY.
+async fn run_safe_call_pty(
+    call: provider::ToolCall,
+    registry: &ToolRegistry,
+    ctx: &ToolCtx,
+    emit: &EventEmitter,
+) -> std::result::Result<ToolOutcome, String> {
+    let term = Terminal::new(emit);
+    let tool = match registry.get(&call.name) {
+        Some(t) => t,
+        None => {
+            term.tool_use(
+                &call.name,
+                &serde_json::to_string(&call.input).unwrap_or_default(),
+            );
+            term.tool_result(false, &format!("unknown tool: {}", call.name));
+            emit.emit(SessionEvent::ToolUse {
+                tool: call.name.clone(),
+                args: call.input.clone(),
+            });
+            emit.emit(SessionEvent::ToolResult {
+                tool: call.id.clone(),
+                ok: false,
+                output: format!("unknown tool: {}", call.name),
+            });
+            return Ok(ToolOutcome {
+                ok: false,
+                output: format!("unknown tool: {}", call.name),
+            });
+        }
+    };
+    let args_summary = tool.args_summary(&call.input);
+    term.tool_use(&call.name, &args_summary);
+    emit.emit(SessionEvent::ToolUse {
+        tool: call.name.clone(),
+        args: call.input.clone(),
+    });
+    let outcome = tool
+        .run(call.input.clone(), ctx)
+        .await
+        .map_err(|e| format!("tool error: {e}"));
+    match &outcome {
+        Ok(o) => {
+            term.tool_result(o.ok, &o.output);
+            emit.emit(SessionEvent::ToolResult {
+                tool: call.id.clone(),
+                ok: o.ok,
+                output: o.output.clone(),
+            });
+        }
+        Err(reason) => {
+            term.tool_result(false, &format!("({reason})"));
+            emit.emit(SessionEvent::ToolResult {
+                tool: call.id.clone(),
+                ok: false,
+                output: format!("({reason})"),
+            });
+        }
+    }
+    outcome
 }
 
 async fn run_with_interrupt(
