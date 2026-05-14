@@ -88,28 +88,83 @@ impl<'a> Terminal<'a> {
     }
 }
 
-/// Sink for the interactive mode: deltas go directly to the PTY (and
-/// also as Message events so the transcript still has them).
+/// Lines whose start matches one of these labels are dimmed in the PTY
+/// (the structured Message event still carries the raw text — this is
+/// purely a rendering tweak). Cheap to extend; keep the entries short
+/// so the at-start-of-line buffer stays tiny.
+const DIM_LINE_PREFIXES: &[&str] = &["Summary:"];
+
+/// Sink for the interactive mode: deltas go directly to the PTY (with
+/// optional dim-line styling) and as Message events so the transcript
+/// still has the raw text.
 struct PtySink<'a> {
     emit: &'a EventEmitter,
+    at_line_start: bool,
+    in_dim_line: bool,
+    /// Buffered chars seen at the start of the current line while we
+    /// decide whether they match a `DIM_LINE_PREFIXES` entry. Bounded
+    /// by the longest prefix length, so streaming UX stays snappy.
+    prefix_buf: String,
+}
+impl<'a> PtySink<'a> {
+    fn new(emit: &'a EventEmitter) -> Self {
+        Self {
+            emit,
+            at_line_start: true,
+            in_dim_line: false,
+            prefix_buf: String::new(),
+        }
+    }
 }
 impl<'a> TextSink for PtySink<'a> {
     fn delta(&mut self, text: &str) {
-        // Provider chunks may contain newlines — terminals expect CRLF.
-        // Convert lone `\n` to `\r\n` so wrapping looks right in the
-        // PTY pane.
-        let mut out = String::with_capacity(text.len() + 4);
+        let mut out = String::with_capacity(text.len() + 16);
         for c in text.chars() {
             if c == '\n' {
-                out.push('\r');
-                out.push('\n');
-            } else {
-                out.push(c);
+                // End of line: flush any buffered prefix, close dim, CRLF.
+                if !self.prefix_buf.is_empty() {
+                    out.push_str(&self.prefix_buf);
+                    self.prefix_buf.clear();
+                }
+                if self.in_dim_line {
+                    out.push_str("\x1b[0m");
+                    self.in_dim_line = false;
+                }
+                out.push_str("\r\n");
+                self.at_line_start = true;
+                continue;
             }
+            if self.at_line_start && !self.in_dim_line {
+                self.prefix_buf.push(c);
+                // Did we just complete one of the dim labels?
+                if let Some(matched) = DIM_LINE_PREFIXES
+                    .iter()
+                    .find(|p| **p == self.prefix_buf.as_str())
+                {
+                    out.push_str("\x1b[2m");
+                    out.push_str(matched);
+                    self.prefix_buf.clear();
+                    self.in_dim_line = true;
+                    self.at_line_start = false;
+                    continue;
+                }
+                // Still a prefix of some candidate? keep buffering.
+                let still_candidate = DIM_LINE_PREFIXES
+                    .iter()
+                    .any(|p| p.starts_with(self.prefix_buf.as_str()));
+                if !still_candidate {
+                    out.push_str(&self.prefix_buf);
+                    self.prefix_buf.clear();
+                    self.at_line_start = false;
+                }
+                continue;
+            }
+            out.push(c);
         }
-        self.emit.emit(SessionEvent::pty(out.as_bytes()));
-        // Also emit as a structured Message event so the transcript
-        // view still works for users who switch to it.
+        if !out.is_empty() {
+            self.emit.emit(SessionEvent::pty(out.as_bytes()));
+        }
+        // Transcript copy stays raw.
         self.emit.emit(SessionEvent::Message {
             role: agentd_protocol::MessageRole::Assistant,
             text: text.to_string(),
@@ -271,7 +326,7 @@ pub async fn run(
         // Inner step loop — feed tool results back until end-of-turn.
         loop {
             let _pruned = context::prune(&mut messages, provider_name, &model);
-            let mut sink = PtySink { emit: &emit };
+            let mut sink = PtySink::new(&emit);
             let turn = match provider
                 .complete(&model, SYSTEM_PROMPT, &messages, &specs, &mut sink)
                 .await
