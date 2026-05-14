@@ -981,7 +981,11 @@ impl App {
                 self.selection = Selection::Session(id.clone());
                 self.transcript_session = None;
                 self.refresh_selected_transcript().await;
-                self.focus = PaneFocus::List;
+                // Drop focus into the view so the user can immediately
+                // type into the (now-promoted) selected session's PTY.
+                // `refresh_selected_transcript` already auto-switches to
+                // Terminal view for PTY-backed sessions.
+                self.focus = PaneFocus::View;
                 return;
             }
         }
