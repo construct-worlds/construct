@@ -431,6 +431,7 @@ impl SessionManager {
 
         // Record the user's initial prompt as the first transcript event so
         // the transcript reads coherently (user → assistant) for every adapter.
+        // Auto-title is triggered inside handle_event for any User message.
         if let Some(p) = params.prompt.as_ref().filter(|s| !s.trim().is_empty()) {
             self.handle_event(
                 &entry,
@@ -440,7 +441,6 @@ impl SessionManager {
                 },
             )
             .await;
-            self.maybe_spawn_auto_title(entry.clone(), p.clone());
         }
 
         adapter
@@ -624,7 +624,7 @@ impl SessionManager {
         }
     }
 
-    async fn handle_event(&self, entry: &SessionEntry, event: SessionEvent) {
+    async fn handle_event(&self, entry: &Arc<SessionEntry>, event: SessionEvent) {
         // Skip everything once the session has been deleted — the drain task
         // and the adapter can still feed us events for a beat.
         if entry.is_deleted() {
@@ -716,6 +716,20 @@ impl SessionManager {
             let _ = self.storage.save_summary(&snapshot);
         }
 
+        // Auto-title hook: trigger on the FIRST User message we record
+        // regardless of where it came from (the daemon's create()
+        // prompt-as-event, send_input, or an adapter that re-emits the
+        // user's typed prompt — zarvis interactive does this). The
+        // `title_gen_attempted` AtomicBool inside maybe_spawn_auto_title
+        // ensures only the first one wins.
+        if let SessionEvent::Message {
+            role: MessageRole::User,
+            text,
+        } = &event
+        {
+            self.maybe_spawn_auto_title(entry.clone(), text.clone());
+        }
+
         let _ = self.broadcast.send(BroadcastMsg::Event(EventNotificationPayload {
             session_id: entry.id.clone(),
             at: now,
@@ -742,6 +756,7 @@ impl SessionManager {
             .clone()
             .ok_or_else(|| anyhow!("session has no live adapter"))?;
         // Record the input as a user message so it shows in the transcript.
+        // Auto-title is triggered inside handle_event for any User message.
         self.handle_event(
             &entry,
             SessionEvent::Message {
@@ -750,7 +765,6 @@ impl SessionManager {
             },
         )
         .await;
-        self.maybe_spawn_auto_title(entry.clone(), text.clone());
         let params = serde_json::to_value(&agentd_protocol::SessionInputParams {
             session_id: id.to_string(),
             text,
