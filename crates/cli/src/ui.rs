@@ -75,6 +75,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.list_area = Some(cols[0]);
     app.layout.view_area = Some(detail_area);
     app.layout.pin_strip_area = pin_strip_area;
+    app.layout.minibuffer_area = Some(minibuffer_area);
     app.layout.list_row_count = app.list_items().len();
 
     render_sessions(f, cols[0], app);
@@ -125,6 +126,11 @@ fn render_zoomed(f: &mut Frame, area: Rect, app: &mut App) {
             .set_size(main_area.height.max(1), main_area.width.max(1));
     }
     apply_focused_scrollback(app);
+    // Zoomed layout snapshot: only the view + minibuffer exist.
+    app.layout.list_area = None;
+    app.layout.view_area = Some(main_area);
+    app.layout.pin_strip_area = None;
+    app.layout.minibuffer_area = Some(minibuffer_area);
 
     if let Some(diff) = &app.last_diff {
         let para = Paragraph::new(diff.clone()).wrap(Wrap { trim: false });

@@ -169,6 +169,7 @@ pub struct LayoutSnapshot {
     pub list_area: Option<ratatui::layout::Rect>,
     pub view_area: Option<ratatui::layout::Rect>,
     pub pin_strip_area: Option<ratatui::layout::Rect>,
+    pub minibuffer_area: Option<ratatui::layout::Rect>,
     /// Number of rows of the list pane currently in use (so a click
     /// past the last row is a no-op rather than selecting an
     /// out-of-range item). Mirrors `app.list_items().len()`.
@@ -842,15 +843,22 @@ impl App {
     }
 
     /// Hit-test a left-click against the last frame's pane geometry.
-    /// - Inside the list pane: select the row (or toggle group on a
-    ///   header click) and focus the list.
-    /// - Inside the view pane: focus the view (so subsequent keystrokes
-    ///   pass through to the PTY when the session is PTY-backed).
-    /// - Inside the pin strip: select the matching pinned session.
+    /// - Inside the **minibuffer**: position the cursor within the
+    ///   typed input when one is open, or open the command palette
+    ///   when none is.
+    /// - Inside the **list pane**: select the row (or toggle group on
+    ///   a header click) and focus the list.
+    /// - Inside the **view pane**: focus the view.
+    /// - Inside the **pin strip**: select the matching pinned session.
     async fn handle_left_click(&mut self, col: u16, row: u16) {
-        // Closure-free containment check.
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
+        }
+        if let Some(mb_area) = self.layout.minibuffer_area {
+            if contains(mb_area, col, row) {
+                self.click_minibuffer(mb_area, col).await;
+                return;
+            }
         }
         if let Some(strip) = self.layout.pin_strip_area {
             if contains(strip, col, row) {
@@ -869,6 +877,31 @@ impl App {
                 self.focus = PaneFocus::View;
                 return;
             }
+        }
+    }
+
+    async fn click_minibuffer(&mut self, mb_area: ratatui::layout::Rect, col: u16) {
+        if let Some(mb) = self.minibuffer.as_mut() {
+            // Position the cursor at the clicked column inside the
+            // input. Math: text starts at `area.x + prompt.width()`.
+            // ApproveTool is a single-key intent — no cursor moves are
+            // meaningful, so we skip those.
+            if matches!(mb.intent, MinibufferIntent::ApproveTool { .. }) {
+                return;
+            }
+            let prompt_w = unicode_width::UnicodeWidthStr::width(mb.prompt.as_str()) as u16;
+            let input_start = mb_area.x + prompt_w;
+            if col < input_start {
+                mb.cursor = 0;
+            } else {
+                let offset_cells = (col - input_start) as usize;
+                let max = mb.input.chars().count();
+                mb.cursor = offset_cells.min(max);
+            }
+        } else {
+            // No minibuffer open — clicking the prompt area opens the
+            // command palette, matching the `M-x` / `C-x x` chord.
+            self.run_action(KeyAction::OpenCommandPalette).await;
         }
     }
 
