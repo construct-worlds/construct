@@ -973,21 +973,31 @@ impl App {
         }
         let tiles = crate::ui::pin_tile_layout(strip, pinned_ids.len());
         for (tile, id) in tiles.iter().zip(pinned_ids.iter()) {
-            if col >= tile.x
+            if !(col >= tile.x
                 && col < tile.x + tile.width
                 && row >= tile.y
-                && row < tile.y + tile.height
+                && row < tile.y + tile.height)
             {
-                self.selection = Selection::Session(id.clone());
-                self.transcript_session = None;
-                self.refresh_selected_transcript().await;
-                // Drop focus into the view so the user can immediately
-                // type into the (now-promoted) selected session's PTY.
-                // `refresh_selected_transcript` already auto-switches to
-                // Terminal view for PTY-backed sessions.
-                self.focus = PaneFocus::View;
+                continue;
+            }
+            // Close button: ` × ` (3 cells) anchored at the top border's
+            // right edge. We forgive one extra cell on the left of the
+            // glyph since it's bordered by a corner char.
+            let close_w = 3u16;
+            let close_x_start = tile.x + tile.width.saturating_sub(close_w + 1);
+            let close_x_end = tile.x + tile.width.saturating_sub(1);
+            if row == tile.y && col >= close_x_start && col < close_x_end {
+                if let Err(e) = self.client.set_pinned(id, false).await {
+                    self.set_status(format!("unpin failed: {e}"));
+                }
                 return;
             }
+            // Body click: select + drop focus into the view.
+            self.selection = Selection::Session(id.clone());
+            self.transcript_session = None;
+            self.refresh_selected_transcript().await;
+            self.focus = PaneFocus::View;
+            return;
         }
     }
 

@@ -689,10 +689,19 @@ fn render_pin_strip(f: &mut Frame, area: Rect, app: &App, pinned_ids: &[String])
             ),
             None => format!(" ⬩ {} ", short_id(id)),
         };
+        // Right-aligned close button. The trailing space is part of the
+        // visual hot-zone so a click landing on either cell unpins.
+        // Style red so it reads as an action.
+        let close = Line::from(Span::styled(
+            " × ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(ratatui::layout::Alignment::Right);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(pane_border_style(is_selected))
-            .title(title);
+            .title(title)
+            .title(close);
         let inner = block.inner(*tile_area);
         f.render_widget(block, *tile_area);
         if let Some(parser) = app.terminals.get(id) {
