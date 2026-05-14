@@ -141,21 +141,44 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &App) {
         .border_style(pane_border_style(focused))
         .title(" sessions ");
 
+    // Total cells available inside the bordered pane.
+    let row_w = (area.width as usize).saturating_sub(2);
     let app_items = app.list_items();
     let mut selected_idx: Option<usize> = None;
     let items: Vec<ListItem> = app_items
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            if item.matches(&app.selection) {
+            let is_selected = item.matches(&app.selection);
+            if is_selected {
                 selected_idx = Some(i);
             }
             match item {
                 AppListItem::Session { summary: s, indented } => {
                     let pin_glyph = if s.pinned { "⬩" } else { " " };
                     let indent_prefix = if *indented { "  " } else { "" };
-                    let secondary = s.last_prompt.clone().unwrap_or_default();
-                    let secondary = shorten(&secondary, 28);
+                    // Fixed-width left side: indent + pin (1) + " glyph " (3).
+                    let prefix_w = indent_prefix.chars().count() + 1 + 3;
+                    let harness = s.harness.as_str();
+                    let harness_w = harness.chars().count();
+                    // Always leave at least one cell of gap between the name
+                    // and the right-aligned harness.
+                    let name_avail =
+                        row_w.saturating_sub(prefix_w + 1 + harness_w);
+                    let raw_name = primary_label(s);
+                    let scroll = if is_selected && focused {
+                        Some(
+                            (app.start_instant.elapsed().as_millis() / 200)
+                                as usize,
+                        )
+                    } else {
+                        None
+                    };
+                    let name_display = fit_name(&raw_name, name_avail, scroll);
+                    let name_display_w = name_display.chars().count();
+                    let gap = row_w
+                        .saturating_sub(prefix_w + name_display_w + harness_w);
+                    let gap_str: String = " ".repeat(gap);
                     ListItem::new(Line::from(vec![
                         Span::raw(indent_prefix.to_string()),
                         Span::styled(
@@ -166,14 +189,15 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &App) {
                             format!(" {} ", session_status_glyph(app, s)),
                             state_style(s.state),
                         ),
-                        Span::styled(primary_label(s), Style::default().fg(Color::White)),
-                        Span::raw("  "),
                         Span::styled(
-                            format!("{:<7}", s.harness),
+                            name_display,
+                            Style::default().fg(Color::White),
+                        ),
+                        Span::raw(gap_str),
+                        Span::styled(
+                            harness.to_string(),
                             Style::default().fg(Color::Cyan),
                         ),
-                        Span::raw(" "),
-                        Span::styled(secondary, Style::default().fg(Color::Gray)),
                     ]))
                 }
                 AppListItem::GroupHeader { group, member_count } => {
@@ -765,6 +789,48 @@ fn role_style(role: MessageRole) -> Style {
         MessageRole::Assistant => Style::default().fg(Color::LightGreen),
         MessageRole::System => Style::default().fg(Color::DarkGray),
         MessageRole::Tool => Style::default().fg(Color::Yellow),
+    }
+}
+
+/// Fit a session name into `width` cells.
+///
+/// - When the name fits, return it as-is (padded callers handle alignment).
+/// - When the name doesn't fit and `scroll` is `None`, truncate with a
+///   trailing ellipsis.
+/// - When the name doesn't fit and `scroll = Some(offset)`, treat
+///   `name + "   "` as a cyclic ribbon and return `width` chars starting
+///   at `offset % ribbon_len`. The caller is expected to bump `offset`
+///   each tick so the selected row's name appears to scroll.
+fn fit_name(name: &str, width: usize, scroll: Option<usize>) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= width {
+        return name.to_string();
+    }
+    match scroll {
+        None => {
+            if width == 0 {
+                return String::new();
+            }
+            if width == 1 {
+                return "…".into();
+            }
+            let take = width - 1;
+            let mut s: String = chars.iter().take(take).collect();
+            s.push('…');
+            s
+        }
+        Some(offset) => {
+            // 3-char gap so the wrap-around boundary is visible.
+            let mut ribbon: Vec<char> = chars.clone();
+            ribbon.extend("   ".chars());
+            let n = ribbon.len();
+            let start = offset % n;
+            let mut visible = String::with_capacity(width);
+            for i in 0..width {
+                visible.push(ribbon[(start + i) % n]);
+            }
+            visible
+        }
     }
 }
 
