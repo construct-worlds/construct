@@ -95,6 +95,13 @@ impl<'a> Terminal<'a> {
 /// so the at-start-of-line buffer stays tiny.
 const DIM_LINE_PREFIXES: &[&str] = &["Summary:"];
 
+/// Available slash commands surfaced by inline ghost-completion and
+/// Tab-accept in the interactive line editor. Order matters — when
+/// multiple commands share a prefix, the first one wins as the ghost.
+/// Keep in lockstep with the `match trimmed { ... }` block that handles
+/// them after submit.
+const SLASH_COMMANDS: &[&str] = &["/model", "/quit", "/exit"];
+
 /// Padding around the assistant's streamed response. The response is
 /// rendered as a chat bubble: `❯` marks user input (the line editor's
 /// prompt), `●` marks the response's first line, continuation lines
@@ -338,18 +345,62 @@ impl LineEditor {
     /// Bytes the terminal needs to repaint the current line. Caller is
     /// responsible for having the cursor sitting on the prompt's row
     /// before calling (we always start with `\r` + erase-to-end).
+    ///
+    /// When the buffer starts with `/`, the longest matching slash
+    /// command is appended in dim ANSI as a ghost suggestion. The
+    /// suggestion's cells count toward the cursor-back-move so the
+    /// real cursor stays where the user is editing.
     fn redraw(&self) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::with_capacity(self.buf.len() + 32);
         out.extend_from_slice(b"\r\x1b[K");
         out.extend_from_slice(self.prompt_seq);
         out.extend_from_slice(self.buf.as_bytes());
-        // Move cursor back by (chars after cursor) cells, if any.
+        let ghost_cells = if let Some(suffix) = self.ghost_suffix() {
+            out.extend_from_slice(b"\x1b[2m");
+            out.extend_from_slice(suffix.as_bytes());
+            out.extend_from_slice(b"\x1b[0m");
+            suffix.chars().count()
+        } else {
+            0
+        };
         let tail = self.buf.chars().count().saturating_sub(self.cursor);
-        if tail > 0 {
-            let mv = format!("\x1b[{tail}D");
+        let back = ghost_cells + tail;
+        if back > 0 {
+            let mv = format!("\x1b[{back}D");
             out.extend_from_slice(mv.as_bytes());
         }
         out
+    }
+
+    /// Suffix the editor would offer as autocomplete for the current
+    /// buffer, if any. Returns `None` when the buf isn't a slash
+    /// command, when no command starts with it, or when the buf already
+    /// matches a command fully.
+    fn ghost_suffix(&self) -> Option<&'static str> {
+        if !self.buf.starts_with('/') {
+            return None;
+        }
+        let buf_len = self.buf.len();
+        for &cmd in SLASH_COMMANDS {
+            if cmd.starts_with(self.buf.as_str()) && cmd.len() > buf_len {
+                return Some(&cmd[buf_len..]);
+            }
+        }
+        None
+    }
+
+    /// Accept the ghost suggestion (if any), appending a trailing
+    /// space so the user can immediately type the command's argument.
+    /// Returns true when something was accepted.
+    fn accept_ghost(&mut self) -> bool {
+        if let Some(suffix) = self.ghost_suffix() {
+            self.buf.push_str(suffix);
+            self.buf.push(' ');
+            self.cursor = self.buf.chars().count();
+            true
+        } else {
+            false
+        }
     }
 
     fn submit(&mut self) -> LineEvent {
@@ -593,6 +644,12 @@ impl LineEditor {
                 out.extend_from_slice(b"\x1b[2J\x1b[H");
                 out.extend_from_slice(&self.redraw());
             }
+            // Tab — accept the slash-command ghost suggestion.
+            0x09 => {
+                if self.accept_ghost() {
+                    out.extend_from_slice(&self.redraw());
+                }
+            }
             // Backspace / DEL
             0x08 | 0x7f => {
                 if self.cursor > 0 {
@@ -611,13 +668,13 @@ impl LineEditor {
             b => {
                 let c = b as char;
                 self.insert_char(c);
-                // If cursor is at end, optimize: just echo the char.
-                // Otherwise full redraw to shift the tail.
-                if self.cursor == self.buf.chars().count() {
-                    out.push(b);
-                } else {
-                    out.extend_from_slice(&self.redraw());
-                }
+                // Always full-redraw so the slash-command ghost
+                // suggestion is recomputed against the new buf
+                // (previously we just echoed the char when the cursor
+                // was at the end — that left stale ghost bytes on
+                // screen when the typed char diverged from the
+                // suggestion).
+                out.extend_from_slice(&self.redraw());
             }
         }
     }
@@ -799,6 +856,35 @@ mod tests {
         let mut ed = editor();
         let (_, evs) = ed.feed_bytes(&[0x04]);
         assert!(matches!(evs.as_slice(), [LineEvent::Eof]));
+    }
+
+    #[test]
+    fn slash_ghost_shows_first_match() {
+        let mut ed = editor();
+        ed.feed_bytes(b"/");
+        assert_eq!(ed.ghost_suffix(), Some("model"));
+        ed.feed_bytes(b"q");
+        assert_eq!(ed.ghost_suffix(), Some("uit"));
+        ed.feed_bytes(b"x");
+        assert_eq!(ed.ghost_suffix(), None);
+    }
+
+    #[test]
+    fn tab_accepts_ghost_and_appends_space() {
+        let mut ed = editor();
+        ed.feed_bytes(b"/m");
+        ed.feed_bytes(&[0x09]); // Tab
+        assert_eq!(ed.buf, "/model ");
+        assert_eq!(ed.cursor, ed.buf.chars().count());
+    }
+
+    #[test]
+    fn tab_no_ghost_is_noop() {
+        let mut ed = editor();
+        ed.feed_bytes(b"hello");
+        let buf_before = ed.buf.clone();
+        ed.feed_bytes(&[0x09]);
+        assert_eq!(ed.buf, buf_before);
     }
 }
 
