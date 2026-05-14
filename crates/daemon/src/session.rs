@@ -759,17 +759,17 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Kick off auto-title generation in the background if the session
-    /// has no user-set title yet and we haven't already attempted it
-    /// this incarnation. Silently no-ops when the zarvis adapter binary
-    /// can't be located or title-gen exits non-zero.
+    /// Kick off auto-title generation in the background if (a) the user
+    /// has not set a title yet (i.e. the `title` field is `None` — the
+    /// hash shown in the UI is just `primary_label`'s display fallback),
+    /// (b) we haven't already attempted this incarnation, (c) the
+    /// prompt is non-empty, and (d) the zarvis adapter binary is
+    /// configured + locatable. Silently no-ops on any miss.
     fn maybe_spawn_auto_title(&self, entry: Arc<SessionEntry>, prompt: String) {
-        if entry
-            .title_gen_attempted
-            .swap(true, Ordering::SeqCst)
-        {
-            return;
-        }
+        // Cheap checks first so we don't burn the per-session attempt
+        // budget (the AtomicBool flip is one-way until a daemon
+        // restart) on inputs that wouldn't have produced a title
+        // anyway.
         if prompt.trim().is_empty() {
             return;
         }
@@ -783,6 +783,14 @@ impl SessionManager {
         let Some(binary) = locate_binary(&binary_spec) else {
             return;
         };
+        // Now claim the attempt. `swap` is the one place we mark this
+        // session as "tried"; the user-renamed path is handled by
+        // `title_gen_attempted` being initialized to `title.is_some()`
+        // when the entry is constructed (both at create-time and when
+        // loaded from disk on daemon restart).
+        if entry.title_gen_attempted.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let storage = self.storage.clone();
         let broadcast_tx = self.broadcast.clone();
         tokio::spawn(async move {
