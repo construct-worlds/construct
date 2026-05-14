@@ -143,6 +143,10 @@ struct PtySink<'a> {
     /// Visible column inside the padded block (0 = just past left
     /// padding). ASCII-counted; CJK chars may misalign.
     col: usize,
+    /// When true, every delta also fires a `SessionEvent::Message` so
+    /// the daemon's transcript view sees the streaming text. Off for
+    /// replay paths where the message is already in the transcript.
+    emit_messages: bool,
 }
 impl<'a> PtySink<'a> {
     fn new(emit: &'a EventEmitter, width: usize) -> Self {
@@ -154,6 +158,16 @@ impl<'a> PtySink<'a> {
             width,
             emitted: false,
             col: 0,
+            emit_messages: true,
+        }
+    }
+    /// Replay constructor — emits PTY bytes only, never `Message`
+    /// events. Used by the resize-redraw path where the messages are
+    /// already in the transcript.
+    fn new_replay(emit: &'a EventEmitter, width: usize) -> Self {
+        Self {
+            emit_messages: false,
+            ..Self::new(emit, width)
         }
     }
 
@@ -275,11 +289,13 @@ impl<'a> TextSink for PtySink<'a> {
         if !out.is_empty() {
             self.emit.emit(SessionEvent::pty(&out));
         }
-        // Transcript copy stays raw (unpadded).
-        self.emit.emit(SessionEvent::Message {
-            role: agentd_protocol::MessageRole::Assistant,
-            text: text.to_string(),
-        });
+        if self.emit_messages {
+            // Transcript copy stays raw (unpadded).
+            self.emit.emit(SessionEvent::Message {
+                role: agentd_protocol::MessageRole::Assistant,
+                text: text.to_string(),
+            });
+        }
     }
 }
 
@@ -1086,7 +1102,19 @@ pub async fn run(
                 state: SessionState::AwaitingInput,
                 detail: None,
             });
-            match read_one_line(&mut inbox, &mut editor, &term, &mut automode, &mut pty_width).await {
+            match read_one_line(
+                &mut inbox,
+                &mut editor,
+                &term,
+                &mut automode,
+                &mut pty_width,
+                &messages,
+                provider_name,
+                &model,
+                &emit,
+            )
+            .await
+            {
                 ReadOutcome::Line(t) => t,
                 ReadOutcome::Stop => break 'outer,
                 ReadOutcome::Eof => {
@@ -1313,6 +1341,10 @@ async fn read_one_line(
     term: &Terminal<'_>,
     automode: &mut bool,
     pty_width: &mut usize,
+    messages: &[Message],
+    provider_name: &str,
+    model: &str,
+    emit: &EventEmitter,
 ) -> ReadOutcome {
     loop {
         match inbox.recv().await {
@@ -1349,10 +1381,88 @@ async fn read_one_line(
                 }
             }
             Some(AdapterInboxMsg::PtyResize { cols, .. }) => {
-                *pty_width = (cols as usize)
+                let new_w = (cols as usize)
                     .max(MIN_USABLE_WIDTH + LEFT_MARGIN_CELLS + PAD_RIGHT);
+                *pty_width = new_w;
+                // Full re-render: claude/codex reflow on resize via
+                // their own SIGWINCH handler in the child; zarvis owns
+                // the rendering itself, so we redraw the banner + every
+                // message in `messages` at the new width, then repaint
+                // the prompt.
+                redraw_history(
+                    term,
+                    emit,
+                    provider_name,
+                    model,
+                    *automode,
+                    messages,
+                    new_w,
+                );
+                // The redraw cleared the screen; any popup we'd tracked
+                // is gone with it.
+                editor.last_popup_lines = 0;
+                let bytes = editor.redraw();
+                term.write(&bytes);
             }
             Some(AdapterInboxMsg::ToolDecision { .. }) => {}
+        }
+    }
+}
+
+/// Clear the PTY and re-emit the entire conversation at the new width.
+/// Skips `Message` events on the re-rendered assistant text (those
+/// already live in the daemon-side transcript). User and tool turns
+/// are re-rendered with the same glyphs the live path uses so the
+/// reflow is visually identical to the original streaming output.
+fn redraw_history(
+    term: &Terminal<'_>,
+    emit: &EventEmitter,
+    provider_name: &str,
+    model: &str,
+    automode: bool,
+    messages: &[Message],
+    width: usize,
+) {
+    // ED 3 clears the on-disk scrollback buffer too (some terminals
+    // support this); ED 2 clears the visible screen; CUP 1;1 homes.
+    term.write(b"\x1b[3J\x1b[2J\x1b[H");
+    term.banner(provider_name, model, automode);
+    for m in messages {
+        match (&m.role, &m.content) {
+            (Role::User, Content::Text { text }) => {
+                // Echo as if the user just typed it: `❯ <text>`.
+                term.write(b"\r\n\x1b[1;36m\xe2\x9d\xaf \x1b[0m");
+                term.write(text.as_bytes());
+                term.write(b"\r\n");
+            }
+            (Role::Assistant, Content::Text { text }) => {
+                let mut sink = PtySink::new_replay(emit, width);
+                sink.delta(text);
+                sink.finalize();
+            }
+            (Role::Assistant, Content::AssistantToolCalls { text, calls }) => {
+                if let Some(t) = text {
+                    if !t.is_empty() {
+                        let mut sink = PtySink::new_replay(emit, width);
+                        sink.delta(t);
+                        sink.finalize();
+                    }
+                }
+                for c in calls {
+                    let args = serde_json::to_string(&c.input).unwrap_or_default();
+                    let summary: String = if args.chars().count() > 120 {
+                        let head: String = args.chars().take(120).collect();
+                        format!("{head}…")
+                    } else {
+                        args
+                    };
+                    term.tool_use(&c.name, &summary);
+                }
+            }
+            (Role::Tool, Content::ToolResult { output, is_error, .. }) => {
+                term.tool_result(!*is_error, output);
+            }
+            _ => {}
         }
     }
 }
