@@ -66,6 +66,7 @@ dependencies = [
  "agentd-protocol",
  "anyhow",
  "async-trait",
+ "base64",
  "bytes",
  "chrono",
  "eventsource-stream",

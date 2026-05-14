@@ -1,0 +1,144 @@
+//! Rolling-window context manager.
+//!
+//! Estimates token count with a coarse `chars / 3.5` heuristic + a
+//! safety margin, then prunes complete turn pairs (user → assistant →
+//! tool exchanges between them) from the oldest end when the budget
+//! is exceeded. The system prompt is owned by the caller and not
+//! included here; we always keep the most-recent N turns.
+//!
+//! Approximate by design. v2 can swap in a real tokenizer (`tiktoken`,
+//! `tokenizers`) and provider-native prompt caching.
+
+use crate::provider::{Content, Message, Role};
+
+/// Token budget per provider/model. Returned as a soft cap — we prune
+/// when the estimated total exceeds `cap * UTILIZATION`.
+pub fn context_window_tokens(provider: &str, model: &str) -> usize {
+    match (provider, model) {
+        ("openai", m) if m.starts_with("gpt-5") => 200_000,
+        ("openai", m) if m.starts_with("gpt-4o") => 128_000,
+        ("openai", m) if m.starts_with("o") => 200_000,
+        ("openai", _) => 32_000,
+        ("anthropic", m) if m.contains("opus") => 200_000,
+        ("anthropic", m) if m.contains("sonnet") => 200_000,
+        ("anthropic", m) if m.contains("haiku") => 200_000,
+        ("anthropic", _) => 200_000,
+        ("ollama", _) => 8_000,
+        _ => 8_000,
+    }
+}
+
+const UTILIZATION: f64 = 0.7;
+const MIN_KEEP_TURNS: usize = 2;
+
+/// Rough token estimate (chars / 3.5). Safe to overestimate.
+fn estimate_tokens(messages: &[Message]) -> usize {
+    let mut chars = 0usize;
+    for m in messages {
+        match &m.content {
+            Content::Text(t) => chars += t.len(),
+            Content::AssistantToolCalls { text, calls } => {
+                if let Some(t) = text {
+                    chars += t.len();
+                }
+                for c in calls {
+                    chars += c.name.len();
+                    chars += serde_json::to_string(&c.input).map(|s| s.len()).unwrap_or(0);
+                }
+            }
+            Content::ToolResult { output, .. } => chars += output.len(),
+        }
+    }
+    (chars as f64 / 3.5) as usize
+}
+
+/// Prune oldest turn pairs until the estimate is under budget. A turn
+/// pair is a User message + everything until the next User (or end).
+/// Returns the number of pruned turns for logging.
+pub fn prune(messages: &mut Vec<Message>, provider: &str, model: &str) -> usize {
+    let cap = (context_window_tokens(provider, model) as f64 * UTILIZATION) as usize;
+    let mut pruned = 0;
+    while estimate_tokens(messages) > cap {
+        // Find next User-message boundary; everything before it is one
+        // (or zero) full turn-pair we can drop.
+        let mut second_user_idx = None;
+        let mut user_seen = 0;
+        for (i, m) in messages.iter().enumerate() {
+            if matches!(m.role, Role::User) {
+                user_seen += 1;
+                if user_seen == MIN_KEEP_TURNS + 1 {
+                    second_user_idx = Some(i);
+                    break;
+                }
+            }
+        }
+        // If we don't have at least MIN_KEEP_TURNS+1 user messages, we
+        // can't prune anything without dropping too much.
+        let cut = match second_user_idx {
+            Some(_) => find_first_user_run_end(messages),
+            None => break,
+        };
+        if cut == 0 {
+            break;
+        }
+        messages.drain(..cut);
+        pruned += 1;
+    }
+    pruned
+}
+
+/// Return the index where the first user-led "turn pair" ends — i.e.
+/// the index of the second User message (or messages.len() if there's
+/// only one).
+fn find_first_user_run_end(messages: &[Message]) -> usize {
+    let mut seen_user = false;
+    for (i, m) in messages.iter().enumerate() {
+        if matches!(m.role, Role::User) {
+            if seen_user {
+                return i;
+            }
+            seen_user = true;
+        }
+    }
+    messages.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(s: &str) -> Message {
+        Message { role: Role::User, content: Content::Text(s.into()) }
+    }
+    fn asst(s: &str) -> Message {
+        Message { role: Role::Assistant, content: Content::Text(s.into()) }
+    }
+
+    #[test]
+    fn no_prune_under_budget() {
+        let mut ms = vec![user("hi"), asst("hello")];
+        let pruned = prune(&mut ms, "openai", "gpt-4o");
+        assert_eq!(pruned, 0);
+        assert_eq!(ms.len(), 2);
+    }
+
+    #[test]
+    fn keeps_min_recent_turns() {
+        // Tiny budget by using ollama default (8k tokens ≈ 28k chars).
+        // Three turn pairs total; MIN_KEEP=2 means at least the most
+        // recent two are preserved.
+        let huge = "x".repeat(40_000);
+        let mut ms = vec![
+            user(&huge),
+            asst(&huge),
+            user("middle question"),
+            asst("middle answer"),
+            user("recent question"),
+            asst("recent answer"),
+        ];
+        let pruned = prune(&mut ms, "ollama", "llama3.1");
+        assert!(pruned >= 1);
+        // Final messages should still contain the recent ones.
+        assert!(matches!(ms.last().map(|m| m.role), Some(Role::Assistant)));
+    }
+}
