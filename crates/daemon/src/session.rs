@@ -571,6 +571,22 @@ impl SessionManager {
         .await
         .with_context(|| format!("respawn adapter for {harness}"))?;
 
+        // Drop stale PTY bytes from the previous incarnation BEFORE the
+        // new child can start emitting. Without this, the in-memory ring
+        // (rehydrated from pty.log at Manager::new) and the on-disk
+        // pty.log both hold the old child's TUI state — when a TUI
+        // client reconnects and calls pty_replay it gets that history
+        // merged with the new child's startup escapes, and vt100 lands
+        // in a weird half-rendered state (often appearing blank with
+        // just a cursor) until a SIGWINCH forces a redraw.
+        {
+            let mut pty = entry.pty.lock().await;
+            pty.ring.clear();
+        }
+        if let Err(e) = self.storage.truncate_pty_log(id) {
+            tracing::warn!(session = %id, error = ?e, "truncate_pty_log on respawn failed");
+        }
+
         adapter
             .request(
                 ahp_method::SESSION_START,

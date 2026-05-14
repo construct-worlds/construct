@@ -240,6 +240,23 @@ impl Storage {
     /// Append raw PTY bytes to the session's `pty.log`. Best-effort; this
     /// gets called on every Pty event so it has to stay cheap. Append-only,
     /// no rotation — operators can truncate / rotate externally if needed.
+    /// Truncate the session's `pty.log` to zero bytes. Called on
+    /// session respawn so the new adapter's child can render into a
+    /// clean PTY without bytes from the previous incarnation
+    /// interfering with vt100 state.
+    pub fn truncate_pty_log(&self, id: &str) -> Result<()> {
+        let path = self.pty_log_path(id);
+        if !path.exists() {
+            return Ok(());
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .with_context(|| format!("truncate {}", path.display()))?;
+        Ok(())
+    }
+
     pub fn append_pty_bytes(&self, id: &str, bytes: &[u8]) -> Result<()> {
         if bytes.is_empty() {
             return Ok(());
