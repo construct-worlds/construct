@@ -95,8 +95,29 @@ impl<'a> Terminal<'a> {
 /// so the at-start-of-line buffer stays tiny.
 const DIM_LINE_PREFIXES: &[&str] = &["Summary:"];
 
+/// Padding around the assistant's streamed response. The response is
+/// rendered as a chat bubble: `❯` marks user input (the line editor's
+/// prompt), `●` marks the response's first line, continuation lines
+/// indent under the text-after-the-dot. Top/bottom are blank lines;
+/// right is implemented as soft-wrap at `width - PAD_RIGHT`.
+const PAD_TOP: usize = 1;
+const PAD_BOTTOM: usize = 1;
+const PAD_RIGHT: usize = 2;
+/// First-line marker for the response. `\xe2\x97\x8f` = `●`.
+const RESPONSE_BULLET: &[u8] = b"\xe2\x97\x8f  ";
+/// Continuation indent that aligns the wrapped text under the text
+/// after the bullet. Must visually match the bullet's cell width
+/// (1 dot + 2 spaces = 3 cells).
+const RESPONSE_INDENT: &[u8] = b"   ";
+/// Left margin in visible cells (counts toward soft-wrap math).
+const LEFT_MARGIN_CELLS: usize = 3;
+/// Hard floor on usable width so a tiny pane doesn't crash the wrap
+/// math.
+const MIN_USABLE_WIDTH: usize = 20;
+
 /// Sink for the interactive mode: deltas go directly to the PTY (with
-/// optional dim-line styling) and as Message events so the transcript
+/// dim-line styling for `Summary:` etc. + top/bottom/left/right padding
+/// around the whole response) and as Message events so the transcript
 /// still has the raw text.
 struct PtySink<'a> {
     emit: &'a EventEmitter,
@@ -106,66 +127,148 @@ struct PtySink<'a> {
     /// decide whether they match a `DIM_LINE_PREFIXES` entry. Bounded
     /// by the longest prefix length, so streaming UX stays snappy.
     prefix_buf: String,
+    /// Current pane width in cells; used to soft-wrap at the right
+    /// gutter so the visible right margin matches `pad_right`.
+    width: usize,
+    /// True once `delta` has emitted anything — top padding fires once
+    /// at first delta, bottom padding fires in `finalize`.
+    emitted: bool,
+    /// Visible column inside the padded block (0 = just past left
+    /// padding). ASCII-counted; CJK chars may misalign.
+    col: usize,
 }
 impl<'a> PtySink<'a> {
-    fn new(emit: &'a EventEmitter) -> Self {
+    fn new(emit: &'a EventEmitter, width: usize) -> Self {
         Self {
             emit,
             at_line_start: true,
             in_dim_line: false,
             prefix_buf: String::new(),
+            width,
+            emitted: false,
+            col: 0,
+        }
+    }
+
+    fn usable_width(&self) -> usize {
+        self.width
+            .saturating_sub(LEFT_MARGIN_CELLS + PAD_RIGHT)
+            .max(MIN_USABLE_WIDTH)
+    }
+
+    fn open_block(&mut self, out: &mut Vec<u8>) {
+        for _ in 0..PAD_TOP {
+            out.extend_from_slice(b"\r\n");
+        }
+        out.push(b'\r');
+        out.extend_from_slice(RESPONSE_BULLET);
+        self.col = 0;
+        self.at_line_start = true;
+        self.emitted = true;
+    }
+
+    fn newline(&mut self, out: &mut Vec<u8>) {
+        out.extend_from_slice(b"\r\n");
+        out.extend_from_slice(RESPONSE_INDENT);
+        self.col = 0;
+        self.at_line_start = true;
+    }
+
+    /// Emit any tail state + bottom padding. Called by the agent loop
+    /// once `provider.complete` returns and the streamed text portion
+    /// is done.
+    fn finalize(&mut self) {
+        if !self.emitted {
+            return;
+        }
+        let mut out: Vec<u8> = Vec::with_capacity(32);
+        // If we still have a partial dim-prefix candidate buffered
+        // (e.g., the model ended on "Summa" without a colon), flush it
+        // verbatim so we don't lose bytes.
+        if !self.prefix_buf.is_empty() {
+            out.extend_from_slice(self.prefix_buf.as_bytes());
+            self.prefix_buf.clear();
+        }
+        if self.in_dim_line {
+            out.extend_from_slice(b"\x1b[0m");
+            self.in_dim_line = false;
+        }
+        for _ in 0..PAD_BOTTOM {
+            out.extend_from_slice(b"\r\n");
+        }
+        if !out.is_empty() {
+            self.emit.emit(SessionEvent::pty(&out));
         }
     }
 }
 impl<'a> TextSink for PtySink<'a> {
     fn delta(&mut self, text: &str) {
-        let mut out = String::with_capacity(text.len() + 16);
+        let mut out: Vec<u8> = Vec::with_capacity(text.len() + 32);
+        if !self.emitted {
+            self.open_block(&mut out);
+        }
         for c in text.chars() {
             if c == '\n' {
-                // End of line: flush any buffered prefix, close dim, CRLF.
                 if !self.prefix_buf.is_empty() {
-                    out.push_str(&self.prefix_buf);
+                    out.extend_from_slice(self.prefix_buf.as_bytes());
                     self.prefix_buf.clear();
                 }
                 if self.in_dim_line {
-                    out.push_str("\x1b[0m");
+                    out.extend_from_slice(b"\x1b[0m");
                     self.in_dim_line = false;
                 }
-                out.push_str("\r\n");
-                self.at_line_start = true;
+                self.newline(&mut out);
                 continue;
+            }
+            // Soft-wrap once we hit the right gutter. Buffered prefix
+            // chars don't count toward col yet; once they're flushed
+            // we'll wrap on subsequent chars as needed.
+            if !self.at_line_start && self.col >= self.usable_width() {
+                let was_dim = self.in_dim_line;
+                if was_dim {
+                    out.extend_from_slice(b"\x1b[0m");
+                }
+                self.newline(&mut out);
+                if was_dim {
+                    out.extend_from_slice(b"\x1b[2m");
+                    self.in_dim_line = true; // newline() reset us to at_line_start
+                    self.at_line_start = false;
+                }
             }
             if self.at_line_start && !self.in_dim_line {
                 self.prefix_buf.push(c);
-                // Did we just complete one of the dim labels?
                 if let Some(matched) = DIM_LINE_PREFIXES
                     .iter()
                     .find(|p| **p == self.prefix_buf.as_str())
                 {
-                    out.push_str("\x1b[2m");
-                    out.push_str(matched);
+                    out.extend_from_slice(b"\x1b[2m");
+                    out.extend_from_slice(matched.as_bytes());
+                    self.col += matched.chars().count();
                     self.prefix_buf.clear();
                     self.in_dim_line = true;
                     self.at_line_start = false;
                     continue;
                 }
-                // Still a prefix of some candidate? keep buffering.
                 let still_candidate = DIM_LINE_PREFIXES
                     .iter()
                     .any(|p| p.starts_with(self.prefix_buf.as_str()));
                 if !still_candidate {
-                    out.push_str(&self.prefix_buf);
+                    out.extend_from_slice(self.prefix_buf.as_bytes());
+                    self.col += self.prefix_buf.chars().count();
                     self.prefix_buf.clear();
                     self.at_line_start = false;
                 }
                 continue;
             }
-            out.push(c);
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            out.extend_from_slice(s.as_bytes());
+            self.col += 1;
         }
         if !out.is_empty() {
-            self.emit.emit(SessionEvent::pty(out.as_bytes()));
+            self.emit.emit(SessionEvent::pty(&out));
         }
-        // Transcript copy stays raw.
+        // Transcript copy stays raw (unpadded).
         self.emit.emit(SessionEvent::Message {
             role: agentd_protocol::MessageRole::Assistant,
             text: text.to_string(),
@@ -756,6 +859,11 @@ pub async fn run(
     // those local to Terminal::prompt because the editor uses bare `\r`
     // for redraw and assumes the prompt sits on a fresh row).
     let mut editor = LineEditor::new(b"\x1b[1;36m\xe2\x9d\xaf \x1b[0m");
+    let mut pty_width: usize = params
+        .pty_size
+        .map(|s| s.cols as usize)
+        .unwrap_or(80)
+        .max(MIN_USABLE_WIDTH + LEFT_MARGIN_CELLS + PAD_RIGHT);
     let data_dir = persist::session_data_dir_from_env();
     let mut persist = Persist::open(data_dir.as_deref());
     let mut messages: Vec<Message> = if persist::is_resume() {
@@ -792,7 +900,7 @@ pub async fn run(
                 state: SessionState::AwaitingInput,
                 detail: None,
             });
-            match read_one_line(&mut inbox, &mut editor, &term, &mut automode).await {
+            match read_one_line(&mut inbox, &mut editor, &term, &mut automode, &mut pty_width).await {
                 ReadOutcome::Line(t) => t,
                 ReadOutcome::Stop => break 'outer,
                 ReadOutcome::Eof => {
@@ -829,13 +937,17 @@ pub async fn run(
         // Inner step loop — feed tool results back until end-of-turn.
         loop {
             let _pruned = context::prune(&mut messages, provider_name, &model);
-            let mut sink = PtySink::new(&emit);
+            let mut sink = PtySink::new(&emit, pty_width);
             let turn = match provider
                 .complete(&model, SYSTEM_PROMPT, &messages, &specs, &mut sink)
                 .await
             {
-                Ok(t) => t,
+                Ok(t) => {
+                    sink.finalize();
+                    t
+                }
                 Err(e) => {
+                    sink.finalize();
                     term.note(&format!("(provider error: {e})"));
                     emit.emit(SessionEvent::Error { message: format!("{e}") });
                     break;
@@ -988,6 +1100,7 @@ async fn read_one_line(
     editor: &mut LineEditor,
     term: &Terminal<'_>,
     automode: &mut bool,
+    pty_width: &mut usize,
 ) -> ReadOutcome {
     loop {
         match inbox.recv().await {
@@ -1023,7 +1136,10 @@ async fn read_one_line(
                     }
                 }
             }
-            Some(AdapterInboxMsg::PtyResize { .. }) => {}
+            Some(AdapterInboxMsg::PtyResize { cols, .. }) => {
+                *pty_width = (cols as usize)
+                    .max(MIN_USABLE_WIDTH + LEFT_MARGIN_CELLS + PAD_RIGHT);
+            }
             Some(AdapterInboxMsg::ToolDecision { .. }) => {}
         }
     }
