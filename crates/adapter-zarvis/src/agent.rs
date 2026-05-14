@@ -588,11 +588,20 @@ pub fn resolve_model(params: &SessionStartParams) -> Result<ResolvedModel> {
                 "ollama:llama3.1".to_string()
             }
         });
-    let spec = provider::routing::parse_model_spec(&spec_str)
+    resolve_model_from_spec(&spec_str)
+}
+
+/// Build a [`ResolvedModel`] from an explicit `<provider>:<name>` (or
+/// auto-detect bare-name) spec string. Used by the `/model <spec>`
+/// slash command to swap mid-session.
+pub fn resolve_model_from_spec(spec_str: &str) -> Result<ResolvedModel> {
+    let spec = provider::routing::parse_model_spec(spec_str)
         .map_err(|e| anyhow::anyhow!("invalid model spec `{spec_str}`: {e}"))?;
     let provider: Box<dyn LlmProvider> = match spec.provider {
         provider::routing::Provider::OpenAI => Box::new(provider::openai::OpenAi::from_env()?),
-        provider::routing::Provider::Anthropic => Box::new(provider::anthropic::Anthropic::from_env()?),
+        provider::routing::Provider::Anthropic => {
+            Box::new(provider::anthropic::Anthropic::from_env()?)
+        }
         provider::routing::Provider::Ollama => Box::new(provider::ollama::Ollama::from_env()?),
     };
     Ok(ResolvedModel {

@@ -54,7 +54,7 @@ impl<'a> Terminal<'a> {
         let banner = format!(
             "\r\n\x1b[1;35mzarvis\x1b[0m  \x1b[2m{provider}:{model}\x1b[0m{mode_badge}\r\n\
              \x1b[2mtype your prompt and press Enter. C-c interrupts a turn. \
-             `/quit` or C-d to end the session.\x1b[0m\r\n",
+             `/model <spec>` switches the model. `/quit` or C-d to end.\x1b[0m\r\n",
         );
         self.write(banner.as_bytes());
     }
@@ -822,9 +822,9 @@ pub async fn run(
     spec: ResolvedModel,
 ) -> Result<()> {
     let AdapterContext { session_id, emit, mut inbox } = ctx;
-    let provider_name = spec.provider_name();
-    let model = spec.model.clone();
-    let provider = spec.provider;
+    let mut provider_name = spec.provider_name();
+    let mut model = spec.model.clone();
+    let mut provider = spec.provider;
     let cwd = PathBuf::from(&params.cwd);
     let registry = std::sync::Arc::new(ToolRegistry::with_defaults());
     let specs = registry.specs();
@@ -910,11 +910,37 @@ pub async fn run(
             }
         };
 
-        // Slash-quit shortcut.
+        // Slash-command meta inputs: never sent to the model.
         let trimmed = user_text.trim();
         if trimmed == "/quit" || trimmed == "/exit" {
             term.note("(bye)");
             break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/model") {
+            let arg = rest.trim();
+            if arg.is_empty() {
+                term.note(&format!("(model: {}:{})", provider_name, model));
+            } else {
+                match crate::agent::resolve_model_from_spec(arg) {
+                    Ok(new) => {
+                        let new_name = new.provider_name();
+                        let new_model = new.model.clone();
+                        provider = new.provider;
+                        provider_name = new_name;
+                        model = new_model;
+                        term.note(&format!("(model → {}:{})", provider_name, model));
+                        emit.emit(SessionEvent::Status {
+                            state: SessionState::Running,
+                            detail: Some(format!("{}:{}  [interactive]", provider_name, model)),
+                        });
+                    }
+                    Err(e) => {
+                        term.note(&format!("(model switch failed: {e})"));
+                    }
+                }
+            }
+            term.prompt();
+            continue;
         }
         if trimmed.is_empty() {
             term.prompt();
