@@ -3,10 +3,9 @@
 //! `OLLAMA_HOST`.
 
 use super::{
-    Content, LlmProvider, Message, ProviderTurn, Role, StopReason, ToolCall, ToolSpec, Usage,
+    Content, LlmProvider, Message, ProviderTurn, Role, StopReason, TextSink, ToolCall, ToolSpec,
+    Usage,
 };
-use agentd_protocol::adapter::EventEmitter;
-use agentd_protocol::{MessageRole, SessionEvent};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -111,7 +110,7 @@ impl LlmProvider for Ollama {
         system: &str,
         messages: &[Message],
         tools: &[ToolSpec],
-        emit: &EventEmitter,
+        sink: &mut dyn TextSink,
     ) -> Result<ProviderTurn> {
         let mut body = json!({
             "model": model,
@@ -166,15 +165,9 @@ impl LlmProvider for Ollama {
                 if let Some(msg) = v.get("message") {
                     if let Some(t) = msg.get("content").and_then(|s| s.as_str()) {
                         if !t.is_empty() {
+                            sink.delta(t);
                             assistant_text.push_str(t);
-                            if assistant_text.len() > emitted_so_far {
-                                let new_part = assistant_text[emitted_so_far..].to_string();
-                                emit.emit(SessionEvent::Message {
-                                    role: MessageRole::Assistant,
-                                    text: new_part,
-                                });
-                                emitted_so_far = assistant_text.len();
-                            }
+                            emitted_so_far = assistant_text.len();
                         }
                     }
                     if let Some(calls) = msg.get("tool_calls").and_then(|a| a.as_array()) {

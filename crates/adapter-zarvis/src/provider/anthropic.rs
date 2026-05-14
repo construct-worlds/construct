@@ -5,10 +5,9 @@
 //! `tool_result` block on the next user message.
 
 use super::{
-    Content, LlmProvider, Message, ProviderTurn, Role, StopReason, ToolCall, ToolSpec, Usage,
+    Content, LlmProvider, Message, ProviderTurn, Role, StopReason, TextSink, ToolCall, ToolSpec,
+    Usage,
 };
-use agentd_protocol::adapter::EventEmitter;
-use agentd_protocol::{MessageRole, SessionEvent};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -111,7 +110,7 @@ impl LlmProvider for Anthropic {
         system: &str,
         messages: &[Message],
         tools: &[ToolSpec],
-        emit: &EventEmitter,
+        sink: &mut dyn TextSink,
     ) -> Result<ProviderTurn> {
         let mut body = json!({
             "model": model,
@@ -204,14 +203,10 @@ impl LlmProvider for Anthropic {
                     match dty {
                         "text_delta" => {
                             if let Some(t) = delta.get("text").and_then(|s| s.as_str()) {
-                                blocks[idx].text.push_str(t);
-                                assistant_text.push_str(t);
-                                if assistant_text.len() > emitted_so_far {
-                                    let new_part = assistant_text[emitted_so_far..].to_string();
-                                    emit.emit(SessionEvent::Message {
-                                        role: MessageRole::Assistant,
-                                        text: new_part,
-                                    });
+                                if !t.is_empty() {
+                                    sink.delta(t);
+                                    blocks[idx].text.push_str(t);
+                                    assistant_text.push_str(t);
                                     emitted_so_far = assistant_text.len();
                                 }
                             }

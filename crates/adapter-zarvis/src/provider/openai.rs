@@ -6,10 +6,9 @@
 //! `OPENAI_BASE_URL` at one of those, the same code path works.
 
 use super::{
-    Content, LlmProvider, Message, ProviderTurn, Role, StopReason, ToolCall, ToolSpec, Usage,
+    Content, LlmProvider, Message, ProviderTurn, Role, StopReason, TextSink, ToolCall, ToolSpec,
+    Usage,
 };
-use agentd_protocol::adapter::EventEmitter;
-use agentd_protocol::{MessageRole, SessionEvent};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -128,7 +127,7 @@ impl LlmProvider for OpenAi {
         system: &str,
         messages: &[Message],
         tools: &[ToolSpec],
-        emit: &EventEmitter,
+        sink: &mut dyn TextSink,
     ) -> Result<ProviderTurn> {
         let mut body = json!({
             "model": model,
@@ -201,14 +200,9 @@ impl LlmProvider for OpenAi {
                 None => continue,
             };
             if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
-                assistant_text.push_str(text);
-                // Stream as we go.
-                if assistant_text.len() > emitted_so_far {
-                    let new_part = assistant_text[emitted_so_far..].to_string();
-                    emit.emit(SessionEvent::Message {
-                        role: MessageRole::Assistant,
-                        text: new_part,
-                    });
+                if !text.is_empty() {
+                    sink.delta(text);
+                    assistant_text.push_str(text);
                     emitted_so_far = assistant_text.len();
                 }
             }

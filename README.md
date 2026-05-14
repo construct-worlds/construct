@@ -240,6 +240,14 @@ the per-adapter env var (`AGENTD_CLAUDE_MODE`, `AGENTD_CODEX_MODE`).
     (e.g. `--session-id`) if your codex build supports cross-turn resumption.
 - **`zarvis`** — agentd's built-in agent. Talks to model APIs directly,
   no vendor CLI needed. See the [zarvis section](#zarvis-built-in-agent) below.
+  - *interactive (default in the TUI)*: chat-style REPL synthesized
+    into the session's PTY pane — colored prompt, streaming assistant
+    text, inline tool blocks, inline approval prompts (`y`/`n`/`a`).
+  - *headless (default for non-PTY clients)*: structured event stream
+    (`Message` / `ToolUse` / `ToolResult` / `Cost`). Approvals come
+    from the TUI minibuffer / `agent` IPC.
+  - Override with `--mode interactive|headless` or
+    `AGENTD_ZARVIS_MODE`.
 
 ## zarvis (built-in agent)
 

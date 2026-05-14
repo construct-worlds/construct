@@ -2,7 +2,6 @@
 //! plus per-provider implementations. The agent loop is generic over
 //! [`LlmProvider`] so adding a new provider is one impl file.
 
-use agentd_protocol::adapter::EventEmitter;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -91,19 +90,27 @@ pub struct ProviderTurn {
     pub usage: Usage,
 }
 
+/// Sink for the assistant's streaming text deltas. Headless mode wires
+/// this to `SessionEvent::Message` events; interactive (PTY) mode wires
+/// it to raw `SessionEvent::Pty` bytes so the user sees the response
+/// flow in the terminal pane. Provider impls don't care which it is.
+pub trait TextSink: Send {
+    fn delta(&mut self, text: &str);
+}
+
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
 
     /// Run one turn against the model. Implementations stream the
-    /// response and emit incremental `SessionEvent::Message` events via
-    /// `emit` so the TUI shows the assistant text flowing.
+    /// response and push deltas through `sink` so the user sees the
+    /// assistant text flowing as it arrives.
     async fn complete(
         &self,
         model: &str,
         system: &str,
         messages: &[Message],
         tools: &[ToolSpec],
-        emit: &EventEmitter,
+        sink: &mut dyn TextSink,
     ) -> Result<ProviderTurn>;
 }

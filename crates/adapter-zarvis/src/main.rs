@@ -7,11 +7,37 @@
 
 mod agent;
 mod context;
+mod interactive;
 mod provider;
 mod tools;
 
 use agentd_protocol::adapter::run;
-use agentd_protocol::{Capabilities, InitializeResult, SessionEvent};
+use agentd_protocol::{Capabilities, InitializeResult, SessionEvent, SessionStartParams};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Interactive,
+    Headless,
+}
+
+fn resolve_mode(params: &SessionStartParams) -> Mode {
+    if let Ok(m) = std::env::var("AGENTD_ZARVIS_MODE") {
+        match m.as_str() {
+            "interactive" => return Mode::Interactive,
+            "headless" => return Mode::Headless,
+            _ => {}
+        }
+    }
+    match params.mode.as_deref() {
+        Some("interactive") => Mode::Interactive,
+        Some("headless") => Mode::Headless,
+        // Default: interactive when the client supplied a PTY size (the
+        // TUI always does), else headless (so `agent new zarvis "..."`
+        // from a non-TUI client gets the structured stream).
+        _ if params.pty_size.is_some() => Mode::Interactive,
+        _ => Mode::Headless,
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
             supports_input: true,
             supports_interrupt: true,
             supports_cost: true,
+            supports_pty: true,
             ..Default::default()
         },
     };
@@ -40,9 +67,12 @@ async fn main() -> anyhow::Result<()> {
                 return;
             }
         };
-        if let Err(e) = agent::run(params, ctx, resolved).await {
-            // The loop already emits Error for in-loop failures; this
-            // is for fatal-spawn-time issues that escape.
+        let mode = resolve_mode(&params);
+        let result = match mode {
+            Mode::Interactive => interactive::run(params, ctx, resolved).await,
+            Mode::Headless => agent::run(params, ctx, resolved).await,
+        };
+        if let Err(e) = result {
             tracing::warn!(error = ?e, "zarvis agent loop returned with error");
         }
     })

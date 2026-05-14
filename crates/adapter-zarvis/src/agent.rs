@@ -5,7 +5,7 @@
 
 use crate::context;
 use crate::provider::{
-    self, Content, LlmProvider, Message, Role, StopReason, ToolCall, ToolSpec,
+    self, Content, LlmProvider, Message, Role, StopReason, TextSink, ToolCall, ToolSpec,
 };
 use crate::tools::{truncate_for_model, ToolCtx, ToolOutcome, ToolRegistry};
 use agentd_protocol::adapter::{AdapterContext, AdapterInboxMsg, EventEmitter};
@@ -15,6 +15,20 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+
+/// Sink that pushes each assistant delta as a `SessionEvent::Message`.
+/// Used by the headless agent loop.
+pub struct MessageSink<'a> {
+    pub emit: &'a EventEmitter,
+}
+impl<'a> TextSink for MessageSink<'a> {
+    fn delta(&mut self, text: &str) {
+        self.emit.emit(SessionEvent::Message {
+            role: MessageRole::Assistant,
+            text: text.to_string(),
+        });
+    }
+}
 
 pub(crate) const SYSTEM_PROMPT: &str = r#"You are zarvis, an AI agent embedded in agentd (a multi-session terminal agent fleet).
 
@@ -109,8 +123,9 @@ pub async fn run(
         loop {
             let _pruned = context::prune(&mut messages, provider_name, &model);
 
+            let mut sink = MessageSink { emit: &emit };
             let turn = match provider
-                .complete(&model, SYSTEM_PROMPT, &messages, &specs, &emit)
+                .complete(&model, SYSTEM_PROMPT, &messages, &specs, &mut sink)
                 .await
             {
                 Ok(t) => t,
