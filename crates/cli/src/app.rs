@@ -1370,6 +1370,25 @@ impl App {
                     Ok(id) => {
                         self.set_status(format!("created {}", short_id(&id)));
                         self.refresh_sessions().await;
+                        // Pre-insert an empty PTY parser so the subsequent
+                        // `refresh_selected_transcript → bootstrap_terminal`
+                        // short-circuits (parser already present). Our live
+                        // subscription will deliver every byte the adapter
+                        // emits; without this short-circuit, pty_replay
+                        // would race the subscription and the banner ends
+                        // up rendered twice (once from the ring, once from
+                        // the live broadcast that was already in flight).
+                        if !self.terminals.contains_key(&id) {
+                            let (cols, rows) = self.terminal_pane_size;
+                            self.terminals.insert(
+                                id.clone(),
+                                vt100::Parser::new(
+                                    rows.max(1),
+                                    cols.max(1),
+                                    SCROLLBACK_MAX,
+                                ),
+                            );
+                        }
                         self.selection = Selection::Session(id);
                         self.refresh_selected_transcript().await;
                         self.focus = PaneFocus::View;
