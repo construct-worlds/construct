@@ -356,11 +356,16 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
     } else {
         String::new()
     };
+    let automode_badge = match s {
+        Some(s) if s.automode => "[automode]  ".to_string(),
+        _ => String::new(),
+    };
     let modeline = format!(
-        " agentd  [{profile}]  focus:{focus}  {sel}  {state}  {model}  {scrollback}{chord}{status}{conn} ",
+        " agentd  [{profile}]  focus:{focus}  {sel}  {state}  {model}  {automode}{scrollback}{chord}{status}{conn} ",
         profile = app.profile.label(),
         focus = focus_label,
         scrollback = scrollback_label,
+        automode = automode_badge,
         sel = match s {
             Some(s) => primary_label(s),
             None => "-".into(),

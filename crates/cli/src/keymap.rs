@@ -46,6 +46,10 @@ pub enum KeyAction {
     ScrollTop,
     ScrollBottom,
     ToggleHelp,
+    /// Toggle automode on the selected session — agents that gate tool
+    /// calls (zarvis) stop prompting for approvals when on. Bound to
+    /// `C-x A` (emacs) / `A` (vim).
+    ToggleAutomode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +222,8 @@ fn emacs() -> Keymap {
         (Chord(vec![shift('G')]), ScrollBottom),
         (Chord(vec![key(KeyCode::PageDown)]), ScrollPageDown),
         (Chord(vec![key(KeyCode::PageUp)]), ScrollPageUp),
+        // Toggle automode on the selected session (zarvis / future agents).
+        (Chord(vec![ctrl('x'), shift('A')]), ToggleAutomode),
         // Help
         (Chord(vec![ch('?')]), ToggleHelp),
     ];
@@ -264,6 +270,7 @@ fn vim() -> Keymap {
         (Chord(vec![ctrl('b')]), ScrollPageUp),
         (Chord(vec![ch('g'), ch('g')]), ScrollTop),
         (Chord(vec![shift('G')]), ScrollBottom),
+        (Chord(vec![shift('A')]), ToggleAutomode),
         (Chord(vec![ch('?')]), ToggleHelp),
     ];
     Keymap { bindings }

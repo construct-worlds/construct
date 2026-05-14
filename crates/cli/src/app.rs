@@ -93,6 +93,16 @@ pub enum MinibufferIntent {
     GroupDeleteConfirm { group_id: String },
     GroupRename { group_id: String },
     CommandPalette,
+    /// Approval prompt for a Risky tool call from an agent harness
+    /// (currently zarvis). Single-key dispatch: `y`/Enter approve,
+    /// `n`/Esc deny, `a` approve + flip automode.
+    ApproveTool {
+        session_id: String,
+        call_id: String,
+        tool: String,
+        args_summary: String,
+        risk: agentd_protocol::ToolRisk,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -564,6 +574,26 @@ impl App {
             m if m == agentd_protocol::ipc_notif::EVENT => {
                 if let Some(p) = n.params {
                     if let Ok(payload) = serde_json::from_value::<EventNotificationPayload>(p) {
+                        // Tool-approval prompt: if no minibuffer is in use,
+                        // open the approval prompt for the matching session.
+                        // Otherwise the user sees the request in the
+                        // transcript and can resume via `C-x .` (future).
+                        if let SessionEvent::ToolApprovalRequest {
+                            call_id,
+                            tool,
+                            args_summary,
+                            risk,
+                        } = &payload.event
+                        {
+                            self.maybe_open_approval_prompt(
+                                payload.session_id.clone(),
+                                call_id.clone(),
+                                tool.clone(),
+                                args_summary.clone(),
+                                *risk,
+                            );
+                            // Also fall through so the transcript records it.
+                        }
                         // PTY events: feed into the per-session terminal emulator.
                         if let SessionEvent::Pty { .. } = &payload.event {
                             if let Some(bytes) = payload.event.pty_bytes() {
@@ -652,6 +682,61 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Open the approval prompt if there's no other minibuffer in flight.
+    /// Best-effort: if the user is already typing something, we skip and
+    /// leave the request visible in the transcript only.
+    fn maybe_open_approval_prompt(
+        &mut self,
+        session_id: String,
+        call_id: String,
+        tool: String,
+        args_summary: String,
+        risk: agentd_protocol::ToolRisk,
+    ) {
+        if self.minibuffer.is_some() {
+            return;
+        }
+        let risk_label = match risk {
+            agentd_protocol::ToolRisk::Safe => "safe",
+            agentd_protocol::ToolRisk::Risky => "risky",
+        };
+        let short_args: String = args_summary.chars().take(80).collect();
+        let prompt = format!(
+            "approve [{risk_label}] {tool}({}) ▸ y=approve  n=deny  a=automode",
+            short_args
+        );
+        self.minibuffer = Some(Minibuffer {
+            prompt,
+            input: String::new(),
+            cursor: 0,
+            intent: MinibufferIntent::ApproveTool {
+                session_id,
+                call_id,
+                tool,
+                args_summary,
+                risk,
+            },
+            error: None,
+        });
+    }
+
+    /// Toggle the selected session's automode flag.
+    pub async fn toggle_automode(&mut self) {
+        let Some(s) = self.selected_session() else {
+            self.set_status("no session selected".into());
+            return;
+        };
+        let id = s.id.clone();
+        let next = !s.automode;
+        match self.client.set_automode(&id, next).await {
+            Ok(()) => self.set_status(format!(
+                "automode {}",
+                if next { "ON" } else { "off" }
+            )),
+            Err(e) => self.set_status(format!("set_automode failed: {e}")),
         }
     }
 
@@ -1082,6 +1167,9 @@ impl App {
             ToggleHelp => {
                 self.help_visible = !self.help_visible;
             }
+            ToggleAutomode => {
+                self.toggle_automode().await;
+            }
         }
     }
 
@@ -1104,6 +1192,35 @@ impl App {
         } else {
             Vec::new()
         };
+
+        // Approval prompt has single-key shortcuts; bypass the normal
+        // editing path so the user can hit y/n/a without typing + Enter.
+        let approve_intent = matches!(
+            self.minibuffer.as_ref().map(|m| &m.intent),
+            Some(MinibufferIntent::ApproveTool { .. })
+        );
+        if approve_intent {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let decision = match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => Some("approve"),
+                KeyCode::Char('n') | KeyCode::Esc => Some("deny"),
+                KeyCode::Char('a') => Some("automode"),
+                KeyCode::Char('g') if ctrl => Some("deny"),
+                _ => None,
+            };
+            if let Some(d) = decision {
+                if let Some(MinibufferIntent::ApproveTool { session_id, call_id, .. }) =
+                    self.minibuffer.as_ref().map(|m| m.intent.clone())
+                {
+                    self.minibuffer = None;
+                    match self.client.tool_decision(&session_id, call_id, d).await {
+                        Ok(()) => self.set_status(format!("tool {d}")),
+                        Err(e) => self.set_status(format!("tool_decision failed: {e}")),
+                    }
+                }
+            }
+            return;
+        }
 
         let Some(mb) = self.minibuffer.as_mut() else { return; };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1343,6 +1460,14 @@ impl App {
             MinibufferIntent::CommandPalette => {
                 let cmd = input.trim();
                 self.run_palette_command(cmd).await;
+            }
+            MinibufferIntent::ApproveTool { session_id, call_id, .. } => {
+                // Reached only if the special-cased key handler in
+                // handle_minibuffer_key fell through (defensive — should
+                // not happen in practice). Treat any submit as approve.
+                if let Err(e) = self.client.tool_decision(&session_id, call_id, "approve").await {
+                    self.set_status(format!("tool_decision failed: {e}"));
+                }
             }
         }
     }
