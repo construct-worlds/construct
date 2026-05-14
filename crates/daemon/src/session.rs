@@ -79,6 +79,11 @@ pub struct SessionEntry {
     /// the drain task and event handler stop writing storage after the
     /// session has been removed.
     deleted: AtomicBool,
+    /// Set the first time we kick off an auto-title generation for this
+    /// session. Stops a flurry of user messages from spawning multiple
+    /// title-gen processes; a failed title-gen leaves the title unset
+    /// and the session keeps its hash-derived display name.
+    title_gen_attempted: AtomicBool,
 }
 
 impl SessionEntry {
@@ -181,6 +186,11 @@ impl SessionManager {
                 adapter: tokio::sync::Mutex::new(None),
                 pty: tokio::sync::Mutex::new(pty_state),
                 deleted: AtomicBool::new(false),
+                // A title set on the previous incarnation lives in the
+                // loaded summary; flagging "attempted" here stops the
+                // restart from re-running title-gen for already-titled
+                // sessions and is harmless for the rest.
+                title_gen_attempted: AtomicBool::new(s.title.is_some()),
             };
             sessions.insert(s.id.clone(), Arc::new(entry));
         }
@@ -416,6 +426,7 @@ impl SessionManager {
                 size: params.pty_size,
             }),
             deleted: AtomicBool::new(false),
+            title_gen_attempted: AtomicBool::new(summary.title.is_some()),
         });
 
         // Record the user's initial prompt as the first transcript event so
@@ -429,6 +440,7 @@ impl SessionManager {
                 },
             )
             .await;
+            self.maybe_spawn_auto_title(entry.clone(), p.clone());
         }
 
         adapter
@@ -738,12 +750,44 @@ impl SessionManager {
             },
         )
         .await;
+        self.maybe_spawn_auto_title(entry.clone(), text.clone());
         let params = serde_json::to_value(&agentd_protocol::SessionInputParams {
             session_id: id.to_string(),
             text,
         })?;
         adapter.request(ahp_method::SESSION_INPUT, params).await?;
         Ok(())
+    }
+
+    /// Kick off auto-title generation in the background if the session
+    /// has no user-set title yet and we haven't already attempted it
+    /// this incarnation. Silently no-ops when the zarvis adapter binary
+    /// can't be located or title-gen exits non-zero.
+    fn maybe_spawn_auto_title(&self, entry: Arc<SessionEntry>, prompt: String) {
+        if entry
+            .title_gen_attempted
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        if prompt.trim().is_empty() {
+            return;
+        }
+        let Some(zarvis_cfg) = self.config.adapters.get("zarvis").cloned() else {
+            return;
+        };
+        let binary_spec = zarvis_cfg
+            .binary
+            .clone()
+            .unwrap_or_else(|| "agentd-adapter-zarvis".to_string());
+        let Some(binary) = locate_binary(&binary_spec) else {
+            return;
+        };
+        let storage = self.storage.clone();
+        let broadcast_tx = self.broadcast.clone();
+        tokio::spawn(async move {
+            generate_auto_title(binary, entry, prompt, storage, broadcast_tx).await;
+        });
     }
 
     pub async fn pty_input(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
@@ -1352,4 +1396,66 @@ impl SessionManager {
             }));
         Ok(())
     }
+}
+
+/// Shell out to `agentd-adapter-zarvis --title-mode "<prompt>"`, capture
+/// stdout, and apply the title to the session summary. Best-effort:
+/// any failure (zarvis missing keys, network error, non-zero exit,
+/// empty output) leaves the session's title unset.
+async fn generate_auto_title(
+    binary: PathBuf,
+    entry: Arc<SessionEntry>,
+    prompt: String,
+    storage: Arc<Storage>,
+    broadcast: tokio::sync::broadcast::Sender<BroadcastMsg>,
+) {
+    use std::process::Stdio;
+    let output = tokio::process::Command::new(&binary)
+        .arg("--title-mode")
+        .arg(&prompt)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await;
+    let out = match output {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(error = ?e, "auto-title spawn failed");
+            return;
+        }
+    };
+    if !out.status.success() {
+        tracing::info!(
+            session = %entry.id,
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "auto-title exit non-zero; skipping",
+        );
+        return;
+    }
+    let title = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if title.is_empty() {
+        return;
+    }
+    if entry.is_deleted() {
+        return;
+    }
+    let snapshot = {
+        let mut s = entry.summary.write().await;
+        // Don't clobber a title the user set after we kicked this off.
+        if s.title.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false) {
+            return;
+        }
+        s.title = Some(title.clone());
+        s.clone()
+    };
+    if let Err(e) = storage.save_summary(&snapshot) {
+        tracing::warn!(session = %entry.id, error = ?e, "auto-title save_summary failed");
+        return;
+    }
+    let _ = broadcast.send(BroadcastMsg::State(StateNotificationPayload {
+        session: snapshot,
+    }));
+    tracing::info!(session = %entry.id, %title, "auto-title applied");
 }

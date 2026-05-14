@@ -10,6 +10,7 @@ mod context;
 mod interactive;
 mod persist;
 mod provider;
+mod title_mode;
 mod tools;
 
 use agentd_protocol::adapter::run;
@@ -42,6 +43,24 @@ fn resolve_mode(params: &SessionStartParams) -> Mode {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // CLI sub-mode: `agentd-adapter-zarvis --title-mode "<prompt>"` runs
+    // one LLM completion that returns a short conversation title on
+    // stdout. Used by the daemon to auto-name sessions on first input.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && args[1] == "--title-mode" {
+        let prompt = args.get(2).cloned().unwrap_or_default();
+        match title_mode::suggest_title(&prompt).await {
+            Ok(title) => {
+                println!("{title}");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("title-mode failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let metadata = InitializeResult {
         name: "zarvis".into(),
         version: env!("CARGO_PKG_VERSION").into(),
