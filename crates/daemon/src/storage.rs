@@ -155,6 +155,33 @@ impl Storage {
         Ok(p)
     }
 
+    /// Path to the per-session cache of the most recent PTY size. Kept
+    /// separate from `start.json` so the "params we were created with"
+    /// stay immutable. Used on daemon respawn so the new adapter's PTY
+    /// starts at the size the user last sized to, not the creation
+    /// default — without this, claude/codex render their resume banner
+    /// at the placeholder 80×10 and the TUI shows a tiny garbled box
+    /// until the user nudges the terminal to trigger a fresh resize.
+    pub fn pty_size_path(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("pty_size.json")
+    }
+
+    pub fn save_pty_size(&self, id: &str, size: agentd_protocol::PtySize) -> Result<()> {
+        self.ensure_session_dir(id)?;
+        let path = self.pty_size_path(id);
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_string(&size)?;
+        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
+        Ok(())
+    }
+
+    pub fn load_pty_size(&self, id: &str) -> Option<agentd_protocol::PtySize> {
+        let path = self.pty_size_path(id);
+        let bytes = std::fs::read(&path).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
     pub fn list_summaries(&self) -> Result<Vec<SessionSummary>> {
         let mut out = Vec::new();
         let root = self.sessions_root();

@@ -84,6 +84,14 @@ pub struct Capabilities {
     /// events and accepts `session.pty_input` / `session.pty_resize`.
     #[serde(default)]
     pub supports_pty: bool,
+    /// Adapter emits no startup escapes (banner, screen-clear, cursor
+    /// reset) on resume — so the daemon can safely keep the prior
+    /// incarnation's PTY ring + on-disk `pty.log` instead of clearing
+    /// them. Without this guarantee, mixing old bytes with a fresh
+    /// adapter's start-up sequence leaves vt100 in a half-rendered
+    /// state, so the daemon defaults to clearing on respawn.
+    #[serde(default)]
+    pub supports_silent_resume: bool,
     #[serde(default)]
     pub models: Vec<String>,
 }

@@ -540,6 +540,12 @@ impl SessionManager {
             "AGENTD_SESSION_DATA_DIR".to_string(),
             self.storage.session_dir(id).to_string_lossy().to_string(),
         );
+        // Use the last-known PTY size so the resumed adapter (which
+        // sizes its PTY off start_params on session.start) doesn't draw
+        // its banner / resume content at the stale creation default.
+        if let Some(size) = self.storage.load_pty_size(id) {
+            start_params.pty_size = Some(size);
+        }
 
         let harness = {
             let s = entry.summary.read().await;
@@ -561,7 +567,7 @@ impl SessionManager {
         };
 
         let (msg_tx, msg_rx) = mpsc::channel::<AdapterMessage>(ADAPTER_DRAIN_CAP);
-        let (adapter, _info) = Adapter::spawn(
+        let (adapter, info) = Adapter::spawn(
             harness.clone(),
             binary,
             combined_args,
@@ -579,12 +585,18 @@ impl SessionManager {
         // merged with the new child's startup escapes, and vt100 lands
         // in a weird half-rendered state (often appearing blank with
         // just a cursor) until a SIGWINCH forces a redraw.
-        {
+        //
+        // Adapters that advertise `supports_silent_resume` promise to
+        // emit nothing on resume (zarvis does this), so we keep the
+        // prior PTY history visible after a daemon restart instead of
+        // wiping it.
+        if !info.capabilities.supports_silent_resume {
             let mut pty = entry.pty.lock().await;
             pty.ring.clear();
-        }
-        if let Err(e) = self.storage.truncate_pty_log(id) {
-            tracing::warn!(session = %id, error = ?e, "truncate_pty_log on respawn failed");
+            drop(pty);
+            if let Err(e) = self.storage.truncate_pty_log(id) {
+                tracing::warn!(session = %id, error = ?e, "truncate_pty_log on respawn failed");
+            }
         }
 
         adapter
@@ -925,7 +937,13 @@ impl SessionManager {
             .get_entry(id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", id))?;
-        entry.pty.lock().await.size = Some(PtySize { cols, rows });
+        let size = PtySize { cols, rows };
+        entry.pty.lock().await.size = Some(size);
+        // Cache the size so the next daemon respawn can re-spawn the
+        // adapter's PTY at the right dimensions from the start.
+        if let Err(e) = self.storage.save_pty_size(id, size) {
+            tracing::warn!(session = %id, error = ?e, "save_pty_size failed");
+        }
         let adapter = entry
             .adapter
             .lock()

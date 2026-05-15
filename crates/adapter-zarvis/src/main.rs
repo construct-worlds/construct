@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
             supports_interrupt: true,
             supports_cost: true,
             supports_pty: true,
+            supports_silent_resume: true,
             ..Default::default()
         },
     };
