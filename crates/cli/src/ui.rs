@@ -42,14 +42,23 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Clamp the user-adjusted list width to leave room for the view
     // pane on narrow terminals. The drag handler stores the raw width
     // (so the user's intent is preserved when the terminal grows
-    // again), and we just clamp at render time.
-    let max_list_w = main_area
-        .width
-        .saturating_sub(crate::app::LIST_PANEL_W_VIEW_MIN)
-        .max(crate::app::LIST_PANEL_W_MIN);
-    let list_w = app
-        .list_panel_w
-        .clamp(crate::app::LIST_PANEL_W_MIN, max_list_w);
+    // again), and we just clamp at render time. When the user has
+    // collapsed the list AND it's not currently focused, render it
+    // at the minimal `LIST_PANEL_W_COLLAPSED` (3 cells) instead — a
+    // small strip with an expand affordance. Focus on the list
+    // temporarily expands so the user can interact with it.
+    let effective_collapsed =
+        app.list_collapsed && app.focus != PaneFocus::List;
+    let list_w = if effective_collapsed {
+        crate::app::LIST_PANEL_W_COLLAPSED
+    } else {
+        let max_list_w = main_area
+            .width
+            .saturating_sub(crate::app::LIST_PANEL_W_VIEW_MIN)
+            .max(crate::app::LIST_PANEL_W_MIN);
+        app.list_panel_w
+            .clamp(crate::app::LIST_PANEL_W_MIN, max_list_w)
+    };
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(list_w), Constraint::Min(0)])
@@ -70,7 +79,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let (detail_area, pin_strip_area) = if pinned_ids.is_empty() {
         (right_area, None)
     } else {
-        let strip_h = pin_strip_height(right_area.height);
+        // Honor the user's persisted preference when present; clamp
+        // against the right pane so we never starve the main view on
+        // a small terminal regardless of what was saved.
+        let upper = right_area.height.saturating_sub(10).max(crate::app::PIN_STRIP_H_MIN);
+        let strip_h = app
+            .pin_strip_h
+            .map(|h| h.clamp(crate::app::PIN_STRIP_H_MIN, upper))
+            .unwrap_or_else(|| pin_strip_height(right_area.height));
         let vsplit = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(strip_h)])
@@ -98,16 +114,28 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.minibuffer_area = Some(minibuffer_area);
     app.layout.list_row_count = app.list_items().len();
 
-    render_sessions(f, cols[0], app);
+    if list_w > 0 {
+        render_sessions(f, cols[0], app);
+    }
     render_detail(f, detail_area, app);
     if let Some(strip) = pin_strip_area {
         render_pin_strip(f, strip, app, &pinned_ids);
+    }
+    // When the list is collapsed, overlay a `›` uncollapse glyph
+    // on the main view's left border so the user can recover the
+    // hidden pane without a key chord. Painted AFTER `render_detail`
+    // so it sits on top of the block's border. Click handler in
+    // `app.rs` mirrors the geometry via `view_uncollapse_glyph_pos`.
+    if effective_collapsed {
+        render_view_uncollapse_glyph(f, app, detail_area);
     }
     render_modeline(f, modeline_area, app);
     render_minibuffer(f, minibuffer_area, app);
     render_diamond_tooltip(f, app);
     render_pin_diamond_tooltip(f, app, &pinned_ids);
     render_view_close_tooltip(f, app);
+    render_list_title_button_tooltips(f, app);
+    render_view_uncollapse_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_tasks_popup(f, app);
     if app.help_visible {
@@ -150,6 +178,121 @@ fn hovered_diamond(app: &App) -> Option<(u16, u16, &SessionSummary)> {
     // state (the materialized item from list_items() is a snapshot).
     let s = app.sessions.iter().find(|s| s.id == summary.id)?;
     Some((zone_start, my, s))
+}
+
+/// Hit zone for the `+` button on the session-list pane's title
+/// (`" + sessions "`). Returns `(x_start, x_end_exclusive, y)`.
+/// Anchored after the top-left border corner — cells `list.x + 1`
+/// and `list.x + 2` cover `[ ][+]` for a forgiving click target.
+pub fn list_plus_button_range(list_area: Rect) -> Option<(u16, u16, u16)> {
+    if list_area.width < 4 {
+        return None;
+    }
+    Some((list_area.x + 1, list_area.x + 3, list_area.y))
+}
+
+/// Hit zone for the right-aligned `−` button that collapses the
+/// session list. Returns `(x_start, x_end_exclusive, y)`. Sits one
+/// cell inset from the right corner so the corner glyph stays
+/// visible.
+pub fn list_collapse_button_range(list_area: Rect) -> Option<(u16, u16, u16)> {
+    if list_area.width < 5 {
+        return None;
+    }
+    let close_w: u16 = 3;
+    let x_start = list_area.x + list_area.width.saturating_sub(close_w + 1);
+    let x_end = list_area.x + list_area.width.saturating_sub(1);
+    Some((x_start, x_end, list_area.y))
+}
+
+/// Cell where the `›` uncollapse glyph is painted on the main
+/// view's left border when the session list is collapsed. Anchored
+/// to the top-left corner so the affordance reads as the "header"
+/// of the would-be list pane. Returns `(x, y)`.
+pub fn view_uncollapse_glyph_pos(view_area: Rect) -> (u16, u16) {
+    (view_area.x, view_area.y)
+}
+
+/// True when `(col, row)` lies on the main view's left border AND
+/// the list is collapsed — the entire left border column acts as
+/// the uncollapse hit zone, so clicks are forgiving.
+pub fn is_on_view_uncollapse_handle(app: &super::app::App, col: u16, row: u16) -> bool {
+    if !(app.list_collapsed && app.focus != crate::app::PaneFocus::List) {
+        return false;
+    }
+    let Some(view) = app.layout.view_area else { return false; };
+    col == view.x && row >= view.y && row < view.y + view.height
+}
+
+/// Float a small one-line tooltip with `label` (padded with single
+/// spaces) anchored near the cell `(anchor_x, anchor_y)`. Default
+/// placement: just to the right of the anchor, vertically centered
+/// on the anchor row; falls back inward when the tooltip would
+/// overflow the screen edges. Mirrors the layout used by
+/// `render_diamond_tooltip` / `render_view_close_tooltip` so all
+/// tooltips look uniform.
+fn render_button_tooltip(f: &mut Frame, label: &str, anchor_x: u16, anchor_y: u16) {
+    let total = f.area();
+    let inner_w = UnicodeWidthStr::width(label) as u16;
+    let w = inner_w + 2;
+    let h: u16 = 3;
+    let mut tx = anchor_x.saturating_add(2);
+    let mut ty = anchor_y.saturating_sub(1);
+    if tx + w > total.x + total.width {
+        tx = total.x + total.width.saturating_sub(w);
+    }
+    if ty + h > total.y + total.height {
+        ty = total.y + total.height.saturating_sub(h);
+    }
+    let rect = Rect { x: tx, y: ty, width: w, height: h };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let p = Paragraph::new(label)
+        .block(block)
+        .style(Style::default().fg(Color::White).bg(Color::Black));
+    f.render_widget(Clear, rect);
+    f.render_widget(p, rect);
+}
+
+fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
+    let Some(list) = app.layout.list_area else { return };
+    let Some((mx, my)) = app.mouse_pos else { return };
+    // Only when expanded — collapsed list has no `+` / `−`.
+    if app.list_collapsed && app.focus != PaneFocus::List {
+        return;
+    }
+    if let Some((xs, xe, y)) = list_plus_button_range(list) {
+        if my == y && mx >= xs && mx < xe {
+            render_button_tooltip(f, " New session ", xs, y);
+            return;
+        }
+    }
+    if let Some((xs, xe, y)) = list_collapse_button_range(list) {
+        if my == y && mx >= xs && mx < xe {
+            render_button_tooltip(f, " Collapse list ", xs, y);
+        }
+    }
+}
+
+fn render_view_uncollapse_tooltip(f: &mut Frame, app: &App) {
+    if !(app.list_collapsed && app.focus != PaneFocus::List) {
+        return;
+    }
+    let Some(view) = app.layout.view_area else { return };
+    let Some((mx, my)) = app.mouse_pos else { return };
+    if mx == view.x && my >= view.y && my < view.y + view.height {
+        let (gx, gy) = view_uncollapse_glyph_pos(view);
+        render_button_tooltip(f, " Expand list ", gx, gy);
+    }
+}
+
+fn render_view_uncollapse_glyph(f: &mut Frame, _app: &App, view_area: Rect) {
+    let (gx, gy) = view_uncollapse_glyph_pos(view_area);
+    let style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    f.buffer_mut().set_string(gx, gy, "›", style);
 }
 
 /// Top-row close-button geometry for the session view's right edge.
@@ -511,10 +654,55 @@ fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn render_sessions(f: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == PaneFocus::List;
+    // Collapsed render path: a thin column with a `>` expand glyph
+    // on the top border. Anywhere inside the pane click-expands.
+    let effective_collapsed =
+        app.list_collapsed && !focused;
+    if effective_collapsed {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(pane_border_style(focused))
+            .title(Line::from(Span::styled(
+                "›",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        f.render_widget(block, area);
+        return;
+    }
+    // Expanded render path: title is ` + sessions ` with a
+    // right-aligned ` − ` for collapse. Both are clickable; the
+    // click handler in `App::click_list` consults
+    // `list_title_button_hit` for the geometry.
+    let plus_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let title_line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("+", plus_style),
+        Span::raw(" sessions "),
+    ]);
+    let minus_hovered = match app.mouse_pos {
+        Some((mx, my)) => list_collapse_button_range(area)
+            .map(|(xs, xe, y)| my == y && mx >= xs && mx < xe)
+            .unwrap_or(false),
+        None => false,
+    };
+    let minus_style = if minus_hovered {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let collapse_line = Line::from(Span::styled(" − ", minus_style))
+        .alignment(ratatui::layout::Alignment::Right);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(pane_border_style(focused))
-        .title(" sessions ");
+        .title(title_line)
+        .title(collapse_line);
 
     // Total cells available inside the bordered pane.
     let row_w = (area.width as usize).saturating_sub(2);
@@ -634,22 +822,46 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
     let summary = app.selected_session();
-    let title_inner = match (summary, app.selected_group()) {
+    let group = app.selected_group();
+    // Width budgets for fitting the title onto the top border.
+    // Layout: `<corner> <glyph> <label>  …  <harness>  x <corner>`.
+    let total = area.width as usize;
+    let close_w: usize = if summary.is_some() { 3 } else { 0 };
+    let harness_w: usize = summary
+        .map(|s| 2 + UnicodeWidthStr::width(s.harness.as_str()))
+        .unwrap_or(0);
+    // Label budget = total − 2 corners − right-side blocks − fixed
+    // title scaffolding (` <glyph> <label> ` is 3 spaces + glyph
+    // width + label).
+    let glyph_w = summary
+        .map(|s| UnicodeWidthStr::width(session_status_glyph(app, s)))
+        .unwrap_or(0);
+    let label_budget = total
+        .saturating_sub(2)
+        .saturating_sub(harness_w)
+        .saturating_sub(close_w)
+        .saturating_sub(3 + glyph_w);
+    let title = match (summary, group) {
         (Some(s), _) => format!(
-            " {} {}  {}  {} ",
+            " {} {} ",
             session_status_glyph(app, s),
-            primary_label(s),
-            s.harness,
-            s.state.label()
+            truncate_to_width(&primary_label(s), label_budget),
         ),
         (None, Some(g)) => format!(" group: {} ", g.name),
         (None, None) => " no session ".to_string(),
     };
-    let view_label = match app.view {
-        ViewMode::Terminal => "[terminal]",
-        ViewMode::Transcript => "[transcript]",
-    };
-    let title = format!("{title_inner}{view_label} ");
+    // Harness name right-aligned on the top border so it visually
+    // detaches from the session-name title. Sits just left of the
+    // close button (or at the right edge when no close is shown).
+    // Color matches the border so harness reads as part of the
+    // title bar's frame, not as a separately-styled badge.
+    let harness_right = summary.map(|s| {
+        Line::from(Span::styled(
+            format!(" {} ", s.harness),
+            pane_border_style(focused),
+        ))
+        .alignment(ratatui::layout::Alignment::Right)
+    });
     // Right-aligned close button on the top border. Hover is
     // hit-tested against `app.mouse_pos` so the glyph bolds when the
     // cursor is over it — the click handler in `app.rs` mirrors the
@@ -671,6 +883,14 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
         .borders(Borders::ALL)
         .border_style(pane_border_style(focused))
         .title(title);
+    // Order matters: ratatui stacks right-aligned titles left-to-right
+    // in the order they're added. Add the harness FIRST so it sits
+    // to the left, then the close button SECOND so it lands at the
+    // rightmost edge (matching `view_close_button_range`, which
+    // hit-tests the last 3 cells of the top border).
+    if let Some(h) = harness_right {
+        block = block.title(h);
+    }
     if show_close {
         block = block.title(close);
     }
@@ -943,17 +1163,12 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
         _ => String::new(),
     };
     let modeline = format!(
-        " agentd  [{profile}]  focus:{focus}  {sel}  {state}  {model}  {automode}{scrollback}{chord}{status}{conn} ",
-        profile = app.profile.label(),
+        " agentd  focus:{focus}  {sel}  {model}  {automode}{scrollback}{chord}{status}{conn} ",
         focus = focus_label,
         scrollback = scrollback_label,
         automode = automode_badge,
         sel = match s {
-            Some(s) => primary_label(s),
-            None => "-".into(),
-        },
-        state = match s {
-            Some(s) => s.state.label().to_string(),
+            Some(s) => format!("\"{}\"", primary_label(s)),
             None => "-".into(),
         },
         model = match s {
@@ -1120,23 +1335,40 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn render_help(f: &mut Frame, area: Rect) {
-    let height = (HELP_TEXT.lines().count() as u16 + 2).min(area.height.saturating_sub(2));
-    let width = 64u16.min(area.width.saturating_sub(4));
+    // Target a comfortable reading width — long enough to keep each
+    // command line on one row without wrapping, capped so it doesn't
+    // span an ultra-wide terminal edge-to-edge. The outer rect adds
+    // 1-cell margins on all four sides so the popup's border is
+    // visually detached from the underlying TUI content. The bounds
+    // (`-6` width / `-4` height) reserve room for both borders plus
+    // those margins.
+    const MARGIN: u16 = 1;
+    let target_w = 92u16;
+    let width = target_w.min(area.width.saturating_sub(2 * MARGIN + 4));
+    // Content height = lines + 2 borders + 2 vertical padding.
+    let height = (HELP_TEXT.lines().count() as u16 + 4)
+        .min(area.height.saturating_sub(2 * MARGIN + 2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let popup = Rect {
-        x,
-        y,
-        width,
-        height,
+    let popup = Rect { x, y, width, height };
+    // Outer rect = popup grown by `MARGIN` cells on each side. We
+    // Clear *this* so the gap between the popup's border and any
+    // background content paints blank — without that, foreground
+    // text from the underlying frame leaks right up to the border.
+    let outer = Rect {
+        x: x.saturating_sub(MARGIN),
+        y: y.saturating_sub(MARGIN),
+        width: width + 2 * MARGIN,
+        height: height + 2 * MARGIN,
     };
+    f.render_widget(Clear, outer);
     let block = Block::default()
         .borders(Borders::ALL)
+        .padding(ratatui::widgets::Padding::new(2, 2, 1, 1))
         .title(" help (any key to close) ");
     let para = Paragraph::new(HELP_TEXT)
         .block(block)
         .wrap(Wrap { trim: false });
-    f.render_widget(Clear, popup);
     f.render_widget(para, popup);
 }
 
@@ -1310,6 +1542,31 @@ fn pane_border_style(focused: bool) -> Style {
     }
 }
 
+/// Clip `s` to at most `max` display columns, appending `…` when the
+/// original didn't fit. Width-aware (handles multi-cell glyphs / CJK).
+fn truncate_to_width(s: &str, max: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if UnicodeWidthStr::width(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let target = max.saturating_sub(1); // reserve a cell for "…"
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > target {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
 fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[String]) {
     if pinned_ids.is_empty() || area.height < 3 || area.width < 6 {
         return;
@@ -1319,25 +1576,52 @@ fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[Stri
     for (tile_area, id) in tiles.iter().zip(pinned_ids.iter()) {
         let summary = app.sessions.iter().find(|s| &s.id == id);
         let is_selected = selected_id.as_deref() == Some(id.as_str());
-        // Title: ` ⬩ <status> <label> <harness> `. The diamond on
-        // the top border is the unpin affordance — same gesture as
-        // the diamond in the list view. Click anywhere in the
-        // 4-cell gutter that holds the diamond + status glyph to
-        // unpin; `render_pin_diamond_tooltip` paints a hover
-        // tooltip and recolors the diamond on hover.
+        // Title: ` ⬩ <status> <label> `. The diamond on the top
+        // border is the unpin affordance — same gesture as the
+        // diamond in the list view. Click anywhere in the 4-cell
+        // gutter that holds the diamond + status glyph to unpin;
+        // `render_pin_diamond_tooltip` paints a hover tooltip and
+        // recolors the diamond on hover. The harness name is shown
+        // right-aligned on the same top border (mirrors the main
+        // session view's title layout) in the border color, and the
+        // session label ellipsizes when the tile is too narrow to
+        // fit both.
+        let total_pin = tile_area.width as usize;
+        let harness_w = summary
+            .map(|s| 2 + UnicodeWidthStr::width(s.harness.as_str()))
+            .unwrap_or(0);
+        let glyph_w = summary
+            .map(|s| UnicodeWidthStr::width(session_status_glyph(app, s)))
+            .unwrap_or(0);
+        // Title shape ` ⬩ <glyph> <label> ` = 5 cells of scaffolding
+        // (1 leading + diamond + 1 + glyph + 1 + label + 1 trailing
+        // = label + 4 + diamond + glyph; diamond is 1 cell).
+        let pin_label_budget = total_pin
+            .saturating_sub(2) // corners
+            .saturating_sub(harness_w)
+            .saturating_sub(5 + glyph_w);
         let title = match summary {
             Some(s) => format!(
-                " ⬩ {} {} {} ",
+                " ⬩ {} {} ",
                 session_status_glyph(app, s),
-                primary_label(s),
-                s.harness
+                truncate_to_width(&primary_label(s), pin_label_budget),
             ),
             None => format!(" ⬩ {} ", short_id(id)),
         };
-        let block = Block::default()
+        let harness_right = summary.map(|s| {
+            Line::from(Span::styled(
+                format!(" {} ", s.harness),
+                pane_border_style(is_selected),
+            ))
+            .alignment(ratatui::layout::Alignment::Right)
+        });
+        let mut block = Block::default()
             .borders(Borders::ALL)
             .border_style(pane_border_style(is_selected))
             .title(title);
+        if let Some(h) = harness_right {
+            block = block.title(h);
+        }
         let inner = block.inner(*tile_area);
         f.render_widget(block, *tile_area);
         if let Some(history) = app.histories.get_mut(id) {
@@ -1488,7 +1772,7 @@ fn state_style(state: SessionState) -> Style {
     match state {
         SessionState::Pending => Style::default().fg(Color::Gray),
         SessionState::Running => Style::default().fg(Color::Green),
-        SessionState::AwaitingInput => Style::default().fg(Color::Magenta),
+        SessionState::AwaitingInput => Style::default().fg(Color::Green),
         SessionState::Paused => Style::default().fg(Color::Yellow),
         SessionState::Done => Style::default().fg(Color::Cyan),
         SessionState::Errored => Style::default().fg(Color::Red),

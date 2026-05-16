@@ -20,6 +20,10 @@ pub struct TuiState {
     pub zoom: crate::app::ZoomMode,
     #[serde(default)]
     pub list_panel_w: Option<u16>,
+    #[serde(default)]
+    pub pin_strip_h: Option<u16>,
+    #[serde(default)]
+    pub list_collapsed: bool,
 }
 
 fn state_path() -> PathBuf {

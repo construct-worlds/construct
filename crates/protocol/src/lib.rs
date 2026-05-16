@@ -413,7 +413,7 @@ impl SessionState {
         match self {
             SessionState::Pending => "○",
             SessionState::Running => "●",
-            SessionState::AwaitingInput => "◐",
+            SessionState::AwaitingInput => "●",
             SessionState::Paused => "⏸",
             SessionState::Done => "✓",
             SessionState::Errored => "✗",

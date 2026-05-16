@@ -217,10 +217,33 @@ pub struct App {
     /// border with the mouse; clamped at render time to
     /// `[LIST_PANEL_W_MIN, terminal_w - LIST_PANEL_W_VIEW_MIN]`.
     pub list_panel_w: u16,
-    /// True while the user is mid-drag on the list/view divider.
-    /// Set on `Down(Left)` over the border column, cleared on
-    /// `Up(Left)` or when the mouse drifts outside the layout.
-    pub resizing_list: bool,
+    /// `Some((anchor_col, anchor_width))` while the user is
+    /// mid-drag on the list/view divider — `anchor_col` is the
+    /// column where Mouse-Down landed, `anchor_width` is the list
+    /// pane's width at drag start. On each `Drag` event we apply
+    /// the column delta to the anchor width, so it doesn't matter
+    /// whether the user grabbed the list's right border, the
+    /// view's left border, or the first pin tile's left border —
+    /// the divider follows the cursor either way. Cleared on
+    /// `Up(Left)`.
+    pub resizing_list: Option<(u16, u16)>,
+    /// User-preferred pin strip height in cells. `None` =
+    /// auto-compute via `ui::pin_strip_height(total)` (≈ ⅓ of the
+    /// right pane, clamped to 7..=18). Adjustable by dragging the
+    /// bottom border of the main view (= top border of the pin
+    /// strip). Persisted across launches.
+    pub pin_strip_h: Option<u16>,
+    /// `Some((anchor_row, anchor_height))` while the user is
+    /// mid-drag on the view/pin-strip horizontal divider — mirrors
+    /// the `resizing_list` model but for the vertical axis.
+    pub resizing_pin_strip: Option<(u16, u16)>,
+    /// User has collapsed the session list pane via the `−` button
+    /// on its title bar. Effective only when the list pane doesn't
+    /// have focus — when focus is on the list (e.g. via `C-x o`),
+    /// the list temporarily renders at its full width so the user
+    /// can interact with it, then re-collapses when focus leaves.
+    /// Persisted across launches.
+    pub list_collapsed: bool,
     /// /tasks popup state: `None` = closed, `Some(...)` = open with
     /// a snapshot of the session's task registry.
     pub tasks_popup: Option<TasksPopup>,
@@ -256,6 +279,22 @@ pub const LIST_PANEL_W_MIN: u16 = 18;
 pub const LIST_PANEL_W_VIEW_MIN: u16 = 20;
 /// Default list-pane width on first launch.
 pub const LIST_PANEL_W_DEFAULT: u16 = 40;
+
+/// Width of the list pane in collapsed state. Zero — the pane is
+/// hidden entirely and the main view expands to occupy the full
+/// horizontal span. The uncollapse affordance is a `›` glyph on
+/// the main view's left border (see `view_uncollapse_glyph_pos`).
+pub const LIST_PANEL_W_COLLAPSED: u16 = 0;
+
+/// Bounds for the pin strip's user-adjustable height. The minimum
+/// must keep the top + bottom border + one row of content visible
+/// (3 cells); the maximum keeps the main session view from being
+/// crushed below ~10 rows on a typical terminal — the upper end is
+/// also clamped at render time against `right_area.height − 10` so
+/// we never starve the main view on a small terminal regardless of
+/// what was persisted.
+pub const PIN_STRIP_H_MIN: u16 = 3;
+pub const PIN_STRIP_H_MAX: u16 = 40;
 
 /// A clickable / hoverable text segment in the minibuffer hint line —
 /// e.g. "C-x z unzoom" or "? help" — that dispatches a KeyAction when
@@ -394,7 +433,10 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         mouse_pos: None,
         orchestrator_id: initial_orch_id,
         list_panel_w: persisted.list_panel_w.unwrap_or(LIST_PANEL_W_DEFAULT),
-        resizing_list: false,
+        resizing_list: None,
+        pin_strip_h: persisted.pin_strip_h,
+        resizing_pin_strip: None,
+        list_collapsed: persisted.list_collapsed,
         editor_states: HashMap::new(),
     };
     // Default to Terminal view when the currently-selected session has a PTY.
@@ -433,6 +475,8 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         last_selected_session_id: app.selection.session_id().map(|s| s.to_string()),
         zoom: app.zoom,
         list_panel_w: Some(app.list_panel_w),
+        pin_strip_h: app.pin_strip_h,
+        list_collapsed: app.list_collapsed,
     });
 
     result
@@ -1241,37 +1285,96 @@ impl App {
             MouseEventKind::ScrollUp => self.adjust_scrollback(STEP),
             MouseEventKind::ScrollDown => self.adjust_scrollback(-STEP),
             MouseEventKind::Down(MouseButton::Left) => {
-                // List ↔ view divider: clicking the list pane's right
-                // border starts a resize-drag rather than the usual
-                // click-into-the-list flow. Only meaningful in the
-                // normal split layout (zoomed modes don't show the
-                // border).
+                // List ↔ view divider: clicking the list pane's
+                // right border (col = list_width - 1), the view's
+                // left border (col = list_width), or the first pin
+                // tile's left border (col = list_width) starts a
+                // resize-drag rather than the usual click-through
+                // flow. Only meaningful in the normal split layout
+                // (zoomed modes don't show the border).
                 if self.is_on_list_divider(ev.column, ev.row) {
-                    self.resizing_list = true;
+                    self.resizing_list = Some((ev.column, self.list_panel_w));
+                    return;
+                }
+                // View ↔ pin-strip horizontal divider: clicking the
+                // view's bottom border (or equivalently the pin
+                // strip's top border, the same row) starts a
+                // vertical resize-drag for the pin strip.
+                if self.is_on_pin_strip_divider(ev.column, ev.row) {
+                    let cur_h = self
+                        .layout
+                        .pin_strip_area
+                        .map(|s| s.height)
+                        .unwrap_or(0);
+                    self.resizing_pin_strip = Some((ev.row, cur_h));
                     return;
                 }
                 self.handle_left_click(ev.column, ev.row).await;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if self.resizing_list {
-                    // Width = column of the new border + 1 (because
-                    // the border sits at width-1).
-                    let want = ev.column.saturating_add(1);
-                    self.list_panel_w = want
-                        .clamp(LIST_PANEL_W_MIN, u16::MAX); // top end clamped at render
+                if let Some((anchor_col, anchor_w)) = self.resizing_list {
+                    // Apply the column delta to the width that was
+                    // current at drag start. Works for both grab
+                    // points: list's right border (col = w−1) and
+                    // view/pin's left border (col = w) — the delta
+                    // is what matters, not the absolute column.
+                    let delta =
+                        ev.column as i32 - anchor_col as i32;
+                    let want = (anchor_w as i32 + delta)
+                        .max(LIST_PANEL_W_MIN as i32)
+                        .min(u16::MAX as i32) as u16;
+                    self.list_panel_w = want;
+                } else if let Some((anchor_row, anchor_h)) =
+                    self.resizing_pin_strip
+                {
+                    // Dragging the divider DOWN (row grows) shrinks
+                    // the pin strip; dragging UP grows it. Negate
+                    // the row delta to match cursor direction.
+                    let delta = anchor_row as i32 - ev.row as i32;
+                    let want = (anchor_h as i32 + delta)
+                        .max(PIN_STRIP_H_MIN as i32)
+                        .min(PIN_STRIP_H_MAX as i32) as u16;
+                    self.pin_strip_h = Some(want);
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.resizing_list = false;
+                self.resizing_list = None;
+                self.resizing_pin_strip = None;
             }
             _ => {}
         }
     }
 
-    /// True if `(col, row)` sits on the list pane's right border in
-    /// the current frame's layout — i.e., the column just to the right
-    /// of the list's content, only when we're in the normal split
-    /// layout. Returns false in zoomed layouts (no border to grab).
+    /// True if `(col, row)` sits on the main view's bottom border
+    /// row — the divider directly above the pin strip. The view's
+    /// bottom border is at `pin_strip.y − 1` (one row above the
+    /// strip's top border / title row). Only meaningful when there
+    /// IS a pin strip and we're in the normal split layout.
+    fn is_on_pin_strip_divider(&self, col: u16, row: u16) -> bool {
+        if !matches!(self.zoom, ZoomMode::None) {
+            return false;
+        }
+        let Some(strip) = self.layout.pin_strip_area else {
+            return false;
+        };
+        let view_bottom = match strip.y.checked_sub(1) {
+            Some(r) => r,
+            None => return false,
+        };
+        row == view_bottom && col >= strip.x && col < strip.x + strip.width
+    }
+
+    /// True if `(col, row)` sits on the list ↔ right-pane divider.
+    /// The grab zone covers three cells side-by-side:
+    ///   * `list.x + list.width − 1` — list's right border
+    ///   * `view_area.x` — main session view's left border
+    ///   * `pin_strip.x` — first pin tile's left border (when any
+    ///     sessions are pinned)
+    /// The two "left border" cells are at the same column as each
+    /// other (view and pin strip stack vertically), but at row-
+    /// disjoint y ranges, so each contributes to one half of the
+    /// vertical span. Returns false in zoomed layouts (no borders
+    /// to grab there).
     fn is_on_list_divider(&self, col: u16, row: u16) -> bool {
         if !matches!(self.zoom, ZoomMode::None) {
             return false;
@@ -1282,8 +1385,26 @@ impl App {
         if list.width == 0 {
             return false;
         }
-        let border_x = list.x + list.width - 1;
-        col == border_x && row >= list.y && row < list.y + list.height
+        let list_right_x = list.x + list.width - 1;
+        // List's right border — the original grab handle.
+        if col == list_right_x && row >= list.y && row < list.y + list.height {
+            return true;
+        }
+        // Main view's left border (immediately right of list's
+        // right border).
+        if let Some(view) = self.layout.view_area {
+            if col == view.x && row >= view.y && row < view.y + view.height {
+                return true;
+            }
+        }
+        // First pin tile's left border. The strip's x is the same
+        // column as view.x; we just need the strip's y range.
+        if let Some(strip) = self.layout.pin_strip_area {
+            if col == strip.x && row >= strip.y && row < strip.y + strip.height {
+                return true;
+            }
+        }
+        false
     }
 
     /// Hit-test a left-click against the last frame's pane geometry.
@@ -1352,6 +1473,16 @@ impl App {
         }
         if let Some(view) = self.layout.view_area {
             if contains(view, col, row) {
+                // Uncollapse handle: when the list is collapsed,
+                // the view's left border column acts as the
+                // "show list" button. Tested before other view
+                // click handlers so a click on column `view.x`
+                // never falls through to a content click.
+                if crate::ui::is_on_view_uncollapse_handle(self, col, row) {
+                    self.list_collapsed = false;
+                    self.focus = PaneFocus::List;
+                    return;
+                }
                 // Top-row close button: ` x ` 3-cell range at the
                 // right edge of the top border. Click → delete
                 // confirmation prompt for the selected session.
@@ -1542,7 +1673,40 @@ impl App {
         // border or empty space past the last item — matching the
         // intuitive "click the pane to focus it" UX.
         self.collapse_orchestrator_panel_on_focus_change();
+        // Collapsed list pane: any click in the pane (border or
+        // body) just re-expands. Don't try to interpret as a row /
+        // button click — the geometry is meaningless at 3 cells.
+        if self.list_collapsed && self.focus != PaneFocus::List {
+            self.list_collapsed = false;
+            self.focus = PaneFocus::List;
+            return;
+        }
         self.focus = PaneFocus::List;
+        // Title bar buttons: `+` (left, new session) and `−`
+        // (right, collapse). Both live on the top border row.
+        if row == list.y {
+            if let Some((xs, xe, y)) =
+                crate::ui::list_plus_button_range(list)
+            {
+                if row == y && col >= xs && col < xe {
+                    self.run_action(crate::keymap::KeyAction::OpenNewSession)
+                        .await;
+                    return;
+                }
+            }
+            if let Some((xs, xe, y)) =
+                crate::ui::list_collapse_button_range(list)
+            {
+                if row == y && col >= xs && col < xe {
+                    self.list_collapsed = true;
+                    // Drop focus so the collapse takes effect this
+                    // frame (effective_collapsed = list_collapsed
+                    // && focus != List).
+                    self.focus = PaneFocus::View;
+                    return;
+                }
+            }
+        }
         // Top + bottom border are 1 row each; rows outside the inner
         // content area only handle the focus change above.
         if row <= list.y || row + 1 >= list.y + list.height {
