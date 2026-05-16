@@ -132,6 +132,17 @@ impl LlmProvider for Ollama {
         if !resp.status().is_success() {
             let code = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            // Ollama returns 4xx for context overflow but body shape
+            // varies by model. Run the parser; it only matches when
+            // the body is actually overflow-shaped.
+            if code.is_client_error() {
+                if let Some(extracted) = super::parse_overflow(&body) {
+                    return Err(anyhow::Error::new(super::ContextOverflow {
+                        extracted,
+                        raw: body,
+                    }));
+                }
+            }
             return Err(anyhow!("ollama {code}: {body}"));
         }
 

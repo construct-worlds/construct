@@ -9,6 +9,7 @@ mod agent;
 mod context;
 mod interactive;
 mod interval_suggest;
+mod model_limits;
 mod observe;
 mod persist;
 mod project_guide;

@@ -12,27 +12,36 @@
 use crate::provider::{Content, Message, Role};
 
 /// Token budget per provider/model. Returned as a soft cap — we prune
-/// when the estimated total exceeds `cap * UTILIZATION`.
+/// when the estimated total exceeds `cap * UTILIZATION`. Numbers are
+/// the *input* context windows the providers advertise at the API
+/// tier, updated for the 2026 model line-ups.
+///
+/// Notes:
+///   * OpenAI gpt-5 family: 400K input tokens (output is a separate
+///     128K budget, not counted here).
+///   * OpenAI o-series (o1/o3/o4): 200K input.
+///   * Anthropic Claude 4.x Sonnet has a 1M-context tier available
+///     *only* with the `anthropic-beta: context-1m-2025-08-07`
+///     header. Without that header it's 200K — and the current
+///     `provider/anthropic.rs` does not send the header. So the
+///     200K value here matches what the wire actually allows.
+///     Opus and Haiku stay at 200K regardless.
 pub fn context_window_tokens(provider: &str, model: &str) -> usize {
     match (provider, model) {
-        ("openai", m) if m.starts_with("gpt-5") => 200_000,
-        ("openai", m) if m.starts_with("gpt-4o") => 128_000,
+        ("openai", m) if m.starts_with("gpt-5") => 400_000,
         ("openai", m) if m.starts_with("o") => 200_000,
         ("openai", _) => 32_000,
-        ("anthropic", m) if m.contains("opus") => 200_000,
-        ("anthropic", m) if m.contains("sonnet") => 200_000,
-        ("anthropic", m) if m.contains("haiku") => 200_000,
         ("anthropic", _) => 200_000,
         ("ollama", _) => 8_000,
         _ => 8_000,
     }
 }
 
-const UTILIZATION: f64 = 0.7;
+pub const UTILIZATION: f64 = 0.7;
 const MIN_KEEP_TURNS: usize = 2;
 
 /// Rough token estimate (chars / 3.5). Safe to overestimate.
-fn estimate_tokens(messages: &[Message]) -> usize {
+pub fn estimate_tokens(messages: &[Message]) -> usize {
     let mut chars = 0usize;
     for m in messages {
         match &m.content {
@@ -57,6 +66,14 @@ fn estimate_tokens(messages: &[Message]) -> usize {
 /// Returns the number of pruned turns for logging.
 pub fn prune(messages: &mut Vec<Message>, provider: &str, model: &str) -> usize {
     let cap = (context_window_tokens(provider, model) as f64 * UTILIZATION) as usize;
+    prune_to_budget(messages, cap)
+}
+
+/// Variant of `prune` that takes an explicit token budget instead
+/// of looking up the hardcoded table. Used by the learned-limit /
+/// probe path in `agent.rs` so the budget reflects the per-model
+/// runtime knowledge.
+pub fn prune_to_budget(messages: &mut Vec<Message>, cap: usize) -> usize {
     let mut pruned = 0;
     while estimate_tokens(messages) > cap {
         // Find next User-message boundary; everything before it is one
@@ -117,7 +134,7 @@ mod tests {
     #[test]
     fn no_prune_under_budget() {
         let mut ms = vec![user("hi"), asst("hello")];
-        let pruned = prune(&mut ms, "openai", "gpt-4o");
+        let pruned = prune(&mut ms, "openai", "gpt-5");
         assert_eq!(pruned, 0);
         assert_eq!(ms.len(), 2);
     }

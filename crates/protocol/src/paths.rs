@@ -75,6 +75,13 @@ impl Paths {
     pub fn tui_state_file(&self) -> PathBuf {
         self.state_dir.join("tui-state.json")
     }
+
+    /// Path to the learned per-model token-limit table — zarvis
+    /// adapts this at runtime when providers reject requests as
+    /// over-budget and bumps it on successful probe calls.
+    pub fn zarvis_model_limits_file(&self) -> PathBuf {
+        self.state_dir.join("zarvis-model-limits.json")
+    }
 }
 
 fn home_dir() -> PathBuf {

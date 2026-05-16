@@ -151,6 +151,14 @@ impl LlmProvider for OpenAi {
         if !resp.status().is_success() {
             let code = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            if code.as_u16() == 400 {
+                if let Some(extracted) = super::parse_overflow(&body) {
+                    return Err(anyhow::Error::new(super::ContextOverflow {
+                        extracted,
+                        raw: body,
+                    }));
+                }
+            }
             return Err(anyhow!("openai {code}: {body}"));
         }
 

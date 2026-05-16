@@ -180,6 +180,10 @@ pub async fn run(
     let provider_name = spec.provider_name();
     let model = spec.model.clone();
     let provider = spec.provider;
+    // Per-model learned token limits — adapts on overflow errors
+    // and bumps upward on successful probe calls. Shared across
+    // all agentd sessions on this machine via state_dir.
+    let mut limits = crate::model_limits::ModelLimits::load();
     // Initial status — tells the user which provider/model the session
     // actually resolved to.
     emit.emit(SessionEvent::Status {
@@ -258,7 +262,32 @@ pub async fn run(
         // Inner step loop: feed tool results back until the model
         // produces an end-of-turn response.
         loop {
-            let _pruned = context::prune(&mut messages, provider_name, &model);
+            // Compute the per-call token budget. Three states:
+            //   1. We have a *learned* limit (from a prior overflow
+            //      or probe) → use that * UTILIZATION.
+            //   2. We don't have a learned limit AND this would
+            //      otherwise be a probe → no-op, since there's no
+            //      baseline to probe past.
+            //   3. Probe: bump the budget to learned * PROBE_RATIO
+            //      so the conversation can spill above the safe
+            //      cap and exercise the actual model limit.
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let hardcoded_cap = context::context_window_tokens(provider_name, &model);
+            let learned = limits.get(provider_name, &model);
+            let est = context::estimate_tokens(&messages) as u64;
+            let is_probe = learned.is_some()
+                && limits.should_probe(provider_name, &model, est, now_ms);
+            let effective_cap = match learned {
+                Some(lim) => lim,
+                None => hardcoded_cap as u64,
+            };
+            let budget = if is_probe {
+                ((effective_cap as f64)
+                    * crate::model_limits::PROBE_OVERFLOW_RATIO) as usize
+            } else {
+                ((effective_cap as f64) * context::UTILIZATION) as usize
+            };
+            let _pruned = context::prune_to_budget(&mut messages, budget);
 
             let mut sink = MessageSink { emit: &emit };
             let turn = match provider
@@ -267,10 +296,71 @@ pub async fn run(
             {
                 Ok(t) => t,
                 Err(e) => {
-                    emit.emit(SessionEvent::Error { message: format!("{e}") });
-                    break;
+                    // Context overflow → learn the real limit and
+                    // retry once. The provider wraps the typed
+                    // sentinel in `anyhow::Error`; we downcast to
+                    // pull out the extracted limit number (when
+                    // the API reported one).
+                    if let Some(ov) =
+                        e.downcast_ref::<crate::provider::ContextOverflow>()
+                    {
+                        let new_limit = limits.record_overflow(
+                            provider_name,
+                            &model,
+                            ov.extracted,
+                            effective_cap,
+                            now_ms,
+                        );
+                        let retry_budget =
+                            ((new_limit as f64) * context::UTILIZATION) as usize;
+                        let _pruned =
+                            context::prune_to_budget(&mut messages, retry_budget);
+                        emit.emit(SessionEvent::Status {
+                            state: SessionState::Running,
+                            detail: Some(format!(
+                                "context overflow — relearning ({} tokens) and retrying",
+                                new_limit
+                            )),
+                        });
+                        let mut sink = MessageSink { emit: &emit };
+                        match provider
+                            .complete(
+                                &model,
+                                &system_prompt,
+                                &messages,
+                                &specs,
+                                &mut sink,
+                            )
+                            .await
+                        {
+                            Ok(t) => t,
+                            Err(e2) => {
+                                emit.emit(SessionEvent::Error {
+                                    message: format!(
+                                        "still over budget after retry: {e2}"
+                                    ),
+                                });
+                                break;
+                            }
+                        }
+                    } else {
+                        emit.emit(SessionEvent::Error { message: format!("{e}") });
+                        break;
+                    }
                 }
             };
+
+            // Record the successful call so probe state advances
+            // (and the learned limit grows on a probe that pushed
+            // past the prior cap).
+            limits.record_call(
+                provider_name,
+                &model,
+                turn.usage.input_tokens,
+                is_probe,
+                hardcoded_cap as u64,
+                now_ms,
+            );
 
             emit.emit(SessionEvent::Cost {
                 usd: turn.usage.usd,
