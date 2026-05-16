@@ -1686,4 +1686,201 @@ mod tests {
              flash the user reports."
         );
     }
+
+    // ============================================================
+    // Pinned-session tests
+    //
+    // The pin strip shows each pinned session as a small tile at the
+    // bottom of the view pane. Each tile drives `history.replay()`
+    // (same ItemHistory cache as the main view) and renders via
+    // `render_pty_tail`, which iterates the screen's bottom-N rows
+    // into a ratatui Buffer. With many pinned sessions every frame
+    // pays the per-session cost N times.
+    //
+    // Tests below exercise:
+    //   * tile correctness after bootstrap / resize,
+    //   * single-tile render performance,
+    //   * aggregate cost when many sessions are pinned.
+    //
+    // They render through `tui_term::PseudoTerminal` into a fresh
+    // ratatui Buffer the same way the TUI does, so cell-level
+    // assertions reflect what the outer terminal would receive.
+    // ============================================================
+
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::Widget;
+
+    /// Render a session's screen into a fresh ratatui Buffer the
+    /// same way `render_pty_tail` does for a pinned tile (via
+    /// `PseudoTerminal::render` into the tile's Rect).
+    fn render_tile(h: &mut ItemHistory, area: Rect) -> Buffer {
+        // Replay at the main view's cols so the wrap matches what
+        // the focused session would render — pin strip currently
+        // does this (see render_pin_strip).
+        let out = h.replay(area.width.max(60), area.height.max(3), 0);
+        let mut buf = Buffer::empty(area);
+        let no_cursor = tui_term::widget::Cursor::default().visibility(false);
+        tui_term::widget::PseudoTerminal::new(out.screen)
+            .cursor(no_cursor)
+            .render(area, &mut buf);
+        buf
+    }
+
+    /// Count cells with a non-blank symbol in the buffer.
+    fn populated_cells(buf: &Buffer) -> usize {
+        let area = *buf.area();
+        let mut n = 0;
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buf.cell(ratatui::layout::Position { x, y }) {
+                    let s = cell.symbol();
+                    if !s.is_empty() && s != " " {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn pinned_tile_renders_content_after_bootstrap() {
+        let mut h = ItemHistory::new();
+        for i in 0..20 {
+            h.feed_pty(format!("pinned session line {i}\r\n").as_bytes());
+        }
+        let tile_area = Rect::new(0, 0, 40, 5);
+        let buf = render_tile(&mut h, tile_area);
+        let n = populated_cells(&buf);
+        assert!(
+            n > 20,
+            "pinned tile should show recent content, got {n} populated cells"
+        );
+    }
+
+    #[test]
+    fn pinned_tile_renders_content_after_resize() {
+        let mut h = ItemHistory::new();
+        for i in 0..20 {
+            h.feed_pty(format!("pinned session line {i}\r\n").as_bytes());
+        }
+        // First render at one tile size, then at another (simulating
+        // user widening the list pane → narrower tile).
+        let _ = render_tile(&mut h, Rect::new(0, 0, 40, 5));
+        let buf = render_tile(&mut h, Rect::new(0, 0, 25, 5));
+        let n = populated_cells(&buf);
+        assert!(
+            n > 10,
+            "narrower pin tile should still show content, got {n} populated cells"
+        );
+    }
+
+    #[test]
+    fn pinned_tile_single_render_is_fast() {
+        let mut h = ItemHistory::new();
+        // A long-lived pinned session — realistic chat history.
+        for i in 0..5_000 {
+            h.feed_pty(format!("pinned line {i} of accumulated chat\r\n").as_bytes());
+        }
+        let tile_area = Rect::new(0, 0, 60, 4);
+        // Warm.
+        let _ = render_tile(&mut h, tile_area);
+        // Measure 100 steady-state renders.
+        let t = Instant::now();
+        for _ in 0..100 {
+            let _ = render_tile(&mut h, tile_area);
+        }
+        let us = t.elapsed().as_micros();
+        let per = us / 100;
+        eprintln!("pinned tile render: 100 frames in {us} µs ({per} µs/frame)");
+        assert!(
+            per < 1_000,
+            "single pin tile render too slow: {per} µs/frame at 5000-line history"
+        );
+    }
+
+    #[test]
+    fn many_pinned_sessions_render_within_frame_budget() {
+        // 20 pinned sessions, each with a modest history. Aggregate
+        // render cost across all of them should fit comfortably in
+        // one TUI frame (we tick at ~120 ms; budget here is much
+        // tighter).
+        let n_pinned = 20;
+        let mut histories: Vec<ItemHistory> = (0..n_pinned)
+            .map(|i| {
+                let mut h = ItemHistory::new();
+                for line in 0..200 {
+                    h.feed_pty(
+                        format!("session {i} line {line}\r\n").as_bytes(),
+                    );
+                }
+                h
+            })
+            .collect();
+        let tile_area = Rect::new(0, 0, 50, 4);
+        // Warm every cache.
+        for h in histories.iter_mut() {
+            let _ = render_tile(h, tile_area);
+        }
+        // Measure aggregate render across all pinned tiles for 50
+        // frames.
+        let frames = 50;
+        let t = Instant::now();
+        for _ in 0..frames {
+            for h in histories.iter_mut() {
+                let _ = render_tile(h, tile_area);
+            }
+        }
+        let us = t.elapsed().as_micros();
+        let per_frame = us / frames as u128;
+        let per_tile = per_frame / n_pinned as u128;
+        eprintln!(
+            "{n_pinned} pin tiles, {frames} frames: total {us} µs, {per_frame} µs/frame, \
+             {per_tile} µs/tile"
+        );
+        assert!(
+            per_frame < 10_000,
+            "{n_pinned} pinned tiles render too slow per frame: {per_frame} µs"
+        );
+    }
+
+    #[test]
+    fn many_pinned_sessions_resize_within_budget() {
+        // Resizing the TUI when many sessions are pinned triggers a
+        // replay per pinned tile (the tile's cols may change). Make
+        // sure the aggregate doesn't blow the frame budget.
+        let n_pinned = 10;
+        let mut histories: Vec<ItemHistory> = (0..n_pinned)
+            .map(|i| {
+                let mut h = ItemHistory::new();
+                for line in 0..1_000 {
+                    h.feed_pty(
+                        format!("pinned-{i} chat line {line}\r\n").as_bytes(),
+                    );
+                }
+                h
+            })
+            .collect();
+        // Warm at one size.
+        for h in histories.iter_mut() {
+            let _ = render_tile(h, Rect::new(0, 0, 60, 4));
+        }
+        // Resize (cols change for each tile).
+        let t = Instant::now();
+        for h in histories.iter_mut() {
+            let _ = render_tile(h, Rect::new(0, 0, 80, 4));
+        }
+        let us = t.elapsed().as_micros();
+        eprintln!("{n_pinned} pin tiles on resize: total {us} µs");
+        // Currently this passes because the per-tile content is
+        // small (1000 lines) so the rebuild is fast. With a long
+        // codex-like history per tile it would fail — same root
+        // cause as the codex test above. Threshold loose enough to
+        // not be flaky.
+        assert!(
+            us < 50_000,
+            "{n_pinned} pinned tiles too slow on resize: {us} µs"
+        );
+    }
 }
