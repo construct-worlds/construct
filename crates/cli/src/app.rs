@@ -17,6 +17,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Stdout;
 use std::sync::Arc;
@@ -84,7 +85,7 @@ pub enum ViewMode {
 /// Which pane (if any) currently takes the entire screen. Zoom mirrors
 /// tmux's `prefix z`: a single key collapses the rest of the layout
 /// onto a single pane and back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ZoomMode {
     #[default]
     None,
@@ -332,6 +333,11 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
     // Restore the previously-selected session if it still exists,
     // else fall back to the first non-orchestrator session.
     let persisted = crate::tui_state::load();
+    let initial_zoom = persisted.zoom;
+    let initial_focus = match initial_zoom {
+        ZoomMode::List => PaneFocus::List,
+        ZoomMode::View | ZoomMode::None => PaneFocus::View,
+    };
     let initial_sel = persisted
         .last_selected_session_id
         .as_ref()
@@ -359,7 +365,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         // Default focus is the view — the selected session is usually
         // what the user wants to interact with first. List navigation
         // is one `C-x o` / `Tab` away.
-        focus: PaneFocus::View,
+        focus: initial_focus,
         transcript: Vec::new(),
         transcript_session: None,
         transcript_scroll: 0,
@@ -380,14 +386,14 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         orchestrator_desired_size: None,
         tasks_popup: None,
         terminal_pane_size: (100, 30),
-        zoom: ZoomMode::None,
+        zoom: initial_zoom,
         view_scrollback: 0,
         pty_activity: HashMap::new(),
         start_instant: Instant::now(),
         layout: LayoutSnapshot::default(),
         mouse_pos: None,
         orchestrator_id: initial_orch_id,
-        list_panel_w: LIST_PANEL_W_DEFAULT,
+        list_panel_w: persisted.list_panel_w.unwrap_or(LIST_PANEL_W_DEFAULT),
         resizing_list: false,
         editor_states: HashMap::new(),
     };
@@ -425,6 +431,8 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
 
     crate::tui_state::save(&crate::tui_state::TuiState {
         last_selected_session_id: app.selection.session_id().map(|s| s.to_string()),
+        zoom: app.zoom,
+        list_panel_w: Some(app.list_panel_w),
     });
 
     result
