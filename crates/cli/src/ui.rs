@@ -106,7 +106,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_modeline(f, modeline_area, app);
     render_minibuffer(f, minibuffer_area, app);
     render_diamond_tooltip(f, app);
-    render_close_button_tooltip(f, app, &pinned_ids);
+    render_pin_diamond_tooltip(f, app, &pinned_ids);
     render_view_close_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_tasks_popup(f, app);
@@ -170,42 +170,59 @@ fn hovered_view_close_button(app: &App, view_area: Rect) -> bool {
     my == y && mx >= x_start && mx < x_end
 }
 
-/// Hover hit-test for the per-tile close button in the pin strip.
-/// Returns the cursor's anchor cell (top-right of the `×` glyph) so the
-/// caller can position a tooltip next to it. Stays in lockstep with
-/// `App::click_pin_strip`'s close-button geometry.
-fn hovered_close_button(app: &App, pinned_ids: &[String]) -> Option<(u16, u16)> {
+/// Hit zone for the pin-tile unpin diamond: 4 cells on the top
+/// border, starting after the corner. Title shape is ` ⬩ <status>
+/// <label> <harness> `, so cells `tile.x + 1 ..= tile.x + 4`
+/// (inclusive) cover `[ ][⬩][ ][status]` — the same 4-cell zone
+/// idiom as the list-view diamond. Returns `(diamond_x,
+/// tile_top_y)` so the tooltip can anchor on the diamond cell.
+fn pin_tile_diamond_zone(tile: Rect) -> (u16, u16) {
+    (tile.x + 1, tile.x + 5)
+}
+
+fn hovered_pin_diamond<'a>(
+    app: &'a App,
+    pinned_ids: &[String],
+) -> Option<(u16, u16, &'a SessionSummary)> {
     let (mx, my) = app.mouse_pos?;
     let strip = app.layout.pin_strip_area?;
     if pinned_ids.is_empty() {
         return None;
     }
     let tiles = pin_tile_layout(strip, pinned_ids.len());
-    for tile in &tiles {
-        // Same hit zone as click_pin_strip: top border row, the 3 cells
-        // covering ` × ` just before the right corner.
-        let close_w: u16 = 3;
-        let close_x_start = tile.x + tile.width.saturating_sub(close_w + 1);
-        let close_x_end = tile.x + tile.width.saturating_sub(1);
-        if my == tile.y && mx >= close_x_start && mx < close_x_end {
-            return Some((close_x_start, tile.y));
+    for (tile, id) in tiles.iter().zip(pinned_ids.iter()) {
+        let (zone_start, zone_end) = pin_tile_diamond_zone(*tile);
+        if my == tile.y && mx >= zone_start && mx < zone_end {
+            // Diamond glyph itself sits at offset +1 in the title
+            // (after the leading space).
+            let diamond_x = tile.x + 2;
+            let summary = app.sessions.iter().find(|s| &s.id == id)?;
+            return Some((diamond_x, tile.y, summary));
         }
     }
     None
 }
 
-fn render_close_button_tooltip(f: &mut Frame, app: &App, pinned_ids: &[String]) {
-    let Some((cx, cy)) = hovered_close_button(app, pinned_ids) else { return };
+fn render_pin_diamond_tooltip(f: &mut Frame, app: &App, pinned_ids: &[String]) {
+    let Some((dx, dy, _summary)) = hovered_pin_diamond(app, pinned_ids) else { return };
+
+    // Overlay the diamond cell in red+bold — same "about to unpin"
+    // affordance the list-view diamond uses for pinned rows.
+    let overlay_style = Style::default()
+        .fg(Color::Red)
+        .add_modifier(Modifier::BOLD);
+    f.buffer_mut().set_string(dx, dy, "⬩", overlay_style);
+
     let label = " Unpin session ";
     let total = f.area();
     let inner_w = UnicodeWidthStr::width(label) as u16;
-    let w = inner_w + 2;
+    let w = inner_w + 2; // borders
     let h: u16 = 3;
-    // Anchor below the top border, shifted left so the tooltip's right
-    // edge aligns with the close button when there's room; fall back
-    // toward the screen edge otherwise.
-    let mut tx = cx.saturating_sub(w.saturating_sub(3));
-    let mut ty = cy + 1;
+    // Default: place tooltip just right of the diamond, vertically
+    // centered on the row. Fall back leftward / upward if it would
+    // overflow the screen. Mirrors `render_diamond_tooltip`.
+    let mut tx = dx + 2;
+    let mut ty = dy.saturating_sub(1);
     if tx + w > total.x + total.width {
         tx = total.x + total.width.saturating_sub(w);
     }
@@ -1302,6 +1319,12 @@ fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[Stri
     for (tile_area, id) in tiles.iter().zip(pinned_ids.iter()) {
         let summary = app.sessions.iter().find(|s| &s.id == id);
         let is_selected = selected_id.as_deref() == Some(id.as_str());
+        // Title: ` ⬩ <status> <label> <harness> `. The diamond on
+        // the top border is the unpin affordance — same gesture as
+        // the diamond in the list view. Click anywhere in the
+        // 4-cell gutter that holds the diamond + status glyph to
+        // unpin; `render_pin_diamond_tooltip` paints a hover
+        // tooltip and recolors the diamond on hover.
         let title = match summary {
             Some(s) => format!(
                 " ⬩ {} {} {} ",
@@ -1311,32 +1334,10 @@ fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[Stri
             ),
             None => format!(" ⬩ {} ", short_id(id)),
         };
-        // Right-aligned unpin affordance. Uses a minus glyph (NOT an
-        // ×) — `x` reads as "close/kill", which is reserved for the
-        // session-view close button. Hover bolds the glyph.
-        let unpin_hovered = match app.mouse_pos {
-            Some((mx, my)) => {
-                let close_w: u16 = 3;
-                let x_start = tile_area.x + tile_area.width.saturating_sub(close_w + 1);
-                let x_end = tile_area.x + tile_area.width.saturating_sub(1);
-                my == tile_area.y && mx >= x_start && mx < x_end
-            }
-            None => false,
-        };
-        let unpin_style = if unpin_hovered {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        let close = Line::from(Span::styled(" − ", unpin_style))
-            .alignment(ratatui::layout::Alignment::Right);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(pane_border_style(is_selected))
-            .title(title)
-            .title(close);
+            .title(title);
         let inner = block.inner(*tile_area);
         f.render_widget(block, *tile_area);
         if let Some(history) = app.histories.get_mut(id) {

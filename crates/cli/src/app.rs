@@ -1616,13 +1616,14 @@ impl App {
             {
                 continue;
             }
-            // Close button: ` × ` (3 cells) anchored at the top border's
-            // right edge. We forgive one extra cell on the left of the
-            // glyph since it's bordered by a corner char.
-            let close_w = 3u16;
-            let close_x_start = tile.x + tile.width.saturating_sub(close_w + 1);
-            let close_x_end = tile.x + tile.width.saturating_sub(1);
-            if row == tile.y && col >= close_x_start && col < close_x_end {
+            // Diamond zone: 4 cells on the top border, starting
+            // after the corner — covers `[ ][⬩][ ][status]` in the
+            // title ` ⬩ <status> <label> <harness> `. Same gesture
+            // as clicking the list-view diamond. Must stay in
+            // lockstep with `pin_tile_diamond_zone` in ui.rs.
+            let diamond_zone_start = tile.x + 1;
+            let diamond_zone_end = tile.x + 5;
+            if row == tile.y && col >= diamond_zone_start && col < diamond_zone_end {
                 if let Err(e) = self.client.set_pinned(id, false).await {
                     self.set_status(format!("unpin failed: {e}"));
                 }
