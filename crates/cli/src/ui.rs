@@ -1687,9 +1687,9 @@ pub fn pin_tile_layout(area: Rect, n: usize) -> Vec<Rect> {
 }
 
 /// Render a slice of a vt100 screen into `area`, preserving colors and
-/// attributes. The window is anchored at the cursor row so a fresh session
-/// (cursor near the top) shows its prompt, and a busy session (cursor near
-/// the bottom) shows its most recent activity. Used by the pin strip.
+/// attributes. The window is anchored at the bottom of the source screen so
+/// harness status/input bars (zarvis, codex, claude all park them in the
+/// last few rows) stay visible on pinned tiles. Used by the pin strip.
 fn render_pty_tail(f: &mut Frame, area: Rect, screen: &vt100::Screen) {
     let (rows, cols) = screen.size();
     if rows == 0 || cols == 0 || area.width == 0 || area.height == 0 {
@@ -1697,9 +1697,8 @@ fn render_pty_tail(f: &mut Frame, area: Rect, screen: &vt100::Screen) {
     }
     let visible_h = area.height.min(rows);
     let visible_w = area.width.min(cols);
-    let (cursor_row, _) = screen.cursor_position();
-    // End of window is exclusive; show at least visible_h rows starting from 0.
-    let end_row = (cursor_row + 1).max(visible_h).min(rows);
+    // End of window is exclusive; always show the bottom `visible_h` rows.
+    let end_row = rows;
     let start_row = end_row.saturating_sub(visible_h);
     let buf = f.buffer_mut();
     for r in 0..visible_h {
