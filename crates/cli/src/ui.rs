@@ -1039,7 +1039,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
         ZoomMode::View => (
             "zoomed: view — ",
             vec![
-                ("C-x x palette", KeyAction::OpenCommandPalette),
+                ("C-x x god", KeyAction::OpenCommandPalette),
                 ("C-x z unzoom", KeyAction::ToggleZoom),
                 ("C-x o list", KeyAction::SwitchFocus),
             ],
@@ -1047,7 +1047,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
         ZoomMode::List => (
             "zoomed: list — ",
             vec![
-                ("C-x x palette", KeyAction::OpenCommandPalette),
+                ("C-x x god", KeyAction::OpenCommandPalette),
                 ("C-x z unzoom", KeyAction::ToggleZoom),
                 ("C-x o view", KeyAction::SwitchFocus),
             ],
@@ -1055,7 +1055,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
         ZoomMode::None => (
             "",
             vec![
-                ("C-x x palette", KeyAction::OpenCommandPalette),
+                ("C-x x god", KeyAction::OpenCommandPalette),
                 ("C-x z zoom", KeyAction::ToggleZoom),
             ],
         ),
@@ -1596,13 +1596,7 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
     }
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(Line::from(Span::styled(
-            " orchestrator ",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        )));
+        .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
     f.render_widget(Clear, area);
     f.render_widget(block, area);
@@ -1616,18 +1610,48 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
         app.orchestrator_desired_size = Some((cols, rows));
     }
 
+    // Same split logic as the main view: if the orchestrator session
+    // is publishing `EditorState`, carve out a fixed editor pane at
+    // the bottom of the panel so the `❯` and live typing are always
+    // visible — otherwise this panel rendered only the PTY scrollback
+    // and the editor was invisible (zarvis stopped painting it).
+    let editor_state = app.editor_states.get(&id).cloned();
+    let (chat_area, editor_area) = if let Some(es) = &editor_state {
+        let queued_lines: usize = es
+            .queued
+            .iter()
+            .map(|s| s.split('\n').count().max(1))
+            .sum();
+        let buf_lines = es.buf.lines().count().max(1);
+        let raw_rows = queued_lines + 1 + buf_lines;
+        let editor_rows: u16 = (raw_rows as u16).min(inner.height.saturating_sub(1));
+        let chat_height = inner.height.saturating_sub(editor_rows);
+        (
+            Rect { x: inner.x, y: inner.y, width: inner.width, height: chat_height },
+            Some(Rect {
+                x: inner.x,
+                y: inner.y + chat_height,
+                width: inner.width,
+                height: editor_rows,
+            }),
+        )
+    } else {
+        (inner, None)
+    };
+
     let history = app.histories.entry(id.clone()).or_default();
-    // No scrollback offset for the orchestrator panel (the user
-    // hasn't asked for one in this small viewport). Future:
-    // mouse-wheel inside the panel could drive a separate
-    // `orchestrator_scrollback` offset.
-    let out = history.replay(cols, rows, 0);
-    // Same as the main view: hide the parser's cursor block so the
-    // only visible cursor is the editor's.
-    let no_cursor = tui_term::widget::Cursor::default().visibility(false);
-    let term = tui_term::widget::PseudoTerminal::new(out.parser.screen()).cursor(no_cursor);
-    f.render_widget(term, inner);
+    let out = history.replay(chat_area.width, chat_area.height, 0);
+    let term = if editor_area.is_some() {
+        let no_cursor = tui_term::widget::Cursor::default().visibility(false);
+        tui_term::widget::PseudoTerminal::new(out.screen).cursor(no_cursor)
+    } else {
+        tui_term::widget::PseudoTerminal::new(out.screen)
+    };
+    f.render_widget(term, chat_area);
     app.block_hits.insert(id, out.blocks);
+    if let (Some(area), Some(es)) = (editor_area, editor_state.as_ref()) {
+        render_editor_pane(f, area, es, true);
+    }
 }
 
 /// Modal popup listing the selected session's task registry, opened
