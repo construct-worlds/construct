@@ -138,6 +138,35 @@ pub fn catalog() -> Vec<Value> {
                 "required": ["session_id"]
             }),
         ),
+        tool(
+            "agentd_set_session_group",
+            "Move a session into a group, or ungroup it. Omit `group_id` (or pass null) \
+             to remove the session from its current group. `position` is `top` or `bottom` \
+             of the target region (default `bottom`).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "group_id":   { "type": ["string", "null"] },
+                    "position":   { "type": "string", "enum": ["top", "bottom"] }
+                },
+                "required": ["session_id"]
+            }),
+        ),
+        tool(
+            "agentd_move_session",
+            "Reorder a session within its current region — `direction` `up` swaps with the \
+             session above (or moves into the previous group/ungrouped region when at the top \
+             of its region); `down` is symmetric.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "direction":  { "type": "string", "enum": ["up", "down"] }
+                },
+                "required": ["session_id", "direction"]
+            }),
+        ),
     ]
 }
 
@@ -257,6 +286,7 @@ pub async fn call(
                 env: Default::default(),
                 args: Vec::new(),
                 kind: agentd_protocol::SessionKind::User,
+                group_id: arg_str(&args, "group_id").ok(),
             };
             let sid = client.create(params).await?;
             json!({ "session_id": sid })
@@ -303,6 +333,35 @@ pub async fn call(
             let sid = arg_str(&args, "session_id")?;
             let title = arg_str(&args, "title").ok().filter(|s| !s.trim().is_empty());
             client.set_title(&sid, title).await?;
+            json!({ "ok": true })
+        }
+        "agentd_set_session_group" => {
+            let sid = arg_str(&args, "session_id")?;
+            let group_id = match args.get("group_id") {
+                Some(serde_json::Value::Null) | None => None,
+                Some(serde_json::Value::String(s)) => Some(s.clone()),
+                Some(_) => return Err(anyhow!("`group_id` must be a string or null")),
+            };
+            let position = match args
+                .get("position")
+                .and_then(|v| v.as_str())
+                .unwrap_or("bottom")
+            {
+                "top" => agentd_protocol::SessionGroupPosition::Top,
+                "bottom" => agentd_protocol::SessionGroupPosition::Bottom,
+                other => return Err(anyhow!("`position` must be \"top\" or \"bottom\", got {other:?}")),
+            };
+            client.set_session_group(&sid, group_id, position).await?;
+            json!({ "ok": true })
+        }
+        "agentd_move_session" => {
+            let sid = arg_str(&args, "session_id")?;
+            let direction = match arg_str(&args, "direction")?.as_str() {
+                "up" => agentd_protocol::MoveDirection::Up,
+                "down" => agentd_protocol::MoveDirection::Down,
+                other => return Err(anyhow!("`direction` must be \"up\" or \"down\", got {other:?}")),
+            };
+            client.move_session(&sid, direction).await?;
             json!({ "ok": true })
         }
         other => return Err(anyhow!("unknown tool: {other}")),

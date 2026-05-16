@@ -371,6 +371,27 @@ impl Client {
             .await?;
         Ok(())
     }
+    /// Change a session's group membership. `group_id: None` ungroups
+    /// the session. `position` controls where in the target region
+    /// the session lands (`Top` of the list or `Bottom`).
+    pub async fn set_session_group(
+        &self,
+        id: &str,
+        group_id: Option<String>,
+        position: agentd_protocol::SessionGroupPosition,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::SESSION_SET_GROUP,
+                &agentd_protocol::SessionSetGroupParams {
+                    session_id: id.to_string(),
+                    group_id,
+                    position,
+                },
+            )
+            .await?;
+        Ok(())
+    }
     pub async fn list_groups(&self) -> Result<Vec<GroupSummary>> {
         self.request(ipc_method::GROUP_LIST, &serde_json::Value::Null).await
     }

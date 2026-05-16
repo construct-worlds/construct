@@ -81,6 +81,8 @@ impl ToolRegistry {
             Box::new(agentd::DeleteSession),
             Box::new(agentd::PinSession),
             Box::new(agentd::RenameSession),
+            Box::new(agentd::SetSessionGroup),
+            Box::new(agentd::MoveSession),
             // Recurring-prompt loops (daemon scheduler).
             Box::new(agentd::LoopCreate),
             Box::new(agentd::LoopList),

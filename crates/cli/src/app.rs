@@ -2218,6 +2218,18 @@ impl App {
                 let cwd = std::env::current_dir()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| ".".to_string());
+                // Inherit the group context from the current selection
+                // so creating a session "while inside" a group keeps
+                // the new session in that same group.
+                let group_id = match &self.selection {
+                    Selection::Group(gid) => Some(gid.clone()),
+                    Selection::Session(sid) => self
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == *sid)
+                        .and_then(|s| s.group_id.clone()),
+                    Selection::None => None,
+                };
                 let params = agentd_protocol::CreateSessionParams {
                     harness: harness.clone(),
                     cwd,
@@ -2233,6 +2245,7 @@ impl App {
                     env: HashMap::new(),
                     args: Vec::new(),
                     kind: agentd_protocol::SessionKind::User,
+                    group_id,
                 };
                 match self.client.create(params).await {
                     Ok(id) => {

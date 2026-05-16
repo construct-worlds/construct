@@ -8,7 +8,7 @@ use agentd_protocol::{
     GroupCreateResult, GroupIdParams, GroupMoveParams, GroupRenameParams, GroupSetCollapsedParams,
     Notification, PingResult, Request, Response, SessionIdParams, SessionInputParams,
     SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams, SessionSetAutomodeParams,
-    SessionSetPinnedParams, SessionSetTitleParams, SessionToolActionParams,
+    SessionSetGroupParams, SessionSetPinnedParams, SessionSetTitleParams, SessionToolActionParams,
     SessionToolDecisionParams, SubscribeParams,
     TranscriptParams, IPC_VERSION,
 };
@@ -407,6 +407,16 @@ async fn dispatch(
         m if m == ipc_method::SESSION_MOVE => {
             let p = params!(SessionMoveParams);
             match manager.move_session(&p.session_id, p.direction).await {
+                Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
+                Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
+            }
+        }
+        m if m == ipc_method::SESSION_SET_GROUP => {
+            let p = params!(SessionSetGroupParams);
+            match manager
+                .set_session_group(&p.session_id, p.group_id, p.position)
+                .await
+            {
                 Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
                 Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
             }

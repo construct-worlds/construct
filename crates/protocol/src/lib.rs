@@ -465,6 +465,7 @@ pub mod ipc_method {
     pub const LOOP_UPDATE: &str = "loop.update";
     pub const LOOP_REMOVE: &str = "loop.remove";
     pub const SESSION_MOVE: &str = "session.move";
+    pub const SESSION_SET_GROUP: &str = "session.set_group";
     pub const GROUP_LIST: &str = "group.list";
     pub const GROUP_CREATE: &str = "group.create";
     pub const GROUP_RENAME: &str = "group.rename";
@@ -589,6 +590,33 @@ pub enum MoveDirection {
 pub struct SessionMoveParams {
     pub session_id: String,
     pub direction: MoveDirection,
+}
+
+/// Move a session into a group (or ungroup it by passing
+/// `group_id: None`). `position` controls where in the target region
+/// the session lands — `Top` of the list or `Bottom`. Default is
+/// `Bottom` so a newly-grouped session appears at the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionGroupPosition {
+    Top,
+    Bottom,
+}
+
+impl Default for SessionGroupPosition {
+    fn default() -> Self {
+        Self::Bottom
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSetGroupParams {
+    pub session_id: String,
+    /// `None` ungroups the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub position: SessionGroupPosition,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -757,6 +785,13 @@ pub struct CreateSessionParams {
     /// passes `Orchestrator`.
     #[serde(default)]
     pub kind: SessionKind,
+    /// Group to file the new session under. `None` (default) creates
+    /// an ungrouped session. The TUI uses this to auto-join the new
+    /// session to whichever group is currently selected (or contains
+    /// the selected session) so creating a session from inside a
+    /// group keeps the user's mental grouping intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

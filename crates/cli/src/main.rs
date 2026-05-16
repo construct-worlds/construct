@@ -186,6 +186,7 @@ async fn main() -> Result<()> {
                     env: Default::default(),
                     args: Vec::new(),
                     kind: agentd_protocol::SessionKind::User,
+                    group_id: None,
                 })
                 .await?;
             println!("{id}");

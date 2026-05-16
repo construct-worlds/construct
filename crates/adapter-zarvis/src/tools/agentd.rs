@@ -231,6 +231,10 @@ impl Tool for CreateSession {
             // Sessions created via the agentd-control tool are always
             // user sessions — the orchestrator is daemon-internal only.
             kind: agentd_protocol::SessionKind::User,
+            group_id: input
+                .get("group_id")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string()),
         };
         let c = client(ctx).await?;
         let sid = c.create(params).await?;
@@ -394,6 +398,58 @@ simple_write_tool!(
         Box::pin(async move { c.set_title(&sid, title).await }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
     },
     "title"
+);
+
+simple_write_tool!(
+    SetSessionGroup,
+    "agentd_set_session_group",
+    "Move a session into a group, or ungroup it by omitting `group_id` (or passing null). \
+     `position` is \"top\" or \"bottom\" of the target region (default \"bottom\").",
+    vec![
+        ("group_id", json!({ "type": ["string", "null"] })),
+        ("position", json!({ "type": "string", "enum": ["top", "bottom"] }))
+    ],
+    json!(["session_id"]),
+    |c: &Arc<Client>, sid: &str, input: &Value| {
+        let group_id = match input.get("group_id") {
+            Some(Value::Null) | None => None,
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        };
+        let position = match input
+            .get("position")
+            .and_then(|v| v.as_str())
+            .unwrap_or("bottom")
+        {
+            "top" => agentd_protocol::SessionGroupPosition::Top,
+            _ => agentd_protocol::SessionGroupPosition::Bottom,
+        };
+        let c = c.clone();
+        let sid = sid.to_string();
+        Box::pin(async move { c.set_session_group(&sid, group_id, position).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+    },
+    "group_id"
+);
+
+simple_write_tool!(
+    MoveSession,
+    "agentd_move_session",
+    "Reorder a session within its region — `direction` `up` swaps with the session above (or \
+     exits into the previous region at its top edge), `down` is symmetric.",
+    vec![("direction", json!({ "type": "string", "enum": ["up", "down"] }))],
+    json!(["session_id", "direction"]),
+    |c: &Arc<Client>, sid: &str, input: &Value| {
+        let dir = match input.get("direction").and_then(|v| v.as_str()).unwrap_or("down") {
+            "up" => agentd_protocol::MoveDirection::Up,
+            _ => agentd_protocol::MoveDirection::Down,
+        };
+        let c = c.clone();
+        let sid = sid.to_string();
+        Box::pin(async move { c.move_session(&sid, dir).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+    },
+    "direction"
 );
 
 // ---------- Loops ----------

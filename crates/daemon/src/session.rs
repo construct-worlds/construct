@@ -517,7 +517,7 @@ impl SessionManager {
             pinned: false,
             // Negative timestamp so newer sessions sort to the top by default.
             position: -now.timestamp_millis(),
-            group_id: None,
+            group_id: params.group_id.clone(),
             last_pty_at_ms: None,
             automode: false,
             kind: params.kind,
@@ -701,6 +701,7 @@ impl SessionManager {
             env: Default::default(),
             args: Vec::new(),
             kind: agentd_protocol::SessionKind::Orchestrator,
+            group_id: None,
         };
         match self.create(params).await {
             Ok(id) => tracing::info!(
@@ -1435,6 +1436,24 @@ impl SessionManager {
 
     /// Re-tag a session into a new region (group_id) and set its position
     /// so it lands at the top or bottom of that region.
+    /// Public wrapper around [`move_session_into_region`] for clients
+    /// that want to change a session's group membership (or ungroup
+    /// it) without first having to fetch the sessions list themselves.
+    pub async fn set_session_group(
+        &self,
+        session_id: &str,
+        new_group_id: Option<String>,
+        position: agentd_protocol::SessionGroupPosition,
+    ) -> Result<()> {
+        let all_sessions = self.list().await;
+        let edge = match position {
+            agentd_protocol::SessionGroupPosition::Top => RegionEdge::Top,
+            agentd_protocol::SessionGroupPosition::Bottom => RegionEdge::Bottom,
+        };
+        self.move_session_into_region(session_id, &new_group_id, edge, &all_sessions)
+            .await
+    }
+
     async fn move_session_into_region(
         &self,
         session_id: &str,
