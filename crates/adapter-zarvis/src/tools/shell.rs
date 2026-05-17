@@ -142,3 +142,61 @@ fn format_output(stdout: &str, stderr: &str, exit_code: i32) -> String {
     out.push_str(&format!("exit_code: {exit_code}\n"));
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::{Tool, ToolCtx};
+
+    fn ctx_with_cwd(cwd: std::path::PathBuf) -> ToolCtx {
+        ToolCtx {
+            cwd,
+            session_id: "test".to_string(),
+            client: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn returns_descriptive_error_when_cwd_missing() {
+        let missing = std::env::temp_dir().join("agentd-zarvis-shell-test-missing-cwd-xyz123");
+        assert!(!missing.exists(), "test precondition: path must not exist");
+
+        let ctx = ctx_with_cwd(missing.clone());
+        let outcome = Shell
+            .run(json!({"command": "echo hi"}), &ctx)
+            .await
+            .expect("run returns Ok");
+
+        assert!(!outcome.ok);
+        assert!(
+            outcome.output.contains("does not exist or is not a directory"),
+            "unexpected output: {}",
+            outcome.output
+        );
+        assert!(
+            outcome.output.contains(&missing.display().to_string()),
+            "output should name the missing path: {}",
+            outcome.output
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_command_when_cwd_exists() {
+        let ctx = ctx_with_cwd(std::env::temp_dir());
+        let outcome = Shell
+            .run(
+                json!({"command": "echo hello-from-shell-test", "timeout_sec": 10}),
+                &ctx,
+            )
+            .await
+            .expect("run returns Ok");
+
+        assert!(outcome.ok, "command should succeed: {}", outcome.output);
+        assert!(
+            outcome.output.contains("hello-from-shell-test"),
+            "stdout should contain the echoed string: {}",
+            outcome.output
+        );
+        assert!(outcome.output.contains("exit_code: 0"));
+    }
+}
