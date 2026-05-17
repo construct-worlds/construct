@@ -3457,6 +3457,9 @@ fn encode_key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
                 Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
             }
         }
+        KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
+            Some(vec![b'\n'])
+        }
         KeyCode::Enter => Some(vec![b'\r']),
         KeyCode::Tab => Some(vec![b'\t']),
         KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),

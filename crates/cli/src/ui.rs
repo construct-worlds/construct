@@ -1161,7 +1161,11 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
     let editor_state = app.editor_states.get(&id).cloned();
     let agent_status = app.agent_statuses.get(&id).cloned();
     let (chat_area, editor_area) = if editor_state.is_some() || agent_status.is_some() {
-        let raw_rows = editor_pane_rows(editor_state.as_ref(), agent_status.as_ref());
+        let raw_rows = editor_pane_rows(
+            editor_state.as_ref(),
+            agent_status.as_ref(),
+            area.width,
+        );
         let editor_rows: u16 = (raw_rows as u16).min(area.height.saturating_sub(1));
         let chat_height = area.height.saturating_sub(editor_rows);
         (
@@ -1281,35 +1285,37 @@ fn render_editor_pane(
         }
     }
 
-    // Queued entries — one `❯` per entry; continuation lines align
-    // under the prompt's text column with a two-space indent.
+    let text_width = area.width.saturating_sub(prompt_w).max(1) as usize;
+
+    // Queued entries — one `❯` per entry; wrapped/continuation rows
+    // align under the prompt's text column with a two-space indent.
     'queued: for entry in &state.queued {
         let mut first = true;
-        for line in entry.split('\n') {
-            if remaining <= 1 {
-                break 'queued;
+        for logical in split_preserve_empty_lines(entry) {
+            let wrapped = wrap_text(logical, text_width);
+            for visual in wrapped {
+                if remaining <= 1 {
+                    break 'queued;
+                }
+                let row = Rect {
+                    x: area.x,
+                    y,
+                    width: area.width,
+                    height: 1,
+                };
+                let spans = if first {
+                    first = false;
+                    vec![
+                        Span::styled("❯ ", queued_glyph_style),
+                        Span::styled(visual.text, queued_style),
+                    ]
+                } else {
+                    vec![Span::raw("  "), Span::styled(visual.text, queued_style)]
+                };
+                f.render_widget(Paragraph::new(Line::from(spans)), row);
+                y = y.saturating_add(1);
+                remaining -= 1;
             }
-            let row = Rect {
-                x: area.x,
-                y,
-                width: area.width,
-                height: 1,
-            };
-            let spans = if first {
-                first = false;
-                vec![
-                    Span::styled("❯ ", queued_glyph_style),
-                    Span::styled(line.to_string(), queued_style),
-                ]
-            } else {
-                vec![
-                    Span::raw("  "),
-                    Span::styled(line.to_string(), queued_style),
-                ]
-            };
-            f.render_widget(Paragraph::new(Line::from(spans)), row);
-            y = y.saturating_add(1);
-            remaining -= 1;
         }
     }
 
@@ -1319,48 +1325,56 @@ fn render_editor_pane(
         remaining -= 1;
     }
 
-    // Active editor — possibly multi-line.
-    let buf_lines: Vec<&str> = if state.buf.is_empty() {
-        vec![""]
-    } else {
-        state.buf.split('\n').collect()
-    };
+    // Active editor — multiline and width-wrapped.
+    let buf_lines = split_preserve_empty_lines(&state.buf);
     let mut cursor_pos: Option<(u16, u16)> = None;
     let mut char_seen = 0usize;
-    for (i, line) in buf_lines.iter().enumerate().take(remaining) {
-        let row = Rect {
-            x: area.x,
-            y,
-            width: area.width,
-            height: 1,
-        };
-        let para = if i == 0 {
-            Paragraph::new(Line::from(vec![
-                Span::styled("❯ ", active_glyph_style),
-                Span::raw(line.to_string()),
-            ]))
-        } else {
-            Paragraph::new(Line::from(vec![
-                Span::raw("  "), // align with prompt width
-                Span::raw(line.to_string()),
-            ]))
-        };
-        f.render_widget(para, row);
-        let line_chars = line.chars().count();
-        if cursor_pos.is_none()
-            && state.cursor >= char_seen
-            && state.cursor <= char_seen + line_chars
-        {
-            let col = (state.cursor - char_seen) as u16;
-            let x = area
-                .x
-                .saturating_add(prompt_w)
-                .saturating_add(col)
-                .min(area.x + area.width.saturating_sub(1));
-            cursor_pos = Some((x, y));
+    let mut first_visual = true;
+    'active: for logical in buf_lines {
+        let logical_chars = logical.chars().count();
+        let wrapped = wrap_text(logical, text_width);
+        for visual in wrapped {
+            if remaining == 0 {
+                break 'active;
+            }
+            let row = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: 1,
+            };
+            let para = if first_visual {
+                first_visual = false;
+                Paragraph::new(Line::from(vec![
+                    Span::styled("❯ ", active_glyph_style),
+                    Span::raw(visual.text.clone()),
+                ]))
+            } else {
+                Paragraph::new(Line::from(vec![
+                    Span::raw("  "), // align with prompt width
+                    Span::raw(visual.text.clone()),
+                ]))
+            };
+            f.render_widget(para, row);
+            let abs_start = char_seen + visual.start;
+            let abs_end = char_seen + visual.end;
+            let contains_cursor = state.cursor >= abs_start
+                && (state.cursor < abs_end
+                    || (visual.end == logical_chars && state.cursor <= abs_end));
+            if cursor_pos.is_none() && contains_cursor {
+                let col = width_between_chars(logical, visual.start, state.cursor - char_seen)
+                    as u16;
+                let x = area
+                    .x
+                    .saturating_add(prompt_w)
+                    .saturating_add(col)
+                    .min(area.x + area.width.saturating_sub(1));
+                cursor_pos = Some((x, y));
+            }
+            y = y.saturating_add(1);
+            remaining -= 1;
         }
-        char_seen += line_chars + 1; // +1 for the `\n`
-        y = y.saturating_add(1);
+        char_seen += logical_chars + 1; // +1 for the `\n`
     }
     if set_cursor {
         if let Some(pos) = cursor_pos {
@@ -1372,16 +1386,89 @@ fn render_editor_pane(
 fn editor_pane_rows(
     state: Option<&crate::app::EditorState>,
     agent_status: Option<&agentd_protocol::AgentStatus>,
+    width: u16,
 ) -> usize {
+    let text_width = width.saturating_sub(2).max(1) as usize;
     let queued_lines: usize = state
-        .map(|s| s.queued.iter().map(|q| q.split('\n').count().max(1)).sum())
+        .map(|s| s.queued.iter().map(|q| wrapped_text_rows(q, text_width)).sum())
         .unwrap_or(0);
-    let buf_lines = state.map(|s| s.buf.lines().count().max(1)).unwrap_or(1);
+    let buf_lines = state
+        .map(|s| wrapped_text_rows(&s.buf, text_width))
+        .unwrap_or(1);
     let status_lines = agent_status
         .filter(|s| s.active)
         .map(|_| 3)
         .unwrap_or(0);
     status_lines + queued_lines + 1 + buf_lines
+}
+
+#[derive(Debug, Clone)]
+struct WrappedLine {
+    text: String,
+    start: usize,
+    end: usize,
+}
+
+fn split_preserve_empty_lines(s: &str) -> Vec<&str> {
+    if s.is_empty() {
+        vec![""]
+    } else {
+        s.split('\n').collect()
+    }
+}
+
+fn wrapped_text_rows(s: &str, width: usize) -> usize {
+    split_preserve_empty_lines(s)
+        .into_iter()
+        .map(|line| wrap_text(line, width).len())
+        .sum::<usize>()
+        .max(1)
+}
+
+fn wrap_text(s: &str, width: usize) -> Vec<WrappedLine> {
+    use unicode_width::UnicodeWidthChar;
+
+    let width = width.max(1);
+    if s.is_empty() {
+        return vec![WrappedLine {
+            text: String::new(),
+            start: 0,
+            end: 0,
+        }];
+    }
+
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut col = 0usize;
+    for (idx, ch) in chars.iter().enumerate() {
+        let ch_width = UnicodeWidthChar::width(*ch).unwrap_or(0);
+        if idx > start && col + ch_width > width {
+            out.push(WrappedLine {
+                text: chars[start..idx].iter().collect(),
+                start,
+                end: idx,
+            });
+            start = idx;
+            col = 0;
+        }
+        col += ch_width;
+    }
+    out.push(WrappedLine {
+        text: chars[start..].iter().collect(),
+        start,
+        end: chars.len(),
+    });
+    out
+}
+
+fn width_between_chars(s: &str, start: usize, end: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    s.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+        .sum()
 }
 
 fn format_elapsed(started_at_ms: i64) -> String {
@@ -2255,7 +2342,11 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
     let editor_state = app.editor_states.get(&id).cloned();
     let agent_status = app.agent_statuses.get(&id).cloned();
     let (chat_area, editor_area) = if editor_state.is_some() || agent_status.is_some() {
-        let raw_rows = editor_pane_rows(editor_state.as_ref(), agent_status.as_ref());
+        let raw_rows = editor_pane_rows(
+            editor_state.as_ref(),
+            agent_status.as_ref(),
+            inner.width,
+        );
         let editor_rows: u16 = (raw_rows as u16).min(inner.height.saturating_sub(1));
         let chat_height = inner.height.saturating_sub(editor_rows);
         (
