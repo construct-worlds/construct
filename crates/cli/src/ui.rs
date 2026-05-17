@@ -1126,10 +1126,6 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect) {
     for x in area.x..area.x + area.width {
         f.buffer_mut().set_string(x, area.y, "─", line_style);
     }
-    if area.width >= 8 {
-        f.buffer_mut()
-            .set_string(area.x + 1, area.y, " rain ", line_style);
-    }
     let x = area.x + area.width.saturating_sub(3);
     f.buffer_mut().set_string(x, area.y, " x ", close_style);
 }
