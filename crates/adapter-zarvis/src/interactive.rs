@@ -195,19 +195,33 @@ impl<'a> Terminal<'a> {
     /// answering right now" in the chat history (the editor pane sees
     /// the line vanish from `queued` at the same moment).
     fn echo_consumed_line(&self, line: &str) {
-        let trimmed = line.trim();
-        let payload = if trimmed.chars().count() > 240 {
-            let head: String = trimmed.chars().take(237).collect();
-            format!("{head}...")
-        } else {
-            trimmed.to_string()
-        };
-        // Two leading `\r\n`s leave a blank row above the echo so the
-        // previous agent paragraph (or any other chat content) gets
-        // visual separation before the user's submission.
-        let bytes = format!("\r\n\r\n\x1b[90m❯ \x1b[0m{payload}\r\n");
-        self.write(bytes.as_bytes());
+        self.write(&consumed_line_echo_bytes(line));
     }
+}
+
+fn consumed_line_echo_bytes(line: &str) -> Vec<u8> {
+    let payload = if line.chars().count() > 240 {
+        let head: String = line.chars().take(237).collect();
+        format!("{head}...")
+    } else {
+        line.to_string()
+    };
+    let mut out: Vec<u8> = Vec::with_capacity(payload.len() + 32);
+    // Two leading `\r\n`s leave a blank row above the echo so the
+    // previous agent paragraph (or any other chat content) gets
+    // visual separation before the user's submission.
+    out.extend_from_slice(b"\r\n\r\n\x1b[90m\xe2\x9d\xaf \x1b[0m");
+    let mut first = true;
+    for logical in payload.split('\n') {
+        if first {
+            first = false;
+        } else {
+            out.extend_from_slice(b"\r\n\x1b[90m  \x1b[0m");
+        }
+        out.extend_from_slice(logical.as_bytes());
+    }
+    out.extend_from_slice(b"\r\n");
+    out
 }
 
 fn now_ms() -> i64 {
@@ -539,6 +553,9 @@ struct LineEditor {
     /// Visible cell width of `prompt_seq` (SGR escapes don't count).
     /// Used for absolute-column cursor positioning after the popup.
     prompt_visible_width: usize,
+    /// Current prompt row width in cells. Used to make vertical cursor
+    /// movement follow visual wraps as well as explicit newlines.
+    width: usize,
     /// Number of popup lines rendered in the last redraw — we erase
     /// these many lines below the prompt at the start of the next
     /// redraw so a shrinking popup doesn't leave stale text.
@@ -589,9 +606,14 @@ impl LineEditor {
             esc: EscState::Idle,
             prompt_seq,
             prompt_visible_width,
+            width: 80,
             last_popup_lines: 0,
             queued_recall: None,
         }
+    }
+
+    fn set_width(&mut self, width: usize) {
+        self.width = width.max(self.prompt_visible_width + 1);
     }
 
     /// Caller-managed mirror of the input queue's current combined
@@ -747,6 +769,37 @@ impl LineEditor {
         self.buf.insert(byte_idx, c);
         self.cursor += 1;
     }
+    fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    fn move_vertical(&mut self, up: bool) -> bool {
+        let chars: Vec<char> = self.buf.chars().collect();
+        let rows = visual_editor_rows(&chars, self.editor_text_width());
+        let Some(row_idx) = current_visual_row(&rows, self.cursor) else {
+            return false;
+        };
+        let target_idx = if up {
+            row_idx.checked_sub(1)
+        } else if row_idx + 1 < rows.len() {
+            Some(row_idx + 1)
+        } else {
+            None
+        };
+        let Some(target_idx) = target_idx else {
+            return false;
+        };
+        let col = visual_width_between(&chars, rows[row_idx].start, self.cursor);
+        let target = &rows[target_idx];
+        self.cursor = cursor_for_visual_col(&chars, target.start, target.end, col);
+        true
+    }
+
+    fn editor_text_width(&self) -> usize {
+        self.width
+            .saturating_sub(self.prompt_visible_width)
+            .max(1)
+    }
 
     fn backspace(&mut self) {
         if self.cursor == 0 {
@@ -893,12 +946,18 @@ impl LineEditor {
         // Plain (non-ESC) byte.
         match b {
             // Enter
-            b'\r' | b'\n' => {
+            b'\r' => {
                 // Wipe any open popup first so the caller's next prompt
                 // doesn't paint on top of stale lines.
                 self.clear_popup(out);
                 events.push(self.submit());
                 out.extend_from_slice(b"\r\n");
+            }
+            // Line feed inserts a prompt newline. The TUI emits LF for
+            // modified Enter keys, and terminals naturally send it for C-j.
+            b'\n' => {
+                self.insert_newline();
+                out.extend_from_slice(&self.redraw());
             }
             // Ctrl-C
             0x03 => events.push(LineEvent::Interrupt),
@@ -946,14 +1005,18 @@ impl LineEditor {
                 self.kill_word_back();
                 out.extend_from_slice(&self.redraw());
             }
-            // Ctrl-P (history prev)
+            // Ctrl-P (line up, then history prev)
             0x10 => {
-                self.history_prev(events);
+                if !self.move_vertical(true) {
+                    self.history_prev(events);
+                }
                 out.extend_from_slice(&self.redraw());
             }
-            // Ctrl-N (history next)
+            // Ctrl-N (line down, then history next)
             0x0e => {
-                self.history_next();
+                if !self.move_vertical(false) {
+                    self.history_next();
+                }
                 out.extend_from_slice(&self.redraw());
             }
             // Ctrl-L — clear screen + redraw.
@@ -1004,8 +1067,16 @@ impl LineEditor {
         events: &mut Vec<LineEvent>,
     ) {
         match final_byte {
-            b'A' => self.history_prev(events),
-            b'B' => self.history_next(),
+            b'A' => {
+                if !self.move_vertical(true) {
+                    self.history_prev(events);
+                }
+            }
+            b'B' => {
+                if !self.move_vertical(false) {
+                    self.history_next();
+                }
+            }
             b'C' => self.move_right(),
             b'D' => self.move_left(),
             b'H' => self.move_home(),
@@ -1030,8 +1101,16 @@ impl LineEditor {
         events: &mut Vec<LineEvent>,
     ) {
         match final_byte {
-            b'A' => self.history_prev(events),
-            b'B' => self.history_next(),
+            b'A' => {
+                if !self.move_vertical(true) {
+                    self.history_prev(events);
+                }
+            }
+            b'B' => {
+                if !self.move_vertical(false) {
+                    self.history_next();
+                }
+            }
             b'C' => self.move_right(),
             b'D' => self.move_left(),
             b'H' => self.move_home(),
@@ -1069,6 +1148,80 @@ fn char_index_to_byte(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct VisualEditorRow {
+    start: usize,
+    end: usize,
+}
+
+fn visual_editor_rows(chars: &[char], width: usize) -> Vec<VisualEditorRow> {
+    use unicode_width::UnicodeWidthChar;
+
+    let width = width.max(1);
+    if chars.is_empty() {
+        return vec![VisualEditorRow { start: 0, end: 0 }];
+    }
+
+    let mut rows = Vec::new();
+    let mut start = 0usize;
+    let mut col = 0usize;
+    for (idx, ch) in chars.iter().enumerate() {
+        if *ch == '\n' {
+            rows.push(VisualEditorRow { start, end: idx });
+            start = idx + 1;
+            col = 0;
+            continue;
+        }
+
+        let ch_width = UnicodeWidthChar::width(*ch).unwrap_or(0);
+        if idx > start && col + ch_width > width {
+            rows.push(VisualEditorRow {
+                start,
+                end: idx,
+            });
+            start = idx;
+            col = 0;
+        }
+        col += ch_width;
+    }
+    rows.push(VisualEditorRow {
+        start,
+        end: chars.len(),
+    });
+    rows
+}
+
+fn current_visual_row(rows: &[VisualEditorRow], cursor: usize) -> Option<usize> {
+    rows.iter()
+        .enumerate()
+        .rev()
+        .find(|(_, row)| cursor >= row.start && cursor <= row.end)
+        .map(|(idx, _)| idx)
+}
+
+fn visual_width_between(chars: &[char], start: usize, end: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+
+    chars[start..end]
+        .iter()
+        .map(|ch| UnicodeWidthChar::width(*ch).unwrap_or(0))
+        .sum()
+}
+
+fn cursor_for_visual_col(chars: &[char], start: usize, end: usize, target_col: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut col = 0usize;
+    for idx in start..end {
+        let ch_width = UnicodeWidthChar::width(chars[idx]).unwrap_or(0);
+        if col + ch_width > target_col {
+            return idx;
+        }
+        col += ch_width;
+    }
+    end
+}
+
 fn pty_input_requests_interrupt(bytes: &[u8]) -> bool {
     bytes.contains(&0x03) || bytes == [0x1b]
 }
@@ -1100,6 +1253,16 @@ mod tests {
         assert_eq!(width, min, "zero-column resize should also clamp");
     }
 
+    #[test]
+    fn consumed_line_echo_uses_crlf_for_multiline_history() {
+        let bytes = consumed_line_echo_bytes("a\nb\nc\n");
+        let rendered = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            rendered,
+            "\r\n\r\n\x1b[90m❯ \x1b[0ma\r\n\x1b[90m  \x1b[0mb\r\n\x1b[90m  \x1b[0mc\r\n\x1b[90m  \x1b[0m\r\n"
+        );
+    }
+
     fn submit_line(ed: &mut LineEditor, bytes: &[u8]) -> Option<String> {
         let (_, evs) = ed.feed_bytes(bytes);
         for ev in evs {
@@ -1114,6 +1277,24 @@ mod tests {
     fn simple_typing_and_enter() {
         let mut ed = editor();
         assert_eq!(submit_line(&mut ed, b"hello\r"), Some("hello".into()));
+    }
+
+    #[test]
+    fn line_feed_inserts_newline_without_submit() {
+        let mut ed = editor();
+        let (_, evs) = ed.feed_bytes(b"hello\nworld");
+        assert!(evs.is_empty());
+        assert_eq!(ed.buf, "hello\nworld");
+        assert_eq!(ed.cursor, 11);
+    }
+
+    #[test]
+    fn carriage_return_submits_multiline_prompt() {
+        let mut ed = editor();
+        assert_eq!(
+            submit_line(&mut ed, b"hello\nworld\r"),
+            Some("hello\nworld".into())
+        );
     }
 
     #[test]
@@ -1206,6 +1387,68 @@ mod tests {
         assert_eq!(ed.buf, "alpha");
         ed.feed_bytes(&[0x0e]); // C-n
         assert_eq!(ed.buf, "beta");
+    }
+
+    #[test]
+    fn arrows_move_within_multiline_before_history() {
+        let mut ed = editor();
+        submit_line(&mut ed, b"history\r");
+        ed.feed_bytes(b"abc\nde");
+        assert_eq!(ed.cursor, 6);
+
+        ed.feed_bytes(b"\x1b[A");
+        assert_eq!(ed.buf, "abc\nde");
+        assert_eq!(ed.cursor, 2);
+
+        ed.feed_bytes(b"\x1b[B");
+        assert_eq!(ed.buf, "abc\nde");
+        assert_eq!(ed.cursor, 6);
+
+        ed.feed_bytes(b"\x1b[A");
+        assert_eq!(ed.cursor, 2);
+        ed.feed_bytes(b"\x1b[A");
+        assert_eq!(ed.buf, "history");
+        ed.feed_bytes(b"\x1b[B");
+        assert_eq!(ed.buf, "abc\nde");
+        assert_eq!(ed.cursor, 6);
+    }
+
+    #[test]
+    fn ctrl_p_n_move_within_multiline_before_history() {
+        let mut ed = editor();
+        submit_line(&mut ed, b"history\r");
+        ed.feed_bytes(b"abc\nde");
+
+        ed.feed_bytes(&[0x10]); // C-p
+        assert_eq!(ed.buf, "abc\nde");
+        assert_eq!(ed.cursor, 2);
+
+        ed.feed_bytes(&[0x0e]); // C-n
+        assert_eq!(ed.buf, "abc\nde");
+        assert_eq!(ed.cursor, 6);
+
+        ed.feed_bytes(&[0x10]);
+        assert_eq!(ed.cursor, 2);
+        ed.feed_bytes(&[0x10]);
+        assert_eq!(ed.buf, "history");
+        ed.feed_bytes(&[0x0e]);
+        assert_eq!(ed.buf, "abc\nde");
+        assert_eq!(ed.cursor, 6);
+    }
+
+    #[test]
+    fn arrows_move_across_soft_wrapped_rows() {
+        let mut ed = editor();
+        ed.set_width(5); // 2 cells for prompt, 3 cells for text.
+        ed.feed_bytes(b"abcdef");
+
+        ed.feed_bytes(b"\x1b[A");
+        assert_eq!(ed.cursor, 3);
+
+        ed.feed_bytes(&[0x01]); // C-a
+        ed.feed_bytes(&[0x06, 0x06]); // C-f twice
+        ed.feed_bytes(b"\x1b[B");
+        assert_eq!(ed.cursor, 5);
     }
 
     #[test]
@@ -1433,6 +1676,7 @@ pub async fn run(
         .map(|s| s.cols as usize)
         .unwrap_or(80)
         .max(MIN_USABLE_WIDTH + LEFT_MARGIN_CELLS + PAD_RIGHT);
+    editor.set_width(pty_width);
     let data_dir = persist::session_data_dir_from_env();
     let mut persist = Persist::open(data_dir.as_deref());
     let mut messages: Vec<Message> = if persist::is_resume() {
@@ -2095,6 +2339,7 @@ async fn read_one_line(
             }
             Some(AdapterInboxMsg::PtyResize { cols, .. }) => {
                 apply_pty_resize(cols, pty_width);
+                editor.set_width(*pty_width);
             }
             Some(AdapterInboxMsg::ToolDecision { .. }) => {}
             Some(AdapterInboxMsg::ToolAction { .. }) => {
