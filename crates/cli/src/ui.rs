@@ -11,6 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthStr;
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -1158,12 +1159,9 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
     // claude / codex / shell render their own input prompt inside the
     // PTY, so a second editor pane would just look like a duplicate.
     let editor_state = app.editor_states.get(&id).cloned();
-    let (chat_area, editor_area) = if let Some(es) = &editor_state {
-        // Each queued entry may itself be multi-line — sum the line
-        // counts so a 3-line queued thought reserves 3 rows.
-        let queued_lines: usize = es.queued.iter().map(|s| s.split('\n').count().max(1)).sum();
-        let buf_lines = es.buf.lines().count().max(1);
-        let raw_rows = queued_lines + 1 + buf_lines;
+    let agent_status = app.agent_statuses.get(&id).cloned();
+    let (chat_area, editor_area) = if editor_state.is_some() || agent_status.is_some() {
+        let raw_rows = editor_pane_rows(editor_state.as_ref(), agent_status.as_ref());
         let editor_rows: u16 = (raw_rows as u16).min(area.height.saturating_sub(1));
         let chat_height = area.height.saturating_sub(editor_rows);
         (
@@ -1189,8 +1187,14 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
             let hint = Paragraph::new("(no PTY history yet — interact to populate)")
                 .style(Style::default().fg(Color::DarkGray));
             f.render_widget(hint, chat_area);
-            if let (Some(area), Some(es)) = (editor_area, editor_state.as_ref()) {
-                render_editor_pane(f, area, es, true);
+            if let Some(area) = editor_area {
+                render_editor_pane(
+                    f,
+                    area,
+                    editor_state.as_ref(),
+                    agent_status.as_ref(),
+                    true,
+                );
             }
             return;
         }
@@ -1208,8 +1212,14 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
     };
     f.render_widget(term, chat_area);
     app.block_hits.insert(id, out.blocks);
-    if let (Some(area), Some(es)) = (editor_area, editor_state.as_ref()) {
-        render_editor_pane(f, area, es, true);
+    if let Some(area) = editor_area {
+        render_editor_pane(
+            f,
+            area,
+            editor_state.as_ref(),
+            agent_status.as_ref(),
+            true,
+        );
     }
 }
 
@@ -1222,7 +1232,8 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
 fn render_editor_pane(
     f: &mut Frame,
     area: Rect,
-    state: &crate::app::EditorState,
+    state: Option<&crate::app::EditorState>,
+    agent_status: Option<&agentd_protocol::AgentStatus>,
     set_cursor: bool,
 ) {
     if area.height == 0 || area.width == 0 {
@@ -1234,10 +1245,41 @@ fn render_editor_pane(
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
     let prompt_w: u16 = 2;
+    let empty_state = crate::app::EditorState::default();
+    let state = state.unwrap_or(&empty_state);
 
     let total_rows = area.height as usize;
     let mut y = area.y;
     let mut remaining = total_rows;
+
+    if let Some(status) = agent_status.filter(|s| s.active) {
+        if remaining > 1 {
+            y = y.saturating_add(1);
+            remaining -= 1;
+        }
+        if remaining > 1 {
+            let row = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: 1,
+            };
+            let label = format!("* {}.. {}", status.status, format_elapsed(status.started_at_ms));
+            f.render_widget(
+                Paragraph::new(Line::from(vec![Span::styled(
+                    label,
+                    Style::default().fg(Color::DarkGray),
+                )])),
+                row,
+            );
+            y = y.saturating_add(1);
+            remaining -= 1;
+        }
+        if remaining > 1 {
+            y = y.saturating_add(1);
+            remaining -= 1;
+        }
+    }
 
     // Queued entries — one `❯` per entry; continuation lines align
     // under the prompt's text column with a two-space indent.
@@ -1324,6 +1366,36 @@ fn render_editor_pane(
         if let Some(pos) = cursor_pos {
             f.set_cursor_position(pos);
         }
+    }
+}
+
+fn editor_pane_rows(
+    state: Option<&crate::app::EditorState>,
+    agent_status: Option<&agentd_protocol::AgentStatus>,
+) -> usize {
+    let queued_lines: usize = state
+        .map(|s| s.queued.iter().map(|q| q.split('\n').count().max(1)).sum())
+        .unwrap_or(0);
+    let buf_lines = state.map(|s| s.buf.lines().count().max(1)).unwrap_or(1);
+    let status_lines = agent_status
+        .filter(|s| s.active)
+        .map(|_| 3)
+        .unwrap_or(0);
+    status_lines + queued_lines + 1 + buf_lines
+}
+
+fn format_elapsed(started_at_ms: i64) -> String {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(started_at_ms);
+    let secs = now_ms.saturating_sub(started_at_ms).max(0) / 1000;
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+    if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -1685,6 +1757,20 @@ fn format_event_body(ev: &SessionEvent) -> Vec<Span<'static>> {
                 format!("   ⟳ {} {}", state.label(), d),
                 Style::default().fg(Color::Blue),
             )]
+        }
+        SessionEvent::AgentStatus(status) => {
+            if status.active {
+                vec![Span::styled(
+                    format!(
+                        "   * {}.. {}",
+                        status.status,
+                        format_elapsed(status.started_at_ms)
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )]
+            } else {
+                vec![]
+            }
         }
         SessionEvent::Cost {
             usd,
@@ -2087,6 +2173,13 @@ pub fn short_event_label(ev: &SessionEvent) -> String {
         SessionEvent::ToolResult { tool, ok, .. } => format!("tool-result {tool} ok={ok}"),
         SessionEvent::AwaitingInput { .. } => "awaiting input".to_string(),
         SessionEvent::Status { state, .. } => format!("status {}", state.label()),
+        SessionEvent::AgentStatus(status) => {
+            if status.active {
+                format!("agent-status {}", status.status)
+            } else {
+                "agent-status cleared".to_string()
+            }
+        }
         SessionEvent::Cost { usd, .. } => format!("cost ${:.4}", usd),
         SessionEvent::Diff { .. } => "diff".to_string(),
         SessionEvent::Error { message } => format!("error: {}", shorten(message, 60)),
@@ -2160,10 +2253,9 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
     // visible — otherwise this panel rendered only the PTY scrollback
     // and the editor was invisible (zarvis stopped painting it).
     let editor_state = app.editor_states.get(&id).cloned();
-    let (chat_area, editor_area) = if let Some(es) = &editor_state {
-        let queued_lines: usize = es.queued.iter().map(|s| s.split('\n').count().max(1)).sum();
-        let buf_lines = es.buf.lines().count().max(1);
-        let raw_rows = queued_lines + 1 + buf_lines;
+    let agent_status = app.agent_statuses.get(&id).cloned();
+    let (chat_area, editor_area) = if editor_state.is_some() || agent_status.is_some() {
+        let raw_rows = editor_pane_rows(editor_state.as_ref(), agent_status.as_ref());
         let editor_rows: u16 = (raw_rows as u16).min(inner.height.saturating_sub(1));
         let chat_height = inner.height.saturating_sub(editor_rows);
         (
@@ -2198,8 +2290,14 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
     };
     f.render_widget(term, chat_area);
     app.block_hits.insert(id, out.blocks);
-    if let (Some(area), Some(es)) = (editor_area, editor_state.as_ref()) {
-        render_editor_pane(f, area, es, true);
+    if let Some(area) = editor_area {
+        render_editor_pane(
+            f,
+            area,
+            editor_state.as_ref(),
+            agent_status.as_ref(),
+            true,
+        );
     }
 }
 

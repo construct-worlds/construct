@@ -960,6 +960,22 @@ impl SessionManager {
             ));
             return;
         }
+        // AgentStatus is ephemeral live UI state. The CLI may render
+        // inactive statuses as display-only history rows, but they
+        // should not enter the structured transcript or PTY log.
+        if let SessionEvent::AgentStatus(_) = &event {
+            let now = Utc::now();
+            let seq = entry.transcript_count.load(Ordering::Relaxed);
+            let _ = self
+                .broadcast
+                .send(BroadcastMsg::Event(EventNotificationPayload {
+                    session_id: entry.id.clone(),
+                    at: now,
+                    event,
+                    seq,
+                }));
+            return;
+        }
         // PTY events take a fast path: they go to the in-memory ring +
         // append to the on-disk pty.log + a live broadcast, but they don't
         // bloat the structured transcript.
@@ -1012,6 +1028,7 @@ impl SessionManager {
                     s.state = *state;
                     s.pending_input = matches!(state, SessionState::AwaitingInput);
                 }
+                SessionEvent::AgentStatus(_) => {}
                 SessionEvent::AwaitingInput { prompt } => {
                     s.state = SessionState::AwaitingInput;
                     s.pending_input = true;
