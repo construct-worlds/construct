@@ -321,6 +321,9 @@ pub struct App {
     pub agent_statuses: HashMap<String, agentd_protocol::AgentStatus>,
     /// Ambient Matrix-rain panel state for empty rows in the session list.
     pub matrix_rain: crate::matrix_rain::MatrixRain,
+    /// User-hidden Matrix-rain panel. Toggle with `/rain`; close with the
+    /// panel's `x` button.
+    pub matrix_rain_hidden: bool,
     /// Last rendered frame, one string per terminal row. Mouse drag
     /// selection copies out of this snapshot, so it works across the
     /// whole TUI without every widget implementing text export.
@@ -609,6 +612,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         editor_states: HashMap::new(),
         agent_statuses: HashMap::new(),
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
+        matrix_rain_hidden: persisted.matrix_rain_hidden,
         frame_text: Vec::new(),
         text_selection: None,
         selected_text: None,
@@ -658,6 +662,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         pin_strip_h: app.pin_strip_h,
         orchestrator_panel_h: app.orchestrator_panel_h,
         list_collapsed: app.list_collapsed,
+        matrix_rain_hidden: app.matrix_rain_hidden,
     });
 
     result
@@ -2093,6 +2098,17 @@ impl App {
                 }
             }
         }
+        if !self.matrix_rain_hidden {
+            if let Some((xs, xe, y)) =
+                crate::ui::matrix_rain_close_button_range(list, self.list_items().len())
+            {
+                if row == y && col >= xs && col < xe {
+                    self.matrix_rain_hidden = true;
+                    self.set_status("matrix rain hidden — M-x rain to show".into());
+                    return;
+                }
+            }
+        }
         // Top + bottom border are 1 row each; rows outside the inner
         // content area only handle the focus change above.
         if row <= list.y || row + 1 >= list.y + list.height {
@@ -3093,6 +3109,13 @@ impl App {
             "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "rename" => self.run_action(KeyAction::OpenRename).await,
             "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
+            "rain" | "matrix" | "matrix-rain" => {
+                self.matrix_rain_hidden = !self.matrix_rain_hidden;
+                self.set_status(format!(
+                    "matrix rain {}",
+                    if self.matrix_rain_hidden { "hidden" } else { "shown" }
+                ));
+            }
             "diff" => self.run_action(KeyAction::OpenDiff).await,
             "interrupt" => self.run_action(KeyAction::Interrupt).await,
             "mouse" | "select" | "selection" => {

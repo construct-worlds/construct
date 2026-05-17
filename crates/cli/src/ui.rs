@@ -388,6 +388,27 @@ pub fn list_collapse_button_range(list_area: Rect) -> Option<(u16, u16, u16)> {
     Some((x_start, x_end, list_area.y))
 }
 
+/// Hit zone for the Matrix-rain panel close button. `occupied_rows`
+/// is the materialized session/group row count inside the list pane.
+pub fn matrix_rain_close_button_range(
+    list_area: Rect,
+    occupied_rows: usize,
+) -> Option<(u16, u16, u16)> {
+    let inner_w = list_area.width.saturating_sub(2);
+    let inner_h = list_area.height.saturating_sub(2);
+    if inner_w < 8 || inner_h < 4 {
+        return None;
+    }
+    let used = (occupied_rows as u16).min(inner_h);
+    if inner_h.saturating_sub(used) < 4 {
+        return None;
+    }
+    let y = list_area.y + 1 + used;
+    let x_start = list_area.x + list_area.width.saturating_sub(4);
+    let x_end = list_area.x + list_area.width.saturating_sub(1);
+    Some((x_start, x_end, y))
+}
+
 /// Cell where the `›` uncollapse glyph is painted on the main
 /// view's left border when the session list is collapsed. Anchored
 /// to the top-left corner so the affordance reads as the "header"
@@ -465,6 +486,16 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
     if let Some((xs, xe, y)) = list_collapse_button_range(list) {
         if my == y && mx >= xs && mx < xe {
             render_button_tooltip(f, " Collapse list ", xs, y);
+            return;
+        }
+    }
+    if !app.matrix_rain_hidden {
+        if let Some((xs, xe, y)) =
+            matrix_rain_close_button_range(list, app.layout.list_row_count)
+        {
+            if my == y && mx >= xs && mx < xe {
+                render_button_tooltip(f, " Hide rain ", xs, y);
+            }
         }
     }
 }
@@ -1015,6 +1046,9 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_matrix_rain(f: &mut Frame, area: Rect, app: &App, occupied_rows: usize) {
+    if app.matrix_rain_hidden {
+        return;
+    }
     if area.width < 8 || area.height < 3 {
         return;
     }
@@ -1025,7 +1059,17 @@ fn render_matrix_rain(f: &mut Frame, area: Rect, app: &App, occupied_rows: usize
         width: area.width,
         height: area.height.saturating_sub(used),
     };
-    if rain_area.width < 8 || rain_area.height < 3 {
+    if rain_area.width < 8 || rain_area.height < 4 {
+        return;
+    }
+    render_matrix_rain_header(f, rain_area);
+    let rain_area = Rect {
+        x: rain_area.x,
+        y: rain_area.y + 1,
+        width: rain_area.width,
+        height: rain_area.height.saturating_sub(1),
+    };
+    if rain_area.height < 3 {
         return;
     }
 
@@ -1072,6 +1116,22 @@ fn render_matrix_rain(f: &mut Frame, area: Rect, app: &App, occupied_rows: usize
             render_matrix_flash(f, rain_area, flash.text, flash.tone, progress);
         }
     }
+}
+
+fn render_matrix_rain_header(f: &mut Frame, area: Rect) {
+    let line_style = Style::default().fg(Color::Rgb(30, 105, 54));
+    let close_style = Style::default()
+        .fg(Color::Rgb(150, 255, 170))
+        .add_modifier(Modifier::BOLD);
+    for x in area.x..area.x + area.width {
+        f.buffer_mut().set_string(x, area.y, "─", line_style);
+    }
+    if area.width >= 8 {
+        f.buffer_mut()
+            .set_string(area.x + 1, area.y, " rain ", line_style);
+    }
+    let x = area.x + area.width.saturating_sub(3);
+    f.buffer_mut().set_string(x, area.y, " x ", close_style);
 }
 
 fn fleet_activity(app: &App, now: Instant) -> f32 {
