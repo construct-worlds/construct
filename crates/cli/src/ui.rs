@@ -11,7 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthStr;
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -918,6 +918,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &App) {
         .border_style(pane_border_style(focused))
         .title(title_line)
         .title(collapse_line);
+    let inner = block.inner(area);
 
     // Total cells available inside the bordered pane.
     let row_w = (area.width as usize).saturating_sub(2);
@@ -1010,6 +1011,172 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &App) {
         .block(block)
         .highlight_style(highlight_style);
     f.render_stateful_widget(list, area, &mut state);
+    render_matrix_rain(f, inner, app, app_items.len());
+}
+
+fn render_matrix_rain(f: &mut Frame, area: Rect, app: &App, occupied_rows: usize) {
+    if area.width < 8 || area.height < 3 {
+        return;
+    }
+    let used = (occupied_rows as u16).min(area.height);
+    let rain_area = Rect {
+        x: area.x,
+        y: area.y + used,
+        width: area.width,
+        height: area.height.saturating_sub(used),
+    };
+    if rain_area.width < 8 || rain_area.height < 3 {
+        return;
+    }
+
+    let now = Instant::now();
+    let activity = fleet_activity(app, now);
+    let elapsed = app.start_instant.elapsed().as_millis() as u64;
+    let tail = (4.0 + activity * 8.0).round() as u16;
+    let cycle = rain_area.height + tail + 1;
+    let charset = b"01:|/\\{}[]<>+$#@*=-zrvshcodxgit";
+
+    for col in 0..rain_area.width {
+        let seed = hash64(col as u64 ^ ((rain_area.width as u64) << 24));
+        let speed = 2 + (seed % 7);
+        let offset = (seed >> 8) % cycle as u64;
+        let head = (((elapsed / (58 + speed * 19)) + offset) % cycle as u64) as i16;
+        let faint_threshold = (3.0 + activity * 11.0).round() as u64;
+        for row in 0..rain_area.height {
+            let dist = head - row as i16;
+            let mut style = None;
+            if dist >= 0 && dist < tail as i16 {
+                let shade = 1.0 - (dist as f32 / tail.max(1) as f32);
+                style = Some(rain_style(shade, activity));
+            } else {
+                let sparkle = hash64(seed ^ row as u64 ^ (elapsed / 260));
+                if sparkle % 100 < faint_threshold {
+                    style = Some(Style::default().fg(Color::Rgb(18, 92, 42)));
+                }
+            }
+            if let Some(style) = style {
+                let glyph_seed = hash64(seed ^ row as u64 ^ (elapsed / 180));
+                let ch = charset[(glyph_seed as usize) % charset.len()] as char;
+                f.buffer_mut().set_string(
+                    rain_area.x + col,
+                    rain_area.y + row,
+                    ch.to_string(),
+                    style,
+                );
+            }
+        }
+    }
+
+    if let Some(flash) = app.matrix_rain.active_flash(now) {
+        if let Some(progress) = flash.progress(now) {
+            render_matrix_flash(f, rain_area, flash.text, flash.tone, progress);
+        }
+    }
+}
+
+fn fleet_activity(app: &App, now: Instant) -> f32 {
+    let user_sessions: Vec<&SessionSummary> = app
+        .sessions
+        .iter()
+        .filter(|s| s.kind != agentd_protocol::SessionKind::Orchestrator)
+        .collect();
+    if user_sessions.is_empty() {
+        return 0.18;
+    }
+    let mut score = 0.0f32;
+    for s in &user_sessions {
+        score += match s.state {
+            SessionState::Running => 1.0,
+            SessionState::AwaitingInput => 0.45,
+            SessionState::Paused | SessionState::Pending => 0.25,
+            SessionState::Done => 0.08,
+            SessionState::Errored => 0.65,
+        };
+        if app
+            .pty_activity
+            .get(&s.id)
+            .and_then(|at| now.checked_duration_since(*at))
+            .map(|d| d.as_millis() < 900)
+            .unwrap_or(false)
+        {
+            score += 0.55;
+        } else if let Some(last) = s.last_pty_at_ms {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(last);
+            if now_ms.saturating_sub(last) < 1_200 {
+                score += 0.35;
+            }
+        }
+    }
+    (0.16 + (score / user_sessions.len().max(1) as f32) * 0.42).clamp(0.12, 0.82)
+}
+
+fn rain_style(shade: f32, activity: f32) -> Style {
+    let shade = shade.clamp(0.0, 1.0);
+    let boost = activity.clamp(0.0, 1.0);
+    let g = (84.0 + shade * 150.0 + boost * 20.0).min(255.0) as u8;
+    let r = (10.0 + shade * 80.0) as u8;
+    let b = (28.0 + shade * 78.0) as u8;
+    let style = Style::default().fg(Color::Rgb(r, g, b));
+    if shade > 0.72 {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn render_matrix_flash(
+    f: &mut Frame,
+    area: Rect,
+    text: &str,
+    tone: crate::matrix_rain::FlashTone,
+    progress: f32,
+) {
+    if area.width < 4 || area.height == 0 {
+        return;
+    }
+    let text_w = text.chars().count() as u16;
+    if text_w == 0 || text_w + 2 > area.width {
+        return;
+    }
+    let pulse = (1.0 - (progress * 2.0 - 1.0).abs()).clamp(0.0, 1.0);
+    let row_seed = hash64(text.bytes().fold(0u64, |acc, b| acc ^ b as u64));
+    let y = area.y
+        + ((area.height / 3) + (row_seed as u16 % area.height.max(1) / 3))
+            .min(area.height.saturating_sub(1));
+    let x = area.x + (area.width.saturating_sub(text_w) / 2);
+    let color = flash_color(tone, pulse);
+    let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let glow = Style::default().fg(Color::Rgb(52, 132, 78));
+    if x > area.x {
+        f.buffer_mut().set_string(x - 1, y, ">", glow);
+    }
+    if x + text_w < area.x + area.width {
+        f.buffer_mut().set_string(x + text_w, y, "<", glow);
+    }
+    for (i, ch) in text.chars().enumerate() {
+        f.buffer_mut()
+            .set_string(x + i as u16, y, ch.to_string(), style);
+    }
+}
+
+fn flash_color(tone: crate::matrix_rain::FlashTone, pulse: f32) -> Color {
+    let lift = (pulse * 70.0) as u8;
+    match tone {
+        crate::matrix_rain::FlashTone::Work => Color::Rgb(165, 255, 190),
+        crate::matrix_rain::FlashTone::Good => Color::Rgb(150, 255, 120),
+        crate::matrix_rain::FlashTone::Warn => Color::Rgb(255, 210, 90 + lift / 3),
+        crate::matrix_rain::FlashTone::Bad => Color::Rgb(255, 95 + lift, 90),
+    }
+}
+
+fn hash64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e3779b97f4a7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+    x ^ (x >> 31)
 }
 
 fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
