@@ -20,6 +20,7 @@ use agentd_protocol::{SessionEvent, SessionStartParams, SessionState, ToolRisk};
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const TOOL_OUTPUT_BUDGET: usize = 8_000;
 
@@ -209,6 +210,33 @@ impl<'a> Terminal<'a> {
     }
 }
 
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn emit_agent_status(
+    emit: &EventEmitter,
+    started_at_ms: i64,
+    status: &str,
+) {
+    emit.emit(SessionEvent::AgentStatus(agentd_protocol::AgentStatus {
+        active: true,
+        started_at_ms,
+        status: status.to_string(),
+    }));
+}
+
+fn finish_agent_status(emit: &EventEmitter, started_at_ms: i64, status: &str) {
+    emit.emit(SessionEvent::AgentStatus(agentd_protocol::AgentStatus {
+        active: false,
+        started_at_ms,
+        status: status.to_string(),
+    }));
+}
+
 /// Emit a `SessionEvent::EditorState` snapshot reflecting the editor
 /// buf, cursor, and pending queue. Called at every state change so the
 /// TUI's input pane stays in sync. Each queued entry is sent as a
@@ -316,9 +344,11 @@ struct PtySink<'a> {
     /// the daemon's transcript view sees the streaming text. Off for
     /// replay paths where the message is already in the transcript.
     emit_messages: bool,
+    /// Start time of the current live turn, used for `AgentStatus`.
+    status_started_at_ms: i64,
 }
 impl<'a> PtySink<'a> {
-    fn new(emit: &'a EventEmitter, width: usize) -> Self {
+    fn new(emit: &'a EventEmitter, width: usize, status_started_at_ms: i64) -> Self {
         Self {
             emit,
             at_line_start: true,
@@ -328,6 +358,7 @@ impl<'a> PtySink<'a> {
             emitted: false,
             col: 0,
             emit_messages: true,
+            status_started_at_ms,
         }
     }
     /// Replay constructor — emits PTY bytes only, never `Message`
@@ -336,7 +367,7 @@ impl<'a> PtySink<'a> {
     fn new_replay(emit: &'a EventEmitter, width: usize) -> Self {
         Self {
             emit_messages: false,
-            ..Self::new(emit, width)
+            ..Self::new(emit, width, now_ms())
         }
     }
 
@@ -393,6 +424,9 @@ impl<'a> PtySink<'a> {
 }
 impl<'a> TextSink for PtySink<'a> {
     fn delta(&mut self, text: &str) {
+        if self.emit_messages {
+            emit_agent_status(self.emit, self.status_started_at_ms, "Working");
+        }
         let mut out: Vec<u8> = Vec::with_capacity(text.len() + 32);
         if !self.emitted {
             self.open_block(&mut out);
@@ -1643,11 +1677,14 @@ pub async fn run(
             state: SessionState::Running,
             detail: None,
         });
+        let turn_started_at_ms = now_ms();
+        let mut final_status = "Worked";
+        emit_agent_status(&emit, turn_started_at_ms, "Working");
 
         // Inner step loop — feed tool results back until end-of-turn.
         loop {
             let _pruned = context::prune(&mut messages, provider_name, &model);
-            let mut sink = PtySink::new(&emit, pty_width);
+            let mut sink = PtySink::new(&emit, pty_width, turn_started_at_ms);
             // Wrap the provider call so user typing during the
             // stream is fed to the editor and pressed-Enter lines
             // join the pending-input queue instead of vanishing
@@ -1681,16 +1718,19 @@ pub async fn run(
                 }
                 DriveExit::Done(Err(e)) => {
                     sink.finalize();
+                    final_status = "Errored";
                     term.note(&format!("(provider error: {e})"));
                     emit.emit(SessionEvent::Error { message: format!("{e}") });
                     break;
                 }
                 DriveExit::Stop | DriveExit::Channel => {
                     sink.finalize();
+                    finish_agent_status(&emit, turn_started_at_ms, "Stopped");
                     break 'outer;
                 }
                 DriveExit::Interrupt => {
                     sink.finalize();
+                    final_status = "Interrupted";
                     term.note("(interrupted)");
                     break;
                 }
@@ -1736,6 +1776,7 @@ pub async fn run(
             let mut early_stop = false;
 
             if !safe_idx.is_empty() {
+                emit_agent_status(&emit, turn_started_at_ms, "Working");
                 // Precompute display metadata in the main task so the
                 // parallel children don't re-derive args summaries.
                 let safe_meta: Vec<(usize, provider::ToolCall, String)> = safe_idx
@@ -1859,6 +1900,7 @@ pub async fn run(
             if !early_stop {
                 for &i in &risky_idx {
                     let call = &turn.tool_calls[i];
+                    emit_agent_status(&emit, turn_started_at_ms, "Working");
                     let outcome = run_one_tool(
                         call,
                         &registry,
@@ -1915,6 +1957,7 @@ pub async fn run(
                 }
             }
             if early_stop {
+                finish_agent_status(&emit, turn_started_at_ms, "Stopped");
                 return Ok(());
             }
             if matches!(turn.stop_reason, StopReason::MaxTokens) {
@@ -1922,6 +1965,7 @@ pub async fn run(
             }
         }
 
+        finish_agent_status(&emit, turn_started_at_ms, final_status);
         // Reset the editor pane to empty after the turn ends.
         emit_editor_state(&emit, &editor, &queue);
     }

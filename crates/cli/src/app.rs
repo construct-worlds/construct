@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::io::{Stdout, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Which pane currently owns the keyboard. `View` covers both the transcript
 /// and the terminal renderer — when the view shows a PTY-backed session and
@@ -316,6 +316,9 @@ pub struct App {
     /// from the adapter (currently zarvis interactive). Drives the
     /// fixed bottom input pane.
     pub editor_states: HashMap<String, EditorState>,
+    /// Per-session live agent status, fed by `SessionEvent::AgentStatus`
+    /// and rendered above queued input while a turn is active.
+    pub agent_statuses: HashMap<String, agentd_protocol::AgentStatus>,
     /// Last rendered frame, one string per terminal row. Mouse drag
     /// selection copies out of this snapshot, so it works across the
     /// whole TUI without every widget implementing text export.
@@ -336,6 +339,33 @@ pub struct EditorState {
     pub queued: Vec<String>,
     pub buf: String,
     pub cursor: usize,
+}
+
+fn agent_status_history_line(status: &agentd_protocol::AgentStatus) -> Option<Vec<u8>> {
+    if status.active || status.started_at_ms <= 0 || status.status.trim().is_empty() {
+        return None;
+    }
+    let line = format!(
+        "\r\n\r\n\x1b[2m* {} ({})\x1b[0m\r\n",
+        status.status.trim(),
+        format_elapsed(status.started_at_ms)
+    );
+    Some(line.into_bytes())
+}
+
+fn format_elapsed(started_at_ms: i64) -> String {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(started_at_ms);
+    let secs = now_ms.saturating_sub(started_at_ms).max(0) / 1000;
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+    if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 /// State for the `/tasks` modal popup. v1 is read-only at the UI
@@ -574,6 +604,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         resizing_pin_strip: None,
         list_collapsed: persisted.list_collapsed,
         editor_states: HashMap::new(),
+        agent_statuses: HashMap::new(),
         frame_text: Vec::new(),
         text_selection: None,
         selected_text: None,
@@ -1122,6 +1153,7 @@ impl App {
                             self.histories.remove(&payload.session_id);
                             self.block_hits.remove(&payload.session_id);
                             self.editor_states.remove(&payload.session_id);
+                            self.agent_statuses.remove(&payload.session_id);
                             self.pty_activity.remove(&payload.session_id);
                             if Some(payload.session_id.as_str()) == self.transcript_session.as_deref() {
                                 self.transcript.clear();
@@ -1234,6 +1266,22 @@ impl App {
                                     cursor: *cursor,
                                 },
                             );
+                        }
+                        if let SessionEvent::AgentStatus(status) = &payload.event {
+                            if status.active {
+                                self.agent_statuses
+                                    .insert(payload.session_id.clone(), status.clone());
+                            } else {
+                                self.agent_statuses.remove(&payload.session_id);
+                                if let Some(bytes) = agent_status_history_line(status) {
+                                    let history = self
+                                        .histories
+                                        .entry(payload.session_id.clone())
+                                        .or_default();
+                                    history.feed_pty(&bytes);
+                                }
+                            }
+                            return;
                         }
                         // Orchestrator session events: PTY bytes flow
                         // through the regular PTY branch above (into

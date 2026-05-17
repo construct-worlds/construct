@@ -171,6 +171,18 @@ pub struct EventEnvelope {
     pub event: SessionEvent,
 }
 
+/// Live, adapter-owned turn status shown near the input editor while
+/// an agent is working. Inactive statuses are ephemeral completion
+/// notices; clients may render them locally without persisting them
+/// into transcript or PTY data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentStatus {
+    pub active: bool,
+    #[serde(default)]
+    pub started_at_ms: i64,
+    pub status: String,
+}
+
 /// A structured event emitted by an adapter while running a session.
 ///
 /// Adapters whose underlying CLI is plain text can lean on
@@ -203,6 +215,10 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    /// Live or just-completed agent turn status. The TUI renders this
+    /// above queued input while active and may render inactive statuses
+    /// as display-only history rows.
+    AgentStatus(AgentStatus),
     Cost {
         #[serde(default)]
         usd: f64,
