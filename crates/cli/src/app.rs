@@ -22,7 +22,6 @@ use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Stdout, Write};
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -529,7 +528,7 @@ pub const SPINNER_FRAME_MS: u128 = 120;
 /// it slots into the same column as the static state glyph.
 pub const SPINNER_FRAMES: [&str; 8] = ["✦", "✧", "✶", "✷", "✸", "✷", "✶", "✧"];
 
-pub async fn run(socket: PathBuf, client: Arc<Client>) -> Result<()> {
+pub async fn run(client: Arc<Client>) -> Result<()> {
     let profile = Profile::from_env();
     let keymap = keymap::default_for(profile);
 
@@ -651,7 +650,7 @@ pub async fn run(socket: PathBuf, client: Arc<Client>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let result = run_loop(&socket, &mut terminal, &mut app).await;
+    let result = run_loop(&mut terminal, &mut app).await;
 
     // Teardown — best effort.
     let _ = disable_raw_mode();
@@ -675,24 +674,15 @@ pub async fn run(socket: PathBuf, client: Arc<Client>) -> Result<()> {
     result
 }
 
-async fn run_loop(
-    socket: &Path,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    app: &mut App,
-) -> Result<()> {
+async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     let mut input_stream = EventStream::new();
-    let mut notifications = Some(
-        app.client
-            .take_notifications()
-            .await
-            .context("notifications channel already taken")?,
-    );
+    let mut notifications = app
+        .client
+        .take_notifications()
+        .await
+        .context("notifications channel already taken")?;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
-    // While disconnected, periodically attempt to attach to a freshly
-    // restarted daemon. Kept separate from the frame tick so reconnect
-    // attempts are cheap and predictable.
-    let mut reconnect_tick = tokio::time::interval(Duration::from_secs(1));
 
     // Debounce window for resize events. Terminal-app drags and
     // list/view divider drags both flood `terminal_pane_size` (and
@@ -765,12 +755,7 @@ async fn run_loop(
                     None => break,
                 }
             }
-            notif = async {
-                match notifications.as_mut() {
-                    Some(rx) => rx.recv().await,
-                    None => futures::future::pending().await,
-                }
-            } => {
+            notif = notifications.recv() => {
                 match notif {
                     Some(n) => {
                         app.on_notification(n).await;
@@ -788,45 +773,27 @@ async fn run_loop(
                         // arms responsive under sustained load.
                         const MAX_DRAIN: usize = 256;
                         let mut drained = 0;
-                        if let Some(rx) = notifications.as_mut() {
-                            while drained < MAX_DRAIN {
-                                match rx.try_recv() {
-                                    Ok(n) => {
-                                        app.on_notification(n).await;
-                                        drained += 1;
-                                    }
-                                    Err(_) => break,
+                        while drained < MAX_DRAIN {
+                            match notifications.try_recv() {
+                                Ok(n) => {
+                                    app.on_notification(n).await;
+                                    drained += 1;
                                 }
+                                Err(_) => break,
                             }
                         }
                     }
                     None => {
-                        notifications = None;
                         app.connected = false;
-                        app.set_status("daemon disconnected; reconnecting…".to_string());
+                        app.set_status("daemon disconnected".to_string());
                     }
                 }
             }
             _ = tick.tick() => {
-                if app.connected {
-                    if let Some((_, at)) = &app.status {
-                        if at.elapsed() > Duration::from_secs(5) {
-                            app.status = None;
-                        }
+                if let Some((_, at)) = &app.status {
+                    if at.elapsed() > Duration::from_secs(5) {
+                        app.status = None;
                     }
-                }
-            }
-            _ = reconnect_tick.tick(), if notifications.is_none() => {
-                if let Ok(Some(rx)) = tokio::time::timeout(Duration::from_secs(2), app.reconnect(socket)).await {
-                    notifications = Some(rx);
-                    // Force focused PTY/orchestrator resizes through the new
-                    // connection even if geometry did not change while the
-                    // daemon was down.
-                    last_size_sent = (0, 0);
-                    last_orch_sent = (0, 0);
-                    last_session_sent = None;
-                    pending_size = None;
-                    pending_orch = None;
                 }
             }
         }
@@ -2746,60 +2713,6 @@ impl App {
             }
         }
     }
-
-}
-
-/// Try to connect to `socket`, subscribe to events, and return the client
-/// plus the notifications receiver on success.
-pub async fn try_connect_and_subscribe(
-    socket: &Path,
-) -> Option<(std::sync::Arc<Client>, tokio::sync::mpsc::UnboundedReceiver<agentd_protocol::Notification>)> {
-    let client = match Client::connect(socket).await {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-    if client.subscribe(None).await.is_err() {
-        return None;
-    }
-    let notifications = match client.take_notifications().await {
-        Some(rx) => rx,
-        None => return None,
-    };
-    Some((client, notifications))
-}
-
-pub async fn reconnect_app(app: &mut App, socket: &Path) -> Option<tokio::sync::mpsc::UnboundedReceiver<agentd_protocol::Notification>> {
-    let (client, notifications) = match try_connect_and_subscribe(socket).await {
-        Some((c, rx)) => (c, rx),
-        None => return None,
-    };
-
-    app.client = client;
-    app.connected = true;
-    app.set_status("daemon reconnected".to_string());
-
-    match app.client.list().await {
-        Ok(list) => app.sessions = list,
-        Err(e) => app.set_status(format!("list after reconnect failed: {e}")),
-    }
-    match app.client.list_groups().await {
-        Ok(list) => app.groups = list,
-        Err(e) => app.set_status(format!("group list after reconnect failed: {e}")),
-    }
-    match app.client.harnesses().await {
-        Ok(list) => app.harnesses = list,
-        Err(e) => app.set_status(format!("harnesses after reconnect failed: {e}")),
-    }
-    app.refresh_orchestrator_id();
-    app.ensure_selection_valid();
-    // Force fresh transcript/PTY snapshots from the new daemon. The old
-    // local histories remain visible until replay succeeds, so the user
-    // does not lose context during the reconnect window.
-    app.transcript_session = None;
-    app.refresh_selected_transcript().await;
-    app.ensure_pinned_parsers().await;
-    Some(notifications)
-}
 
     /// Key handler for the orchestrator panel: same shape as the main
     /// view's PTY mode (C-x chord escape, `C-x C-x` to forward a
