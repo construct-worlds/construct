@@ -23,8 +23,10 @@ async fn test_reconnect_flow() {
 
         // helper to run a one-shot mock server that accepts a single
         // connection, replies to a few RPCs, and emits a notification.
-        async fn run_one_shot_server<P: AsRef<std::path::Path>>(path: P) {
+        async fn run_one_shot_server<P: AsRef<std::path::Path>>(path: P, ready: tokio::sync::oneshot::Sender<()>) {
             let listener = UnixListener::bind(path.as_ref()).unwrap();
+            // signal that bind succeeded so the test can connect
+            let _ = ready.send(());
             let (stream, _) = listener.accept().await.unwrap();
             let (r, mut w) = split(stream);
             let mut reader = BufReader::new(r);
@@ -86,13 +88,10 @@ async fn test_reconnect_flow() {
 
         // Spawn first server and exercise client subscribe
         let path1 = sock.clone();
-        let srv1 = tokio::spawn(async move { run_one_shot_server(path1).await });
-
-        // wait for server socket to appear
-        let start_wait = Instant::now();
-        while !sock.exists() && start_wait.elapsed() < std::time::Duration::from_secs(2) {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        let srv1 = tokio::spawn(async move { run_one_shot_server(path1, tx1).await });
+        // wait for bind signal from server
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx1).await.expect("server bind timeout");
         // Client connect
         let client = Client::connect(&sock).await.unwrap();
         let mut notif_rx = client.take_notifications().await.expect("take notifications");
