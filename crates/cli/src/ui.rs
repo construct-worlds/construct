@@ -15,6 +15,25 @@ use ratatui::Frame;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthStr;
 
+/// Content area for panes that render only a top border while preserving the
+/// old one-row bottom gap as empty space between adjacent regions.
+pub fn top_border_content_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x,
+        y: area.y.saturating_add(1),
+        width: area.width,
+        height: area.height.saturating_sub(2),
+    }
+}
+
+/// The list pane keeps its rightmost column clear as the visual divider and
+/// drag handle. Its left edge is regular usable content.
+pub fn list_content_area(area: Rect) -> Rect {
+    let mut inner = top_border_content_area(area);
+    inner.width = inner.width.saturating_sub(1);
+    inner
+}
+
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
     match app.zoom {
@@ -113,8 +132,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // before drawing so the current frame's parser screen geometry matches
     // the area we're rendering into (otherwise zoom-in shows blank rows at
     // the bottom and zoom-out clips content).
-    let inner_cols = detail_area.width.saturating_sub(2);
-    let inner_rows = detail_area.height.saturating_sub(2);
+    let detail_inner = top_border_content_area(detail_area);
+    let inner_cols = detail_inner.width;
+    let inner_rows = detail_inner.height;
     app.terminal_pane_size = (inner_cols, inner_rows);
     // No need to pre-size per-session vt100 parsers — the items
     // model rebuilds a fresh parser at the current pane size on
@@ -337,14 +357,11 @@ fn normalized_points(a: ScreenPoint, b: ScreenPoint) -> (ScreenPoint, ScreenPoin
 fn hovered_diamond(app: &App) -> Option<(u16, u16, &SessionSummary)> {
     let (mx, my) = app.mouse_pos?;
     let list_area = app.layout.list_area?;
-    if mx <= list_area.x
-        || mx + 1 >= list_area.x + list_area.width
-        || my <= list_area.y
-        || my + 1 >= list_area.y + list_area.height
-    {
+    let inner = list_content_area(list_area);
+    if mx < inner.x || mx >= inner.x + inner.width || my < inner.y || my >= inner.y + inner.height {
         return None;
     }
-    let row = (my - list_area.y - 1) as usize;
+    let row = (my - inner.y) as usize;
     let items = app.list_items();
     let item = items.into_iter().nth(row)?;
     let (summary, indented) = match item {
@@ -356,7 +373,7 @@ fn hovered_diamond(app: &App) -> Option<(u16, u16, &SessionSummary)> {
     //   [diamond][ ][status-circle][ ]   ← then the name starts
     // Wider than the bare diamond glyph so it's easier to click —
     // the visual overlay still anchors on the diamond cell itself.
-    let zone_start = list_area.x + 1 + indent;
+    let zone_start = inner.x + indent;
     let zone_end = zone_start + 4; // exclusive
     if mx < zone_start || mx >= zone_end {
         return None;
@@ -369,19 +386,18 @@ fn hovered_diamond(app: &App) -> Option<(u16, u16, &SessionSummary)> {
 
 /// Hit zone for the `+` button on the session-list pane's title
 /// (`" + sessions "`). Returns `(x_start, x_end_exclusive, y)`.
-/// Anchored after the top-left border corner — cells `list.x + 1`
-/// and `list.x + 2` cover `[ ][+]` for a forgiving click target.
+/// Anchored at the left edge of the top border. Cells `list.x`
+/// and `list.x + 1` cover `[ ][+]` for a forgiving click target.
 pub fn list_plus_button_range(list_area: Rect) -> Option<(u16, u16, u16)> {
-    if list_area.width < 4 {
+    if list_area.width < 3 {
         return None;
     }
-    Some((list_area.x + 1, list_area.x + 3, list_area.y))
+    Some((list_area.x, list_area.x + 2, list_area.y))
 }
 
 /// Hit zone for the right-aligned `−` button that collapses the
 /// session list. Returns `(x_start, x_end_exclusive, y)`. Sits one
-/// cell inset from the right corner so the corner glyph stays
-/// visible.
+/// cell inset from the right edge so the divider column stays clear.
 pub fn list_collapse_button_range(list_area: Rect) -> Option<(u16, u16, u16)> {
     if list_area.width < 5 {
         return None;
@@ -410,9 +426,7 @@ pub fn view_uncollapse_glyph_pos(view_area: Rect) -> (u16, u16) {
     (view_area.x, view_area.y)
 }
 
-/// True when `(col, row)` lies on the main view's left border AND
-/// the list is collapsed — the entire left border column acts as
-/// the uncollapse hit zone, so clicks are forgiving.
+/// True when `(col, row)` lies on the collapsed-list expand glyph.
 pub fn is_on_view_uncollapse_handle(app: &super::app::App, col: u16, row: u16) -> bool {
     if !(app.list_collapsed && app.focus != crate::app::PaneFocus::List) {
         return false;
@@ -420,7 +434,8 @@ pub fn is_on_view_uncollapse_handle(app: &super::app::App, col: u16, row: u16) -
     let Some(view) = app.layout.view_area else {
         return false;
     };
-    col == view.x && row >= view.y && row < view.y + view.height
+    let (gx, gy) = view_uncollapse_glyph_pos(view);
+    col == gx && row == gy
 }
 
 /// Float a small one-line tooltip with `label` (padded with single
@@ -503,7 +518,7 @@ fn render_view_uncollapse_tooltip(f: &mut Frame, app: &App) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
-    if mx == view.x && my >= view.y && my < view.y + view.height {
+    if is_on_view_uncollapse_handle(app, mx, my) {
         let (gx, gy) = view_uncollapse_glyph_pos(view);
         render_button_tooltip(f, &app.theme, " Expand list ", gx, gy);
     }
@@ -519,11 +534,11 @@ fn render_view_uncollapse_glyph(f: &mut Frame, app: &App, view_area: Rect) {
 
 /// Top-row close-button geometry for the session view's right edge.
 /// Returns `(x_start, x_end_exclusive, y)`. Same 3-cell shape the pin
-/// strip uses (` x `), one column inset from the right corner.
+/// strip uses (` x `), one column inset from the right edge.
 pub fn view_close_button_range(view_area: Rect) -> (u16, u16, u16) {
     let close_w: u16 = 3;
-    let x_start = view_area.x + view_area.width.saturating_sub(close_w + 1);
-    let x_end = view_area.x + view_area.width.saturating_sub(1);
+    let x_start = view_area.x + view_area.width.saturating_sub(close_w);
+    let x_end = view_area.x + view_area.width;
     (x_start, x_end, view_area.y)
 }
 
@@ -536,13 +551,13 @@ fn hovered_view_close_button(app: &App, view_area: Rect) -> bool {
 }
 
 /// Hit zone for the pin-tile unpin diamond: 4 cells on the top
-/// border, starting after the corner. Title shape is ` ⬩ <status>
-/// <label> <harness> `, so cells `tile.x + 1 ..= tile.x + 4`
+/// border, starting at the tile's left edge. Title shape is ` ⬩ <status>
+/// <label> <harness> `, so cells `tile.x .. tile.x + 4`
 /// (inclusive) cover `[ ][⬩][ ][status]` — the same 4-cell zone
 /// idiom as the list-view diamond. Returns `(diamond_x,
 /// tile_top_y)` so the tooltip can anchor on the diamond cell.
 fn pin_tile_diamond_zone(tile: Rect) -> (u16, u16) {
-    (tile.x + 1, tile.x + 5)
+    (tile.x, tile.x + 4)
 }
 
 fn hovered_pin_diamond<'a>(
@@ -558,9 +573,8 @@ fn hovered_pin_diamond<'a>(
     for (tile, id) in tiles.iter().zip(pinned_ids.iter()) {
         let (zone_start, zone_end) = pin_tile_diamond_zone(*tile);
         if my == tile.y && mx >= zone_start && mx < zone_end {
-            // Diamond glyph itself sits at offset +1 in the title
-            // (after the leading space).
-            let diamond_x = tile.x + 2;
+            // Diamond glyph itself sits at offset +1 in the title.
+            let diamond_x = tile.x + 1;
             let summary = app.sessions.iter().find(|s| &s.id == id)?;
             return Some((diamond_x, tile.y, summary));
         }
@@ -917,7 +931,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     let effective_collapsed = app.list_collapsed && !focused;
     if effective_collapsed {
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP)
             .border_style(pane_border_style(&app.theme, focused))
             .title(Line::from(Span::styled(
                 "›",
@@ -956,14 +970,15 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     let collapse_line =
         Line::from(Span::styled(" − ", minus_style)).alignment(ratatui::layout::Alignment::Right);
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
         .border_style(pane_border_style(&app.theme, focused))
         .title(title_line)
         .title(collapse_line);
-    let inner = block.inner(area);
+    let inner = list_content_area(area);
 
-    // Total cells available inside the bordered pane.
-    let row_w = (area.width as usize).saturating_sub(2);
+    // Total cells available inside the pane body. The rightmost column stays
+    // clear as the list/view divider and drag handle.
+    let row_w = inner.width as usize;
     let app_items = app.list_items();
     let mut selected_idx: Option<usize> = None;
     let items: Vec<ListItem> = app_items
@@ -1046,10 +1061,9 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         selected_idx
     });
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(highlight_style);
-    f.render_stateful_widget(list, area, &mut state);
+    let list = List::new(items).highlight_style(highlight_style);
+    f.render_widget(block, area);
+    f.render_stateful_widget(list, inner, &mut state);
     render_matrix_rain(f, inner, app, app_items.len());
 }
 
@@ -1362,32 +1376,31 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == PaneFocus::View;
     if let Some(diff) = &app.last_diff {
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP)
             .border_style(pane_border_style(&app.theme, focused))
             .title(" diff (ESC clears; press d to refresh) ");
-        let para = Paragraph::new(diff.clone())
-            .block(block)
-            .wrap(Wrap { trim: false });
-        f.render_widget(para, area);
+        let inner = top_border_content_area(area);
+        let para = Paragraph::new(diff.clone()).wrap(Wrap { trim: false });
+        f.render_widget(block, area);
+        f.render_widget(para, inner);
         return;
     }
     let summary = app.selected_session();
     let group = app.selected_group();
     // Width budgets for fitting the title onto the top border.
-    // Layout: `<corner> <glyph> <label>  …  <harness>  x <corner>`.
+    // Layout: `<glyph> <label>  …  <harness>  x`.
     let total = area.width as usize;
     let close_w: usize = if summary.is_some() { 3 } else { 0 };
     let harness_w: usize = summary
         .map(|s| 2 + UnicodeWidthStr::width(s.harness.as_str()))
         .unwrap_or(0);
-    // Label budget = total − 2 corners − right-side blocks − fixed
+    // Label budget = total − right-side blocks − fixed
     // title scaffolding (` <glyph> <label> ` is 3 spaces + glyph
     // width + label).
     let glyph_w = summary
         .map(|s| UnicodeWidthStr::width(session_status_glyph(app, s)))
         .unwrap_or(0);
     let label_budget = total
-        .saturating_sub(2)
         .saturating_sub(harness_w)
         .saturating_sub(close_w)
         .saturating_sub(3 + glyph_w);
@@ -1430,7 +1443,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     let close =
         Line::from(Span::styled(" x ", close_style)).alignment(ratatui::layout::Alignment::Right);
     let mut block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
         .border_style(pane_border_style(&app.theme, focused))
         .title(title);
     // Order matters: ratatui stacks right-aligned titles left-to-right
@@ -1444,7 +1457,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     if show_close {
         block = block.title(close);
     }
-    let inner = block.inner(area);
+    let inner = top_border_content_area(area);
     f.render_widget(block, area);
 
     if let Some(g) = app.selected_group() {
@@ -2437,7 +2450,6 @@ fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[Stri
         // (1 leading + diamond + 1 + glyph + 1 + label + 1 trailing
         // = label + 4 + diamond + glyph; diamond is 1 cell).
         let pin_label_budget = total_pin
-            .saturating_sub(2) // corners
             .saturating_sub(harness_w)
             .saturating_sub(5 + glyph_w);
         let title = match summary {
@@ -2456,13 +2468,13 @@ fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[Stri
             .alignment(ratatui::layout::Alignment::Right)
         });
         let mut block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP)
             .border_style(pane_border_style(&app.theme, is_selected))
             .title(title);
         if let Some(h) = harness_right {
             block = block.title(h);
         }
-        let inner = block.inner(*tile_area);
+        let inner = top_border_content_area(*tile_area);
         f.render_widget(block, *tile_area);
         if let Some(history) = app.histories.get_mut(id) {
             // Render at the *main view's* virtual size, not the
@@ -2497,9 +2509,13 @@ pub fn pin_tile_layout(area: Rect, n: usize) -> Vec<Rect> {
     let n = n.max(1);
     let cols = n.min(4).max(1);
     let rows = (n + cols - 1) / cols;
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
+    let mut row_constraints: Vec<Constraint> = Vec::with_capacity(rows.saturating_mul(2));
+    for idx in 0..rows {
+        if idx > 0 {
+            row_constraints.push(Constraint::Length(1));
+        }
+        row_constraints.push(Constraint::Ratio(1, rows as u32));
+    }
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(row_constraints)
@@ -2512,9 +2528,13 @@ pub fn pin_tile_layout(area: Rect, n: usize) -> Vec<Rect> {
             break;
         }
         let cols_here = remaining.min(cols).max(1);
-        let col_constraints: Vec<Constraint> = (0..cols_here)
-            .map(|_| Constraint::Ratio(1, cols_here as u32))
-            .collect();
+        let mut col_constraints: Vec<Constraint> = Vec::with_capacity(cols_here.saturating_mul(2));
+        for idx in 0..cols_here {
+            if idx > 0 {
+                col_constraints.push(Constraint::Length(1));
+            }
+            col_constraints.push(Constraint::Ratio(1, cols_here as u32));
+        }
         let col_areas = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(col_constraints)

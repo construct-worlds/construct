@@ -479,24 +479,15 @@ fn selection_bounds_for_layout(
     fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
         c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
     }
-    fn inner(r: ratatui::layout::Rect) -> ratatui::layout::Rect {
-        ratatui::layout::Rect {
-            x: r.x.saturating_add(1),
-            y: r.y.saturating_add(1),
-            width: r.width.saturating_sub(2),
-            height: r.height.saturating_sub(2),
-        }
-    }
-
     if let Some(list) = layout.list_area {
-        let list_inner = inner(list);
+        let list_inner = crate::ui::list_content_area(list);
         if contains(list_inner, col, row) {
             return Some(list_inner);
         }
     }
 
     if let Some(view) = layout.view_area {
-        let view_inner = inner(view);
+        let view_inner = crate::ui::top_border_content_area(view);
         if contains(view_inner, col, row) {
             return Some(view_inner);
         }
@@ -504,7 +495,7 @@ fn selection_bounds_for_layout(
 
     if let Some(strip) = layout.pin_strip_area {
         for tile in crate::ui::pin_tile_layout(strip, pinned_count) {
-            let tile_inner = inner(tile);
+            let tile_inner = crate::ui::top_border_content_area(tile);
             if contains(tile_inner, col, row) {
                 return Some(tile_inner);
             }
@@ -1888,22 +1879,14 @@ impl App {
 
     fn matrix_rain_available_height(&self) -> Option<u16> {
         let list = self.layout.list_area?;
-        let inner_h = list.height.saturating_sub(2);
+        let inner_h = crate::ui::list_content_area(list).height;
         let used = (self.layout.list_row_count as u16).min(inner_h);
         Some(inner_h.saturating_sub(used))
     }
 
-    /// True if `(col, row)` sits on the list ↔ right-pane divider.
-    /// The grab zone covers three cells side-by-side:
-    ///   * `list.x + list.width − 1` — list's right border
-    ///   * `view_area.x` — main session view's left border
-    ///   * `pin_strip.x` — first pin tile's left border (when any
-    ///     sessions are pinned)
-    /// The two "left border" cells are at the same column as each
-    /// other (view and pin strip stack vertically), but at row-
-    /// disjoint y ranges, so each contributes to one half of the
-    /// vertical span. Returns false in zoomed layouts (no borders
-    /// to grab there).
+    /// True if `(col, row)` sits on the list/right-pane divider.
+    /// The grab zone is the list pane's rightmost clear column; the
+    /// right pane's left edge is regular usable content.
     fn is_on_list_divider(&self, col: u16, row: u16) -> bool {
         if !matches!(self.zoom, ZoomMode::None) {
             return false;
@@ -1915,25 +1898,7 @@ impl App {
             return false;
         }
         let list_right_x = list.x + list.width - 1;
-        // List's right border — the original grab handle.
-        if col == list_right_x && row >= list.y && row < list.y + list.height {
-            return true;
-        }
-        // Main view's left border (immediately right of list's
-        // right border).
-        if let Some(view) = self.layout.view_area {
-            if col == view.x && row >= view.y && row < view.y + view.height {
-                return true;
-            }
-        }
-        // First pin tile's left border. The strip's x is the same
-        // column as view.x; we just need the strip's y range.
-        if let Some(strip) = self.layout.pin_strip_area {
-            if col == strip.x && row >= strip.y && row < strip.y + strip.height {
-                return true;
-            }
-        }
-        false
+        col == list_right_x && row >= list.y && row < list.y + list.height
     }
 
     /// Hit-test a left-click against the last frame's pane geometry.
@@ -1999,11 +1964,8 @@ impl App {
         }
         if let Some(view) = self.layout.view_area {
             if contains(view, col, row) {
-                // Uncollapse handle: when the list is collapsed,
-                // the view's left border column acts as the
-                // "show list" button. Tested before other view
-                // click handlers so a click on column `view.x`
-                // never falls through to a content click.
+                // Uncollapse handle: when the list is collapsed, the
+                // top-left glyph acts as the "show list" button.
                 if crate::ui::is_on_view_uncollapse_handle(self, col, row) {
                     self.list_collapsed = false;
                     self.focus = PaneFocus::List;
@@ -2023,16 +1985,9 @@ impl App {
                         .await;
                     return;
                 }
-                // Inner area: same Rect minus the 1-cell border on
-                // each side. The render path stores hit ranges
-                // relative to the inner area's top — translate
-                // before lookup.
-                let inner = ratatui::layout::Rect {
-                    x: view.x + 1,
-                    y: view.y + 1,
-                    width: view.width.saturating_sub(2),
-                    height: view.height.saturating_sub(2),
-                };
+                // Inner area: top border plus a bottom gap. The render path
+                // stores hit ranges relative to this area.
+                let inner = crate::ui::top_border_content_area(view);
                 if let Some(id) = self.selected_id() {
                     if self.try_toggle_block_at(&id, inner, col, row).await {
                         return;
@@ -2234,12 +2189,17 @@ impl App {
                 }
             }
         }
-        // Top + bottom border are 1 row each; rows outside the inner
+        // Top border and bottom gap are 1 row each; rows outside the
         // content area only handle the focus change above.
-        if row <= list.y || row + 1 >= list.y + list.height {
+        let inner = crate::ui::list_content_area(list);
+        if col < inner.x
+            || col >= inner.x + inner.width
+            || row < inner.y
+            || row >= inner.y + inner.height
+        {
             return;
         }
-        let idx = (row - list.y - 1) as usize;
+        let idx = (row - inner.y) as usize;
         let items = self.list_items();
         if idx >= items.len() {
             return;
@@ -2251,7 +2211,7 @@ impl App {
         // with `hovered_diamond` in ui.rs.
         if let ListItem::Session { summary, indented } = &items[idx] {
             let indent = if *indented { 2 } else { 0 };
-            let zone_start = list.x + 1 + indent;
+            let zone_start = inner.x + indent;
             let zone_end = zone_start + 4;
             if col >= zone_start && col < zone_end {
                 let id = summary.id.clone();
@@ -2308,12 +2268,12 @@ impl App {
                 continue;
             }
             // Diamond zone: 4 cells on the top border, starting
-            // after the corner — covers `[ ][⬩][ ][status]` in the
+            // at the tile's left edge — covers `[ ][⬩][ ][status]` in the
             // title ` ⬩ <status> <label> <harness> `. Same gesture
             // as clicking the list-view diamond. Must stay in
             // lockstep with `pin_tile_diamond_zone` in ui.rs.
-            let diamond_zone_start = tile.x + 1;
-            let diamond_zone_end = tile.x + 5;
+            let diamond_zone_start = tile.x;
+            let diamond_zone_end = tile.x + 4;
             if row == tile.y && col >= diamond_zone_start && col < diamond_zone_end {
                 if let Err(e) = self.client.set_pinned(id, false).await {
                     self.set_status(format!("unpin failed: {e}"));
