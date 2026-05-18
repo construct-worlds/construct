@@ -3148,4 +3148,67 @@ mod tests {
              Got:\n{scrolled}",
         );
     }
+
+    /// REGRESSION: a fresh TUI re-attaching to an existing zarvis
+    /// session must show tool blocks just like the session that
+    /// originally rendered them — including in scrollback.
+    ///
+    /// `bootstrap_terminal` in `app.rs` does two steps to rehydrate
+    /// PTY-backed history:
+    ///   1. `client.pty_replay(id)` returns the PTY bytes the daemon
+    ///      buffered in `pty.log` + the in-memory ring.
+    ///   2. `client.transcript(id, …)` is replayed through
+    ///      `apply_transcript_to_local_state`, which forwards events
+    ///      to the history.
+    ///
+    /// Current zarvis interactive sessions do NOT write OSC 7700
+    /// fences to the PTY (they're defined in `interactive.rs` but
+    /// never called); the OSC backstop only fires for `pty.log`
+    /// files left over from older zarvis builds. New sessions
+    /// communicate tool blocks exclusively through
+    /// `SessionEvent::TaskStart` (which carries the `call_id`) +
+    /// `ToolUse` + `ToolResult`. If `apply_transcript_to_local_state`
+    /// drops `TaskStart` on the floor (which it did before this
+    /// fix), no `ToolBlock` items exist after bootstrap and the
+    /// `has_blocks` check in `replay()` is false — `replay_cached`
+    /// runs and the user sees raw chat with no synthesized blocks
+    /// at any scroll position.
+    ///
+    /// This test simulates a current zarvis session: PTY bytes
+    /// without OSC fences, plus a TaskStart + ToolResult on the
+    /// transcript side. After both replays the synthesized block
+    /// must appear in both live and scrolled renders.
+    #[test]
+    fn zarvis_tool_block_visible_after_bootstrap_via_task_start() {
+        let mut h = ItemHistory::new();
+        // Step 1: pty_replay bytes — pure chat, no OSC fences (that's
+        // what current zarvis adapters actually write).
+        for i in 0..10u32 {
+            h.feed_pty(format!("chat line {i:02}\r\n").as_bytes());
+        }
+        // Step 2: transcript replay — TaskStart carries the call_id
+        // and is the canonical block-creation event for new zarvis
+        // sessions. apply_transcript_to_local_state must forward it.
+        h.feed_task_start(
+            "t1".to_string(),
+            "shell".to_string(),
+            "ls".to_string(),
+        );
+        h.feed_tool_result("t1", true, "OUTPUT-LINE".to_string());
+
+        let live = screen_text(h.replay(80, 24, 0).screen, 24, 80);
+        let scrolled = screen_text(h.replay(80, 24, 1).screen, 24, 80);
+
+        assert!(
+            live.contains("→ shell"),
+            "live render after bootstrap should show synthesized header — \
+             feed_task_start must create a ToolBlock. got:\n{live}",
+        );
+        assert!(
+            scrolled.contains("→ shell"),
+            "scrolled render after bootstrap should keep the synthesized \
+             header (companion to zarvis_tool_block_survives_one_row_of_scroll \
+             — same fix, different bootstrap source). got:\n{scrolled}",
+        );
+    }
 }
