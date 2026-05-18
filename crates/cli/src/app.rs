@@ -2682,7 +2682,7 @@ impl App {
                         .unwrap_or_default();
                     self.minibuffer = Some(Minibuffer {
                         prompt: format!(
-                            "Delete group '{}'? (y = orphan members / a = delete sessions too / N = cancel): ",
+                            "Delete group '{}'? (y = orphan members / type 'all' to delete sessions too / N = cancel): ",
                             name
                         ),
                         input: String::new(),
@@ -4111,14 +4111,18 @@ pub enum GroupDeleteChoice {
     /// `y` / `yes` — drop the group, keep the sessions (their
     /// `group_id` clears to `None`).
     OrphanMembers,
-    /// `a` / `all` — drop the group AND every member session.
+    /// `all` — drop the group AND every member session. Requires
+    /// typing the full word; a single-letter `a` is rejected so a
+    /// stray keystroke can't trigger a cascade delete.
     DeleteMembers,
 }
 
 pub fn parse_group_delete_choice(input: &str) -> GroupDeleteChoice {
     match input.trim().to_lowercase().as_str() {
         "y" | "yes" => GroupDeleteChoice::OrphanMembers,
-        "a" | "all" => GroupDeleteChoice::DeleteMembers,
+        // Intentionally NO single-letter alias here — the destructive
+        // cascade should never be a typo away from "y".
+        "all" => GroupDeleteChoice::DeleteMembers,
         _ => GroupDeleteChoice::Cancel,
     }
 }
@@ -4140,14 +4144,31 @@ mod group_delete_prompt_tests {
         }
     }
 
-    /// `a` / `all` → cascade-delete every member session.
+    /// Only the full word `all` (case-insensitive, whitespace ok)
+    /// triggers cascade-delete. Requiring the full word means the
+    /// destructive option is never one stray keystroke away from a
+    /// confirm.
     #[test]
     fn all_deletes_members() {
-        for s in ["a", "A", "all", "ALL", "  a  ", " All "] {
+        for s in ["all", "ALL", "  all  ", " All "] {
             assert_eq!(
                 parse_group_delete_choice(s),
                 GroupDeleteChoice::DeleteMembers,
                 "input {s:?} should delete members",
+            );
+        }
+    }
+
+    /// Regression: a single `a` must NOT be a shortcut for cascade.
+    /// Same for `al` or any prefix. The user has to type the full
+    /// word.
+    #[test]
+    fn single_letter_a_does_not_delete_members() {
+        for s in ["a", "A", "  a  ", "al", "AL"] {
+            assert_eq!(
+                parse_group_delete_choice(s),
+                GroupDeleteChoice::Cancel,
+                "input {s:?} must not delete members — full word required",
             );
         }
     }
