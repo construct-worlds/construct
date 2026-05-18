@@ -327,6 +327,11 @@ pub struct App {
     /// Per-session live agent status, fed by `SessionEvent::AgentStatus`
     /// and rendered above queued input while a turn is active.
     pub agent_statuses: HashMap<String, agentd_protocol::AgentStatus>,
+    /// Short visual transition when the main view switches to a different
+    /// session.
+    pub session_transition: Option<SessionTransition>,
+    /// Short visual transitions for newly visible pinned-session tiles.
+    pub pin_transitions: HashMap<String, Instant>,
     /// Ambient Matrix-rain panel state for empty rows in the session list.
     pub matrix_rain: crate::matrix_rain::MatrixRain,
     /// Smoothed 0..1 foreground intensity for Matrix rain. The render path
@@ -351,6 +356,12 @@ pub struct App {
     pub selected_text: Option<String>,
     pub selected_text_bounds: Option<ratatui::layout::Rect>,
     pub selected_text_range: Option<TextSelectionRange>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionTransition {
+    pub session_id: String,
+    pub started_at: Instant,
 }
 
 /// Adapter-owned input editor state, mirrored from
@@ -549,6 +560,8 @@ pub const SPINNER_FRAME_MS: u128 = 120;
 /// palindromic frame schedule (small → big → small). Single cell wide so
 /// it slots into the same column as the static state glyph.
 pub const SPINNER_FRAMES: [&str; 8] = ["✦", "✧", "✶", "✷", "✸", "✷", "✶", "✧"];
+/// Duration of the session-switch visual transition.
+pub const SESSION_TRANSITION_MS: u128 = 200;
 
 pub async fn run(client: Arc<Client>) -> Result<()> {
     let profile = Profile::from_env();
@@ -639,6 +652,8 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         list_collapsed: persisted.list_collapsed,
         editor_states: HashMap::new(),
         agent_statuses: HashMap::new(),
+        session_transition: None,
+        pin_transitions: HashMap::new(),
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
         matrix_rain_intensity: 0.0,
         matrix_rain_intensity_updated_at: now,
@@ -734,6 +749,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut A
     // every time it gains focus.
     let mut last_session_sent: Option<String> = None;
     while !app.should_quit {
+        app.prune_finished_transitions();
         terminal.draw(|f| ui::render(f, app))?;
         // Right pane (main session) resize — debounced fire. Also
         // refires if the *selected* session changed since last sent.
@@ -876,6 +892,39 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut A
 impl App {
     pub fn set_status(&mut self, msg: String) {
         self.status = Some((msg, Instant::now()));
+    }
+
+    pub fn start_session_transition(&mut self, session_id: impl Into<String>) {
+        self.session_transition = Some(SessionTransition {
+            session_id: session_id.into(),
+            started_at: Instant::now(),
+        });
+    }
+
+    pub fn start_pin_transition(&mut self, session_id: impl Into<String>) {
+        self.pin_transitions
+            .insert(session_id.into(), Instant::now());
+    }
+
+    pub fn select_session(&mut self, id: String) {
+        if self.selection.session_id() != Some(id.as_str()) {
+            self.start_session_transition(id.clone());
+        }
+        self.selection = Selection::Session(id);
+        self.transcript_session = None;
+    }
+
+    pub fn prune_finished_transitions(&mut self) {
+        let done = |started: Instant| started.elapsed().as_millis() >= SESSION_TRANSITION_MS;
+        if self
+            .session_transition
+            .as_ref()
+            .map(|t| done(t.started_at))
+            .unwrap_or(false)
+        {
+            self.session_transition = None;
+        }
+        self.pin_transitions.retain(|_, started| !done(*started));
     }
 
     pub fn selected_session(&self) -> Option<&SessionSummary> {
@@ -1096,6 +1145,7 @@ impl App {
                     self.sessions[i].pinned = want;
                 }
                 if want && s.has_pty {
+                    self.start_pin_transition(id.clone());
                     self.bootstrap_terminal(&id).await;
                 }
                 self.set_status(if want { "pinned" } else { "unpinned" }.into());
@@ -1201,10 +1251,12 @@ impl App {
             .unwrap_or(0);
         let n = items.len() as i32;
         let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
-        self.selection = match &items[next] {
-            ListItem::Session { summary, .. } => Selection::Session(summary.id.clone()),
-            ListItem::GroupHeader { group, .. } => Selection::Group(group.id.clone()),
-        };
+        match &items[next] {
+            ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
+            ListItem::GroupHeader { group, .. } => {
+                self.selection = Selection::Group(group.id.clone())
+            }
+        }
         self.refresh_selected_transcript().await;
     }
 
@@ -1429,6 +1481,7 @@ impl App {
                         // populates immediately, even when the pin came from
                         // outside this TUI process.
                         if has_pty && now_pinned && !was_pinned {
+                            self.start_pin_transition(id.clone());
                             self.bootstrap_terminal(&id).await;
                         }
                     }
@@ -2275,8 +2328,7 @@ impl App {
         }
         match &items[idx] {
             ListItem::Session { summary, .. } => {
-                self.selection = Selection::Session(summary.id.clone());
-                self.transcript_session = None;
+                self.select_session(summary.id.clone());
                 self.refresh_selected_transcript().await;
             }
             ListItem::GroupHeader { group, .. } => {
@@ -2332,8 +2384,7 @@ impl App {
                 return;
             }
             // Body click: select + drop focus into the view.
-            self.selection = Selection::Session(id.clone());
-            self.transcript_session = None;
+            self.select_session(id.clone());
             self.refresh_selected_transcript().await;
             self.collapse_orchestrator_panel_on_focus_change();
             self.focus = PaneFocus::View;
@@ -3107,7 +3158,7 @@ impl App {
                             self.histories
                                 .insert(id.clone(), crate::pty_render::ItemHistory::new());
                         }
-                        self.selection = Selection::Session(id);
+                        self.select_session(id);
                         self.refresh_selected_transcript().await;
                         self.focus = PaneFocus::View;
                     }
