@@ -41,7 +41,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use std::future::Future;
-use tokio::io::BufReader;
+use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
 use tokio::sync::mpsc;
 
 #[cfg(feature = "pty")]
@@ -234,15 +234,34 @@ where
     F: FnOnce(SessionStartParams, AdapterContext) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let stdin = tokio::io::stdin();
-    let mut stdin = BufReader::new(stdin);
+    let reader = BufReader::new(tokio::io::stdin());
+    let writer = tokio::io::stdout();
+    run_with_io(metadata, handler, reader, writer).await
+}
+
+/// I/O-generic core of [`run`]. Split out so unit tests can drive the
+/// adapter event loop over an in-memory duplex pipe (`tokio::io::duplex`)
+/// instead of the real process stdio. The behavior is identical to
+/// [`run`]; the only difference is where the JSON-RPC frames flow.
+pub async fn run_with_io<R, W, F, Fut>(
+    metadata: InitializeResult,
+    handler: F,
+    mut reader: R,
+    mut writer: W,
+) -> Result<()>
+where
+    R: AsyncBufRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+    F: FnOnce(SessionStartParams, AdapterContext) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 
-    // Writer task: serialize outgoing messages to stdout one per line.
-    let writer = tokio::spawn(async move {
-        let mut stdout = tokio::io::stdout();
+    // Writer task: serialize outgoing messages to the configured sink one
+    // per line.
+    let writer_task = tokio::spawn(async move {
         while let Some(v) = out_rx.recv().await {
-            if transport::write_message(&mut stdout, &v).await.is_err() {
+            if transport::write_message(&mut writer, &v).await.is_err() {
                 break;
             }
         }
@@ -254,11 +273,46 @@ where
     let mut should_exit = false;
 
     while !should_exit {
-        let raw = match transport::read_message(&mut stdin).await {
-            Ok(Some(v)) => v,
-            Ok(None) => break,
-            Err(e) => {
+        // Race the AHP stdin loop against the running session
+        // handle. If the session handler completes on its own
+        // (e.g. zarvis hits EOF after a Ctrl-D), we MUST exit the
+        // loop and let the process die — otherwise the inbox
+        // receiver is gone but `inbox_tx` is still held by this
+        // loop, every subsequent `pty_input` request silently
+        // errors on `tx.send(...)`, the adapter still acks `Ok`
+        // to the daemon, and from the user's seat typing is dead.
+        // The daemon transitions state to Done only when the
+        // adapter process actually exits.
+        let raw_msg = {
+            let read_fut = transport::read_message(&mut reader);
+            let handle_done_fut = async {
+                match session_handle.as_mut() {
+                    Some(h) => {
+                        let _ = h.await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::pin!(read_fut);
+            tokio::pin!(handle_done_fut);
+            tokio::select! {
+                biased;
+                msg = &mut read_fut => Some(msg),
+                _ = &mut handle_done_fut => None,
+            }
+        };
+        let raw = match raw_msg {
+            Some(Ok(Some(v))) => v,
+            Some(Ok(None)) => break,
+            Some(Err(e)) => {
                 tracing::warn!(error = %e, "adapter: invalid input, ignoring");
+                continue;
+            }
+            None => {
+                // Session handler returned — clear the handle so we
+                // don't await it again, and exit the loop.
+                session_handle = None;
+                should_exit = true;
                 continue;
             }
         };
@@ -505,7 +559,7 @@ where
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), h).await;
     }
     drop(out_tx);
-    let _ = writer.await;
+    let _ = writer_task.await;
     Ok(())
 }
 
@@ -516,4 +570,112 @@ fn _ensure_send<T: Send>() {}
 #[allow(dead_code)]
 fn _unused_context() {
     let _: Result<()> = Err(anyhow::anyhow!("x")).context("y");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Capabilities, SessionState};
+    use tokio::io::AsyncWriteExt;
+
+    fn test_metadata() -> InitializeResult {
+        InitializeResult {
+            name: "test".into(),
+            version: "0.0.0".into(),
+            capabilities: Capabilities {
+                supports_input: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Symptom-level repro for the stuck-zarvis-prompt bug. The user
+    /// hit Ctrl-D in a zarvis session; `interactive::run` returned;
+    /// but the AHP loop in `run_with_io` kept polling stdin and
+    /// silently dropped every subsequent `pty_input` (the inbox
+    /// receiver had been dropped with the handler future, so
+    /// `tx.send(...)` errored and was ignored). The TUI typed into
+    /// the void.
+    ///
+    /// Fix: race the AHP read loop against `session_handle` so the
+    /// adapter exits the moment the handler is done. The daemon's
+    /// wait task then sees `AdapterMessage::Closed` and transitions
+    /// state to `Done` instead of leaving it at `AwaitingInput`.
+    ///
+    /// This test drives `run_with_io` over an in-memory duplex pipe.
+    /// The handler returns as soon as `SESSION_START` lands; without
+    /// the fix the run future blocks on stdin forever and the
+    /// timeout below fires.
+    #[tokio::test]
+    async fn adapter_exits_when_session_handler_returns() {
+        let (mut daemon_side, adapter_side) = tokio::io::duplex(8192);
+        let adapter_reader = BufReader::new(adapter_side);
+
+        let handler = |_params: SessionStartParams, ctx: AdapterContext| async move {
+            // Emit a couple of events and return — mirrors what a
+            // zarvis interactive loop does after Ctrl-D once it
+            // learns to emit Done. The library-level fix doesn't
+            // depend on the Done emission; it MUST exit when the
+            // handler returns regardless.
+            ctx.emit.emit(SessionEvent::Status {
+                state: SessionState::Running,
+                detail: None,
+            });
+            ctx.emit.emit(SessionEvent::Done { exit_code: 0 });
+            // drop ctx → drops inbox receiver → handler future ends.
+        };
+
+        let adapter_task = tokio::spawn(async move {
+            run_with_io(
+                test_metadata(),
+                handler,
+                adapter_reader,
+                tokio::io::sink(),
+            )
+            .await
+        });
+
+        // Drive the protocol: INITIALIZE, then SESSION_START. The
+        // SessionStartParams shape is permissive (most fields are
+        // `#[serde(default)]`) so a minimal body is fine.
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": ahp_method::INITIALIZE,
+            "params": {
+                "protocol_version": "1",
+                "client_info": {"name": "test", "version": "0"},
+            },
+        });
+        let session_start = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": ahp_method::SESSION_START,
+            "params": {
+                "session_id": "s_test",
+                "cwd": "/",
+            },
+        });
+        for v in [&initialize, &session_start] {
+            let mut buf = serde_json::to_string(v).unwrap();
+            buf.push('\n');
+            daemon_side.write_all(buf.as_bytes()).await.unwrap();
+        }
+        // Keep daemon_side alive (not dropped) so the adapter's
+        // stdin doesn't see EOF — only the session-handle race
+        // should drive the exit.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            adapter_task,
+        )
+        .await
+        .expect(
+            "adapter did not exit after session handler returned \
+             — run_with_io kept blocking on stdin (zombie loop)",
+        );
+        let inner = result.expect("adapter task panicked");
+        inner.expect("adapter returned Err");
+        // daemon_side dropped here; not relied on for exit.
+        drop(daemon_side);
+    }
 }
