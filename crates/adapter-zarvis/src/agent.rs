@@ -120,6 +120,14 @@ pub(crate) async fn run_safe_call(
             });
         }
     };
+    emit.emit(SessionEvent::TaskStart {
+        call_id: call.id.clone(),
+        tool: call.name.clone(),
+        args_summary: registry
+            .get(&call.name)
+            .map(|t| t.args_summary(&call.input))
+            .unwrap_or_else(|| serde_json::to_string(&call.input).unwrap_or_default()),
+    });
     emit.emit(SessionEvent::ToolUse {
         tool: call.name.clone(),
         args: call.input.clone(),
