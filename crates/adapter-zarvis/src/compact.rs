@@ -58,11 +58,16 @@ pub fn auto_compact_enabled() -> bool {
 pub const DEFAULT_KEEP_PAIRS: usize = 4;
 
 /// Auto-compact threshold as a fraction of the effective per-model
-/// input-token cap. 0.75 sits between the rolling-prune utilization
-/// (0.7) and the overflow ceiling (1.0) so we get a swing at
-/// summarizing before the rolling prune kicks in destructively, but
-/// without thrashing on every short conversation.
-pub const AUTO_COMPACT_RATIO: f64 = 0.75;
+/// input-token cap. 0.95 keeps auto-compaction as a near-overflow
+/// backstop: short conversations that briefly poke above the
+/// rolling-prune utilization (0.7) don't pay the summarizer-call
+/// cost; only conversations that have grown long enough to brush
+/// against the actual model ceiling get summarized. The existing
+/// `context::prune_to_budget` still runs each step against the 0.7
+/// utilization, so we keep losing tail-end detail on long chats —
+/// auto-compact just intervenes before the model itself starts
+/// rejecting requests.
+pub const AUTO_COMPACT_RATIO: f64 = 0.95;
 
 /// Maximum recursion depth when summarizing a head that's itself too
 /// large for one provider call. Each level halves the input. Depth 3
