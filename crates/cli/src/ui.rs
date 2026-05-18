@@ -18,6 +18,43 @@ use unicode_width::UnicodeWidthStr;
 const MATRIX_RAIN_RAMP_UP_SECS: f32 = 5.0;
 const MATRIX_RAIN_DECAY_SECS: f32 = 20.0;
 
+fn clear_pane_side_borders(f: &mut Frame, area: Rect, app: &App) {
+    if !app.hide_pane_side_borders || area.width == 0 || area.height <= 1 {
+        return;
+    }
+    let side_y = area.y.saturating_add(1);
+    let side_h = area.height.saturating_sub(1);
+    f.render_widget(
+        Clear,
+        Rect {
+            x: area.x,
+            y: side_y,
+            width: 1,
+            height: side_h,
+        },
+    );
+    if area.width > 1 {
+        f.render_widget(
+            Clear,
+            Rect {
+                x: area.x + area.width - 1,
+                y: side_y,
+                width: 1,
+                height: side_h,
+            },
+        );
+    }
+    f.render_widget(
+        Clear,
+        Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        },
+    );
+}
+
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
     match app.zoom {
@@ -929,6 +966,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             )));
         f.render_widget(block, area);
+        clear_pane_side_borders(f, area, app);
         return;
     }
     // Expanded render path: title is ` + sessions ` with a
@@ -1053,6 +1091,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         .block(block)
         .highlight_style(highlight_style);
     f.render_stateful_widget(list, area, &mut state);
+    clear_pane_side_borders(f, area, app);
     render_matrix_rain(f, inner, app, app_items.len());
 }
 
@@ -1452,6 +1491,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
             .block(block)
             .wrap(Wrap { trim: false });
         f.render_widget(para, area);
+        clear_pane_side_borders(f, area, app);
         return;
     }
     let summary = app.selected_session();
@@ -1529,6 +1569,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
+    clear_pane_side_borders(f, area, app);
 
     if let Some(g) = app.selected_group() {
         render_group_overview(f, inner, app, g);
@@ -2298,7 +2339,7 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
 
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
-                    palette commands: new send delete rename diff
+                    palette commands: new send delete rename diff border
                                       zoom interrupt refresh harnesses help
     ?               toggle this help
     C-x C-c / q     quit
@@ -2547,6 +2588,7 @@ fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[Stri
         }
         let inner = block.inner(*tile_area);
         f.render_widget(block, *tile_area);
+        clear_pane_side_borders(f, *tile_area, app);
         if let Some(history) = app.histories.get_mut(id) {
             // Render at the *main view's* virtual size, not the
             // pin tile's narrow size. Each `ItemHistory` is shared
