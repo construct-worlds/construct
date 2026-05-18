@@ -1,18 +1,27 @@
 //! Translate a model spec string into a (provider, bare model name).
 //!
-//! Explicit prefixes (`openai:`, `anthropic:`, `ollama:`) always win.
-//! Otherwise we sniff the bare name:
+//! Explicit prefixes (`openai:`, `anthropic:`, `ollama:`, `codex-oauth:`)
+//! always win. Otherwise we sniff the bare name:
 //!   - starts with `gpt-` or `o[1-5]` → OpenAI
 //!   - starts with `claude-` → Anthropic
 //!   - anything else → Ollama (local fallback)
 //!
 //! Returning an enum keeps the dispatch table small and testable.
+//!
+//! `codex-oauth:` is the subscription-billed Codex backend
+//! (`chatgpt.com/backend-api/codex/responses`), distinct from `openai:`
+//! which hits the public platform API at `api.openai.com`. There is no
+//! bare-name fallback for it — users must opt in explicitly because the
+//! billing path is different.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     OpenAI,
     Anthropic,
     Ollama,
+    /// OAuth-backed Codex backend; reads `~/.codex/auth.json`, bills
+    /// against the user's ChatGPT subscription.
+    CodexOauth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,11 +53,20 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
             model: rest.to_string(),
         });
     }
+    if let Some(rest) = s.strip_prefix("codex-oauth:") {
+        return Ok(ModelSpec {
+            provider: Provider::CodexOauth,
+            model: rest.to_string(),
+        });
+    }
     if let Some(prefix) = s.split(':').next() {
         // Reject unknown explicit prefixes so typos don't silently fall through.
-        if s.contains(':') && !matches!(prefix, "openai" | "anthropic" | "ollama") {
+        if s.contains(':')
+            && !matches!(prefix, "openai" | "anthropic" | "ollama" | "codex-oauth")
+        {
             return Err(format!(
-                "unknown provider prefix `{prefix}:` (expected one of openai:, anthropic:, ollama:)"
+                "unknown provider prefix `{prefix}:` (expected one of \
+                 openai:, anthropic:, ollama:, codex-oauth:)"
             ));
         }
     }
@@ -145,5 +163,32 @@ mod tests {
     fn empty_errors() {
         assert!(parse_model_spec("").is_err());
         assert!(parse_model_spec("   ").is_err());
+    }
+
+    /// `codex-oauth:` routes to the OAuth-backed Codex backend
+    /// (`chatgpt.com/backend-api/codex/responses`). Distinct from
+    /// `openai:` to keep billing paths from getting silently swapped —
+    /// `openai:gpt-5` stays on platform pay-as-you-go, only
+    /// `codex-oauth:gpt-5` draws against ChatGPT subscription.
+    #[test]
+    fn codex_oauth_prefix_is_recognized() {
+        let s = parse("codex-oauth:gpt-5-codex");
+        assert_eq!(s.provider, Provider::CodexOauth);
+        assert_eq!(s.model, "gpt-5-codex");
+
+        let s = parse("codex-oauth:gpt-5");
+        assert_eq!(s.provider, Provider::CodexOauth);
+        assert_eq!(s.model, "gpt-5");
+    }
+
+    /// No bare-name fallback for codex-oauth: opting into a different
+    /// billing path requires explicit prefix, even for the
+    /// codex-specific model strings.
+    #[test]
+    fn gpt_5_codex_bare_does_not_route_to_codex_oauth() {
+        // The platform OpenAI API doesn't serve `gpt-5-codex`, but the
+        // router treats it as OpenAI based on the `gpt-` prefix; users
+        // must type the `codex-oauth:` prefix explicitly.
+        assert_eq!(parse("gpt-5-codex").provider, Provider::OpenAI);
     }
 }
