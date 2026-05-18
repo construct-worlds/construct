@@ -1833,6 +1833,16 @@ pub async fn run(
                 ReadOutcome::Stop => break 'outer,
                 ReadOutcome::Eof => {
                     term.note("(end of session)");
+                    // Tell the daemon the session ended on its own so
+                    // state moves to `Done` cleanly. Without this the
+                    // last-broadcast state stays `AwaitingInput`, and
+                    // even after the adapter library's run loop exits
+                    // (which broadcasts `Closed`), a daemon restart
+                    // would resurrect the session via
+                    // `resume_running_sessions`. Emitting `Done`
+                    // explicitly captures user intent — Ctrl-D meant
+                    // "I'm done."
+                    term.emit.emit(SessionEvent::Done { exit_code: 0 });
                     break 'outer;
                 }
             }
