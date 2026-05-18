@@ -1900,7 +1900,7 @@ impl App {
     }
 
     /// True if `(col, row)` sits on the list/right-pane divider.
-    /// The grab zone is the list pane's rightmost clear column; the
+    /// The grab zone is the list pane's two rightmost clear columns; the
     /// right pane's left edge is regular usable content.
     fn is_on_list_divider(&self, col: u16, row: u16) -> bool {
         if !matches!(self.zoom, ZoomMode::None) {
@@ -1912,8 +1912,11 @@ impl App {
         if list.width == 0 {
             return false;
         }
-        let list_right_x = list.x + list.width - 1;
-        col == list_right_x && row >= list.y && row < list.y + list.height
+        let divider_start = list.x + list.width.saturating_sub(2);
+        col >= divider_start
+            && col < list.x + list.width
+            && row >= list.y
+            && row < list.y + list.height
     }
 
     /// Hit-test a left-click against the last frame's pane geometry.
@@ -2283,8 +2286,8 @@ impl App {
                 continue;
             }
             // Diamond zone: 4 cells on the top border, starting
-            // after the leading title dash — covers `[ ][⬩][ ][status]` in the
-            // title `- ⬩ <status> <label> <harness>`. Same gesture
+            // after the leading title border — covers `[ ][⬩][ ][status]` in the
+            // title `─ ⬩ <status> <label> <harness>`. Same gesture
             // as clicking the list-view diamond. Must stay in
             // lockstep with `pin_tile_diamond_zone` in ui.rs.
             let diamond_zone_start = tile.x + 1;

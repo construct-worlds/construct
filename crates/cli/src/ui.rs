@@ -15,6 +15,8 @@ use ratatui::Frame;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthStr;
 
+const TITLE_BORDER: &str = "─";
+
 /// Content area for panes that render only a top border while preserving the
 /// old one-row bottom gap as empty space between adjacent regions.
 pub fn top_border_content_area(area: Rect) -> Rect {
@@ -26,11 +28,11 @@ pub fn top_border_content_area(area: Rect) -> Rect {
     }
 }
 
-/// The list pane keeps its rightmost column clear as the visual divider and
+/// The list pane keeps its two rightmost columns clear as the visual divider and
 /// drag handle. Its left edge is regular usable content.
 pub fn list_content_area(area: Rect) -> Rect {
     let mut inner = top_border_content_area(area);
-    inner.width = inner.width.saturating_sub(1);
+    inner.width = inner.width.saturating_sub(2);
     inner
 }
 
@@ -386,7 +388,7 @@ fn hovered_diamond(app: &App) -> Option<(u16, u16, &SessionSummary)> {
 
 /// Hit zone for the `+` button on the session-list pane's title
 /// (`" + sessions "`). Returns `(x_start, x_end_exclusive, y)`.
-/// Anchored after the leading title dash. Cells `list.x + 1`
+/// Anchored after the leading title border. Cells `list.x + 1`
 /// and `list.x + 2` cover `[ ][+]` for a forgiving click target.
 pub fn list_plus_button_range(list_area: Rect) -> Option<(u16, u16, u16)> {
     if list_area.width < 4 {
@@ -551,8 +553,8 @@ fn hovered_view_close_button(app: &App, view_area: Rect) -> bool {
 }
 
 /// Hit zone for the pin-tile unpin diamond: 4 cells on the top
-/// border, starting after the leading title dash. Title shape is
-/// `- ⬩ <status> <label> <harness>`, so cells `tile.x + 1 .. tile.x + 5`
+/// border, starting after the leading title border. Title shape is
+/// `─ ⬩ <status> <label> <harness>`, so cells `tile.x + 1 .. tile.x + 5`
 /// (inclusive) cover `[ ][⬩][ ][status]` — the same 4-cell zone
 /// idiom as the list-view diamond. Returns `(diamond_x,
 /// tile_top_y)` so the tooltip can anchor on the diamond cell.
@@ -934,7 +936,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
             .borders(Borders::TOP)
             .border_style(pane_border_style(&app.theme, focused))
             .title(Line::from(Span::styled(
-                "-›-",
+                "─›─",
                 Style::default()
                     .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
@@ -950,9 +952,9 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         .fg(app.theme.accent)
         .add_modifier(Modifier::BOLD);
     let title_line = Line::from(vec![
-        Span::raw("- "),
+        Span::raw("─ "),
         Span::styled("+", plus_style),
-        Span::raw(" sessions -"),
+        Span::raw(" sessions ─"),
     ]);
     let minus_hovered = match app.mouse_pos {
         Some((mx, my)) => list_collapse_button_range(area)
@@ -967,7 +969,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         Style::default().fg(app.theme.muted)
     };
-    let collapse_line = Line::from(Span::styled("- − - ", minus_style))
+    let collapse_line = Line::from(Span::styled("─ − ─ ", minus_style))
         .alignment(ratatui::layout::Alignment::Right);
     let block = Block::default()
         .borders(Borders::TOP)
@@ -1378,7 +1380,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
         let block = Block::default()
             .borders(Borders::TOP)
             .border_style(pane_border_style(&app.theme, focused))
-            .title("- diff (ESC clears; press d to refresh) -");
+            .title("─ diff (ESC clears; press d to refresh) ─");
         let inner = top_border_content_area(area);
         let para = Paragraph::new(diff.clone()).wrap(Wrap { trim: false });
         f.render_widget(block, area);
@@ -1388,7 +1390,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     let summary = app.selected_session();
     let group = app.selected_group();
     // Width budgets for fitting the title onto the top border.
-    // Layout: `- <glyph> <label> - … - <harness> -  x -`.
+    // Layout: `─ <glyph> <label> ─ … ─ <harness> ─  x ─`.
     let total = area.width as usize;
     let close_w: usize = if summary.is_some() { 4 } else { 0 };
     let harness_w: usize = summary
@@ -1405,12 +1407,14 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
         .saturating_sub(5 + glyph_w);
     let title = match (summary, group) {
         (Some(s), _) => format!(
-            "- {} {} -",
+            "{} {} {} {}",
+            TITLE_BORDER,
             session_status_glyph(app, s),
             truncate_to_width(&primary_label(s), label_budget),
+            TITLE_BORDER,
         ),
-        (None, Some(g)) => format!("- group: {} -", g.name),
-        (None, None) => "- no session -".to_string(),
+        (None, Some(g)) => format!("{TITLE_BORDER} group: {} {TITLE_BORDER}", g.name),
+        (None, None) => format!("{TITLE_BORDER} no session {TITLE_BORDER}"),
     };
     // Harness name right-aligned on the top border so it visually
     // detaches from the session-name title. Sits just left of the
@@ -1419,7 +1423,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     // title bar's frame, not as a separately-styled badge.
     let harness_right = summary.map(|s| {
         Line::from(Span::styled(
-            format!("- {} -", s.harness),
+            format!("{TITLE_BORDER} {} {TITLE_BORDER}", s.harness),
             pane_border_style(&app.theme, focused),
         ))
         .alignment(ratatui::layout::Alignment::Right)
@@ -1440,7 +1444,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
         Style::default().fg(app.theme.matrix_close)
     };
     let close =
-        Line::from(Span::styled(" x -", close_style)).alignment(ratatui::layout::Alignment::Right);
+        Line::from(Span::styled(" x ─", close_style)).alignment(ratatui::layout::Alignment::Right);
     let mut block = Block::default()
         .borders(Borders::TOP)
         .border_style(pane_border_style(&app.theme, focused))
@@ -2452,15 +2456,17 @@ fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[Stri
             .saturating_sub(7 + glyph_w);
         let title = match summary {
             Some(s) => format!(
-                "- ⬩ {} {} -",
+                "{} ⬩ {} {} {}",
+                TITLE_BORDER,
                 session_status_glyph(app, s),
                 truncate_to_width(&primary_label(s), pin_label_budget),
+                TITLE_BORDER,
             ),
-            None => format!("- ⬩ {} -", short_id(id)),
+            None => format!("{TITLE_BORDER} ⬩ {} {TITLE_BORDER}", short_id(id)),
         };
         let harness_right = summary.map(|s| {
             Line::from(Span::styled(
-                format!("- {} -", s.harness),
+                format!("{TITLE_BORDER} {} {TITLE_BORDER}", s.harness),
                 pane_border_style(&app.theme, is_selected),
             ))
             .alignment(ratatui::layout::Alignment::Right)
@@ -2507,7 +2513,7 @@ pub fn pin_tile_layout(area: Rect, n: usize) -> Vec<Rect> {
     let n = n.max(1);
     let cols = n.min(4).max(1);
     let rows = (n + cols - 1) / cols;
-    let row_constraints = spaced_constraints(rows);
+    let row_constraints = spaced_constraints(rows, 1);
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(row_constraints)
@@ -2520,7 +2526,7 @@ pub fn pin_tile_layout(area: Rect, n: usize) -> Vec<Rect> {
             break;
         }
         let cols_here = remaining.min(cols).max(1);
-        let col_constraints = spaced_constraints(cols_here);
+        let col_constraints = spaced_constraints(cols_here, 2);
         let col_areas = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(col_constraints)
@@ -2532,11 +2538,11 @@ pub fn pin_tile_layout(area: Rect, n: usize) -> Vec<Rect> {
     tiles
 }
 
-fn spaced_constraints(n: usize) -> Vec<Constraint> {
+fn spaced_constraints(n: usize, gap: u16) -> Vec<Constraint> {
     let mut constraints = Vec::with_capacity(n.saturating_mul(2));
     for idx in 0..n {
         if idx > 0 {
-            constraints.push(Constraint::Length(1));
+            constraints.push(Constraint::Length(gap));
         }
         constraints.push(Constraint::Ratio(1, n as u32));
     }
@@ -3113,7 +3119,7 @@ mod tests {
             let a = pair[0];
             let b = pair[1];
             if a.y == b.y {
-                assert_eq!(b.x, a.x + a.width + 1);
+                assert_eq!(b.x, a.x + a.width + 2);
             }
         }
         assert_eq!(tiles[4].y, tiles[0].y + tiles[0].height + 1);
