@@ -338,6 +338,8 @@ pub struct App {
     /// User-hidden Matrix-rain panel. Toggle with `/rain`; close with the
     /// panel's `x` button.
     pub matrix_rain_hidden: bool,
+    /// Hide left, right, and bottom border lines for list/view/pin panes.
+    pub hide_pane_side_borders: bool,
     /// Last rendered frame, one string per terminal row. Mouse drag
     /// selection copies out of this snapshot, so it works across the
     /// whole TUI without every widget implementing text export.
@@ -642,6 +644,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         matrix_rain_intensity_updated_at: now,
         matrix_rain_foreground_epoch: now,
         matrix_rain_hidden: persisted.matrix_rain_hidden,
+        hide_pane_side_borders: persisted.hide_pane_side_borders,
         frame_text: Vec::new(),
         text_selection: None,
         selected_text: None,
@@ -696,6 +699,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         matrix_rain_h: app.matrix_rain_h,
         list_collapsed: app.list_collapsed,
         matrix_rain_hidden: app.matrix_rain_hidden,
+        hide_pane_side_borders: app.hide_pane_side_borders,
     });
 
     result
@@ -3246,6 +3250,17 @@ impl App {
                 self.set_status(format!(
                     "matrix rain {}",
                     if self.matrix_rain_hidden { "hidden" } else { "shown" }
+                ));
+            }
+            "border" => {
+                self.hide_pane_side_borders = !self.hide_pane_side_borders;
+                self.set_status(format!(
+                    "pane side borders {}",
+                    if self.hide_pane_side_borders {
+                        "hidden"
+                    } else {
+                        "shown"
+                    }
                 ));
             }
             "diff" => self.run_action(KeyAction::OpenDiff).await,
