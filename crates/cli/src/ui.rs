@@ -12,8 +12,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthStr;
+
+const MATRIX_RAIN_RAMP_UP_SECS: f32 = 5.0;
+const MATRIX_RAIN_DECAY_SECS: f32 = 20.0;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -1086,26 +1089,33 @@ fn render_matrix_rain(f: &mut Frame, area: Rect, app: &mut App, occupied_rows: u
     }
 
     let now = Instant::now();
-    let activity = fleet_activity(app, now);
+    let activity = update_matrix_rain_intensity(app, now);
     let elapsed = app.start_instant.elapsed().as_millis() as u64;
-    let tail = (4.0 + activity * 8.0).round() as u16;
+    let tail = (3.0 + activity * 9.0).round() as u16;
     let cycle = rain_area.height + tail + 1;
     let charset = b"01:|/\\{}[]<>+$#@*=-zrvshcodxgit";
 
     for col in 0..rain_area.width {
         let seed = hash64(col as u64 ^ ((rain_area.width as u64) << 24));
         let speed = 2 + (seed % 7);
-        let offset = (seed >> 8) % cycle as u64;
-        let head = (((elapsed / (58 + speed * 19)) + offset) % cycle as u64) as i16;
-        let faint_threshold = (3.0 + activity * 11.0).round() as u64;
+        let threshold = foreground_column_threshold(seed);
+        let head = foreground_rain_head(
+            now,
+            app.matrix_rain_foreground_epoch,
+            threshold,
+            activity,
+            speed,
+            cycle,
+        );
         for row in 0..rain_area.height {
-            let dist = head - row as i16;
+            let dist = head.unwrap_or(-1) - row as i16;
             let mut style = None;
-            if dist >= 0 && dist < tail as i16 {
+            if head.is_some() && dist >= 0 && dist < tail as i16 {
                 let shade = 1.0 - (dist as f32 / tail.max(1) as f32);
                 style = Some(rain_style(&app.theme, shade, activity));
             } else {
                 let sparkle = hash64(seed ^ row as u64 ^ (elapsed / 260));
+                let faint_threshold = (2.0 + activity * 3.0).round() as u64;
                 if sparkle % 100 < faint_threshold {
                     style = Some(Style::default().fg(app.theme.matrix_dim));
                 }
@@ -1155,24 +1165,90 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, theme: &Theme) {
     f.buffer_mut().set_string(x, area.y, " x ", close_style);
 }
 
-fn fleet_activity(app: &App, now: Instant) -> f32 {
+fn update_matrix_rain_intensity(app: &mut App, now: Instant) -> f32 {
+    let target = fleet_activity_target(app, now);
+    let elapsed = now
+        .checked_duration_since(app.matrix_rain_intensity_updated_at)
+        .unwrap_or(Duration::ZERO);
+    let prev = app.matrix_rain_intensity;
+    app.matrix_rain_intensity =
+        eased_matrix_rain_intensity(app.matrix_rain_intensity, target, elapsed);
+    if app.matrix_rain_intensity > prev {
+        let offset = Duration::from_secs_f32(app.matrix_rain_intensity * MATRIX_RAIN_RAMP_UP_SECS);
+        app.matrix_rain_foreground_epoch = now.checked_sub(offset).unwrap_or(now);
+    }
+    app.matrix_rain_intensity_updated_at = now;
+    app.matrix_rain_intensity
+}
+
+fn eased_matrix_rain_intensity(current: f32, target: f32, elapsed: Duration) -> f32 {
+    let current = current.clamp(0.0, 1.0);
+    let target = target.clamp(0.0, 1.0);
+    if (current - target).abs() <= f32::EPSILON {
+        return target;
+    }
+    let ramp = if target > current {
+        MATRIX_RAIN_RAMP_UP_SECS
+    } else {
+        MATRIX_RAIN_DECAY_SECS
+    };
+    let step = elapsed.as_secs_f32() / ramp;
+    if target > current {
+        (current + step).min(target)
+    } else {
+        (current - step).max(target)
+    }
+}
+
+fn foreground_column_threshold(seed: u64) -> f32 {
+    unit_f32(hash64(seed ^ 0x9a4b_2f1d_87c6_e503))
+}
+
+fn foreground_rain_head(
+    now: Instant,
+    foreground_epoch: Instant,
+    threshold: f32,
+    activity: f32,
+    speed: u64,
+    cycle: u16,
+) -> Option<i16> {
+    if activity < threshold {
+        return None;
+    }
+    let crossing = foreground_epoch.checked_add(Duration::from_secs_f32(
+        threshold * MATRIX_RAIN_RAMP_UP_SECS,
+    ))?;
+    let age = now.checked_duration_since(crossing)?;
+    let cell_ms = 58 + speed * 19;
+    Some(((age.as_millis() as u64 / cell_ms) % cycle.max(1) as u64) as i16)
+}
+
+fn fleet_activity_target(app: &App, now: Instant) -> f32 {
     let user_sessions: Vec<&SessionSummary> = app
         .sessions
         .iter()
         .filter(|s| s.kind != agentd_protocol::SessionKind::Orchestrator)
         .collect();
     if user_sessions.is_empty() {
-        return 0.18;
+        return 0.0;
     }
     let mut score = 0.0f32;
+    let mut peak = 0.0f32;
     for s in &user_sessions {
-        score += match s.state {
+        let mut session_score: f32 = match s.state {
             SessionState::Running => 1.0,
-            SessionState::AwaitingInput => 0.45,
-            SessionState::Paused | SessionState::Pending => 0.25,
-            SessionState::Done => 0.08,
-            SessionState::Errored => 0.65,
+            SessionState::Pending => 0.55,
+            SessionState::Paused | SessionState::AwaitingInput | SessionState::Done => 0.0,
+            SessionState::Errored => 0.25,
         };
+        if app
+            .agent_statuses
+            .get(&s.id)
+            .map(|status| status.active)
+            .unwrap_or(false)
+        {
+            session_score = session_score.max(1.0);
+        }
         if app
             .pty_activity
             .get(&s.id)
@@ -1180,18 +1256,21 @@ fn fleet_activity(app: &App, now: Instant) -> f32 {
             .map(|d| d.as_millis() < 900)
             .unwrap_or(false)
         {
-            score += 0.55;
+            session_score = session_score.max(1.0);
         } else if let Some(last) = s.last_pty_at_ms {
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(last);
             if now_ms.saturating_sub(last) < 1_200 {
-                score += 0.35;
+                session_score = session_score.max(0.7);
             }
         }
+        peak = peak.max(session_score);
+        score += session_score;
     }
-    (0.16 + (score / user_sessions.len().max(1) as f32) * 0.42).clamp(0.12, 0.82)
+    let average = score / user_sessions.len().max(1) as f32;
+    (peak * 0.7 + average * 0.3).clamp(0.0, 1.0)
 }
 
 fn rain_style(theme: &Theme, shade: f32, activity: f32) -> Style {
@@ -1356,6 +1435,10 @@ fn hash64(mut x: u64) -> u64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
     x ^ (x >> 31)
+}
+
+fn unit_f32(seed: u64) -> f32 {
+    ((seed >> 11) as f64 / ((1u64 << 53) as f64)) as f32
 }
 
 fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
@@ -3081,6 +3164,37 @@ mod tests {
         assert_eq!(matrix_rain_panel_height(Some(2), 30), crate::app::MATRIX_RAIN_H_MIN);
         assert_eq!(matrix_rain_panel_height(Some(50), 30), 30);
         assert_eq!(matrix_rain_panel_height(Some(8), 3), 3);
+    }
+
+    #[test]
+    fn matrix_rain_intensity_ramps_up_faster_than_down() {
+        assert_eq!(
+            eased_matrix_rain_intensity(0.0, 1.0, Duration::from_secs(5)),
+            1.0
+        );
+        assert_eq!(
+            eased_matrix_rain_intensity(1.0, 0.0, Duration::from_secs(5)),
+            0.75
+        );
+        assert_eq!(
+            eased_matrix_rain_intensity(1.0, 0.0, Duration::from_secs(20)),
+            0.0
+        );
+    }
+
+    #[test]
+    fn foreground_rain_head_starts_at_top_after_activation() {
+        let epoch = Instant::now();
+        let threshold = 0.5;
+        let crossing = epoch + Duration::from_millis(2500);
+        assert_eq!(
+            foreground_rain_head(crossing, epoch, threshold, threshold, 2, 20),
+            Some(0)
+        );
+        assert_eq!(
+            foreground_rain_head(crossing, epoch, threshold, threshold - 0.01, 2, 20),
+            None
+        );
     }
 
     #[test]

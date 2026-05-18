@@ -329,6 +329,12 @@ pub struct App {
     pub agent_statuses: HashMap<String, agentd_protocol::AgentStatus>,
     /// Ambient Matrix-rain panel state for empty rows in the session list.
     pub matrix_rain: crate::matrix_rain::MatrixRain,
+    /// Smoothed 0..1 foreground intensity for Matrix rain. The render path
+    /// eases this toward current fleet activity so rain ramps up and decays
+    /// instead of snapping between idle and active states.
+    pub matrix_rain_intensity: f32,
+    pub matrix_rain_intensity_updated_at: Instant,
+    pub matrix_rain_foreground_epoch: Instant,
     /// User-hidden Matrix-rain panel. Toggle with `/rain`; close with the
     /// panel's `x` button.
     pub matrix_rain_hidden: bool,
@@ -580,6 +586,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         })
         .unwrap_or(Selection::None);
 
+    let now = Instant::now();
     let mut app = App {
         client: client.clone(),
         sessions,
@@ -616,7 +623,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         orchestrator_panel_h: persisted.orchestrator_panel_h,
         resizing_orchestrator_panel: None,
         pty_activity: HashMap::new(),
-        start_instant: Instant::now(),
+        start_instant: now,
         layout: LayoutSnapshot::default(),
         mouse_pos: None,
         mouse_capture_enabled: true,
@@ -631,6 +638,9 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         editor_states: HashMap::new(),
         agent_statuses: HashMap::new(),
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
+        matrix_rain_intensity: 0.0,
+        matrix_rain_intensity_updated_at: now,
+        matrix_rain_foreground_epoch: now,
         matrix_rain_hidden: persisted.matrix_rain_hidden,
         frame_text: Vec::new(),
         text_selection: None,
