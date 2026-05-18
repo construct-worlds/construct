@@ -1476,8 +1476,95 @@ fn hash64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
+fn hash_str(s: &str) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 fn unit_f32(seed: u64) -> f32 {
     ((seed >> 11) as f64 / ((1u64 << 53) as f64)) as f32
+}
+
+fn transition_amount(started_at: Instant) -> Option<f32> {
+    let elapsed = started_at.elapsed().as_millis();
+    if elapsed >= crate::app::SESSION_TRANSITION_MS {
+        return None;
+    }
+    Some(1.0 - (elapsed as f32 / crate::app::SESSION_TRANSITION_MS as f32))
+}
+
+fn render_glitch_overlay(f: &mut Frame, area: Rect, theme: &Theme, seed: u64, amount: f32) {
+    if area.width == 0 || area.height == 0 || amount <= 0.0 {
+        return;
+    }
+    let frame = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64 / crate::app::SPINNER_FRAME_MS as u64)
+        .unwrap_or(0);
+    let density = 0.18 + 0.48 * amount;
+    let charset = b"01#@%+-/\\_|";
+    for row in 0..area.height {
+        let row_seed = hash64(seed ^ frame.wrapping_mul(97) ^ row as u64);
+        if unit_f32(row_seed) > density {
+            continue;
+        }
+        let mut text = String::with_capacity(area.width as usize);
+        let shift = (unit_f32(hash64(row_seed ^ 0x51)) * 6.0 * amount) as usize;
+        for col in 0..area.width as usize {
+            let cell_seed = hash64(row_seed ^ (col as u64).wrapping_mul(0x9e37));
+            let noise = unit_f32(cell_seed);
+            if col < shift || noise < 0.20 + 0.42 * amount {
+                let idx = (hash64(cell_seed ^ 0xa11ce) as usize) % charset.len();
+                text.push(charset[idx] as char);
+            } else {
+                text.push(' ');
+            }
+        }
+        let style = if row % 3 == 0 {
+            Style::default().fg(theme.accent_alt)
+        } else if row % 5 == 0 {
+            Style::default().fg(theme.warning)
+        } else {
+            Style::default().fg(theme.accent)
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(text, style))),
+            Rect {
+                x: area.x,
+                y: area.y + row,
+                width: area.width,
+                height: 1,
+            },
+        );
+    }
+}
+
+fn render_main_transition(f: &mut Frame, area: Rect, app: &App, session_id: &str) {
+    let Some(t) = app
+        .session_transition
+        .as_ref()
+        .filter(|t| t.session_id == session_id)
+    else {
+        return;
+    };
+    let Some(amount) = transition_amount(t.started_at) else {
+        return;
+    };
+    render_glitch_overlay(f, area, &app.theme, hash_str(session_id), amount);
+}
+
+fn render_pin_transition(f: &mut Frame, area: Rect, app: &App, session_id: &str) {
+    let Some(started_at) = app.pin_transitions.get(session_id).copied() else {
+        return;
+    };
+    let Some(amount) = transition_amount(started_at) else {
+        return;
+    };
+    render_glitch_overlay(f, area, &app.theme, hash_str(session_id) ^ 0x70696e, amount);
 }
 
 fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
@@ -1575,9 +1662,13 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
         render_group_overview(f, inner, app, g);
         return;
     }
+    let selected_id = app.selected_id();
     match app.view {
         ViewMode::Terminal => render_terminal(f, inner, app),
         ViewMode::Transcript => render_transcript(f, inner, app),
+    }
+    if let Some(id) = selected_id {
+        render_main_transition(f, inner, app, &id);
     }
 }
 
@@ -2615,6 +2706,7 @@ fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[Stri
             let p = Paragraph::new("(no data yet)").style(Style::default().fg(app.theme.dim));
             f.render_widget(p, inner);
         }
+        render_pin_transition(f, inner, app, id);
     }
 }
 
