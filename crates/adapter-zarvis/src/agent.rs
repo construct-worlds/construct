@@ -737,6 +737,7 @@ impl ResolvedModel {
             provider::routing::Provider::OpenAI => "openai",
             provider::routing::Provider::Anthropic => "anthropic",
             provider::routing::Provider::Ollama => "ollama",
+            provider::routing::Provider::CodexOauth => "codex-oauth",
         }
     }
 }
@@ -778,6 +779,9 @@ pub fn resolve_model_from_spec(spec_str: &str) -> Result<ResolvedModel> {
             Box::new(provider::anthropic::Anthropic::from_env()?)
         }
         provider::routing::Provider::Ollama => Box::new(provider::ollama::Ollama::from_env()?),
+        provider::routing::Provider::CodexOauth => {
+            Box::new(provider::codex_oauth::CodexOauth::from_env()?)
+        }
     };
     Ok(ResolvedModel {
         model: spec.model,

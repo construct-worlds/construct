@@ -241,6 +241,10 @@ pub struct App {
     /// screen except for the minibuffer line at the bottom. Toggled with
     /// `C-x z` (emacs) / `z` (vim), matching tmux's prefix-z.
     pub zoom: ZoomMode,
+    /// User-controlled scroll offset for the session list. 0 = first item at
+    /// top. Mouse wheel over the list adjusts this; keyboard selection still
+    /// lets ratatui pull the selected item back into view when needed.
+    pub list_scroll_offset: usize,
     /// Scrollback offset (in rows) applied to the *focused* session's PTY
     /// parser when rendering. 0 = live view. Increased by mouse-wheel up,
     /// decreased by mouse-wheel down. Reset to 0 on user keystroke into
@@ -450,6 +454,12 @@ pub const PIN_STRIP_H_MAX: u16 = 40;
 pub const MATRIX_RAIN_H_MIN: u16 = 4;
 pub const MATRIX_RAIN_H_DEFAULT: u16 = 12;
 
+/// Minimum number of session-list rows the layout keeps visible when
+/// the matrix-rain panel is shown. Below this the list takes the
+/// entire pane and the matrix is hidden — preserving the ability to
+/// see and select sessions in a very short terminal.
+pub const SESSION_LIST_H_MIN: u16 = 3;
+
 /// A clickable / hoverable text segment in the minibuffer hint line —
 /// e.g. "C-x z unzoom" or "? help" — that dispatches a KeyAction when
 /// clicked. Geometry is filled by `render_minibuffer` so the click
@@ -475,6 +485,17 @@ pub struct LayoutSnapshot {
     /// past the last row is a no-op rather than selecting an
     /// out-of-range item). Mirrors `app.list_items().len()`.
     pub list_row_count: usize,
+    /// Sub-rect of the list pane where session rows are actually
+    /// drawn — the inner area minus the bottom matrix-rain panel
+    /// (when shown). Click hit-testing for rows uses this so clicks
+    /// inside the matrix panel don't mis-fire as row selections, and
+    /// it also bounds the visible window when the list scrolls.
+    pub list_items_area: Option<ratatui::layout::Rect>,
+    /// Scroll offset of the session list (number of items scrolled
+    /// off the top). Captured from `ListState::offset()` after the
+    /// last render so click-to-row mapping stays correct when the
+    /// list overflows its visible area.
+    pub list_scroll_offset: usize,
     /// Clickable segments in the minibuffer hint line. Empty when a
     /// minibuffer prompt (palette / send-input / etc.) is open.
     pub minibuffer_hints: Vec<HintZone>,
@@ -642,6 +663,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         tasks_popup: None,
         terminal_pane_size: (100, 30),
         zoom: initial_zoom,
+        list_scroll_offset: 0,
         view_scrollback: 0,
         orchestrator_scrollback: 0,
         orchestrator_panel_h: persisted.orchestrator_panel_h,
@@ -1308,7 +1330,8 @@ impl App {
             m if m == agentd_protocol::ipc_notif::EVENT => {
                 if let Some(p) = n.params {
                     if let Ok(payload) = serde_json::from_value::<EventNotificationPayload>(p) {
-                        self.matrix_rain.observe_event(&payload.event);
+                        self.matrix_rain
+                            .observe_event(&payload.event, self.matrix_rain_intensity);
                         // Tool-approval prompt: if no minibuffer is in use,
                         // open the approval prompt for the matching session.
                         // Otherwise the user sees the request in the
@@ -1335,6 +1358,7 @@ impl App {
                             self.editor_states.remove(&payload.session_id);
                             self.agent_statuses.remove(&payload.session_id);
                             self.pty_activity.remove(&payload.session_id);
+                            self.matrix_rain.forget_session(&payload.session_id);
                             if Some(payload.session_id.as_str()) == self.transcript_session.as_deref() {
                                 self.transcript.clear();
                                 self.transcript_scroll = u16::MAX;
@@ -1366,16 +1390,31 @@ impl App {
                         }
                         // PTY events: feed into the per-session items history.
                         if let SessionEvent::Pty { .. } = &payload.event {
-                            if let Some(bytes) = payload.event.pty_bytes() {
+                            let now = Instant::now();
+                            let bytes = payload.event.pty_bytes();
+                            if let Some(b) = bytes.as_deref() {
                                 let history = self
                                     .histories
                                     .entry(payload.session_id.clone())
                                     .or_default();
-                                history.feed_pty(&bytes);
+                                history.feed_pty(b);
                             }
                             // Mark the session as freshly active for the spinner.
                             self.pty_activity
-                                .insert(payload.session_id.clone(), Instant::now());
+                                .insert(payload.session_id.clone(), now);
+                            // PTY-only harnesses (codex/claude in interactive
+                            // mode, shell) don't emit structured ToolUse/Status
+                            // events while working, so feed the matrix-rain
+                            // the byte stream too. It harvests recent words
+                            // and reveals them on a per-session throttle, so
+                            // the rain reflects what the harness is actually
+                            // printing instead of cycling a hard-coded list.
+                            self.matrix_rain.observe_pty_activity(
+                                &payload.session_id,
+                                bytes.as_deref().unwrap_or(&[]),
+                                now,
+                                self.matrix_rain_intensity,
+                            );
                             return;
                         }
                         // Tool events feed the same history so the
@@ -1621,6 +1660,7 @@ impl App {
         self.histories.remove(id);
         self.block_hits.remove(id);
         self.pty_activity.remove(id);
+        self.matrix_rain.forget_session(id);
         // Orchestrator session went away → palette fallback after the
         // re-derive below. The orchestrator's PTY parser in
         // `terminals[id]` was already removed by the generic cleanup
@@ -1696,8 +1736,16 @@ impl App {
         // tooltip, etc.) has a current position to render against.
         self.mouse_pos = Some((ev.column, ev.row));
         match ev.kind {
-            MouseEventKind::ScrollUp => self.adjust_mouse_scrollback(ev.column, ev.row, STEP),
-            MouseEventKind::ScrollDown => self.adjust_mouse_scrollback(ev.column, ev.row, -STEP),
+            MouseEventKind::ScrollUp => {
+                if !self.adjust_mouse_list_scroll(ev.column, ev.row, -STEP) {
+                    self.adjust_mouse_scrollback(ev.column, ev.row, STEP);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if !self.adjust_mouse_list_scroll(ev.column, ev.row, STEP) {
+                    self.adjust_mouse_scrollback(ev.column, ev.row, -STEP);
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 // List ↔ view divider: clicking the list pane's
                 // right border (col = list_width - 1), the view's
@@ -1982,8 +2030,10 @@ impl App {
     fn matrix_rain_available_height(&self) -> Option<u16> {
         let list = self.layout.list_area?;
         let inner_h = list.height.saturating_sub(2);
-        let used = (self.layout.list_row_count as u16).min(inner_h);
-        Some(inner_h.saturating_sub(used))
+        // The matrix panel is sticky and may shrink the visible item
+        // window, but it's clamped so the list always keeps at least
+        // SESSION_LIST_H_MIN rows when both are shown.
+        Some(inner_h.saturating_sub(SESSION_LIST_H_MIN))
     }
 
     /// True if `(col, row)` sits on the list ↔ right-pane divider.
@@ -2332,7 +2382,21 @@ impl App {
         if row <= list.y || row + 1 >= list.y + list.height {
             return;
         }
-        let idx = (row - list.y - 1) as usize;
+        // Clicks inside the (sticky) matrix-rain panel at the bottom
+        // of the list pane focus the list but do NOT count as a row
+        // click — without this guard, clicks past the last visible
+        // item would map to phantom indices when items overflow.
+        let items_area = self.layout.list_items_area.unwrap_or(ratatui::layout::Rect {
+            x: list.x,
+            y: list.y.saturating_add(1),
+            width: list.width,
+            height: list.height.saturating_sub(2),
+        });
+        if row < items_area.y || row >= items_area.y + items_area.height {
+            return;
+        }
+        let visible_row = (row - items_area.y) as usize;
+        let idx = visible_row + self.layout.list_scroll_offset;
         let items = self.list_items();
         if idx >= items.len() {
             return;
@@ -2434,6 +2498,32 @@ impl App {
             return;
         }
         self.view_scrollback = adjusted_scrollback(self.view_scrollback, delta);
+    }
+
+    fn adjust_mouse_list_scroll(&mut self, col: u16, row: u16, delta: i32) -> bool {
+        let Some(area) = self.layout.list_items_area else {
+            return false;
+        };
+        if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height
+        {
+            return false;
+        }
+        self.adjust_list_scroll(delta);
+        true
+    }
+
+    fn adjust_list_scroll(&mut self, delta: i32) {
+        let visible_h = self
+            .layout
+            .list_items_area
+            .map(|area| area.height as usize)
+            .unwrap_or(0);
+        self.list_scroll_offset = adjusted_list_scroll_offset(
+            self.list_scroll_offset,
+            delta,
+            self.list_items().len(),
+            visible_h,
+        );
     }
 
     fn adjust_mouse_scrollback(&mut self, col: u16, row: u16, delta: i32) {
@@ -3069,7 +3159,8 @@ impl App {
                     self.minibuffer = None;
                     match self.client.tool_decision(&session_id, call_id, d).await {
                         Ok(()) => {
-                            self.matrix_rain.observe_tool_decision(d);
+                            self.matrix_rain
+                                .observe_tool_decision(d, self.matrix_rain_intensity);
                             self.set_status(format!("tool {d}"));
                         }
                         Err(e) => self.set_status(format!("tool_decision failed: {e}")),
@@ -3395,7 +3486,8 @@ impl App {
                 {
                     self.set_status(format!("tool_decision failed: {e}"));
                 } else {
-                    self.matrix_rain.observe_tool_decision("approve");
+                    self.matrix_rain
+                        .observe_tool_decision("approve", self.matrix_rain_intensity);
                 }
             }
         }
@@ -3542,6 +3634,27 @@ pub fn apply_transcript_to_local_state(
 ) {
     for ev in events {
         match &ev.event {
+            // TaskStart is the PRIMARY block-creation event for
+            // current zarvis sessions — it carries the explicit
+            // `call_id` and the live `on_notification` handler
+            // forwards it to `feed_task_start`. Without forwarding
+            // it here too, a fresh TUI re-attaching to an existing
+            // session sees no `ToolBlock` items in the replayed
+            // history (the OSC 7700 backstop only fires for legacy
+            // `pty.log` files; current zarvis doesn't write the
+            // fences), `has_blocks` is false, and the user can no
+            // longer see synthesized tool blocks at all — including
+            // when scrolling. See
+            // `zarvis_tool_block_visible_after_bootstrap_via_task_start`.
+            SessionEvent::TaskStart { call_id, tool, args_summary } => {
+                if tool != agentd_protocol::TUI_DISPATCH_TOOL {
+                    history.feed_task_start(
+                        call_id.clone(),
+                        tool.clone(),
+                        args_summary.clone(),
+                    );
+                }
+            }
             SessionEvent::ToolUse { tool, args } => {
                 // The TUI-dispatch tool (`tui`) is a slash-command
                 // short-circuit, not a real tool block — skip it
@@ -3678,6 +3791,8 @@ mod tests {
             matrix_rain_area: None,
             minibuffer_area: Some(Rect::new(0, 29, 100, 4)),
             list_row_count: 0,
+            list_items_area: None,
+            list_scroll_offset: 0,
             minibuffer_hints: Vec::new(),
             minibuffer_harness_hits: Vec::new(),
         }
@@ -3691,6 +3806,77 @@ mod tests {
         assert_eq!(
             selection_bounds_for_layout(&test_layout(), 0, false, 0, 1),
             None
+        );
+    }
+
+    /// REGRESSION: a TUI re-attaching to an existing zarvis session
+    /// shows the tool blocks again. Current zarvis interactive
+    /// adapters never write OSC 7700 fences to the PTY (the helpers
+    /// `tool_block_open` / `tool_block_close` exist but no call
+    /// site remains); tool blocks are communicated entirely via
+    /// `SessionEvent::TaskStart` (carrying `call_id`) followed by
+    /// `ToolUse` and `ToolResult`. `apply_transcript_to_local_state`
+    /// must forward `TaskStart` to `feed_task_start` or no
+    /// `ToolBlock` items exist after bootstrap and the user sees
+    /// raw chat with no synthesized blocks at any scroll position.
+    #[test]
+    fn task_start_in_transcript_creates_tool_block() {
+        use agentd_protocol::{AgentStatus, SessionEvent, TimestampedEvent};
+        use chrono::Utc;
+        fn ev(seq: u64, event: SessionEvent) -> TimestampedEvent {
+            TimestampedEvent {
+                seq,
+                at: Utc::now(),
+                event,
+            }
+        }
+        let events = vec![
+            ev(
+                1,
+                SessionEvent::TaskStart {
+                    call_id: "t1".into(),
+                    tool: "shell".into(),
+                    args_summary: "ls -la".into(),
+                },
+            ),
+            ev(
+                2,
+                SessionEvent::ToolResult {
+                    tool: "t1".into(),
+                    ok: true,
+                    output: "out".into(),
+                },
+            ),
+        ];
+
+        let mut history = crate::pty_render::ItemHistory::new();
+        let mut editor: Option<EditorState> = None;
+        let mut status: Option<AgentStatus> = None;
+        apply_transcript_to_local_state(&events, &mut history, &mut editor, &mut status);
+
+        // The render must include the synthesized header for the
+        // block. Before the fix, no `ToolBlock` items existed and
+        // the renderer fell through to `replay_cached` — no header.
+        let screen_rows = 24u16;
+        let screen_cols = 80u16;
+        let out = history.replay(screen_cols, screen_rows, 0);
+        let text: String = (0..screen_rows)
+            .flat_map(|r| {
+                let mut row = String::new();
+                for c in 0..screen_cols {
+                    if let Some(cell) = out.screen.cell(r, c) {
+                        row.push_str(&cell.contents());
+                    }
+                }
+                row.push('\n');
+                row.chars().collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            text.contains("→ shell"),
+            "TaskStart must be forwarded to ItemHistory::feed_task_start. \
+             Without it, fresh-TUI bootstrap of an existing zarvis session \
+             rebuilds history with no tool blocks. Got render:\n{text}",
         );
     }
 
@@ -3820,11 +4006,31 @@ mod tests {
         assert_eq!(adjusted_scrollback(5, 3), 8);
         assert_eq!(adjusted_scrollback(SCROLLBACK_MAX - 1, 10), SCROLLBACK_MAX);
     }
+
+    #[test]
+    fn adjusted_list_scroll_offset_clamps_to_visible_range() {
+        assert_eq!(adjusted_list_scroll_offset(0, 3, 10, 4), 3);
+        assert_eq!(adjusted_list_scroll_offset(3, -1, 10, 4), 2);
+        assert_eq!(adjusted_list_scroll_offset(0, -99, 10, 4), 0);
+        assert_eq!(adjusted_list_scroll_offset(0, 99, 10, 4), 6);
+        assert_eq!(adjusted_list_scroll_offset(9, 0, 10, 4), 6);
+        assert_eq!(adjusted_list_scroll_offset(2, 1, 3, 4), 0);
+    }
 }
 
 fn adjusted_scrollback(current: usize, delta: i32) -> usize {
     let next = current as i32 + delta;
     next.max(0).min(SCROLLBACK_MAX as i32) as usize
+}
+
+fn adjusted_list_scroll_offset(
+    current: usize,
+    delta: i32,
+    item_count: usize,
+    visible_rows: usize,
+) -> usize {
+    let max_scroll = item_count.saturating_sub(visible_rows);
+    adjusted_scrollback(current, delta).min(max_scroll)
 }
 
 fn delete_back_char(mb: &mut Minibuffer) {
