@@ -1219,20 +1219,23 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
     for col in 0..rain_area.width {
         let seed = hash64(col as u64 ^ ((rain_area.width as u64) << 24));
         let speed = 2 + (seed % 7);
-        let threshold = foreground_column_threshold(seed);
         let frame = foreground_rain_frame(now, app.matrix_rain_foreground_epoch, seed, speed, cycle);
         current_drop_keys.insert(frame.key);
         // Register a fresh drop only at the *top* of its cycle, and
-        // only if current activity meets this column's threshold.
-        // This is what keeps drops from popping in mid-screen when
-        // activity rises — they wait for their next cycle to start.
-        // A drop already registered keeps falling for the rest of
-        // its cycle regardless of later activity dips (until its
-        // key disappears from current_drop_keys on cycle wrap).
-        if activity >= threshold && frame.head <= MATRIX_RAIN_REGISTRATION_TOP_ROW as i16 {
-            app.matrix_rain_active_drops
-                .entry(frame.key)
-                .or_insert(spawn_tail);
+        // only if a per-cycle random roll comes in under the current
+        // activity. The roll is keyed on `frame.key` (which already
+        // includes the column seed + cycle index), so it's STABLE
+        // within a single cycle — no flicker — but scatters across
+        // cycles and columns. With this every column gets a chance
+        // every cycle, instead of the old fixed per-column threshold
+        // that left some columns permanently dark at low intensity.
+        if frame.head <= MATRIX_RAIN_REGISTRATION_TOP_ROW as i16 {
+            let roll = unit_f32(hash64(frame.key ^ 0xc3d2_e1f0_a574_8b96));
+            if roll < activity {
+                app.matrix_rain_active_drops
+                    .entry(frame.key)
+                    .or_insert(spawn_tail);
+            }
         }
         let active = app
             .matrix_rain_active_drops
@@ -1275,7 +1278,26 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
 
     let theme = app.theme.clone();
     for reveal in app.matrix_rain.active_reveals_mut(now) {
-        render_matrix_reveal(f, rain_area, &theme, reveal, elapsed, &drop_heads);
+        match reveal.orientation {
+            crate::matrix_rain::RevealOrientation::Horizontal => render_matrix_reveal_horizontal(
+                f,
+                rain_area,
+                &theme,
+                reveal,
+                elapsed,
+                &drop_heads,
+                spawn_tail,
+            ),
+            crate::matrix_rain::RevealOrientation::Vertical => render_matrix_reveal_vertical(
+                f,
+                rain_area,
+                &theme,
+                reveal,
+                elapsed,
+                &drop_heads,
+                spawn_tail,
+            ),
+        }
     }
 }
 
@@ -1333,10 +1355,6 @@ fn eased_matrix_rain_intensity(current: f32, target: f32, elapsed: Duration) -> 
     } else {
         (current - step).max(target)
     }
-}
-
-fn foreground_column_threshold(seed: u64) -> f32 {
-    unit_f32(hash64(seed ^ 0x9a4b_2f1d_87c6_e503))
 }
 
 fn matrix_rain_tail(activity: f32) -> u16 {
@@ -1430,24 +1448,26 @@ fn rain_style(theme: &Theme, shade: f32, activity: f32) -> Style {
     }
 }
 
-/// Render one reveal word. Letters are pinned the moment a real
-/// foreground drop's head reaches that letter's cell — `drop_heads`
-/// carries the *current* head per column captured during the main
-/// rain pass, so there's no analytic prediction that could disagree
-/// with the visible animation.
+/// Render a horizontal reveal word (letters laid left-to-right at a
+/// single row). Each letter pins the first frame a real foreground
+/// drop's body is currently *covering* its cell — checked against
+/// `drop_heads` from the rain pass, not predicted analytically. The
+/// pin window is the drop's bright body (`tail` rows wide), so a
+/// letter never latches based on a stale head position from many
+/// rows below.
 ///
 /// Once every letter is pinned the reveal enters a short hold and
-/// then fades. If some letters never get pinned (e.g. their column
-/// is consistently below the activity threshold), the hold/fade
-/// never starts — the reveal just expires naturally when its 12s
-/// `duration` elapses and the queue drops it.
-fn render_matrix_reveal(
+/// then fades. If some letters never pin (their column is
+/// consistently below activity threshold), the reveal simply expires
+/// when its `duration` elapses.
+fn render_matrix_reveal_horizontal(
     f: &mut Frame,
     area: Rect,
     theme: &Theme,
     reveal: &mut crate::matrix_rain::RevealWord,
     elapsed_ms: u64,
     drop_heads: &[Option<i16>],
+    spawn_tail: u16,
 ) {
     if area.width < 4 || area.height == 0 {
         return;
@@ -1457,23 +1477,28 @@ fn render_matrix_reveal(
     if text_w == 0 || text_w + 2 > area.width {
         return;
     }
-    let target_x = area.x
-        + ((area.width.saturating_sub(text_w) as f32) * reveal.x)
-            .round()
-            .clamp(0.0, area.width.saturating_sub(text_w) as f32) as u16;
-    let target_y = area.y
-        + ((area.height.saturating_sub(1) as f32) * reveal.y)
-            .round()
-            .clamp(0.0, area.height.saturating_sub(1) as f32) as u16;
+    // Lock the absolute (col, row) on the first frame so already-
+    // pinned letters don't drift if the area resizes mid-reveal.
+    let (target_x, target_y) = match reveal.resolved_position() {
+        Some((c, r)) => (c, r),
+        None => {
+            let cx = area.x
+                + ((area.width.saturating_sub(text_w) as f32) * reveal.x)
+                    .round()
+                    .clamp(0.0, area.width.saturating_sub(text_w) as f32) as u16;
+            let ry = area.y
+                + ((area.height.saturating_sub(1) as f32) * reveal.y)
+                    .round()
+                    .clamp(0.0, area.height.saturating_sub(1) as f32) as u16;
+            reveal.set_resolved_position(cx, ry);
+            (cx, ry)
+        }
+    };
 
     let target_rel_y = target_y.saturating_sub(area.y) as i16;
     let base_col = target_x.saturating_sub(area.x) as usize;
+    let tail = spawn_tail.max(1) as i16;
 
-    // Live pinning: for each letter still unpinned, check this
-    // frame's drop head in that column. The head moves at most a
-    // few cells per frame, so accept any frame where the head is
-    // at or just past `target_rel_y` (the drop's bright body still
-    // covers the cell or just exited).
     let letter_count = reveal.pin_state().len();
     for i in 0..letter_count {
         if reveal.pin_state()[i].is_some() {
@@ -1481,14 +1506,126 @@ fn render_matrix_reveal(
         }
         let col = base_col + i;
         if let Some(Some(head)) = drop_heads.get(col) {
-            if *head >= target_rel_y {
+            // Pin only while the drop's BRIGHT BODY is currently
+            // covering the cell — i.e. head ≥ row and head − row <
+            // tail. Without the upper bound, on sparse frames the
+            // letter would latch on a head that's already far past,
+            // making it appear out of nowhere with no drop nearby.
+            let delta = *head - target_rel_y;
+            if delta >= 0 && delta < tail {
                 reveal.pin_letter(i, elapsed_ms);
             }
         }
     }
 
+    render_pinned_letters_at(
+        f,
+        theme,
+        reveal,
+        elapsed_ms,
+        &chars,
+        |i| target_x + i as u16,
+        |_| target_y,
+    );
+}
+
+/// Render a vertical reveal word: the letters live stacked top-to-
+/// bottom in a single column. As one foreground drop falls through
+/// that column, its head passes each letter's row in turn — pinning
+/// the letters one by one from the top. A single drop pass is enough
+/// to pin the entire word, which is why this orientation works well
+/// at low fleet intensity (the horizontal layout would need every
+/// column under the word to fire a drop independently).
+///
+/// At render time the column is biased toward one whose threshold
+/// the *current* activity already meets, so the drop actually shows
+/// up within the reveal's lifetime.
+fn render_matrix_reveal_vertical(
+    f: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    reveal: &mut crate::matrix_rain::RevealWord,
+    elapsed_ms: u64,
+    drop_heads: &[Option<i16>],
+    spawn_tail: u16,
+) {
+    if area.width == 0 || area.height < 2 {
+        return;
+    }
+    let chars: Vec<char> = reveal.text.chars().collect();
+    let text_len = chars.len() as u16;
+    if text_len == 0 || text_len > area.height {
+        return;
+    }
+
+    // Resolve column + starting row once; stored on the reveal so
+    // the word doesn't shift if intensity changes mid-reveal. Every
+    // column gets a per-cycle random chance of firing a drop (see
+    // `render_matrix_rain`), so we just pick the column directly
+    // from the reveal's x hint — within the 12 s reveal window
+    // even a low-activity column is very likely to see at least one
+    // drop pass through.
+    let (col_abs, row_start_abs) = match reveal.resolved_position() {
+        Some((c, r)) => (c, r),
+        None => {
+            let col_rel = ((area.width.saturating_sub(1)) as f32 * reveal.x)
+                .round()
+                .clamp(0.0, area.width.saturating_sub(1) as f32) as u16;
+            let row_rel = ((area.height.saturating_sub(text_len)) as f32 * reveal.y)
+                .round()
+                .clamp(0.0, area.height.saturating_sub(text_len) as f32) as u16;
+            let c = area.x + col_rel;
+            let r = area.y + row_rel;
+            reveal.set_resolved_position(c, r);
+            (c, r)
+        }
+    };
+
+    let col_idx = col_abs.saturating_sub(area.x) as usize;
+    let row_start_rel = row_start_abs.saturating_sub(area.y) as i16;
+    let tail = spawn_tail.max(1) as i16;
+
+    // Per-letter live pinning. All letters share one column, so a
+    // single drop's head passing through this column will pin them
+    // top-to-bottom in order.
+    let letter_count = reveal.pin_state().len();
+    if let Some(Some(head)) = drop_heads.get(col_idx) {
+        for i in 0..letter_count {
+            if reveal.pin_state()[i].is_some() {
+                continue;
+            }
+            let row_rel = row_start_rel + i as i16;
+            let delta = *head - row_rel;
+            if delta >= 0 && delta < tail {
+                reveal.pin_letter(i, elapsed_ms);
+            }
+        }
+    }
+
+    render_pinned_letters_at(
+        f,
+        theme,
+        reveal,
+        elapsed_ms,
+        &chars,
+        |_| col_abs,
+        |i| row_start_abs + i as u16,
+    );
+}
+
+/// Shared brightness / hold / fade pipeline for both reveal
+/// orientations — only the per-letter `(x, y)` placement differs.
+fn render_pinned_letters_at(
+    f: &mut Frame,
+    theme: &Theme,
+    reveal: &crate::matrix_rain::RevealWord,
+    elapsed_ms: u64,
+    chars: &[char],
+    xs: impl Fn(usize) -> u16,
+    ys: impl Fn(usize) -> u16,
+) {
     let pin_state = reveal.pin_state();
-    let all_pinned_at = if pin_state.iter().all(Option::is_some) {
+    let all_pinned_at = if !pin_state.is_empty() && pin_state.iter().all(Option::is_some) {
         pin_state.iter().filter_map(|x| *x).max()
     } else {
         None
@@ -1507,8 +1644,8 @@ fn render_matrix_reveal(
         (1.0 - elapsed_fade as f32 / fade_ms.max(1) as f32).clamp(0.0, 1.0)
     };
 
-    for (i, ch) in chars.into_iter().enumerate() {
-        let Some(pinned_at) = reveal.pin_state()[i] else {
+    for (i, ch) in chars.iter().copied().enumerate() {
+        let Some(pinned_at) = pin_state[i] else {
             continue;
         };
         if elapsed_ms >= fade_end {
@@ -1525,11 +1662,10 @@ fn render_matrix_reveal(
             (0.12 + fade_level * 0.64).clamp(0.0, 1.0)
         };
         let style = matrix_reveal_style(theme, brightness, elapsed_ms < fade_start);
-        let x = target_x + i as u16;
-        f.buffer_mut()
-            .set_string(x, target_y, ch.to_string(), style);
+        f.buffer_mut().set_string(xs(i), ys(i), ch.to_string(), style);
     }
 }
+
 
 fn matrix_reveal_style(theme: &Theme, brightness: f32, bold: bool) -> Style {
     let brightness = brightness.clamp(0.0, 1.0);
