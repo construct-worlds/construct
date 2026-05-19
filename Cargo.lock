@@ -49,6 +49,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentd-adapter-gemini"
+version = "0.1.0"
+dependencies = [
+ "agentd-protocol",
+ "anyhow",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "agentd-adapter-shell"
 version = "0.1.0"
 dependencies = [

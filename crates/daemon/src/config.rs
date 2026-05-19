@@ -137,6 +137,11 @@ pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
         description: "OpenAI Codex (wraps the `codex` CLI)",
     },
     BuiltinAdapter {
+        name: "gemini",
+        binary: "agentd-adapter-gemini",
+        description: "Google Gemini (wraps the `gemini` CLI)",
+    },
+    BuiltinAdapter {
         name: "zarvis",
         binary: "agentd-adapter-zarvis",
         description: "Built-in multi-provider agent (OpenAI / Anthropic / Ollama)",

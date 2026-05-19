@@ -1,0 +1,21 @@
+[package]
+name = "agentd-adapter-gemini"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Gemini CLI adapter for agentd (wraps the `gemini` CLI)"
+
+[[bin]]
+name = "agentd-adapter-gemini"
+path = "src/main.rs"
+
+[dependencies]
+agentd-protocol = { workspace = true, features = ["pty"] }
+tokio.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+uuid.workspace = true
