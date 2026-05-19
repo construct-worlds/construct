@@ -48,12 +48,13 @@ const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 /// Required `OpenAI-Beta` header value (from openai/codex source).
 const CODEX_OPENAI_BETA: &str = "responses=experimental";
 
-/// Env var that supplies the canonical Codex system prompt
-/// (`instructions` field). Per design decision: we don't bundle the
-/// upstream `gpt_5_codex_prompt.md` — operators opt in by setting
-/// this so they can choose whether to mirror codex CLI exactly or
-/// ship their own prompt. The Codex backend rejects empty
-/// `instructions`, so an unset env var is a hard error.
+/// Optional env var that overrides the `instructions` field. When
+/// set, takes precedence over the agent's `system` prompt — useful
+/// when an operator wants to mirror Codex CLI exactly by pasting the
+/// upstream `gpt_5_codex_prompt.md`. When unset, we fall back to the
+/// `system` arg the agent loop already builds (same shape every
+/// other provider uses). The Codex backend rejects empty
+/// `instructions`, so the final value must be non-empty either way.
 const INSTRUCTIONS_ENV: &str = "AGENTD_ZARVIS_CODEX_INSTRUCTIONS";
 
 /// Refresh tokens are good for ~30 days but the server-side window can
@@ -329,31 +330,36 @@ impl CodexOauth {
     }
 }
 
-/// Read the `instructions` field (Codex's canonical system prompt
-/// equivalent) from the operator-supplied env var. Returns an error
-/// with an actionable hint when unset / empty — sending an empty
-/// `instructions` field gets the request rejected server-side, so
-/// we'd rather fail fast with a useful message.
-fn instructions_from_env() -> Result<String> {
-    let raw = std::env::var(INSTRUCTIONS_ENV).map_err(|_| {
-        anyhow!(
-            "{INSTRUCTIONS_ENV} is not set. The Codex backend requires \
-             a non-empty `instructions` field; zarvis doesn't bundle \
-             the upstream codex CLI prompt by default. Either:\n  \
-             * Copy the canonical prompt from openai/codex \
-             (e.g. codex-rs/core/gpt_5_codex_prompt.md) and export it \
-             as {INSTRUCTIONS_ENV}, OR\n  * Write your own zarvis \
-             system prompt and export that. Empty / unset → request \
-             will be rejected with a 400."
-        )
-    })?;
-    if raw.trim().is_empty() {
-        return Err(anyhow!(
-            "{INSTRUCTIONS_ENV} is set but empty — Codex backend will \
-             reject the request. Set a non-empty value."
-        ));
+/// Resolve the `instructions` field for the Codex backend. Order:
+///
+///   1. `AGENTD_ZARVIS_CODEX_INSTRUCTIONS` env var, if set and
+///      non-empty — explicit operator override (e.g. to mirror Codex
+///      CLI exactly with the upstream `gpt_5_codex_prompt.md`).
+///   2. The `system` argument the agent loop passes — same prompt
+///      every other provider (openai / anthropic / ollama) uses for
+///      the equivalent slot. This is the default, and the same
+///      out-of-box experience the other providers give.
+///
+/// Errors only if BOTH are empty — the Codex backend rejects an
+/// empty `instructions` field with `400`, so failing fast here gives
+/// a more actionable message than letting the request go out and
+/// get refused.
+fn resolve_instructions(system: &str) -> Result<String> {
+    if let Ok(raw) = std::env::var(INSTRUCTIONS_ENV) {
+        if !raw.trim().is_empty() {
+            return Ok(raw);
+        }
     }
-    Ok(raw)
+    if !system.trim().is_empty() {
+        return Ok(system.to_string());
+    }
+    Err(anyhow!(
+        "codex-oauth: no `instructions` available. Either set \
+         {INSTRUCTIONS_ENV} to a non-empty value, or run zarvis with \
+         a non-empty `system` prompt (the agent loop populates this \
+         from its system-prompt builder). Empty / unset → Codex \
+         backend will reject the request with a 400."
+    ))
 }
 
 /// Convert one of our `Message`s into Responses-API "input items".
@@ -449,6 +455,13 @@ pub fn build_responses_body(
         "instructions": instructions,
         "input": input,
         "stream": true,
+        // ChatGPT-account backend REQUIRES `store: false`. The
+        // public Responses API defaults to true (server-side
+        // conversation storage), but `chatgpt.com/backend-api/codex`
+        // refuses requests where store != false with
+        // `400 "Store must be set to false"`. Codex CLI sets this
+        // explicitly in `codex-rs/core/src/client.rs`.
+        "store": false,
         // Asks the server to emit reasoning summary deltas; we don't
         // surface them to the user today but it costs nothing to
         // request and the SSE parser handles them gracefully.
@@ -481,21 +494,18 @@ impl LlmProvider for CodexOauth {
     async fn complete(
         &self,
         model: &str,
-        _system: &str, // intentionally ignored — see instructions_from_env
+        system: &str,
         messages: &[Message],
         tools: &[ToolSpec],
         sink: &mut dyn TextSink,
     ) -> Result<ProviderTurn> {
-        // The provider's `system` argument exists for the
-        // platform-API providers (OpenAI / Anthropic / Ollama) that
-        // accept system text inline. Codex's Responses API uses the
-        // dedicated `instructions` field instead, and the server
-        // enforces a non-trivial value. We DO NOT silently substitute
-        // the agent's `system` prompt here, because that would mean
-        // shipping zarvis's prompt into Codex's prompt-cache key and
-        // mis-billing reasoning that's been tuned for a different
-        // shape. Operator opts in via the env var.
-        let instructions = instructions_from_env()?;
+        // Codex's Responses API uses `instructions` instead of an
+        // inline system message. We pass the agent's `system` arg
+        // through as-is, matching what every other provider does
+        // for the equivalent slot. `AGENTD_ZARVIS_CODEX_INSTRUCTIONS`
+        // is an optional operator override (handy for mirroring
+        // Codex CLI exactly with the upstream prompt).
+        let instructions = resolve_instructions(system)?;
         let body = build_responses_body(model, &instructions, messages, tools);
 
         // Take the auth lock for the duration of the request so
@@ -894,6 +904,12 @@ mod tests {
         assert_eq!(body["model"], "gpt-5-codex");
         assert_eq!(body["instructions"], "system-prompt-here");
         assert_eq!(body["stream"], true);
+        // ChatGPT-account backend rejects requests with `store: true`
+        // (the public-API default). Locking this in here so the
+        // field never silently gets dropped — re-adding it would
+        // produce a 400 "Store must be set to false" that's
+        // confusing without context.
+        assert_eq!(body["store"], false);
         let input = body["input"].as_array().expect("input array");
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["role"], "user");
@@ -1006,6 +1022,43 @@ mod tests {
         let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "function_call");
+    }
+
+    /// `instructions` resolution: env var wins when set,
+    /// `system` arg is the fallback, both empty errors out. Uses a
+    /// scoped env-guard to keep the global env clean for other
+    /// tests running in parallel.
+    #[test]
+    fn resolve_instructions_prefers_env_then_system() {
+        // Save/restore the env var around the test body so parallel
+        // tests don't see our state.
+        struct EnvGuard(Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => std::env::set_var(INSTRUCTIONS_ENV, v),
+                    None => std::env::remove_var(INSTRUCTIONS_ENV),
+                }
+            }
+        }
+        let _g = EnvGuard(std::env::var(INSTRUCTIONS_ENV).ok());
+
+        // env wins when set & non-empty.
+        std::env::set_var(INSTRUCTIONS_ENV, "from-env");
+        assert_eq!(resolve_instructions("from-system").unwrap(), "from-env");
+
+        // env blank → falls back to system.
+        std::env::set_var(INSTRUCTIONS_ENV, "   ");
+        assert_eq!(resolve_instructions("from-system").unwrap(), "from-system");
+
+        // env unset → system is used.
+        std::env::remove_var(INSTRUCTIONS_ENV);
+        assert_eq!(resolve_instructions("from-system").unwrap(), "from-system");
+
+        // Both empty → actionable error mentioning the env var.
+        let err = resolve_instructions("").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(INSTRUCTIONS_ENV), "{msg}");
     }
 
     /// `needs_refresh` semantics: no `last_refresh` → refresh now;
