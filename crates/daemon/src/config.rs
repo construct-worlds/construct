@@ -155,15 +155,22 @@ impl Config {
             Self::default()
         };
         // Layer in built-ins so users don't have to declare them.
+        // Important: we layer at the FIELD level, not the entry level
+        // — a user who declared `[adapters.zarvis] env = {...}` (only
+        // to set per-harness env defaults) still needs the builtin
+        // `binary` + `description` to fill in. Without this,
+        // declaring an `[adapters.<name>]` block to set ONE field
+        // would silently drop the builtin's binary path and the
+        // daemon would fail with "adapter binary not found" on
+        // session create.
         for b in BUILTIN_ADAPTERS {
-            cfg.adapters
-                .entry(b.name.to_string())
-                .or_insert_with(|| AdapterConfig {
-                    binary: Some(b.binary.to_string()),
-                    description: Some(b.description.to_string()),
-                    args: Vec::new(),
-                    env: HashMap::new(),
-                });
+            let entry = cfg.adapters.entry(b.name.to_string()).or_default();
+            if entry.binary.is_none() {
+                entry.binary = Some(b.binary.to_string());
+            }
+            if entry.description.is_none() {
+                entry.description = Some(b.description.to_string());
+            }
         }
         Ok(cfg)
     }
@@ -202,5 +209,49 @@ mod tests {
         let cfg: Config = toml::from_str(toml).expect("parse");
         let zarvis = cfg.adapters.get("zarvis").expect("zarvis adapter");
         assert!(zarvis.env.is_empty());
+    }
+
+    /// REGRESSION: declaring `[adapters.zarvis] env = {…}` (to set
+    /// per-harness env defaults — the motivating use case for that
+    /// field) must NOT drop the built-in `binary` / `description`
+    /// values that the daemon needs to actually spawn the adapter.
+    ///
+    /// Before this fix, the BUILTIN_ADAPTERS layer used
+    /// `or_insert_with`, which only fired when the entry was
+    /// missing entirely. A user-supplied entry that lacked `binary`
+    /// got NO `binary` field, the daemon fell back to looking up a
+    /// binary named bare `zarvis` (not `agentd-adapter-zarvis`),
+    /// and session create failed with "adapter binary not found".
+    #[test]
+    fn user_partial_adapter_config_keeps_builtin_binary() {
+        let toml = r#"
+            [adapters.zarvis]
+            env = { AGENTD_ZARVIS_MODEL = "codex-oauth:gpt-5.5" }
+        "#;
+        let mut cfg: Config = toml::from_str(toml).expect("parse");
+        // Mimic Config::load's builtin-layering step (the actual
+        // load() walks the filesystem, which we'd rather not in
+        // tests).
+        for b in BUILTIN_ADAPTERS {
+            let entry = cfg.adapters.entry(b.name.to_string()).or_default();
+            if entry.binary.is_none() {
+                entry.binary = Some(b.binary.to_string());
+            }
+            if entry.description.is_none() {
+                entry.description = Some(b.description.to_string());
+            }
+        }
+        let zarvis = cfg.adapters.get("zarvis").expect("zarvis adapter");
+        assert_eq!(
+            zarvis.binary.as_deref(),
+            Some("agentd-adapter-zarvis"),
+            "user-supplied [adapters.zarvis] with only `env` set must \
+             still pick up the built-in binary path",
+        );
+        // And the user's env stays in place.
+        assert_eq!(
+            zarvis.env.get("AGENTD_ZARVIS_MODEL").map(String::as_str),
+            Some("codex-oauth:gpt-5.5"),
+        );
     }
 }
