@@ -10,6 +10,7 @@ mod remote;
 mod server;
 mod session;
 mod storage;
+mod tunnel;
 mod worktree;
 
 use agentd_protocol::paths::Paths;
@@ -127,6 +128,21 @@ async fn run(socket_override: Option<PathBuf>) -> Result<()> {
                 url = %format!("ws://{addr}/t/{}", remote.token()),
                 "remote ws ready (token-gated, localhost-bind)"
             );
+            // Spawn the cloudflared quick-tunnel supervisor unless
+            // the user explicitly opts out. Opt-out is for the
+            // localhost-only smoke-test path (e.g. testing the WS
+            // transport over `ssh -L`) where the public tunnel is
+            // unwanted overhead.
+            if std::env::var("AGENTD_REMOTE_NO_TUNNEL").is_err() {
+                let tunnel_remote = remote.clone();
+                tokio::spawn(async move {
+                    tunnel::run(tunnel_remote, port).await;
+                });
+            } else {
+                tracing::info!(
+                    "AGENTD_REMOTE_NO_TUNNEL is set; skipping cloudflared spawn"
+                );
+            }
             tokio::spawn(async move {
                 if let Err(e) = server::serve_ws(mgr, remote, &addr).await {
                     tracing::error!(error = %e, "ws server exited");
