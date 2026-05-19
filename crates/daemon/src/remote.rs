@@ -10,6 +10,7 @@
 //! Both are reasonable follow-ups once we have a web client driving
 //! real usage and can see what the access patterns are.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -26,6 +27,12 @@ pub struct RemoteState {
     /// read this without `.await`.
     token: Arc<String>,
     tunnel_url: Arc<RwLock<Option<String>>>,
+    /// Active remote WS connection count. Bumped on accept,
+    /// decremented when the connection task drops. Read by the
+    /// `remote/state` broadcast path on every change so local
+    /// clients (e.g. the desktop TUI) can show a "remote attached"
+    /// badge without polling.
+    clients: Arc<AtomicUsize>,
 }
 
 impl RemoteState {
@@ -36,7 +43,34 @@ impl RemoteState {
         Self {
             token: Arc::new(token),
             tunnel_url: Arc::new(RwLock::new(None)),
+            clients: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Atomically increment the active-client counter and return the
+    /// new value. Called immediately after a WS upgrade succeeds.
+    pub fn add_client(&self) -> u32 {
+        // `fetch_add` returns the previous value, so `+ 1` is the
+        // new count. Saturating to u32::MAX is fine — the daemon
+        // would die from socket exhaustion long before that.
+        let prev = self.clients.fetch_add(1, Ordering::SeqCst);
+        u32::try_from(prev.saturating_add(1)).unwrap_or(u32::MAX)
+    }
+
+    /// Atomically decrement the active-client counter and return the
+    /// new value. Called from the connection task's `Drop` so it
+    /// runs no matter how the task ended (normal close, panic,
+    /// network error).
+    pub fn sub_client(&self) -> u32 {
+        // Underflow guard: a corrupted increment elsewhere shouldn't
+        // wrap us to usize::MAX. `fetch_sub` then floor at 0.
+        let prev = self.clients.fetch_sub(1, Ordering::SeqCst);
+        let new = prev.saturating_sub(1);
+        u32::try_from(new).unwrap_or(u32::MAX)
+    }
+
+    pub fn client_count(&self) -> u32 {
+        u32::try_from(self.clients.load(Ordering::SeqCst)).unwrap_or(u32::MAX)
     }
 
     pub fn token(&self) -> &str {

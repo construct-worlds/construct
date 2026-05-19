@@ -216,6 +216,12 @@ pub struct App {
     pub last_diff: Option<String>,
     pub should_quit: bool,
     pub connected: bool,
+    /// How many remote WS clients are currently attached to the
+    /// daemon. Surfaced as a "● remote" badge in the modeline so
+    /// the local user can see when the phone (or any future remote
+    /// client) is also driving sessions. Updated by the
+    /// `remote/state` notification handler.
+    pub remote_clients: u32,
     // Terminal-pane state.
     pub view: ViewMode,
     /// Per-session items history. Replaces the old direct
@@ -656,6 +662,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         last_diff: None,
         should_quit: false,
         connected: true,
+        remote_clients: 0,
         view: ViewMode::Transcript,
         histories: HashMap::new(),
         block_hits: HashMap::new(),
@@ -1580,6 +1587,16 @@ impl App {
                     >(p)
                     {
                         self.on_group_deleted(&payload.group_id).await;
+                    }
+                }
+            }
+            m if m == agentd_protocol::ipc_notif::REMOTE_STATE => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        agentd_protocol::RemoteStateNotificationPayload,
+                    >(p)
+                    {
+                        self.remote_clients = payload.clients;
                     }
                 }
             }

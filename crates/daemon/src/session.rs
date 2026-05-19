@@ -77,6 +77,10 @@ pub enum BroadcastMsg {
     Deleted(DeletedNotificationPayload),
     GroupState(GroupStateNotificationPayload),
     GroupDeleted(GroupDeletedNotificationPayload),
+    /// Aggregate state for the remote WS transport. Emitted by
+    /// `server::handle_ws_connection` on every accept/drop so the
+    /// local TUI can show a "remote attached" badge.
+    RemoteState(agentd_protocol::RemoteStateNotificationPayload),
 }
 
 pub struct SessionEntry {
@@ -382,6 +386,16 @@ impl SessionManager {
 
     pub fn subscribe(&self) -> broadcast::Receiver<BroadcastMsg> {
         self.broadcast.subscribe()
+    }
+
+    /// Send a `remote/state` broadcast announcing the current remote-
+    /// WS client count. Best-effort — silently skipped if no
+    /// subscribers (the broadcast channel is the same one all
+    /// notifications flow through).
+    pub fn broadcast_remote_state(&self, clients: u32) {
+        let _ = self.broadcast.send(BroadcastMsg::RemoteState(
+            agentd_protocol::RemoteStateNotificationPayload { clients },
+        ));
     }
 
     pub fn harnesses(&self) -> Vec<HarnessInfo> {

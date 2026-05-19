@@ -2473,11 +2473,21 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
         Some(s) if s.automode => "[automode]  ".to_string(),
         _ => String::new(),
     };
+    // "● remote: N" badge when at least one phone / remote client is
+    // attached to the daemon. Visible signal that another surface
+    // is also driving sessions, so the local user doesn't get
+    // surprised by a session changing under them.
+    let remote_badge = if app.remote_clients > 0 {
+        format!("[● remote: {}]  ", app.remote_clients)
+    } else {
+        String::new()
+    };
     let modeline = format!(
-        " agentd  focus:{focus}  {sel}  {model}  {automode}{scrollback}{chord}{status}{conn} ",
+        " agentd  focus:{focus}  {sel}  {model}  {remote}{automode}{scrollback}{chord}{status}{conn} ",
         focus = focus_label,
         scrollback = scrollback_label,
         automode = automode_badge,
+        remote = remote_badge,
         sel = match s {
             Some(s) => format!("\"{}\"", primary_label(s)),
             None => "-".into(),

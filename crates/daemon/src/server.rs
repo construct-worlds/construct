@@ -266,6 +266,32 @@ fn find_prelude_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
 }
 
+/// RAII guard around an active remote WS connection. On creation it
+/// bumps `RemoteState::clients` and emits a `remote/state`
+/// broadcast so the local TUI can paint the "remote attached"
+/// badge. On drop it decrements and broadcasts again — Drop runs
+/// regardless of whether the connection ended cleanly, panicked,
+/// or the future was aborted, so the counter never leaks.
+struct RemoteClientGuard {
+    remote: RemoteState,
+    manager: Arc<SessionManager>,
+}
+
+impl RemoteClientGuard {
+    fn new(remote: RemoteState, manager: Arc<SessionManager>) -> Self {
+        let n = remote.add_client();
+        manager.broadcast_remote_state(n);
+        Self { remote, manager }
+    }
+}
+
+impl Drop for RemoteClientGuard {
+    fn drop(&mut self) {
+        let n = self.remote.sub_client();
+        self.manager.broadcast_remote_state(n);
+    }
+}
+
 /// Write a minimal HTTP/1.1 response with the given status, body,
 /// and content type. Uses `Connection: close` so the wire shape is
 /// dead-simple (no chunked encoding, no keep-alive bookkeeping).
@@ -411,6 +437,13 @@ async fn handle_ws_connection(
         .await
         .context("ws upgrade")?;
 
+    // From here on the WS is open and we're about to run a real
+    // session loop. Bump the active-client counter (with a RAII
+    // guard) and broadcast `remote/state` so the local TUI repaints
+    // its badge. Drop runs on any exit path — clean close, panic,
+    // task abort — so the counter doesn't leak.
+    let _client_guard = RemoteClientGuard::new(remote, manager.clone());
+
     let (mut ws_tx, ws_rx) = ws_stream.split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 
@@ -495,8 +528,13 @@ fn forward_broadcast(
             BroadcastMsg::Event(e) => e.session_id == *f,
             BroadcastMsg::State(s) => s.session.id == *f,
             BroadcastMsg::Deleted(d) => d.session_id == *f,
-            // Group notifications aren't session-specific; always forward.
-            BroadcastMsg::GroupState(_) | BroadcastMsg::GroupDeleted(_) => true,
+            // Group + remote-state notifications aren't session-
+            // specific; always forward even when a session filter
+            // is set so the local TUI's remote badge stays accurate
+            // while a single-session view is active.
+            BroadcastMsg::GroupState(_)
+            | BroadcastMsg::GroupDeleted(_)
+            | BroadcastMsg::RemoteState(_) => true,
         };
         if !matches {
             return;
@@ -537,6 +575,13 @@ fn forward_broadcast(
                 Err(_) => return,
             };
             Notification::new(ipc_notif::GROUP_DELETED, Some(p))
+        }
+        BroadcastMsg::RemoteState(r) => {
+            let p = match serde_json::to_value(&r) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            Notification::new(ipc_notif::REMOTE_STATE, Some(p))
         }
     };
     let v = match serde_json::to_value(&notif) {

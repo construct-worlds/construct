@@ -546,6 +546,12 @@ pub mod ipc_notif {
     pub const DELETED: &str = "session/deleted";
     pub const GROUP_STATE: &str = "group/state";
     pub const GROUP_DELETED: &str = "group/deleted";
+    /// Aggregate state for the daemon's remote WebSocket transport:
+    /// how many remote clients are currently attached. Broadcast on
+    /// every connect / disconnect so the local TUI can render a
+    /// "● remote attached" badge as a visible signal that another
+    /// surface is also driving the daemon.
+    pub const REMOTE_STATE: &str = "remote/state";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -903,6 +909,15 @@ pub struct StateNotificationPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeletedNotificationPayload {
     pub session_id: String,
+}
+
+/// Payload of the `remote/state` notification — number of remote WS
+/// clients currently attached to the daemon. Local clients (Unix
+/// socket) don't count; this is specifically the "is someone else
+/// also driving this daemon over the phone web client" signal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteStateNotificationPayload {
+    pub clients: u32,
 }
 
 /// A user-created group used to organize sessions in the list view.
