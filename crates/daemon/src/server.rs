@@ -1,6 +1,7 @@
 //! Unix-socket IPC server. Dispatches JSON-RPC requests to [`SessionManager`]
 //! and forwards subscribed broadcast events back to the client.
 
+use crate::remote::{token_from_uri_path, RemoteState};
 use crate::session::{BroadcastMsg, SessionManager};
 use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
@@ -185,33 +186,86 @@ impl Inbound for ReadFromWs {
 
 /// Spawn a WebSocket listener bound to `addr`. Uses the same
 /// `run_session` dispatch loop as the Unix socket — no transport-
-/// specific request handling. Caller is responsible for hooking up
-/// auth (token-in-URL gate) before promoting a request to a WS
-/// upgrade; the v1 form here is **localhost-only and unauthenticated**,
-/// suitable for behind-a-tunnel use only.
-pub async fn serve_ws(manager: Arc<SessionManager>, addr: &str) -> Result<()> {
+/// specific request handling. The WS upgrade is gated on a
+/// token-in-URL-path check (`/t/<token>`) against `remote`; without
+/// a valid token the upgrade is refused with HTTP 403 before any
+/// JSON-RPC traffic flows.
+pub async fn serve_ws(
+    manager: Arc<SessionManager>,
+    remote: RemoteState,
+    addr: &str,
+) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind WS listener {addr}"))?;
-    tracing::info!(addr, "ws listening (unauthenticated; tunnel only)");
+    tracing::info!(
+        addr,
+        "ws listening (token required at /t/<token>; bind localhost only)"
+    );
     loop {
         let (stream, peer) = listener.accept().await?;
         let manager = manager.clone();
+        let remote = remote.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_ws_connection(stream, manager).await {
+            if let Err(e) = handle_ws_connection(stream, manager, remote).await {
                 tracing::debug!(?peer, error = ?e, "ws connection closed with error");
             }
         });
     }
 }
 
+/// Build a 403 response for `accept_hdr_async` to abort the upgrade
+/// with. The body is short and plain-text; clients that send
+/// malformed tokens shouldn't need detailed diagnostics from the
+/// server.
+fn error_response_403(
+    msg: &str,
+) -> tokio_tungstenite::tungstenite::handshake::server::ErrorResponse {
+    use tokio_tungstenite::tungstenite::http;
+    http::Response::builder()
+        .status(http::StatusCode::FORBIDDEN)
+        .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Some(msg.to_string()))
+        .expect("static 403 response should always build")
+}
+
 async fn handle_ws_connection(
     stream: tokio::net::TcpStream,
     manager: Arc<SessionManager>,
+    remote: RemoteState,
 ) -> Result<()> {
-    let ws_stream = tokio_tungstenite::accept_async(stream)
-        .await
-        .context("ws upgrade")?;
+    // Token gate: read the HTTP upgrade request, check the URI
+    // path for `/t/<token>` against `remote`. Reject the upgrade
+    // with HTTP 403 if missing / wrong. Doing this inside the
+    // upgrade callback means an unauthorized client never gets a
+    // WS stream — no JSON-RPC dispatch, no event subscription,
+    // nothing.
+    //
+    // The token is immutable for the daemon's lifetime, so we can
+    // do the full constant-time compare synchronously inside the
+    // callback. (The `RemoteState` clone is cheap — one `Arc`.)
+    let ws_stream = tokio_tungstenite::accept_hdr_async(
+        stream,
+        move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+              resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            let path = req.uri().path();
+            let candidate = match token_from_uri_path(path) {
+                Some(t) => t,
+                None => {
+                    return Err(error_response_403(
+                        "missing token; expected ws upgrade at /t/<token>",
+                    ));
+                }
+            };
+            if !remote.token_matches(candidate) {
+                return Err(error_response_403("invalid token"));
+            }
+            Ok(resp)
+        },
+    )
+    .await
+    .context("ws upgrade")?;
+
     let (mut ws_tx, ws_rx) = ws_stream.split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 mod adapter;
 mod config;
 mod loops;
+mod remote;
 mod server;
 mod session;
 mod storage;
@@ -108,19 +109,27 @@ async fn run(socket_override: Option<PathBuf>) -> Result<()> {
 
     let socket_path = socket_override.unwrap_or_else(|| paths.socket());
 
-    // Phase 1A of the remote-control plan (issue #62): also start a
+    // Phase 1 of the remote-control plan (issue #62): start a
     // WebSocket listener on localhost when `AGENTD_REMOTE_WS_PORT`
-    // is set. UNAUTHENTICATED in this commit — only meant to validate
-    // the transport layer behind a tunnel; auth + cloudflared
-    // bundling come in subsequent commits before this can be turned
-    // on for general use.
+    // is set. The listener is bound to 127.0.0.1 and gated on a
+    // token in the WS upgrade URL path (`/t/<token>`). The token
+    // is minted here and logged at info level so a developer can
+    // copy it for local testing; once Phase 1C wires up
+    // `cloudflared`, the daemon will also print a QR code with
+    // the full `wss://<host>/t/<token>` URL.
     if let Ok(port) = std::env::var("AGENTD_REMOTE_WS_PORT") {
         if let Ok(port) = port.parse::<u16>() {
             let mgr = manager.clone();
+            let remote = remote::RemoteState::new();
             let addr = format!("127.0.0.1:{port}");
+            tracing::info!(
+                addr = %addr,
+                url = %format!("ws://{addr}/t/{}", remote.token()),
+                "remote ws ready (token-gated, localhost-bind)"
+            );
             tokio::spawn(async move {
-                if let Err(e) = server::serve_ws(mgr, &addr).await {
-                    tracing::error!(addr, error = %e, "ws server exited");
+                if let Err(e) = server::serve_ws(mgr, remote, &addr).await {
+                    tracing::error!(error = %e, "ws server exited");
                 }
             });
         } else {
