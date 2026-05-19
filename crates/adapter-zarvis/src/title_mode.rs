@@ -50,6 +50,16 @@ fn provider_for(p: Provider) -> Result<Box<dyn LlmProvider>> {
         Provider::OpenAI => Box::new(provider::openai::OpenAi::from_env()?),
         Provider::Anthropic => Box::new(provider::anthropic::Anthropic::from_env()?),
         Provider::Ollama => Box::new(provider::ollama::Ollama::from_env()?),
+        // Title generation always uses one of the trio above; the
+        // user never picks `codex-oauth:` for title-gen since the
+        // selection comes from `pick_default_spec_str` which only
+        // emits openai/anthropic/ollama. Bail loudly if we ever get
+        // here so the contract doesn't drift silently.
+        Provider::CodexOauth => {
+            return Err(anyhow!(
+                "title-gen does not support codex-oauth provider"
+            ));
+        }
     })
 }
 
