@@ -5,9 +5,24 @@
 //! renderer reveals by pinning letters when rain columns pass their target row.
 
 use agentd_protocol::{SessionEvent, SessionState};
+use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_ACTIVE_REVEALS: usize = 4;
+
+/// Minimum gap between PTY-triggered reveal words for the same
+/// session. PTY events arrive in bursts (many bytes per agent turn);
+/// without throttling each chunk would queue a word and starve the
+/// active-reveal cap.
+const PTY_REVEAL_GAP: Duration = Duration::from_millis(3500);
+
+/// Rotating activity words for PTY-driven harnesses (codex / claude
+/// in interactive mode, shell). Zarvis already emits structured tool
+/// events that map to richer words via `word_for_event` — these are
+/// the fallback for harnesses whose only signal is "bytes happened".
+const PTY_ACTIVITY_WORDS: &[&str] = &[
+    "working", "thinking", "running", "writing", "reading", "typing",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlashTone {
@@ -47,6 +62,13 @@ impl RevealWord {
 #[derive(Debug, Default, Clone)]
 pub struct MatrixRain {
     queue: Vec<RevealWord>,
+    /// Last PTY-triggered reveal per session — used to rate-limit
+    /// the heartbeat path so a single agent turn doesn't flood the
+    /// reveal queue.
+    pty_throttle: HashMap<String, Instant>,
+    /// Monotonic counter so successive PTY heartbeats rotate through
+    /// `PTY_ACTIVITY_WORDS` for visual variety.
+    pty_word_cursor: u32,
 }
 
 impl MatrixRain {
@@ -67,6 +89,32 @@ impl MatrixRain {
         }
     }
 
+    /// Heartbeat from a PTY-only harness (codex / claude in
+    /// interactive mode, shell). PTY adapters don't emit structured
+    /// `ToolUse` / `Status` events while the agent is working, so
+    /// without this the matrix rain reveals nothing for them. We
+    /// rate-limit per session (one reveal per ~3.5s of byte traffic)
+    /// and rotate through generic activity words so the rain still
+    /// reflects that something is happening.
+    pub fn observe_pty_activity(&mut self, session_id: &str, now: Instant) {
+        if let Some(prev) = self.pty_throttle.get(session_id) {
+            if now.duration_since(*prev) < PTY_REVEAL_GAP {
+                return;
+            }
+        }
+        self.pty_throttle.insert(session_id.to_string(), now);
+        let idx = (self.pty_word_cursor as usize) % PTY_ACTIVITY_WORDS.len();
+        self.pty_word_cursor = self.pty_word_cursor.wrapping_add(1);
+        self.queue_random_at(PTY_ACTIVITY_WORDS[idx], FlashTone::Work, 25, now);
+    }
+
+    /// Forget per-session throttle state. Call when a session is
+    /// reset, ends, or is deleted so the map doesn't grow unbounded
+    /// and a future session reusing the id starts fresh.
+    pub fn forget_session(&mut self, session_id: &str) {
+        self.pty_throttle.remove(session_id);
+    }
+
     pub fn observe_tool_decision(&mut self, decision: &str) {
         match decision {
             "approve" | "automode" => self.queue_random("approved", FlashTone::Good, 95),
@@ -76,8 +124,12 @@ impl MatrixRain {
     }
 
     fn queue_random(&mut self, text: &'static str, tone: FlashTone, priority: u8) {
+        self.queue_random_at(text, tone, priority, Instant::now());
+    }
+
+    fn queue_random_at(&mut self, text: &'static str, tone: FlashTone, priority: u8, now: Instant) {
         let (x, y) = random_position(text, self.queue.len());
-        self.queue(text, tone, x, y, priority);
+        self.queue_at(text, tone, x, y, priority, now);
     }
 
     pub fn queue(
@@ -88,7 +140,18 @@ impl MatrixRain {
         y: f32,
         priority: u8,
     ) {
-        let now = Instant::now();
+        self.queue_at(text, tone, x, y, priority, Instant::now());
+    }
+
+    fn queue_at(
+        &mut self,
+        text: impl Into<String>,
+        tone: FlashTone,
+        x: f32,
+        y: f32,
+        priority: u8,
+        now: Instant,
+    ) {
         self.queue.retain(|word| !word.expired(now));
         let duration = Duration::from_millis(12_000);
         self.queue.push(RevealWord {
@@ -308,5 +371,78 @@ mod tests {
             assert!((0.08..=0.86).contains(&x));
             assert!((0.22..=0.88).contains(&y));
         }
+    }
+
+    #[test]
+    fn pty_activity_queues_word_on_first_call() {
+        // Codex / claude / shell emit only PTY events while the
+        // agent is working — without this path the matrix rain has
+        // nothing to reveal for them.
+        let mut rain = MatrixRain::default();
+        let now = Instant::now();
+        rain.observe_pty_activity("sess-a", now);
+        let word = rain.active_reveal(now).map(|w| w.text.clone());
+        assert!(
+            word.as_deref().map(|w| PTY_ACTIVITY_WORDS.contains(&w)).unwrap_or(false),
+            "expected one of {PTY_ACTIVITY_WORDS:?}, got {word:?}"
+        );
+    }
+
+    #[test]
+    fn pty_activity_throttles_repeated_calls_within_gap() {
+        // A burst of PTY events from a single session should produce
+        // exactly one reveal, not one per byte chunk.
+        let mut rain = MatrixRain::default();
+        let now = Instant::now();
+        rain.observe_pty_activity("sess-a", now);
+        rain.observe_pty_activity("sess-a", now + Duration::from_millis(100));
+        rain.observe_pty_activity("sess-a", now + Duration::from_millis(1000));
+        let count = rain.active_reveals(now + Duration::from_millis(1100)).count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn pty_activity_unblocks_after_gap_and_rotates_word() {
+        // Past PTY_REVEAL_GAP a second reveal is allowed, and the
+        // rotation cursor should pick a different word so the
+        // animation doesn't look stuck.
+        let mut rain = MatrixRain::default();
+        let now = Instant::now();
+        rain.observe_pty_activity("sess-a", now);
+        let first = rain
+            .active_reveal(now)
+            .map(|w| w.text.clone())
+            .expect("first reveal");
+        let later = now + PTY_REVEAL_GAP + Duration::from_millis(10);
+        rain.observe_pty_activity("sess-a", later);
+        let texts: Vec<_> = rain
+            .active_reveals(later)
+            .map(|w| w.text.clone())
+            .collect();
+        assert_eq!(texts.len(), 2);
+        assert_ne!(texts[0], texts[1], "consecutive reveals should rotate");
+        // Sanity: the first word is still one of the rotation words.
+        assert!(PTY_ACTIVITY_WORDS.contains(&first.as_str()));
+    }
+
+    #[test]
+    fn pty_activity_per_session_throttle_is_independent() {
+        // Two different sessions can each get their own reveal
+        // within the gap window — the throttle is per-session.
+        let mut rain = MatrixRain::default();
+        let now = Instant::now();
+        rain.observe_pty_activity("sess-a", now);
+        rain.observe_pty_activity("sess-b", now);
+        assert_eq!(rain.active_reveals(now).count(), 2);
+    }
+
+    #[test]
+    fn forget_session_resets_throttle() {
+        let mut rain = MatrixRain::default();
+        let now = Instant::now();
+        rain.observe_pty_activity("sess-a", now);
+        rain.forget_session("sess-a");
+        rain.observe_pty_activity("sess-a", now + Duration::from_millis(50));
+        assert_eq!(rain.active_reveals(now + Duration::from_millis(50)).count(), 2);
     }
 }
