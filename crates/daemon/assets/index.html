@@ -1009,6 +1009,15 @@ async function enterTerminalMode(id) {
   state.ptyBuffer = [];
   state.ptyBuffering = false;
 
+  // Session-select must claim PTY ownership for the remote client
+  // at the current xterm geometry — the TUI fires `pty_resize` on
+  // every focus change for the same reason. `refitTerminal` has
+  // a dedup against `state.lastReportedSize` that's correct for
+  // back-to-back refits on the SAME session, but identical
+  // cols/rows on session A vs session B mean different things to
+  // the daemon's active-wins policy. Reset the dedup so this
+  // refit always fires `pty_resize`.
+  state.lastReportedSize = { cols: 0, rows: 0 };
   refitTerminal();
   state.term.focus();
 }
