@@ -2462,4 +2462,114 @@ mod tests {
             None
         );
     }
+
+    /// Regression for the post-#69 "all sessions go to `done` after
+    /// graceful daemon restart" bug: when `shutdown_adapters` is in
+    /// flight, any `SessionEvent::Done` or `AdapterMessage::Closed`
+    /// that flushes out of a dying adapter must NOT transition the
+    /// session to a terminal state. Otherwise `resume_running_sessions`
+    /// on the next boot skips the session and the user has to restart
+    /// it manually.
+    #[tokio::test]
+    async fn handle_event_preserves_state_during_shutdown() {
+        use chrono::Utc;
+        use std::sync::atomic::Ordering;
+        use tempfile::tempdir;
+        use tokio::sync::RwLock;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage = Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let manager = Arc::new(
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager"),
+        );
+
+        // Synthetic session in `Running` (what a live shell / zarvis
+        // session looks like just before the user hits Ctrl-C on the
+        // daemon).
+        let id = "stest_shutdown".to_string();
+        let summary = agentd_protocol::SessionSummary {
+            id: id.clone(),
+            harness: "shell".into(),
+            cwd: "/tmp".into(),
+            title: None,
+            state: SessionState::Running,
+            created_at: Utc::now(),
+            last_event_at: None,
+            cost_usd: None,
+            model: None,
+            worktree: None,
+            pending_input: false,
+            last_prompt: None,
+            event_count: 0,
+            has_pty: true,
+            mode: None,
+            pinned: false,
+            position: 0,
+            group_id: None,
+            last_pty_at_ms: None,
+            automode: false,
+            kind: agentd_protocol::SessionKind::User,
+        };
+        let entry = Arc::new(SessionEntry {
+            id: id.clone(),
+            summary: RwLock::new(summary),
+            transcript_count: AtomicU64::new(0),
+            adapter: tokio::sync::Mutex::new(None),
+            pty: tokio::sync::Mutex::new(PtyState {
+                ring: Default::default(),
+                size: None,
+            }),
+            deleted: AtomicBool::new(false),
+            title_gen_attempted: AtomicBool::new(false),
+            pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+            tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
+        });
+        manager.sessions.write().await.insert(id.clone(), entry.clone());
+
+        // Pre-shutdown: a `Done` event WOULD transition state.
+        manager
+            .handle_event(&entry, SessionEvent::Done { exit_code: 0 })
+            .await;
+        assert_eq!(
+            entry.summary.read().await.state,
+            SessionState::Done,
+            "sanity: without the shutdown flag, Done transitions state",
+        );
+
+        // Reset and flip the shutdown flag (what `shutdown_adapters`
+        // does before sending SHUTDOWN to each adapter).
+        entry.summary.write().await.state = SessionState::Running;
+        manager.is_shutting_down.store(true, Ordering::Release);
+
+        // Same `Done` event during shutdown must be dropped — the
+        // session needs to keep its `Running` state on disk so the
+        // next boot's `resume_running_sessions` picks it up.
+        manager
+            .handle_event(&entry, SessionEvent::Done { exit_code: 0 })
+            .await;
+        assert_eq!(
+            entry.summary.read().await.state,
+            SessionState::Running,
+            "Done during shutdown must NOT transition state — that's \
+             the resume regression we're guarding against",
+        );
+
+        // Error events are the same shape and must also be dropped.
+        manager
+            .handle_event(
+                &entry,
+                SessionEvent::Error {
+                    message: "adapter died".into(),
+                },
+            )
+            .await;
+        assert_eq!(
+            entry.summary.read().await.state,
+            SessionState::Running,
+            "Error during shutdown must NOT transition state either",
+        );
+    }
 }
