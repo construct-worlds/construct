@@ -1,0 +1,1654 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark light" />
+<title>agentd · remote</title>
+<!--
+  xterm.js + addon-fit are bundled into the daemon binary and served
+  at `static/...` (relative to `/t/<token>/`). The daemon redirects
+  `/t/<token>` → `/t/<token>/` so these relative paths resolve
+  correctly. Loading them from the same origin as the HTML keeps
+  the phone reachable even when its network only has the cloudflared
+  tunnel and nothing else (the captive-WiFi failure mode that bit us
+  on the first hand-test against a public CDN).
+-->
+<link rel="stylesheet" href="static/xterm.css" />
+<script src="static/xterm.js" defer></script>
+<script src="static/xterm-addon-fit.js" defer></script>
+<style>
+  :root {
+    --bg: #0e1014;
+    --bg-elev: #161a20;
+    --bg-elev-2: #1f242c;
+    --border: #262c36;
+    --fg: #e5e7eb;
+    --fg-dim: #98a2b3;
+    --fg-faint: #6b7280;
+    --accent: #6ea8fe;
+    --ok: #5cd1a6;
+    --warn: #f4b860;
+    --err: #f47c7c;
+    --bubble-user: #1a2c4a;
+    --bubble-assistant: #1c2027;
+    --bubble-system: #1a1a1f;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f8fa;
+      --bg-elev: #ffffff;
+      --bg-elev-2: #eef0f4;
+      --border: #dfe3ea;
+      --fg: #11161e;
+      --fg-dim: #4b5563;
+      --fg-faint: #8a93a4;
+      --accent: #2563eb;
+      --bubble-user: #dceaff;
+      --bubble-assistant: #f2f3f6;
+      --bubble-system: #ebecf0;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
+          system-ui, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    /* iOS safe areas */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--border);
+  }
+  header .title { font-weight: 600; font-size: 15px; }
+  header .meta { color: var(--fg-dim); font-size: 12px; }
+  .conn {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--fg-dim);
+  }
+  .conn .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--fg-faint);
+  }
+  .conn[data-state="open"] .dot { background: var(--ok); }
+  .conn[data-state="connecting"] .dot { background: var(--warn); }
+  .conn[data-state="closed"] .dot { background: var(--err); }
+
+  main {
+    flex: 1 1 0;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 240px 1fr;
+  }
+  @media (max-width: 720px) {
+    main {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto 1fr;
+    }
+    .session-list { max-height: 32vh; }
+    .session-list.collapsed { max-height: 0; padding: 0; border-bottom: none; }
+  }
+
+  .session-list {
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    background: var(--bg-elev);
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .session-list .item {
+    padding: 8px 14px;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .session-list .item:hover { background: var(--bg-elev-2); }
+  .session-list .item.active {
+    background: var(--bg-elev-2);
+    border-left-color: var(--accent);
+  }
+  .session-list .item .name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session-list .item .state {
+    font-size: 11px;
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  /* Group header (matches TUI's `▾ name` line above each group). */
+  .session-list .group-header {
+    padding: 6px 12px 4px;
+    color: var(--fg-dim);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    /* Faint divider above each group, except the first one — the
+       ungrouped region already has a bottom border. */
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+  }
+  .session-list .group-glyph { color: var(--fg-faint); }
+  /* Sessions belonging to a group get a bit of left-padding so they
+     read as members under the header above them. */
+  .session-list .item.indent {
+    padding-left: 24px;
+  }
+  .session-list .empty {
+    color: var(--fg-dim);
+    padding: 14px;
+    font-style: italic;
+    font-size: 13px;
+  }
+
+  .view {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+  .transcript {
+    flex: 1 1 0;
+    overflow-y: auto;
+    padding: 12px 14px 16px;
+    scroll-behavior: smooth;
+  }
+  .row {
+    margin: 8px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+  }
+  .row .meta {
+    font-size: 11px;
+    color: var(--fg-faint);
+    letter-spacing: 0.02em;
+  }
+  .bubble {
+    border-radius: 10px;
+    padding: 8px 12px;
+    white-space: pre-wrap;
+    max-width: min(720px, 95%);
+  }
+  .role-user .bubble {
+    background: var(--bubble-user);
+    align-self: flex-end;
+  }
+  .role-user { align-items: flex-end; }
+  .role-assistant .bubble { background: var(--bubble-assistant); }
+  .role-system .bubble {
+    background: var(--bubble-system);
+    color: var(--fg-dim);
+    font-size: 13px;
+  }
+  .tool {
+    border-left: 3px solid var(--accent);
+    background: var(--bg-elev);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--fg-dim);
+  }
+  .tool .tool-name { color: var(--fg); font-weight: 500; }
+  .tool details { margin-top: 4px; }
+  .tool summary {
+    cursor: pointer;
+    color: var(--fg-faint);
+    font-size: 11px;
+  }
+  .tool pre {
+    margin: 4px 0 0 0;
+    padding: 6px 8px;
+    background: var(--bg);
+    border-radius: 4px;
+    overflow-x: auto;
+    color: var(--fg);
+    font-size: 12px;
+    max-height: 240px;
+  }
+  .tool .badge {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 10px;
+    font-size: 10px;
+    margin-left: 6px;
+    vertical-align: middle;
+    background: var(--bg-elev-2);
+    color: var(--fg-dim);
+  }
+  .tool .badge.ok { background: rgba(92, 209, 166, 0.18); color: var(--ok); }
+  .tool .badge.err { background: rgba(244, 124, 124, 0.18); color: var(--err); }
+  .status {
+    color: var(--fg-dim);
+    font-size: 12px;
+    font-style: italic;
+  }
+  .error {
+    background: rgba(244, 124, 124, 0.12);
+    border-left: 3px solid var(--err);
+    padding: 6px 10px;
+    border-radius: 4px;
+    color: var(--err);
+    font-size: 13px;
+  }
+  .pty {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--fg);
+    background: var(--bg-elev);
+    padding: 6px 10px;
+    border-radius: 4px;
+    white-space: pre-wrap;
+    overflow-x: auto;
+  }
+
+  .composer {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-elev);
+    align-items: end;
+  }
+  .composer textarea {
+    flex: 1;
+    resize: none;
+    min-height: 36px;
+    max-height: 30vh;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    line-height: 1.4;
+    /* iOS: keep font ≥16px to suppress auto-zoom on focus */
+    font-size: 16px;
+  }
+  .composer textarea:focus {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+  }
+  .composer button {
+    flex: 0 0 auto;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: none;
+    background: var(--accent);
+    color: white;
+    font-weight: 500;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .composer button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .toggle-list {
+    display: none;
+    flex: 0 0 auto;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--bg-elev-2);
+    color: var(--fg-dim);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  @media (max-width: 720px) {
+    .toggle-list { display: inline-block; }
+  }
+
+  .terminal-wrap {
+    flex: 1 1 0;
+    min-height: 0;
+    background: #000;
+    position: relative;
+    padding: 6px 0 0 6px;
+    /* iOS safe-area inset on the right edge for landscape with notch. */
+    padding-right: env(safe-area-inset-right);
+  }
+  .terminal-host {
+    width: 100%;
+    height: 100%;
+  }
+  .terminal-host:focus,
+  .terminal-host .xterm:focus { outline: none; }
+  /* xterm.js paints into the host element; ensure it fills the wrap. */
+  .terminal-host .xterm,
+  .terminal-host .xterm .xterm-viewport,
+  .terminal-host .xterm .xterm-screen { height: 100%; }
+  .terminal-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-faint);
+    font-size: 13px;
+    pointer-events: none;
+  }
+  .terminal-loading.gone { display: none; }
+
+  /* Virtual keyboard — sits below the terminal in PTY mode.
+     Two-section layout: a horizontally-scrolling special-keys
+     row (Esc/Tab/arrows/Ctrl combos) on top, then the QWERTY
+     main rows below. Touch-friendly key sizes (44px target),
+     safe-area padding at the bottom for iOS. Hidden in chat
+     mode. */
+  .vkbd {
+    flex: 0 0 auto;
+    background: var(--bg-elev);
+    border-top: 1px solid var(--border);
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+    /* Disable iOS double-tap zoom for the whole keyboard area
+       so taps register without a 300ms delay. */
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .vkbd-special {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    padding-bottom: 4px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .vkbd-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .vkbd-row {
+    display: flex;
+    gap: 4px;
+    /* Each row's keys flex-fill so 10 keys per row of QWERTY
+       split the viewport evenly regardless of phone width. */
+  }
+  .vk {
+    appearance: none;
+    flex: 1 1 0;
+    /* Min width is the iOS HIG touch target floor. The flex grow
+       above means each key fills its share of the row width. */
+    min-width: 28px;
+    height: 38px;
+    padding: 0 2px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg-elev-2);
+    color: var(--fg);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background-color 80ms ease-out;
+    /* Mobile browsers add a tap highlight that flashes on every
+       press — we have our own :active style, so disable theirs. */
+    -webkit-tap-highlight-color: transparent;
+  }
+  .vk:active { background: var(--accent); color: #fff; }
+  .vk.modifier { background: var(--bg); }
+  .vk.modifier.on { background: var(--accent); color: #fff; }
+  .vk.wide { flex: 2.2 1 0; }
+  .vk.xwide { flex: 3.4 1 0; }
+  /* Special-keys row buttons stay sized intrinsic; they don't
+     flex-fill because the row scrolls horizontally. */
+  .vkbd-special .vk {
+    flex: 0 0 auto;
+    min-width: 44px;
+    padding: 0 10px;
+    height: 34px;
+    font-size: 13px;
+  }
+
+  /* Tool approval bottom sheet -------------------------------------- */
+  .approval-sheet {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    z-index: 1000;
+    /* Animate in. */
+    animation: approval-fade-in 120ms ease-out;
+  }
+  @keyframes approval-fade-in { from { opacity: 0; } to { opacity: 1; } }
+  .approval-sheet[hidden] { display: none; }
+  .approval-card {
+    width: 100%;
+    max-width: 480px;
+    background: var(--bg-elev);
+    border-top: 1px solid var(--border);
+    border-radius: 14px 14px 0 0;
+    padding: 14px 14px calc(14px + env(safe-area-inset-bottom));
+    box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.35);
+    animation: approval-slide-up 180ms cubic-bezier(0.2, 0.9, 0.3, 1);
+  }
+  @keyframes approval-slide-up {
+    from { transform: translateY(40%); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+  }
+  .approval-head { display: flex; gap: 8px; align-items: baseline; }
+  .approval-tool-name {
+    font-weight: 600;
+    font-size: 15px;
+    flex: 1;
+    word-break: break-word;
+  }
+  .approval-risk {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: var(--bg-elev-2);
+    color: var(--fg-dim);
+  }
+  .approval-risk.safe { background: rgba(92, 209, 166, 0.18); color: var(--ok); }
+  .approval-risk.risky { background: rgba(244, 124, 124, 0.18); color: var(--err); }
+  .approval-summary {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--fg);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 36vh;
+    overflow-y: auto;
+  }
+  .approval-queue-hint {
+    color: var(--fg-dim);
+    font-size: 11px;
+    margin-top: 6px;
+  }
+  .approval-actions {
+    margin-top: 12px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .approval-actions .btn-automode {
+    grid-column: 1 / 3;
+  }
+  .approval-actions button {
+    appearance: none;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    color: var(--fg);
+    background: var(--bg-elev-2);
+  }
+  .approval-actions .btn-approve {
+    background: var(--accent);
+    color: #fff;
+  }
+  .approval-actions .btn-deny {
+    background: rgba(244, 124, 124, 0.18);
+    color: var(--err);
+  }
+  .approval-actions .btn-automode {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg-dim);
+    font-size: 13px;
+  }
+  .approval-actions button:disabled { opacity: 0.5; cursor: progress; }
+</style>
+</head>
+<body>
+  <header>
+    <button class="toggle-list" id="toggleList" type="button">≡</button>
+    <div class="title">agentd</div>
+    <div class="meta" id="sessionTitle"></div>
+    <div class="conn" id="conn" data-state="connecting">
+      <span class="dot"></span><span class="label">connecting…</span>
+    </div>
+  </header>
+  <main>
+    <aside class="session-list" id="sessionList">
+      <div class="empty">connecting…</div>
+    </aside>
+    <section class="view">
+      <!-- Chat view: zarvis / shell / any non-PTY session. -->
+      <div class="transcript" id="transcript"></div>
+      <form class="composer" id="composer">
+        <textarea
+          id="input"
+          placeholder="message…"
+          rows="1"
+          autocomplete="off"
+          autocapitalize="sentences"
+          spellcheck="true"
+        ></textarea>
+        <button type="submit" id="send" disabled>send</button>
+      </form>
+      <!--
+        Terminal view: PTY-backed sessions (codex / claude / shell).
+        Mutually exclusive with the chat view above; toggled in
+        `selectSession()` based on the summary's `has_pty` flag.
+      -->
+      <div class="terminal-wrap" id="terminalWrap" hidden>
+        <div class="terminal-host" id="terminal"></div>
+        <div class="terminal-loading" id="terminalLoading">loading xterm…</div>
+      </div>
+      <!--
+        Virtual keyboard for PTY-mode sessions on mobile. Two
+        layers (letters / symbols) plus a fixed top row of special
+        keys (Esc, Tab, arrows, common Ctrl combos). Buttons are
+        rendered by JS from a config table (see `VKBD_LAYERS`);
+        each tap forwards a literal byte sequence via the same
+        `session.pty_input` channel `term.onData` uses, so the
+        daemon-side PTY echoes back through the usual render
+        path. Hidden in chat mode.
+      -->
+      <div class="vkbd" id="vkbd" hidden>
+        <div class="vkbd-special" id="vkbdSpecial"></div>
+        <div class="vkbd-main" id="vkbdMain"></div>
+      </div>
+    </section>
+  </main>
+
+  <!--
+    Tool-approval bottom sheet. Shown when the adapter emits
+    `tool_approval_request`; the user picks approve / deny /
+    approve-all (automode) and the client posts back via
+    `session.tool_decision`. Queued sheet if multiple arrive while
+    one is open.
+  -->
+  <div id="approvalSheet" class="approval-sheet" hidden role="dialog" aria-modal="true">
+    <div class="approval-card">
+      <div class="approval-head">
+        <div class="approval-tool-name" id="approvalToolName"></div>
+        <span class="approval-risk" id="approvalRisk"></span>
+      </div>
+      <pre class="approval-summary" id="approvalSummary"></pre>
+      <div class="approval-queue-hint" id="approvalQueueHint" hidden></div>
+      <div class="approval-actions">
+        <button type="button" class="btn-deny" id="approvalDeny">Deny</button>
+        <button type="button" class="btn-approve" id="approvalApprove">Approve</button>
+        <button type="button" class="btn-automode" id="approvalAutomode">
+          Approve all from now on (auto-mode)
+        </button>
+      </div>
+    </div>
+  </div>
+
+<script>
+"use strict";
+
+// --- Lightweight JSON-RPC over WebSocket ---------------------------------
+//
+// One persistent connection multiplexes every method call and event
+// subscription. Reconnects with exponential backoff so a brief network
+// blip (mobile WiFi → cellular handoff) doesn't kill the session view.
+
+const $ = (id) => document.getElementById(id);
+const transcriptEl = $("transcript");
+const sessionListEl = $("sessionList");
+const sessionTitleEl = $("sessionTitle");
+const connEl = $("conn");
+const composerEl = $("composer");
+const inputEl = $("input");
+const sendBtn = $("send");
+const toggleListBtn = $("toggleList");
+const terminalWrapEl = $("terminalWrap");
+const terminalEl = $("terminal");
+const terminalLoadingEl = $("terminalLoading");
+const vkbdEl = $("vkbd");
+const vkbdSpecialEl = $("vkbdSpecial");
+const vkbdMainEl = $("vkbdMain");
+const approvalSheetEl = $("approvalSheet");
+const approvalToolNameEl = $("approvalToolName");
+const approvalRiskEl = $("approvalRisk");
+const approvalSummaryEl = $("approvalSummary");
+const approvalQueueHintEl = $("approvalQueueHint");
+const approvalDenyBtn = $("approvalDeny");
+const approvalApproveBtn = $("approvalApprove");
+const approvalAutomodeBtn = $("approvalAutomode");
+
+const state = {
+  ws: null,
+  rpcNextId: 1,
+  pending: new Map(),
+  reconnectDelay: 1000,
+  sessions: [], // [{id, title, harness, state, group_id, position, ...}]
+  groups: [],   // [{id, name, position, collapsed}], TUI-style ordering
+  currentId: null,
+  // Per-session transcript items (the rows we've rendered). Keyed by
+  // session_id so switching sessions is just a re-render of cached
+  // events. Cleared on explicit `Reset` events from the adapter.
+  byId: new Map(),
+  // Current view mode — "chat" (zarvis-style transcript + composer)
+  // or "terminal" (xterm.js mounted to a PTY-backed session). Set by
+  // `selectSession` based on the summary's `has_pty` flag.
+  mode: "chat",
+  // Lazily-initialized xterm.js handle + fit addon. Reused across
+  // PTY-session switches; `term.reset()` clears between sessions.
+  term: null,
+  fitAddon: null,
+  // Last cols/rows we reported to the daemon, to avoid spamming
+  // `session.pty_resize` on every paint when nothing actually
+  // changed (ResizeObserver fires generously).
+  lastReportedSize: { cols: 0, rows: 0 },
+  // PTY events that arrived during the `pty_replay` round-trip get
+  // queued here, then drained after the snapshot is written. Keeps
+  // history-before-live ordering correct without a race window.
+  ptyBuffer: [],
+  ptyBuffering: false,
+  // FIFO queue of pending tool-approval requests for the active
+  // session. The bottom-sheet shows the head; each decision pops
+  // and re-shows for the next, so multiple back-to-back approval
+  // prompts (codex with tool-heavy turns) don't lose any.
+  approvalQueue: [],
+  approvalShown: null,
+};
+
+function setConnState(s, label) {
+  connEl.dataset.state = s;
+  connEl.querySelector(".label").textContent = label;
+  sendBtn.disabled = !(s === "open" && state.currentId);
+}
+
+function connect() {
+  setConnState("connecting", "connecting…");
+  const url = location.href.replace(/^http/, "ws");
+  let ws;
+  try { ws = new WebSocket(url); } catch (e) {
+    setConnState("closed", "failed");
+    scheduleReconnect();
+    return;
+  }
+  state.ws = ws;
+
+  ws.addEventListener("open", () => {
+    setConnState("open", "connected");
+    state.reconnectDelay = 1000;
+    // Pull initial state, then subscribe globally so we get state
+    // notifications for every session (we filter to currentId
+    // when rendering).
+    rpc("ping", null).catch(() => {});
+    refreshSessions();
+    rpc("subscribe.events", { session_id: null }).catch(() => {});
+    // If a session was already selected before the reconnect, re-
+    // fill its transcript.
+    if (state.currentId) loadTranscript(state.currentId);
+  });
+
+  ws.addEventListener("close", () => {
+    setConnState("closed", "disconnected");
+    state.ws = null;
+    // Reject any in-flight calls so promises don't hang.
+    for (const { reject } of state.pending.values()) {
+      reject(new Error("ws closed"));
+    }
+    state.pending.clear();
+    scheduleReconnect();
+  });
+
+  ws.addEventListener("error", () => {/* close fires next */});
+
+  ws.addEventListener("message", (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg && msg.id != null && (msg.result !== undefined || msg.error !== undefined)) {
+      const pend = state.pending.get(msg.id);
+      if (!pend) return;
+      state.pending.delete(msg.id);
+      if (msg.error) pend.reject(new Error(msg.error.message || "rpc error"));
+      else pend.resolve(msg.result);
+      return;
+    }
+    if (msg && msg.method) {
+      handleNotification(msg.method, msg.params || {});
+    }
+  });
+}
+
+function scheduleReconnect() {
+  setTimeout(connect, state.reconnectDelay);
+  state.reconnectDelay = Math.min(state.reconnectDelay * 2, 15000);
+}
+
+function rpc(method, params) {
+  return new Promise((resolve, reject) => {
+    if (!state.ws || state.ws.readyState !== 1) {
+      reject(new Error("ws not open"));
+      return;
+    }
+    const id = state.rpcNextId++;
+    state.pending.set(id, { resolve, reject });
+    state.ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+  });
+}
+
+// --- Sessions list -------------------------------------------------------
+
+async function refreshSessions() {
+  try {
+    // Fetch sessions + groups in parallel. Groups arrive as
+    // `group.list -> Vec<GroupSummary>`; sessions reference them
+    // via `group_id`. Both can change live via `session/state`,
+    // `session/deleted`, `group/state`, `group/deleted` — the
+    // existing `handleNotification` path updates the caches and
+    // re-renders.
+    const [list, groups] = await Promise.all([
+      rpc("session.list", null),
+      rpc("group.list", null).catch(() => []),
+    ]);
+    state.sessions = Array.isArray(list) ? list : [];
+    state.sessions = state.sessions.filter((s) => s.kind !== "orchestrator");
+    state.groups = Array.isArray(groups) ? groups : [];
+    renderSessions();
+    // Auto-select the same session the TUI would (top of the
+    // sorted list) — typically the most recently created one.
+    if (!state.currentId) {
+      const ordered = orderedSessions();
+      if (ordered.length) selectSession(ordered[0].id);
+    }
+  } catch (e) {
+    sessionListEl.innerHTML = `<div class="empty">${escape(e.message)}</div>`;
+  }
+}
+
+/**
+ * Compute the visible list ordering, matching the TUI's
+ * `list_items()` shape:
+ *   1. Ungrouped sessions, ascending by `position`.
+ *   2. Each group (ascending by `position`) followed by its
+ *      member sessions (ascending by `position` within the
+ *      group).
+ *
+ * Returns a flat array of either a session summary or a
+ * `{kind: "group", group}` marker. Renderer paints group rows
+ * differently.
+ */
+function orderedItems() {
+  const ungrouped = state.sessions
+    .filter((s) => !s.group_id)
+    .slice()
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  const groups = state.groups
+    .slice()
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  const items = ungrouped.map((s) => ({ kind: "session", session: s }));
+  for (const g of groups) {
+    items.push({ kind: "group", group: g });
+    if (g.collapsed) continue;
+    const members = state.sessions
+      .filter((s) => s.group_id === g.id)
+      .slice()
+      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    for (const s of members) {
+      items.push({ kind: "session", session: s, indented: true });
+    }
+  }
+  return items;
+}
+
+/** Flat list of just the sessions in `orderedItems` ordering. */
+function orderedSessions() {
+  return orderedItems()
+    .filter((i) => i.kind === "session")
+    .map((i) => i.session);
+}
+
+function renderSessions() {
+  const items = orderedItems();
+  if (!items.length) {
+    sessionListEl.innerHTML = `<div class="empty">no sessions</div>`;
+    return;
+  }
+  const html = items
+    .map((item) => {
+      if (item.kind === "group") {
+        const g = item.group;
+        const glyph = g.collapsed ? "▸" : "▾";
+        return `
+          <div class="group-header">
+            <span class="group-glyph">${glyph}</span>
+            <span class="group-name">${escape(g.name || "(unnamed)")}</span>
+          </div>`;
+      }
+      const s = item.session;
+      const active = s.id === state.currentId ? "active" : "";
+      const indent = item.indented ? "indent" : "";
+      const title = s.title || s.harness || s.id.slice(0, 8);
+      const status = (s.state || "").toLowerCase();
+      return `
+        <div class="item ${active} ${indent}" data-id="${attr(s.id)}">
+          <div class="name">${escape(title)}</div>
+          <div class="state">${escape(status)}</div>
+        </div>`;
+    })
+    .join("");
+  sessionListEl.innerHTML = html;
+  sessionListEl.querySelectorAll(".item").forEach((el) => {
+    el.addEventListener("click", () => selectSession(el.dataset.id));
+  });
+}
+
+async function selectSession(id) {
+  if (state.currentId === id) return;
+  state.currentId = id;
+  renderSessions();
+  const s = state.sessions.find((x) => x.id === id);
+  sessionTitleEl.textContent = s ? (s.title || s.harness || s.id.slice(0, 8)) : "";
+  // Hide the session list on narrow screens after selection.
+  if (window.matchMedia("(max-width: 720px)").matches) {
+    sessionListEl.classList.add("collapsed");
+  }
+  if (s && s.has_pty) {
+    await enterTerminalMode(id);
+  } else {
+    enterChatMode();
+    await loadTranscript(id);
+  }
+  // Composer is meaningful only in chat mode; PTY sessions route
+  // input through xterm directly.
+  sendBtn.disabled =
+    state.mode !== "chat" || !(state.ws && state.ws.readyState === 1);
+}
+
+// --- PTY / xterm.js mode -------------------------------------------------
+
+function enterChatMode() {
+  state.mode = "chat";
+  transcriptEl.hidden = false;
+  composerEl.hidden = false;
+  terminalWrapEl.hidden = true;
+  // Virtual keyboard only makes sense over xterm — chat sessions
+  // have a text-style editor instead.
+  vkbdEl.hidden = true;
+}
+
+async function enterTerminalMode(id) {
+  state.mode = "terminal";
+  transcriptEl.hidden = true;
+  composerEl.hidden = true;
+  terminalWrapEl.hidden = false;
+  vkbdEl.hidden = false;
+  // Build the keyboard markup once per session-switch; cheap, and
+  // makes future per-session layout customization easy if it ever
+  // becomes a thing.
+  renderVirtualKeyboard();
+
+  // Wait for xterm.js (CDN-loaded). If the phone has no public
+  // internet but reached the cloudflared tunnel, we never resolve
+  // and the placeholder stays — user sees "loading xterm…" instead
+  // of a confusing empty pane.
+  const ok = await waitForXterm(8000);
+  if (!ok) {
+    terminalLoadingEl.textContent =
+      "xterm.js failed to load (check daemon log)";
+    return;
+  }
+  terminalLoadingEl.classList.add("gone");
+
+  if (!state.term) initTerminal();
+  state.term.reset();
+
+  // Buffer PTY events that arrive while we're waiting on the
+  // snapshot RPC. Drained after the snapshot is written so
+  // history → live ordering stays correct.
+  state.ptyBuffer = [];
+  state.ptyBuffering = true;
+
+  try {
+    const r = await rpc("session.pty_replay", { session_id: id });
+    if (r && r.size) {
+      // Daemon's last-known size wins as the initial geometry; we
+      // refit below in case the phone screen is narrower.
+      state.term.resize(r.size.cols, r.size.rows);
+    }
+    if (r && r.data) state.term.write(decodeBase64(r.data));
+  } catch (e) {
+    state.term.write(`\r\n\x1b[31mreplay failed: ${escape(e.message)}\x1b[0m\r\n`);
+  }
+
+  // Flush any live PTY events that buffered during the replay.
+  for (const chunk of state.ptyBuffer) state.term.write(chunk);
+  state.ptyBuffer = [];
+  state.ptyBuffering = false;
+
+  refitTerminal();
+  state.term.focus();
+}
+
+/**
+ * Resolves to true when xterm.js + addon-fit have loaded from the CDN.
+ * Polls window.Terminal / window.FitAddon since both UMD bundles
+ * attach themselves to those globals.
+ */
+function waitForXterm(timeoutMs) {
+  const start = performance.now();
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (window.Terminal && window.FitAddon) return resolve(true);
+      if (performance.now() - start > timeoutMs) return resolve(false);
+      setTimeout(tick, 80);
+    };
+    tick();
+  });
+}
+
+function initTerminal() {
+  state.term = new window.Terminal({
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    fontSize: 13,
+    convertEol: false,
+    cursorBlink: true,
+    // Mobile-friendly defaults; the daemon controls actual PTY size
+    // via `session.pty_resize` after we report the fit.
+    scrollback: 4000,
+    // Match the surrounding dark theme — xterm's default xtermjs
+    // palette already does OK in dark mode; tweak background to
+    // pure black so the canvas blends with the wrap.
+    theme: { background: "#000000" },
+  });
+  state.fitAddon = new window.FitAddon.FitAddon();
+  state.term.loadAddon(state.fitAddon);
+  state.term.open(terminalEl);
+
+  // Forward user keystrokes (and pasted text) as base64-encoded
+  // PTY input. xterm's onData yields a JS string of UTF-8
+  // codepoints; we re-encode through TextEncoder so multi-byte
+  // input round-trips cleanly.
+  state.term.onData((s) => {
+    if (state.mode !== "terminal" || !state.currentId) return;
+    const data = encodeBase64Utf8(s);
+    rpc("session.pty_input", { session_id: state.currentId, data })
+      .catch((e) => console.error("pty_input failed:", e));
+  });
+
+  // Refit when the viewport changes (orientation, soft-keyboard
+  // showing, etc.). ResizeObserver covers the layout-changes case;
+  // visualViewport covers the soft-keyboard case on mobile.
+  new ResizeObserver(refitTerminal).observe(terminalEl);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", refitTerminal);
+  }
+
+  // Tapping the terminal area focuses xterm's helper textarea, which
+  // is what summons the soft keyboard on iOS/Android.
+  terminalEl.addEventListener("click", () => state.term && state.term.focus());
+}
+
+function refitTerminal() {
+  if (!state.term || !state.fitAddon) return;
+  if (state.mode !== "terminal") return;
+  try {
+    state.fitAddon.fit();
+  } catch (_) { return; }
+  const cols = state.term.cols;
+  const rows = state.term.rows;
+  if (!cols || !rows) return;
+  if (cols === state.lastReportedSize.cols && rows === state.lastReportedSize.rows) {
+    return;
+  }
+  state.lastReportedSize = { cols, rows };
+  if (state.currentId) {
+    rpc("session.pty_resize", { session_id: state.currentId, cols, rows })
+      .catch((e) => console.warn("pty_resize failed:", e));
+  }
+}
+
+function encodeBase64Utf8(s) {
+  const bytes = new TextEncoder().encode(s);
+  let bin = "";
+  // Build a latin-1 binary string (each char 0..255) so btoa accepts
+  // it. Looping bytewise is fine for typical keystroke / paste sizes.
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+// --- Virtual keyboard ---------------------------------------------------
+//
+// On-screen QWERTY + symbols + special-keys row for PTY-mode
+// sessions. The OS soft keyboard is unreliable in a WebSocket-
+// driven page (focus on a `<canvas>` doesn't summon it on iOS,
+// xterm.js's helper textarea is a div), so we ship our own.
+//
+// Layout is config-driven (see VKBD_LAYERS); rendering generates
+// a `<button>` per key. Each button carries either `data-char`
+// (literal character to send) or `data-key` (named special key
+// dispatched through KEYBAR_BYTES / SPECIAL_HANDLERS).
+
+/** Top row — special keys + Ctrl combos. Renders once and
+ *  doesn't depend on shift / layer state. */
+const VKBD_SPECIAL = [
+  { key: "esc", label: "Esc" },
+  { key: "tab", label: "Tab" },
+  { key: "up", label: "↑" },
+  { key: "down", label: "↓" },
+  { key: "left", label: "←" },
+  { key: "right", label: "→" },
+  { key: "cc", label: "^C" },
+  { key: "cd", label: "^D" },
+  { key: "cz", label: "^Z" },
+  { key: "cl", label: "^L" },
+  { key: "ca", label: "^A" },
+  { key: "ce", label: "^E" },
+  { key: "ck", label: "^K" },
+  { key: "cu", label: "^U" },
+  { key: "cw", label: "^W" },
+];
+
+/** Byte sequences for named keys (top row + main-row specials). */
+const KEYBAR_BYTES = {
+  esc: "\x1b",
+  tab: "\t",
+  up: "\x1b[A",
+  down: "\x1b[B",
+  left: "\x1b[D",
+  right: "\x1b[C",
+  cc: "\x03",
+  cd: "\x04",
+  cz: "\x1a",
+  cl: "\x0c",
+  ca: "\x01",
+  ce: "\x05",
+  ck: "\x0b",
+  cu: "\x15",
+  cw: "\x17",
+  // Main-keyboard special keys.
+  enter: "\r",
+  backspace: "\x7f",
+  space: " ",
+};
+
+/**
+ * Main keyboard layouts. Each row is an array of cell descriptors.
+ *
+ * Cells are either:
+ *   - a literal single-character string ("q", "1", ".") → tap
+ *     sends that character (uppercased if shift is on for letter
+ *     keys).
+ *   - an object `{ key, label, class?, ... }` for special keys.
+ *
+ * Two layers: letters (default) and symbols (123 toggle). Keeping
+ * it to two layers avoids the "where did `?` go" maze of a
+ * three-layer iOS keyboard.
+ */
+const VKBD_LAYERS = {
+  letters: [
+    ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+    ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
+    [
+      { key: "shift", label: "⇧", class: "modifier" },
+      "z", "x", "c", "v", "b", "n", "m",
+      { key: "backspace", label: "⌫" },
+    ],
+    [
+      { key: "layer-symbols", label: "123", class: "modifier" },
+      { key: "space", label: " ", class: "xwide" },
+      { key: "enter", label: "⏎", class: "wide" },
+    ],
+  ],
+  symbols: [
+    ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+    ["-", "/", ":", ";", "(", ")", "$", "&", "@", "\""],
+    [
+      { key: "shift", label: "#+=", class: "modifier" },
+      ".", ",", "?", "!", "'", "*", "+",
+      { key: "backspace", label: "⌫" },
+    ],
+    [
+      { key: "layer-letters", label: "abc", class: "modifier" },
+      { key: "space", label: " ", class: "xwide" },
+      { key: "enter", label: "⏎", class: "wide" },
+    ],
+  ],
+  // Third layer reached via shift in symbols mode. Just enough to
+  // cover the rest of the printable ASCII set without making the
+  // user hunt.
+  more: [
+    ["~", "`", "|", "\\", "{", "}", "[", "]", "<", ">"],
+    ["_", "=", "+", "^", "%", "#"],
+    [
+      { key: "shift", label: "123", class: "modifier" },
+      "(", ")", "/", "?", ":", ";",
+      { key: "backspace", label: "⌫" },
+    ],
+    [
+      { key: "layer-letters", label: "abc", class: "modifier" },
+      { key: "space", label: " ", class: "xwide" },
+      { key: "enter", label: "⏎", class: "wide" },
+    ],
+  ],
+};
+
+const vkbd = {
+  layer: "letters",
+  // Shift state machine. `off`: lowercase letters. `next`: next
+  // letter is uppercased, then state reverts to `off` (tap-and-
+  // type pattern). `lock`: stays uppercase until shift is tapped
+  // again. From the symbols layer, the same button toggles to
+  // `more`.
+  shift: "off",
+};
+
+/** Send a synthetic PTY input chunk — same code path as
+ *  `term.onData`, used by the virtual keyboard to fire bytes
+ *  the user typed on-screen. */
+function sendPtyBytes(s) {
+  if (!state.currentId || state.mode !== "terminal") return;
+  const data = encodeBase64Utf8(s);
+  rpc("session.pty_input", { session_id: state.currentId, data })
+    .catch((e) => console.warn("vkbd pty_input failed:", e));
+}
+
+/** Rebuild the keyboard markup from VKBD_SPECIAL + the current
+ *  layer in VKBD_LAYERS. Idempotent; called on terminal-mode
+ *  enter and on every layer/shift change. */
+function renderVirtualKeyboard() {
+  // Top row — special keys (fixed across layers).
+  vkbdSpecialEl.innerHTML = VKBD_SPECIAL.map(
+    (k) => `<button type="button" class="vk" data-key="${attr(k.key)}">${escape(k.label)}</button>`,
+  ).join("");
+
+  // Main rows — current layer.
+  const rows = VKBD_LAYERS[vkbd.layer] || VKBD_LAYERS.letters;
+  const isLetters = vkbd.layer === "letters";
+  const shiftOn = vkbd.shift === "next" || vkbd.shift === "lock";
+  vkbdMainEl.innerHTML = rows
+    .map((row) => {
+      const cells = row
+        .map((cell) => {
+          if (typeof cell === "string") {
+            const display = isLetters && shiftOn ? cell.toUpperCase() : cell;
+            return `<button type="button" class="vk" data-char="${attr(display)}">${escape(display)}</button>`;
+          }
+          // Object cell.
+          const cls = ["vk", cell.class || ""].filter(Boolean).join(" ");
+          // Highlight the shift modifier when it's "armed" or
+          // locked so the user sees that next-letter-is-capital
+          // is sticky.
+          const modOn = cell.key === "shift" && shiftOn ? "on" : "";
+          return `<button type="button" class="${cls} ${modOn}" data-key="${attr(cell.key)}">${escape(cell.label)}</button>`;
+        })
+        .join("");
+      return `<div class="vkbd-row">${cells}</div>`;
+    })
+    .join("");
+}
+
+/** Handle a virtual-keyboard tap. Dispatches by attribute:
+ *  `data-char` → literal character (uppercased if shift on);
+ *  `data-key` → named special key (KEYBAR_BYTES + modifiers). */
+function handleVkbdClick(ev) {
+  const btn = ev.target.closest(".vk");
+  if (!btn) return;
+  // Literal character.
+  if (btn.dataset.char !== undefined) {
+    const ch = btn.dataset.char;
+    sendPtyBytes(ch);
+    // Auto-reset "next" shift after a single letter, to mirror
+    // the iOS keyboard behavior. Stay locked when in "lock".
+    if (vkbd.shift === "next") {
+      vkbd.shift = "off";
+      renderVirtualKeyboard();
+    }
+    return;
+  }
+  // Named special key.
+  const k = btn.dataset.key;
+  if (!k) return;
+  switch (k) {
+    case "shift":
+      // 3-state cycle: off → next → lock → off. In the symbols
+      // layer, shift instead toggles between symbols and `more`.
+      if (vkbd.layer === "symbols") {
+        vkbd.layer = "more";
+      } else if (vkbd.layer === "more") {
+        vkbd.layer = "symbols";
+      } else {
+        vkbd.shift =
+          vkbd.shift === "off" ? "next" : vkbd.shift === "next" ? "lock" : "off";
+      }
+      renderVirtualKeyboard();
+      return;
+    case "layer-symbols":
+      vkbd.layer = "symbols";
+      vkbd.shift = "off";
+      renderVirtualKeyboard();
+      return;
+    case "layer-letters":
+      vkbd.layer = "letters";
+      vkbd.shift = "off";
+      renderVirtualKeyboard();
+      return;
+    default: {
+      const bytes = KEYBAR_BYTES[k];
+      if (bytes !== undefined) sendPtyBytes(bytes);
+      return;
+    }
+  }
+}
+
+if (vkbdEl) {
+  vkbdEl.addEventListener("click", handleVkbdClick);
+}
+
+toggleListBtn.addEventListener("click", () => {
+  sessionListEl.classList.toggle("collapsed");
+});
+
+// --- Transcript rendering -------------------------------------------------
+
+async function loadTranscript(id) {
+  transcriptEl.innerHTML = "";
+  state.byId.set(id, []);
+  let result;
+  try {
+    result = await rpc("session.transcript", { session_id: id, from: 0 });
+  } catch (e) {
+    appendError(`failed to load transcript: ${e.message}`);
+    return;
+  }
+  const events = (result && result.events) || [];
+  for (const te of events) renderEvent(te.event, te.at);
+  scrollToBottom();
+}
+
+function handleNotification(method, params) {
+  if (method === "session/event") {
+    const { session_id, event } = params;
+    // Tool-approval requests are interactive and time-sensitive —
+    // surface them in the bottom sheet regardless of which session
+    // is currently being viewed. The session_id sticks with the
+    // queued entry so the eventual `tool_decision` RPC routes back
+    // to the right session even if the user switches views.
+    if (event && event.type === "tool_approval_request" && event.call_id) {
+      enqueueApproval(session_id, event);
+    }
+    if (session_id !== state.currentId) return;
+    renderEvent(event, params.at);
+    scrollToBottom();
+  } else if (method === "session/state") {
+    const { session } = params;
+    if (!session) return;
+    // Patch the cached summary so the list re-renders with new
+    // state. Update in place rather than refetching.
+    const i = state.sessions.findIndex((s) => s.id === session.id);
+    if (i >= 0) state.sessions[i] = session;
+    else state.sessions.push(session);
+    renderSessions();
+    if (session.id === state.currentId) {
+      sessionTitleEl.textContent = session.title || session.harness || session.id.slice(0, 8);
+    }
+  } else if (method === "session/deleted") {
+    state.sessions = state.sessions.filter((s) => s.id !== params.session_id);
+    renderSessions();
+    if (params.session_id === state.currentId) {
+      state.currentId = null;
+      transcriptEl.innerHTML = "";
+      sessionTitleEl.textContent = "";
+    }
+  } else if (method === "group/state") {
+    const { group } = params;
+    if (!group) return;
+    const i = state.groups.findIndex((g) => g.id === group.id);
+    if (i >= 0) state.groups[i] = group;
+    else state.groups.push(group);
+    renderSessions();
+  } else if (method === "group/deleted") {
+    state.groups = state.groups.filter((g) => g.id !== params.group_id);
+    renderSessions();
+  }
+}
+
+function renderEvent(event, at) {
+  if (!event || !event.type) return;
+  // PTY events go to xterm in terminal mode (decoded raw bytes →
+  // term.write); fall through to the chat-style `appendPty`
+  // otherwise so the user still sees something for non-PTY views.
+  if (event.type === "pty") {
+    const text = decodeBase64(event.data || "");
+    if (state.mode === "terminal" && state.term) {
+      if (state.ptyBuffering) state.ptyBuffer.push(text);
+      else state.term.write(text);
+    } else {
+      appendPty(text);
+    }
+    return;
+  }
+  // In terminal mode we deliberately skip the structured rendering
+  // for everything except `reset` and `error` — those are useful
+  // signals that wouldn't otherwise reach the terminal surface. The
+  // PTY itself already paints the rest.
+  if (state.mode === "terminal") {
+    if (event.type === "reset" && state.term) state.term.reset();
+    if (event.type === "error" && state.term) {
+      state.term.write(`\r\n\x1b[31m[error] ${event.message || ""}\x1b[0m\r\n`);
+    }
+    return;
+  }
+  switch (event.type) {
+    case "message":
+      appendMessage(event.role || "assistant", event.text || "");
+      break;
+    case "tool_use":
+      appendToolUse(event.tool, event.args);
+      break;
+    case "tool_result":
+      appendToolResult(event.tool, event.ok, event.output);
+      break;
+    case "error":
+      appendError(event.message || "(error)");
+      break;
+    case "status":
+      appendStatus(event.state, event.detail);
+      break;
+    case "reset":
+      transcriptEl.innerHTML = "";
+      break;
+    case "tool_approval_request":
+      // Render as a tool-use card; v1 doesn't yet implement
+      // approve/deny from mobile, but seeing it requested is
+      // already useful signal.
+      appendToolApproval(event);
+      break;
+    // Quietly ignore: editor_state, agent_status, cost, task_*,
+    // context_compacted, diff, awaiting_input, done. These map
+    // onto richer chrome in the desktop TUI; Phase 2 surfaces
+    // only message + tool + raw PTY. A small "(<type>)" line on
+    // unknown variants helps debugging without being noisy.
+    default:
+      // Skip silently.
+      break;
+  }
+}
+
+function appendMessage(role, text) {
+  const row = document.createElement("div");
+  row.className = `row role-${escape(role)}`;
+  row.innerHTML = `
+    <div class="meta">${escape(role)}</div>
+    <div class="bubble"></div>`;
+  row.querySelector(".bubble").textContent = text;
+  transcriptEl.appendChild(row);
+}
+
+function appendToolUse(tool, args) {
+  const row = document.createElement("div");
+  row.className = "row";
+  const argStr = args === undefined ? "" : tryStringify(args);
+  row.innerHTML = `
+    <div class="tool">
+      <span class="tool-name">→ ${escape(tool || "tool")}</span>
+      ${argStr ? `<details><summary>args</summary><pre></pre></details>` : ""}
+    </div>`;
+  if (argStr) row.querySelector("pre").textContent = argStr;
+  transcriptEl.appendChild(row);
+}
+
+function appendToolResult(tool, ok, output) {
+  const row = document.createElement("div");
+  row.className = "row";
+  const badge = ok ? '<span class="badge ok">ok</span>' : '<span class="badge err">err</span>';
+  row.innerHTML = `
+    <div class="tool">
+      <span class="tool-name">← ${escape(tool || "tool")}</span>${badge}
+      ${output ? `<details><summary>output</summary><pre></pre></details>` : ""}
+    </div>`;
+  if (output) row.querySelector("pre").textContent = output;
+  transcriptEl.appendChild(row);
+}
+
+function appendToolApproval(event) {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.innerHTML = `
+    <div class="tool">
+      <span class="tool-name">⚠ approval requested: ${escape(event.tool || "")}</span>
+      <span class="badge">${escape(event.risk || "")}</span>
+      <details open><summary>${escape(event.args_summary || "args")}</summary></details>
+    </div>`;
+  transcriptEl.appendChild(row);
+}
+
+function appendPty(text) {
+  // Coalesce consecutive PTY rows so each frame doesn't create a
+  // new DOM block; matters for chatty interactive harnesses.
+  const last = transcriptEl.lastElementChild;
+  if (last && last.classList.contains("row") && last.dataset.kind === "pty") {
+    last.querySelector("pre").textContent += text;
+    return;
+  }
+  const row = document.createElement("div");
+  row.className = "row";
+  row.dataset.kind = "pty";
+  row.innerHTML = `<pre class="pty"></pre>`;
+  row.querySelector("pre").textContent = text;
+  transcriptEl.appendChild(row);
+}
+
+function appendStatus(stateStr, detail) {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.innerHTML = `<div class="status"></div>`;
+  row.querySelector(".status").textContent =
+    `· ${stateStr || ""}${detail ? ` — ${detail}` : ""}`;
+  transcriptEl.appendChild(row);
+}
+
+function appendError(msg) {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.innerHTML = `<div class="error"></div>`;
+  row.querySelector(".error").textContent = msg;
+  transcriptEl.appendChild(row);
+}
+
+function scrollToBottom() {
+  // Only auto-scroll if we're already near the bottom — otherwise a
+  // user reading earlier content keeps their place when new events
+  // arrive.
+  const nearBottom =
+    transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight < 80;
+  if (nearBottom) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+// --- Composer ------------------------------------------------------------
+
+composerEl.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  sendInput();
+});
+
+inputEl.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
+    ev.preventDefault();
+    sendInput();
+  }
+});
+
+inputEl.addEventListener("input", () => {
+  // Auto-grow the textarea so multi-line composing isn't a tiny
+  // single-row box.
+  inputEl.style.height = "auto";
+  inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.3) + "px";
+});
+
+async function sendInput() {
+  const text = inputEl.value;
+  if (!text.trim() || !state.currentId) return;
+  inputEl.value = "";
+  inputEl.style.height = "auto";
+  // Optimistic render of the user's message so the UX feels
+  // immediate; the adapter typically echoes back its own
+  // canonical "user" event a moment later but the duplicate is
+  // harmless for v1.
+  appendMessage("user", text);
+  scrollToBottom();
+  try {
+    await rpc("session.input", { session_id: state.currentId, text });
+  } catch (e) {
+    appendError(`send failed: ${e.message}`);
+  }
+}
+
+// --- Tiny helpers --------------------------------------------------------
+
+function escape(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+function attr(s) {
+  return escape(s).replace(/"/g, "&quot;");
+}
+function tryStringify(v) {
+  try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+}
+function decodeBase64(s) {
+  try {
+    // atob → binary string. For UTF-8 PTY output, decodeURIComponent
+    // + escape is the standard browser idiom that handles multi-byte
+    // sequences correctly.
+    return decodeURIComponent(escapeBin(atob(s)));
+  } catch {
+    return s;
+  }
+}
+function escapeBin(bin) {
+  // Convert binary string → %xx form so decodeURIComponent treats it
+  // as UTF-8.
+  let out = "";
+  for (let i = 0; i < bin.length; i++) {
+    const c = bin.charCodeAt(i);
+    out += "%" + (c < 16 ? "0" : "") + c.toString(16);
+  }
+  return out;
+}
+
+// --- Tool approval sheet ------------------------------------------------
+
+/**
+ * Queue a fresh approval request. The bottom sheet pops up if it
+ * isn't already showing one; otherwise the request waits in line.
+ */
+function enqueueApproval(sessionId, event) {
+  state.approvalQueue.push({
+    session_id: sessionId,
+    call_id: event.call_id,
+    tool: event.tool || "tool",
+    args_summary: event.args_summary || "",
+    risk: event.risk || "",
+  });
+  if (!state.approvalShown) showNextApproval();
+  else updateApprovalQueueHint();
+}
+
+function showNextApproval() {
+  const next = state.approvalQueue.shift();
+  if (!next) {
+    state.approvalShown = null;
+    approvalSheetEl.hidden = true;
+    return;
+  }
+  state.approvalShown = next;
+  approvalToolNameEl.textContent = next.tool;
+  approvalRiskEl.textContent = next.risk || "";
+  approvalRiskEl.classList.remove("safe", "risky");
+  if (next.risk === "safe" || next.risk === "risky") {
+    approvalRiskEl.classList.add(next.risk);
+  }
+  approvalSummaryEl.textContent = next.args_summary || "(no args)";
+  setApprovalButtonsDisabled(false);
+  updateApprovalQueueHint();
+  approvalSheetEl.hidden = false;
+}
+
+function updateApprovalQueueHint() {
+  const n = state.approvalQueue.length;
+  if (n > 0) {
+    approvalQueueHintEl.textContent =
+      `${n} more request${n === 1 ? "" : "s"} queued`;
+    approvalQueueHintEl.hidden = false;
+  } else {
+    approvalQueueHintEl.hidden = true;
+  }
+}
+
+function setApprovalButtonsDisabled(disabled) {
+  approvalDenyBtn.disabled = disabled;
+  approvalApproveBtn.disabled = disabled;
+  approvalAutomodeBtn.disabled = disabled;
+}
+
+async function decideApproval(decision) {
+  const pending = state.approvalShown;
+  if (!pending) return;
+  setApprovalButtonsDisabled(true);
+  try {
+    await rpc("session.tool_decision", {
+      session_id: pending.session_id,
+      call_id: pending.call_id,
+      decision,
+    });
+  } catch (e) {
+    // Surface the failure so the user can retry. The next approval
+    // doesn't auto-advance — the user re-decides this one.
+    appendError(`tool_decision failed: ${e.message}`);
+    setApprovalButtonsDisabled(false);
+    return;
+  }
+  showNextApproval();
+}
+
+approvalApproveBtn.addEventListener("click", () => decideApproval("approve"));
+approvalDenyBtn.addEventListener("click", () => decideApproval("deny"));
+approvalAutomodeBtn.addEventListener("click", () => decideApproval("automode"));
+
+// --- Boot ---------------------------------------------------------------
+
+connect();
+</script>
+</body>
+</html>
