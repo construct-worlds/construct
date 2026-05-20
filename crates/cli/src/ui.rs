@@ -206,6 +206,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
 fn finish_frame(f: &mut Frame, app: &mut App) {
     capture_frame_text(f, app);
+    render_hovered_url(f, app);
     render_text_selection(f, app);
 }
 
@@ -265,6 +266,28 @@ fn render_text_selection(f: &mut Frame, app: &App) {
                 end,
                 style,
             );
+        }
+    }
+}
+
+fn render_hovered_url(f: &mut Frame, app: &App) {
+    let Some(hit) = app.hovered_url() else {
+        return;
+    };
+    let area = *f.buffer_mut().area();
+    for range in hit.ranges {
+        if range.row < area.top() || range.row >= area.bottom() {
+            continue;
+        }
+        let start = range.start_col.max(area.left());
+        let end = range.end_col.min(area.right());
+        if start >= end {
+            continue;
+        }
+        for x in start..end {
+            if let Some(cell) = f.buffer_mut().cell_mut(Position { x, y: range.row }) {
+                cell.set_style(cell.style().add_modifier(Modifier::UNDERLINED));
+            }
         }
     }
 }
