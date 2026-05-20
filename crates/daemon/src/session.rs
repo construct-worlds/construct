@@ -294,6 +294,15 @@ pub struct SessionManager {
     /// Recurring-prompt loops attached to sessions. The scheduler
     /// task (`crate::loops::run_scheduler`) iterates these.
     pub(crate) loops: Arc<crate::loops::LoopRegistry>,
+    /// Set by [`Self::shutdown_adapters`] before it tells each
+    /// adapter to exit, so the `drain_adapter` task can tell the
+    /// resulting `AdapterMessage::Closed` events apart from real
+    /// adapter crashes and *not* transition the session to `Done`.
+    /// Sessions need to keep their pre-shutdown state on disk so
+    /// `resume_running_sessions` picks them up on the next boot —
+    /// otherwise a graceful `kill -TERM` of the daemon would mark
+    /// every live session terminal and skip them on restart.
+    is_shutting_down: AtomicBool,
 }
 
 impl SessionManager {
@@ -385,6 +394,7 @@ impl SessionManager {
             groups: RwLock::new(groups),
             broadcast,
             loops,
+            is_shutting_down: AtomicBool::new(false),
         })
     }
 
@@ -860,6 +870,20 @@ impl SessionManager {
             }
         }
 
+        // Attach failed. The probe's reader task in `Adapter::attach`
+        // still holds a clone of `msg_tx` and, when its hung-connection
+        // read finally errors out, will push a spurious
+        // `AdapterMessage::Closed` into the channel. If we kept the
+        // same `msg_rx` for the post-spawn `drain_adapter`, that
+        // `Closed` would arrive seconds after the freshly-spawned
+        // adapter is up and immediately mark the resumed session
+        // `Done` — defeating the whole resume. Replace the channel
+        // here so the leaked sender's `send` lands in a dropped
+        // receiver (and silently fails) instead.
+        drop(msg_tx);
+        drop(msg_rx);
+        let (msg_tx, msg_rx) = mpsc::channel::<AdapterMessage>(ADAPTER_DRAIN_CAP);
+
         let adapter_cfg = self
             .config
             .adapters
@@ -1020,7 +1044,15 @@ impl SessionManager {
     /// Gracefully stop every live adapter. Used for intentional daemon
     /// termination; restart-oriented signals skip this so reconnectable
     /// adapters can survive the daemon process.
+    ///
+    /// Sets [`Self::is_shutting_down`] before sending the SHUTDOWN
+    /// RPCs so the `drain_adapter` task knows to keep the session's
+    /// pre-shutdown state on disk (instead of marking it `Done` from
+    /// the resulting `AdapterMessage::Closed`). Without that,
+    /// `resume_running_sessions` would skip every session on the
+    /// next boot because they'd all be terminal.
     pub async fn shutdown_adapters(&self) {
+        self.is_shutting_down.store(true, Ordering::Release);
         let entries: Vec<Arc<SessionEntry>> = {
             let guard = self.sessions.read().await;
             guard.values().cloned().collect()
@@ -1055,6 +1087,18 @@ impl SessionManager {
                         *entry.adapter.lock().await = None;
                         break;
                     }
+                    // Operator-initiated shutdown (SIGINT/SIGTERM →
+                    // `shutdown_adapters`): the adapter exiting is
+                    // *expected*, not a session ending. Leave the
+                    // session's persisted state untouched so it's
+                    // resumable on the next daemon boot. Without
+                    // this guard a graceful daemon restart marks
+                    // every live session `Done` and the next start's
+                    // `resume_running_sessions` skips them all.
+                    if self.is_shutting_down.load(Ordering::Acquire) {
+                        *entry.adapter.lock().await = None;
+                        break;
+                    }
                     let mut summary = entry.summary.write().await;
                     if !summary.state.is_terminal() {
                         summary.state = if exit_code.unwrap_or(0) == 0 {
@@ -1083,6 +1127,16 @@ impl SessionManager {
         // Skip everything once the session has been deleted — the drain task
         // and the adapter can still feed us events for a beat.
         if entry.is_deleted() {
+            return;
+        }
+        // Operator-initiated shutdown: the adapter exiting may still
+        // flush a `Done` / `Error` event (e.g. the shell adapter's
+        // PTY emits `Done` when the wrapped process dies). Letting
+        // those land would transition the session to terminal and
+        // make `resume_running_sessions` skip it on the next boot,
+        // defeating the whole point of the reconnectable-adapters
+        // shutdown path. Drop all events during shutdown.
+        if self.is_shutting_down.load(Ordering::Acquire) {
             return;
         }
         if matches!(event, SessionEvent::Reset) {
@@ -2406,6 +2460,116 @@ mod tests {
         assert_eq!(
             force_redraw_size_on_resume(&caps, Some(PtySize { cols: 160, rows: 0 })),
             None
+        );
+    }
+
+    /// Regression for the post-#69 "all sessions go to `done` after
+    /// graceful daemon restart" bug: when `shutdown_adapters` is in
+    /// flight, any `SessionEvent::Done` or `AdapterMessage::Closed`
+    /// that flushes out of a dying adapter must NOT transition the
+    /// session to a terminal state. Otherwise `resume_running_sessions`
+    /// on the next boot skips the session and the user has to restart
+    /// it manually.
+    #[tokio::test]
+    async fn handle_event_preserves_state_during_shutdown() {
+        use chrono::Utc;
+        use std::sync::atomic::Ordering;
+        use tempfile::tempdir;
+        use tokio::sync::RwLock;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage = Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let manager = Arc::new(
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager"),
+        );
+
+        // Synthetic session in `Running` (what a live shell / zarvis
+        // session looks like just before the user hits Ctrl-C on the
+        // daemon).
+        let id = "stest_shutdown".to_string();
+        let summary = agentd_protocol::SessionSummary {
+            id: id.clone(),
+            harness: "shell".into(),
+            cwd: "/tmp".into(),
+            title: None,
+            state: SessionState::Running,
+            created_at: Utc::now(),
+            last_event_at: None,
+            cost_usd: None,
+            model: None,
+            worktree: None,
+            pending_input: false,
+            last_prompt: None,
+            event_count: 0,
+            has_pty: true,
+            mode: None,
+            pinned: false,
+            position: 0,
+            group_id: None,
+            last_pty_at_ms: None,
+            automode: false,
+            kind: agentd_protocol::SessionKind::User,
+        };
+        let entry = Arc::new(SessionEntry {
+            id: id.clone(),
+            summary: RwLock::new(summary),
+            transcript_count: AtomicU64::new(0),
+            adapter: tokio::sync::Mutex::new(None),
+            pty: tokio::sync::Mutex::new(PtyState {
+                ring: Default::default(),
+                size: None,
+            }),
+            deleted: AtomicBool::new(false),
+            title_gen_attempted: AtomicBool::new(false),
+            pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+            tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
+        });
+        manager.sessions.write().await.insert(id.clone(), entry.clone());
+
+        // Pre-shutdown: a `Done` event WOULD transition state.
+        manager
+            .handle_event(&entry, SessionEvent::Done { exit_code: 0 })
+            .await;
+        assert_eq!(
+            entry.summary.read().await.state,
+            SessionState::Done,
+            "sanity: without the shutdown flag, Done transitions state",
+        );
+
+        // Reset and flip the shutdown flag (what `shutdown_adapters`
+        // does before sending SHUTDOWN to each adapter).
+        entry.summary.write().await.state = SessionState::Running;
+        manager.is_shutting_down.store(true, Ordering::Release);
+
+        // Same `Done` event during shutdown must be dropped — the
+        // session needs to keep its `Running` state on disk so the
+        // next boot's `resume_running_sessions` picks it up.
+        manager
+            .handle_event(&entry, SessionEvent::Done { exit_code: 0 })
+            .await;
+        assert_eq!(
+            entry.summary.read().await.state,
+            SessionState::Running,
+            "Done during shutdown must NOT transition state — that's \
+             the resume regression we're guarding against",
+        );
+
+        // Error events are the same shape and must also be dropped.
+        manager
+            .handle_event(
+                &entry,
+                SessionEvent::Error {
+                    message: "adapter died".into(),
+                },
+            )
+            .await;
+        assert_eq!(
+            entry.summary.read().await.state,
+            SessionState::Running,
+            "Error during shutdown must NOT transition state either",
         );
     }
 }
