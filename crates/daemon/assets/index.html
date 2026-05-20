@@ -164,6 +164,18 @@
   .session-list .item.indent {
     padding-left: 24px;
   }
+  /* God / orchestrator row — pinned at the top, name in the
+     accent color so it stands out as the special "fleet
+     dispatcher" session. */
+  .session-list .item.is-god .name {
+    color: var(--accent);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .session-list .item.is-god {
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+  }
   /* Per-row action button (restart, move up/down, future delete).
      Small touch target on the right edge of each session row. */
   .session-list .row-action {
@@ -1018,14 +1030,22 @@ async function refreshSessions() {
       rpc("group.list", null).catch(() => []),
     ]);
     state.sessions = Array.isArray(list) ? list : [];
-    state.sessions = state.sessions.filter((s) => s.kind !== "orchestrator");
+    // The orchestrator session ("god") used to be filtered out
+    // to mirror the TUI, which surfaces it via a special
+    // minibuffer panel instead of the list. The web client
+    // doesn't have that panel, so include god in the list at the
+    // top — `orderedItems` pins it ahead of everything else.
     state.groups = Array.isArray(groups) ? groups : [];
     renderSessions();
-    // Auto-select the same session the TUI would (top of the
-    // sorted list) — typically the most recently created one.
+    // Auto-select the first *user* session; god is shown but
+    // shouldn't be the default landing — most phone visits are
+    // to look at a real workload, not the dispatcher. Fall back
+    // to god only when there are no user sessions yet.
     if (!state.currentId) {
       const ordered = orderedSessions();
-      if (ordered.length) selectSession(ordered[0].id);
+      const firstUser = ordered.find((s) => s.kind !== "orchestrator");
+      const pick = firstUser || ordered[0];
+      if (pick) selectSession(pick.id);
     }
   } catch (e) {
     sessionListEl.innerHTML = `<div class="empty">${escape(e.message)}</div>`;
@@ -1045,18 +1065,25 @@ async function refreshSessions() {
  * differently.
  */
 function orderedItems() {
-  const ungrouped = state.sessions
+  // God session (orchestrator) goes at the very top, distinct
+  // from the position-sorted user sessions. No reorder or
+  // restart actions on this row — the daemon owns its lifecycle.
+  const god = state.sessions.find((s) => s.kind === "orchestrator");
+  const userSessions = state.sessions.filter((s) => s.kind !== "orchestrator");
+  const ungrouped = userSessions
     .filter((s) => !s.group_id)
     .slice()
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   const groups = state.groups
     .slice()
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-  const items = ungrouped.map((s) => ({ kind: "session", session: s }));
+  const items = [];
+  if (god) items.push({ kind: "session", session: god, isGod: true });
+  for (const s of ungrouped) items.push({ kind: "session", session: s });
   for (const g of groups) {
     items.push({ kind: "group", group: g });
     if (g.collapsed) continue;
-    const members = state.sessions
+    const members = userSessions
       .filter((s) => s.group_id === g.id)
       .slice()
       .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
@@ -1094,8 +1121,20 @@ function renderSessions() {
       const s = item.session;
       const active = s.id === state.currentId ? "active" : "";
       const indent = item.indented ? "indent" : "";
-      const title = s.title || s.harness || s.id.slice(0, 8);
       const status = (s.state || "").toLowerCase();
+      // God / orchestrator session is rendered without
+      // restart / reorder buttons — the daemon owns its
+      // lifecycle and there's only one of them. Label is fixed
+      // as "god" so the user spots it regardless of whether the
+      // adapter auto-titled the session.
+      if (item.isGod) {
+        return `
+          <div class="item is-god ${active}" data-id="${attr(s.id)}">
+            <div class="name">god</div>
+            <div class="state">${escape(status)}</div>
+          </div>`;
+      }
+      const title = s.title || s.harness || s.id.slice(0, 8);
       // Per-row affordances:
       //   ↻ restart — only on terminal-state sessions.
       //   ↑ / ↓     — reorder via session.move (direction up/down).
