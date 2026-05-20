@@ -994,7 +994,12 @@ async function enterTerminalMode(id) {
       // refit below in case the phone screen is narrower.
       state.term.resize(r.size.cols, r.size.rows);
     }
-    if (r && r.data) state.term.write(decodeBase64(r.data));
+    // Hand xterm the raw bytes (not a decoded string) so its
+    // built-in streaming UTF-8 decoder owns boundary handling
+    // across this and any subsequent `term.write` call. Passing a
+    // string forces a one-shot per-call decode and corrupts
+    // multi-byte glyphs that straddle PTY frame boundaries.
+    if (r && r.data) state.term.write(decodeBase64ToBytes(r.data));
   } catch (e) {
     state.term.write(`\r\n\x1b[31mreplay failed: ${escape(e.message)}\x1b[0m\r\n`);
   }
@@ -1475,12 +1480,20 @@ function renderEvent(event, at) {
   // term.write); fall through to the chat-style `appendPty`
   // otherwise so the user still sees something for non-PTY views.
   if (event.type === "pty") {
-    const text = decodeBase64(event.data || "");
     if (state.mode === "terminal" && state.term) {
-      if (state.ptyBuffering) state.ptyBuffer.push(text);
-      else state.term.write(text);
+      // Bytes (not a pre-decoded string) so xterm's streaming
+      // UTF-8 decoder owns multi-byte boundaries — critical at
+      // narrow PTY widths where a single glyph can straddle two
+      // Pty events, otherwise renders as "random chars".
+      const bytes = decodeBase64ToBytes(event.data || "");
+      if (state.ptyBuffering) state.ptyBuffer.push(bytes);
+      else state.term.write(bytes);
     } else {
-      appendPty(text);
+      // Chat-mode fallback (non-PTY session that still emits Pty
+      // events — uncommon but possible). One-shot decode with
+      // TextDecoder + fatal:false; cross-chunk split sequences
+      // get a single U+FFFD instead of dumping the base64 string.
+      appendPty(decodeBase64(event.data || ""));
     }
     return;
   }
@@ -1674,25 +1687,30 @@ function attr(s) {
 function tryStringify(v) {
   try { return JSON.stringify(v, null, 2); } catch { return String(v); }
 }
-function decodeBase64(s) {
+/** Decode a base64 string to a `Uint8Array`. Caller is responsible
+ *  for downstream UTF-8 handling — for xterm.js we pass these
+ *  bytes directly so xterm's internal streaming decoder can stitch
+ *  partial multi-byte sequences across chunks; for the chat-mode
+ *  `<pre>` fallback we run them through `TextDecoder`. */
+function decodeBase64ToBytes(s) {
   try {
-    // atob → binary string. For UTF-8 PTY output, decodeURIComponent
-    // + escape is the standard browser idiom that handles multi-byte
-    // sequences correctly.
-    return decodeURIComponent(escapeBin(atob(s)));
+    const bin = atob(s);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
   } catch {
-    return s;
+    return new Uint8Array(0);
   }
 }
-function escapeBin(bin) {
-  // Convert binary string → %xx form so decodeURIComponent treats it
-  // as UTF-8.
-  let out = "";
-  for (let i = 0; i < bin.length; i++) {
-    const c = bin.charCodeAt(i);
-    out += "%" + (c < 16 ? "0" : "") + c.toString(16);
-  }
-  return out;
+
+/** Decode a base64 string to a UTF-8 `String`. Uses `TextDecoder`
+ *  with `fatal:false` so split multi-byte sequences (the
+ *  narrow-PTY case) produce a single U+FFFD replacement character
+ *  instead of throwing — the old `decodeURIComponent` pipeline
+ *  threw and dumped the raw base64 as fallback, which is what
+ *  showed as "random chars" in the narrow-width screenshots. */
+function decodeBase64(s) {
+  return new TextDecoder("utf-8", { fatal: false }).decode(decodeBase64ToBytes(s));
 }
 
 // --- Tool approval sheet ------------------------------------------------
