@@ -4257,6 +4257,7 @@ mod tests {
             list_scroll_offset: 0,
             minibuffer_hints: Vec::new(),
             minibuffer_harness_hits: Vec::new(),
+            modal_area: None,
         }
     }
 
