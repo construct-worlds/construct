@@ -408,6 +408,15 @@ where
 /// Write a minimal HTTP/1.1 response with the given status, body,
 /// and content type. Uses `Connection: close` so the wire shape is
 /// dead-simple (no chunked encoding, no keep-alive bookkeeping).
+///
+/// `Cache-Control: no-store` is set so the phone browser always
+/// fetches a fresh copy — without it, Safari and Chrome on iOS /
+/// Android cache HTML aggressively over HTTPS even without
+/// validators, and the user sees stale UI for hours after we push
+/// a fix. The xterm.js bundle (~290KB) re-downloads on each page
+/// load as a side effect; acceptable trade for "edits actually
+/// appear on next refresh" until we wire up content-addressed
+/// asset URLs.
 async fn write_http_response<W>(
     wr: &mut W,
     status: u16,
@@ -423,6 +432,7 @@ where
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
+         Cache-Control: no-store\r\n\
          Connection: close\r\n\
          X-Content-Type-Options: nosniff\r\n\
          \r\n",
