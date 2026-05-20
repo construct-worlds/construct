@@ -105,8 +105,16 @@
       grid-template-columns: 1fr;
       grid-template-rows: auto 1fr;
     }
-    .session-list { max-height: 32vh; }
-    .session-list.collapsed { max-height: 0; padding: 0; border-bottom: none; }
+    /* On phones the list shares the screen with the session
+       view, so cap its height — but leave enough room for 5-6
+       rows + the new-session button + toolbar without forcing
+       the user to scroll inside the list to find anything.
+       50vh is the rough sweet spot on a 6.x" portrait viewport. */
+    .session-list {
+      max-height: 50vh;
+      min-height: 200px;
+    }
+    .session-list.collapsed { max-height: 0; min-height: 0; padding: 0; border-bottom: none; }
   }
 
   .session-list {
@@ -129,8 +137,23 @@
     background: var(--bg-elev-2);
     border-left-color: var(--accent);
   }
-  .session-list .item .name {
+  .session-list .item .row-main {
     flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .session-list .item .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session-list .item .sub {
+    color: var(--fg-faint);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -682,6 +705,28 @@
     border-right: none;
     background: transparent;
   }
+  /* Shared action toolbar pinned to the bottom of the list wrap.
+     Acts on the currently-selected session (state.currentId). */
+  .list-toolbar {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 6px;
+    padding: 6px 8px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-elev);
+  }
+  .list-toolbar .row-action {
+    /* Override the per-row sizing — toolbar gets slightly larger
+       touch targets since it's the only button surface. */
+    width: 36px;
+    height: 32px;
+    font-size: 14px;
+    margin-left: 0;
+  }
+  .list-toolbar .row-action:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
 
   /* New-session form rows reuse the approval-sheet shell. */
   .ns-row {
@@ -742,6 +787,23 @@
       <aside class="session-list" id="sessionList">
         <div class="empty">connecting…</div>
       </aside>
+      <!--
+        Shared action toolbar — acts on the currently-selected
+        session. Used to be per-row but on a narrow phone the row
+        got cluttered (title + state + 3 buttons + harness name)
+        and the buttons fell off the right edge. Single bar at
+        the bottom is simpler. Buttons disable when there's no
+        selection (or when the selection isn't eligible for that
+        action — restart only enables on terminal-state sessions).
+      -->
+      <div class="list-toolbar" id="listToolbar">
+        <button type="button" class="row-action" data-action="move-up"
+                id="toolbarUpBtn" aria-label="move selected up" disabled>↑</button>
+        <button type="button" class="row-action" data-action="move-down"
+                id="toolbarDownBtn" aria-label="move selected down" disabled>↓</button>
+        <button type="button" class="row-action" data-action="restart"
+                id="toolbarRestartBtn" aria-label="restart selected" disabled>↻</button>
+      </div>
     </div>
     <section class="view">
       <!--
@@ -1122,11 +1184,9 @@ function renderSessions() {
       const active = s.id === state.currentId ? "active" : "";
       const indent = item.indented ? "indent" : "";
       const status = (s.state || "").toLowerCase();
-      // God / orchestrator session is rendered without
-      // restart / reorder buttons — the daemon owns its
-      // lifecycle and there's only one of them. Label is fixed
-      // as "god" so the user spots it regardless of whether the
-      // adapter auto-titled the session.
+      // God / orchestrator session is rendered with a fixed
+      // "god" label. Lifecycle is daemon-owned so no action
+      // affordances ever apply.
       if (item.isGod) {
         return `
           <div class="item is-god ${active}" data-id="${attr(s.id)}">
@@ -1134,28 +1194,19 @@ function renderSessions() {
             <div class="state">${escape(status)}</div>
           </div>`;
       }
+      // Two-line row: title on top, dim harness sub-line below.
+      // The shared toolbar below the list handles
+      // restart / move actions, so each row is just a tappable
+      // surface that selects the session.
       const title = s.title || s.harness || s.id.slice(0, 8);
-      // Per-row affordances:
-      //   ↻ restart — only on terminal-state sessions.
-      //   ↑ / ↓     — reorder via session.move (direction up/down).
-      // All three are wrapped in `[data-action]` buttons so the
-      // dispatch in handleRowAction picks them up; they also call
-      // `stopPropagation` to keep the row tap from selecting the
-      // session. Touch-drag reorder is a possible follow-up but
-      // up/down buttons cover the common cases.
-      const terminal = ["done", "errored", "killed", "stopped"].includes(status);
-      const restart = terminal
-        ? `<button type="button" class="row-action" data-action="restart" data-id="${attr(s.id)}" aria-label="restart session">↻</button>`
-        : "";
-      const moveBtns = `
-        <button type="button" class="row-action" data-action="move-up" data-id="${attr(s.id)}" aria-label="move up">↑</button>
-        <button type="button" class="row-action" data-action="move-down" data-id="${attr(s.id)}" aria-label="move down">↓</button>`;
+      const harness = s.harness ? `<div class="sub">${escape(s.harness)}</div>` : "";
       return `
         <div class="item ${active} ${indent}" data-id="${attr(s.id)}">
-          <div class="name">${escape(title)}</div>
+          <div class="row-main">
+            <div class="name">${escape(title)}</div>
+            ${harness}
+          </div>
           <div class="state">${escape(status)}</div>
-          ${restart}
-          ${moveBtns}
         </div>`;
     })
     .join("");
@@ -1164,18 +1215,26 @@ function renderSessions() {
     el.addEventListener("click", () => toggleGroupCollapsed(el.dataset.groupId));
   });
   sessionListEl.querySelectorAll(".item").forEach((el) => {
-    el.addEventListener("click", (ev) => {
-      // Per-row action buttons (restart, future delete, etc.)
-      // shouldn't also select the session.
-      const action = ev.target.closest("[data-action]");
-      if (action) {
-        ev.stopPropagation();
-        handleRowAction(action.dataset.action, action.dataset.id);
-        return;
-      }
-      selectSession(el.dataset.id);
-    });
+    el.addEventListener("click", () => selectSession(el.dataset.id));
   });
+  refreshListToolbar();
+}
+
+/** Recompute enable/disable state of the shared toolbar buttons
+ *  against the currently-selected session. Restart only enables
+ *  on terminal-state sessions; move-up/down enable as long as
+ *  there's a non-god selection. */
+function refreshListToolbar() {
+  const sel = state.sessions.find((s) => s.id === state.currentId);
+  const isUserSession = sel && sel.kind !== "orchestrator";
+  const status = (sel && sel.state ? sel.state : "").toLowerCase();
+  const terminal = ["done", "errored", "killed", "stopped"].includes(status);
+  const upBtn = $("toolbarUpBtn");
+  const downBtn = $("toolbarDownBtn");
+  const restartBtn = $("toolbarRestartBtn");
+  if (upBtn) upBtn.disabled = !isUserSession;
+  if (downBtn) downBtn.disabled = !isUserSession;
+  if (restartBtn) restartBtn.disabled = !sel || !terminal;
 }
 
 /** Flip a group's collapsed bit on the daemon side. The
@@ -1193,9 +1252,11 @@ async function toggleGroupCollapsed(groupId) {
   }
 }
 
-/** Dispatch a per-row action by name. Future candidates: delete,
- *  kill, pin, rename. */
+/** Dispatch a session action by name. Wired up to the shared
+ *  list toolbar (acts on `state.currentId`). Future candidates:
+ *  delete, kill, pin, rename. */
 async function handleRowAction(action, sessionId) {
+  if (!sessionId) return;
   try {
     if (action === "restart") {
       await rpc("session.restart", { session_id: sessionId });
@@ -2208,6 +2269,17 @@ async function submitNewSession(ev) {
 newSessionBtn.addEventListener("click", openNewSessionDialog);
 newSessionCancelBtn.addEventListener("click", closeNewSessionDialog);
 newSessionFormEl.addEventListener("submit", submitNewSession);
+
+// Shared list toolbar — delegate the click to the same
+// `handleRowAction` the per-row buttons used to call. After the
+// action, `session/state` notifications refresh the cached
+// summary and re-render the list (which calls
+// `refreshListToolbar` for us).
+$("listToolbar").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("[data-action]");
+  if (!btn || btn.disabled) return;
+  handleRowAction(btn.dataset.action, state.currentId);
+});
 
 // --- Mobile keyboard awareness ------------------------------------------
 //
