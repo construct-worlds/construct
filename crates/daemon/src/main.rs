@@ -156,6 +156,26 @@ async fn run(socket_override: Option<PathBuf>) -> Result<()> {
                 "AGENTD_REMOTE_WS_PORT is not a valid u16; skipping ws listener"
             ),
         }
+    } else if paths.runtime_dir.join("remote.json").exists() {
+        // `/agentd restart` path: the prior daemon had the remote
+        // listener up and persisted a snapshot. Auto-start so the
+        // new daemon picks the port + token + password back up
+        // without waiting for the user to retype `/remote-control`.
+        // Supervisor's `bind_and_install` checks freshness + PID
+        // liveness before adopting; if anything's off it falls
+        // through to mint-fresh + the snapshot file is cleaned up.
+        let mgr = manager.clone();
+        tokio::spawn(async move {
+            let params = agentd_protocol::RemoteStartParams {
+                local_only: false,
+                password: None,
+            };
+            // port_hint=None — the supervisor reads the snapshot
+            // and uses snapshot.port instead.
+            if let Err(e) = mgr.start_remote(None, params).await {
+                tracing::warn!(error = %e, "remote snapshot resume failed");
+            }
+        });
     }
 
     // Race the IPC accept loop against shutdown signals + the

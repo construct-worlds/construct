@@ -1132,15 +1132,24 @@ async fn dispatch(
             // reconnect.
             match manager.request_daemon_restart() {
                 Ok(cmd) => {
+                    // Cloudflared survives the daemon's exec()
+                    // because it's spawned in a separate process
+                    // group. The new daemon adopts it via the
+                    // persisted snapshot, so the public URL +
+                    // password stay valid across the restart. We
+                    // report that to the caller — `false` only if
+                    // remote was never running, or if the snapshot
+                    // is missing for some reason.
+                    let tunnel_preserved = manager
+                        .remote_slot()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|h| h.state.tunnel_pid()))
+                        .map(|pid| pid != 0)
+                        .unwrap_or(false);
                     let r = agentd_protocol::DaemonRestartResult {
                         exe: cmd.exe.display().to_string(),
                         pid: std::process::id(),
-                        // Tunnel preservation is follow-up work (see
-                        // issue #90 follow-up). Today the cloudflared
-                        // subprocess is killed by `kill_on_drop` as
-                        // the runtime tears down, so the public URL
-                        // rotates on each restart.
-                        tunnel_preserved: false,
+                        tunnel_preserved,
                     };
                     ok!(&r)
                 }

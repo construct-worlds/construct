@@ -351,6 +351,11 @@ pub struct SessionManager {
     /// `serve_ws_on` directly — see the comment on
     /// `remote_supervisor` for why that indirection is mandatory.
     remote_starter: tokio::sync::mpsc::UnboundedSender<crate::remote_supervisor::SupervisorMsg>,
+    /// Where the supervisor writes (and the next-boot supervisor
+    /// reads) the `RemoteSnapshot`. Lives under `runtime_dir`
+    /// because it's tightly coupled to the live cloudflared PID;
+    /// `XDG_RUNTIME_DIR` is the natural home for such files.
+    remote_snapshot_path: PathBuf,
     /// Sender side of the daemon-restart channel. Holding `Some`
     /// means `daemon.restart` has been issued and main's
     /// `tokio::select!` should observe it and `exec()` the current
@@ -478,6 +483,7 @@ impl SessionManager {
         std::fs::create_dir_all(&adapter_runtime_dir).ok();
         let (remote_tx, remote_rx) = tokio::sync::mpsc::unbounded_channel();
         let (restart_tx, restart_rx) = tokio::sync::mpsc::unbounded_channel();
+        let remote_snapshot_path = runtime_dir.join("remote.json");
         Ok((
             Self {
                 storage,
@@ -490,11 +496,19 @@ impl SessionManager {
                 is_shutting_down: AtomicBool::new(false),
                 remote: std::sync::Mutex::new(None),
                 remote_starter: remote_tx,
+                remote_snapshot_path,
                 restart_tx,
             },
             remote_rx,
             restart_rx,
         ))
+    }
+
+    /// Path where the supervisor reads / writes the remote
+    /// `RemoteSnapshot`. Exposed so the supervisor can hand it to
+    /// `RemoteState::with_snapshot_path`.
+    pub(crate) fn remote_snapshot_path(&self) -> PathBuf {
+        self.remote_snapshot_path.clone()
     }
 
     /// Request a daemon restart. Resolves the current exe and
@@ -2848,7 +2862,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let storage = Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
         let config = Arc::new(crate::config::Config::default());
-        let (mgr, _remote_rx) = SessionManager::new(storage, config, tmp.path().join("run"))
+        let (mgr, _remote_rx, _restart_rx) = SessionManager::new(storage, config, tmp.path().join("run"))
             .await
             .expect("session manager");
         let manager = Arc::new(mgr);
