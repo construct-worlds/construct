@@ -141,7 +141,8 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  /* Group header (matches TUI's `▾ name` line above each group). */
+  /* Group header (matches TUI's `▾ name` line above each group).
+     Tappable — flips the group's collapsed bit. */
   .session-list .group-header {
     padding: 6px 12px 4px;
     color: var(--fg-dim);
@@ -151,16 +152,41 @@
     display: flex;
     gap: 6px;
     align-items: center;
-    /* Faint divider above each group, except the first one — the
-       ungrouped region already has a bottom border. */
     border-top: 1px solid var(--border);
     margin-top: 4px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
   }
+  .session-list .group-header:hover { background: var(--bg-elev-2); }
   .session-list .group-glyph { color: var(--fg-faint); }
   /* Sessions belonging to a group get a bit of left-padding so they
      read as members under the header above them. */
   .session-list .item.indent {
     padding-left: 24px;
+  }
+  /* Per-row action button (restart, move up/down, future delete).
+     Small touch target on the right edge of each session row. */
+  .session-list .row-action {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    margin-left: 2px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg-dim);
+    font-size: 12px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    line-height: 1;
+  }
+  .session-list .row-action:hover {
+    background: var(--bg-elev-2);
+    color: var(--fg);
+  }
+  .session-list .row-action:active {
+    background: var(--accent);
+    color: #fff;
   }
   .session-list .empty {
     color: var(--fg-dim);
@@ -315,6 +341,37 @@
   .composer button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+  /* Minimize toggle, sized like vkbd's toggle for visual rhyme. */
+  .composer-toggle {
+    flex: 0 0 auto;
+    width: 36px;
+    height: 36px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  /* Minimized state: hide the textarea + send button, collapse
+     to a slim bar that hints at "tap to compose". The whole bar
+     stays tappable so the user doesn't have to aim at the small
+     toggle button to re-expand. */
+  .composer.minimized {
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  .composer.minimized textarea,
+  .composer.minimized #send { display: none; }
+  .composer.minimized::before {
+    content: "tap to compose";
+    flex: 1;
+    color: var(--fg-faint);
+    font-size: 13px;
   }
 
   .toggle-list {
@@ -575,6 +632,80 @@
     font-size: 13px;
   }
   .approval-actions button:disabled { opacity: 0.5; cursor: progress; }
+
+  /* New-session button at the top of the list panel. Visually
+     prominent but unobtrusive — same width as a session row. */
+  .session-list-wrap {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-right: 1px solid var(--border);
+    background: var(--bg-elev);
+  }
+  .new-session-btn {
+    appearance: none;
+    flex: 0 0 auto;
+    margin: 6px 8px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px dashed var(--border);
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .new-session-btn:hover {
+    background: var(--bg-elev-2);
+    color: var(--fg);
+    border-style: solid;
+  }
+  /* When `.session-list-wrap` becomes the list container, the
+     inner `<aside>` keeps its scrollbar but loses its right border
+     (the wrap has it now). */
+  .session-list-wrap .session-list {
+    flex: 1 1 0;
+    min-height: 0;
+    border-right: none;
+    background: transparent;
+  }
+
+  /* New-session form rows reuse the approval-sheet shell. */
+  .ns-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 10px;
+  }
+  .ns-label {
+    color: var(--fg-dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .ns-input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    /* iOS-safe 16px to suppress focus auto-zoom. */
+    font-size: 16px;
+  }
+  .ns-input:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
+  textarea.ns-input { resize: vertical; min-height: 60px; }
+  .ns-error {
+    margin-top: 8px;
+    padding: 6px 8px;
+    background: rgba(244, 124, 124, 0.12);
+    border-left: 3px solid var(--err);
+    color: var(--err);
+    font-size: 13px;
+    border-radius: 4px;
+  }
 </style>
 </head>
 <body>
@@ -587,12 +718,36 @@
     </div>
   </header>
   <main>
-    <aside class="session-list" id="sessionList">
-      <div class="empty">connecting…</div>
-    </aside>
+    <div class="session-list-wrap">
+      <!--
+        Fixed-position "+ new" button at the top of the session
+        list. Tap → open `#newSessionDialog`. Stays visible on
+        mobile when the list collapses (sessionList.classList
+        toggling adjusts max-height, not the wrapper).
+      -->
+      <button type="button" class="new-session-btn" id="newSessionBtn"
+              aria-label="new session">+ new session</button>
+      <aside class="session-list" id="sessionList">
+        <div class="empty">connecting…</div>
+      </aside>
+    </div>
     <section class="view">
-      <!-- Chat view: zarvis / shell / any non-PTY session. -->
+      <!--
+        DOM order inside `.view` (`flex-direction: column`):
+          1. transcript    — chat-mode content (zarvis / shell)
+          2. terminal-wrap — PTY-mode content (codex / claude /
+             zarvis interactive)
+          3. composer      — always visible; sends `session.input`
+             in both modes
+          4. vkbd          — terminal-mode virtual keyboard
+        Mutual exclusion is via the `hidden` attribute set in
+        `enterChatMode` / `enterTerminalMode`.
+      -->
       <div class="transcript" id="transcript"></div>
+      <div class="terminal-wrap" id="terminalWrap" hidden>
+        <div class="terminal-host" id="terminal"></div>
+        <div class="terminal-loading" id="terminalLoading">loading xterm…</div>
+      </div>
       <form class="composer" id="composer">
         <textarea
           id="input"
@@ -603,16 +758,15 @@
           spellcheck="true"
         ></textarea>
         <button type="submit" id="send" disabled>send</button>
+        <!--
+          Minimize toggle, right-aligned, always visible. Lets
+          the user reclaim screen real estate when reading long
+          transcripts / scrollback; tap the slim bar (or the
+          toggle) to expand again.
+        -->
+        <button type="button" class="composer-toggle" id="composerToggle"
+                aria-label="toggle composer">▾</button>
       </form>
-      <!--
-        Terminal view: PTY-backed sessions (codex / claude / shell).
-        Mutually exclusive with the chat view above; toggled in
-        `selectSession()` based on the summary's `has_pty` flag.
-      -->
-      <div class="terminal-wrap" id="terminalWrap" hidden>
-        <div class="terminal-host" id="terminal"></div>
-        <div class="terminal-loading" id="terminalLoading">loading xterm…</div>
-      </div>
       <!--
         Virtual keyboard for PTY-mode sessions on mobile. Two
         layers (letters / symbols) plus a fixed top row of special
@@ -667,6 +821,39 @@
     </div>
   </div>
 
+  <!--
+    New-session dialog. Same slide-up sheet pattern as the
+    approval sheet so phone-side gestures stay consistent. Form
+    fields are populated when the sheet opens; `harness.list`
+    drives the available-harnesses dropdown.
+  -->
+  <div id="newSessionSheet" class="approval-sheet" hidden role="dialog" aria-modal="true">
+    <form class="approval-card" id="newSessionForm">
+      <div class="approval-head">
+        <div class="approval-tool-name">New session</div>
+      </div>
+      <label class="ns-row">
+        <span class="ns-label">harness</span>
+        <select id="newSessionHarness" class="ns-input"></select>
+      </label>
+      <label class="ns-row">
+        <span class="ns-label">cwd</span>
+        <input id="newSessionCwd" type="text" class="ns-input"
+               placeholder="/path/to/project" />
+      </label>
+      <label class="ns-row ns-row-grow">
+        <span class="ns-label">initial prompt (optional)</span>
+        <textarea id="newSessionPrompt" class="ns-input" rows="3"
+                  placeholder="what should the agent do first?"></textarea>
+      </label>
+      <div class="ns-error" id="newSessionError" hidden></div>
+      <div class="approval-actions">
+        <button type="button" class="btn-deny" id="newSessionCancel">Cancel</button>
+        <button type="submit" class="btn-approve" id="newSessionCreate">Create</button>
+      </div>
+    </form>
+  </div>
+
 <script>
 "use strict";
 
@@ -684,6 +871,7 @@ const connEl = $("conn");
 const composerEl = $("composer");
 const inputEl = $("input");
 const sendBtn = $("send");
+const composerToggleBtn = $("composerToggle");
 const toggleListBtn = $("toggleList");
 const terminalWrapEl = $("terminalWrap");
 const terminalEl = $("terminal");
@@ -898,7 +1086,7 @@ function renderSessions() {
         const g = item.group;
         const glyph = g.collapsed ? "▸" : "▾";
         return `
-          <div class="group-header">
+          <div class="group-header" data-group-id="${attr(g.id)}">
             <span class="group-glyph">${glyph}</span>
             <span class="group-name">${escape(g.name || "(unnamed)")}</span>
           </div>`;
@@ -908,17 +1096,78 @@ function renderSessions() {
       const indent = item.indented ? "indent" : "";
       const title = s.title || s.harness || s.id.slice(0, 8);
       const status = (s.state || "").toLowerCase();
+      // Per-row affordances:
+      //   ↻ restart — only on terminal-state sessions.
+      //   ↑ / ↓     — reorder via session.move (direction up/down).
+      // All three are wrapped in `[data-action]` buttons so the
+      // dispatch in handleRowAction picks them up; they also call
+      // `stopPropagation` to keep the row tap from selecting the
+      // session. Touch-drag reorder is a possible follow-up but
+      // up/down buttons cover the common cases.
+      const terminal = ["done", "errored", "killed", "stopped"].includes(status);
+      const restart = terminal
+        ? `<button type="button" class="row-action" data-action="restart" data-id="${attr(s.id)}" aria-label="restart session">↻</button>`
+        : "";
+      const moveBtns = `
+        <button type="button" class="row-action" data-action="move-up" data-id="${attr(s.id)}" aria-label="move up">↑</button>
+        <button type="button" class="row-action" data-action="move-down" data-id="${attr(s.id)}" aria-label="move down">↓</button>`;
       return `
         <div class="item ${active} ${indent}" data-id="${attr(s.id)}">
           <div class="name">${escape(title)}</div>
           <div class="state">${escape(status)}</div>
+          ${restart}
+          ${moveBtns}
         </div>`;
     })
     .join("");
   sessionListEl.innerHTML = html;
-  sessionListEl.querySelectorAll(".item").forEach((el) => {
-    el.addEventListener("click", () => selectSession(el.dataset.id));
+  sessionListEl.querySelectorAll(".group-header").forEach((el) => {
+    el.addEventListener("click", () => toggleGroupCollapsed(el.dataset.groupId));
   });
+  sessionListEl.querySelectorAll(".item").forEach((el) => {
+    el.addEventListener("click", (ev) => {
+      // Per-row action buttons (restart, future delete, etc.)
+      // shouldn't also select the session.
+      const action = ev.target.closest("[data-action]");
+      if (action) {
+        ev.stopPropagation();
+        handleRowAction(action.dataset.action, action.dataset.id);
+        return;
+      }
+      selectSession(el.dataset.id);
+    });
+  });
+}
+
+/** Flip a group's collapsed bit on the daemon side. The
+ *  `group/state` broadcast triggers a re-render. */
+async function toggleGroupCollapsed(groupId) {
+  const g = state.groups.find((x) => x.id === groupId);
+  if (!g) return;
+  try {
+    await rpc("group.set_collapsed", {
+      group_id: groupId,
+      collapsed: !g.collapsed,
+    });
+  } catch (e) {
+    appendError(`toggle group failed: ${e.message}`);
+  }
+}
+
+/** Dispatch a per-row action by name. Future candidates: delete,
+ *  kill, pin, rename. */
+async function handleRowAction(action, sessionId) {
+  try {
+    if (action === "restart") {
+      await rpc("session.restart", { session_id: sessionId });
+    } else if (action === "move-up") {
+      await rpc("session.move", { session_id: sessionId, direction: "up" });
+    } else if (action === "move-down") {
+      await rpc("session.move", { session_id: sessionId, direction: "down" });
+    }
+  } catch (e) {
+    appendError(`${action} failed: ${e.message}`);
+  }
 }
 
 async function selectSession(id) {
@@ -937,10 +1186,10 @@ async function selectSession(id) {
     enterChatMode();
     await loadTranscript(id);
   }
-  // Composer is meaningful only in chat mode; PTY sessions route
-  // input through xterm directly.
-  sendBtn.disabled =
-    state.mode !== "chat" || !(state.ws && state.ws.readyState === 1);
+  // Composer is meaningful in both modes — `session.input` is the
+  // "submit this prompt" verb for chat-style adapters and for PTY-
+  // backed ones alike. Only block on disconnect.
+  sendBtn.disabled = !(state.ws && state.ws.readyState === 1 && state.currentId);
 }
 
 // --- PTY / xterm.js mode -------------------------------------------------
@@ -958,7 +1207,13 @@ function enterChatMode() {
 async function enterTerminalMode(id) {
   state.mode = "terminal";
   transcriptEl.hidden = true;
-  composerEl.hidden = true;
+  // Composer stays visible above the vkbd in terminal mode —
+  // `session.input` is still meaningful for PTY-backed adapters
+  // (it's how the high-level "send this prompt to the agent"
+  // verb reaches codex / claude / zarvis interactive). The
+  // per-keystroke editing path is the vkbd + xterm; composer is
+  // for committing a whole prompt at once.
+  composerEl.hidden = false;
   terminalWrapEl.hidden = false;
   vkbdEl.hidden = false;
   // Build the keyboard markup once per session-switch; cheap, and
@@ -1650,6 +1905,29 @@ composerEl.addEventListener("submit", (ev) => {
   sendInput();
 });
 
+// Minimize toggle. Click the chevron to collapse; tap the slim
+// bar (anywhere outside the textarea / send button) to expand
+// again.
+state.composerMinimized = false;
+function setComposerMinimized(v) {
+  state.composerMinimized = !!v;
+  composerEl.classList.toggle("minimized", state.composerMinimized);
+  composerToggleBtn.textContent = state.composerMinimized ? "▴" : "▾";
+}
+composerToggleBtn.addEventListener("click", (ev) => {
+  ev.preventDefault();
+  ev.stopPropagation();
+  setComposerMinimized(!state.composerMinimized);
+  if (!state.composerMinimized) inputEl.focus();
+});
+composerEl.addEventListener("click", (ev) => {
+  // When minimized, the whole form is a "tap to expand" surface.
+  if (state.composerMinimized && ev.target !== composerToggleBtn) {
+    setComposerMinimized(false);
+    inputEl.focus();
+  }
+});
+
 inputEl.addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
     ev.preventDefault();
@@ -1800,6 +2078,97 @@ async function decideApproval(decision) {
 approvalApproveBtn.addEventListener("click", () => decideApproval("approve"));
 approvalDenyBtn.addEventListener("click", () => decideApproval("deny"));
 approvalAutomodeBtn.addEventListener("click", () => decideApproval("automode"));
+
+// --- New-session dialog -------------------------------------------------
+
+const newSessionBtn = $("newSessionBtn");
+const newSessionSheetEl = $("newSessionSheet");
+const newSessionFormEl = $("newSessionForm");
+const newSessionHarnessEl = $("newSessionHarness");
+const newSessionCwdEl = $("newSessionCwd");
+const newSessionPromptEl = $("newSessionPrompt");
+const newSessionErrorEl = $("newSessionError");
+const newSessionCancelBtn = $("newSessionCancel");
+const newSessionCreateBtn = $("newSessionCreate");
+
+async function openNewSessionDialog() {
+  // Populate the harness dropdown from `harness.list`. Filtered to
+  // available harnesses so the user can't pick one that the daemon
+  // would reject.
+  let harnesses = [];
+  try {
+    harnesses = await rpc("harness.list", null);
+  } catch (e) {
+    newSessionErrorEl.textContent = `harness.list failed: ${e.message}`;
+    newSessionErrorEl.hidden = false;
+    newSessionSheetEl.hidden = false;
+    return;
+  }
+  const usable = (Array.isArray(harnesses) ? harnesses : []).filter((h) => h.available);
+  if (!usable.length) {
+    newSessionErrorEl.textContent = "no harnesses available on this daemon";
+    newSessionErrorEl.hidden = false;
+  } else {
+    newSessionErrorEl.hidden = true;
+  }
+  newSessionHarnessEl.innerHTML = usable
+    .map((h) => `<option value="${attr(h.name)}">${escape(h.name)}</option>`)
+    .join("");
+  // Pre-fill cwd with the current session's cwd if we have one
+  // (keeps the new session in the same project context).
+  const cur = state.sessions.find((s) => s.id === state.currentId);
+  newSessionCwdEl.value = (cur && cur.cwd) || "";
+  newSessionPromptEl.value = "";
+  newSessionSheetEl.hidden = false;
+  // Defer focus so the slide-up animation doesn't fight the
+  // keyboard-summon path.
+  setTimeout(() => newSessionHarnessEl.focus(), 200);
+}
+
+function closeNewSessionDialog() {
+  newSessionSheetEl.hidden = true;
+  newSessionErrorEl.hidden = true;
+  newSessionCreateBtn.disabled = false;
+}
+
+async function submitNewSession(ev) {
+  ev.preventDefault();
+  const harness = newSessionHarnessEl.value;
+  const cwd = newSessionCwdEl.value.trim();
+  const prompt = newSessionPromptEl.value.trim();
+  if (!harness) {
+    newSessionErrorEl.textContent = "pick a harness";
+    newSessionErrorEl.hidden = false;
+    return;
+  }
+  if (!cwd) {
+    newSessionErrorEl.textContent = "cwd is required";
+    newSessionErrorEl.hidden = false;
+    return;
+  }
+  newSessionCreateBtn.disabled = true;
+  newSessionErrorEl.hidden = true;
+  const params = { harness, cwd };
+  if (prompt) params.prompt = prompt;
+  try {
+    const res = await rpc("session.create", params);
+    closeNewSessionDialog();
+    // session/state notifications will repopulate the list; also
+    // auto-select the new session so the user sees it immediately.
+    if (res && res.session_id) {
+      await refreshSessions();
+      selectSession(res.session_id);
+    }
+  } catch (e) {
+    newSessionCreateBtn.disabled = false;
+    newSessionErrorEl.textContent = `create failed: ${e.message}`;
+    newSessionErrorEl.hidden = false;
+  }
+}
+
+newSessionBtn.addEventListener("click", openNewSessionDialog);
+newSessionCancelBtn.addEventListener("click", closeNewSessionDialog);
+newSessionFormEl.addEventListener("submit", submitNewSession);
 
 // --- Mobile keyboard awareness ------------------------------------------
 //
