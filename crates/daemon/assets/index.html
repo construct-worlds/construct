@@ -389,36 +389,12 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
-  /* Minimize toggle, sized like vkbd's toggle for visual rhyme. */
-  .composer-toggle {
-    flex: 0 0 auto;
-    width: 36px;
-    height: 36px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--fg-dim);
-    font: inherit;
-    font-size: 14px;
-    cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
-    touch-action: manipulation;
-  }
-  /* Minimized state: hide the textarea + send button, collapse
-     to a slim bar that hints at "tap to compose". The whole bar
-     stays tappable so the user doesn't have to aim at the small
-     toggle button to re-expand. */
-  .composer.minimized {
-    padding: 6px 12px;
-    cursor: pointer;
-  }
-  .composer.minimized textarea,
-  .composer.minimized #send { display: none; }
-  .composer.minimized::before {
-    content: "tap to compose";
-    flex: 1;
-    color: var(--fg-faint);
-    font-size: 13px;
+  /* "Insert" button styling — visually subordinate to Enter (it's
+     the "type but don't submit" path), so muted background to
+     differentiate from the accent-colored Enter. */
+  .composer #insertBtn {
+    background: var(--bg-elev-2);
+    color: var(--fg);
   }
 
   .toggle-list {
@@ -834,6 +810,15 @@
         <div class="terminal-host" id="terminal"></div>
         <div class="terminal-loading" id="terminalLoading">loading xterm…</div>
       </div>
+      <!--
+        Composer: two submit-style buttons. "Insert" writes the
+        textarea contents into the session as keystrokes — for
+        PTY-backed sessions this types into the editor / shell
+        buffer without firing Enter; for non-PTY chat sessions it
+        falls back to `session.input` (which submits, since
+        there's no editor to land in). "Enter" appends `\r` so
+        a PTY session also submits in the same gesture.
+      -->
       <form class="composer" id="composer">
         <textarea
           id="input"
@@ -843,15 +828,8 @@
           autocapitalize="sentences"
           spellcheck="true"
         ></textarea>
-        <button type="submit" id="send" disabled>send</button>
-        <!--
-          Minimize toggle, right-aligned, always visible. Lets
-          the user reclaim screen real estate when reading long
-          transcripts / scrollback; tap the slim bar (or the
-          toggle) to expand again.
-        -->
-        <button type="button" class="composer-toggle" id="composerToggle"
-                aria-label="toggle composer">▾</button>
+        <button type="button" id="insertBtn" disabled>Insert</button>
+        <button type="submit" id="enterBtn" disabled>Enter</button>
       </form>
       <!--
         Virtual keyboard for PTY-mode sessions on mobile. Two
@@ -956,8 +934,8 @@ const sessionTitleEl = $("sessionTitle");
 const connEl = $("conn");
 const composerEl = $("composer");
 const inputEl = $("input");
-const sendBtn = $("send");
-const composerToggleBtn = $("composerToggle");
+const insertBtn = $("insertBtn");
+const enterBtn = $("enterBtn");
 const toggleListBtn = $("toggleList");
 const terminalWrapEl = $("terminalWrap");
 const terminalEl = $("terminal");
@@ -1014,7 +992,12 @@ const state = {
 function setConnState(s, label) {
   connEl.dataset.state = s;
   connEl.querySelector(".label").textContent = label;
-  sendBtn.disabled = !(s === "open" && state.currentId);
+  setComposerEnabled(s === "open" && !!state.currentId);
+}
+
+function setComposerEnabled(on) {
+  insertBtn.disabled = !on;
+  enterBtn.disabled = !on;
 }
 
 function connect() {
@@ -1298,10 +1281,11 @@ async function selectSession(id) {
     enterChatMode();
     await loadTranscript(id);
   }
-  // Composer is meaningful in both modes — `session.input` is the
-  // "submit this prompt" verb for chat-style adapters and for PTY-
-  // backed ones alike. Only block on disconnect.
-  sendBtn.disabled = !(state.ws && state.ws.readyState === 1 && state.currentId);
+  // Composer is meaningful in both modes — Insert / Enter route
+  // to `pty_input` (with or without trailing `\r`) for PTY-backed
+  // sessions, `session.input` for chat-only adapters. Just block
+  // on disconnect / no-selection.
+  setComposerEnabled(!!(state.ws && state.ws.readyState === 1 && state.currentId));
 }
 
 // --- PTY / xterm.js mode -------------------------------------------------
@@ -2011,64 +1995,89 @@ function scrollToBottom() {
 }
 
 // --- Composer ------------------------------------------------------------
+//
+// Two submit paths:
+//
+//   Insert — type the composer text into the session as
+//            keystrokes. For PTY sessions this lands in the
+//            editor / readline buffer without firing Enter, so
+//            the user can keep editing in xterm. For non-PTY
+//            chat sessions there's no editor to land in, so we
+//            fall back to `session.input` (which submits).
+//
+//   Enter  — same as Insert but with a trailing `\r` for PTY
+//            sessions, so the buffer also submits. For non-PTY
+//            sessions, identical to Insert (`session.input`
+//            already submits).
+//
+// Form `submit` event fires from Enter button (it's
+// `type="submit"`) and from Enter-key-in-textarea via the
+// keydown handler. Insert button is `type="button"` so it never
+// submits the form.
 
 composerEl.addEventListener("submit", (ev) => {
   ev.preventDefault();
-  sendInput();
+  submitComposer({ enter: true });
 });
-
-// Minimize toggle. Click the chevron to collapse; tap the slim
-// bar (anywhere outside the textarea / send button) to expand
-// again.
-state.composerMinimized = false;
-function setComposerMinimized(v) {
-  state.composerMinimized = !!v;
-  composerEl.classList.toggle("minimized", state.composerMinimized);
-  composerToggleBtn.textContent = state.composerMinimized ? "▴" : "▾";
-}
-composerToggleBtn.addEventListener("click", (ev) => {
+insertBtn.addEventListener("click", (ev) => {
   ev.preventDefault();
-  ev.stopPropagation();
-  setComposerMinimized(!state.composerMinimized);
-  if (!state.composerMinimized) inputEl.focus();
-});
-composerEl.addEventListener("click", (ev) => {
-  // When minimized, the whole form is a "tap to expand" surface.
-  if (state.composerMinimized && ev.target !== composerToggleBtn) {
-    setComposerMinimized(false);
-    inputEl.focus();
-  }
+  submitComposer({ enter: false });
 });
 
 inputEl.addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
     ev.preventDefault();
-    sendInput();
+    submitComposer({ enter: true });
   }
 });
 
 inputEl.addEventListener("input", () => {
   // Auto-grow the textarea so multi-line composing isn't a tiny
   // single-row box.
-  inputEl.style.height = "auto";
-  inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.3) + "px";
+  resetInputHeight();
 });
 
-async function sendInput() {
-  const text = inputEl.value;
-  if (!text.trim() || !state.currentId) return;
-  inputEl.value = "";
+function resetInputHeight() {
   inputEl.style.height = "auto";
-  // Optimistic render of the user's message so the UX feels
-  // immediate; the adapter typically echoes back its own
-  // canonical "user" event a moment later but the duplicate is
-  // harmless for v1.
-  appendMessage("user", text);
-  scrollToBottom();
-  try {
-    await rpc("session.input", { session_id: state.currentId, text });
-  } catch (e) {
-    appendError(`send failed: ${e.message}`);
+  inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.3) + "px";
+}
+
+function currentSessionHasPty() {
+  const s = state.sessions.find((x) => x.id === state.currentId);
+  return !!(s && s.has_pty);
+}
+
+/** Insert vs Enter — see the comment on the Composer section. */
+async function submitComposer({ enter }) {
+  const text = inputEl.value;
+  if (!state.currentId) return;
+  // Empty Insert is a no-op. Empty Enter on a PTY session is
+  // meaningful (sends a bare `\r`), so allow it there.
+  if (!text && !(enter && currentSessionHasPty())) return;
+  inputEl.value = "";
+  resetInputHeight();
+  const pty = currentSessionHasPty();
+  if (pty) {
+    const payload = enter ? text + "\r" : text;
+    const data = encodeBase64Utf8(payload);
+    try {
+      await rpc("session.pty_input", { session_id: state.currentId, data });
+    } catch (e) {
+      appendError(`pty_input failed: ${e.message}`);
+    }
+  } else {
+    // Non-PTY chat sessions: only `session.input` makes sense.
+    // Insert and Enter both submit. Show an optimistic bubble so
+    // the UX feels immediate; the adapter typically echoes back
+    // its own canonical "user" event a moment later.
+    if (!text.trim()) return;
+    appendMessage("user", text);
+    scrollToBottom();
+    try {
+      await rpc("session.input", { session_id: state.currentId, text });
+    } catch (e) {
+      appendError(`send failed: ${e.message}`);
+    }
   }
 }
 
