@@ -473,6 +473,20 @@ pub struct HintZone {
     pub action: KeyAction,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlHit {
+    pub url: String,
+    pub ranges: Vec<UrlLineHit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlLineHit {
+    pub row: u16,
+    pub start_col: u16,
+    /// Exclusive end column.
+    pub end_col: u16,
+}
+
 /// Last-frame geometry for hit-testing mouse clicks.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutSnapshot {
@@ -2091,6 +2105,13 @@ impl App {
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
         }
+        if let Some(hit) = self.url_hit_at(col, row) {
+            match open_url(&hit.url) {
+                Ok(()) => self.set_status(format!("opened {}", hit.url)),
+                Err(e) => self.set_status(format!("open URL failed: {e}")),
+            }
+            return;
+        }
         if let Some(mb_area) = self.layout.minibuffer_area {
             if contains(mb_area, col, row) {
                 // First check the inline-hint zones ("C-x z unzoom" /
@@ -2186,6 +2207,54 @@ impl App {
                 return;
             }
         }
+    }
+
+    pub fn hovered_url(&self) -> Option<UrlHit> {
+        let (col, row) = self.mouse_pos?;
+        self.url_hit_at(col, row)
+    }
+
+    fn url_hit_at(&self, col: u16, row: u16) -> Option<UrlHit> {
+        let bounds = self.url_click_bounds(col, row)?;
+        url_hit_in_frame(&self.frame_text, col, row, bounds)
+    }
+
+    fn url_click_bounds(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<ratatui::layout::Rect> {
+        fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
+            c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
+        }
+        if let Some(view) = self.layout.view_area {
+            let inner = ratatui::layout::Rect {
+                x: view.x.saturating_add(1),
+                y: view.y.saturating_add(1),
+                width: view.width.saturating_sub(2),
+                height: view.height.saturating_sub(2),
+            };
+            if contains(inner, col, row) {
+                return Some(inner);
+            }
+        }
+        if matches!(
+            self.minibuffer.as_ref().map(|m| &m.intent),
+            Some(MinibufferIntent::Orchestrator)
+        ) {
+            if let Some(area) = self.layout.minibuffer_area {
+                let inner = ratatui::layout::Rect {
+                    x: area.x,
+                    y: area.y.saturating_add(1),
+                    width: area.width,
+                    height: area.height.saturating_sub(1),
+                };
+                if contains(inner, col, row) {
+                    return Some(inner);
+                }
+            }
+        }
+        None
     }
 
     /// Collapse the orchestrator panel (close the
@@ -3738,6 +3807,166 @@ fn slice_line(line: &str, start_col: u16, end_col: u16) -> String {
         .collect()
 }
 
+fn url_hit_in_frame(
+    frame_text: &[String],
+    col: u16,
+    row: u16,
+    bounds: ratatui::layout::Rect,
+) -> Option<UrlHit> {
+    let (text, positions) = wrapped_text_with_positions(frame_text, bounds);
+    let idx = positions.iter().position(|p| p.col == col && p.row == row)?;
+    let (start, end, url) = url_range_at_col(&text, idx)?;
+    let ranges = url_line_ranges(&positions[start..end]);
+    Some(UrlHit {
+        url,
+        ranges,
+    })
+}
+
+fn wrapped_text_with_positions(
+    frame_text: &[String],
+    bounds: ratatui::layout::Rect,
+) -> (String, Vec<ScreenPoint>) {
+    let mut text = String::new();
+    let mut positions = Vec::new();
+    for row in bounds.top()..bounds.bottom() {
+        let Some(line) = frame_text.get(row as usize) else {
+            continue;
+        };
+        for col in bounds.left()..bounds.right() {
+            let ch = line.chars().nth(col as usize).unwrap_or(' ');
+            text.push(ch);
+            positions.push(ScreenPoint { col, row });
+        }
+    }
+    (text, positions)
+}
+
+fn url_line_ranges(positions: &[ScreenPoint]) -> Vec<UrlLineHit> {
+    let mut ranges = Vec::new();
+    let Some(first) = positions.first().copied() else {
+        return ranges;
+    };
+    let mut row = first.row;
+    let mut start_col = first.col;
+    let mut last_col = first.col;
+    for p in positions.iter().copied().skip(1) {
+        if p.row == row && p.col == last_col.saturating_add(1) {
+            last_col = p.col;
+            continue;
+        }
+        ranges.push(UrlLineHit {
+            row,
+            start_col,
+            end_col: last_col.saturating_add(1),
+        });
+        row = p.row;
+        start_col = p.col;
+        last_col = p.col;
+    }
+    ranges.push(UrlLineHit {
+        row,
+        start_col,
+        end_col: last_col.saturating_add(1),
+    });
+    ranges
+}
+
+fn url_range_at_col(line: &str, col: usize) -> Option<(usize, usize, String)> {
+    for (start, end) in url_ranges(line) {
+        if col >= start && col < end {
+            return Some((
+                start,
+                end,
+                line.chars().skip(start).take(end - start).collect(),
+            ));
+        }
+    }
+    None
+}
+
+fn url_ranges(line: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut ranges = Vec::new();
+    let mut i = 0usize;
+    while i + 2 < chars.len() {
+        if chars[i] == ':' && chars[i + 1] == '/' && chars[i + 2] == '/' {
+            let Some(start) = scheme_start(&chars, i) else {
+                i += 3;
+                continue;
+            };
+            let mut end = i + 3;
+            while end < chars.len() && is_url_body_char(chars[end]) {
+                end += 1;
+            }
+            while end > start && is_trailing_url_punct(chars[end - 1]) {
+                end -= 1;
+            }
+            if end > i + 3 {
+                ranges.push((start, end));
+            }
+            i = end.max(i + 3);
+        } else {
+            i += 1;
+        }
+    }
+    ranges
+}
+
+fn scheme_start(chars: &[char], colon: usize) -> Option<usize> {
+    if colon == 0 {
+        return None;
+    }
+    let mut start = colon;
+    while start > 0 && is_scheme_char(chars[start - 1]) {
+        start -= 1;
+    }
+    if start == colon || !chars[start].is_ascii_alphabetic() {
+        return None;
+    }
+    Some(start)
+}
+
+fn is_scheme_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')
+}
+
+fn is_url_body_char(c: char) -> bool {
+    !c.is_whitespace() && !matches!(c, '"' | '\'' | '`' | '<' | '>')
+}
+
+fn is_trailing_url_punct(c: char) -> bool {
+    matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}')
+}
+
+fn open_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn opener for {url}"))?;
+    Ok(())
+}
+
 fn copy_to_clipboard(text: &str) -> Result<()> {
     if copy_with_pbcopy(text).is_ok() {
         return Ok(());
@@ -4230,11 +4459,12 @@ fn should_drain_after(ev: &CtEvent) -> bool {
 
 #[cfg(test)]
 mod drain_gate_tests {
-    use super::should_drain_after;
+    use super::{should_drain_after, url_range_at_col, url_ranges};
     use crossterm::event::{
         Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
         MouseButton, MouseEvent, MouseEventKind,
     };
+    use ratatui::layout::Rect;
 
     fn mouse(kind: MouseEventKind) -> CtEvent {
         CtEvent::Mouse(MouseEvent {
@@ -4304,6 +4534,56 @@ mod drain_gate_tests {
         assert!(!should_drain_after(&CtEvent::Paste(String::from("hi"))));
         assert!(!should_drain_after(&CtEvent::FocusGained));
         assert!(!should_drain_after(&CtEvent::FocusLost));
+    }
+
+    #[test]
+    fn url_ranges_find_scheme_urls_and_trim_sentence_punctuation() {
+        let line = "see https://example.com/path?q=1, then file:///tmp/a.txt.";
+        let ranges = url_ranges(line);
+        let urls: Vec<String> = ranges
+            .into_iter()
+            .map(|(s, e)| line.chars().skip(s).take(e - s).collect())
+            .collect();
+        assert_eq!(
+            urls,
+            vec!["https://example.com/path?q=1", "file:///tmp/a.txt"]
+        );
+    }
+
+    #[test]
+    fn url_hit_requires_cursor_inside_url() {
+        let line = "open https://example.com/docs now";
+        assert_eq!(
+            url_range_at_col(line, 8).map(|(_, _, url)| url),
+            Some("https://example.com/docs".to_string())
+        );
+        assert!(url_range_at_col(line, 0).is_none());
+        assert!(url_range_at_col(line, line.chars().count() - 1).is_none());
+    }
+
+    #[test]
+    fn url_ranges_reject_missing_scheme_and_empty_authority() {
+        assert!(url_ranges("not a url: ://example.com").is_empty());
+        assert!(url_ranges("not a url: https://").is_empty());
+        assert!(url_ranges("example.com/path").is_empty());
+    }
+
+    #[test]
+    fn url_hit_reconstructs_wrapped_url_across_rows() {
+        let frame = vec![
+            "    https://example.".to_string(),
+            "com/docs?q=1      ".to_string(),
+        ];
+        let hit = super::url_hit_in_frame(&frame, 2, 1, Rect::new(0, 0, 20, 2))
+            .expect("wrapped URL should be clickable from second row");
+        assert_eq!(hit.url, "https://example.com/docs?q=1");
+        assert_eq!(hit.ranges.len(), 2);
+        assert_eq!(hit.ranges[0].row, 0);
+        assert_eq!(hit.ranges[0].start_col, 4);
+        assert_eq!(hit.ranges[0].end_col, 20);
+        assert_eq!(hit.ranges[1].row, 1);
+        assert_eq!(hit.ranges[1].start_col, 0);
+        assert_eq!(hit.ranges[1].end_col, 12);
     }
 }
 
