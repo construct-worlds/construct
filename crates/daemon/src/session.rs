@@ -109,6 +109,31 @@ pub struct SessionEntry {
     /// Surfaced by `session.list_tasks` for the TUI `/tasks` popup
     /// and the MCP `agentd_get_tasks` tool.
     pub tasks: tokio::sync::Mutex<TaskRegistry>,
+    /// "Active client wins" PTY-size policy. A POSIX PTY can only
+    /// have one size, so when both the TUI and the remote web
+    /// client are attached to the same session we resize the OS
+    /// PTY to whichever kind most recently sent a `pty_input` or
+    /// `pty_resize`. Switching attention (typing on TUI →
+    /// `last_active = Tui`; typing on phone → `Remote`) flips the
+    /// size. The other client's view temporarily looks wrong until
+    /// they re-engage. See `SessionManager::note_pty_activity`.
+    pub pty_client_policy: std::sync::Mutex<PtyClientPolicy>,
+}
+
+/// Tracking state for the per-session "active client wins" PTY
+/// resize policy. Kept on `SessionEntry`. `std::sync::Mutex` (not
+/// tokio) is deliberate — every critical section is tiny and we
+/// never want to hold this across an .await.
+#[derive(Debug, Default)]
+pub struct PtyClientPolicy {
+    /// Last viewport the TUI client claimed for this session.
+    pub tui_size: Option<(u16, u16)>,
+    /// Last viewport a remote (WS) client claimed for this session.
+    pub remote_size: Option<(u16, u16)>,
+    /// The kind whose viewport currently owns the OS PTY size. On
+    /// any further activity from a *different* kind, the daemon
+    /// resizes to that kind's stored viewport.
+    pub last_active: Option<crate::server::ClientKind>,
 }
 
 /// Bounded log of recent + in-flight task entries. Held inside
@@ -403,6 +428,7 @@ impl SessionManager {
                 title_gen_attempted: AtomicBool::new(s.title.is_some()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
+                pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
             };
             sessions.insert(s.id.clone(), Arc::new(entry));
         }
@@ -866,6 +892,7 @@ impl SessionManager {
             title_gen_attempted: AtomicBool::new(summary.title.is_some()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
+            pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
         });
 
         // Record the user's initial prompt as the first transcript event so
@@ -1739,6 +1766,64 @@ impl SessionManager {
                     cap.esc = 0;
                 }
                 _ => cap.esc = 0,
+            }
+        }
+    }
+
+    /// Record that a given client kind just acted on a session's
+    /// PTY (typed input or sent a resize). Updates the kind's
+    /// last-known viewport (if `resize_to` was supplied), flips
+    /// `last_active` to that kind, and — if the kind switched
+    /// since last time — issues a `pty_resize` to match the kind's
+    /// stored viewport. No-op when only one kind is attached.
+    ///
+    /// This is the daemon-side half of the "active client wins"
+    /// PTY-size policy. The complementary half lives in
+    /// `server::dispatch`'s `SESSION_PTY_INPUT` and
+    /// `SESSION_PTY_RESIZE` arms, which call this method before
+    /// forwarding the actual request to the PTY.
+    pub async fn note_pty_activity(
+        self: &Arc<Self>,
+        id: &str,
+        kind: crate::server::ClientKind,
+        resize_to: Option<(u16, u16)>,
+    ) {
+        let Some(entry) = self.get_entry(id).await else {
+            return;
+        };
+        let to_apply = {
+            let mut policy = entry
+                .pty_client_policy
+                .lock()
+                .expect("pty_client_policy mutex poisoned");
+            if let Some(sz) = resize_to {
+                match kind {
+                    crate::server::ClientKind::Tui => policy.tui_size = Some(sz),
+                    crate::server::ClientKind::Remote => policy.remote_size = Some(sz),
+                }
+            }
+            let switched = policy.last_active != Some(kind);
+            policy.last_active = Some(kind);
+            // Only re-resize on a *switch*, or when this call was
+            // itself a pty_resize. Plain pty_input from the same
+            // kind that's already active is a no-op for the size
+            // policy (the per-call pty_resize handler still runs
+            // separately).
+            if switched || resize_to.is_some() {
+                match kind {
+                    crate::server::ClientKind::Tui => policy.tui_size,
+                    crate::server::ClientKind::Remote => policy.remote_size,
+                }
+            } else {
+                None
+            }
+        };
+        if let Some((cols, rows)) = to_apply {
+            // Best-effort. The pty_resize dedup inside
+            // `SessionManager::pty_resize` handles the case where
+            // the OS PTY is already at this size.
+            if let Err(e) = self.pty_resize(id, cols, rows).await {
+                tracing::debug!(session = %id, error = %e, "policy-driven pty_resize failed");
             }
         }
     }
@@ -2771,6 +2856,7 @@ mod tests {
             title_gen_attempted: AtomicBool::new(false),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
+            pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
         });
         manager.sessions.write().await.insert(id.clone(), entry.clone());
 

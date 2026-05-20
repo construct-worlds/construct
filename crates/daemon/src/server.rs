@@ -47,6 +47,21 @@ enum SubCmd {
     Unsubscribe,
 }
 
+/// Which transport a request arrived on. Drives the activity-
+/// driven PTY-resize policy: whichever kind most recently sent a
+/// `pty_input` or `pty_resize` to a given session "owns" that
+/// session's PTY size, and the daemon resizes the OS PTY to that
+/// kind's last-known viewport. Switching attention between TUI
+/// and phone flips the size on the next interaction.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ClientKind {
+    /// Unix-socket caller — the desktop TUI, MCP, or CLI scripts.
+    Tui,
+    /// WebSocket caller — the `/remote-control` web client on
+    /// phone (or any other authenticated WS consumer).
+    Remote,
+}
+
 async fn handle_connection(stream: UnixStream, manager: Arc<SessionManager>) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<serde_json::Value>();
@@ -64,7 +79,7 @@ async fn handle_connection(stream: UnixStream, manager: Arc<SessionManager>) -> 
     let inbound = ReadFromUnix {
         reader: BufReader::new(reader),
     };
-    run_session(inbound, out_tx, manager).await;
+    run_session(inbound, out_tx, manager, ClientKind::Tui).await;
     writer_task.abort();
     Ok(())
 }
@@ -79,6 +94,7 @@ async fn run_session<I: Inbound>(
     mut inbound: I,
     out_tx: mpsc::UnboundedSender<serde_json::Value>,
     manager: Arc<SessionManager>,
+    kind: ClientKind,
 ) {
     let (sub_cmd_tx, sub_cmd_rx) = mpsc::channel::<SubCmd>(8);
 
@@ -107,7 +123,7 @@ async fn run_session<I: Inbound>(
                 continue;
             }
         };
-        let resp = dispatch(&manager, &sub_cmd_tx, req).await;
+        let resp = dispatch(&manager, &sub_cmd_tx, kind, req).await;
         let v = match serde_json::to_value(&resp) {
             Ok(v) => v,
             Err(e) => {
@@ -646,7 +662,7 @@ async fn handle_ws_connection(
     });
 
     let inbound = ReadFromWs { rx: ws_rx };
-    run_session(inbound, out_tx, manager).await;
+    run_session(inbound, out_tx, manager, ClientKind::Remote).await;
     writer_task.abort();
     Ok(())
 }
@@ -785,6 +801,7 @@ fn parse_params<T: serde::de::DeserializeOwned>(
 async fn dispatch(
     manager: &Arc<SessionManager>,
     sub_cmd_tx: &mpsc::Sender<SubCmd>,
+    kind: ClientKind,
     req: Request,
 ) -> Response {
     let id = req.id.clone();
@@ -838,6 +855,12 @@ async fn dispatch(
                 Ok(b) => b,
                 Err(e) => return Response::err(id.clone(), ErrorObject::invalid_params(e.to_string())),
             };
+            // Mark this client kind as the active one for the
+            // session and re-resize the PTY to its last-known
+            // viewport. The OS PTY only has one size; "active
+            // wins" lets users alternate between TUI and phone
+            // without losing their preferred geometry.
+            manager.note_pty_activity(&p.session_id, kind, None).await;
             match manager.pty_input(&p.session_id, bytes).await {
                 Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
                 Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
@@ -845,6 +868,12 @@ async fn dispatch(
         }
         m if m == ipc_method::SESSION_PTY_RESIZE => {
             let p = params!(SessionPtyResizeParams);
+            // Resize is an explicit "I want this viewport"
+            // signal — store it for this client kind, mark
+            // active, and apply.
+            manager
+                .note_pty_activity(&p.session_id, kind, Some((p.cols, p.rows)))
+                .await;
             match manager.pty_resize(&p.session_id, p.cols, p.rows).await {
                 Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
                 Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
