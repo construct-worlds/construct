@@ -3041,6 +3041,11 @@ impl App {
             return;
         }
 
+        if self.should_autofocus_view_from_list(key) {
+            self.collapse_orchestrator_panel_on_focus_change();
+            self.focus = PaneFocus::View;
+        }
+
         // When the PTY is capturing keystrokes (View focus + terminal mode +
         // session has a PTY), keys go straight to the child *unless* the user
         // is starting or continuing a `C-x` chord — those drive the keymap.
@@ -3086,6 +3091,15 @@ impl App {
 
     fn in_pty_session(&self) -> bool {
         self.selected_session().map(|s| s.has_pty).unwrap_or(false)
+    }
+
+    fn should_autofocus_view_from_list(&self, key: KeyEvent) -> bool {
+        should_autofocus_view_from_list(
+            self.focus,
+            self.zoom,
+            self.chord_state.is_empty(),
+            key,
+        )
     }
 
     /// True when keystrokes should be forwarded to the session's PTY by
@@ -5240,6 +5254,24 @@ fn encode_key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
     }
 }
 
+fn should_autofocus_view_from_list(
+    focus: PaneFocus,
+    zoom: ZoomMode,
+    chord_is_empty: bool,
+    key: KeyEvent,
+) -> bool {
+    if focus != PaneFocus::List || !matches!(zoom, ZoomMode::None) {
+        return false;
+    }
+    if !chord_is_empty {
+        return false;
+    }
+    if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        return false;
+    }
+    matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphabetic())
+}
+
 /// True when the just-handled input event should trigger the
 /// drag-coalesce drain (which calls `now_or_never` on the input
 /// stream, briefly poisoning crossterm's wake task). Only left-button
@@ -5259,7 +5291,10 @@ fn should_drain_after(ev: &CtEvent) -> bool {
 
 #[cfg(test)]
 mod drain_gate_tests {
-    use super::{should_drain_after, url_range_at_col, url_ranges};
+    use super::{
+        should_autofocus_view_from_list, should_drain_after, url_range_at_col, url_ranges,
+        PaneFocus, ZoomMode,
+    };
     use crossterm::event::{
         Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
         MouseButton, MouseEvent, MouseEventKind,
@@ -5297,6 +5332,93 @@ mod drain_gate_tests {
         assert!(!should_drain_after(&key(KeyCode::Enter)));
         assert!(!should_drain_after(&key(KeyCode::Esc)));
         assert!(!should_drain_after(&key(KeyCode::Backspace)));
+    }
+
+    fn autofocus_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    fn autofocus_key_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    #[test]
+    fn list_focus_plain_letters_autofocus_view_only_when_unzoomed() {
+        assert!(should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key(KeyCode::Char('a')),
+        ));
+        assert!(should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key(KeyCode::Char('Z')),
+        ));
+
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::List,
+            true,
+            autofocus_key(KeyCode::Char('a')),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::View,
+            true,
+            autofocus_key(KeyCode::Char('a')),
+        ));
+    }
+
+    #[test]
+    fn list_focus_autofocus_ignores_shortcuts_chords_and_non_letters() {
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::View,
+            ZoomMode::None,
+            true,
+            autofocus_key(KeyCode::Char('a')),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            false,
+            autofocus_key(KeyCode::Char('a')),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key_with_modifiers(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key_with_modifiers(KeyCode::Char('a'), KeyModifiers::ALT),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key(KeyCode::Char('1')),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key(KeyCode::Enter),
+        ));
     }
 
     #[test]
