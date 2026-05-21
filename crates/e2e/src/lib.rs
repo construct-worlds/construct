@@ -71,6 +71,20 @@ impl Daemon {
         for d in [&runtime_dir, &state_dir, &data_dir, &config_dir] {
             std::fs::create_dir_all(d)?;
         }
+        // Disable the orchestrator session in e2e. Without this,
+        // CI runners (which have the zarvis adapter binary built
+        // and discoverable) auto-spawn a "god" session whose
+        // panel grabs initial keyboard focus — keys then route
+        // to the orchestrator's editor instead of the global
+        // keymap, and chords like `Ctrl-x x` (palette) silently
+        // type into the editor. Local dev environments where
+        // the zarvis adapter isn't on PATH skip this naturally,
+        // which is why the test passed locally but failed on CI.
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[orchestrator]\nenabled = false\n",
+        )
+        .context("write e2e config.toml")?;
         let socket = runtime_dir.join("agentd.sock");
 
         let bin = agentd_bin_path()?;
