@@ -79,9 +79,9 @@ scripts/smoke.sh
 
 When a change benefits from visual review, upload before/after screenshots or
 recordings with [`gh-attach`](https://github.com/atani/gh-attach) and reference
-the returned URLs from the PR description or a PR comment. This produces the
-same `user-attachments/assets/...` URLs GitHub creates when you drag and drop a
-file into the markdown editor.
+the returned URLs from the PR description or a PR comment. Use release mode for
+scriptable uploads: it only needs `gh` CLI authentication and stores the files
+as assets on a temporary GitHub Release.
 
 Install once:
 
@@ -94,10 +94,11 @@ Upload artifacts and keep the URLs for markdown:
 ```sh
 PR=123
 REPO=owner/repo
+TAG="pr-${PR}-review-artifacts"
 
-before_url=$(gh attach --repo "$REPO" --issue "$PR" --image ./artifacts/before.png --url-only)
-after_url=$(gh attach --repo "$REPO" --issue "$PR" --image ./artifacts/after.png --url-only)
-video_url=$(gh attach --repo "$REPO" --issue "$PR" --image ./artifacts/demo.mp4 --url-only)
+before_url=$(gh attach --repo "$REPO" --issue "$PR" --image ./artifacts/before.png --url-only --release --release-tag "$TAG")
+after_url=$(gh attach --repo "$REPO" --issue "$PR" --image ./artifacts/after.png --url-only --release --release-tag "$TAG")
+video_url=$(gh attach --repo "$REPO" --issue "$PR" --image ./artifacts/demo.mp4 --url-only --release --release-tag "$TAG")
 ```
 
 Post them as a PR comment:
@@ -126,10 +127,17 @@ cat /tmp/agentd-pr-artifacts.md >> /tmp/agentd-pr-body.md
 gh pr edit "$PR" --repo "$REPO" --body-file /tmp/agentd-pr-body.md
 ```
 
-For GitHub Enterprise or SAML-backed accounts, keep a persistent browser session
-and add `--session <name> --keep-session --browser` to the `gh attach` commands.
-Keep all files for one upload batch in the same directory so the browser
-automation can read them.
+Release-mode uploads create or reuse the tag in `TAG`. Clean it up after the PR
+is merged only if the rendered links no longer matter:
+
+```sh
+gh release delete "$TAG" --repo "$REPO" --yes
+git push origin --delete "$TAG"
+```
+
+If you need the exact same `https://github.com/user-attachments/assets/...` URL
+shape that GitHub creates on drag/drop, omit `--release` and use a logged-in
+browser session with `gh-attach`'s browser mode instead.
 
 ## Paths
 
