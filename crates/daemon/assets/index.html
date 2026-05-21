@@ -793,6 +793,8 @@
                 id="toolbarRenameBtn" aria-label="rename selected" disabled>✎</button>
         <button type="button" class="row-action" data-action="restart"
                 id="toolbarRestartBtn" aria-label="restart selected" disabled>↻</button>
+        <button type="button" class="row-action" data-action="delete"
+                id="toolbarDeleteBtn" aria-label="delete selected" disabled>×</button>
       </div>
     </div>
     <section class="view">
@@ -1254,10 +1256,12 @@ function refreshListToolbar() {
   const downBtn = $("toolbarDownBtn");
   const renameBtn = $("toolbarRenameBtn");
   const restartBtn = $("toolbarRestartBtn");
+  const deleteBtn = $("toolbarDeleteBtn");
   if (upBtn) upBtn.disabled = !isUserSession;
   if (downBtn) downBtn.disabled = !isUserSession;
-  // Rename a user session only — god's label is daemon-owned.
+  // Rename/delete user sessions only — god's label/lifecycle is daemon-owned.
   if (renameBtn) renameBtn.disabled = !isUserSession;
+  if (deleteBtn) deleteBtn.disabled = !isUserSession;
   if (restartBtn) restartBtn.disabled = !sel || !terminal;
 }
 
@@ -1277,15 +1281,19 @@ async function toggleGroupCollapsed(groupId) {
 }
 
 /** Dispatch a session action by name. Wired up to the shared
- *  list toolbar (acts on `state.currentId`). Future candidates:
- *  delete, kill, pin. Rename hands off to a slide-up sheet
- *  instead of firing the RPC directly because it needs a text
- *  input from the user. */
+ *  list toolbar (acts on `state.currentId`). Rename hands off
+ *  to a slide-up sheet because it needs text input; delete asks
+ *  for browser confirmation before firing the RPC. */
 async function handleRowAction(action, sessionId) {
   if (!sessionId) return;
   if (action === "rename") {
     openRenameDialog(sessionId);
     return;
+  }
+  if (action === "delete") {
+    const s = state.sessions.find((x) => x.id === sessionId);
+    const label = (s && (s.title || s.harness || s.id.slice(0, 8))) || sessionId.slice(0, 8);
+    if (!window.confirm(`Delete session “${label}”? This cannot be undone.`)) return;
   }
   try {
     if (action === "restart") {
@@ -1294,6 +1302,8 @@ async function handleRowAction(action, sessionId) {
       await rpc("session.move", { session_id: sessionId, direction: "up" });
     } else if (action === "move-down") {
       await rpc("session.move", { session_id: sessionId, direction: "down" });
+    } else if (action === "delete") {
+      await rpc("session.delete", { session_id: sessionId });
     }
   } catch (e) {
     appendError(`${action} failed: ${e.message}`);
@@ -1855,6 +1865,7 @@ function handleNotification(method, params) {
       state.currentId = null;
       transcriptEl.innerHTML = "";
       sessionTitleEl.textContent = "";
+      refreshListToolbar();
     }
   } else if (method === "group/state") {
     const { group } = params;
