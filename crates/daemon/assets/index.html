@@ -983,6 +983,7 @@ const state = {
   pending: new Map(),
   reconnectDelay: 1000,
   sessions: [], // [{id, title, harness, state, group_id, position, ...}]
+  harnesses: [],
   groups: [],   // [{id, name, position, collapsed}], TUI-style ordering
   currentId: null,
   // Per-session transcript items (the rows we've rendered). Keyed by
@@ -2253,13 +2254,14 @@ async function openNewSessionDialog() {
   let harnesses = [];
   try {
     harnesses = await rpc("harness.list", null);
+    state.harnesses = Array.isArray(harnesses) ? harnesses : [];
   } catch (e) {
     newSessionErrorEl.textContent = `harness.list failed: ${e.message}`;
     newSessionErrorEl.hidden = false;
     newSessionSheetEl.hidden = false;
     return;
   }
-  const usable = (Array.isArray(harnesses) ? harnesses : []).filter((h) => h.available);
+  const usable = state.harnesses.filter((h) => h.available);
   if (!usable.length) {
     newSessionErrorEl.textContent = "no harnesses available on this daemon";
     newSessionErrorEl.hidden = false;
@@ -2286,6 +2288,16 @@ function closeNewSessionDialog() {
   newSessionCreateBtn.disabled = false;
 }
 
+function currentTerminalSize() {
+  if (state.term && state.fitAddon) {
+    try { state.fitAddon.fit(); } catch (_) {}
+    if (state.term.cols && state.term.rows) {
+      return { cols: state.term.cols, rows: state.term.rows };
+    }
+  }
+  return { cols: 100, rows: 30 };
+}
+
 async function submitNewSession(ev) {
   ev.preventDefault();
   const harness = newSessionHarnessEl.value;
@@ -2305,6 +2317,11 @@ async function submitNewSession(ev) {
   newSessionErrorEl.hidden = true;
   const params = { harness, cwd };
   if (prompt) params.prompt = prompt;
+  const info = state.harnesses.find((h) => h.name === harness);
+  if (info && info.capabilities && info.capabilities.supports_pty) {
+    params.mode = "interactive";
+    params.pty_size = currentTerminalSize();
+  }
   try {
     const res = await rpc("session.create", params);
     closeNewSessionDialog();
