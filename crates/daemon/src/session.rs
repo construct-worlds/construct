@@ -724,7 +724,7 @@ impl SessionManager {
                     available: resolved.is_some(),
                     binary: resolved.as_ref().map(|p| p.to_string_lossy().to_string()),
                     description: cfg.description.clone(),
-                    capabilities: Default::default(),
+                    capabilities: builtin_harness_capabilities(name),
                 }
             })
             .collect()
@@ -2715,6 +2715,16 @@ async fn generate_auto_title(
         session: snapshot,
     }));
     tracing::info!(session = %entry.id, %title, "auto-title applied");
+}
+
+fn builtin_harness_capabilities(name: &str) -> agentd_protocol::Capabilities {
+    match name {
+        "shell" | "claude" | "codex" | "zarvis" => agentd_protocol::Capabilities {
+            supports_pty: true,
+            ..Default::default()
+        },
+        _ => Default::default(),
+    }
 }
 
 /// Decide whether to schedule the bump+restore SIGWINCH cycle after a
