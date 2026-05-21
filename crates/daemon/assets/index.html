@@ -53,6 +53,8 @@
   html, body {
     margin: 0; padding: 0;
     height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
     background: var(--bg);
     color: var(--fg);
     font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
@@ -456,6 +458,9 @@
     min-height: 0;
     background: #000;
     position: relative;
+    overflow: hidden;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
     padding: 6px 0 0 6px;
     /* iOS safe-area inset on the right edge for landscape with notch. */
     padding-right: env(safe-area-inset-right);
@@ -463,6 +468,9 @@
   .terminal-host {
     width: 100%;
     height: 100%;
+    overflow: hidden;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
   }
   .terminal-host:focus,
   .terminal-host .xterm:focus { outline: none; }
@@ -470,6 +478,13 @@
   .terminal-host .xterm,
   .terminal-host .xterm .xterm-viewport,
   .terminal-host .xterm .xterm-screen { height: 100%; }
+  .terminal-host .xterm,
+  .terminal-host .xterm .xterm-viewport,
+  .terminal-host .xterm .xterm-screen,
+  .terminal-host .xterm .xterm-helpers {
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+  }
   .terminal-loading {
     position: absolute;
     inset: 0;
@@ -1488,6 +1503,20 @@ function waitForXterm(timeoutMs) {
   });
 }
 
+function installTerminalScrollContainment() {
+  // Mobile browsers — especially iOS Safari while the native keyboard is
+  // open — sometimes chain a touch scroll that starts on xterm's viewport
+  // up to the page visual viewport. The page is a fixed app shell, so that
+  // rubber-bands the header/list/composer/vkbd instead of only scrolling the
+  // terminal buffer. CSS `overscroll-behavior` is not reliable for this case
+  // on iOS, so stop touch/wheel propagation at the terminal surface. xterm's
+  // own listeners still receive the event and update terminal scrollback.
+  const stop = (ev) => ev.stopPropagation();
+  terminalEl.addEventListener("touchstart", stop, { passive: true });
+  terminalEl.addEventListener("touchmove", stop, { passive: true });
+  terminalEl.addEventListener("wheel", stop, { passive: true });
+}
+
 function initTerminal() {
   state.term = new window.Terminal({
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
@@ -1505,6 +1534,7 @@ function initTerminal() {
   state.fitAddon = new window.FitAddon.FitAddon();
   state.term.loadAddon(state.fitAddon);
   state.term.open(terminalEl);
+  installTerminalScrollContainment();
 
   // Forward user keystrokes (and pasted text) as base64-encoded
   // PTY input. xterm's onData yields a JS string of UTF-8
@@ -2556,11 +2586,17 @@ function syncBodyHeightToVisualViewport() {
   // Direct style override of the CSS `height: 100%` rule. The
   // existing rule re-applies as soon as we clear this when the
   // keyboard hides (visualViewport.height === innerHeight).
+  document.documentElement.style.height = `${h}px`;
   document.body.style.height = `${h}px`;
+  // Some mobile browsers keep a non-zero page scroll offset after the
+  // keyboard shifts the visual viewport. Resetting it keeps the app shell
+  // anchored; terminal scrollback remains inside xterm's own viewport.
+  if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
 }
 
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", syncBodyHeightToVisualViewport);
+  window.visualViewport.addEventListener("scroll", syncBodyHeightToVisualViewport);
   // Run once at boot to handle the case where the page is loaded
   // with an already-open keyboard (rare but possible after
   // page-refresh while focused).
