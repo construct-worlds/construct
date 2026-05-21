@@ -145,6 +145,48 @@ async fn web_client_loads_and_websocket_connects() {
         "bundled xterm.js never loaded (window.Terminal !== 'function')"
     );
 
+    // Regression coverage for mobile terminal scroll containment:
+    // when the native keyboard shrinks the visual viewport, scroll
+    // gestures starting on xterm must stay inside the terminal rather
+    // than chaining to the app shell and moving the header/list/vkbd.
+    let scroll_containment: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const html = getComputedStyle(document.documentElement);
+              const body = getComputedStyle(document.body);
+              const wrap = getComputedStyle(document.getElementById('terminalWrap'));
+              const host = getComputedStyle(document.getElementById('terminal'));
+              return {
+                htmlOverflow: html.overflow,
+                htmlOverscroll: html.overscrollBehavior,
+                bodyOverflow: body.overflow,
+                bodyOverscroll: body.overscrollBehavior,
+                wrapOverflow: wrap.overflow,
+                wrapOverscroll: wrap.overscrollBehavior,
+                wrapTouchAction: wrap.touchAction,
+                hostOverflow: host.overflow,
+                hostOverscroll: host.overscrollBehavior,
+                hostTouchAction: host.touchAction,
+              };
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate scroll containment")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(scroll_containment["htmlOverflow"], "hidden");
+    assert_eq!(scroll_containment["htmlOverscroll"], "none");
+    assert_eq!(scroll_containment["bodyOverflow"], "hidden");
+    assert_eq!(scroll_containment["bodyOverscroll"], "none");
+    assert_eq!(scroll_containment["wrapOverflow"], "hidden");
+    assert_eq!(scroll_containment["wrapOverscroll"], "contain");
+    assert_eq!(scroll_containment["wrapTouchAction"], "pan-y");
+    assert_eq!(scroll_containment["hostOverflow"], "hidden");
+    assert_eq!(scroll_containment["hostOverscroll"], "contain");
+    assert_eq!(scroll_containment["hostTouchAction"], "pan-y");
+
     // The remote client mirrors zarvis EditorState events in a
     // terminal-mode strip so PTY-backed zarvis input is visible even
     // though zarvis deliberately does not echo its live editor into
