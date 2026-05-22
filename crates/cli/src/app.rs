@@ -1347,10 +1347,31 @@ impl App {
 
     fn update_browser_preview_hover_and_expiry(&mut self) {
         let now = Instant::now();
-        self.browser_previews.retain(|_, state| {
-            if state.hover_started.is_some() {
+        let selected_sid = self.selected_id();
+        let mouse_pos = self.mouse_pos;
+        let preview_area = self.layout.browser_preview_area;
+
+        self.browser_previews.retain(|sid, state| {
+            // Check if this preview is currently being hovered.
+            // A preview can only be hovered if it belongs to the selected session,
+            // the preview area is currently rendered, and the mouse is inside that area.
+            let is_hovered = if Some(sid.as_str()) == selected_sid.as_deref() {
+                if let (Some(area), Some((mx, my))) = (preview_area, mouse_pos) {
+                    mx >= area.x && mx < area.x + area.width && my >= area.y && my < area.y + area.height
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if is_hovered {
+                state.hover_started.get_or_insert(now);
                 true
             } else {
+                if state.hover_started.take().is_some() {
+                    state.hide_after = now + Duration::from_secs(5);
+                }
                 now < state.hide_after
             }
         });

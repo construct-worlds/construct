@@ -60,6 +60,8 @@ fn clear_pane_side_borders(f: &mut Frame, area: Rect, app: &App) {
 }
 
 pub fn render(f: &mut Frame, app: &mut App) {
+    app.layout.browser_preview_area = None;
+    app.layout.browser_preview_close = None;
     let area = f.area();
     match app.zoom {
         ZoomMode::View => {
@@ -196,6 +198,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_diamond_tooltip(f, app);
     render_pin_diamond_tooltip(f, app, &pinned_ids);
     render_view_close_tooltip(f, app);
+    render_browser_preview_close_tooltip(f, app);
     render_list_title_button_tooltips(f, app);
     render_view_uncollapse_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
@@ -718,6 +721,18 @@ fn render_view_close_tooltip(f: &mut Frame, app: &App) {
         .style(Style::default().fg(app.theme.text));
     f.render_widget(Clear, rect);
     f.render_widget(p, rect);
+}
+
+fn render_browser_preview_close_tooltip(f: &mut Frame, app: &App) {
+    let Some((x_start, x_end, y)) = app.layout.browser_preview_close else {
+        return;
+    };
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    if my == y && mx >= x_start && mx < x_end {
+        render_button_tooltip(f, &app.theme, " Close preview ", x_start, y);
+    }
 }
 
 /// Tooltip that appears when the cursor is hovering an
@@ -2179,31 +2194,6 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
         render_browser_preview_overlay(f, chat_area, &app.theme, app.mouse_pos, preview.as_ref());
     app.layout.browser_preview_area = preview_area;
     app.layout.browser_preview_close = preview_close;
-
-    // Update hover state immediately during rendering to feel extremely premium and lag-free,
-    // mirroring how other tooltips do mouse-coordinate checks in real-time.
-    if let Some(area) = preview_area {
-        let now = Instant::now();
-        if let Some((mx, my)) = app.mouse_pos {
-            if mx >= area.x && mx < area.x + area.width && my >= area.y && my < area.y + area.height {
-                if let Some(state) = app.browser_previews.get_mut(&id) {
-                    state.hover_started.get_or_insert(now);
-                }
-            } else {
-                if let Some(state) = app.browser_previews.get_mut(&id) {
-                    if state.hover_started.take().is_some() {
-                        state.hide_after = now + Duration::from_secs(5);
-                    }
-                }
-            }
-        } else {
-            if let Some(state) = app.browser_previews.get_mut(&id) {
-                if state.hover_started.take().is_some() {
-                    state.hide_after = now + Duration::from_secs(5);
-                }
-            }
-        }
-    }
 
     app.block_hits.insert(
         id,
