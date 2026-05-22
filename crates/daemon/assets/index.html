@@ -70,31 +70,35 @@
     padding-bottom: env(safe-area-inset-bottom);
   }
   header {
+    --header-h: 42px;
     flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 14px;
+    min-height: var(--header-h);
+    padding: 0 0 0 14px;
     background: var(--bg-elev);
     border-bottom: 1px solid var(--border);
   }
-  header .title { font-weight: 600; font-size: 15px; }
+  .mini-matrix {
+    flex: 0 0 auto;
+    align-self: stretch;
+    width: 96px;
+    height: auto;
+    min-height: var(--header-h);
+    display: block;
+    border-radius: 4px;
+    background: #050806;
+  }
+  @media (max-width: 720px) {
+    .mini-matrix { width: 84px; }
+  }
   header .meta { color: var(--fg-dim); font-size: 12px; }
   .conn {
     margin-left: auto;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--fg-dim);
   }
-  .conn .dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--fg-faint);
-  }
-  .conn[data-state="open"] .dot { background: var(--ok); }
-  .conn[data-state="connecting"] .dot { background: var(--warn); }
-  .conn[data-state="closed"] .dot { background: var(--err); }
 
   main {
     flex: 1 1 0;
@@ -870,10 +874,10 @@
 <body>
   <header>
     <button class="toggle-list" id="toggleList" type="button">≡</button>
-    <div class="title">agentd</div>
     <div class="meta" id="sessionTitle"></div>
-    <div class="conn" id="conn" data-state="connecting">
-      <span class="dot"></span><span class="label">connecting…</span>
+    <div class="conn" id="conn" data-state="connecting" aria-label="connecting">
+      <canvas class="mini-matrix" id="miniMatrix" width="192" height="84"
+              aria-label="agentd connecting" role="img"></canvas>
     </div>
   </header>
   <main>
@@ -1087,6 +1091,7 @@ const transcriptEl = $("transcript");
 const sessionListEl = $("sessionList");
 const sessionTitleEl = $("sessionTitle");
 const connEl = $("conn");
+const miniMatrixEl = $("miniMatrix");
 const composerEl = $("composer");
 const inputEl = $("input");
 const insertBtn = $("insertBtn");
@@ -1155,9 +1160,204 @@ const state = {
   approvalShown: null,
 };
 
+function initMiniMatrix() {
+  const canvas = miniMatrixEl;
+  const ctx = canvas && canvas.getContext ? canvas.getContext("2d") : null;
+  if (!canvas || !ctx) return;
+
+  const glyphs = "01:|/\\{}[]<>+$#@*=-zrvshcodxgit";
+  const revealText = "agentd";
+  const tickMs = 120;
+  let grid = null;
+  let lastTick = 0;
+  let frame = 0;
+  let running = true;
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+    const w = Math.max(1, Math.round(rect.width * dpr));
+    const h = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      const cellW = Math.max(2.6 * dpr, Math.floor(w / 28));
+      const cellH = Math.max(3.2 * dpr, Math.floor(h / 8));
+      const cols = Math.max(revealText.length + 2, Math.floor(w / cellW));
+      const rows = Math.max(2, Math.floor(h / cellH));
+      grid = {
+        dpr,
+        cols,
+        rows,
+        cellW: w / cols,
+        cellH: h / rows,
+        drops: Array.from({ length: cols }, (_, col) => ({
+          head: -((col * 3) % (rows + 4)),
+          speed: 1 + (col % 3),
+          tail: 1 + (col % 2),
+          glyph: glyphs[(col * 7) % glyphs.length],
+        })),
+        revealStart: Math.max(0, Math.floor((cols - revealText.length) / 2)),
+        revealRow: Math.min(rows - 1, Math.max(0, Math.floor(rows / 2))),
+        pinned: Array.from({ length: revealText.length }, () => 0),
+      };
+    }
+    const fontPx = Math.max(4 * dpr, Math.floor((grid ? grid.cellH : 4 * dpr) * 0.96));
+    ctx.font = `700 ${fontPx}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.imageSmoothingEnabled = false;
+  }
+
+  function drawGlyph(ch, col, row, color, glow = false) {
+    const x = (col + 0.5) * grid.cellW;
+    const y = (row + 0.54) * grid.cellH;
+    if (glow) {
+      ctx.shadowBlur = 7 * grid.dpr;
+      ctx.shadowColor = color;
+    } else {
+      ctx.shadowBlur = 0;
+    }
+    ctx.fillStyle = color;
+    ctx.fillText(ch, x, y);
+  }
+
+  function stateText() {
+    switch (connEl.dataset.state) {
+      case "open": return revealText;
+      case "connecting": return "connecting";
+      default: return "disconnected";
+    }
+  }
+
+  function stateColor(alpha = "0.82") {
+    switch (connEl.dataset.state) {
+      case "open": return `rgba(92, 209, 166, ${alpha})`;
+      case "connecting": return `rgba(244, 184, 96, ${alpha})`;
+      default: return `rgba(244, 124, 124, ${alpha})`;
+    }
+  }
+
+  function drawStaticStatus(alpha = "0.82") {
+    resize();
+    if (!grid) return;
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "rgba(3, 8, 5, 0.94)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const text = stateText();
+    const chars = Array.from(text).slice(0, grid.cols);
+    const start = Math.max(0, Math.floor((grid.cols - chars.length) / 2));
+    const color = stateColor(alpha);
+    for (let i = 0; i < chars.length; i += 1) {
+      drawGlyph(chars[i], start + i, grid.revealRow, color);
+    }
+  }
+
+  function tick(ts) {
+    if (!running) return;
+    resize();
+    if (!grid) {
+      requestAnimationFrame(tick);
+      return;
+    }
+    if (connEl.dataset.state !== "open") {
+      drawStaticStatus();
+      requestAnimationFrame(tick);
+      return;
+    }
+    if (ts - lastTick < tickMs) {
+      requestAnimationFrame(tick);
+      return;
+    }
+    lastTick = ts;
+    frame += 1;
+
+    const w = canvas.width;
+    const h = canvas.height;
+
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "rgba(3, 8, 5, 0.86)";
+    ctx.fillRect(0, 0, w, h);
+
+    const open = connEl.dataset.state === "open";
+    const head = open ? "rgba(218, 255, 229, 0.98)" : "rgba(255, 202, 116, 0.96)";
+    const tail = open ? "rgba(48, 188, 116, 0.62)" : "rgba(224, 145, 64, 0.58)";
+    const dim = open ? "rgba(24, 96, 58, 0.42)" : "rgba(106, 74, 36, 0.48)";
+    const word = open ? "rgba(232, 255, 238, 0.98)" : "rgba(255, 226, 166, 0.98)";
+
+    for (let col = 0; col < grid.cols; col += 1) {
+      if ((col + frame) % 5 === 0) {
+        const y = Math.abs(col * 3 - frame) % grid.rows;
+        const ch = glyphs[(col * 11 + frame) % glyphs.length];
+        drawGlyph(ch, col, y, dim);
+      }
+    }
+
+    for (let col = 0; col < grid.cols; col += 1) {
+      const drop = grid.drops[col];
+      if (frame % drop.speed === 0) {
+        drop.head += 1;
+        if (drop.head > grid.rows + drop.tail + 1) {
+          drop.head = -((col * 5 + frame) % (grid.rows + 4));
+          drop.speed = 1 + ((col + frame) % 3);
+          drop.tail = 1 + ((col + frame) % 2);
+        }
+      }
+      if (frame % 2 === 0) {
+        drop.glyph = glyphs[(col * 17 + frame) % glyphs.length];
+      }
+
+      for (let row = 0; row < grid.rows; row += 1) {
+        const delta = drop.head - row;
+        if (delta === 0) {
+          drawGlyph(drop.glyph, col, row, head, true);
+        } else if (delta > 0 && delta <= drop.tail) {
+          const ch = glyphs[(col * 13 + row * 5 + frame) % glyphs.length];
+          drawGlyph(ch, col, row, tail);
+        }
+      }
+    }
+
+    // TUI-like horizontal reveal: letters pin when a rain head passes
+    // the target row, then decay back into the terminal noise.
+    for (let i = 0; i < revealText.length; i += 1) {
+      const col = grid.revealStart + i;
+      const drop = grid.drops[col];
+      if (drop && drop.head >= grid.revealRow && drop.head <= grid.revealRow + drop.tail) {
+        grid.pinned[i] = 7;
+      }
+      if (grid.pinned[i] > 0) {
+        const hot = drop && drop.head === grid.revealRow;
+        drawGlyph(revealText[i], col, grid.revealRow, hot ? head : word, hot);
+        grid.pinned[i] -= 1;
+      }
+    }
+
+    requestAnimationFrame(tick);
+  }
+
+  const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)");
+  function syncMotion() {
+    running = !(reduced && reduced.matches);
+    if (!running) {
+      drawStaticStatus();
+      return;
+    }
+    lastTick = 0;
+    drawStaticStatus("0.58");
+    requestAnimationFrame(tick);
+  }
+  if (reduced && reduced.addEventListener) {
+    reduced.addEventListener("change", syncMotion);
+  }
+  window.addEventListener("resize", resize);
+  syncMotion();
+}
+
 function setConnState(s, label) {
   connEl.dataset.state = s;
-  connEl.querySelector(".label").textContent = label;
+  connEl.setAttribute("aria-label", label);
+  if (miniMatrixEl) miniMatrixEl.setAttribute("aria-label", `agentd ${label}`);
   setComposerEnabled(s === "open" && !!state.currentId);
 }
 
@@ -3005,6 +3205,7 @@ if (window.visualViewport) {
 
 // --- Boot ---------------------------------------------------------------
 
+initMiniMatrix();
 connect();
 </script>
 </body>
