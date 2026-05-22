@@ -9,9 +9,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod browser;
+
 /// Static tool catalog returned by `tools/list`.
 pub fn catalog() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         // ----- Read -----
         tool(
             "agentd_whoami",
@@ -167,7 +169,9 @@ pub fn catalog() -> Vec<Value> {
                 "required": ["session_id", "direction"]
             }),
         ),
-    ]
+    ];
+    tools.extend(browser::catalog());
+    tools
 }
 
 fn tool(name: &str, description: &str, schema: Value) -> Value {
@@ -207,6 +211,18 @@ pub async fn call(
         .ok_or_else(|| anyhow!("missing tool name"))?
         .to_string();
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    if matches!(
+        name.as_str(),
+        "browser_open" | "browser_inspect" | "browser_screenshot" | "browser_eval"
+    ) {
+        let result_json = browser::call(client.clone(), name.as_str(), args).await?;
+        let text = serde_json::to_string_pretty(&result_json)?;
+        return Ok(json!({
+            "content": [{ "type": "text", "text": text }],
+            "isError": false,
+        }));
+    }
 
     let result_json: Value = match name.as_str() {
         // ----- Read -----
