@@ -1248,7 +1248,9 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
         .and_then(|id| app.browser_previews.get(&id))
         .and_then(|state| state.decoded.clone());
     if let Some(img) = &wallpaper {
-        blit_image_half_blocks(f, rain_area, img, true, MATRIX_WALLPAPER_DIM);
+        let (ow, oh) = blit_scale_dims(img.dimensions(), rain_area, true);
+        let resized = resized_image(&mut app.image_resize_cache, img, ow, oh);
+        paint_resized_half_blocks(f, rain_area, &resized, MATRIX_WALLPAPER_DIM);
     }
 
     let now = Instant::now();
@@ -2259,8 +2261,14 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
         editor_area.is_none(),
         row_offset,
     );
-    let (preview_area, preview_close) =
-        render_browser_preview_overlay(f, chat_area, &app.theme, app.mouse_pos, preview.as_ref());
+    let (preview_area, preview_close) = render_browser_preview_overlay(
+        f,
+        chat_area,
+        &app.theme,
+        app.mouse_pos,
+        preview.as_ref(),
+        &mut app.image_resize_cache,
+    );
     app.layout.browser_preview_area = preview_area;
     app.layout.browser_preview_close = preview_close;
     app.block_hits.insert(
@@ -2297,6 +2305,7 @@ fn render_browser_preview_overlay(
     theme: &Theme,
     mouse_pos: Option<(u16, u16)>,
     preview: Option<&crate::app::BrowserPreviewState>,
+    resize_cache: &mut crate::app::ImageResizeCache,
 ) -> (Option<Rect>, Option<(u16, u16, u16)>) {
     let Some(preview_state) = preview else {
         return (None, None);
@@ -2351,7 +2360,9 @@ fn render_browser_preview_overlay(
         height: inner.height.saturating_sub(caption_rows),
     };
     if let Some(img) = preview_state.decoded.as_ref() {
-        blit_image_half_blocks(f, image_area, img, false, 1.0);
+        let (ow, oh) = blit_scale_dims(img.dimensions(), image_area, false);
+        let resized = resized_image(resize_cache, img, ow, oh);
+        paint_resized_half_blocks(f, image_area, &resized, 1.0);
     }
     if inner.height > 0 {
         let caption = preview
@@ -2388,24 +2399,67 @@ fn render_browser_preview_overlay(
 ///
 /// `dim` in `0.0..=1.0` multiplies brightness (1.0 = untouched); the
 /// wallpaper dims so the rain stays legible on top.
-fn blit_image_half_blocks(f: &mut Frame, area: Rect, img: &image::RgbaImage, cover: bool, dim: f32) {
+/// Output pixel dims to resize an image to before half-block blitting
+/// into `area`. `cover` true scales to fill (image ≥ area, crop); false
+/// fits inside (image ≤ area, letterbox). Half-block packs 2 px per row.
+fn blit_scale_dims((w, h): (u32, u32), area: Rect, cover: bool) -> (u32, u32) {
+    let target_w = area.width as u32;
+    let target_h_px = area.height as u32 * 2;
+    let sx = target_w as f32 / w.max(1) as f32;
+    let sy = target_h_px as f32 / h.max(1) as f32;
+    let scale = if cover { sx.max(sy) } else { sx.min(sy) };
+    (
+        ((w as f32 * scale).round() as u32).max(1),
+        ((h as f32 * scale).round() as u32).max(1),
+    )
+}
+
+/// Resize `src` to `out_w × out_h`, memoized in `cache` keyed by the
+/// source `Arc` identity + output dims. The matrix-rain wallpaper
+/// re-blits the same image every animation frame; without this we'd
+/// re-run a (very expensive) downscale each frame and the animation
+/// stutters. Cache is a tiny MRU — at most a handful of live previews ×
+/// render targets (overlay + wallpaper).
+fn resized_image(
+    cache: &mut crate::app::ImageResizeCache,
+    src: &std::sync::Arc<image::RgbaImage>,
+    out_w: u32,
+    out_h: u32,
+) -> std::sync::Arc<image::RgbaImage> {
+    let key = (std::sync::Arc::as_ptr(src) as usize, out_w, out_h);
+    if let Some(pos) = cache.iter().position(|e| e.0 == key) {
+        let entry = cache.remove(pos);
+        let img = entry.1.clone();
+        cache.push((key, img.clone()));
+        return img;
+    }
+    let resized = std::sync::Arc::new(image::imageops::resize(
+        src.as_ref(),
+        out_w,
+        out_h,
+        image::imageops::FilterType::Triangle,
+    ));
+    cache.push((key, resized.clone()));
+    while cache.len() > 4 {
+        cache.remove(0);
+    }
+    resized
+}
+
+/// Paint an already-resized RGBA image into `area` as half-block (`▀`)
+/// cells — fg = top pixel, bg = bottom pixel. Center-crops `resized`
+/// into the area (so cover images crop, contain images letterbox). `dim`
+/// in `0.0..=1.0` multiplies brightness.
+fn paint_resized_half_blocks(f: &mut Frame, area: Rect, resized: &image::RgbaImage, dim: f32) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let (w, h) = img.dimensions();
-    if w == 0 || h == 0 {
+    let (out_w, out_h) = resized.dimensions();
+    if out_w == 0 || out_h == 0 {
         return;
     }
     let target_w = area.width as u32;
     let target_h_px = area.height as u32 * 2;
-    let sx = target_w as f32 / w as f32;
-    let sy = target_h_px as f32 / h as f32;
-    let scale = if cover { sx.max(sy) } else { sx.min(sy) };
-    let out_w = ((w as f32 * scale).round() as u32).max(1);
-    let out_h = ((h as f32 * scale).round() as u32).max(1);
-    let resized = image::imageops::resize(img, out_w, out_h, image::imageops::FilterType::Triangle);
-    // Crop to the target (cover: image >= target; contain: image <=
-    // target, so this is a no-op and we just center it).
     let crop_w = out_w.min(target_w);
     let crop_h = out_h.min(target_h_px);
     let src_off_x = (out_w - crop_w) / 2;
@@ -2441,6 +2495,17 @@ fn blit_image_half_blocks(f: &mut Frame, area: Rect, img: &image::RgbaImage, cov
             }
         }
     }
+}
+
+/// Test-only convenience: resize + paint in one shot (no cache).
+#[cfg(test)]
+fn blit_image_half_blocks(f: &mut Frame, area: Rect, img: &image::RgbaImage, cover: bool, dim: f32) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (ow, oh) = blit_scale_dims(img.dimensions(), area, cover);
+    let resized = image::imageops::resize(img, ow, oh, image::imageops::FilterType::Triangle);
+    paint_resized_half_blocks(f, area, &resized, dim);
 }
 
 /// Paint the fixed bottom input pane:
@@ -4216,6 +4281,31 @@ mod tests {
             filled > 0 && filled < 16,
             "contain should letterbox (partial fill), got {filled}/16"
         );
+    }
+
+    #[test]
+    fn resized_image_memoizes_per_source_and_size() {
+        let mut cache: crate::app::ImageResizeCache = Vec::new();
+        let src = std::sync::Arc::new(image::RgbaImage::from_pixel(100, 100, image::Rgba([1, 2, 3, 255])));
+        let a = resized_image(&mut cache, &src, 20, 10);
+        let b = resized_image(&mut cache, &src, 20, 10);
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "same source + size must hit the cache (no re-resize)"
+        );
+        assert_eq!(cache.len(), 1);
+        // Different output size → distinct entry.
+        let _c = resized_image(&mut cache, &src, 30, 10);
+        assert_eq!(cache.len(), 2);
+        // Different source image → distinct entry.
+        let src2 = std::sync::Arc::new(image::RgbaImage::from_pixel(100, 100, image::Rgba([9, 9, 9, 255])));
+        let _d = resized_image(&mut cache, &src2, 20, 10);
+        assert_eq!(cache.len(), 3);
+        // MRU stays bounded.
+        for w in 40..60 {
+            let _ = resized_image(&mut cache, &src, w, 10);
+        }
+        assert!(cache.len() <= 4, "cache must stay bounded, got {}", cache.len());
     }
 
     #[test]

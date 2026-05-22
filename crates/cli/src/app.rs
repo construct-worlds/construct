@@ -380,6 +380,10 @@ pub struct App {
     /// Latest browser preview per session, fed by `SessionEvent::BrowserPreview`
     /// and rendered as a top-right overlay in the terminal view.
     pub browser_previews: HashMap<String, BrowserPreviewState>,
+    /// MRU cache of resized preview images shared by the terminal-view
+    /// overlay and the matrix-rain wallpaper — avoids re-downscaling the
+    /// screenshot every frame. See [`ImageResizeCache`].
+    pub image_resize_cache: ImageResizeCache,
     /// Short visual transition when the main view switches to a different
     /// session.
     pub session_transition: Option<SessionTransition>,
@@ -473,15 +477,38 @@ pub struct EditorState {
     pub completions: Vec<String>,
 }
 
-/// Decode a base64-PNG browser-preview image to a shared RGBA buffer.
-/// `None` if the base64 or the image fails to decode. Done once on
-/// insert so per-frame rendering (overlay + matrix wallpaper) is just a
-/// resize/blit.
+/// MRU cache of resized preview images, keyed by `(source Arc ptr,
+/// out_w, out_h)`. Lets the overlay and the matrix-rain wallpaper blit
+/// the same image every frame without re-running the (very expensive)
+/// downscale. Kept tiny (a few entries) — see `ui::resized_image`.
+pub type ImageResizeCache = Vec<((usize, u32, u32), std::sync::Arc<image::RgbaImage>)>;
+
+/// Largest dimension (px) we keep a decoded preview at. Browser
+/// screenshots arrive at full page size (often >1280px); the overlay and
+/// wallpaper render into tiny cell grids, so a one-time downscale to this
+/// cap makes every subsequent resize cheap with no visible quality loss.
+const PREVIEW_MAX_DIM: u32 = 400;
+
+/// Decode a base64-PNG browser-preview image to a shared RGBA buffer,
+/// downscaled once to `PREVIEW_MAX_DIM`. `None` if the base64 or the
+/// image fails to decode. Done once on insert so per-frame rendering
+/// (overlay + matrix wallpaper) only does a small resize/blit.
 pub fn decode_browser_preview_image(b64: &str) -> Option<std::sync::Arc<image::RgbaImage>> {
     use base64::Engine;
     let png = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-    let img = image::load_from_memory(&png).ok()?;
-    Some(std::sync::Arc::new(img.to_rgba8()))
+    let img = image::load_from_memory(&png).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let img = if w.max(h) > PREVIEW_MAX_DIM {
+        let scale = PREVIEW_MAX_DIM as f32 / w.max(h) as f32;
+        let nw = ((w as f32 * scale).round() as u32).max(1);
+        let nh = ((h as f32 * scale).round() as u32).max(1);
+        // `thumbnail` is an averaging downscaler — faster than the
+        // general resampler and fine for this one-time shrink.
+        image::imageops::thumbnail(&img, nw, nh)
+    } else {
+        img
+    };
+    Some(std::sync::Arc::new(img))
 }
 
 #[derive(Debug, Clone)]
@@ -997,6 +1024,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         editor_states: HashMap::new(),
         agent_statuses: HashMap::new(),
         browser_previews: HashMap::new(),
+        image_resize_cache: Vec::new(),
         session_transition: None,
         pin_transitions: HashMap::new(),
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
@@ -4997,6 +5025,7 @@ mod tests {
             editor_states: HashMap::new(),
             agent_statuses: HashMap::new(),
             browser_previews: HashMap::new(),
+            image_resize_cache: Vec::new(),
             session_transition: None,
             pin_transitions: HashMap::new(),
             matrix_rain: crate::matrix_rain::MatrixRain::default(),
