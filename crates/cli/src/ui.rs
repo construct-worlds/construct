@@ -19,8 +19,9 @@ use unicode_width::UnicodeWidthStr;
 const MATRIX_RAIN_RAMP_UP_SECS: f32 = 5.0;
 const MATRIX_RAIN_DECAY_SECS: f32 = 20.0;
 /// Brightness multiplier for the browser-preview wallpaper behind the
-/// matrix rain — dimmed so the green rain stays the foreground.
-const MATRIX_WALLPAPER_DIM: f32 = 0.42;
+/// matrix rain — kept very dim so the green rain clearly stays the
+/// foreground and the image reads as a faint backdrop.
+const MATRIX_WALLPAPER_DIM: f32 = 0.22;
 const MATRIX_RAIN_TAIL_MIN: u16 = 5;
 const MATRIX_RAIN_TAIL_MAX: u16 = 9;
 
