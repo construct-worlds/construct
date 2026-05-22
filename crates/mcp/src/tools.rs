@@ -200,11 +200,7 @@ fn schema_obj(fields: &[(&str, &str, bool)]) -> Value {
 
 /// Dispatch a `tools/call` to the right method. Returns the full
 /// `tools/call` response payload (a `{content: [...], isError?}` object).
-pub async fn call(
-    client: &Arc<Client>,
-    session_id: Option<&str>,
-    params: Value,
-) -> Result<Value> {
+pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value) -> Result<Value> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -216,7 +212,7 @@ pub async fn call(
         name.as_str(),
         "browser_open" | "browser_inspect" | "browser_screenshot" | "browser_eval"
     ) {
-        let result_json = browser::call(client.clone(), name.as_str(), args).await?;
+        let result_json = browser::call(client.clone(), session_id, name.as_str(), args).await?;
         let text = serde_json::to_string_pretty(&result_json)?;
         return Ok(json!({
             "content": [{ "type": "text", "text": text }],
@@ -241,9 +237,7 @@ pub async fn call(
                 .iter()
                 .map(|s| {
                     let mut v = serde_json::to_value(s).unwrap_or_else(|_| json!({}));
-                    if let (Some(gid), Value::Object(map)) =
-                        (s.group_id.as_deref(), &mut v)
-                    {
+                    if let (Some(gid), Value::Object(map)) = (s.group_id.as_deref(), &mut v) {
                         if let Some(name) = group_name_by_id.get(gid) {
                             map.insert("group_name".into(), json!(name));
                         }
@@ -297,8 +291,14 @@ pub async fn call(
                 model: None,
                 title: arg_str(&args, "title").ok(),
                 mode: arg_str(&args, "mode").ok(),
-                pty_size: Some(PtySize { cols: 100, rows: 30 }),
-                worktree: args.get("worktree").and_then(|v| v.as_bool()).unwrap_or(false),
+                pty_size: Some(PtySize {
+                    cols: 100,
+                    rows: 30,
+                }),
+                worktree: args
+                    .get("worktree")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 env: Default::default(),
                 args: Vec::new(),
                 kind: agentd_protocol::SessionKind::User,
@@ -347,7 +347,9 @@ pub async fn call(
         }
         "agentd_rename_session" => {
             let sid = arg_str(&args, "session_id")?;
-            let title = arg_str(&args, "title").ok().filter(|s| !s.trim().is_empty());
+            let title = arg_str(&args, "title")
+                .ok()
+                .filter(|s| !s.trim().is_empty());
             client.set_title(&sid, title).await?;
             json!({ "ok": true })
         }
@@ -365,7 +367,11 @@ pub async fn call(
             {
                 "top" => agentd_protocol::SessionGroupPosition::Top,
                 "bottom" => agentd_protocol::SessionGroupPosition::Bottom,
-                other => return Err(anyhow!("`position` must be \"top\" or \"bottom\", got {other:?}")),
+                other => {
+                    return Err(anyhow!(
+                        "`position` must be \"top\" or \"bottom\", got {other:?}"
+                    ))
+                }
             };
             client.set_session_group(&sid, group_id, position).await?;
             json!({ "ok": true })
@@ -375,7 +381,11 @@ pub async fn call(
             let direction = match arg_str(&args, "direction")?.as_str() {
                 "up" => agentd_protocol::MoveDirection::Up,
                 "down" => agentd_protocol::MoveDirection::Down,
-                other => return Err(anyhow!("`direction` must be \"up\" or \"down\", got {other:?}")),
+                other => {
+                    return Err(anyhow!(
+                        "`direction` must be \"up\" or \"down\", got {other:?}"
+                    ))
+                }
             };
             client.move_session(&sid, direction).await?;
             json!({ "ok": true })
@@ -409,3 +419,28 @@ fn arg_usize(args: &Value, name: &str) -> Option<usize> {
     args.get(name).and_then(|v| v.as_u64()).map(|n| n as usize)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_includes_browser_tools() {
+        let names: std::collections::HashSet<String> = catalog()
+            .into_iter()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(|name| name.as_str())
+                    .map(|name| name.to_string())
+            })
+            .collect();
+
+        for expected in [
+            "browser_open",
+            "browser_inspect",
+            "browser_screenshot",
+            "browser_eval",
+        ] {
+            assert!(names.contains(expected), "missing {expected}");
+        }
+    }
+}

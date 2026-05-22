@@ -89,17 +89,26 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({ "name": name, "description": description, "inputSchema": input_schema })
 }
 
-pub async fn call(client: Arc<Client>, name: &str, args: Value) -> Result<Value> {
+pub async fn call(
+    client: Arc<Client>,
+    session_id: Option<&str>,
+    name: &str,
+    args: Value,
+) -> Result<Value> {
     match name {
-        "browser_open" => browser_open(client, args).await,
-        "browser_inspect" => browser_inspect(client, args).await,
-        "browser_screenshot" => browser_screenshot(client, args).await,
-        "browser_eval" => browser_eval(client, args).await,
+        "browser_open" => browser_open(client, session_id, args).await,
+        "browser_inspect" => browser_inspect(client, session_id, args).await,
+        "browser_screenshot" => browser_screenshot(client, session_id, args).await,
+        "browser_eval" => browser_eval(client, session_id, args).await,
         _ => Err(anyhow!("unknown browser tool: {name}")),
     }
 }
 
-async fn browser_open(client: Arc<Client>, input: Value) -> Result<Value> {
+async fn browser_open(
+    client: Arc<Client>,
+    session_id: Option<&str>,
+    input: Value,
+) -> Result<Value> {
     let url = input
         .get("url")
         .and_then(|s| s.as_str())
@@ -122,12 +131,16 @@ async fn browser_open(client: Arc<Client>, input: Value) -> Result<Value> {
         .json()
         .await?;
     if should_emit_preview(&input) {
-        let _ = emit_browser_preview_from_response(client, &resp).await;
+        let _ = emit_browser_preview_from_response(client, session_id, &resp).await;
     }
     Ok(resp)
 }
 
-async fn browser_inspect(client: Arc<Client>, input: Value) -> Result<Value> {
+async fn browser_inspect(
+    client: Arc<Client>,
+    session_id: Option<&str>,
+    input: Value,
+) -> Result<Value> {
     let endpoint = Endpoint::from_input(&input);
     let tabs = list_tabs(&endpoint).await?;
     let Some(tab) = select_tab(&tabs, &input) else {
@@ -150,12 +163,16 @@ async fn browser_inspect(client: Arc<Client>, input: Value) -> Result<Value> {
     );
     let value = cdp_eval(&tab.websocket_url, &script).await?;
     if should_emit_preview(&input) {
-        let _ = emit_browser_preview_from_tab(client, &tab, false).await;
+        let _ = emit_browser_preview_from_tab(client, session_id, &tab, false).await;
     }
     Ok(value)
 }
 
-async fn browser_screenshot(client: Arc<Client>, input: Value) -> Result<Value> {
+async fn browser_screenshot(
+    client: Arc<Client>,
+    session_id: Option<&str>,
+    input: Value,
+) -> Result<Value> {
     let endpoint = Endpoint::from_input(&input);
     let tabs = list_tabs(&endpoint).await?;
     let tab = select_tab(&tabs, &input).ok_or_else(|| anyhow!("no matching tab"))?;
@@ -166,14 +183,26 @@ async fn browser_screenshot(client: Arc<Client>, input: Value) -> Result<Value> 
     let png = cdp_capture_screenshot(&tab.websocket_url, full_page).await?;
     let dims = image::load_from_memory(&png)?.dimensions();
     if should_emit_preview(&input) {
-        emit_browser_preview(client, &tab.url, tab.title.clone(), png.clone(), dims).await?;
+        emit_browser_preview(
+            client,
+            session_id,
+            &tab.url,
+            tab.title.clone(),
+            png.clone(),
+            dims,
+        )
+        .await?;
     }
     Ok(
         json!({ "screenshot": { "width": dims.0, "height": dims.1, "format": "png", "bytes": png.len() }}),
     )
 }
 
-async fn browser_eval(client: Arc<Client>, input: Value) -> Result<Value> {
+async fn browser_eval(
+    client: Arc<Client>,
+    session_id: Option<&str>,
+    input: Value,
+) -> Result<Value> {
     let script = input
         .get("script")
         .and_then(|s| s.as_str())
@@ -183,7 +212,7 @@ async fn browser_eval(client: Arc<Client>, input: Value) -> Result<Value> {
     let tab = select_tab(&tabs, &input).ok_or_else(|| anyhow!("no matching tab"))?;
     let value = cdp_eval(&tab.websocket_url, script).await?;
     if should_emit_preview(&input) {
-        let _ = emit_browser_preview_from_tab(client, &tab, false).await;
+        let _ = emit_browser_preview_from_tab(client, session_id, &tab, false).await;
     }
     Ok(value)
 }
@@ -197,16 +226,18 @@ fn should_emit_preview(input: &Value) -> bool {
 
 async fn emit_browser_preview_from_tab(
     client: Arc<Client>,
+    session_id: Option<&str>,
     tab: &Tab,
     full_page: bool,
 ) -> Result<()> {
     let png = cdp_capture_screenshot(&tab.websocket_url, full_page).await?;
     let dims = image::load_from_memory(&png)?.dimensions();
-    emit_browser_preview(client, &tab.url, tab.title.clone(), png, dims).await
+    emit_browser_preview(client, session_id, &tab.url, tab.title.clone(), png, dims).await
 }
 
 async fn emit_browser_preview_from_response(
     client: Arc<Client>,
+    session_id: Option<&str>,
     tab_response: &Value,
 ) -> Result<()> {
     let ws_url = tab_response
@@ -233,25 +264,23 @@ async fn emit_browser_preview_from_response(
         .get("title")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    emit_browser_preview(client, url, title, png, dims).await
+    emit_browser_preview(client, session_id, url, title, png, dims).await
 }
 
 async fn emit_browser_preview(
     client: Arc<Client>,
+    session_id: Option<&str>,
     url: &str,
     title: Option<String>,
     png: Vec<u8>,
     dims: (u32, u32),
 ) -> Result<()> {
-    let Some(session_id) = std::env::var("AGENTD_SESSION_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(session_id) = session_id.filter(|s| !s.is_empty()) else {
         return Ok(());
     };
     client
         .emit_event(
-            &session_id,
+            session_id,
             SessionEvent::BrowserPreview(BrowserPreview {
                 url: url.to_string(),
                 title,
@@ -515,5 +544,20 @@ mod tests {
         let tab = select_tab(&tabs, &json!({ "url_contains": "example.com" })).unwrap();
         assert_eq!(tab.websocket_url, "ws://127.0.0.1/devtools/page/t1");
         assert_eq!(tab.url, "https://example.com/search");
+    }
+
+    #[test]
+    fn catalog_includes_preview_defaults() {
+        for tool in catalog() {
+            let preview = tool
+                .pointer("/inputSchema/properties/preview/default")
+                .and_then(|value| value.as_bool());
+            assert_eq!(
+                preview,
+                Some(true),
+                "{} missing preview default",
+                tool["name"]
+            );
+        }
     }
 }
