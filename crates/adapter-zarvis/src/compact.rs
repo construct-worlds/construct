@@ -58,16 +58,10 @@ pub fn auto_compact_enabled() -> bool {
 pub const DEFAULT_KEEP_PAIRS: usize = 4;
 
 /// Auto-compact threshold as a fraction of the effective per-model
-/// input-token cap. 0.95 keeps auto-compaction as a near-overflow
-/// backstop: short conversations that briefly poke above the
-/// rolling-prune utilization (0.7) don't pay the summarizer-call
-/// cost; only conversations that have grown long enough to brush
-/// against the actual model ceiling get summarized. The existing
-/// `context::prune_to_budget` still runs each step against the 0.7
-/// utilization, so we keep losing tail-end detail on long chats —
-/// auto-compact just intervenes before the model itself starts
-/// rejecting requests.
-pub const AUTO_COMPACT_RATIO: f64 = 0.95;
+/// input-token cap. This must stay below `context::UTILIZATION` so
+/// compaction gets a chance to preserve long-history context before
+/// the rolling prune starts dropping old turns.
+pub const AUTO_COMPACT_RATIO: f64 = 0.65;
 
 /// Maximum recursion depth when summarizing a head that's itself too
 /// large for one provider call. Each level halves the input. Depth 3
@@ -635,6 +629,36 @@ mod tests {
             .await
             .unwrap()
             .expect("should auto-compact");
+        assert!(outcome.dropped_turn_pairs > 0);
+    }
+
+    #[tokio::test]
+    async fn auto_compact_fires_before_rolling_prune_budget() {
+        let effective_cap = 1000;
+        let prune_budget = ((effective_cap as f64) * context::UTILIZATION) as usize;
+        let trigger = ((effective_cap as f64) * AUTO_COMPACT_RATIO) as usize;
+        assert!(trigger < prune_budget);
+
+        let mut messages = Vec::new();
+        let target_tokens = (trigger + prune_budget) / 2;
+        let target_chars = target_tokens * 7 / 2;
+        let bulk = "x".repeat(target_chars / 8);
+        for _ in 0..4 {
+            messages.push(user(&bulk));
+            messages.push(asst(&bulk));
+        }
+        messages.push(user("recent"));
+        messages.push(asst("latest"));
+
+        let est = context::estimate_tokens(&messages);
+        assert!(est > trigger);
+        assert!(est < prune_budget);
+
+        let provider = StubProvider::new("pre-prune-summary");
+        let outcome = maybe_auto_compact(&mut messages, effective_cap as u64, &provider, "stub")
+            .await
+            .unwrap()
+            .expect("should auto-compact before rolling prune would fire");
         assert!(outcome.dropped_turn_pairs > 0);
     }
 }
