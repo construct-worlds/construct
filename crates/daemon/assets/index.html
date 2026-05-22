@@ -1767,9 +1767,7 @@ function initTerminal() {
 function refitTerminal() {
   if (!state.term || !state.fitAddon) return;
   if (state.mode !== "terminal") return;
-  try {
-    state.fitAddon.fit();
-  } catch (_) { return; }
+  if (!fitTerminalPreservingScroll()) return;
   const cols = state.term.cols;
   const rows = state.term.rows;
   if (!cols || !rows) return;
@@ -1781,6 +1779,34 @@ function refitTerminal() {
     rpc("session.pty_resize", { session_id: state.currentId, cols, rows })
       .catch((e) => console.warn("pty_resize failed:", e));
   }
+}
+
+function terminalIsAtBottom() {
+  const active = state.term && state.term.buffer && state.term.buffer.active;
+  return !!active && active.viewportY >= active.baseY;
+}
+
+function restoreTerminalBottom(wasAtBottom) {
+  if (!wasAtBottom || !state.term) return;
+  const term = state.term;
+  term.scrollToBottom();
+  // xterm/addon-fit can finish DOM measurements after the current
+  // call stack; repeat once on the next frame so sheet/menu reflows
+  // do not leave a bottom-following terminal several pages up.
+  requestAnimationFrame(() => {
+    if (state.term === term) term.scrollToBottom();
+  });
+}
+
+function fitTerminalPreservingScroll() {
+  const wasAtBottom = terminalIsAtBottom();
+  try {
+    state.fitAddon.fit();
+  } catch (_) {
+    return false;
+  }
+  restoreTerminalBottom(wasAtBottom);
+  return true;
 }
 
 function encodeBase64Utf8(s) {
@@ -2808,7 +2834,7 @@ function closeNewSessionDialog() {
 
 function currentTerminalSize() {
   if (state.term && state.fitAddon) {
-    try { state.fitAddon.fit(); } catch (_) {}
+    fitTerminalPreservingScroll();
     if (state.term.cols && state.term.rows) {
       return { cols: state.term.cols, rows: state.term.rows };
     }

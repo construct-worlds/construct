@@ -346,6 +346,107 @@ async fn web_client_loads_and_websocket_connects() {
         serde_json::json!(["top", "focus", "bottom", "focus"])
     );
 
+    // Regression coverage for bottom-following terminal scrollback:
+    // opening/closing web UI sheets can trigger xterm fit/resize.
+    // If the user was already at the bottom, the fit must keep them
+    // there; if they had scrolled up, it must leave their position
+    // alone.
+    let fit_scroll: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const oldTerm = state.term;
+              const oldFit = state.fitAddon;
+              const oldMode = state.mode;
+              const oldCurrent = state.currentId;
+              const oldSize = state.lastReportedSize;
+              const oldRpc = rpc;
+              const calls = [];
+              rpc = async (method, params) => {
+                calls.push({ method, params });
+                return null;
+              };
+              state.mode = 'terminal';
+              state.currentId = 's-fit';
+              state.lastReportedSize = { cols: 0, rows: 0 };
+
+              const bottom = { viewportY: 30, baseY: 30 };
+              state.term = {
+                cols: 100,
+                rows: 40,
+                buffer: { active: bottom },
+                scrollToBottom: () => {
+                  calls.push('bottom');
+                  bottom.viewportY = bottom.baseY;
+                },
+              };
+              state.fitAddon = {
+                fit: () => {
+                  calls.push('fit-bottom');
+                  bottom.baseY = 80;
+                },
+              };
+              refitTerminal();
+              await new Promise((resolve) => requestAnimationFrame(resolve));
+
+              const scrolledUp = { viewportY: 10, baseY: 80 };
+              state.lastReportedSize = { cols: 0, rows: 0 };
+              state.term = {
+                cols: 100,
+                rows: 40,
+                buffer: { active: scrolledUp },
+                scrollToBottom: () => {
+                  calls.push('unexpected-bottom');
+                  scrolledUp.viewportY = scrolledUp.baseY;
+                },
+              };
+              state.fitAddon = {
+                fit: () => {
+                  calls.push('fit-scrolled-up');
+                  scrolledUp.baseY = 90;
+                },
+              };
+              refitTerminal();
+              await new Promise((resolve) => requestAnimationFrame(resolve));
+
+              state.term = oldTerm;
+              state.fitAddon = oldFit;
+              state.mode = oldMode;
+              state.currentId = oldCurrent;
+              state.lastReportedSize = oldSize;
+              rpc = oldRpc;
+              return { calls, bottom, scrolledUp };
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate fit scroll preservation")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    let calls = fit_scroll["calls"].as_array().cloned().unwrap_or_default();
+    let bottom_calls = calls
+        .iter()
+        .filter(|v| v.as_str() == Some("bottom"))
+        .count();
+    assert!(
+        bottom_calls >= 1,
+        "expected refit at bottom to call scrollToBottom, got {fit_scroll:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|v| v.as_str() == Some("unexpected-bottom")),
+        "refit incorrectly forced a manually-scrolled terminal to bottom: {fit_scroll:?}"
+    );
+    assert_eq!(
+        fit_scroll["bottom"]["viewportY"],
+        fit_scroll["bottom"]["baseY"]
+    );
+    assert_ne!(
+        fit_scroll["scrolledUp"]["viewportY"], fit_scroll["scrolledUp"]["baseY"],
+        "manual scroll position should not be forced to bottom: {fit_scroll:?}"
+    );
+
     // The remote client mirrors zarvis EditorState events in a
     // terminal-mode strip so PTY-backed zarvis input is visible even
     // though zarvis deliberately does not echo its live editor into
