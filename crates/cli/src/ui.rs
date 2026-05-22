@@ -1391,13 +1391,12 @@ fn render_matrix_reveal_tooltip(f: &mut Frame, rain_area: Rect, app: &App) {
             let harness = harness_label(s);
             // Title if the session has a distinct one, else just the
             // harness; append harness too when a title exists so the
-            // tooltip says both (e.g. "fix auth · zarvis · running").
+            // tooltip says both (e.g. "fix auth · zarvis").
             let title = s.title.as_deref().filter(|t| !t.is_empty());
-            let name = match title {
-                Some(t) => format!("{t} · {harness}"),
-                None => harness,
-            };
-            format!(" {name} · {} ", s.state.label())
+            match title {
+                Some(t) => format!(" {t} · {harness} "),
+                None => format!(" {harness} "),
+            }
         }
         None => format!(" {} · session ended ", hit.text),
     };
