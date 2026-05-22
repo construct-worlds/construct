@@ -7,7 +7,6 @@ use crate::app::{
 use crate::keymap::KeyAction;
 use crate::theme::Theme;
 use agentd_protocol::{MessageRole, SessionEvent, SessionState, SessionSummary, TimestampedEvent};
-use base64::Engine;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -19,6 +18,39 @@ use unicode_width::UnicodeWidthStr;
 
 const MATRIX_RAIN_RAMP_UP_SECS: f32 = 5.0;
 const MATRIX_RAIN_DECAY_SECS: f32 = 20.0;
+/// Brightness multiplier for the browser-preview wallpaper behind the
+/// matrix rain — kept very dim so the green rain clearly stays the
+/// foreground and the image reads as a faint backdrop.
+const MATRIX_WALLPAPER_DIM: f32 = 0.22;
+/// Seconds for a browser preview's top-to-bottom "dial-up" reveal on
+/// appear, and the top-to-bottom erase on disappear. Applies to both the
+/// terminal-view overlay and the matrix-rain wallpaper.
+const PREVIEW_REVEAL_SECS: f32 = 1.0;
+
+/// Row-fraction range `[start, end)` of a preview image to paint this
+/// frame. On appear the image fills from the top over `PREVIEW_REVEAL_SECS`
+/// (range `(0, a)`); while shown it's full (`(0, 1)`); on disappear it
+/// erases from the top over the last `PREVIEW_REVEAL_SECS` before
+/// `hide_after` (range `(d, 1)` — only the bottom remains). The same
+/// curve drives the overlay and the wallpaper so they stay in sync.
+fn preview_reveal_range(
+    revealed_at: std::time::Instant,
+    hide_after: std::time::Instant,
+    now: std::time::Instant,
+    hovered: bool,
+) -> (f32, f32) {
+    let appear =
+        (now.saturating_duration_since(revealed_at).as_secs_f32() / PREVIEW_REVEAL_SECS).clamp(0.0, 1.0);
+    let remaining = hide_after.saturating_duration_since(now).as_secs_f32();
+    // Hovering pins the preview (the expiry timer is frozen), so don't
+    // play the disappear erase while the cursor is over it.
+    let disappear = if !hovered && remaining < PREVIEW_REVEAL_SECS {
+        (1.0 - remaining / PREVIEW_REVEAL_SECS).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (disappear, appear)
+}
 const MATRIX_RAIN_TAIL_MIN: u16 = 5;
 const MATRIX_RAIN_TAIL_MAX: u16 = 9;
 
@@ -1251,6 +1283,35 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
     }
 
     let now = Instant::now();
+
+    // Wallpaper: if the selected session has a live browser preview (the
+    // same one shown as the terminal-view overlay — appears/disappears in
+    // lock-step since both read `browser_previews`), paint it dimmed and
+    // cropped-to-fill as a backdrop. The rain loop below draws over it:
+    // cells with a drop/letter overwrite the image, empty cells keep it,
+    // so the animation runs uninterrupted on top of the wallpaper.
+    //
+    // Dial-up nostalgia: the image draws in top-to-bottom when the
+    // preview arrives and erases top-to-bottom when it's about to hide,
+    // like a JPEG over a slow modem. The matrix tick (~8fps) already
+    // redraws each frame, so the animation advances on its own.
+    let wallpaper = app.selected_id().and_then(|id| app.browser_previews.get(&id)).and_then(
+        |state| {
+            state
+                .decoded
+                .clone()
+                .map(|img| (img, state.revealed_at, state.hide_after, state.hover_started.is_some()))
+        },
+    );
+    if let Some((img, revealed_at, hide_after, hovered)) = &wallpaper {
+        let row_frac = preview_reveal_range(*revealed_at, *hide_after, now, *hovered);
+        if row_frac.1 > row_frac.0 {
+            let (ow, oh) = blit_scale_dims(img.dimensions(), rain_area, true);
+            let resized = resized_image(&mut app.image_resize_cache, img, ow, oh);
+            paint_resized_half_blocks(f, rain_area, &resized, MATRIX_WALLPAPER_DIM, row_frac);
+        }
+    }
+
     let activity = update_matrix_rain_intensity(app, now);
     let elapsed = app.start_instant.elapsed().as_millis() as u64;
     let cycle = rain_area.height + MATRIX_RAIN_TAIL_MAX + 1;
@@ -2258,8 +2319,14 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
         editor_area.is_none(),
         row_offset,
     );
-    let (preview_area, preview_close) =
-        render_browser_preview_overlay(f, chat_area, &app.theme, app.mouse_pos, preview.as_ref());
+    let (preview_area, preview_close) = render_browser_preview_overlay(
+        f,
+        chat_area,
+        &app.theme,
+        app.mouse_pos,
+        preview.as_ref(),
+        &mut app.image_resize_cache,
+    );
     app.layout.browser_preview_area = preview_area;
     app.layout.browser_preview_close = preview_close;
 
@@ -2297,6 +2364,7 @@ fn render_browser_preview_overlay(
     theme: &Theme,
     mouse_pos: Option<(u16, u16)>,
     preview: Option<&crate::app::BrowserPreviewState>,
+    resize_cache: &mut crate::app::ImageResizeCache,
 ) -> (Option<Rect>, Option<(u16, u16, u16)>) {
     let Some(preview_state) = preview else {
         return (None, None);
@@ -2306,11 +2374,9 @@ fn render_browser_preview_overlay(
         return (None, None);
     }
 
-    // Decode the browser preview image first to calculate the exact dimensions
-    let Ok(png) = base64::engine::general_purpose::STANDARD.decode(&preview.image) else {
-        return (None, None);
-    };
-    let Ok(img) = image::load_from_memory(&png).map(|img| img.to_rgba8()) else {
+    // Use the preview image (decoded once on insert) to size the panel to
+    // its exact aspect ratio — no per-frame base64 decode.
+    let Some(img) = preview_state.decoded.as_ref() else {
         return (None, None);
     };
     let (w, h) = img.dimensions();
@@ -2375,7 +2441,21 @@ fn render_browser_preview_overlay(
         width: inner.width,
         height: inner.height.saturating_sub(caption_rows),
     };
-    render_browser_preview_image(f, image_area, &img);
+    if let Some(img) = preview_state.decoded.as_ref() {
+        // Same dial-up reveal/erase as the matrix wallpaper, in sync.
+        // Hovering this overlay pins it, so the erase won't start.
+        let row_frac = preview_reveal_range(
+            preview_state.revealed_at,
+            preview_state.hide_after,
+            std::time::Instant::now(),
+            preview_state.hover_started.is_some(),
+        );
+        if row_frac.1 > row_frac.0 {
+            let (ow, oh) = blit_scale_dims(img.dimensions(), image_area, false);
+            let resized = resized_image(resize_cache, img, ow, oh);
+            paint_resized_half_blocks(f, image_area, &resized, 1.0, row_frac);
+        }
+    }
     if inner.height > 0 {
         let caption = preview
             .title
@@ -2400,54 +2480,141 @@ fn render_browser_preview_overlay(
     (Some(panel), Some(close_bounds))
 }
 
-fn render_browser_preview_image(
+/// Blit an RGBA image into `area` using half-block cells — each cell is
+/// two vertically-stacked pixels rendered as `▀` (fg = top pixel, bg =
+/// bottom pixel), so a cell row is 2 image rows.
+///
+/// - `cover = false` (contain): scale to fit inside `area`, centered,
+///   letterboxed — the whole image is visible.
+/// - `cover = true`: scale to fill `area` and crop the overflow,
+///   preserving aspect ratio — no empty margins. Used for the wallpaper.
+///
+/// `dim` in `0.0..=1.0` multiplies brightness (1.0 = untouched); the
+/// wallpaper dims so the rain stays legible on top.
+/// Output pixel dims to resize an image to before half-block blitting
+/// into `area`. `cover` true scales to fill (image ≥ area, crop); false
+/// fits inside (image ≤ area, letterbox). Half-block packs 2 px per row.
+fn blit_scale_dims((w, h): (u32, u32), area: Rect, cover: bool) -> (u32, u32) {
+    let target_w = area.width as u32;
+    let target_h_px = area.height as u32 * 2;
+    let sx = target_w as f32 / w.max(1) as f32;
+    let sy = target_h_px as f32 / h.max(1) as f32;
+    let scale = if cover { sx.max(sy) } else { sx.min(sy) };
+    (
+        ((w as f32 * scale).round() as u32).max(1),
+        ((h as f32 * scale).round() as u32).max(1),
+    )
+}
+
+/// Resize `src` to `out_w × out_h`, memoized in `cache` keyed by the
+/// source `Arc` identity + output dims. The matrix-rain wallpaper
+/// re-blits the same image every animation frame; without this we'd
+/// re-run a (very expensive) downscale each frame and the animation
+/// stutters. Cache is a tiny MRU — at most a handful of live previews ×
+/// render targets (overlay + wallpaper).
+fn resized_image(
+    cache: &mut crate::app::ImageResizeCache,
+    src: &std::sync::Arc<image::RgbaImage>,
+    out_w: u32,
+    out_h: u32,
+) -> std::sync::Arc<image::RgbaImage> {
+    let key = (std::sync::Arc::as_ptr(src) as usize, out_w, out_h);
+    if let Some(pos) = cache.iter().position(|e| e.0 == key) {
+        let entry = cache.remove(pos);
+        let img = entry.1.clone();
+        cache.push((key, img.clone()));
+        return img;
+    }
+    let resized = std::sync::Arc::new(image::imageops::resize(
+        src.as_ref(),
+        out_w,
+        out_h,
+        image::imageops::FilterType::Triangle,
+    ));
+    cache.push((key, resized.clone()));
+    while cache.len() > 4 {
+        cache.remove(0);
+    }
+    resized
+}
+
+/// Paint an already-resized RGBA image into `area` as half-block (`▀`)
+/// cells — fg = top pixel, bg = bottom pixel. Center-crops `resized`
+/// into the area (so cover images crop, contain images letterbox). `dim`
+/// in `0.0..=1.0` multiplies brightness. `row_frac` is the `[start, end)`
+/// fraction of the image's cell rows to paint (rest stay blank):
+/// `(0.0, 1.0)` draws all; `(0.0, a)` reveals the top `a` (appear);
+/// `(d, 1.0)` keeps only the bottom `1-d` (top-down erase on disappear).
+fn paint_resized_half_blocks(
     f: &mut Frame,
     area: Rect,
-    img: &image::RgbaImage,
+    resized: &image::RgbaImage,
+    dim: f32,
+    row_frac: (f32, f32),
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let (w, h) = img.dimensions();
-    if w == 0 || h == 0 {
+    let (out_w, out_h) = resized.dimensions();
+    if out_w == 0 || out_h == 0 {
         return;
     }
-    let max_cols = area.width as u32;
-    let max_cell_rows = area.height as u32;
-    let scale = (max_cols as f32 / w as f32).min((max_cell_rows as f32 * 2.0) / h as f32);
-    let out_w = ((w as f32 * scale).round() as u32).clamp(1, max_cols);
-    let out_h_px = ((h as f32 * scale).round() as u32).clamp(1, max_cell_rows * 2);
-    let resized =
-        image::imageops::resize(img, out_w, out_h_px, image::imageops::FilterType::Triangle);
-    let x0 = area.x + ((area.width as u32).saturating_sub(out_w) / 2) as u16;
-    let rows = out_h_px.div_ceil(2).min(max_cell_rows);
-    let y0 = area.y + ((area.height as u32).saturating_sub(rows) / 2) as u16;
+    let target_w = area.width as u32;
+    let target_h_px = area.height as u32 * 2;
+    let crop_w = out_w.min(target_w);
+    let crop_h = out_h.min(target_h_px);
+    let src_off_x = (out_w - crop_w) / 2;
+    let src_off_y = (out_h - crop_h) / 2;
+    let cell_rows = crop_h.div_ceil(2).min(area.height as u32);
+    let x0 = area.x + ((target_w - crop_w) / 2) as u16;
+    let y0 = area.y + ((area.height as u32 - cell_rows) / 2) as u16;
+    // Only paint cell rows inside the reveal window; the rest stay blank
+    // this frame (the appear/erase animation).
+    let cf = cell_rows as f32;
+    let start_row = ((row_frac.0 * cf).floor() as u32).min(cell_rows);
+    let end_row = ((row_frac.1 * cf).ceil() as u32).min(cell_rows);
+    let dim = dim.clamp(0.0, 1.0);
+    let d = |c: u8| (c as f32 * dim).round() as u8;
     let buf = f.buffer_mut();
-    for y in (0..out_h_px).step_by(2) {
-        let row = y / 2;
-        if row >= rows {
+    for ry in (0..crop_h).step_by(2) {
+        let row = ry / 2;
+        if row >= end_row {
             break;
         }
-        for x in 0..out_w {
-            let top = resized.get_pixel(x, y).0;
-            let bot = if y + 1 < out_h_px {
-                resized.get_pixel(x, y + 1).0
+        if row < start_row {
+            continue;
+        }
+        for rx in 0..crop_w {
+            let top = resized.get_pixel(src_off_x + rx, src_off_y + ry).0;
+            let bot = if ry + 1 < crop_h {
+                resized.get_pixel(src_off_x + rx, src_off_y + ry + 1).0
             } else {
                 [0, 0, 0, 255]
             };
             if let Some(cell) = buf.cell_mut(Position {
-                x: x0 + x as u16,
+                x: x0 + rx as u16,
                 y: y0 + row as u16,
             }) {
                 cell.set_symbol("▀");
                 cell.set_style(
                     Style::default()
-                        .fg(Color::Rgb(top[0], top[1], top[2]))
-                        .bg(Color::Rgb(bot[0], bot[1], bot[2])),
+                        .fg(Color::Rgb(d(top[0]), d(top[1]), d(top[2])))
+                        .bg(Color::Rgb(d(bot[0]), d(bot[1]), d(bot[2]))),
                 );
             }
         }
     }
+}
+
+/// Test-only convenience: resize + paint in one shot (no cache).
+#[cfg(test)]
+fn blit_image_half_blocks(f: &mut Frame, area: Rect, img: &image::RgbaImage, cover: bool, dim: f32) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (ow, oh) = blit_scale_dims(img.dimensions(), area, cover);
+    let resized = image::imageops::resize(img, ow, oh, image::imageops::FilterType::Triangle);
+    paint_resized_half_blocks(f, area, &resized, dim, (0.0, 1.0));
 }
 
 /// Paint the fixed bottom input pane:
@@ -4185,6 +4352,132 @@ fn render_remote_err<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn blit_filled_cells(area_w: u16, area_h: u16, img: &image::RgbaImage, cover: bool) -> usize {
+        let backend = ratatui::backend::TestBackend::new(area_w, area_h);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            blit_image_half_blocks(f, Rect::new(0, 0, area_w, area_h), img, cover, 1.0);
+        })
+        .expect("draw");
+        let buf = term.backend().buffer();
+        let mut n = 0;
+        for y in 0..area_h {
+            for x in 0..area_w {
+                if buf.cell((x, y)).map(|c| c.symbol()) == Some("▀") {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn wallpaper_cover_fills_area_contain_letterboxes() {
+        // Square-ish image into a non-matching aspect area.
+        let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 30, 30, 255]));
+        // Cover fills every cell of a 5x3 area (no empty margins).
+        assert_eq!(
+            blit_filled_cells(5, 3, &img, true),
+            15,
+            "cover must fill every cell"
+        );
+        // A very wide, short image fit into a tall area letterboxes —
+        // some cells stay empty.
+        let wide = image::RgbaImage::from_pixel(16, 1, image::Rgba([30, 200, 30, 255]));
+        let filled = blit_filled_cells(4, 4, &wide, false);
+        assert!(
+            filled > 0 && filled < 16,
+            "contain should letterbox (partial fill), got {filled}/16"
+        );
+    }
+
+    #[test]
+    fn resized_image_memoizes_per_source_and_size() {
+        let mut cache: crate::app::ImageResizeCache = Vec::new();
+        let src = std::sync::Arc::new(image::RgbaImage::from_pixel(100, 100, image::Rgba([1, 2, 3, 255])));
+        let a = resized_image(&mut cache, &src, 20, 10);
+        let b = resized_image(&mut cache, &src, 20, 10);
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "same source + size must hit the cache (no re-resize)"
+        );
+        assert_eq!(cache.len(), 1);
+        // Different output size → distinct entry.
+        let _c = resized_image(&mut cache, &src, 30, 10);
+        assert_eq!(cache.len(), 2);
+        // Different source image → distinct entry.
+        let src2 = std::sync::Arc::new(image::RgbaImage::from_pixel(100, 100, image::Rgba([9, 9, 9, 255])));
+        let _d = resized_image(&mut cache, &src2, 20, 10);
+        assert_eq!(cache.len(), 3);
+        // MRU stays bounded.
+        for w in 40..60 {
+            let _ = resized_image(&mut cache, &src, w, 10);
+        }
+        assert!(cache.len() <= 4, "cache must stay bounded, got {}", cache.len());
+    }
+
+    fn paint_rows_for(row_frac: (f32, f32)) -> Vec<bool> {
+        // 4x6 cover-filled image; return per-cell-row whether it's painted.
+        let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 30, 30, 255]));
+        let area = Rect::new(0, 0, 4, 6);
+        let (ow, oh) = blit_scale_dims(img.dimensions(), area, true);
+        let resized = image::imageops::resize(&img, ow, oh, image::imageops::FilterType::Triangle);
+        let backend = ratatui::backend::TestBackend::new(4, 6);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| paint_resized_half_blocks(f, area, &resized, 1.0, row_frac))
+            .expect("draw");
+        let buf = term.backend().buffer();
+        (0..6)
+            .map(|y| (0..4).all(|x| buf.cell((x, y)).map(|c| c.symbol()) == Some("▀")))
+            .collect()
+    }
+
+    #[test]
+    fn preview_reveal_range_freezes_erase_on_hover() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let revealed = now - Duration::from_secs(5); // fully appeared
+        let hide_soon = now + Duration::from_millis(300); // inside the erase window
+        let (start, end) = preview_reveal_range(revealed, hide_soon, now, false);
+        assert!(start > 0.0, "erase should be underway when not hovered: {start}");
+        assert!((end - 1.0).abs() < 1e-3);
+        let (start_h, _) = preview_reveal_range(revealed, hide_soon, now, true);
+        assert_eq!(start_h, 0.0, "hover must freeze the top-down erase");
+    }
+
+    #[test]
+    fn wallpaper_appears_top_down() {
+        // Appear half-done → top ~3 of 6 rows drawn, bottom blank.
+        let rows = paint_rows_for((0.0, 0.5));
+        assert!(rows[0] && rows[1] && rows[2], "top rows revealed: {rows:?}");
+        assert!(!rows[3] && !rows[4] && !rows[5], "bottom not yet: {rows:?}");
+    }
+
+    #[test]
+    fn wallpaper_erases_top_down_on_disappear() {
+        // Disappear half-done → top ~3 rows erased (blank), bottom remains.
+        let rows = paint_rows_for((0.5, 1.0));
+        assert!(!rows[0] && !rows[1] && !rows[2], "top rows erased: {rows:?}");
+        assert!(rows[3] && rows[4] && rows[5], "bottom still shown: {rows:?}");
+    }
+
+    #[test]
+    fn wallpaper_dim_darkens_pixels() {
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([200, 200, 200, 255]));
+        let backend = ratatui::backend::TestBackend::new(2, 1);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| blit_image_half_blocks(f, Rect::new(0, 0, 2, 1), &img, true, 0.5))
+            .expect("draw");
+        let buf = term.backend().buffer();
+        // 200 * 0.5 = 100, so the dimmed fg should be well below 200.
+        match buf.cell((0, 0)).map(|c| c.style().fg) {
+            Some(Some(Color::Rgb(r, _, _))) => {
+                assert!(r <= 110, "dim should darken (~100), got {r}")
+            }
+            other => panic!("expected an Rgb fg cell, got {other:?}"),
+        }
+    }
 
     /// User-reported regression: zarvis emits `\x1b[2m` (DIM/faint)
     /// for markers like `[+N lines — click to expand]` and tool
