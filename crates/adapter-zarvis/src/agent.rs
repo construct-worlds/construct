@@ -405,6 +405,16 @@ pub async fn run(
                 tokens_out: turn.usage.output_tokens,
             });
 
+            if turn.is_empty() {
+                emit.emit(SessionEvent::Error {
+                    message: format!(
+                        "{} returned an empty response for model {}",
+                        provider_name, model
+                    ),
+                });
+                break;
+            }
+
             if turn.tool_calls.is_empty() {
                 if let Some(text) = turn.text {
                     push_msg!(

@@ -2323,6 +2323,17 @@ pub async fn run(
                 tokens_out: turn.usage.output_tokens,
             });
 
+            if turn.is_empty() {
+                final_status = "Errored";
+                let msg = format!(
+                    "{} returned an empty response for model {}",
+                    provider_name, model
+                );
+                term.note(&format!("(provider error: {msg})"));
+                emit.emit(SessionEvent::Error { message: msg });
+                break;
+            }
+
             if turn.tool_calls.is_empty() {
                 if let Some(text) = turn.text {
                     push_msg!(
