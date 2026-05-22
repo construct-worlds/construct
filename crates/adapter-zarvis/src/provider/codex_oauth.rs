@@ -589,6 +589,7 @@ impl LlmProvider for CodexOauth {
         let mut fn_call_order: Vec<String> = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = Usage::default();
+        let mut terminal_event_seen = false;
 
         while let Some(ev) = stream.next().await {
             let ev = ev.context("codex-oauth SSE stream")?;
@@ -695,6 +696,7 @@ impl LlmProvider for CodexOauth {
                 // End of stream. Pull usage + stop reason if the
                 // server reported them.
                 "response.completed" | "response.incomplete" | "response.failed" => {
+                    terminal_event_seen = true;
                     if let Some(u) = chunk.pointer("/response/usage") {
                         usage.input_tokens = u
                             .get("input_tokens")
@@ -713,6 +715,12 @@ impl LlmProvider for CodexOauth {
                             stop_reason = StopReason::MaxTokens;
                         }
                     }
+                    if kind == "response.failed" {
+                        return Err(anyhow!(
+                            "codex-oauth response failed: {}",
+                            response_error_message(&chunk)
+                        ));
+                    }
                     break;
                 }
                 _ => {
@@ -720,6 +728,11 @@ impl LlmProvider for CodexOauth {
                     // etc.) are not surfaced to the agent in v1.
                 }
             }
+        }
+        if !terminal_event_seen {
+            return Err(anyhow!(
+                "codex-oauth stream ended before response.completed"
+            ));
         }
 
         // If the model emitted tool calls, that's the turn's stop
@@ -760,6 +773,20 @@ impl LlmProvider for CodexOauth {
             usage,
         })
     }
+}
+
+fn response_error_message(chunk: &Value) -> String {
+    chunk
+        .pointer("/response/error/message")
+        .and_then(|v| v.as_str())
+        .or_else(|| chunk.pointer("/error/message").and_then(|v| v.as_str()))
+        .or_else(|| {
+            chunk
+                .pointer("/response/incomplete_details/reason")
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("unknown error")
+        .to_string()
 }
 
 fn short_hash(s: &str) -> String {
@@ -1105,5 +1132,26 @@ mod tests {
         // Malformed timestamp → conservatively refresh.
         auth.last_refresh = Some("not-a-date".to_string());
         assert!(CodexOauth::needs_refresh(&auth));
+    }
+
+    #[test]
+    fn response_error_message_extracts_failed_response_reason() {
+        let chunk = json!({
+            "response": {
+                "error": {
+                    "message": "context too large"
+                }
+            }
+        });
+        assert_eq!(response_error_message(&chunk), "context too large");
+
+        let chunk = json!({
+            "response": {
+                "incomplete_details": {
+                    "reason": "max_output_tokens"
+                }
+            }
+        });
+        assert_eq!(response_error_message(&chunk), "max_output_tokens");
     }
 }

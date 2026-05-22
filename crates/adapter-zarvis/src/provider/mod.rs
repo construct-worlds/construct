@@ -116,6 +116,21 @@ pub struct ProviderTurn {
     pub usage: Usage,
 }
 
+impl ProviderTurn {
+    /// True when the provider returned a successful turn that gives the
+    /// agent nothing to display, persist, or execute. Agent loops treat
+    /// this as an error so provider/server regressions cannot silently
+    /// eat a user prompt.
+    pub fn is_empty(&self) -> bool {
+        let has_text = self
+            .text
+            .as_deref()
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false);
+        !has_text && self.tool_calls.is_empty()
+    }
+}
+
 /// Sink for the assistant's streaming text deltas. Headless mode wires
 /// this to `SessionEvent::Message` events; interactive (PTY) mode wires
 /// it to raw `SessionEvent::Pty` bytes so the user sees the response
@@ -210,6 +225,56 @@ pub fn parse_overflow(body: &str) -> Option<Option<u64>> {
     // same order. Anthropic / Ollama vary; the fallback ratio at the
     // agent layer corrects either way.
     Some(nums.into_iter().next())
+}
+
+#[cfg(test)]
+mod provider_turn_tests {
+    use super::*;
+
+    #[test]
+    fn detects_empty_successful_turns() {
+        let turn = ProviderTurn {
+            text: None,
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        assert!(turn.is_empty());
+    }
+
+    #[test]
+    fn whitespace_text_is_still_empty() {
+        let turn = ProviderTurn {
+            text: Some(" \n\t".into()),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        assert!(turn.is_empty());
+    }
+
+    #[test]
+    fn text_or_tools_are_not_empty() {
+        let text_turn = ProviderTurn {
+            text: Some("done".into()),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        assert!(!text_turn.is_empty());
+
+        let tool_turn = ProviderTurn {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "call_1".into(),
+                name: "exec".into(),
+                input: serde_json::json!({}),
+            }],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        };
+        assert!(!tool_turn.is_empty());
+    }
 }
 
 /// Scan `s` for non-overlapping decimal integer runs and return the
