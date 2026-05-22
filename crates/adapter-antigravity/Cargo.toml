@@ -1,15 +1,15 @@
 [package]
-name = "agentd-adapter-gemini"
+name = "agentd-adapter-antigravity"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Gemini CLI adapter for agentd (wraps the `gemini` CLI)"
+description = "Google Antigravity CLI adapter for agentd (wraps the `agy` CLI)"
 
 [[bin]]
-name = "agentd-adapter-gemini"
+name = "agentd-adapter-antigravity"
 path = "src/main.rs"
 
 [dependencies]

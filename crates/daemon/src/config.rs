@@ -137,9 +137,9 @@ pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
         description: "OpenAI Codex (wraps the `codex` CLI)",
     },
     BuiltinAdapter {
-        name: "gemini",
-        binary: "agentd-adapter-gemini",
-        description: "Google Gemini (wraps the `gemini` CLI)",
+        name: "antigravity",
+        binary: "agentd-adapter-antigravity",
+        description: "Google Antigravity (wraps the `agy` CLI)",
     },
     BuiltinAdapter {
         name: "zarvis",
