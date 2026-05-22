@@ -380,6 +380,10 @@ pub struct App {
     /// Latest browser preview per session, fed by `SessionEvent::BrowserPreview`
     /// and rendered as a top-right overlay in the terminal view.
     pub browser_previews: HashMap<String, BrowserPreviewState>,
+    /// MRU cache of resized preview images shared by the terminal-view
+    /// overlay and the matrix-rain wallpaper — avoids re-downscaling the
+    /// screenshot every frame. See [`ImageResizeCache`].
+    pub image_resize_cache: ImageResizeCache,
     /// Short visual transition when the main view switches to a different
     /// session.
     pub session_transition: Option<SessionTransition>,
@@ -473,11 +477,57 @@ pub struct EditorState {
     pub completions: Vec<String>,
 }
 
+/// MRU cache of resized preview images, keyed by `(source Arc ptr,
+/// out_w, out_h)`. Lets the overlay and the matrix-rain wallpaper blit
+/// the same image every frame without re-running the (very expensive)
+/// downscale. Kept tiny (a few entries) — see `ui::resized_image`.
+pub type ImageResizeCache = Vec<((usize, u32, u32), std::sync::Arc<image::RgbaImage>)>;
+
+/// Largest dimension (px) we keep a decoded preview at. Browser
+/// screenshots arrive at full page size (often >1280px); the overlay and
+/// wallpaper render into tiny cell grids, so a one-time downscale to this
+/// cap makes every subsequent resize cheap with no visible quality loss.
+const PREVIEW_MAX_DIM: u32 = 400;
+
+/// How long a browser preview stays up (before its top-to-bottom erase)
+/// when not hovered. Hovering keeps it and resets this on un-hover.
+const BROWSER_PREVIEW_TTL: Duration = Duration::from_secs(7);
+
+/// Decode a base64-PNG browser-preview image to a shared RGBA buffer,
+/// downscaled once to `PREVIEW_MAX_DIM`. `None` if the base64 or the
+/// image fails to decode. Done once on insert so per-frame rendering
+/// (overlay + matrix wallpaper) only does a small resize/blit.
+pub fn decode_browser_preview_image(b64: &str) -> Option<std::sync::Arc<image::RgbaImage>> {
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let img = image::load_from_memory(&png).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let img = if w.max(h) > PREVIEW_MAX_DIM {
+        let scale = PREVIEW_MAX_DIM as f32 / w.max(h) as f32;
+        let nw = ((w as f32 * scale).round() as u32).max(1);
+        let nh = ((h as f32 * scale).round() as u32).max(1);
+        // `thumbnail` is an averaging downscaler — faster than the
+        // general resampler and fine for this one-time shrink.
+        image::imageops::thumbnail(&img, nw, nh)
+    } else {
+        img
+    };
+    Some(std::sync::Arc::new(img))
+}
+
 #[derive(Debug, Clone)]
 pub struct BrowserPreviewState {
     pub preview: agentd_protocol::BrowserPreview,
     pub hide_after: Instant,
     pub hover_started: Option<Instant>,
+    /// When this preview first arrived — drives the matrix-rain
+    /// wallpaper's top-to-bottom "dial-up" reveal.
+    pub revealed_at: Instant,
+    /// PNG decoded to RGBA once on insert, shared (`Arc`) so both the
+    /// terminal-view overlay and the matrix-rain wallpaper can blit it
+    /// every frame without re-decoding. `None` if the bytes failed to
+    /// decode.
+    pub decoded: Option<std::sync::Arc<image::RgbaImage>>,
 }
 
 fn agent_status_history_line(status: &agentd_protocol::AgentStatus) -> Option<Vec<u8>> {
@@ -981,6 +1031,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         editor_states: HashMap::new(),
         agent_statuses: HashMap::new(),
         browser_previews: HashMap::new(),
+        image_resize_cache: Vec::new(),
         session_transition: None,
         pin_transitions: HashMap::new(),
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
@@ -1358,12 +1409,16 @@ impl App {
         session_id: String,
         preview: agentd_protocol::BrowserPreview,
     ) {
+        let decoded = decode_browser_preview_image(&preview.image);
+        let now = Instant::now();
         self.browser_previews.insert(
             session_id,
             BrowserPreviewState {
                 preview,
-                hide_after: Instant::now() + Duration::from_secs(5),
+                hide_after: now + BROWSER_PREVIEW_TTL,
                 hover_started: None,
+                decoded,
+                revealed_at: now,
             },
         );
     }
@@ -1393,7 +1448,7 @@ impl App {
                 true
             } else {
                 if state.hover_started.take().is_some() {
-                    state.hide_after = now + Duration::from_secs(5);
+                    state.hide_after = now + BROWSER_PREVIEW_TTL;
                 }
                 now < state.hide_after
             }
@@ -4982,6 +5037,7 @@ mod tests {
             editor_states: HashMap::new(),
             agent_statuses: HashMap::new(),
             browser_previews: HashMap::new(),
+            image_resize_cache: Vec::new(),
             session_transition: None,
             pin_transitions: HashMap::new(),
             matrix_rain: crate::matrix_rain::MatrixRain::default(),
@@ -5195,6 +5251,108 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    // The selected session's browser preview is painted as a wallpaper
+    // behind the matrix rain (half-block `▀` cells), and vanishes when
+    // the preview is gone — in lock-step with the terminal-view overlay.
+    #[tokio::test]
+    async fn matrix_rain_paints_browser_preview_wallpaper() {
+        use agentd_client::Client;
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("agentd.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            let _ = listener.accept().await;
+            futures::future::pending::<()>().await;
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+
+        let mut s1 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        let mut app = test_app(client, vec![s1]);
+        app.matrix_rain_hidden = false;
+
+        let count_wallpaper_cells = |app: &mut App| -> usize {
+            let backend = ratatui::backend::TestBackend::new(140, 44);
+            let mut term = ratatui::Terminal::new(backend).expect("terminal");
+            term.draw(|f| crate::ui::render(f, app)).expect("draw");
+            let area = app
+                .layout
+                .matrix_rain_area
+                .expect("matrix rain area rendered");
+            let buf = term.backend().buffer();
+            let mut n = 0;
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if buf.cell((x, y)).map(|c| c.symbol()) == Some("▀") {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+
+        // No preview → no wallpaper cells in the rain (the rain charset
+        // never uses `▀`).
+        assert_eq!(count_wallpaper_cells(&mut app), 0);
+
+        // Insert a preview for the selected session → wallpaper appears.
+        app.browser_previews.insert(
+            "s1".into(),
+            BrowserPreviewState {
+                preview: agentd_protocol::BrowserPreview {
+                    url: "http://example.com".into(),
+                    title: None,
+                    image: String::new(),
+                    width: 32,
+                    height: 24,
+                },
+                hide_after: Instant::now() + Duration::from_secs(60),
+                hover_started: None,
+                decoded: Some(std::sync::Arc::new(image::RgbaImage::from_pixel(
+                    32,
+                    24,
+                    image::Rgba([180, 40, 40, 255]),
+                ))),
+                // In the past so the top-to-bottom reveal has completed
+                // and the full wallpaper is drawn.
+                revealed_at: Instant::now() - Duration::from_secs(10),
+            },
+        );
+        assert!(
+            count_wallpaper_cells(&mut app) > 0,
+            "selected session's browser preview should paint a matrix-rain wallpaper"
+        );
+
+        // Preview expires/removed → wallpaper gone again.
+        app.browser_previews.clear();
+        assert_eq!(
+            count_wallpaper_cells(&mut app),
+            0,
+            "wallpaper must vanish when the preview is gone"
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn browser_preview_image_decodes_once() {
+        use base64::Engine;
+        let img = image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .expect("encode png");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
+
+        let decoded = decode_browser_preview_image(&b64).expect("valid png decodes");
+        assert_eq!(decoded.dimensions(), (3, 2));
+        assert_eq!(decoded.get_pixel(0, 0).0, [10, 20, 30, 255]);
+
+        // Garbage in → None (no panic), so a bad preview just renders nothing.
+        assert!(decode_browser_preview_image("not-base64-@@@").is_none());
     }
 
     #[test]
