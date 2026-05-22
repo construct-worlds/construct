@@ -4,8 +4,8 @@ use crate::keymap::{self, ChordState, KeyAction, Keymap, KeymapResult, Profile};
 use crate::ui;
 use agentd_client::Client;
 use agentd_protocol::{
-    EventNotificationPayload, GroupSummary, HarnessInfo, SessionEvent, SessionSummary,
-    StateNotificationPayload, TimestampedEvent,
+    EventNotificationPayload, GroupSummary, HarnessInfo, Notification, Request, SessionEvent,
+    SessionSummary, StateNotificationPayload, TimestampedEvent,
 };
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -25,6 +25,7 @@ use std::io::{Stdout, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
 
 /// Which pane currently owns the keyboard. `View` covers both the transcript
 /// and the terminal renderer — when the view shows a PTY-backed session and
@@ -49,6 +50,10 @@ pub enum ListItem {
         group: GroupSummary,
         member_count: usize,
     },
+}
+
+fn is_list_visible_session(s: &SessionSummary) -> bool {
+    matches!(s.kind, agentd_protocol::SessionKind::User)
 }
 
 impl ListItem {
@@ -341,6 +346,8 @@ pub struct App {
     /// remote-WS deployment. `Some` while open, `None` otherwise.
     /// Dismissed with Esc the same way `tasks_popup` is.
     pub remote_control_popup: Option<RemoteControlPopup>,
+    pub remote_control_task:
+        Option<tokio::task::JoinHandle<(bool, Result<agentd_protocol::RemoteStartResult>)>>,
     /// Per-session input editor state, fed by `SessionEvent::EditorState`
     /// from the adapter (currently zarvis interactive). Drives the
     /// fixed bottom input pane.
@@ -380,6 +387,49 @@ pub struct App {
     pub selected_text: Option<String>,
     pub selected_text_bounds: Option<ratatui::layout::Rect>,
     pub selected_text_range: Option<TextSelectionRange>,
+    pty_input_tx: mpsc::UnboundedSender<PtyInputJob>,
+    pty_input_errors: mpsc::UnboundedReceiver<String>,
+}
+
+struct ReconnectState {
+    next_attempt: Instant,
+    backoff: Duration,
+}
+
+impl ReconnectState {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_attempt: now,
+            backoff: Duration::from_millis(250),
+        }
+    }
+
+    fn schedule_next(&mut self, now: Instant) {
+        self.next_attempt = now + self.backoff;
+        self.backoff = (self.backoff * 2).min(Duration::from_secs(5));
+    }
+}
+
+struct SessionHydration {
+    session_id: String,
+    transcript: Vec<TimestampedEvent>,
+    history: Option<crate::pty_render::ItemHistory>,
+    editor_state: Option<EditorState>,
+    agent_status: Option<agentd_protocol::AgentStatus>,
+    status_messages: Vec<String>,
+}
+
+struct SessionHydrationRequest {
+    socket: std::path::PathBuf,
+    session_id: String,
+    needs_history: bool,
+    terminal_pane_size: (u16, u16),
+}
+
+struct PtyInputJob {
+    session_id: String,
+    bytes: Vec<u8>,
+    label: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -424,6 +474,137 @@ fn format_elapsed(started_at_ms: i64) -> String {
     }
 }
 
+async fn load_session_hydration(req: SessionHydrationRequest) -> Result<SessionHydration> {
+    tokio::task::spawn_blocking(move || {
+        let mut status_messages = Vec::new();
+        let transcript: agentd_protocol::TranscriptResult = blocking_request(
+            &req.socket,
+            agentd_protocol::ipc_method::SESSION_TRANSCRIPT,
+            &agentd_protocol::TranscriptParams {
+                session_id: req.session_id.clone(),
+                from: 0,
+                limit: None,
+            },
+        )?;
+
+        let history = if req.needs_history {
+            let mut h = crate::pty_render::ItemHistory::new();
+            let pty: Result<agentd_protocol::PtyReplayResult> = blocking_request(
+                &req.socket,
+                agentd_protocol::ipc_method::SESSION_PTY_REPLAY,
+                &agentd_protocol::SessionIdParams {
+                    session_id: req.session_id.clone(),
+                },
+            );
+            match pty {
+                Ok(snap) => {
+                    let (cols, rows) = snap
+                        .size
+                        .as_ref()
+                        .map(|s| (s.cols, s.rows))
+                        .unwrap_or(req.terminal_pane_size);
+                    h.set_pty_size(cols, rows);
+                    use base64::Engine;
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&snap.data)
+                    {
+                        h.feed_pty(&bytes);
+                    }
+                }
+                Err(e) => status_messages.push(format!("pty_replay: {e}")),
+            }
+
+            let mut editor_state = None;
+            let mut agent_status = None;
+            if transcript
+                .events
+                .iter()
+                .any(|ev| matches!(ev.event, SessionEvent::Pty { .. }))
+            {
+                // New daemons persist PTY events in the transcript as ordering
+                // markers. Prefer rebuilding from those markers so transcript-only
+                // items (zarvis tool blocks) are interleaved with the raw bytes in
+                // chronological order. The pty_replay path above remains the
+                // fallback for older sessions whose transcripts do not contain PTY.
+                h.clear_items();
+            }
+            apply_transcript_to_local_state(
+                &transcript.events,
+                &mut h,
+                &mut editor_state,
+                &mut agent_status,
+            );
+            let (cols, rows) = req.terminal_pane_size;
+            let _ = h.replay(cols.max(1), rows.max(1), 0);
+            (Some(h), editor_state, agent_status)
+        } else {
+            (None, None, None)
+        };
+
+        Ok(SessionHydration {
+            session_id: req.session_id,
+            transcript: transcript.events,
+            history: history.0,
+            editor_state: history.1,
+            agent_status: history.2,
+            status_messages,
+        })
+    })
+    .await
+    .context("join session hydration worker")?
+}
+
+fn blocking_request<P, R>(socket: &std::path::Path, method: &str, params: &P) -> Result<R>
+where
+    P: serde::Serialize + ?Sized,
+    R: serde::de::DeserializeOwned,
+{
+    use anyhow::anyhow;
+    use std::io::{BufRead, Write};
+
+    let mut stream = std::os::unix::net::UnixStream::connect(socket)
+        .with_context(|| format!("connect {}", socket.display()))?;
+    let req = Request::new(
+        serde_json::json!(1),
+        method.to_string(),
+        Some(serde_json::to_value(params)?),
+    );
+    serde_json::to_writer(&mut stream, &req)?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut reader = std::io::BufReader::new(stream);
+    let mut line = String::new();
+    let n = reader.read_line(&mut line)?;
+    if n == 0 {
+        return Err(anyhow!("daemon disconnected"));
+    }
+    let resp: agentd_protocol::Response = serde_json::from_str(line.trim())?;
+    if let Some(err) = resp.error {
+        return Err(anyhow!("daemon error: {}", err.message));
+    }
+    Ok(serde_json::from_value(
+        resp.result.unwrap_or(serde_json::Value::Null),
+    )?)
+}
+
+fn spawn_pty_input_pump(
+    client: Arc<Client>,
+) -> (
+    mpsc::UnboundedSender<PtyInputJob>,
+    mpsc::UnboundedReceiver<String>,
+) {
+    let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+    let (err_tx, err_rx) = mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        while let Some(job) = rx.recv().await {
+            if let Err(e) = client.pty_input(&job.session_id, job.bytes).await {
+                let _ = err_tx.send(format!("{} failed: {e}", job.label));
+            }
+        }
+    });
+    (tx, err_rx)
+}
+
 /// State for the `/tasks` modal popup. v1 is read-only at the UI
 /// layer (Esc closes; clicks outside close); re-typing `/tasks`
 /// refreshes the snapshot.
@@ -444,6 +625,7 @@ pub struct TasksPopup {
 /// which is the fix for the "tunnel is warming up" UX trap.
 #[derive(Debug, Clone)]
 pub enum RemoteControlPopup {
+    Starting(RemoteControlOk),
     Ok(RemoteControlOk),
     Err {
         /// Which slash was invoked, so the title still reads
@@ -656,7 +838,13 @@ pub const SPINNER_FRAMES: [&str; 8] = ["✦", "✧", "✶", "✷", "✸", "✷",
 /// Duration of the session-switch visual transition.
 pub const SESSION_TRANSITION_MS: u128 = 200;
 
+#[allow(dead_code)]
 pub async fn run(client: Arc<Client>) -> Result<()> {
+    run_with_socket(client.socket_path().to_path_buf()).await
+}
+
+pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
+    let client = Client::connect(&socket).await?;
     let profile = Profile::from_env();
     let keymap = keymap::default_for(profile);
 
@@ -683,18 +871,20 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         .and_then(|id| {
             sessions
                 .iter()
-                .find(|s| s.id == *id && s.kind != agentd_protocol::SessionKind::Orchestrator)
+                .find(|s| s.id == *id && is_list_visible_session(s))
                 .map(|s| Selection::Session(s.id.clone()))
         })
         .or_else(|| {
             sessions
                 .iter()
-                .find(|s| s.kind != agentd_protocol::SessionKind::Orchestrator)
+                .find(|s| is_list_visible_session(s))
                 .map(|s| Selection::Session(s.id.clone()))
         })
         .unwrap_or(Selection::None);
 
     let now = Instant::now();
+    let socket = client.socket_path().to_path_buf();
+    let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
     let mut app = App {
         client: client.clone(),
         sessions,
@@ -726,6 +916,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         orchestrator_desired_size: None,
         tasks_popup: None,
         remote_control_popup: None,
+        remote_control_task: None,
         terminal_pane_size: (100, 30),
         zoom: initial_zoom,
         list_scroll_offset: 0,
@@ -762,6 +953,8 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
         selected_text: None,
         selected_text_bounds: None,
         selected_text_range: None,
+        pty_input_tx,
+        pty_input_errors,
     };
     if let Some(warning) = theme_warning {
         app.status = Some((warning, Instant::now()));
@@ -791,7 +984,7 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let result = run_loop(&mut terminal, &mut app).await;
+    let result = run_loop(&mut terminal, &mut app, socket).await;
 
     // Teardown — best effort.
     let _ = disable_raw_mode();
@@ -817,13 +1010,18 @@ pub async fn run(client: Arc<Client>) -> Result<()> {
     result
 }
 
-async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+async fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    socket: std::path::PathBuf,
+) -> Result<()> {
     let mut input_stream = EventStream::new();
     let mut notifications = app
         .client
         .take_notifications()
         .await
         .context("notifications channel already taken")?;
+    let mut reconnect: Option<ReconnectState> = None;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
 
@@ -845,9 +1043,65 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut A
     // without a SIGWINCH, so the focused session needs a fresh resize
     // every time it gains focus.
     let mut last_session_sent: Option<String> = None;
+    let mut hydration_session: Option<String> = None;
+    let mut hydration_task: Option<tokio::task::JoinHandle<Result<SessionHydration>>> = None;
     while !app.should_quit {
+        while let Ok(msg) = app.pty_input_errors.try_recv() {
+            app.set_status(msg);
+        }
+        if app.connected && app.client.is_disconnected() {
+            app.connected = false;
+            reconnect = Some(ReconnectState::new(Instant::now()));
+            app.set_status("daemon disconnected — reconnecting… (press q to quit)".to_string());
+        }
         app.prune_finished_transitions();
+        app.poll_remote_control_task().await;
+        if let Some(state) = reconnect.as_mut() {
+            let now = Instant::now();
+            if now >= state.next_attempt {
+                match app.reconnect(&socket).await {
+                    Ok(rx) => {
+                        notifications = rx;
+                        reconnect = None;
+                        last_size_sent = (0, 0);
+                        last_orch_sent = (0, 0);
+                        last_session_sent = None;
+                        hydration_session = None;
+                        if let Some(task) = hydration_task.take() {
+                            task.abort();
+                        }
+                    }
+                    Err(e) => {
+                        state.schedule_next(now);
+                        app.set_status(format!(
+                            "daemon disconnected — reconnecting… (press q to quit; last error: {e})"
+                        ));
+                    }
+                }
+            }
+        }
         terminal.draw(|f| ui::render(f, app))?;
+
+        // A session switch should stay interactive while history-sized
+        // work runs. Selection handlers only mark the transcript as
+        // stale; after the frame above has painted the new list highlight
+        // / placeholder view, start transcript + PTY hydration in the
+        // background. If the user switches again, abort the old task and
+        // discard any stale result.
+        let desired_hydration_session = app.selection.session_id().map(|s| s.to_string());
+        if hydration_session != desired_hydration_session {
+            if let Some(task) = hydration_task.take() {
+                task.abort();
+            }
+            hydration_session = None;
+        }
+        if app.selected_transcript_needs_refresh() && hydration_task.is_none() {
+            if let Some(req) = app.selected_hydration_request() {
+                hydration_session = Some(req.session_id.clone());
+                hydration_task = Some(tokio::spawn(load_session_hydration(req)));
+            }
+        }
+
         // Right pane (main session) resize — debounced fire. Also
         // refires if the *selected* session changed since last sent.
         let cur = app.terminal_pane_size;
@@ -890,6 +1144,21 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut A
             }
         }
         tokio::select! {
+            hydrated = async {
+                match hydration_task.as_mut() {
+                    Some(task) => task.await,
+                    None => futures::future::pending().await,
+                }
+            }, if hydration_task.is_some() => {
+                hydration_task = None;
+                hydration_session = None;
+                match hydrated {
+                    Ok(Ok(h)) => app.apply_session_hydration(h).await,
+                    Ok(Err(e)) => app.set_status(format!("load transcript: {e}")),
+                    Err(e) if e.is_cancelled() => {}
+                    Err(e) => app.set_status(format!("load transcript task failed: {e}")),
+                }
+            }
             ev = input_stream.next() => {
                 match ev {
                     Some(Ok(ev)) => {
@@ -977,15 +1246,13 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut A
                         }
                     }
                     None => {
-                        app.connected = false;
-                        // Spell out the recovery path: q quits, and
-                        // re-running `agent` reconnects. Without
-                        // this the user just sees "disconnected"
-                        // and may not realize they can press q to
-                        // get out cleanly (issue #101).
-                        app.set_status(
-                            "daemon disconnected — press q to quit (re-run `agent` to reconnect)".to_string(),
-                        );
+                        if app.connected {
+                            app.connected = false;
+                            reconnect = Some(ReconnectState::new(Instant::now()));
+                            app.set_status(
+                                "daemon disconnected — reconnecting… (press q to quit)".to_string(),
+                            );
+                        }
                     }
                 }
             }
@@ -1002,8 +1269,59 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut A
 }
 
 impl App {
+    async fn reconnect(
+        &mut self,
+        socket: &std::path::Path,
+    ) -> Result<mpsc::UnboundedReceiver<Notification>> {
+        let client = Client::connect(socket).await?;
+        client.subscribe(None).await?;
+        let notifications = client
+            .take_notifications()
+            .await
+            .context("notifications channel already taken")?;
+        let sessions = client.list().await.unwrap_or_default();
+        let groups = client.list_groups().await.unwrap_or_default();
+        let harnesses = client.harnesses().await.unwrap_or_default();
+        let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
+
+        self.client = client;
+        self.pty_input_tx = pty_input_tx;
+        self.pty_input_errors = pty_input_errors;
+        self.sessions = sessions;
+        self.groups = groups;
+        self.harnesses = harnesses;
+        self.connected = true;
+        self.ensure_selection_valid();
+        self.orchestrator_id = self
+            .sessions
+            .iter()
+            .find(|s| {
+                s.kind == agentd_protocol::SessionKind::Orchestrator && !s.state.is_terminal()
+            })
+            .map(|s| s.id.clone());
+        self.transcript_session = None;
+        self.refresh_selected_transcript().await;
+        self.ensure_pinned_parsers().await;
+        self.set_status("reconnected to daemon".to_string());
+        Ok(notifications)
+    }
+
     pub fn set_status(&mut self, msg: String) {
         self.status = Some((msg, Instant::now()));
+    }
+
+    fn queue_pty_input(&mut self, session_id: String, bytes: Vec<u8>, label: &'static str) {
+        if self
+            .pty_input_tx
+            .send(PtyInputJob {
+                session_id,
+                bytes,
+                label,
+            })
+            .is_err()
+        {
+            self.set_status(format!("{label} failed: input pump stopped"));
+        }
     }
 
     pub fn start_session_transition(&mut self) {
@@ -1022,7 +1340,15 @@ impl App {
             self.start_session_transition();
         }
         self.selection = Selection::Session(id);
+        self.transcript.clear();
         self.transcript_session = None;
+        self.transcript_scroll = u16::MAX;
+        self.view_scrollback = 0;
+        self.view = if self.selected_session().map(|s| s.has_pty).unwrap_or(false) {
+            ViewMode::Terminal
+        } else {
+            ViewMode::Transcript
+        };
     }
 
     pub fn select_group(&mut self, id: String) {
@@ -1063,6 +1389,60 @@ impl App {
         self.selected_session().map(|s| s.id.clone())
     }
 
+    fn selected_transcript_needs_refresh(&self) -> bool {
+        let Some(id) = self.selection.session_id() else {
+            return false;
+        };
+        self.transcript_session.as_deref() != Some(id)
+    }
+
+    fn selected_hydration_request(&self) -> Option<SessionHydrationRequest> {
+        let id = self.selection.session_id()?.to_string();
+        let needs_history = self
+            .selected_session()
+            .map(|s| s.has_pty && !self.histories.contains_key(&s.id))
+            .unwrap_or(false);
+        Some(SessionHydrationRequest {
+            socket: self.client.socket_path().to_path_buf(),
+            session_id: id,
+            needs_history,
+            terminal_pane_size: self.terminal_pane_size,
+        })
+    }
+
+    async fn apply_session_hydration(&mut self, hydration: SessionHydration) {
+        if self.selection.session_id() != Some(hydration.session_id.as_str()) {
+            return;
+        }
+
+        self.transcript = hydration.transcript;
+        self.transcript_session = Some(hydration.session_id.clone());
+        self.transcript_scroll = u16::MAX;
+
+        if let Some(history) = hydration.history {
+            self.histories.insert(hydration.session_id.clone(), history);
+            let (cols, rows) = self.terminal_pane_size;
+            let _ = self
+                .client
+                .pty_resize(&hydration.session_id, cols, rows)
+                .await;
+        }
+        if let Some(state) = hydration.editor_state {
+            self.editor_states
+                .insert(hydration.session_id.clone(), state);
+        }
+        if let Some(status) = hydration.agent_status {
+            self.agent_statuses
+                .insert(hydration.session_id.clone(), status);
+        }
+        if let Some(msg) = hydration.status_messages.last() {
+            self.set_status(msg.clone());
+        }
+        if self.selection.session_id() == Some(hydration.session_id.as_str()) {
+            self.start_session_transition();
+        }
+    }
+
     /// Materialize the rendered list: ungrouped sessions (sorted by
     /// position) on top, then groups in position order with each group's
     /// members indented underneath (skipped entirely when the group is
@@ -1076,8 +1456,10 @@ impl App {
             .iter()
             .filter(|s| s.group_id.is_none())
             // Hide the orchestrator from the list — it's rendered in
-            // the minibuffer instead.
+            // the minibuffer instead. Subagents are implementation
+            // details of their parent Zarvis task surface.
             .filter(|s| Some(s.id.as_str()) != orch_id)
+            .filter(|s| is_list_visible_session(s))
             .collect();
         ungrouped.sort_by(|a, b| {
             a.position
@@ -1098,6 +1480,7 @@ impl App {
                 .sessions
                 .iter()
                 .filter(|s| s.group_id.as_deref() == Some(g.id.as_str()))
+                .filter(|s| is_list_visible_session(s))
                 .collect();
             members.sort_by_key(|s| s.position);
             out.push(ListItem::GroupHeader {
@@ -1231,7 +1614,10 @@ impl App {
         let mut replayed_agent_status: Option<agentd_protocol::AgentStatus> = None;
         match self.client.transcript(id, 0, None).await {
             Ok(t) => {
-                if t.events.iter().any(|ev| matches!(ev.event, SessionEvent::Pty { .. })) {
+                if t.events
+                    .iter()
+                    .any(|ev| matches!(ev.event, SessionEvent::Pty { .. }))
+                {
                     // New daemons persist PTY events in the transcript as ordering
                     // markers. Prefer rebuilding from those markers so transcript-only
                     // items (zarvis tool blocks) are interleaved with the raw bytes in
@@ -1388,7 +1774,6 @@ impl App {
             ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
             ListItem::GroupHeader { group, .. } => self.select_group(group.id.clone()),
         }
-        self.refresh_selected_transcript().await;
     }
 
     /// After any list mutation, make sure `self.selection` still refers to
@@ -1439,7 +1824,9 @@ impl App {
                             self.agent_statuses.remove(&payload.session_id);
                             self.pty_activity.remove(&payload.session_id);
                             self.matrix_rain.forget_session(&payload.session_id);
-                            if Some(payload.session_id.as_str()) == self.transcript_session.as_deref() {
+                            if Some(payload.session_id.as_str())
+                                == self.transcript_session.as_deref()
+                            {
                                 self.transcript.clear();
                                 self.transcript_scroll = u16::MAX;
                             }
@@ -1480,8 +1867,7 @@ impl App {
                                 history.feed_pty(b);
                             }
                             // Mark the session as freshly active for the spinner.
-                            self.pty_activity
-                                .insert(payload.session_id.clone(), now);
+                            self.pty_activity.insert(payload.session_id.clone(), now);
                             // PTY-only harnesses (codex/claude in interactive
                             // mode, shell) don't emit structured ToolUse/Status
                             // events while working, so feed the matrix-rain
@@ -1665,9 +2051,8 @@ impl App {
             }
             m if m == agentd_protocol::ipc_notif::REMOTE_STATE => {
                 if let Some(p) = n.params {
-                    if let Ok(payload) = serde_json::from_value::<
-                        agentd_protocol::RemoteStateNotificationPayload,
-                    >(p)
+                    if let Ok(payload) =
+                        serde_json::from_value::<agentd_protocol::RemoteStateNotificationPayload>(p)
                     {
                         self.remote_clients = payload.clients;
                     }
@@ -1929,10 +2314,8 @@ impl App {
                     let delta = anchor_row as i32 - ev.row as i32;
                     let raw = (anchor_h as i32 + delta).max(MATRIX_RAIN_H_MIN as i32) as u16;
                     let available = self.matrix_rain_available_height().unwrap_or(raw);
-                    self.matrix_rain_h = Some(crate::ui::matrix_rain_panel_height(
-                        Some(raw),
-                        available,
-                    ));
+                    self.matrix_rain_h =
+                        Some(crate::ui::matrix_rain_panel_height(Some(raw), available));
                 } else if let Some(sel) = self.text_selection.as_mut() {
                     sel.head = ScreenPoint {
                         col: ev.column,
@@ -1943,11 +2326,10 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let was_resizing =
-                    self.resizing_list.is_some()
-                        || self.resizing_pin_strip.is_some()
-                        || self.resizing_orchestrator_panel.is_some()
-                        || self.resizing_matrix_rain.is_some();
+                let was_resizing = self.resizing_list.is_some()
+                    || self.resizing_pin_strip.is_some()
+                    || self.resizing_orchestrator_panel.is_some()
+                    || self.resizing_matrix_rain.is_some();
                 self.resizing_list = None;
                 self.resizing_pin_strip = None;
                 self.resizing_orchestrator_panel = None;
@@ -2058,13 +2440,7 @@ impl App {
             self.minibuffer.as_ref().map(|m| &m.intent),
             Some(MinibufferIntent::Orchestrator)
         );
-        selection_bounds_for_layout(
-            &self.layout,
-            pinned_count,
-            is_orchestrator_panel,
-            col,
-            row,
-        )
+        selection_bounds_for_layout(&self.layout, pinned_count, is_orchestrator_panel, col, row)
     }
 
     /// True if `(col, row)` sits on the main view's bottom border
@@ -2321,11 +2697,7 @@ impl App {
         url_hit_in_frame(&self.frame_text, col, row, bounds)
     }
 
-    fn url_click_bounds(
-        &self,
-        col: u16,
-        row: u16,
-    ) -> Option<ratatui::layout::Rect> {
+    fn url_click_bounds(&self, col: u16, row: u16) -> Option<ratatui::layout::Rect> {
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
         }
@@ -2557,12 +2929,15 @@ impl App {
         // of the list pane focus the list but do NOT count as a row
         // click — without this guard, clicks past the last visible
         // item would map to phantom indices when items overflow.
-        let items_area = self.layout.list_items_area.unwrap_or(ratatui::layout::Rect {
-            x: list.x,
-            y: list.y.saturating_add(1),
-            width: list.width,
-            height: list.height.saturating_sub(2),
-        });
+        let items_area = self
+            .layout
+            .list_items_area
+            .unwrap_or(ratatui::layout::Rect {
+                x: list.x,
+                y: list.y.saturating_add(1),
+                width: list.width,
+                height: list.height.saturating_sub(2),
+            });
         if row < items_area.y || row >= items_area.y + items_area.height {
             return;
         }
@@ -2593,7 +2968,6 @@ impl App {
         match &items[idx] {
             ListItem::Session { summary, .. } => {
                 self.select_session(summary.id.clone());
-                self.refresh_selected_transcript().await;
             }
             ListItem::GroupHeader { group, .. } => {
                 let id = group.id.clone();
@@ -2649,7 +3023,6 @@ impl App {
             }
             // Body click: select + drop focus into the view.
             self.select_session(id.clone());
-            self.refresh_selected_transcript().await;
             self.collapse_orchestrator_panel_on_focus_change();
             self.focus = PaneFocus::View;
             return;
@@ -2757,6 +3130,10 @@ impl App {
         // /tasks modal: Esc closes it; everything else falls through
         // (the popup itself is read-only at the keyboard layer in
         // v1 — mouse-only row interactions).
+        if !self.connected && matches!(key.code, KeyCode::Char('q')) {
+            self.should_quit = true;
+            return;
+        }
         if self.tasks_popup.is_some() {
             if matches!(key.code, KeyCode::Esc) {
                 self.tasks_popup = None;
@@ -2806,6 +3183,11 @@ impl App {
             return;
         }
 
+        if self.should_autofocus_view_from_list(key) {
+            self.collapse_orchestrator_panel_on_focus_change();
+            self.focus = PaneFocus::View;
+        }
+
         // When the PTY is capturing keystrokes (View focus + terminal mode +
         // session has a PTY), keys go straight to the child *unless* the user
         // is starting or continuing a `C-x` chord — those drive the keymap.
@@ -2818,7 +3200,7 @@ impl App {
                 self.chord_state = ChordState::default();
                 self.chord_label.clear();
                 if let Some(id) = self.selected_id() {
-                    let _ = self.client.pty_input(&id, vec![0x18]).await;
+                    self.queue_pty_input(id, vec![0x18], "pty_input");
                 }
                 return;
             }
@@ -2828,9 +3210,7 @@ impl App {
                 self.view_scrollback = 0;
                 if let Some(bytes) = encode_key_to_bytes(key) {
                     if let Some(id) = self.selected_id() {
-                        if let Err(e) = self.client.pty_input(&id, bytes).await {
-                            self.set_status(format!("pty_input failed: {e}"));
-                        }
+                        self.queue_pty_input(id, bytes, "pty_input");
                     }
                 }
                 return;
@@ -2851,6 +3231,10 @@ impl App {
 
     fn in_pty_session(&self) -> bool {
         self.selected_session().map(|s| s.has_pty).unwrap_or(false)
+    }
+
+    fn should_autofocus_view_from_list(&self, key: KeyEvent) -> bool {
+        should_autofocus_view_from_list(self.focus, self.zoom, self.chord_state.is_empty(), key)
     }
 
     /// True when keystrokes should be forwarded to the session's PTY by
@@ -3238,7 +3622,7 @@ impl App {
         if !self.chord_state.is_empty() && is_ctrl_x {
             self.chord_state = ChordState::default();
             self.chord_label.clear();
-            let _ = self.client.pty_input(&orch_id, vec![0x18]).await;
+            self.queue_pty_input(orch_id, vec![0x18], "orchestrator pty_input");
             return;
         }
         // Start of a chord or continuation: dispatch through the keymap.
@@ -3262,9 +3646,7 @@ impl App {
             // Typing into god snaps back to live output, matching the main
             // PTY pane's behavior.
             self.orchestrator_scrollback = 0;
-            if let Err(e) = self.client.pty_input(&orch_id, bytes).await {
-                self.set_status(format!("orchestrator pty_input: {e}"));
-            }
+            self.queue_pty_input(orch_id, bytes, "orchestrator pty_input");
         }
     }
 
@@ -3543,7 +3925,6 @@ impl App {
                                 .insert(id.clone(), crate::pty_render::ItemHistory::new());
                         }
                         self.select_session(id);
-                        self.refresh_selected_transcript().await;
                         self.focus = PaneFocus::View;
                     }
                     Err(e) => self.set_status(format!("create failed: {e}")),
@@ -3729,7 +4110,11 @@ impl App {
                 self.matrix_rain_hidden = !self.matrix_rain_hidden;
                 self.set_status(format!(
                     "matrix rain {}",
-                    if self.matrix_rain_hidden { "hidden" } else { "shown" }
+                    if self.matrix_rain_hidden {
+                        "hidden"
+                    } else {
+                        "shown"
+                    }
                 ));
             }
             "border" => {
@@ -3838,9 +4223,9 @@ impl App {
                         }
                     }
                     "" => self.set_status("agentd: subcommand required (e.g. `restart`)".into()),
-                    other => {
-                        self.set_status(format!("agentd: unknown subcommand '{other}'; try `restart`"))
-                    }
+                    other => self.set_status(format!(
+                        "agentd: unknown subcommand '{other}'; try `restart`"
+                    )),
                 }
             }
             other => self.set_status(format!("unknown command: {other}")),
@@ -3882,26 +4267,87 @@ impl App {
     /// returns the local `ws://127.0.0.1` URL immediately, never
     /// touches cloudflared. Useful for desktop-browser smoke tests
     /// and CI.
-    pub async fn open_remote_control_popup(
+    pub async fn open_remote_control_popup(&mut self, local_only: bool, password: Option<String>) {
+        if let Some(task) = self.remote_control_task.take() {
+            task.abort();
+        }
+        if local_only {
+            match self.client.remote_start(local_only, password).await {
+                Ok(r) => self.apply_remote_control_result(local_only, r, false),
+                Err(e) => {
+                    self.remote_control_popup = Some(RemoteControlPopup::Err {
+                        local_only,
+                        message: e.to_string(),
+                    });
+                }
+            }
+            return;
+        }
+
+        match self
+            .client
+            .remote_start_with_wait(false, password.clone(), false)
+            .await
+        {
+            Ok(r) => self.apply_remote_control_result(false, r, true),
+            Err(e) => {
+                self.remote_control_popup = Some(RemoteControlPopup::Err {
+                    local_only: false,
+                    message: e.to_string(),
+                });
+                return;
+            }
+        }
+
+        let client = self.client.clone();
+        self.remote_control_task = Some(tokio::spawn(async move {
+            let result = client.remote_start_with_wait(false, password, true).await;
+            (false, result)
+        }));
+    }
+
+    fn apply_remote_control_result(
         &mut self,
         local_only: bool,
-        password: Option<String>,
+        r: agentd_protocol::RemoteStartResult,
+        starting: bool,
     ) {
-        match self.client.remote_start(local_only, password).await {
-            Ok(r) => {
-                self.remote_control_popup = Some(RemoteControlPopup::Ok(RemoteControlOk {
-                    url: r.url,
-                    qr: r.qr,
-                    tunnel_ready: r.tunnel_ready,
-                    password: r.password,
-                    hint: r.hint,
-                    local_only,
-                }));
-            }
-            Err(e) => {
+        let ok = RemoteControlOk {
+            url: r.url,
+            qr: r.qr,
+            tunnel_ready: r.tunnel_ready,
+            password: r.password,
+            hint: r.hint,
+            local_only,
+        };
+        self.remote_control_popup = Some(if starting {
+            RemoteControlPopup::Starting(ok)
+        } else {
+            RemoteControlPopup::Ok(ok)
+        });
+    }
+
+    async fn poll_remote_control_task(&mut self) {
+        let Some(task) = self.remote_control_task.as_mut() else {
+            return;
+        };
+        let Some(joined) = task.now_or_never() else {
+            return;
+        };
+        self.remote_control_task = None;
+        match joined {
+            Ok((local_only, Ok(r))) => self.apply_remote_control_result(local_only, r, false),
+            Ok((local_only, Err(e))) => {
                 self.remote_control_popup = Some(RemoteControlPopup::Err {
                     local_only,
                     message: e.to_string(),
+                });
+            }
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => {
+                self.remote_control_popup = Some(RemoteControlPopup::Err {
+                    local_only: false,
+                    message: format!("remote-control task failed: {e}"),
                 });
             }
         }
@@ -3913,6 +4359,9 @@ impl App {
     /// was running to stop". Also auto-dismisses any open
     /// `/remote-control` popup since the URL it shows is now dead.
     pub async fn stop_remote_control(&mut self) {
+        if let Some(task) = self.remote_control_task.take() {
+            task.abort();
+        }
         match self.client.remote_stop().await {
             Ok(r) if r.was_running => {
                 self.remote_control_popup = None;
@@ -4100,13 +4549,12 @@ fn url_hit_in_frame(
     bounds: ratatui::layout::Rect,
 ) -> Option<UrlHit> {
     let (text, positions) = wrapped_text_with_positions(frame_text, bounds);
-    let idx = positions.iter().position(|p| p.col == col && p.row == row)?;
+    let idx = positions
+        .iter()
+        .position(|p| p.col == col && p.row == row)?;
     let (start, end, url) = url_range_at_col(&text, idx)?;
     let ranges = url_line_ranges(&positions[start..end]);
-    Some(UrlHit {
-        url,
-        ranges,
-    })
+    Some(UrlHit { url, ranges })
 }
 
 fn wrapped_text_with_positions(
@@ -4314,6 +4762,79 @@ mod tests {
         }
     }
 
+    fn test_app(client: Arc<Client>, sessions: Vec<SessionSummary>) -> App {
+        let now = Instant::now();
+        let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
+        App {
+            client,
+            sessions,
+            groups: Vec::new(),
+            selection: Selection::Session("s1".into()),
+            focus: PaneFocus::View,
+            transcript: Vec::new(),
+            transcript_session: None,
+            transcript_scroll: 0,
+            minibuffer: None,
+            harnesses: Vec::new(),
+            theme: crate::theme::Theme::default(),
+            help_visible: false,
+            profile: Profile::Emacs,
+            keymap: keymap::default_for(Profile::Emacs),
+            chord_state: ChordState::default(),
+            chord_label: String::new(),
+            status: None,
+            last_diff: None,
+            should_quit: false,
+            connected: true,
+            remote_clients: 0,
+            view: ViewMode::Terminal,
+            histories: HashMap::new(),
+            block_hits: HashMap::new(),
+            orchestrator_desired_size: None,
+            terminal_pane_size: (80, 24),
+            zoom: ZoomMode::None,
+            list_scroll_offset: 0,
+            view_scrollback: 0,
+            orchestrator_scrollback: 0,
+            orchestrator_panel_h: None,
+            resizing_orchestrator_panel: None,
+            pty_activity: HashMap::new(),
+            start_instant: now,
+            layout: LayoutSnapshot::default(),
+            mouse_pos: None,
+            mouse_capture_enabled: true,
+            orchestrator_id: None,
+            list_panel_w: LIST_PANEL_W_DEFAULT,
+            resizing_list: None,
+            pin_strip_h: None,
+            resizing_pin_strip: None,
+            matrix_rain_h: None,
+            resizing_matrix_rain: None,
+            list_collapsed: false,
+            tasks_popup: None,
+            remote_control_popup: None,
+            remote_control_task: None,
+            editor_states: HashMap::new(),
+            agent_statuses: HashMap::new(),
+            session_transition: None,
+            pin_transitions: HashMap::new(),
+            matrix_rain: crate::matrix_rain::MatrixRain::default(),
+            matrix_rain_intensity: 0.0,
+            matrix_rain_intensity_updated_at: now,
+            matrix_rain_foreground_epoch: now,
+            matrix_rain_active_drops: HashMap::new(),
+            matrix_rain_hidden: false,
+            hide_pane_side_borders: false,
+            frame_text: Vec::new(),
+            text_selection: None,
+            selected_text: None,
+            selected_text_bounds: None,
+            selected_text_range: None,
+            pty_input_tx,
+            pty_input_errors,
+        }
+    }
+
     #[test]
     fn selection_bounds_use_list_inner_area() {
         let bounds = selection_bounds_for_layout(&test_layout(), 0, false, 1, 1);
@@ -4323,6 +4844,269 @@ mod tests {
             selection_bounds_for_layout(&test_layout(), 0, false, 0, 1),
             None
         );
+    }
+
+    fn summary_with_kind(kind: agentd_protocol::SessionKind) -> SessionSummary {
+        SessionSummary {
+            id: "s1".into(),
+            harness: "shell".into(),
+            cwd: "/tmp".into(),
+            title: None,
+            state: agentd_protocol::SessionState::Running,
+            created_at: chrono::Utc::now(),
+            last_event_at: None,
+            cost_usd: None,
+            model: None,
+            worktree: None,
+            pending_input: false,
+            last_prompt: None,
+            event_count: 0,
+            has_pty: false,
+            mode: None,
+            pinned: false,
+            position: 0,
+            group_id: None,
+            last_pty_at_ms: None,
+            automode: false,
+            kind,
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnected_q_quits_even_when_pty_would_capture_keys() {
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("agentd.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            let _ = listener.accept().await;
+            futures::future::pending::<()>().await;
+        });
+
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut summary = summary_with_kind(agentd_protocol::SessionKind::User);
+        summary.has_pty = true;
+        let mut app = test_app(client, vec![summary]);
+        app.connected = false;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .await;
+
+        assert!(app.should_quit);
+        server.abort();
+    }
+
+    #[test]
+    fn only_user_sessions_are_visible_list_items() {
+        assert!(is_list_visible_session(&summary_with_kind(
+            agentd_protocol::SessionKind::User
+        )));
+        assert!(!is_list_visible_session(&summary_with_kind(
+            agentd_protocol::SessionKind::Orchestrator
+        )));
+        assert!(!is_list_visible_session(&summary_with_kind(
+            agentd_protocol::SessionKind::Subagent
+        )));
+    }
+
+    #[tokio::test]
+    async fn pty_typing_does_not_wait_for_input_rpc_response() {
+        use agentd_client::Client;
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+        use tokio::sync::{mpsc, Notify};
+
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("agentd.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let release_input = Arc::new(Notify::new());
+        let (input_seen_tx, mut input_seen_rx) = mpsc::unbounded_channel();
+        let release_for_server = release_input.clone();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                if method == ipc_method::SESSION_PTY_INPUT {
+                    let _ = input_seen_tx.send(());
+                    release_for_server.notified().await;
+                }
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": Value::Null,
+                });
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(
+            client,
+            vec![summary_with_kind(agentd_protocol::SessionKind::User)],
+        );
+        app.sessions[0].has_pty = true;
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            app.on_term_event(CtEvent::Key(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+            ))),
+        )
+        .await
+        .expect("typing should queue PTY input without waiting for daemon response");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), input_seen_rx.recv())
+            .await
+            .expect("mock daemon should receive queued PTY input")
+            .expect("pty input seen");
+        release_input.notify_waiters();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn background_hydration_does_not_block_primary_client_rpc() {
+        use agentd_client::Client;
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+        use tokio::sync::{mpsc, Notify};
+
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("agentd.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let release_transcript = Arc::new(Notify::new());
+        let (transcript_seen_tx, mut transcript_seen_rx) = mpsc::unbounded_channel();
+        let release_for_server = release_transcript.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let release = release_for_server.clone();
+                let transcript_seen_tx = transcript_seen_tx.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut reader = BufReader::new(reader);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        let Ok(n) = reader.read_line(&mut line).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+                            continue;
+                        };
+                        let id = req.get("id").cloned().unwrap_or(Value::Null);
+                        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                        let result = match method {
+                            ipc_method::PING => {
+                                serde_json::json!({"pong": true, "version": "test"})
+                            }
+                            ipc_method::SESSION_TRANSCRIPT => {
+                                let _ = transcript_seen_tx.send(());
+                                release.notified().await;
+                                let events: Vec<Value> = (0..2_000)
+                                    .map(|i| {
+                                        serde_json::json!({
+                                            "seq": i + 1,
+                                            "at": "2026-05-21T00:00:00Z",
+                                            "event": {
+                                                "type": "pty",
+                                                "data": base64::Engine::encode(
+                                                    &base64::engine::general_purpose::STANDARD,
+                                                    format!("line {i}\r\n")
+                                                )
+                                            }
+                                        })
+                                    })
+                                    .collect();
+                                serde_json::json!({"events": events, "total": 2_000})
+                            }
+                            ipc_method::SESSION_PTY_REPLAY => {
+                                serde_json::json!({"data": "", "size": {"cols": 80, "rows": 24}})
+                            }
+                            _ => Value::Null,
+                        };
+                        let resp = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": result,
+                        });
+                        if writer
+                            .write_all((resp.to_string() + "\n").as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        let client = Client::connect(&sock)
+            .await
+            .expect("primary client connects");
+        let hydration = tokio::spawn(load_session_hydration(SessionHydrationRequest {
+            socket: sock.clone(),
+            session_id: "s-big".to_string(),
+            needs_history: true,
+            terminal_pane_size: (80, 24),
+        }));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), transcript_seen_rx.recv())
+            .await
+            .expect("hydration transcript request should reach mock daemon")
+            .expect("transcript request marker");
+
+        let ping = tokio::time::timeout(std::time::Duration::from_millis(100), client.ping())
+            .await
+            .expect("primary client RPC should not wait for hydration transcript")
+            .expect("ping should succeed");
+        assert!(ping.pong);
+
+        release_transcript.notify_waiters();
+        let loaded = tokio::time::timeout(std::time::Duration::from_secs(2), hydration)
+            .await
+            .expect("hydration should finish")
+            .expect("hydration task should join")
+            .expect("hydration should succeed");
+        assert_eq!(loaded.session_id, "s-big");
+        assert_eq!(loaded.transcript.len(), 2_000);
+
+        server.abort();
     }
 
     /// REGRESSION: a TUI re-attaching to an existing zarvis session
@@ -4809,7 +5593,11 @@ fn encode_key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
                 Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
             }
         }
-        KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
+        KeyCode::Enter
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+        {
             Some(vec![b'\n'])
         }
         KeyCode::Enter => Some(vec![b'\r']),
@@ -4849,6 +5637,27 @@ fn encode_key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
     }
 }
 
+fn should_autofocus_view_from_list(
+    focus: PaneFocus,
+    zoom: ZoomMode,
+    chord_is_empty: bool,
+    key: KeyEvent,
+) -> bool {
+    if focus != PaneFocus::List || !matches!(zoom, ZoomMode::None) {
+        return false;
+    }
+    if !chord_is_empty {
+        return false;
+    }
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphabetic())
+}
+
 /// True when the just-handled input event should trigger the
 /// drag-coalesce drain (which calls `now_or_never` on the input
 /// stream, briefly poisoning crossterm's wake task). Only left-button
@@ -4868,7 +5677,10 @@ fn should_drain_after(ev: &CtEvent) -> bool {
 
 #[cfg(test)]
 mod drain_gate_tests {
-    use super::{should_drain_after, url_range_at_col, url_ranges};
+    use super::{
+        should_autofocus_view_from_list, should_drain_after, url_range_at_col, url_ranges,
+        PaneFocus, ZoomMode,
+    };
     use crossterm::event::{
         Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
         MouseButton, MouseEvent, MouseEventKind,
@@ -4906,6 +5718,93 @@ mod drain_gate_tests {
         assert!(!should_drain_after(&key(KeyCode::Enter)));
         assert!(!should_drain_after(&key(KeyCode::Esc)));
         assert!(!should_drain_after(&key(KeyCode::Backspace)));
+    }
+
+    fn autofocus_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    fn autofocus_key_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    #[test]
+    fn list_focus_plain_letters_autofocus_view_only_when_unzoomed() {
+        assert!(should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key(KeyCode::Char('a')),
+        ));
+        assert!(should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key(KeyCode::Char('Z')),
+        ));
+
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::List,
+            true,
+            autofocus_key(KeyCode::Char('a')),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::View,
+            true,
+            autofocus_key(KeyCode::Char('a')),
+        ));
+    }
+
+    #[test]
+    fn list_focus_autofocus_ignores_shortcuts_chords_and_non_letters() {
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::View,
+            ZoomMode::None,
+            true,
+            autofocus_key(KeyCode::Char('a')),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            false,
+            autofocus_key(KeyCode::Char('a')),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key_with_modifiers(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key_with_modifiers(KeyCode::Char('a'), KeyModifiers::ALT),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key(KeyCode::Char('1')),
+        ));
+        assert!(!should_autofocus_view_from_list(
+            PaneFocus::List,
+            ZoomMode::None,
+            true,
+            autofocus_key(KeyCode::Enter),
+        ));
     }
 
     #[test]

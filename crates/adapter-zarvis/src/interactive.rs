@@ -1734,17 +1734,20 @@ pub async fn run(
         tokio::sync::mpsc::unbounded_channel::<crate::tasks::BackgroundCompletion>();
     let bg_after = crate::tasks::bg_after_duration();
 
-    // Project-guide injection: assemble the full system prompt once
-    // here, then re-use across every provider.complete call. Read
-    // happens at session start (and on resume since we re-enter
-    // this function), not per turn — so edits to AGENTS.md mid-
-    // session aren't picked up until the session is reopened.
+    // Session-local prompt sections are built once here, then reused
+    // across every provider.complete call. Resume re-enters this
+    // function and refreshes them.
     let system_prompt: String = {
-        let base = crate::agent::system_prompt_for_env();
-        match crate::project_guide::format_section(&cwd) {
-            Some(section) => format!("{base}\n\n{section}"),
-            None => base.to_string(),
+        let mut prompt = crate::agent::system_prompt_for_env().to_string();
+        if let Some(section) = crate::project_guide::format_section(&cwd) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&section);
         }
+        if let Some(section) = crate::skills::format_section(&cwd) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&section);
+        }
+        prompt
     };
 
     let term = Terminal::new(&emit);
@@ -2322,6 +2325,17 @@ pub async fn run(
                 tokens_in: turn.usage.input_tokens,
                 tokens_out: turn.usage.output_tokens,
             });
+
+            if turn.is_empty() {
+                final_status = "Errored";
+                let msg = format!(
+                    "{} returned an empty response for model {}",
+                    provider_name, model
+                );
+                term.note(&format!("(provider error: {msg})"));
+                emit.emit(SessionEvent::Error { message: msg });
+                break;
+            }
 
             if turn.tool_calls.is_empty() {
                 if let Some(text) = turn.text {

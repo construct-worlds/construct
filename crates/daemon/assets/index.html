@@ -53,6 +53,8 @@
   html, body {
     margin: 0; padding: 0;
     height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
     background: var(--bg);
     color: var(--fg);
     font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
@@ -346,6 +348,50 @@
     overflow-x: auto;
   }
 
+  .editor-state {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 10px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-elev);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--fg);
+  }
+  .editor-state[hidden] { display: none; }
+  .editor-state .editor-row {
+    display: flex;
+    gap: 6px;
+    min-width: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .editor-state .editor-prompt { color: var(--accent); flex: 0 0 auto; }
+  .editor-state .editor-text { min-width: 0; }
+  .editor-state .editor-cursor {
+    display: inline-block;
+    width: 0.6ch;
+    background: var(--fg);
+    color: var(--bg);
+    animation: editor-cursor-blink 1s steps(1) infinite;
+  }
+  .editor-state .editor-queued { color: var(--fg-dim); }
+  .editor-state .editor-agent-status {
+    color: var(--fg-dim);
+    font-style: italic;
+  }
+  .editor-state .editor-agent-status::before { content: "* "; }
+  .editor-state .editor-completions {
+    color: var(--fg-faint);
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  @keyframes editor-cursor-blink { 50% { opacity: 0; } }
+
   .composer {
     flex: 0 0 auto;
     display: flex;
@@ -417,6 +463,9 @@
     min-height: 0;
     background: #000;
     position: relative;
+    overflow: hidden;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
     padding: 6px 0 0 6px;
     /* iOS safe-area inset on the right edge for landscape with notch. */
     padding-right: env(safe-area-inset-right);
@@ -424,6 +473,9 @@
   .terminal-host {
     width: 100%;
     height: 100%;
+    overflow: hidden;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
   }
   .terminal-host:focus,
   .terminal-host .xterm:focus { outline: none; }
@@ -431,6 +483,13 @@
   .terminal-host .xterm,
   .terminal-host .xterm .xterm-viewport,
   .terminal-host .xterm .xterm-screen { height: 100%; }
+  .terminal-host .xterm,
+  .terminal-host .xterm .xterm-viewport,
+  .terminal-host .xterm .xterm-screen,
+  .terminal-host .xterm .xterm-helpers {
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+  }
   .terminal-loading {
     position: absolute;
     inset: 0;
@@ -442,6 +501,40 @@
     pointer-events: none;
   }
   .terminal-loading.gone { display: none; }
+  .terminal-scroll-overlay {
+    position: absolute;
+    top: 8px;
+    right: calc(8px + env(safe-area-inset-right));
+    z-index: 5;
+    display: flex;
+    gap: 4px;
+    pointer-events: none;
+  }
+  .terminal-scroll-overlay[hidden] { display: none; }
+  .terminal-scroll-overlay button {
+    pointer-events: auto;
+    appearance: none;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 999px;
+    padding: 2px 6px;
+    background: rgba(0, 0, 0, 0.28);
+    color: rgba(255, 255, 255, 0.76);
+    font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    backdrop-filter: blur(4px);
+  }
+  .terminal-scroll-overlay button:hover,
+  .terminal-scroll-overlay button:focus-visible {
+    background: rgba(0, 0, 0, 0.48);
+    color: #fff;
+    outline: none;
+  }
+  .terminal-scroll-overlay button:active {
+    background: rgba(110, 168, 254, 0.42);
+    border-color: rgba(110, 168, 254, 0.7);
+  }
 
   /* Virtual keyboard — sits below the terminal in PTY mode.
      Two-section layout: a horizontally-scrolling special-keys
@@ -803,17 +896,29 @@
           1. transcript    — chat-mode content (zarvis / shell)
           2. terminal-wrap — PTY-mode content (codex / claude /
              zarvis interactive)
-          3. composer      — always visible; sends `session.input`
+          3. editor-state — Zarvis live editor mirror in terminal mode
+          4. composer      — always visible; sends `session.input`
              in both modes
-          4. vkbd          — terminal-mode virtual keyboard
+          5. vkbd          — terminal-mode virtual keyboard
         Mutual exclusion is via the `hidden` attribute set in
         `enterChatMode` / `enterTerminalMode`.
       -->
       <div class="transcript" id="transcript"></div>
       <div class="terminal-wrap" id="terminalWrap" hidden>
         <div class="terminal-host" id="terminal"></div>
+        <div class="terminal-scroll-overlay" id="terminalScrollOverlay" hidden>
+          <button type="button" id="terminalTopBtn" aria-label="scroll terminal to top">top</button>
+          <button type="button" id="terminalBottomBtn" aria-label="scroll terminal to bottom">bottom</button>
+        </div>
         <div class="terminal-loading" id="terminalLoading">loading xterm…</div>
       </div>
+      <!--
+        Zarvis interactive emits structured editor_state events instead
+        of echoing its live input buffer into PTY scrollback. Mirror that
+        state here so remote-control users can see virtual-keyboard and
+        composer-insert typing while terminal mode keeps transcript hidden.
+      -->
+      <div class="editor-state" id="editorState" hidden></div>
       <!--
         Composer: two submit-style buttons. "Insert" writes the
         textarea contents into the session as keystrokes — for
@@ -967,6 +1072,10 @@ const toggleListBtn = $("toggleList");
 const terminalWrapEl = $("terminalWrap");
 const terminalEl = $("terminal");
 const terminalLoadingEl = $("terminalLoading");
+const terminalScrollOverlayEl = $("terminalScrollOverlay");
+const terminalTopBtn = $("terminalTopBtn");
+const terminalBottomBtn = $("terminalBottomBtn");
+const editorStateEl = $("editorState");
 const vkbdEl = $("vkbd");
 const vkbdSpecialEl = $("vkbdSpecial");
 const vkbdMainEl = $("vkbdMain");
@@ -992,6 +1101,12 @@ const state = {
   // session_id so switching sessions is just a re-render of cached
   // events. Cleared on explicit `Reset` events from the adapter.
   byId: new Map(),
+  // Latest Zarvis editor_state by session id. Claude/Codex/shell do not
+  // emit this and continue to rely on their PTY UI echoing input.
+  editorById: new Map(),
+  // Latest active Zarvis agent_status by session id, rendered in the
+  // same fixed editor strip as the TUI's "* Working.." line.
+  agentStatusById: new Map(),
   // Current view mode — "chat" (headless transcript + composer)
   // or "terminal" (xterm.js mounted to a PTY-backed session). Set by
   // `selectSession` based on `has_pty` plus the session mode.
@@ -1340,6 +1455,8 @@ function enterChatMode() {
   transcriptEl.hidden = false;
   composerEl.hidden = false;
   terminalWrapEl.hidden = true;
+  terminalScrollOverlayEl.hidden = true;
+  renderEditorState(null);
   // Virtual keyboard only makes sense over xterm — chat sessions
   // have a text-style editor instead.
   vkbdEl.hidden = true;
@@ -1356,7 +1473,9 @@ async function enterTerminalMode(id) {
   // for committing a whole prompt at once.
   composerEl.hidden = false;
   terminalWrapEl.hidden = false;
+  terminalScrollOverlayEl.hidden = false;
   vkbdEl.hidden = false;
+  renderEditorStateForSession(id);
   // Build the keyboard markup once per session-switch; cheap, and
   // makes future per-session layout customization easy if it ever
   // becomes a thing.
@@ -1435,6 +1554,120 @@ function waitForXterm(timeoutMs) {
   });
 }
 
+function installTerminalScrollContainment() {
+  // Mobile browsers — especially iOS Safari while the native keyboard is
+  // open — sometimes chain a touch scroll that starts on xterm's viewport
+  // up to the page visual viewport. The page is a fixed app shell, so that
+  // rubber-bands the header/list/composer/vkbd instead of only scrolling the
+  // terminal buffer. CSS `overscroll-behavior` is not reliable for this case
+  // on iOS, so keep terminal touch scrolling fully local and drive xterm's
+  // scrollback ourselves with a small momentum scroller.
+  const stop = (ev) => ev.stopPropagation();
+  terminalEl.addEventListener("wheel", stop, { passive: true });
+
+  let active = false;
+  let lastY = 0;
+  let lastT = 0;
+  let velocity = 0;
+  let carryPx = 0;
+  let inertiaFrame = 0;
+  const stopInertia = () => {
+    if (inertiaFrame) cancelAnimationFrame(inertiaFrame);
+    inertiaFrame = 0;
+  };
+  const pxPerLine = () => {
+    if (!state.term || !state.term.rows) return 16;
+    return Math.max(8, terminalEl.clientHeight / state.term.rows);
+  };
+  const scrollPixels = (px) => {
+    if (!state.term) return;
+    carryPx += px;
+    const lineH = pxPerLine();
+    const lines = carryPx > 0 ? Math.floor(carryPx / lineH) : Math.ceil(carryPx / lineH);
+    if (lines !== 0) {
+      state.term.scrollLines(lines);
+      carryPx -= lines * lineH;
+    }
+  };
+  const beginInertia = () => {
+    stopInertia();
+    let prev = performance.now();
+    const tick = (now) => {
+      const dt = Math.min(32, now - prev);
+      prev = now;
+      scrollPixels(velocity * dt);
+      // Exponential-ish decay tuned to feel close to native inertial scroll
+      // without running forever at tiny sub-line velocities.
+      velocity *= Math.pow(0.95, dt / 16);
+      if (Math.abs(velocity) >= 0.02) inertiaFrame = requestAnimationFrame(tick);
+      else inertiaFrame = 0;
+    };
+    if (Math.abs(velocity) >= 0.02) inertiaFrame = requestAnimationFrame(tick);
+  };
+
+  terminalEl.addEventListener("touchstart", (ev) => {
+    if (ev.touches.length !== 1) return;
+    stopInertia();
+    active = true;
+    lastY = ev.touches[0].clientY;
+    lastT = performance.now();
+    velocity = 0;
+    carryPx = 0;
+    ev.stopPropagation();
+  }, { passive: true });
+
+  terminalEl.addEventListener("touchmove", (ev) => {
+    if (!active || ev.touches.length !== 1) return;
+    const y = ev.touches[0].clientY;
+    const now = performance.now();
+    const dy = lastY - y;
+    const dt = Math.max(1, now - lastT);
+    lastY = y;
+    lastT = now;
+    velocity = dy / dt;
+    scrollPixels(dy);
+    ev.preventDefault();
+    ev.stopPropagation();
+  }, { passive: false });
+
+  terminalEl.addEventListener("touchend", (ev) => {
+    if (!active) return;
+    active = false;
+    ev.stopPropagation();
+    beginInertia();
+  }, { passive: true });
+  terminalEl.addEventListener("touchcancel", () => {
+    active = false;
+    stopInertia();
+  }, { passive: true });
+
+  // Test hook: lets the web smoke assert the custom momentum scroller is
+  // installed without poking at browser-private event listener internals.
+  window.__agentdTerminalMomentumScroll = true;
+}
+
+function initTerminalScrollButtons() {
+  const stop = (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+  };
+  terminalTopBtn.addEventListener("click", (ev) => {
+    stop(ev);
+    if (state.term) state.term.scrollToTop();
+    state.term && state.term.focus();
+  });
+  terminalBottomBtn.addEventListener("click", (ev) => {
+    stop(ev);
+    if (state.term) state.term.scrollToBottom();
+    state.term && state.term.focus();
+  });
+  for (const btn of [terminalTopBtn, terminalBottomBtn]) {
+    btn.addEventListener("touchstart", (ev) => ev.stopPropagation(), { passive: true });
+    btn.addEventListener("touchmove", stop, { passive: false });
+  }
+  window.__agentdTerminalScrollButtons = true;
+}
+
 function initTerminal() {
   state.term = new window.Terminal({
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
@@ -1452,6 +1685,8 @@ function initTerminal() {
   state.fitAddon = new window.FitAddon.FitAddon();
   state.term.loadAddon(state.fitAddon);
   state.term.open(terminalEl);
+  installTerminalScrollContainment();
+  initTerminalScrollButtons();
 
   // Forward user keystrokes (and pasted text) as base64-encoded
   // PTY input. xterm's onData yields a JS string of UTF-8
@@ -1861,9 +2096,12 @@ function handleNotification(method, params) {
   } else if (method === "session/deleted") {
     state.sessions = state.sessions.filter((s) => s.id !== params.session_id);
     renderSessions();
+    state.editorById.delete(params.session_id);
+    state.agentStatusById.delete(params.session_id);
     if (params.session_id === state.currentId) {
       state.currentId = null;
       transcriptEl.innerHTML = "";
+      renderEditorState(null);
       sessionTitleEl.textContent = "";
       refreshListToolbar();
     }
@@ -1908,7 +2146,21 @@ function renderEvent(event, at) {
   // signals that wouldn't otherwise reach the terminal surface. The
   // PTY itself already paints the rest.
   if (state.mode === "terminal") {
-    if (event.type === "reset" && state.term) state.term.reset();
+    if (event.type === "editor_state") {
+      state.editorById.set(state.currentId, event);
+      renderEditorStateForSession(state.currentId);
+    }
+    if (event.type === "agent_status") {
+      if (event.active) state.agentStatusById.set(state.currentId, event);
+      else state.agentStatusById.delete(state.currentId);
+      renderEditorStateForSession(state.currentId);
+    }
+    if (event.type === "reset") {
+      if (state.term) state.term.reset();
+      state.editorById.delete(state.currentId);
+      state.agentStatusById.delete(state.currentId);
+      renderEditorState(null);
+    }
     if (event.type === "error" && state.term) {
       state.term.write(`\r\n\x1b[31m[error] ${event.message || ""}\x1b[0m\r\n`);
     }
@@ -1932,6 +2184,18 @@ function renderEvent(event, at) {
       break;
     case "reset":
       transcriptEl.innerHTML = "";
+      state.editorById.delete(state.currentId);
+      state.agentStatusById.delete(state.currentId);
+      renderEditorState(null);
+      break;
+    case "editor_state":
+      state.editorById.set(state.currentId, event);
+      renderEditorStateForSession(state.currentId);
+      break;
+    case "agent_status":
+      if (event.active) state.agentStatusById.set(state.currentId, event);
+      else state.agentStatusById.delete(state.currentId);
+      renderEditorStateForSession(state.currentId);
       break;
     case "tool_approval_request":
       // Render as a tool-use card; v1 doesn't yet implement
@@ -1939,7 +2203,7 @@ function renderEvent(event, at) {
       // already useful signal.
       appendToolApproval(event);
       break;
-    // Quietly ignore: editor_state, agent_status, cost, task_*,
+    // Quietly ignore: cost, task_*,
     // context_compacted, diff, awaiting_input, done. These map
     // onto richer chrome in the desktop TUI; Phase 2 surfaces
     // only message + tool + raw PTY. A small "(<type>)" line on
@@ -1948,6 +2212,56 @@ function renderEvent(event, at) {
       // Skip silently.
       break;
   }
+}
+
+function renderEditorStateForSession(id) {
+  renderEditorState(state.editorById.get(id) || null, state.agentStatusById.get(id) || null);
+}
+
+function renderEditorState(event, agentStatus = null) {
+  if ((!event && !agentStatus) || state.mode !== "terminal") {
+    editorStateEl.hidden = true;
+    editorStateEl.innerHTML = "";
+    return;
+  }
+  const queued = Array.isArray(event && event.queued) ? event.queued : [];
+  const completions = Array.isArray(event && event.completions) ? event.completions : [];
+  const buf = String((event && event.buf) || "");
+  const cursor = Math.max(0, Math.min(Number((event && event.cursor) || 0), Array.from(buf).length));
+  const active = editorLineHtml("❯", buf, cursor, false);
+  const queuedRows = queued.map((q) => editorLineHtml("↥", String(q), null, true)).join("");
+  const statusRow = agentStatus && agentStatus.active
+    ? `<div class="editor-agent-status">${escape(agentStatus.status || "Working")}.. ${escape(formatElapsed(agentStatus.started_at_ms || 0))}</div>`
+    : "";
+  const completionRow = completions.length
+    ? `<div class="editor-completions">${escape(completions.join("  "))}</div>`
+    : "";
+  editorStateEl.innerHTML = statusRow + queuedRows + active + completionRow;
+  editorStateEl.hidden = false;
+}
+
+function formatElapsed(startedAtMs) {
+  const start = Number(startedAtMs) || 0;
+  if (start <= 0) return "0s";
+  const elapsed = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  return mins > 0 ? `${mins}m${String(secs).padStart(2, "0")}s` : `${secs}s`;
+}
+
+function editorLineHtml(prompt, text, cursor, queued) {
+  const chars = Array.from(text);
+  let body;
+  if (cursor == null) {
+    body = escape(text);
+  } else {
+    const before = chars.slice(0, cursor).join("");
+    const at = chars[cursor] || " ";
+    const after = chars.slice(cursor + 1).join("");
+    body = `${escape(before)}<span class="editor-cursor">${escape(at)}</span>${escape(after)}`;
+  }
+  const cls = queued ? "editor-row editor-queued" : "editor-row";
+  return `<div class="${cls}"><span class="editor-prompt">${escape(prompt)}</span><span class="editor-text">${body}</span></div>`;
 }
 
 function appendMessage(role, text) {
@@ -2478,11 +2792,17 @@ function syncBodyHeightToVisualViewport() {
   // Direct style override of the CSS `height: 100%` rule. The
   // existing rule re-applies as soon as we clear this when the
   // keyboard hides (visualViewport.height === innerHeight).
+  document.documentElement.style.height = `${h}px`;
   document.body.style.height = `${h}px`;
+  // Some mobile browsers keep a non-zero page scroll offset after the
+  // keyboard shifts the visual viewport. Resetting it keeps the app shell
+  // anchored; terminal scrollback remains inside xterm's own viewport.
+  if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
 }
 
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", syncBodyHeightToVisualViewport);
+  window.visualViewport.addEventListener("scroll", syncBodyHeightToVisualViewport);
   // Run once at boot to handle the case where the page is loaded
   // with an already-open keyboard (rare but possible after
   // page-refresh while focused).
