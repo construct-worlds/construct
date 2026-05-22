@@ -1347,28 +1347,10 @@ impl App {
 
     fn update_browser_preview_hover_and_expiry(&mut self) {
         let now = Instant::now();
-        let Some((mx, my)) = self.mouse_pos else {
-            self.browser_previews
-                .retain(|_, state| now < state.hide_after);
-            return;
-        };
-        let hovered_session = match self.layout.browser_preview_area {
-            Some(area)
-                if mx >= area.x
-                    && mx < area.x + area.width
-                    && my >= area.y
-                    && my < area.y + area.height => self.selected_id(),
-            _ => None,
-        };
-        let hovered_session = hovered_session.as_deref();
-        self.browser_previews.retain(|sid, state| {
-            if Some(sid.as_str()) == hovered_session {
-                state.hover_started.get_or_insert(now);
+        self.browser_previews.retain(|_, state| {
+            if state.hover_started.is_some() {
                 true
             } else {
-                if state.hover_started.take().is_some() {
-                    state.hide_after = now + Duration::from_secs(5);
-                }
                 now < state.hide_after
             }
         });

@@ -2179,6 +2179,32 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
         render_browser_preview_overlay(f, chat_area, &app.theme, app.mouse_pos, preview.as_ref());
     app.layout.browser_preview_area = preview_area;
     app.layout.browser_preview_close = preview_close;
+
+    // Update hover state immediately during rendering to feel extremely premium and lag-free,
+    // mirroring how other tooltips do mouse-coordinate checks in real-time.
+    if let Some(area) = preview_area {
+        let now = Instant::now();
+        if let Some((mx, my)) = app.mouse_pos {
+            if mx >= area.x && mx < area.x + area.width && my >= area.y && my < area.y + area.height {
+                if let Some(state) = app.browser_previews.get_mut(&id) {
+                    state.hover_started.get_or_insert(now);
+                }
+            } else {
+                if let Some(state) = app.browser_previews.get_mut(&id) {
+                    if state.hover_started.take().is_some() {
+                        state.hide_after = now + Duration::from_secs(5);
+                    }
+                }
+            }
+        } else {
+            if let Some(state) = app.browser_previews.get_mut(&id) {
+                if state.hover_started.take().is_some() {
+                    state.hide_after = now + Duration::from_secs(5);
+                }
+            }
+        }
+    }
+
     app.block_hits.insert(
         id,
         translate_block_hits(out.blocks, row_offset, chat_area.height),
