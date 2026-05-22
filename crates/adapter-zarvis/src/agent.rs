@@ -177,15 +177,19 @@ pub async fn run(
     let registry = Arc::new(ToolRegistry::with_defaults());
     let specs = registry.specs();
 
-    // Project-guide injection — same pattern as the interactive
-    // path. Built once at session start; appended to the base
-    // system prompt under a "## Project guide" section.
+    // Session-local prompt sections are built once at session start;
+    // resume re-enters this function and refreshes them.
     let system_prompt: String = {
-        let base = system_prompt_for_env();
-        match crate::project_guide::format_section(&cwd) {
-            Some(section) => format!("{base}\n\n{section}"),
-            None => base.to_string(),
+        let mut prompt = system_prompt_for_env().to_string();
+        if let Some(section) = crate::project_guide::format_section(&cwd) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&section);
         }
+        if let Some(section) = crate::skills::format_section(&cwd) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&section);
+        }
+        prompt
     };
 
     let provider_name = spec.provider_name();
