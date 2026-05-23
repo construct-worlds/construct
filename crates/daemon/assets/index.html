@@ -1199,6 +1199,8 @@ const state = {
   approvalShown: null,
 };
 
+const LARGE_TEXT_PASTE_CHARS = 16 * 1024;
+
 function initMiniMatrix() {
   const canvas = miniMatrixEl;
   const ctx = canvas && canvas.getContext ? canvas.getContext("2d") : null;
@@ -2861,9 +2863,84 @@ inputEl.addEventListener("input", () => {
   resetInputHeight();
 });
 
+inputEl.addEventListener("paste", (ev) => {
+  handleComposerPaste(ev).catch((e) => appendError(`paste failed: ${e.message}`));
+});
+
 function resetInputHeight() {
   inputEl.style.height = "auto";
   inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.3) + "px";
+}
+
+async function handleComposerPaste(ev) {
+  if (!state.currentId || !state.ws || state.ws.readyState !== 1) return;
+  const items = Array.from((ev.clipboardData && ev.clipboardData.items) || []);
+  const clipboardFiles = Array.from((ev.clipboardData && ev.clipboardData.files) || []);
+  const files = items
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+  if (files.length === 0) files.push(...clipboardFiles);
+  if (files.length > 0) {
+    ev.preventDefault();
+    const refs = [];
+    for (const file of files) refs.push(await attachClipboardFile(file));
+    insertComposerText(refs.join(" "));
+    return;
+  }
+
+  const text = ev.clipboardData && ev.clipboardData.getData("text/plain");
+  if (text && text.length >= LARGE_TEXT_PASTE_CHARS) {
+    ev.preventDefault();
+    const ref = await attachClipboardBytes({
+      bytes: new TextEncoder().encode(text),
+      filename: "clipboard.txt",
+      mime: "text/plain",
+    });
+    insertComposerText(ref);
+  }
+}
+
+async function attachClipboardFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return attachClipboardBytes({
+    bytes,
+    filename: file.name || "clipboard",
+    mime: file.type || null,
+  });
+}
+
+async function attachClipboardBytes({ bytes, filename, mime }) {
+  const result = await rpc("session.attach_clipboard", {
+    session_id: state.currentId,
+    data: bytesToBase64(bytes),
+    filename,
+    mime,
+  });
+  return result.reference || `[#file:${result.path}]`;
+}
+
+function insertComposerText(text) {
+  const start = inputEl.selectionStart ?? inputEl.value.length;
+  const end = inputEl.selectionEnd ?? start;
+  const before = inputEl.value.slice(0, start);
+  const after = inputEl.value.slice(end);
+  const prefix = before && !/\s$/.test(before) ? " " : "";
+  const suffix = after && !/^\s/.test(after) ? " " : "";
+  const insert = `${prefix}${text}${suffix}`;
+  inputEl.value = before + insert + after;
+  const pos = before.length + insert.length;
+  inputEl.setSelectionRange(pos, pos);
+  resetInputHeight();
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
 function currentSessionHasPty() {

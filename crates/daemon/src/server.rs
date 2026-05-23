@@ -7,11 +7,11 @@ use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
     ipc_method, ipc_notif, transport, CreateSessionParams, ErrorObject, GroupCreateParams,
     GroupCreateResult, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
-    GroupSetCollapsedParams, Notification, PingResult, Request, Response, SessionIdParams,
-    SessionInputParams, SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams,
-    SessionSetAutomodeParams, SessionSetGroupParams, SessionSetPinnedParams,
-    SessionSetTitleParams, SessionToolActionParams, SessionToolDecisionParams, SubscribeParams,
-    TranscriptParams, IPC_VERSION,
+    GroupSetCollapsedParams, Notification, PingResult, Request, Response,
+    SessionAttachClipboardParams, SessionIdParams, SessionInputParams, SessionMoveParams,
+    SessionPtyInputParams, SessionPtyResizeParams, SessionSetAutomodeParams, SessionSetGroupParams,
+    SessionSetPinnedParams, SessionSetTitleParams, SessionToolActionParams,
+    SessionToolDecisionParams, SubscribeParams, TranscriptParams, IPC_VERSION,
 };
 use anyhow::{Context, Result};
 use futures::{SinkExt as _, StreamExt as _};
@@ -943,6 +943,13 @@ async fn dispatch(
             let p = params!(SessionInputParams);
             match manager.send_input(&p.session_id, p.text).await {
                 Ok(()) => Response::ok(id.clone(), serde_json::Value::Null),
+                Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
+            }
+        }
+        m if m == ipc_method::SESSION_ATTACH_CLIPBOARD => {
+            let p = params!(SessionAttachClipboardParams);
+            match manager.attach_clipboard(p).await {
+                Ok(result) => ok!(&result),
                 Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
             }
         }
