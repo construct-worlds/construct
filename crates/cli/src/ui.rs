@@ -3919,23 +3919,40 @@ fn vt100_color(c: vt100::Color) -> Option<Color> {
 /// bytes within the quiescence window, otherwise the session's static
 /// lifecycle glyph.
 fn session_status_glyph(app: &App, s: &SessionSummary) -> &'static str {
-    if session_should_animate_status(s, app.pty_active(&s.id)) {
+    // `agent_statuses` only holds entries while a turn is active (the live
+    // handler removes them on the `active=false` turn-end event), so a
+    // present, active entry means zarvis is working right now.
+    let agent_active = app
+        .agent_statuses
+        .get(&s.id)
+        .map(|st| st.active)
+        .unwrap_or(false);
+    if session_should_animate_status(s, app.pty_active(&s.id), agent_active) {
         app.spinner_frame()
     } else {
         s.state.glyph()
     }
 }
 
-fn session_should_animate_status(s: &SessionSummary, pty_active: bool) -> bool {
+fn session_should_animate_status(s: &SessionSummary, pty_active: bool, agent_active: bool) -> bool {
     if !matches!(s.state, SessionState::Running) {
         return false;
     }
-    // Shell and PTY-only harnesses can remain in `Running` while idle,
-    // so they still need the short PTY-activity gate. Zarvis has an
-    // explicit Running/AwaitingInput turn boundary and often works via
-    // structured tool/status events without PTY bytes, so `Running`
-    // itself means the session should visibly animate.
-    pty_active || s.harness == "zarvis"
+    // Zarvis reports an explicit agent-turn signal (`AgentStatus`):
+    // active=true at turn start, active=false at every turn end. A zarvis
+    // session can linger in `Running` while idle (e.g. an interrupted turn
+    // that returned without flipping back to AwaitingInput), so animate
+    // strictly while that turn is active — not merely because the
+    // lifecycle state reads `Running`. Animating on `Running` alone was
+    // the bug: an idle session kept spinning.
+    //
+    // Shell / PTY-only harnesses have no agent-status signal and also sit
+    // in `Running` while idle, so they keep the short PTY-activity gate.
+    if s.harness == "zarvis" {
+        agent_active
+    } else {
+        pty_active
+    }
 }
 
 fn state_style(theme: &Theme, state: SessionState) -> Style {
@@ -5067,24 +5084,33 @@ mod tests {
     }
 
     #[test]
-    fn zarvis_running_status_animates_without_recent_pty() {
+    fn zarvis_running_animates_only_while_agent_active() {
         let mut s = summary_with_mode("zarvis", Some("interactive"));
         s.state = SessionState::Running;
-        assert!(session_should_animate_status(&s, false));
+        // Mid-turn: agent active → animate, even with no recent PTY bytes.
+        assert!(session_should_animate_status(&s, false, true));
+        // Running but the turn has ended (agent inactive) → stay static,
+        // even though the lifecycle state still reads Running. This is the
+        // idle-zarvis regression: PR #179 spun the glyph here.
+        assert!(!session_should_animate_status(&s, false, false));
+        assert!(!session_should_animate_status(&s, true, false));
     }
 
     #[test]
-    fn shell_running_status_stays_static_without_recent_pty() {
+    fn shell_running_status_uses_pty_activity_gate() {
         let mut s = summary_with_mode("shell", None);
         s.state = SessionState::Running;
-        assert!(!session_should_animate_status(&s, false));
-        assert!(session_should_animate_status(&s, true));
+        // Shell has no agent-status signal; gate on recent PTY bytes
+        // (agent_active is irrelevant for non-zarvis harnesses).
+        assert!(!session_should_animate_status(&s, false, false));
+        assert!(session_should_animate_status(&s, true, false));
     }
 
     #[test]
-    fn awaiting_input_status_stays_static_for_zarvis() {
+    fn awaiting_input_status_stays_static() {
         let mut s = summary_with_mode("zarvis", Some("interactive"));
         s.state = SessionState::AwaitingInput;
-        assert!(!session_should_animate_status(&s, true));
+        // Not Running → never animates, regardless of activity signals.
+        assert!(!session_should_animate_status(&s, true, true));
     }
 }
