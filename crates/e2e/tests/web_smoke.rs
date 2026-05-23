@@ -130,6 +130,53 @@ async fn web_client_loads_and_websocket_connects() {
         "expected 'session(s)' in rendered body, got:\n{body}"
     );
 
+    // Connection state is rendered as a tiny matrix canvas rather than
+    // a static "connected" text label. The accessible label remains
+    // for screen readers.
+    let mini_matrix: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const canvas = document.getElementById('miniMatrix');
+              const headerTitle = document.querySelector('header .title');
+              const conn = document.getElementById('conn');
+              const rect = canvas ? canvas.getBoundingClientRect() : null;
+              return {
+                tag: canvas ? canvas.tagName : null,
+                label: canvas ? canvas.getAttribute('aria-label') : null,
+                role: canvas ? canvas.getAttribute('role') : null,
+                connState: conn ? conn.dataset.state : null,
+                connLabel: conn ? conn.getAttribute('aria-label') : null,
+                visibleConnText: conn ? conn.textContent.trim() : null,
+                width: rect ? rect.width : 0,
+                height: rect ? rect.height : 0,
+                hasStaticTitle: !!headerTitle,
+                painted: canvas
+                  ? Array.from(canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data)
+                      .some((v, i) => (i % 4 === 3) && v > 0)
+                  : false,
+              };
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate mini matrix")
+        .into_value()
+        .expect("json");
+    assert_eq!(mini_matrix["tag"], "CANVAS");
+    assert_eq!(mini_matrix["label"], "agentd connected");
+    assert_eq!(mini_matrix["role"], "img");
+    assert_eq!(mini_matrix["connState"], "open");
+    assert_eq!(mini_matrix["connLabel"], "connected");
+    assert_eq!(mini_matrix["visibleConnText"], "");
+    assert_eq!(mini_matrix["hasStaticTitle"], false);
+    assert!(
+        mini_matrix["width"].as_f64().unwrap_or_default() >= 40.0
+            && mini_matrix["height"].as_f64().unwrap_or_default() >= 16.0,
+        "mini matrix should have visible dimensions, got {mini_matrix:?}"
+    );
+    assert_eq!(mini_matrix["painted"], true);
+
     // Page-level sanity: the bundled xterm.js was loaded (i.e.
     // the embedded `/t/<token>/static/xterm.js` request
     // succeeded). The web client puts `Terminal` on `window` as
