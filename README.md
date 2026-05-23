@@ -1,6 +1,11 @@
 # agentd
 
-A terminal **agent fleet** — run and supervise multiple coding-agent sessions across heterogeneous harnesses (Claude Code, Codex, generic shell, ...) from one TUI.
+**Run a fleet of coding agents from one terminal.**
+
+`agentd` is a local agent supervisor and TUI for launching, watching, steering,
+and composing multiple AI coding sessions at once. Keep Claude Code, Codex,
+zarvis, shell tasks, and future harnesses in one persistent workspace instead of
+juggling terminals, tabs, transcripts, and background processes by hand.
 
 Status: **early — M2 (PTY mode) just landed. Wire protocols may still break.**
 
@@ -17,6 +22,124 @@ Status: **early — M2 (PTY mode) just landed. Wire protocols may still break.**
 │ agentd  [emacs]  sc4d20bd24  done  -    ? for help                   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+## Why agentd?
+
+Modern development often means asking several agents to investigate, edit, test,
+review, or monitor the same project. `agentd` turns that from a pile of orphaned
+CLI windows into a managed fleet:
+
+- **One cockpit for every agent** — attach to Claude Code, Codex, zarvis, or a
+  shell process from a single terminal UI.
+- **Persistent sessions** — transcripts, PTY scrollback, status, cwd, and resume
+  metadata live in the daemon instead of disappearing with your terminal.
+- **Parallel work without losing control** — spawn helper sessions, pin important
+  work, interrupt stuck runs, inspect diffs, and send follow-up input mid-turn.
+- **Native PTY mode** — interactive CLIs render as themselves inside the right
+  pane, including slash commands and upstream TUIs.
+- **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
+  output, spawn helpers, send input, inspect diffs, and drive Chrome.
+- **Extensible harness protocol** — adapters are separate processes speaking
+  JSON-RPC over stdio, so new tools can plug in without changing the daemon.
+
+## What you can do with it
+
+- Launch a Claude session, a Codex session, and a shell test watcher side by side.
+- Ask zarvis to browse, inspect files, run commands, and coordinate other sessions.
+- Keep a long-running agent alive across client exits and daemon restarts.
+- Review each session's live transcript, raw PTY output, and git diff from the TUI.
+- Use worktree isolation for experimental changes.
+- Give MCP-capable agents controlled access to browser automation and daemon
+  control tools.
+
+## Getting started
+
+### 1. Build
+
+```sh
+git clone https://github.com/zarvis-ai/agentd.git
+cd agentd
+cargo build --workspace
+```
+
+Debug binaries land in `target/debug/`:
+
+- `target/debug/agentd` — daemon / session supervisor
+- `target/debug/agent` — terminal UI and control CLI
+- `target/debug/agentd-mcp` — MCP bridge for agents
+- `target/debug/agentd-adapter-*` — harness adapters
+
+For an optimized build, use `cargo build --workspace --release` and replace
+`target/debug` with `target/release` below.
+
+### 2. Start the daemon
+
+```sh
+./target/debug/agentd run
+```
+
+Leave this running. It owns sessions, persists state, and exposes the local IPC
+socket used by clients.
+
+### 3. Create your first sessions
+
+In another terminal:
+
+```sh
+./target/debug/agent harnesses
+./target/debug/agent new shell "echo hello from agentd"
+./target/debug/agent new shell "while true; do date; sleep 5; done"
+./target/debug/agent list
+```
+
+If you have Claude Code or Codex installed and authenticated, try:
+
+```sh
+./target/debug/agent new claude "inspect this repo and suggest a first issue"
+./target/debug/agent new codex "summarize the workspace structure"
+```
+
+### 4. Open the fleet TUI
+
+```sh
+./target/debug/agent
+```
+
+Useful defaults:
+
+- `?` — help
+- `M-x` — command palette
+- `Enter` — send input to the selected session
+- `C-c` / interrupt command — stop the selected session's current work
+- emacs keymap by default; set `AGENTD_KEYMAP=vim` for vim-style bindings
+
+### 5. Try the built-in zarvis agent
+
+`zarvis` ships with agentd and talks directly to OpenAI, Anthropic, or local
+Ollama — no vendor CLI required.
+
+```sh
+# Pick one provider, or run local Ollama at http://localhost:11434
+export ANTHROPIC_API_KEY=sk-ant-...
+# export OPENAI_API_KEY=sk-...
+
+./target/debug/agent new zarvis "list the Rust crates and explain what each one does"
+```
+
+## Core capabilities
+
+| Capability | Benefit |
+|---|---|
+| Multi-harness sessions | Use Claude Code, Codex, zarvis, and shell workflows together. |
+| PTY + headless modes | Keep full upstream TUIs when you want them; use structured event streams for automation. |
+| Persistent daemon | Close clients without killing work; retain transcripts and scrollback. |
+| Resume support | Reattach Claude/Codex/zarvis sessions after daemon restarts where the harness supports it. |
+| Worktree isolation | Let agents edit safely in separate git worktrees. |
+| Diff panel | See what a session changed without leaving the TUI. |
+| MCP bridge | Give agents controlled tools to coordinate the fleet and browse. |
+| Browser automation | Open, inspect, screenshot, and evaluate pages through Chrome DevTools. |
+| Command palette + keymaps | Every action is command-driven; use emacs or vim profiles. |
+| Theme config | Customize the Matrix-inspired TUI colors. |
 
 ## Architecture
 
@@ -53,22 +176,7 @@ Five layers, each replaceable:
 | `crates/adapter-codex` | `agentd-adapter-codex` | Wraps the `codex` CLI |
 | `crates/adapter-zarvis` | `agentd-adapter-zarvis` | Built-in multi-provider agent (OpenAI / Anthropic / Ollama) |
 
-## Quick start
-
-```sh
-cargo build --workspace --release
-
-# Terminal 1: daemon (foreground)
-./target/release/agentd run
-
-# Terminal 2: control
-./target/release/agent harnesses
-./target/release/agent new shell "echo hello"
-./target/release/agent list
-./target/release/agent          # launches TUI
-```
-
-Smoke test:
+## Smoke test
 
 ```sh
 cargo build --workspace
