@@ -283,6 +283,15 @@ pub struct App {
     /// decreased by mouse-wheel down. Reset to 0 on user keystroke into
     /// the PTY or on session change.
     pub view_scrollback: usize,
+    /// Set by an event handler when the just-handled event produced
+    /// no local display change that needs an immediate repaint — the
+    /// canonical case being a keystroke forwarded straight to a PTY,
+    /// whose visible effect arrives later as PTY output (which
+    /// triggers its own redraw). The run loop honors this to skip a
+    /// wasted `terminal.draw()` per repeated keystroke; the 120ms
+    /// tick is a safety net so nothing can stay stale for long.
+    /// Reset to false every loop iteration.
+    pub skip_redraw_after_event: bool,
     /// Scrollback offset for the daemon-owned orchestrator panel rendered in
     /// the minibuffer. Kept separate from `view_scrollback` so reading god
     /// history does not leave the main session view scrolled when the panel
@@ -681,9 +690,46 @@ fn spawn_pty_input_pump(
     let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
     let (err_tx, err_rx) = mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
-        while let Some(job) = rx.recv().await {
-            if let Err(e) = client.pty_input(&job.session_id, job.bytes).await {
-                let _ = err_tx.send(format!("{} failed: {e}", job.label));
+        // Coalesce a burst of queued keystrokes for the same session
+        // into one `pty_input`. A held key (delete / arrow across a
+        // long line) queues repeats faster than each RPC round-trips,
+        // so the previous one-RPC-per-key loop serialized the whole
+        // backlog — the dominant repeated-key latency. Concatenating
+        // all immediately-available same-session bytes into a single
+        // write lets the child process the burst at once and emit one
+        // settled frame instead of animating every intermediate
+        // keystroke. Single keystrokes (nothing else queued) are
+        // unaffected — the inner drain finds an empty channel and
+        // sends exactly those bytes.
+        let mut carried: Option<PtyInputJob> = None;
+        loop {
+            let first = match carried.take() {
+                Some(j) => j,
+                None => match rx.recv().await {
+                    Some(j) => j,
+                    None => break,
+                },
+            };
+            let session_id = first.session_id;
+            let label = first.label;
+            let mut bytes = first.bytes;
+            // Drain further same-session jobs without awaiting. A
+            // different-session job is carried to the next outer
+            // iteration so its own burst still coalesces.
+            loop {
+                match rx.try_recv() {
+                    Ok(next) if next.session_id == session_id => {
+                        bytes.extend_from_slice(&next.bytes);
+                    }
+                    Ok(next) => {
+                        carried = Some(next);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if let Err(e) = client.pty_input(&session_id, bytes).await {
+                let _ = err_tx.send(format!("{label} failed: {e}"));
             }
         }
     });
@@ -1011,6 +1057,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         zoom: initial_zoom,
         list_scroll_offset: 0,
         view_scrollback: 0,
+        skip_redraw_after_event: false,
         orchestrator_scrollback: 0,
         orchestrator_panel_h: persisted.orchestrator_panel_h,
         resizing_orchestrator_panel: None,
@@ -1172,7 +1219,16 @@ async fn run_loop(
                 }
             }
         }
-        terminal.draw(|f| ui::render(f, app))?;
+        // Skip the paint when the previous event was a PTY-passthrough
+        // keystroke that produced no local display change — its
+        // visible effect arrives as PTY output, which sets a fresh
+        // loop iteration with the flag cleared. This is what makes a
+        // held key (delete / arrow across long text) cheap: one
+        // render per output batch instead of one per keypress.
+        let skip_draw = std::mem::take(&mut app.skip_redraw_after_event);
+        if !skip_draw {
+            terminal.draw(|f| ui::render(f, app))?;
+        }
 
         // A session switch should stay interactive while history-sized
         // work runs. Selection handlers only mark the transcript as
@@ -3410,11 +3466,21 @@ impl App {
             if self.chord_state.is_empty() && !is_ctrl_x {
                 // Typing snaps the view back to live: it's confusing to
                 // type "into the past" while reading scrollback.
+                let was_scrolled = self.view_scrollback != 0;
                 self.view_scrollback = 0;
                 if let Some(bytes) = encode_key_to_bytes(key) {
                     if let Some(id) = self.selected_id() {
                         self.queue_pty_input(id, bytes, "pty_input");
                     }
+                }
+                // The keystroke's visible effect arrives later as PTY
+                // output, which triggers its own redraw. Painting now
+                // just renders a stale frame — the dominant wasted
+                // work when a key is held down (one render per repeat).
+                // Skip it, unless we just snapped scrollback back to
+                // live, which is a local display change with no output.
+                if !was_scrolled {
+                    self.skip_redraw_after_event = true;
                 }
                 return;
             }
@@ -5013,6 +5079,7 @@ mod tests {
             zoom: ZoomMode::None,
             list_scroll_offset: 0,
             view_scrollback: 0,
+            skip_redraw_after_event: false,
             orchestrator_scrollback: 0,
             orchestrator_panel_h: None,
             resizing_orchestrator_panel: None,
