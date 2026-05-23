@@ -189,10 +189,25 @@
     white-space: nowrap;
   }
   .session-list .item .state {
-    font-size: 11px;
+    flex: 0 0 18px;
+    width: 18px;
+    text-align: center;
+    font-size: 14px;
+    line-height: 1;
     color: var(--fg-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+  }
+  .session-list .item .state.state-pending { color: var(--fg-faint); }
+  .session-list .item .state.state-running,
+  .session-list .item .state.state-awaiting_input { color: var(--ok); }
+  .session-list .item .state.state-paused { color: var(--warn); }
+  .session-list .item .state.state-done { color: var(--accent); }
+  .session-list .item .state.state-errored { color: var(--err); }
+  .session-list .item .state.is-active {
+    animation: statusPulse 900ms ease-in-out infinite;
+  }
+  @keyframes statusPulse {
+    0%, 100% { opacity: 0.62; transform: scale(0.92); }
+    50% { opacity: 1; transform: scale(1); }
   }
   /* Group header (matches TUI's `▾ name` line above each group).
      Tappable — flips the group's collapsed bit. */
@@ -1565,6 +1580,43 @@ function orderedSessions() {
     .map((i) => i.session);
 }
 
+const SESSION_STATUS_SPINNER = ["✦", "✧", "✶", "✷", "✸", "✷", "✶", "✧"];
+const SESSION_PTY_QUIESCENCE_MS = 600;
+const SESSION_STATUS_FRAME_MS = 120;
+
+function sessionPtyActive(s, now = Date.now()) {
+  if (!s || !s.last_pty_at_ms) return false;
+  return now - Number(s.last_pty_at_ms) < SESSION_PTY_QUIESCENCE_MS;
+}
+
+function sessionStatusLabel(s) {
+  return String((s && s.state) || "pending").toLowerCase();
+}
+
+function sessionStatusGlyph(s, now = Date.now()) {
+  const status = sessionStatusLabel(s);
+  if (status === "running" && sessionPtyActive(s, now)) {
+    const idx = Math.floor(now / SESSION_STATUS_FRAME_MS) % SESSION_STATUS_SPINNER.length;
+    return SESSION_STATUS_SPINNER[idx];
+  }
+  switch (status) {
+    case "pending": return "○";
+    case "running": return "●";
+    case "awaiting_input": return "●";
+    case "paused": return "⏸";
+    case "done": return "✓";
+    case "errored": return "✗";
+    default: return "○";
+  }
+}
+
+function sessionStatusHtml(s) {
+  const status = sessionStatusLabel(s);
+  const active = status === "running" && sessionPtyActive(s);
+  const classes = `state state-${status}${active ? " is-active" : ""}`;
+  return `<div class="${attr(classes)}" title="${attr(status)}" aria-label="${attr(status)}">${escape(sessionStatusGlyph(s))}</div>`;
+}
+
 function renderSessions() {
   const items = orderedItems();
   if (!items.length) {
@@ -1585,7 +1637,6 @@ function renderSessions() {
       const s = item.session;
       const active = s.id === state.currentId ? "active" : "";
       const indent = item.indented ? "indent" : "";
-      const status = (s.state || "").toLowerCase();
       // God / orchestrator session is rendered with a fixed
       // "god" label. Lifecycle is daemon-owned so no action
       // affordances ever apply.
@@ -1593,7 +1644,7 @@ function renderSessions() {
         return `
           <div class="item is-god ${active}" data-id="${attr(s.id)}">
             <div class="name">god</div>
-            <div class="state">${escape(status)}</div>
+            ${sessionStatusHtml(s)}
           </div>`;
       }
       // Two-line row: title on top, dim harness sub-line below.
@@ -1612,7 +1663,7 @@ function renderSessions() {
             <div class="name-line">${pin}<div class="name">${escape(title)}</div></div>
             ${harness}
           </div>
-          <div class="state">${escape(status)}</div>
+          ${sessionStatusHtml(s)}
         </div>`;
     })
     .join("");
