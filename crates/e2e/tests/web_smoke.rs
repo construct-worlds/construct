@@ -275,6 +275,92 @@ async fn web_client_loads_and_websocket_connects() {
         ])
     );
 
+    // Issue #75: pasted image/file clipboard items and very large text
+    // are uploaded to the daemon as session attachments, and the prompt
+    // receives a compact [#file:...] reference instead of raw bytes/text.
+    let paste_attachment: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const oldRpc = rpc;
+              const oldCurrent = state.currentId;
+              const oldWs = state.ws;
+              const calls = [];
+              rpc = async (method, params) => {
+                calls.push({ method, params, byteLength: atob(params.data).length });
+                return { path: `/tmp/${params.filename}`, reference: `[#file:/tmp/${params.filename}]` };
+              };
+              state.currentId = 's-paste';
+              state.ws = { readyState: 1 };
+
+              inputEl.value = 'Look';
+              inputEl.setSelectionRange(4, 4);
+              let filePrevented = false;
+              const file = new File([new Uint8Array([1, 2, 3, 4])], 'shot.png', { type: 'image/png' });
+              await handleComposerPaste({
+                clipboardData: {
+                  items: [{ kind: 'file', getAsFile: () => file }],
+                  files: [],
+                  getData: () => '',
+                },
+                preventDefault: () => { filePrevented = true; },
+              });
+              const fileValue = inputEl.value;
+
+              inputEl.value = '';
+              inputEl.setSelectionRange(0, 0);
+              let textPrevented = false;
+              const largeText = 'x'.repeat(LARGE_TEXT_PASTE_CHARS);
+              await handleComposerPaste({
+                clipboardData: {
+                  items: [],
+                  files: [],
+                  getData: (type) => type === 'text/plain' ? largeText : '',
+                },
+                preventDefault: () => { textPrevented = true; },
+              });
+              const textValue = inputEl.value;
+
+              state.currentId = oldCurrent;
+              state.ws = oldWs;
+              rpc = oldRpc;
+              return { filePrevented, textPrevented, fileValue, textValue, calls };
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate paste attachment")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(paste_attachment["filePrevented"], true);
+    assert_eq!(paste_attachment["textPrevented"], true);
+    assert_eq!(paste_attachment["fileValue"], "Look [#file:/tmp/shot.png]");
+    assert_eq!(paste_attachment["textValue"], "[#file:/tmp/clipboard.txt]");
+    assert_eq!(
+        paste_attachment["calls"][0]["method"],
+        "session.attach_clipboard"
+    );
+    assert_eq!(
+        paste_attachment["calls"][0]["params"]["session_id"],
+        "s-paste"
+    );
+    assert_eq!(
+        paste_attachment["calls"][0]["params"]["filename"],
+        "shot.png"
+    );
+    assert_eq!(paste_attachment["calls"][0]["params"]["mime"], "image/png");
+    assert_eq!(paste_attachment["calls"][0]["byteLength"], 4);
+    assert_eq!(
+        paste_attachment["calls"][1]["params"]["filename"],
+        "clipboard.txt"
+    );
+    assert!(
+        paste_attachment["calls"][1]["byteLength"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 16 * 1024
+    );
+
     // Regression coverage for mobile terminal scroll containment:
     // when the native keyboard shrinks the visual viewport, scroll
     // gestures starting on xterm must stay inside the terminal rather

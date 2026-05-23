@@ -9,8 +9,8 @@ use agentd_protocol::{
 };
 use anyhow::{Context, Result};
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyEvent,
-    KeyModifiers, MouseEvent, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -37,6 +37,7 @@ pub const SCROLLBACK_MAX: usize = 5_000;
 pub const MINIBUFFER_PANEL_H_DEFAULT: u16 = 13;
 pub const MINIBUFFER_PANEL_H_MIN: u16 = 3;
 pub const MINIBUFFER_PANEL_H_MAX: u16 = 80;
+const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
 
 /// A row in the rendered list view. Sessions and group headers share the
 /// list; key dispatch and selection are typed.
@@ -1132,8 +1133,13 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
     // Terminal setup.
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("enter alternate screen / enable mouse")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("enter alternate screen / enable mouse")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
@@ -1144,7 +1150,8 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
     let _ = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     );
     terminal.show_cursor().ok();
 
@@ -1503,7 +1510,10 @@ impl App {
             // the preview area is currently rendered, and the mouse is inside that area.
             let is_hovered = if Some(sid.as_str()) == selected_sid.as_deref() {
                 if let (Some(area), Some((mx, my))) = (preview_area, mouse_pos) {
-                    mx >= area.x && mx < area.x + area.width && my >= area.y && my < area.y + area.height
+                    mx >= area.x
+                        && mx < area.x + area.width
+                        && my >= area.y
+                        && my < area.y + area.height
                 } else {
                     false
                 }
@@ -1534,6 +1544,75 @@ impl App {
             .is_err()
         {
             self.set_status(format!("{label} failed: input pump stopped"));
+        }
+    }
+
+    async fn on_paste(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+
+        if text.chars().count() >= LARGE_TEXT_PASTE_CHARS {
+            if let Some(session_id) = self.large_text_paste_target() {
+                use base64::Engine as _;
+
+                let data = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+                match self
+                    .client
+                    .attach_clipboard(
+                        &session_id,
+                        data,
+                        Some("clipboard.txt".to_string()),
+                        Some("text/plain".to_string()),
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        self.dispatch_paste_text(result.reference);
+                        self.set_status(format!(
+                            "saved paste as attachment for {}",
+                            short_id(&session_id)
+                        ));
+                    }
+                    Err(e) => self.set_status(format!("paste attachment failed: {e}")),
+                }
+                return;
+            }
+        }
+
+        self.dispatch_paste_text(text);
+    }
+
+    fn large_text_paste_target(&self) -> Option<String> {
+        match self.minibuffer.as_ref().map(|m| &m.intent) {
+            Some(MinibufferIntent::SendInput { session_id }) => Some(session_id.clone()),
+            Some(MinibufferIntent::Orchestrator) => self.orchestrator_id.clone(),
+            Some(_) => None,
+            None if self.is_pty_captured() => self.selected_id(),
+            None => None,
+        }
+    }
+
+    fn dispatch_paste_text(&mut self, text: String) {
+        match self.minibuffer.as_ref().map(|m| &m.intent) {
+            Some(MinibufferIntent::Orchestrator) => {
+                if let Some(orch_id) = self.orchestrator_id.clone() {
+                    self.orchestrator_scrollback = 0;
+                    self.queue_pty_input(orch_id, text.into_bytes(), "orchestrator pty_input");
+                }
+            }
+            Some(_) => {
+                if let Some(mb) = self.minibuffer.as_mut() {
+                    insert_minibuffer_text(mb, &text);
+                }
+            }
+            None if self.is_pty_captured() => {
+                self.view_scrollback = 0;
+                if let Some(id) = self.selected_id() {
+                    self.queue_pty_input(id, text.into_bytes(), "pty_input");
+                }
+            }
+            None => {}
         }
     }
 
@@ -2196,7 +2275,10 @@ impl App {
                             );
                         }
                         if let SessionEvent::BrowserPreview(preview) = &payload.event {
-                            self.insert_browser_preview(payload.session_id.clone(), preview.clone());
+                            self.insert_browser_preview(
+                                payload.session_id.clone(),
+                                preview.clone(),
+                            );
                             return;
                         }
                         if let SessionEvent::AgentStatus(status) = &payload.event {
@@ -2438,6 +2520,7 @@ impl App {
         match ev {
             CtEvent::Key(k) => self.on_key(k).await,
             CtEvent::Mouse(m) => self.on_mouse(m).await,
+            CtEvent::Paste(text) => self.on_paste(text).await,
             CtEvent::Resize(_, _) => {
                 // The TUI re-derives the pane size on next render; we trigger
                 // an explicit resize for the current PTY there.
@@ -2833,7 +2916,10 @@ impl App {
                 self.focus = PaneFocus::List;
                 self.select_session(hit.session_id);
             } else {
-                self.set_status(format!("session for \u{201c}{}\u{201d} has ended", hit.text));
+                self.set_status(format!(
+                    "session for \u{201c}{}\u{201d} has ended",
+                    hit.text
+                ));
             }
             return;
         }
@@ -4126,10 +4212,7 @@ impl App {
             // wasn't handled above so stray modifier combos don't pollute
             // the input.
             KeyCode::Char(c) if !ctrl && !alt => {
-                let pos = byte_pos(&mb.input, mb.cursor);
-                mb.input.insert(pos, c);
-                mb.cursor += 1;
-                mb.error = None;
+                insert_minibuffer_text(mb, &c.to_string());
             }
             _ => {}
         }
@@ -5654,6 +5737,89 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn large_tui_paste_uploads_attachment_and_inserts_reference() {
+        use agentd_client::Client;
+        use agentd_protocol::ipc_method;
+        use base64::Engine as _;
+        use serde_json::Value;
+        use tempfile::tempdir;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+        use tokio::sync::oneshot;
+
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("agentd.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let (seen_tx, seen_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            let Ok(n) = reader.read_line(&mut line).await else {
+                return;
+            };
+            if n == 0 {
+                return;
+            }
+            let req: Value = serde_json::from_str(&line).expect("json request");
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            let params = req.get("params").cloned().unwrap_or(Value::Null);
+            if method == ipc_method::SESSION_ATTACH_CLIPBOARD {
+                let _ = seen_tx.send(params.clone());
+            }
+            let resp = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "path": "/tmp/clipboard.txt",
+                    "reference": "[#file:/tmp/clipboard.txt]"
+                }
+            });
+            let _ = writer.write_all((resp.to_string() + "\n").as_bytes()).await;
+        });
+
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(
+            client,
+            vec![summary_with_kind(agentd_protocol::SessionKind::User)],
+        );
+        app.minibuffer = Some(Minibuffer {
+            prompt: "Input: ".into(),
+            input: "see ".into(),
+            cursor: 4,
+            intent: MinibufferIntent::SendInput {
+                session_id: "s1".into(),
+            },
+            error: None,
+        });
+
+        let paste = "x".repeat(LARGE_TEXT_PASTE_CHARS);
+        app.on_term_event(CtEvent::Paste(paste.clone())).await;
+
+        let params = tokio::time::timeout(std::time::Duration::from_secs(1), seen_rx)
+            .await
+            .expect("attach request should reach mock daemon")
+            .expect("attach params");
+        assert_eq!(params["session_id"], "s1");
+        assert_eq!(params["filename"], "clipboard.txt");
+        assert_eq!(params["mime"], "text/plain");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(params["data"].as_str().expect("base64 data"))
+            .expect("decode attachment");
+        assert_eq!(decoded, paste.as_bytes());
+        assert_eq!(
+            app.minibuffer.as_ref().map(|mb| mb.input.as_str()),
+            Some("see [#file:/tmp/clipboard.txt]")
+        );
+
+        server.abort();
+    }
+
     // Typing into a zarvis prompt grows the editor pane, shrinking the
     // chat area. The chat parser must stay at the full pane height so
     // editor growth never resizes (and O(history)-rebuilds) it — that
@@ -6228,6 +6394,13 @@ fn adjusted_list_scroll_offset(
 ) -> usize {
     let max_scroll = item_count.saturating_sub(visible_rows);
     adjusted_scrollback(current, delta).min(max_scroll)
+}
+
+fn insert_minibuffer_text(mb: &mut Minibuffer, text: &str) {
+    let pos = byte_pos(&mb.input, mb.cursor);
+    mb.input.insert_str(pos, text);
+    mb.cursor += text.chars().count();
+    mb.error = None;
 }
 
 fn delete_back_char(mb: &mut Minibuffer) {
