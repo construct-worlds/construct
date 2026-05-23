@@ -5526,6 +5526,89 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn large_tui_paste_uploads_attachment_and_inserts_reference() {
+        use agentd_client::Client;
+        use agentd_protocol::ipc_method;
+        use base64::Engine as _;
+        use serde_json::Value;
+        use tempfile::tempdir;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+        use tokio::sync::oneshot;
+
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("agentd.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let (seen_tx, seen_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            let Ok(n) = reader.read_line(&mut line).await else {
+                return;
+            };
+            if n == 0 {
+                return;
+            }
+            let req: Value = serde_json::from_str(&line).expect("json request");
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            let params = req.get("params").cloned().unwrap_or(Value::Null);
+            if method == ipc_method::SESSION_ATTACH_CLIPBOARD {
+                let _ = seen_tx.send(params.clone());
+            }
+            let resp = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "path": "/tmp/clipboard.txt",
+                    "reference": "[#file:/tmp/clipboard.txt]"
+                }
+            });
+            let _ = writer.write_all((resp.to_string() + "\n").as_bytes()).await;
+        });
+
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(
+            client,
+            vec![summary_with_kind(agentd_protocol::SessionKind::User)],
+        );
+        app.minibuffer = Some(Minibuffer {
+            prompt: "Input: ".into(),
+            input: "see ".into(),
+            cursor: 4,
+            intent: MinibufferIntent::SendInput {
+                session_id: "s1".into(),
+            },
+            error: None,
+        });
+
+        let paste = "x".repeat(LARGE_TEXT_PASTE_CHARS);
+        app.on_term_event(CtEvent::Paste(paste.clone())).await;
+
+        let params = tokio::time::timeout(std::time::Duration::from_secs(1), seen_rx)
+            .await
+            .expect("attach request should reach mock daemon")
+            .expect("attach params");
+        assert_eq!(params["session_id"], "s1");
+        assert_eq!(params["filename"], "clipboard.txt");
+        assert_eq!(params["mime"], "text/plain");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(params["data"].as_str().expect("base64 data"))
+            .expect("decode attachment");
+        assert_eq!(decoded, paste.as_bytes());
+        assert_eq!(
+            app.minibuffer.as_ref().map(|mb| mb.input.as_str()),
+            Some("see [#file:/tmp/clipboard.txt]")
+        );
+
+        server.abort();
+    }
+
     // Typing into a zarvis prompt grows the editor pane, shrinking the
     // chat area. The chat parser must stay at the full pane height so
     // editor growth never resizes (and O(history)-rebuilds) it — that
