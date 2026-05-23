@@ -38,8 +38,8 @@ CLI windows into a managed fleet:
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
   output, spawn helpers, send input, inspect diffs, and drive Chrome.
 - **Remote control when you step away** — `/remote-control` opens a
-  browser-accessible web client with a QR code, basic auth, and a local modeline
-  badge when remote clients are attached.
+  browser-accessible web client with a QR code. Connect from your phone, no
+  service signup, no setup required.
 - **Extensible harness protocol** — adapters are separate processes speaking
   JSON-RPC over stdio, so new tools can plug in without changing the daemon.
 
