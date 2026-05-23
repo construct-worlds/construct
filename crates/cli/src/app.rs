@@ -699,8 +699,8 @@ fn spawn_pty_input_pump(
         // write lets the child process the burst at once and emit one
         // settled frame instead of animating every intermediate
         // keystroke. Single keystrokes (nothing else queued) are
-        // unaffected — the inner drain finds an empty channel and
-        // sends exactly those bytes.
+        // unaffected — the drain finds an empty channel and sends
+        // exactly those bytes. See `coalesce_pty_input`.
         let mut carried: Option<PtyInputJob> = None;
         loop {
             let first = match carried.take() {
@@ -710,30 +710,44 @@ fn spawn_pty_input_pump(
                     None => break,
                 },
             };
-            let session_id = first.session_id;
-            let label = first.label;
-            let mut bytes = first.bytes;
-            // Drain further same-session jobs without awaiting. A
-            // different-session job is carried to the next outer
-            // iteration so its own burst still coalesces.
-            loop {
-                match rx.try_recv() {
-                    Ok(next) if next.session_id == session_id => {
-                        bytes.extend_from_slice(&next.bytes);
-                    }
-                    Ok(next) => {
-                        carried = Some(next);
-                        break;
-                    }
-                    Err(_) => break,
-                }
-            }
+            let (session_id, bytes, label, next) = coalesce_pty_input(first, &mut rx);
+            carried = next;
             if let Err(e) = client.pty_input(&session_id, bytes).await {
                 let _ = err_tx.send(format!("{label} failed: {e}"));
             }
         }
     });
     (tx, err_rx)
+}
+
+/// Drain all *immediately-available* jobs for the same session as
+/// `first` and concatenate their bytes into one batch. Stops at
+/// the first different-session job, which is returned as `carried`
+/// so the caller can start a fresh batch for it (its own burst
+/// still coalesces on the next call). Pure + synchronous so it can
+/// be unit-tested without a daemon — the regression guard for the
+/// "one RPC per keystroke" latency bug this replaced.
+fn coalesce_pty_input(
+    first: PtyInputJob,
+    rx: &mut mpsc::UnboundedReceiver<PtyInputJob>,
+) -> (String, Vec<u8>, &'static str, Option<PtyInputJob>) {
+    let session_id = first.session_id;
+    let label = first.label;
+    let mut bytes = first.bytes;
+    let mut carried = None;
+    loop {
+        match rx.try_recv() {
+            Ok(next) if next.session_id == session_id => {
+                bytes.extend_from_slice(&next.bytes);
+            }
+            Ok(next) => {
+                carried = Some(next);
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    (session_id, bytes, label, carried)
 }
 
 /// State for the `/tasks` modal popup. v1 is read-only at the UI
@@ -5157,6 +5171,130 @@ mod tests {
             automode: false,
             kind,
         }
+    }
+
+    // --- repeated-key latency regression guards (see PR #157) ---
+    //
+    // These encode the two optimizations as invariants so a future
+    // change that reintroduces per-keystroke RPCs or per-keystroke
+    // stale renders fails in CI — without depending on wall-clock
+    // timing (which is too flaky on shared runners to assert).
+
+    /// A burst of queued same-session keystrokes must coalesce into
+    /// ONE batched write. Regression guard for the "one awaited
+    /// `pty_input` RPC per keystroke" latency bug.
+    #[test]
+    fn coalesce_pty_input_batches_same_session_burst() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        for i in 0..40u8 {
+            tx.send(PtyInputJob {
+                session_id: "s1".into(),
+                bytes: vec![i],
+                label: "pty_input",
+            })
+            .unwrap();
+        }
+        let first = rx.try_recv().unwrap();
+        let (sid, bytes, _label, carried) = coalesce_pty_input(first, &mut rx);
+        assert_eq!(sid, "s1");
+        assert_eq!(
+            bytes.len(),
+            40,
+            "all 40 same-session keystrokes must batch into one write"
+        );
+        assert!(carried.is_none());
+    }
+
+    /// Coalescing stops at the first different-session job, which is
+    /// carried over so its own burst still batches next call.
+    #[test]
+    fn coalesce_pty_input_stops_at_session_boundary() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        for (s, b) in [("s1", b'a'), ("s1", b'b'), ("s2", b'c'), ("s2", b'd')] {
+            tx.send(PtyInputJob {
+                session_id: s.into(),
+                bytes: vec![b],
+                label: "pty_input",
+            })
+            .unwrap();
+        }
+        let first = rx.try_recv().unwrap();
+        let (sid, bytes, _label, carried) = coalesce_pty_input(first, &mut rx);
+        assert_eq!(sid, "s1");
+        assert_eq!(bytes, b"ab");
+        let carried = carried.expect("different-session job must carry over");
+        assert_eq!(carried.session_id, "s2");
+        assert_eq!(carried.bytes, b"c");
+    }
+
+    /// Build an App that's in PTY-capture mode (view focus, terminal
+    /// view, a live PTY session), connected to a mock daemon that
+    /// just accepts the socket. Returns the temp dir + server task so
+    /// the caller keeps them alive.
+    async fn captured_app() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        use tokio::net::UnixListener;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("agentd.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut summary = summary_with_kind(agentd_protocol::SessionKind::User);
+        summary.has_pty = true;
+        let app = test_app(client, vec![summary]);
+        (app, dir, server)
+    }
+
+    /// A plain keystroke forwarded to the PTY must set
+    /// `skip_redraw_after_event` — its visible effect arrives later
+    /// as PTY output, so the immediate top-of-loop draw would be a
+    /// wasted stale frame. Regression guard for per-keystroke renders.
+    #[tokio::test]
+    async fn pty_passthrough_keystroke_skips_redraw() {
+        let (mut app, _dir, _srv) = captured_app().await;
+        assert!(app.is_pty_captured(), "precondition: PTY-capture mode");
+        app.skip_redraw_after_event = false;
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .await;
+        assert!(
+            app.skip_redraw_after_event,
+            "a PTY-passthrough keystroke must skip the immediate stale redraw"
+        );
+    }
+
+    /// But a keystroke that snaps scrollback back to live IS a local
+    /// display change with no PTY output of its own — it must redraw.
+    #[tokio::test]
+    async fn pty_keystroke_snapping_scrollback_still_redraws() {
+        let (mut app, _dir, _srv) = captured_app().await;
+        app.view_scrollback = 5;
+        app.skip_redraw_after_event = false;
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.view_scrollback, 0, "typing snaps the view to live");
+        assert!(
+            !app.skip_redraw_after_event,
+            "snapping scrollback to live has no PTY output, so it must redraw"
+        );
+    }
+
+    /// Starting a `C-x` chord is not a passthrough — it must redraw
+    /// (to surface the chord indicator), never skip.
+    #[tokio::test]
+    async fn ctrl_x_chord_start_does_not_skip_redraw() {
+        let (mut app, _dir, _srv) = captured_app().await;
+        app.skip_redraw_after_event = false;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        assert!(
+            !app.skip_redraw_after_event,
+            "a C-x chord start must redraw, not skip"
+        );
     }
 
     #[tokio::test]
