@@ -275,6 +275,72 @@ async fn web_client_loads_and_websocket_connects() {
         ])
     );
 
+    // Session rows use the same lifecycle glyph semantics as the TUI
+    // instead of spelling the state out in visible English.
+    let status_icons: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const oldCurrent = state.currentId;
+              const oldSessions = state.sessions;
+              const oldGroups = state.groups;
+              const now = Date.now();
+              state.currentId = 'sp';
+              state.groups = [];
+              state.sessions = [
+                { id: 'sp', title: 'Pending', harness: 'shell', state: 'pending', kind: 'user', position: 0 },
+                { id: 'sr', title: 'Running', harness: 'shell', state: 'running', kind: 'user', position: 1 },
+                { id: 'sa', title: 'Awaiting', harness: 'shell', state: 'awaiting_input', kind: 'user', position: 2 },
+                { id: 'sz', title: 'Paused', harness: 'shell', state: 'paused', kind: 'user', position: 3 },
+                { id: 'sd', title: 'Done', harness: 'shell', state: 'done', kind: 'user', position: 4 },
+                { id: 'se', title: 'Errored', harness: 'shell', state: 'errored', kind: 'user', position: 5 },
+                { id: 'sb', title: 'Busy', harness: 'shell', state: 'running', kind: 'user', position: 6, last_pty_at_ms: now },
+              ];
+              renderSessions();
+              const rows = {};
+              for (const el of document.querySelectorAll('#sessionList .item')) {
+                const icon = el.querySelector('.state');
+                rows[el.dataset.id] = {
+                  icon: icon?.textContent || '',
+                  label: icon?.getAttribute('aria-label') || '',
+                  title: icon?.getAttribute('title') || '',
+                  text: el.innerText || '',
+                  busy: icon?.classList.contains('is-active') === true,
+                };
+              }
+              state.currentId = oldCurrent;
+              state.sessions = oldSessions;
+              state.groups = oldGroups;
+              renderSessions();
+              return rows;
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate session status icons")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(status_icons["sp"]["icon"], "○");
+    assert_eq!(status_icons["sr"]["icon"], "●");
+    assert_eq!(status_icons["sa"]["icon"], "●");
+    assert_eq!(status_icons["sz"]["icon"], "⏸");
+    assert_eq!(status_icons["sd"]["icon"], "✓");
+    assert_eq!(status_icons["se"]["icon"], "✗");
+    assert!(
+        ["✦", "✧", "✶", "✷", "✸"]
+            .contains(&status_icons["sb"]["icon"].as_str().unwrap_or_default()),
+        "busy running row should use a TUI spinner glyph: {status_icons:?}"
+    );
+    assert_eq!(status_icons["sb"]["busy"], true);
+    assert_eq!(status_icons["se"]["label"], "errored");
+    assert!(
+        !status_icons["se"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("errored"),
+        "visible row text should not spell out the status: {status_icons:?}"
+    );
+
     // Issue #75: pasted image/file clipboard items and very large text
     // are uploaded to the daemon as session attachments, and the prompt
     // receives a compact [#file:...] reference instead of raw bytes/text.
