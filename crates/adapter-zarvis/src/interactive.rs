@@ -1332,6 +1332,10 @@ fn pty_input_requests_interrupt(bytes: &[u8]) -> bool {
     bytes.contains(&0x03) || bytes == [0x1b]
 }
 
+fn pty_input_requests_background(bytes: &[u8]) -> bool {
+    bytes == [0x02]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1576,6 +1580,14 @@ mod tests {
         assert!(!pty_input_requests_interrupt(b"abc"));
     }
 
+    #[test]
+    fn pty_background_detection_only_matches_ctrl_b() {
+        assert!(pty_input_requests_background(&[0x02]));
+        assert!(!pty_input_requests_background(&[0x02, b'x']));
+        assert!(!pty_input_requests_background(&[0x03]));
+        assert!(!pty_input_requests_background(b"b"));
+    }
+
     #[tokio::test]
     async fn kill_supervisor_task_aborts_running_tool() {
         struct DropNotify(Option<tokio::sync::oneshot::Sender<()>>);
@@ -1742,7 +1754,7 @@ pub async fn run(
     let mut limits = crate::model_limits::ModelLimits::load();
 
     // Per-session task registry: tracks every spawned tool's
-    // supervisor handle so manual `[kill]` / `[bg]` clicks can find
+    // supervisor handle so manual kill/background controls can find
     // the right call_id, and so auto-bg can hand off cleanly. The
     // background-completion channel feeds completions back into the
     // agent loop as `OBSERVATION:` synthetic messages.
@@ -3364,7 +3376,7 @@ async fn kill_joined_task<T>(
 /// Variant of `drive_with_input` that *also* relays
 /// `AdapterInboxMsg::ToolAction` events to a specific call_id's
 /// supervisor via its control channel. Used by
-/// `run_with_supervisor` so kill/bg buttons on the live tool block
+/// `run_with_supervisor` so kill/background controls on the live tool block
 /// actually take effect. Other inbox handling is identical to the
 /// regular `drive_with_input`.
 #[allow(clippy::too_many_arguments)]
@@ -3405,6 +3417,15 @@ where
                     Some(AdapterInboxMsg::PtyInput(bytes)) => {
                         if pty_input_requests_interrupt(&bytes) {
                             return DriveExit::Interrupt;
+                        }
+                        if pty_input_requests_background(&bytes) {
+                            let _ = crate::tasks::forward_control(
+                                &tasks,
+                                this_call_id,
+                                crate::tasks::ToolControl::Background,
+                            )
+                            .await;
+                            continue;
                         }
                         let (_discarded, events) = editor.feed_bytes(&bytes);
                         for ev in events {

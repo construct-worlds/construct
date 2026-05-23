@@ -52,7 +52,7 @@ pub struct ToolBlock {
     /// Click target on the footer toggles this.
     pub expanded: bool,
     /// TUI-local wall clock for "when did this block first appear?".
-    /// Drives the running-tool elapsed counter + the "show buttons
+    /// Drives the running-tool elapsed counter + the "show controls
     /// after 15s" affordance. Not synced with the adapter's
     /// supervisor clock; close enough for display.
     pub started_at: Instant,
@@ -68,13 +68,13 @@ pub struct BlockHitRect {
     /// directly comparable to `(click_row - panel_inner_y)`.
     pub row_start: u16,
     pub row_end: u16,
-    /// `[bg]` button hit zone on the header row (relative to the
-    /// rendered area). `None` if the block isn't showing buttons
-    /// (already completed, or too young per `BUTTONS_AFTER_MS`).
+    /// Legacy `[bg]` button hit zone on the header row (relative to
+    /// the rendered area). New renders use keyboard hints instead,
+    /// so this is normally `None`.
     pub bg_button: Option<(u16, u16)>,
-    /// `[kill]` button hit zone on the header row.
+    /// Legacy `[kill]` button hit zone on the header row.
     pub kill_button: Option<(u16, u16)>,
-    /// Header row's screen index — both buttons share it.
+    /// Header row's screen index.
     pub header_row: u16,
 }
 
@@ -87,7 +87,7 @@ pub struct RenderOutput<'a> {
     pub blocks: Vec<BlockHitRect>,
 }
 
-/// Per-block synthesized output + button geometry. Returned by
+/// Per-block synthesized output + optional control geometry. Returned by
 /// [`synth_block`] so the replay loop can both feed the parser and
 /// record click-targets.
 struct SynthOutput {
@@ -96,17 +96,17 @@ struct SynthOutput {
     /// `None`, this block doesn't render a status row (typically a
     /// completed block) and no buttons exist for it.
     status_row_offset: Option<u16>,
-    /// Button column ranges on the status row. `None` when not
-    /// rendered (block is too young, or already completed, etc.).
+    /// Legacy button column ranges on the status row. New renders use
+    /// keyboard hints, so these remain `None`.
     bg_button_cols: Option<(u16, u16)>,
     kill_button_cols: Option<(u16, u16)>,
 }
 
-/// How long a block must be running before the `[bg]` / `[kill]`
-/// buttons appear. Overridable via `AGENTD_TOOL_BUTTONS_AFTER_MS`.
+/// How long a block must be running before the keyboard-control hint
+/// appears. Overridable via `AGENTD_TOOL_BUTTONS_AFTER_MS`.
 /// Default lowered from 15s to 7s so the affordance is visible
 /// before the typical user gives up on the tool. Auto-promote
-/// still defaults to 60s — the buttons just announce themselves
+/// still defaults to 60s — the hint just announces itself
 /// earlier.
 fn buttons_after_ms() -> u64 {
     std::env::var("AGENTD_TOOL_BUTTONS_AFTER_MS")
@@ -1202,10 +1202,10 @@ fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
 ///
 /// States rendered:
 /// - **Running** (`output == None`): header + status row with
-///   elapsed counter; `[bg]` and `[kill]` buttons appear after the
+///   elapsed counter; a keyboard-control hint appears after the
 ///   `BUTTONS_AFTER_MS` threshold.
 /// - **Backgrounded** (`output == BG_PLACEHOLDER_OUTPUT`): header +
-///   status row with "in background"; `[kill]` button only.
+///   status row with "in background"; `Esc` kill hint only.
 /// - **Completed** (`output != None` and non-placeholder): header
 ///   + glyph + truncated body + optional expand/collapse footer.
 fn synth_block(block: &ToolBlock, cols: u16) -> SynthOutput {
@@ -1245,60 +1245,28 @@ fn synth_block(block: &ToolBlock, cols: u16) -> SynthOutput {
     let is_completed = !is_running && !is_backgrounded;
 
     let mut status_row_offset: Option<u16> = None;
-    let mut bg_button_cols: Option<(u16, u16)> = None;
-    let mut kill_button_cols: Option<(u16, u16)> = None;
+    let bg_button_cols: Option<(u16, u16)> = None;
+    let kill_button_cols: Option<(u16, u16)> = None;
 
     if is_running || is_backgrounded {
         status_row_offset = Some(1 + header_rows as u16);
         let elapsed_secs = block.started_at.elapsed().as_secs();
-        let buttons_ready = block.started_at.elapsed().as_millis() as u64 >= buttons_after_ms();
+        let controls_ready = block.started_at.elapsed().as_millis() as u64 >= buttons_after_ms();
 
-        let show_bg_button = is_running && buttons_ready;
-        let show_kill_button = (is_running || is_backgrounded) && buttons_ready;
-
-        // New status-row shape — buttons FIRST at fixed columns,
-        // status text after. This decouples the click target's
-        // column from variable-width content (elapsed seconds,
-        // tool name, Unicode glyph width differences). Stable
-        // hit-test:
-        //
-        //   "  [bg] [kill] running 8s"
-        //    01234567890123456789
-        //
-        // [bg]   → cols 2..6  (4 cells: '[', 'b', 'g', ']')
-        // [kill] → cols 7..13 (6 cells: '[', 'k', 'i', 'l', 'l', ']')
-        //
-        // ASCII only. No `↻` — different terminals disagree on its
-        // cell width and one off-by-one breaks click registration.
         let mut line = String::new();
-        line.push_str("  "); // 2-cell left margin (cols 0,1)
-        if show_bg_button {
-            // "[bg]" — 4 cells from col 2 to col 6 (exclusive).
-            line.push_str("\x1b[2m[\x1b[0m\x1b[1mbg\x1b[0m\x1b[2m]\x1b[0m");
-            bg_button_cols = Some((2, 6));
-        } else {
-            // Pad with 4 spaces so the kill button stays at col 7.
-            line.push_str("    ");
-        }
-        line.push(' '); // separator col 6
-        if show_kill_button {
-            line.push_str("\x1b[2m[\x1b[0m\x1b[1;31mkill\x1b[0m\x1b[2m]\x1b[0m");
-            kill_button_cols = Some((7, 13));
-        } else {
-            line.push_str("      ");
-        }
-        line.push(' '); // separator col 13
+        line.push_str("  ");
         let status_text = if is_running {
             format!("running {elapsed_secs}s")
         } else {
             format!("in background {elapsed_secs}s")
         };
         line.push_str(&format!("\x1b[2;33m{status_text}\x1b[0m"));
-        if is_running && buttons_ready {
-            // Hint that the queue is live during a tool run. Same
-            // dim styling as the elapsed counter so it reads as
-            // metadata, not active output.
-            line.push_str("  \x1b[2m· type to queue next prompt\x1b[0m");
+        if controls_ready {
+            if is_running {
+                line.push_str("  \x1b[2m· Ctrl-b background · Esc kill · type to queue\x1b[0m");
+            } else {
+                line.push_str("  \x1b[2m· Esc kill\x1b[0m");
+            }
         }
         line.push_str("\r\n");
         out.extend_from_slice(line.as_bytes());
@@ -3573,6 +3541,74 @@ mod tests {
              perceives the tool block as 'disappearing' since several \
              rows of UI vanish and every row below shifts up. \
              Got:\n{scrolled}",
+        );
+    }
+
+    #[test]
+    fn running_tool_block_shows_keyboard_hints_not_buttons() {
+        let mut h = ItemHistory::new();
+        h.feed_task_start(
+            "t1".to_string(),
+            "shell".to_string(),
+            "sleep 60".to_string(),
+        );
+        if let Some(Item::ToolBlock(block)) = h.items.last_mut() {
+            block.started_at = Instant::now() - std::time::Duration::from_secs(8);
+        }
+
+        let out = h.replay(100, 12, 0);
+        let text = screen_text(out.screen, 12, 100);
+
+        assert!(text.contains("running"), "missing running status:\n{text}");
+        assert!(
+            text.contains("Ctrl-b background"),
+            "missing background key hint:\n{text}"
+        );
+        assert!(text.contains("Esc kill"), "missing kill key hint:\n{text}");
+        assert!(
+            !text.contains("[bg]") && !text.contains("[kill]"),
+            "button labels should not render:\n{text}"
+        );
+        assert!(
+            out.blocks
+                .iter()
+                .all(|hit| hit.bg_button.is_none() && hit.kill_button.is_none()),
+            "button hit zones should not be exposed for text hints: {:?}",
+            out.blocks
+        );
+    }
+
+    #[test]
+    fn backgrounded_tool_block_shows_kill_key_hint_only() {
+        let mut h = ItemHistory::new();
+        h.feed_task_start(
+            "t1".to_string(),
+            "shell".to_string(),
+            "sleep 60".to_string(),
+        );
+        h.feed_tool_result(
+            "t1",
+            true,
+            "(running in background; will report when complete)".to_string(),
+        );
+        if let Some(Item::ToolBlock(block)) = h.items.last_mut() {
+            block.started_at = Instant::now() - std::time::Duration::from_secs(8);
+        }
+
+        let text = screen_text(h.replay(100, 12, 0).screen, 12, 100);
+
+        assert!(
+            text.contains("in background"),
+            "missing background status:\n{text}"
+        );
+        assert!(text.contains("Esc kill"), "missing kill key hint:\n{text}");
+        assert!(
+            !text.contains("Ctrl-b background"),
+            "backgrounded tools should not show background hint:\n{text}"
+        );
+        assert!(
+            !text.contains("[bg]") && !text.contains("[kill]"),
+            "button labels should not render:\n{text}"
         );
     }
 
