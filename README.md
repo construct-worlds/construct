@@ -37,6 +37,9 @@ CLI windows into a managed fleet:
   pane, including slash commands and upstream TUIs.
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
   output, spawn helpers, send input, inspect diffs, and drive Chrome.
+- **Remote control when you step away** — `/remote-control` opens a
+  browser-accessible web client with a QR code, basic auth, and a local modeline
+  badge when remote clients are attached.
 - **Extensible harness protocol** — adapters are separate processes speaking
   JSON-RPC over stdio, so new tools can plug in without changing the daemon.
 
@@ -104,8 +107,8 @@ export ANTHROPIC_API_KEY=sk-ant-...
   approvals, automode, and hooks.
 - [Unified tool layer](docs/unified-tool-layer.md) — MCP servers and shared tools for
   fleet control, browser automation, and agent coordination.
-- [Configuration](docs/configuration.md) — XDG paths, `AGENTD_*` overrides, and
-  TUI theme customization.
+- [Configuration](docs/configuration.md) — XDG paths, `AGENTD_*` overrides,
+  remote-control setup, and TUI theme customization.
 - [Contributor workflow](AGENTS.md) — PR workflow, build expectations, and TUI
   recording guidance.
 
