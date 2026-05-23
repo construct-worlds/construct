@@ -265,9 +265,14 @@ fn web_asset(dev_dir: Option<&std::path::Path>, rel: &str, embedded: &[u8]) -> (
 /// `index.html` bytes, with a live-reload poller injected when served
 /// from the dev-assets dir so browser edits show up on save.
 fn web_index_html(dev_dir: Option<&std::path::Path>) -> Vec<u8> {
-    let (bytes, from_disk) = web_asset(dev_dir, "index.html", REMOTE_INDEX_HTML.as_bytes());
+    let (bytes, _from_disk) = web_asset(dev_dir, "index.html", REMOTE_INDEX_HTML.as_bytes());
+    // Inject the poller whenever dev mode is on — even if we just fell
+    // back to the embedded copy because the dir is momentarily empty or
+    // removed (editor atomic-saves, `rm`'d worktree). Keeping the poller
+    // means the page auto-recovers to the dev assets the moment the file
+    // reappears, instead of getting stuck on a stale or embedded page.
     #[cfg(debug_assertions)]
-    if from_disk {
+    if dev_dir.is_some() {
         if let Ok(html) = std::str::from_utf8(&bytes) {
             // Poll the version endpoint; reload on any change. URL is
             // relative to `/t/<token>/`.
@@ -287,7 +292,6 @@ fn web_index_html(dev_dir: Option<&std::path::Path>) -> Vec<u8> {
             return out.into_bytes();
         }
     }
-    let _ = from_disk;
     bytes
 }
 
@@ -1284,15 +1288,37 @@ mod tests {
     }
 
     #[test]
-    fn web_index_html_injects_livereload_only_from_disk() {
+    fn web_index_html_serves_dev_with_poller_and_falls_back_to_embedded() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("index.html"), b"<html><body>hi</body></html>").unwrap();
+        std::fs::write(
+            dir.path().join("index.html"),
+            b"<html><body>DEV_MARKER</body></html>",
+        )
+        .unwrap();
+        // Dir has index.html → dev content + live-reload poller.
         let html = String::from_utf8(web_index_html(Some(dir.path()))).unwrap();
-        assert!(html.contains("hi"));
-        assert!(html.contains("dev/version"), "live-reload poller injected: {html}");
-        // Injected before the closing </body>.
+        assert!(html.contains("DEV_MARKER"));
+        assert!(html.contains("dev/version"), "poller injected: {html}");
         assert!(html.find("dev/version").unwrap() < html.rfind("</body>").unwrap());
-        // Embedded (no dev dir) is served verbatim — no poller.
+
+        // Empty/removed dir → fall back to the embedded copy, but KEEP the
+        // poller so the page auto-recovers when the file returns.
+        let empty = String::from_utf8(web_index_html(Some(dir.path()))).unwrap();
+        std::fs::remove_file(dir.path().join("index.html")).unwrap();
+        let fallback = String::from_utf8(web_index_html(Some(dir.path()))).unwrap();
+        assert!(!fallback.contains("DEV_MARKER"), "served embedded, not the dev file");
+        assert!(fallback.contains("dev/version"), "poller kept for auto-recovery");
+        assert_ne!(empty, fallback);
+
+        // A nonexistent dir behaves the same (embedded + poller).
+        let missing = String::from_utf8(web_index_html(Some(std::path::Path::new(
+            "/no/such/agentd/assets",
+        ))))
+        .unwrap();
+        assert!(!missing.contains("DEV_MARKER"));
+        assert!(missing.contains("dev/version"));
+
+        // Dev mode off → embedded served verbatim, no poller.
         let embedded = String::from_utf8(web_index_html(None)).unwrap();
         assert!(!embedded.contains("dev/version"));
     }
