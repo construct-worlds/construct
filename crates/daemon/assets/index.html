@@ -2644,7 +2644,10 @@ function handleNotification(method, params) {
 function renderEvent(event, at) {
   if (!event || !event.type) return;
   if (event.type === "browser_preview") {
-    setBrowserPreview(state.currentId, event);
+    // Ephemeral, live-only: never resurrected from the transcript on
+    // (re)load. The live WS notification path (`handleNotification`) is
+    // the sole setter; here we just skip so a stale historical preview
+    // doesn't pop back up, and so it doesn't fall through to PTY.
     return;
   }
   // PTY events go to xterm in terminal mode (decoded raw bytes →
@@ -2903,9 +2906,9 @@ function replayTranscriptToTerm(events) {
         if (e.active) state.agentStatusById.set(state.currentId, e);
         else state.agentStatusById.delete(state.currentId);
         break;
-      case "browser_preview":
-        setBrowserPreview(state.currentId, e);
-        break;
+      // browser_preview: ephemeral, live-only — deliberately NOT replayed
+      // from the historical transcript (it would resurrect a stale
+      // thumbnail on reload). The live WS path is the sole setter.
       // message / reasoning / status / cost / …: prose is already in
       // the PTY events; structured chrome isn't shown in terminal mode.
     }

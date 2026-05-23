@@ -895,24 +895,31 @@ async fn web_client_loads_and_websocket_connects() {
         "message event was rendered in terminal mode — prose would double up:\n{replay}"
     );
 
-    // Browser preview (issue: TUI parity). Stored per session and shown
-    // as a top-right overlay ANCHORED OVER THE TERMINAL (a child of
+    // Browser preview (issue: TUI parity). Delivered by the LIVE WS
+    // notification path (`handleNotification`), stored per session, and
+    // shown as a top-right overlay ANCHORED OVER THE TERMINAL (a child of
     // #terminalWrap, position:absolute), with a caption + close button,
     // not the old separate strip below the terminal. The × dismisses it
-    // and drops the stored entry.
+    // and drops the stored entry. Previews are EPHEMERAL: replaying the
+    // transcript (`renderEvent`, as `loadTranscript` does on reload) must
+    // NOT resurrect a stale thumbnail.
     let browser_preview: serde_json::Value = page
         .evaluate(
             r#"
             (() => {
               const png1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
               state.currentId = 'sBrowser';
-              renderEvent({
+              const evt = {
                 type: 'browser_preview',
                 url: 'https://example.test/page',
                 title: 'Example Preview',
                 image: png1x1,
                 width: 1,
                 height: 1
+              };
+              // Live path: arrives as a session/event notification.
+              handleNotification('session/event', {
+                session_id: 'sBrowser', event: evt, at: 0,
               });
               const panel = document.getElementById('browserPreview');
               const img = document.getElementById('browserPreviewImg');
@@ -931,6 +938,11 @@ async fn web_client_loads_and_websocket_connects() {
               document.getElementById('browserPreviewClose').click();
               out.hiddenAfterClose = panel.hidden;
               out.storedAfterClose = state.browserPreviewById.has('sBrowser');
+              // Ephemeral: replaying the same event through the transcript
+              // path must NOT bring the thumbnail back.
+              renderEvent(evt);
+              out.shownAfterReplay = !panel.hidden;
+              out.storedAfterReplay = state.browserPreviewById.has('sBrowser');
               return out;
             })()
             "#,
@@ -948,6 +960,14 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(browser_preview["hasClose"], true);
     assert_eq!(browser_preview["hiddenAfterClose"], true, "× dismisses the overlay");
     assert_eq!(browser_preview["storedAfterClose"], false, "× forgets the stored preview");
+    assert_eq!(
+        browser_preview["shownAfterReplay"], false,
+        "transcript replay must not resurrect a closed/ephemeral preview"
+    );
+    assert_eq!(
+        browser_preview["storedAfterReplay"], false,
+        "transcript replay must not re-store an ephemeral preview"
+    );
 
     // Pause briefly so the final rendered state lands in the
     // video before we stop the screencast — otherwise reviewers
