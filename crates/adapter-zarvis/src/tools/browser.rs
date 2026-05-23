@@ -22,6 +22,11 @@ use tokio_tungstenite::connect_async;
 const DEFAULT_PORT: u16 = 9222;
 const DEFAULT_HOST: &str = "127.0.0.1";
 const MAX_TEXT_CHARS: usize = 12_000;
+const CDP_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+const OPEN_PREVIEW_TIMEOUT: Duration = Duration::from_secs(5);
+const PREVIEW_READY_TIMEOUT: Duration = Duration::from_millis(500);
+const PREVIEW_READY_DEADLINE: Duration = Duration::from_secs(4);
+const PREVIEW_SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct BrowserOpen;
 pub struct BrowserInspect;
@@ -89,7 +94,11 @@ impl Tool for BrowserOpen {
             .json()
             .await?;
         if should_emit_preview(&input) {
-            let _ = emit_browser_preview_from_response(ctx, &resp).await;
+            let _ = tokio::time::timeout(
+                OPEN_PREVIEW_TIMEOUT,
+                emit_browser_preview_from_response(ctx, &resp),
+            )
+            .await;
         }
         Ok(ToolOutcome {
             ok: true,
@@ -401,6 +410,10 @@ fn select_tab(tabs: &[Value], input: &Value) -> Option<Tab> {
 }
 
 async fn cdp_eval(ws_url: &str, expression: &str) -> Result<Value> {
+    cdp_eval_with_timeout(ws_url, expression, CDP_CALL_TIMEOUT).await
+}
+
+async fn cdp_eval_with_timeout(ws_url: &str, expression: &str, timeout: Duration) -> Result<Value> {
     let value = cdp_call(
         ws_url,
         "Runtime.evaluate",
@@ -409,6 +422,7 @@ async fn cdp_eval(ws_url: &str, expression: &str) -> Result<Value> {
             "awaitPromise": true,
             "returnByValue": true
         }),
+        timeout,
     )
     .await?;
     if let Some(exception) = value.pointer("/result/exceptionDetails") {
@@ -432,11 +446,7 @@ fn should_emit_preview(input: &Value) -> bool {
         .unwrap_or(true)
 }
 
-async fn emit_browser_preview_from_tab(
-    ctx: &ToolCtx,
-    tab: &Tab,
-    full_page: bool,
-) -> Result<()> {
+async fn emit_browser_preview_from_tab(ctx: &ToolCtx, tab: &Tab, full_page: bool) -> Result<()> {
     let png = cdp_capture_screenshot(&tab.websocket_url, full_page).await?;
     let dims = image::load_from_memory(&png)?.dimensions();
     emit_browser_preview(ctx, &tab.url, tab.title.clone(), png, dims).await;
@@ -448,8 +458,11 @@ async fn emit_browser_preview_from_response(ctx: &ToolCtx, tab_response: &Value)
         .get("webSocketDebuggerUrl")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("browser_open response had no webSocketDebuggerUrl"))?;
-    for _ in 0..20 {
-        let ready = cdp_eval(ws_url, "document.readyState").await.ok();
+    let start = std::time::Instant::now();
+    while start.elapsed() < PREVIEW_READY_DEADLINE {
+        let ready = cdp_eval_with_timeout(ws_url, "document.readyState", PREVIEW_READY_TIMEOUT)
+            .await
+            .ok();
         if matches!(
             ready.as_ref().and_then(|v| v.as_str()),
             Some("complete" | "interactive")
@@ -458,7 +471,8 @@ async fn emit_browser_preview_from_response(ctx: &ToolCtx, tab_response: &Value)
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let png = cdp_capture_screenshot(ws_url, false).await?;
+    let png =
+        cdp_capture_screenshot_with_timeout(ws_url, false, PREVIEW_SCREENSHOT_TIMEOUT).await?;
     let dims = image::load_from_memory(&png)?.dimensions();
     let url = tab_response
         .get("url")
@@ -491,6 +505,14 @@ async fn emit_browser_preview(
 }
 
 async fn cdp_capture_screenshot(ws_url: &str, full_page: bool) -> Result<Vec<u8>> {
+    cdp_capture_screenshot_with_timeout(ws_url, full_page, CDP_CALL_TIMEOUT).await
+}
+
+async fn cdp_capture_screenshot_with_timeout(
+    ws_url: &str,
+    full_page: bool,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
     let value = cdp_call(
         ws_url,
         "Page.captureScreenshot",
@@ -499,6 +521,7 @@ async fn cdp_capture_screenshot(ws_url: &str, full_page: bool) -> Result<Vec<u8>
             "captureBeyondViewport": full_page,
             "fromSurface": true
         }),
+        timeout,
     )
     .await?;
     let data = value
@@ -508,7 +531,13 @@ async fn cdp_capture_screenshot(ws_url: &str, full_page: bool) -> Result<Vec<u8>
     Ok(base64::engine::general_purpose::STANDARD.decode(data.as_bytes())?)
 }
 
-async fn cdp_call(ws_url: &str, method: &str, params: Value) -> Result<Value> {
+async fn cdp_call(ws_url: &str, method: &str, params: Value, timeout: Duration) -> Result<Value> {
+    tokio::time::timeout(timeout, cdp_call_inner(ws_url, method, params))
+        .await
+        .with_context(|| format!("CDP {method} timed out after {}ms", timeout.as_millis()))?
+}
+
+async fn cdp_call_inner(ws_url: &str, method: &str, params: Value) -> Result<Value> {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let (mut ws, _) = connect_async(ws_url).await?;
     if method.starts_with("Runtime.") {
