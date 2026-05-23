@@ -84,7 +84,27 @@ impl Daemon {
     }
 
     async fn spawn_inner(relocatable: bool) -> Result<Self> {
-        let dir = tempfile::tempdir().context("create tempdir")?;
+        // Root the tempdir under a SHORT base. macOS caps Unix
+        // socket paths (`sun_path`) at 104 bytes, and the daemon's
+        // per-adapter connect-back socket lives at
+        // `<runtime>/adapters/s<32-hex>.sock`. The default macOS
+        // temp dir (`/var/folders/<...long...>/T/`) blows past 104
+        // once the tempdir suffix + `run/adapters/` + socket name
+        // are appended, so the adapter's `bind()` fails silently
+        // and `session.create` times out. `/tmp` keeps the whole
+        // path well under the limit. (Linux's default `/tmp` is
+        // already short, so this is a no-op there — which is why
+        // CI never hit it.)
+        let base: PathBuf = if cfg!(unix) {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        std::fs::create_dir_all(&base).ok();
+        let dir = tempfile::Builder::new()
+            .prefix("ae")
+            .tempdir_in(&base)
+            .context("create tempdir")?;
         let runtime_dir = dir.path().join("run");
         let state_dir = dir.path().join("state");
         let data_dir = dir.path().join("data");
@@ -411,6 +431,14 @@ impl Tui {
         self.parser.lock().unwrap().screen().contents()
     }
 
+    /// Current cursor position as `(row, col)` from the parsed
+    /// screen. Lets a benchmark measure cursor-movement latency
+    /// (e.g. left-arrow across a line) deterministically rather
+    /// than via screen-stability heuristics.
+    pub fn cursor(&self) -> (u16, u16) {
+        self.parser.lock().unwrap().screen().cursor_position()
+    }
+
     /// Write raw bytes to the PTY. Strings are sent as-is — for
     /// keypresses, use the escape sequences a real terminal
     /// would send (e.g. `"\x1b"` for Esc, `"\r"` for Enter,
@@ -513,11 +541,19 @@ fn bin_path(name: &str) -> Result<PathBuf> {
     } else {
         name.to_string()
     };
-    let p = target_dir().join("debug").join(&exe);
+    // Match the test binary's own profile so `cargo test --release`
+    // spawns release daemons/TUIs (which is what perf benchmarks
+    // want — debug renders are an order of magnitude slower and
+    // not representative of the real experience).
+    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let p = target_dir().join(profile).join(&exe);
     if !p.exists() {
         anyhow::bail!(
-            "expected {} — run `cargo build --workspace` before `cargo test -p agentd-e2e`",
-            p.display()
+            "expected {} — run `cargo build --workspace{}` before \
+             `cargo test -p agentd-e2e{}`",
+            p.display(),
+            if profile == "release" { " --release" } else { "" },
+            if profile == "release" { " --release" } else { "" },
         );
     }
     Ok(p)
