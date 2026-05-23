@@ -1,11 +1,10 @@
 # agentd
 
-**Command a fleet of coding agents without losing the thread.**
+**Command a fleet of agents, designed for hackers.**
 
-Launch, watch, steer, and compose multiple AI coding sessions in a workspace
-that feels alive on the wire. Keep Claude Code, Codex, Antigravity, Zarvis, shell
-tasks, and future harnesses moving together instead of juggling tabs, transcripts,
-and background processes.
+Create Codex, Claude Code, Antigravity, and Zarvis sessions all in one place. Or
+let your agent coordinate them in a workspace crafted for hardcore hackers like
+you. Remote control from your phone when you're in motion.
 
 ```
 ┌─ sessions ────────────────┬─ session: s4f3...  shell  running ─────┐
