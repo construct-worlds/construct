@@ -12,6 +12,8 @@ you. Remote control from your phone when you're in motion.
 
 - **One cockpit for every agent** — attach to Claude Code, Codex, Antigravity,
   Zarvis, or a shell process from one focused workspace that rewards attention.
+
+  <img src="https://raw.githubusercontent.com/zarvis-ai/agentd/f8fae6e5227ccd0b2140c35ce6e2ad16349da848/demos/new-session.gif" alt="agentd new session demo" width="50%">
 - **Parallel work without losing control** — spawn helper sessions, pin important
   work, interrupt stuck runs, inspect diffs, and send follow-up input mid-turn.
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
@@ -19,6 +21,8 @@ you. Remote control from your phone when you're in motion.
 - **[Remote control](docs/remote-control.md) when you step away** — `/remote-control`
   opens a browser-accessible web client with a QR code. Connect from your phone,
   no service signup, no setup required.
+
+  <img src="https://raw.githubusercontent.com/zarvis-ai/agentd/31239874073db9fee79d78eb98ea1e7f434d051b/demos/remote-control.gif" alt="agentd remote control demo" width="50%">
 - **Extensible harness protocol** — adapters are separate processes speaking
   JSON-RPC over stdio, so new tools can plug in without changing the daemon.
 
