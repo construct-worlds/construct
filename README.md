@@ -2,10 +2,10 @@
 
 **Run a fleet of coding agents from one terminal.**
 
-Launch, watch, steer, and compose multiple AI coding sessions at once. Keep
-Claude Code, Codex, Antigravity, Zarvis, shell tasks, and future harnesses in one
-persistent workspace instead of juggling terminals, tabs, transcripts, and
-background processes by hand.
+Launch, watch, steer, and compose multiple AI coding sessions from a terminal
+that feels alive under your hands. Keep Claude Code, Codex, Antigravity, Zarvis,
+shell tasks, and future harnesses in one persistent workspace instead of juggling
+tabs, transcripts, and background processes by hand.
 
 ```
 ┌─ sessions ────────────────┬─ session: s4f3...  shell  running ─────┐
@@ -25,15 +25,16 @@ background processes by hand.
 
 Modern development often means asking several agents to investigate, edit, test,
 review, or monitor the same project. `agentd` turns that from a pile of orphaned
-CLI windows into a managed fleet:
+CLI windows into a managed fleet — fast to read, tactile to drive, and built for
+people who live in terminals all day:
 
 - **One cockpit for every agent** — attach to Claude Code, Codex, Antigravity,
-  Zarvis, or a shell process from a single terminal UI.
+  Zarvis, or a shell process from one terminal surface that rewards attention.
 - **Persistent sessions** — transcripts, PTY scrollback, status, cwd, and resume
   metadata live in the daemon instead of disappearing with your terminal.
 - **Parallel work without losing control** — spawn helper sessions, pin important
   work, interrupt stuck runs, inspect diffs, and send follow-up input mid-turn.
-- **Native PTY mode** — interactive CLIs render as themselves inside the right
+- **Native PTY mode** — interactive CLIs keep their real shape inside the right
   pane, including slash commands and upstream TUIs.
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
   output, spawn helpers, send input, inspect diffs, and drive Chrome.
@@ -82,7 +83,7 @@ In another terminal:
 
 Use `?` for help and `M-x` for the command palette. From the TUI you can create
 sessions, switch between agents, send input, inspect diffs, and interrupt or stop
-work.
+work without leaving the flow.
 
 ### 4. Try the built-in Zarvis agent
 
