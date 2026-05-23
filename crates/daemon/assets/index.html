@@ -1185,6 +1185,10 @@ const state = {
   // Latest active Zarvis agent_status by session id, rendered in the
   // same fixed editor strip as the TUI's "* Working.." line.
   agentStatusById: new Map(),
+  // Recent live PTY activity by session id. Used by the web mini
+  // matrix to mirror the TUI rain intensity formula without relying
+  // on only the currently selected terminal stream.
+  ptyActivityById: new Map(),
   // Latest browser thumbnail per session. Browser-aware tools emit
   // base64 PNG previews as UI-only events; keep them out of the
   // textual transcript and show only the selected session's image.
@@ -1220,6 +1224,57 @@ const state = {
 };
 
 const LARGE_TEXT_PASTE_CHARS = 16 * 1024;
+
+const miniMatrixActivity = {
+  intensity: 0,
+  updatedAt: performance.now(),
+};
+
+function sessionKindIsUser(s) {
+  return !s || !s.kind || s.kind === "user" || s.kind === "User";
+}
+
+function rainActivityForActiveSessions(activeCount) {
+  return Math.max(0, Math.min(1, Number(activeCount || 0) * 0.25));
+}
+
+function fleetActivityTarget(nowMs = Date.now()) {
+  let activeCount = 0;
+  for (const s of state.sessions) {
+    if (!sessionKindIsUser(s)) continue;
+    const activeAgent = !!state.agentStatusById.get(s.id);
+    const ptyAt = state.ptyActivityById.get(s.id) || Number(s.last_pty_at_ms || 0);
+    const recentLivePty = ptyAt > 0 && nowMs - ptyAt < 900;
+    if (activeAgent || recentLivePty) activeCount += 1;
+  }
+  return rainActivityForActiveSessions(activeCount);
+}
+
+function easedMatrixRainIntensity(current, target, elapsedMs) {
+  current = Math.max(0, Math.min(1, Number(current || 0)));
+  target = Math.max(0, Math.min(1, Number(target || 0)));
+  if (Math.abs(current - target) <= Number.EPSILON) return target;
+  const rampSecs = target > current ? MATRIX_RAIN_RAMP_UP_SECS : MATRIX_RAIN_DECAY_SECS;
+  const step = Math.max(0, Number(elapsedMs || 0)) / 1000 / rampSecs;
+  return target > current ? Math.min(target, current + step) : Math.max(target, current - step);
+}
+
+function updateMiniMatrixIntensity(ts) {
+  const target = fleetActivityTarget(Date.now());
+  const elapsed = Math.max(0, ts - miniMatrixActivity.updatedAt);
+  miniMatrixActivity.intensity = easedMatrixRainIntensity(
+    miniMatrixActivity.intensity,
+    target,
+    elapsed
+  );
+  miniMatrixActivity.updatedAt = ts;
+  return miniMatrixActivity.intensity;
+}
+
+function observeSessionPtyActivity(sessionId, atMs = Date.now()) {
+  if (!sessionId) return;
+  state.ptyActivityById.set(sessionId, Number(atMs) || Date.now());
+}
 
 function initMiniMatrix() {
   const canvas = miniMatrixEl;
@@ -1332,6 +1387,7 @@ function initMiniMatrix() {
     }
     lastTick = ts;
     frame += 1;
+    const activity = updateMiniMatrixIntensity(ts);
 
     const w = canvas.width;
     const h = canvas.height;
@@ -1341,13 +1397,18 @@ function initMiniMatrix() {
     ctx.fillRect(0, 0, w, h);
 
     const open = connEl.dataset.state === "open";
-    const head = open ? "rgba(218, 255, 229, 0.98)" : "rgba(255, 202, 116, 0.96)";
-    const tail = open ? "rgba(48, 188, 116, 0.62)" : "rgba(224, 145, 64, 0.58)";
-    const dim = open ? "rgba(24, 96, 58, 0.42)" : "rgba(106, 74, 36, 0.48)";
-    const word = open ? "rgba(232, 255, 238, 0.98)" : "rgba(255, 226, 166, 0.98)";
+    const glow = 0.35 + activity * 0.65;
+    const faintAlpha = 0.16 + activity * 0.26;
+    const tailAlpha = 0.22 + activity * 0.40;
+    const headAlpha = 0.50 + activity * 0.48;
+    const wordAlpha = 0.62 + activity * 0.36;
+    const head = open ? `rgba(218, 255, 229, ${headAlpha})` : "rgba(255, 202, 116, 0.96)";
+    const tail = open ? `rgba(48, 188, 116, ${tailAlpha})` : "rgba(224, 145, 64, 0.58)";
+    const dim = open ? `rgba(24, 96, 58, ${faintAlpha})` : "rgba(106, 74, 36, 0.48)";
+    const word = open ? `rgba(232, 255, 238, ${wordAlpha})` : "rgba(255, 226, 166, 0.98)";
 
     for (let col = 0; col < grid.cols; col += 1) {
-      if ((col + frame) % 5 === 0) {
+      if ((col + frame) % 5 === 0 && ((col * 17 + frame) % 100) < 24 + activity * 56) {
         const y = Math.abs(col * 3 - frame) % grid.rows;
         const ch = glyphs[(col * 11 + frame) % glyphs.length];
         drawGlyph(ch, col, y, dim);
@@ -1368,10 +1429,13 @@ function initMiniMatrix() {
         drop.glyph = glyphs[(col * 17 + frame) % glyphs.length];
       }
 
+      const threshold = ((col * 37 + Math.floor((frame + col) / Math.max(1, (grid.rows + drop.tail + 2) * drop.speed))) % 100) / 100;
+      if (threshold > activity) continue;
+
       for (let row = 0; row < grid.rows; row += 1) {
         const delta = drop.head - row;
         if (delta === 0) {
-          drawGlyph(drop.glyph, col, row, head, true);
+          drawGlyph(drop.glyph, col, row, head, glow > 0.55);
         } else if (delta > 0 && delta <= drop.tail) {
           const ch = glyphs[(col * 13 + row * 5 + frame) % glyphs.length];
           drawGlyph(ch, col, row, tail);
@@ -1389,7 +1453,7 @@ function initMiniMatrix() {
       }
       if (grid.pinned[i] > 0) {
         const hot = drop && drop.head === grid.revealRow;
-        drawGlyph(revealText[i], col, grid.revealRow, hot ? head : word, hot);
+        drawGlyph(revealText[i], col, grid.revealRow, hot ? head : word, hot && glow > 0.55);
         grid.pinned[i] -= 1;
       }
     }
@@ -1601,6 +1665,8 @@ function orderedSessions() {
 const SESSION_STATUS_SPINNER = ["✦", "✧", "✶", "✷", "✸", "✷", "✶", "✧"];
 const SESSION_PTY_QUIESCENCE_MS = 600;
 const SESSION_STATUS_FRAME_MS = 120;
+const MATRIX_RAIN_RAMP_UP_SECS = 5;
+const MATRIX_RAIN_DECAY_SECS = 20;
 
 function sessionPtyActive(s, now = Date.now()) {
   if (!s || !s.last_pty_at_ms) return false;
@@ -2540,6 +2606,11 @@ function handleNotification(method, params) {
     if (event && event.type === "browser_preview") {
       setBrowserPreview(session_id, event);
     }
+    if (event && event.type === "pty") observeSessionPtyActivity(session_id, params.at);
+    if (event && event.type === "agent_status") {
+      if (event.active) state.agentStatusById.set(session_id, event);
+      else state.agentStatusById.delete(session_id);
+    }
     if (session_id !== state.currentId) return;
     renderEvent(event, params.at);
     scrollToBottom();
@@ -2560,6 +2631,7 @@ function handleNotification(method, params) {
     renderSessions();
     state.editorById.delete(params.session_id);
     state.agentStatusById.delete(params.session_id);
+    state.ptyActivityById.delete(params.session_id);
     clearBrowserPreview(params.session_id);
     if (params.session_id === state.currentId) {
       state.currentId = null;
