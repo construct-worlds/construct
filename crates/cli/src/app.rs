@@ -3103,8 +3103,7 @@ impl App {
     /// the given session, relative to `inner`. Returns true if the
     /// click was consumed:
     ///
-    /// - `[bg]` button row + col range → `client.tool_action(call_id, "background")`.
-    /// - `[kill]` button row + col range → `client.tool_action(call_id, "kill")`.
+    /// - legacy `[bg]` / `[kill]` hit zones → `client.tool_action(...)`.
     /// - Else inside a block's row range → toggle expand/collapse.
     /// - Else → false (caller falls through to default focus behavior).
     async fn try_toggle_block_at(
@@ -3128,13 +3127,9 @@ impl App {
             None => return false,
         };
         for hit in hits {
-            // Button row check. Button cols come from synth_block's
-            // fixed-column layout (buttons FIRST in the status row),
-            // so the recorded ranges are exact regardless of
-            // elapsed-counter width or Unicode glyph width. A click
-            // landing on the status row that DOESN'T hit a button
-            // is consumed (returns true) so it can't silently fall
-            // through to the toggle path.
+            // Legacy button-row check. Current tool blocks render
+            // keyboard hints instead of buttons, but older block hit
+            // geometry may still exist across a live upgrade.
             if rel_row == hit.header_row {
                 if let Some((bs, be)) = hit.bg_button {
                     if rel_col >= bs && rel_col < be {
