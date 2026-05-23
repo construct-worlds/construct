@@ -3,9 +3,9 @@
 **Run a fleet of coding agents from one terminal.**
 
 Launch, watch, steer, and compose multiple AI coding sessions from a terminal
-that feels alive under your hands. Keep Claude Code, Codex, Antigravity, Zarvis,
-shell tasks, and future harnesses in one persistent workspace instead of juggling
-tabs, transcripts, and background processes by hand.
+that feels alive on the wire. Keep Claude Code, Codex, Antigravity, Zarvis, shell
+tasks, and future harnesses in one persistent workspace instead of juggling tabs,
+transcripts, and background processes.
 
 ```
 ┌─ sessions ────────────────┬─ session: s4f3...  shell  running ─────┐
