@@ -9,8 +9,8 @@ use agentd_protocol::{
 };
 use anyhow::{Context, Result};
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyEvent,
-    KeyModifiers, MouseEvent, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -37,6 +37,7 @@ pub const SCROLLBACK_MAX: usize = 5_000;
 pub const MINIBUFFER_PANEL_H_DEFAULT: u16 = 13;
 pub const MINIBUFFER_PANEL_H_MIN: u16 = 3;
 pub const MINIBUFFER_PANEL_H_MAX: u16 = 80;
+const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
 
 /// A row in the rendered list view. Sessions and group headers share the
 /// list; key dispatch and selection are typed.
@@ -1071,8 +1072,13 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
     // Terminal setup.
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("enter alternate screen / enable mouse")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("enter alternate screen / enable mouse")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
@@ -1083,7 +1089,8 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
     let _ = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     );
     terminal.show_cursor().ok();
 
@@ -1433,7 +1440,10 @@ impl App {
             // the preview area is currently rendered, and the mouse is inside that area.
             let is_hovered = if Some(sid.as_str()) == selected_sid.as_deref() {
                 if let (Some(area), Some((mx, my))) = (preview_area, mouse_pos) {
-                    mx >= area.x && mx < area.x + area.width && my >= area.y && my < area.y + area.height
+                    mx >= area.x
+                        && mx < area.x + area.width
+                        && my >= area.y
+                        && my < area.y + area.height
                 } else {
                     false
                 }
@@ -1464,6 +1474,75 @@ impl App {
             .is_err()
         {
             self.set_status(format!("{label} failed: input pump stopped"));
+        }
+    }
+
+    async fn on_paste(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+
+        if text.chars().count() >= LARGE_TEXT_PASTE_CHARS {
+            if let Some(session_id) = self.large_text_paste_target() {
+                use base64::Engine as _;
+
+                let data = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+                match self
+                    .client
+                    .attach_clipboard(
+                        &session_id,
+                        data,
+                        Some("clipboard.txt".to_string()),
+                        Some("text/plain".to_string()),
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        self.dispatch_paste_text(result.reference);
+                        self.set_status(format!(
+                            "saved paste as attachment for {}",
+                            short_id(&session_id)
+                        ));
+                    }
+                    Err(e) => self.set_status(format!("paste attachment failed: {e}")),
+                }
+                return;
+            }
+        }
+
+        self.dispatch_paste_text(text);
+    }
+
+    fn large_text_paste_target(&self) -> Option<String> {
+        match self.minibuffer.as_ref().map(|m| &m.intent) {
+            Some(MinibufferIntent::SendInput { session_id }) => Some(session_id.clone()),
+            Some(MinibufferIntent::Orchestrator) => self.orchestrator_id.clone(),
+            Some(_) => None,
+            None if self.is_pty_captured() => self.selected_id(),
+            None => None,
+        }
+    }
+
+    fn dispatch_paste_text(&mut self, text: String) {
+        match self.minibuffer.as_ref().map(|m| &m.intent) {
+            Some(MinibufferIntent::Orchestrator) => {
+                if let Some(orch_id) = self.orchestrator_id.clone() {
+                    self.orchestrator_scrollback = 0;
+                    self.queue_pty_input(orch_id, text.into_bytes(), "orchestrator pty_input");
+                }
+            }
+            Some(_) => {
+                if let Some(mb) = self.minibuffer.as_mut() {
+                    insert_minibuffer_text(mb, &text);
+                }
+            }
+            None if self.is_pty_captured() => {
+                self.view_scrollback = 0;
+                if let Some(id) = self.selected_id() {
+                    self.queue_pty_input(id, text.into_bytes(), "pty_input");
+                }
+            }
+            None => {}
         }
     }
 
@@ -2126,7 +2205,10 @@ impl App {
                             );
                         }
                         if let SessionEvent::BrowserPreview(preview) = &payload.event {
-                            self.insert_browser_preview(payload.session_id.clone(), preview.clone());
+                            self.insert_browser_preview(
+                                payload.session_id.clone(),
+                                preview.clone(),
+                            );
                             return;
                         }
                         if let SessionEvent::AgentStatus(status) = &payload.event {
@@ -2368,6 +2450,7 @@ impl App {
         match ev {
             CtEvent::Key(k) => self.on_key(k).await,
             CtEvent::Mouse(m) => self.on_mouse(m).await,
+            CtEvent::Paste(text) => self.on_paste(text).await,
             CtEvent::Resize(_, _) => {
                 // The TUI re-derives the pane size on next render; we trigger
                 // an explicit resize for the current PTY there.
@@ -2763,7 +2846,10 @@ impl App {
                 self.focus = PaneFocus::List;
                 self.select_session(hit.session_id);
             } else {
-                self.set_status(format!("session for \u{201c}{}\u{201d} has ended", hit.text));
+                self.set_status(format!(
+                    "session for \u{201c}{}\u{201d} has ended",
+                    hit.text
+                ));
             }
             return;
         }
@@ -4046,10 +4132,7 @@ impl App {
             // wasn't handled above so stray modifier combos don't pollute
             // the input.
             KeyCode::Char(c) if !ctrl && !alt => {
-                let pos = byte_pos(&mb.input, mb.cursor);
-                mb.input.insert(pos, c);
-                mb.cursor += 1;
-                mb.error = None;
+                insert_minibuffer_text(mb, &c.to_string());
             }
             _ => {}
         }
@@ -6017,6 +6100,13 @@ fn adjusted_list_scroll_offset(
 ) -> usize {
     let max_scroll = item_count.saturating_sub(visible_rows);
     adjusted_scrollback(current, delta).min(max_scroll)
+}
+
+fn insert_minibuffer_text(mb: &mut Minibuffer, text: &str) {
+    let pos = byte_pos(&mb.input, mb.cursor);
+    mb.input.insert_str(pos, text);
+    mb.cursor += text.chars().count();
+    mb.error = None;
 }
 
 fn delete_back_char(mb: &mut Minibuffer) {

@@ -7,11 +7,13 @@ use crate::worktree;
 use agentd_protocol::{
     ahp_method, CreateSessionParams, DeletedNotificationPayload, EventNotificationPayload,
     GroupDeletedNotificationPayload, GroupStateNotificationPayload, GroupSummary, HarnessInfo,
-    MessageRole, MoveDirection, PtyReplayResult, PtySize, SessionDetail, SessionEmitEventParams,
-    SessionEvent, SessionStartParams, SessionState, SessionSummary, StateNotificationPayload,
-    TimestampedEvent, TranscriptResult,
+    MessageRole, MoveDirection, PtyReplayResult, PtySize, SessionAttachClipboardParams,
+    SessionAttachClipboardResult, SessionDetail, SessionEmitEventParams, SessionEvent,
+    SessionStartParams, SessionState, SessionSummary, StateNotificationPayload, TimestampedEvent,
+    TranscriptResult,
 };
 use anyhow::{anyhow, Context, Result};
+use base64::Engine as _;
 use chrono::Utc;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -30,9 +32,86 @@ const PTY_RING_CAP: usize = 256 * 1024;
 /// startup draw, short enough that the user sees the resumed pane
 /// painted by the time they navigate to it.
 const RESPAWN_REDRAW_DELAY: Duration = Duration::from_millis(250);
+const MAX_CLIPBOARD_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 
 fn should_resume_on_startup(state: SessionState) -> bool {
     !matches!(state, SessionState::Done)
+}
+
+fn sanitized_file_stem(name: &str) -> Option<String> {
+    let raw = std::path::Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        } else if ch.is_whitespace() {
+            out.push('-');
+        }
+        if out.len() >= 48 {
+            break;
+        }
+    }
+    let out = out.trim_matches(['-', '.', '_']).to_string();
+    (!out.is_empty()).then_some(out)
+}
+
+fn extension_for_attachment(filename: Option<&str>, mime: Option<&str>, bytes: &[u8]) -> String {
+    if let Some(ext) = filename
+        .and_then(|f| std::path::Path::new(f).extension())
+        .and_then(|s| s.to_str())
+        .map(|s| sanitize_extension(s))
+        .filter(|s| !s.is_empty())
+    {
+        return ext;
+    }
+    if let Some(ext) = mime.and_then(extension_for_mime) {
+        return ext.to_string();
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "png".to_string()
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "jpg".to_string()
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "gif".to_string()
+    } else if bytes.starts_with(b"%PDF-") {
+        "pdf".to_string()
+    } else if std::str::from_utf8(bytes).is_ok() {
+        "txt".to_string()
+    } else {
+        "bin".to_string()
+    }
+}
+
+fn extension_for_mime(mime: &str) -> Option<&'static str> {
+    match mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "application/pdf" => Some("pdf"),
+        "text/plain" => Some("txt"),
+        "text/markdown" => Some("md"),
+        "application/json" => Some("json"),
+        _ => None,
+    }
+}
+
+fn sanitize_extension(ext: &str) -> String {
+    ext.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(12)
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1779,6 +1858,62 @@ impl SessionManager {
         Ok(())
     }
 
+    pub async fn attach_clipboard(
+        &self,
+        p: SessionAttachClipboardParams,
+    ) -> Result<SessionAttachClipboardResult> {
+        self.get_entry(&p.session_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", p.session_id))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&p.data)
+            .context("decode clipboard attachment")?;
+        if bytes.is_empty() {
+            anyhow::bail!("clipboard attachment is empty");
+        }
+        if bytes.len() > MAX_CLIPBOARD_ATTACHMENT_BYTES {
+            anyhow::bail!(
+                "clipboard attachment is too large: {} bytes (max {})",
+                bytes.len(),
+                MAX_CLIPBOARD_ATTACHMENT_BYTES
+            );
+        }
+
+        let dir = self
+            .storage
+            .data_dir()
+            .join("sessions")
+            .join(&p.session_id)
+            .join("attachments");
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .with_context(|| format!("create {}", dir.display()))?;
+
+        let ext = extension_for_attachment(p.filename.as_deref(), p.mime.as_deref(), &bytes);
+        let stem = p
+            .filename
+            .as_deref()
+            .and_then(sanitized_file_stem)
+            .unwrap_or_else(|| "clipboard".to_string());
+        let ts = Utc::now().format("%Y%m%d-%H%M%S%.3f");
+        let mut path = dir.join(format!("{stem}-{ts}.{ext}"));
+        let mut suffix = 1usize;
+        while tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            path = dir.join(format!("{stem}-{ts}-{suffix}.{ext}"));
+            suffix += 1;
+        }
+        tokio::fs::write(&path, &bytes)
+            .await
+            .with_context(|| format!("write {}", path.display()))?;
+
+        let path_str = path.display().to_string();
+        let reference = format!("[#file:{}]", path_str);
+        Ok(SessionAttachClipboardResult {
+            path: path_str,
+            reference,
+        })
+    }
+
     pub async fn send_input(&self, id: &str, text: String) -> Result<()> {
         let entry = self
             .get_entry(id)
@@ -2881,6 +3016,32 @@ mod tests {
         assert!(!should_resume_on_startup(SessionState::Done));
     }
 
+    #[test]
+    fn clipboard_attachment_names_are_safe_and_typed() {
+        assert_eq!(
+            sanitized_file_stem("../../My Screen Shot.png").as_deref(),
+            Some("My-Screen-Shot")
+        );
+        assert_eq!(sanitized_file_stem("😵").as_deref(), None);
+        assert_eq!(
+            extension_for_attachment(
+                Some("photo.jpeg"),
+                Some("application/octet-stream"),
+                b"plain"
+            ),
+            "jpeg"
+        );
+        assert_eq!(
+            extension_for_attachment(None, Some("image/png; charset=binary"), b"plain"),
+            "png"
+        );
+        assert_eq!(
+            extension_for_attachment(None, None, b"\x89PNG\r\n\x1a\nrest"),
+            "png"
+        );
+        assert_eq!(extension_for_attachment(None, None, b"hello"), "txt");
+    }
+
     fn pty_caps() -> Capabilities {
         Capabilities {
             supports_pty: true,
@@ -3013,6 +3174,45 @@ mod tests {
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
             pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
         })
+    }
+
+    #[tokio::test]
+    async fn attach_clipboard_writes_session_attachment_and_reference() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        mgr.sessions.write().await.insert(
+            "spaste".into(),
+            synthetic_entry("spaste", agentd_protocol::SessionKind::User, 0),
+        );
+
+        let result = mgr
+            .attach_clipboard(SessionAttachClipboardParams {
+                session_id: "spaste".into(),
+                data: base64::engine::general_purpose::STANDARD.encode(b"hello paste"),
+                filename: Some("../../screen shot.png".into()),
+                mime: Some("image/png".into()),
+            })
+            .await
+            .expect("attach clipboard");
+
+        assert!(result.reference.starts_with("[#file:"));
+        assert!(result.reference.ends_with(']'));
+        assert!(result.path.contains("/sessions/spaste/attachments/"));
+        assert!(result.path.ends_with(".png"));
+        assert_eq!(
+            tokio::fs::read(&result.path)
+                .await
+                .expect("read attachment"),
+            b"hello paste"
+        );
     }
 
     #[tokio::test]

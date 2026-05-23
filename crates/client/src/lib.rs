@@ -5,7 +5,8 @@ use agentd_protocol::{
     ipc_method, transport, CreateSessionParams, DiffResult, ErrorObject, GroupCreateParams,
     GroupDeleteParams, GroupMoveParams, GroupRenameParams, GroupSetCollapsedParams, GroupSummary,
     HarnessInfo, MoveDirection, Notification, PingResult, PtyReplayResult, Request, Response,
-    SessionDetail, SessionEmitEventParams, SessionIdParams, SessionInputParams, SessionMoveParams,
+    SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
+    SessionEmitEventParams, SessionIdParams, SessionInputParams, SessionMoveParams,
     SessionPtyInputParams, SessionPtyResizeParams, SessionSetAutomodeParams,
     SessionSetPinnedParams, SessionSetTitleParams, SessionSummary, SessionToolDecisionParams,
     SubscribeParams, TranscriptParams, TranscriptResult,
@@ -296,6 +297,24 @@ impl Client {
             )
             .await?;
         Ok(())
+    }
+    pub async fn attach_clipboard(
+        &self,
+        id: &str,
+        data: String,
+        filename: Option<String>,
+        mime: Option<String>,
+    ) -> Result<SessionAttachClipboardResult> {
+        self.request(
+            ipc_method::SESSION_ATTACH_CLIPBOARD,
+            &SessionAttachClipboardParams {
+                session_id: id.to_string(),
+                data,
+                filename,
+                mime,
+            },
+        )
+        .await
     }
     pub async fn pty_input(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
         let _: serde_json::Value = self

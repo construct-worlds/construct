@@ -165,6 +165,25 @@ pub struct SessionInputParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionAttachClipboardParams {
+    pub session_id: String,
+    /// Base64-encoded clipboard/file bytes.
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionAttachClipboardResult {
+    /// Absolute path written on the daemon host.
+    pub path: String,
+    /// Short text clients can insert into the prompt.
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEmitEventParams {
     pub session_id: String,
     pub event: SessionEvent,
@@ -538,6 +557,7 @@ pub mod ipc_method {
     pub const SESSION_CREATE: &str = "session.create";
     pub const SESSION_GET: &str = "session.get";
     pub const SESSION_INPUT: &str = "session.input";
+    pub const SESSION_ATTACH_CLIPBOARD: &str = "session.attach_clipboard";
     pub const SESSION_PTY_INPUT: &str = "session.pty_input";
     pub const SESSION_PTY_RESIZE: &str = "session.pty_resize";
     pub const SESSION_PTY_REPLAY: &str = "session.pty_replay";
