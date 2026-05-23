@@ -1716,6 +1716,26 @@ impl SessionManager {
                 }));
             return;
         }
+        // BrowserPreview is ephemeral, live-only UI: a base64 PNG that
+        // clients render as an overlay/wallpaper but never replay from the
+        // transcript. Persisting it would bloat transcript.jsonl with
+        // full-size screenshots (slowing every load, since `read_transcript`
+        // parses every line) for no consumer, and leak the image into the
+        // model via `agentd_get_transcript`. So broadcast to live clients
+        // and return before `append_event` — same treatment as AgentStatus.
+        if let SessionEvent::BrowserPreview(_) = &event {
+            let now = Utc::now();
+            let seq = entry.transcript_count.load(Ordering::Relaxed);
+            let _ = self
+                .broadcast
+                .send(BroadcastMsg::Event(EventNotificationPayload {
+                    session_id: entry.id.clone(),
+                    at: now,
+                    event,
+                    seq,
+                }));
+            return;
+        }
         // PTY events take a fast path: they go to the in-memory ring +
         // append to the on-disk pty.log + a live broadcast. A copy was
         // also appended to the transcript above as an ordering marker.
@@ -3295,6 +3315,71 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "suser");
         assert_eq!(sessions[0].kind, agentd_protocol::SessionKind::User);
+    }
+
+    /// Browser previews are ephemeral, live-only UI (a base64 PNG shown as
+    /// an overlay / matrix-rain wallpaper). They must NEVER reach the
+    /// transcript: persisting full-size screenshots would bloat
+    /// transcript.jsonl and slow every load (`read_transcript` parses each
+    /// line), with no transcript consumer — clients render them only from
+    /// the live broadcast. Normal structured events must still persist.
+    #[tokio::test]
+    async fn browser_preview_is_not_persisted_to_transcript() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage.clone(), config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let id = "sbrowser";
+        let entry = synthetic_entry(id, agentd_protocol::SessionKind::User, 0);
+        mgr.sessions.write().await.insert(id.into(), entry.clone());
+
+        // Control: a normal structured event MUST be persisted.
+        mgr.handle_event(
+            &entry,
+            SessionEvent::Message {
+                role: agentd_protocol::MessageRole::Assistant,
+                text: "hi".into(),
+            },
+        )
+        .await;
+
+        // The browser preview (with a stand-in base64 image) MUST NOT be.
+        mgr.handle_event(
+            &entry,
+            SessionEvent::BrowserPreview(agentd_protocol::BrowserPreview {
+                url: "https://example.test".into(),
+                title: Some("Example".into()),
+                image: "QUJD".into(), // base64("ABC")
+                width: 2,
+                height: 1,
+            }),
+        )
+        .await;
+
+        let transcript = storage
+            .read_transcript(id, 0, None)
+            .expect("read transcript");
+        assert!(
+            !transcript
+                .events
+                .iter()
+                .any(|e| matches!(e.event, SessionEvent::BrowserPreview(_))),
+            "BrowserPreview must not be written to the transcript"
+        );
+        assert!(
+            transcript
+                .events
+                .iter()
+                .any(|e| matches!(e.event, SessionEvent::Message { .. })),
+            "control: a normal Message event should still be persisted"
+        );
     }
 
     /// Regression for the post-#69 "all sessions go to `done` after
