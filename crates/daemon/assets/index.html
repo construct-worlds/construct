@@ -1007,6 +1007,14 @@
     background: var(--bg-elev);
     box-shadow: inset -1px 0 0 rgba(57, 255, 136, 0.10);
   }
+  .session-list-sr-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
   .new-session-btn {
     appearance: none;
     flex: 0 0 auto;
@@ -1116,6 +1124,7 @@
       -->
       <button type="button" class="new-session-btn" id="newSessionBtn"
               aria-label="new session">+ new session</button>
+      <span class="session-list-sr-label">sessions</span>
       <aside class="session-list" id="sessionList">
         <div class="empty">connecting…</div>
       </aside>
