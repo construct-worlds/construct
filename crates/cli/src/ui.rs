@@ -2516,7 +2516,7 @@ fn render_terminal_scrollbar(
         height: thumb_h as u16,
     };
     let track_color = blend_color(Color::Black, theme.text, 0.30);
-    let thumb_color = blend_color(Color::Black, theme.text, 0.70);
+    let thumb_color = blend_color(Color::Black, theme.text, 0.80);
     for row in 0..track_h {
         let y = area.y + row as u16;
         for col in 0..bar_w {
