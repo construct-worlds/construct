@@ -491,6 +491,10 @@ struct SessionHydrationRequest {
     session_id: String,
     needs_history: bool,
     terminal_pane_size: (u16, u16),
+    /// Whether the session is headless (no PTY). Headless sessions carry
+    /// their conversation as structured Message/Reasoning events, which
+    /// replay folds into the items history; PTY-backed sessions don't.
+    is_headless: bool,
 }
 
 struct PtyInputJob {
@@ -651,6 +655,7 @@ async fn load_session_hydration(req: SessionHydrationRequest) -> Result<SessionH
                 &mut h,
                 &mut editor_state,
                 &mut agent_status,
+                req.is_headless,
             );
             let (cols, rows) = req.terminal_pane_size;
             let _ = h.replay(cols.max(1), rows.max(1), 0);
@@ -1835,11 +1840,18 @@ impl App {
     }
 
     fn session_hydration_request(&self, id: &str, needs_history: bool) -> SessionHydrationRequest {
+        let is_headless = self
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(crate::ui::is_headless)
+            .unwrap_or(false);
         SessionHydrationRequest {
             socket: self.client.socket_path().to_path_buf(),
             session_id: id.to_string(),
             needs_history,
             terminal_pane_size: self.terminal_pane_size,
+            is_headless,
         }
     }
 
@@ -2099,6 +2111,12 @@ impl App {
         // call_id and just fills `output` on the existing block.
         let mut replayed_editor_state: Option<EditorState> = None;
         let mut replayed_agent_status: Option<agentd_protocol::AgentStatus> = None;
+        let is_headless = self
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(crate::ui::is_headless)
+            .unwrap_or(false);
         match self.client.transcript(id, 0, None).await {
             Ok(t) => {
                 if t.events
@@ -2117,6 +2135,7 @@ impl App {
                     &mut history,
                     &mut replayed_editor_state,
                     &mut replayed_agent_status,
+                    is_headless,
                 );
             }
             Err(e) => {
@@ -2425,6 +2444,43 @@ impl App {
                                 .entry(payload.session_id.clone())
                                 .or_default();
                             history.feed_tool_result(tool, *ok, output.clone());
+                        }
+                        // Headless sessions (any harness) emit their
+                        // conversation as structured Message/Reasoning
+                        // events with no PTY, so fold the prose into the
+                        // items history. PTY-backed sessions already carry
+                        // it in the PTY stream, so skip them to avoid
+                        // double-rendering. (Streaming arrives as many
+                        // same-kind deltas; `feed_message` coalesces.)
+                        let msg = match &payload.event {
+                            SessionEvent::Message { role, text } => Some((
+                                match role {
+                                    agentd_protocol::MessageRole::User => {
+                                        crate::pty_render::MessageKind::User
+                                    }
+                                    _ => crate::pty_render::MessageKind::Assistant,
+                                },
+                                text.clone(),
+                            )),
+                            SessionEvent::Reasoning { text } => {
+                                Some((crate::pty_render::MessageKind::Reasoning, text.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some((kind, text)) = msg {
+                            let headless = self
+                                .sessions
+                                .iter()
+                                .find(|s| s.id == payload.session_id)
+                                .map(crate::ui::is_headless)
+                                .unwrap_or(false);
+                            if headless {
+                                let history = self
+                                    .histories
+                                    .entry(payload.session_id.clone())
+                                    .or_default();
+                                history.feed_message(kind, &text);
+                            }
                         }
                         // Adapter editor state — drives the fixed
                         // bottom input pane.
@@ -4996,6 +5052,7 @@ pub fn apply_transcript_to_local_state(
     history: &mut crate::pty_render::ItemHistory,
     editor_state: &mut Option<EditorState>,
     agent_status: &mut Option<agentd_protocol::AgentStatus>,
+    is_headless: bool,
 ) {
     for ev in events {
         match &ev.event {
@@ -5077,6 +5134,20 @@ pub fn apply_transcript_to_local_state(
                         history.feed_pty(&bytes);
                     }
                 }
+            }
+            // Headless sessions carry their conversation as structured
+            // Message / Reasoning events (no PTY), so fold the prose into
+            // history to render it on reconnect. PTY-backed sessions keep
+            // their prose in the PTY stream — skip to avoid double-render.
+            SessionEvent::Message { role, text } if is_headless => {
+                let kind = match role {
+                    agentd_protocol::MessageRole::User => crate::pty_render::MessageKind::User,
+                    _ => crate::pty_render::MessageKind::Assistant,
+                };
+                history.feed_message(kind, text);
+            }
+            SessionEvent::Reasoning { text } if is_headless => {
+                history.feed_message(crate::pty_render::MessageKind::Reasoning, text);
             }
             _ => {}
         }
@@ -6458,6 +6529,7 @@ mod tests {
             session_id: "s-big".to_string(),
             needs_history: true,
             terminal_pane_size: (80, 24),
+            is_headless: false,
         }));
 
         tokio::time::timeout(std::time::Duration::from_secs(1), transcript_seen_rx.recv())
@@ -6526,7 +6598,7 @@ mod tests {
         let mut history = crate::pty_render::ItemHistory::new();
         let mut editor: Option<EditorState> = None;
         let mut status: Option<AgentStatus> = None;
-        apply_transcript_to_local_state(&events, &mut history, &mut editor, &mut status);
+        apply_transcript_to_local_state(&events, &mut history, &mut editor, &mut status, false);
 
         // The render must include the synthesized header for the
         // block. Before the fix, no `ToolBlock` items existed and
@@ -6551,6 +6623,80 @@ mod tests {
             "TaskStart must be forwarded to ItemHistory::feed_task_start. \
              Without it, fresh-TUI bootstrap of an existing zarvis session \
              rebuilds history with no tool blocks. Got render:\n{text}",
+        );
+    }
+
+    /// Headless sessions carry their conversation as structured
+    /// Message/Reasoning events (no PTY). Replay must fold them into the
+    /// items history when the session is headless, and ignore them when
+    /// it's PTY-backed (the prose is already in the PTY stream there).
+    #[test]
+    fn transcript_replay_renders_messages_only_when_headless() {
+        use agentd_protocol::{MessageRole, SessionEvent, TimestampedEvent};
+        use chrono::Utc;
+        fn ev(seq: u64, event: SessionEvent) -> TimestampedEvent {
+            TimestampedEvent {
+                seq,
+                at: Utc::now(),
+                event,
+            }
+        }
+        let events = vec![
+            ev(
+                1,
+                SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text: "answer from a headless run".into(),
+                },
+            ),
+            ev(
+                2,
+                SessionEvent::Reasoning {
+                    text: "some reasoning".into(),
+                },
+            ),
+        ];
+
+        let render = |is_headless: bool| {
+            let mut history = crate::pty_render::ItemHistory::new();
+            let mut editor: Option<EditorState> = None;
+            let mut status: Option<agentd_protocol::AgentStatus> = None;
+            apply_transcript_to_local_state(
+                &events,
+                &mut history,
+                &mut editor,
+                &mut status,
+                is_headless,
+            );
+            let out = history.replay(80, 24, 0);
+            (0..24u16)
+                .flat_map(|r| {
+                    let mut row = String::new();
+                    for c in 0..80u16 {
+                        if let Some(cell) = out.screen.cell(r, c) {
+                            row.push_str(&cell.contents());
+                        }
+                    }
+                    row.push('\n');
+                    row.chars().collect::<Vec<_>>()
+                })
+                .collect::<String>()
+        };
+
+        let headless = render(true);
+        assert!(
+            headless.contains("answer from a headless run"),
+            "headless replay must render assistant prose:\n{headless}"
+        );
+        assert!(
+            headless.contains("some reasoning"),
+            "headless replay must render reasoning:\n{headless}"
+        );
+
+        let interactive = render(false);
+        assert!(
+            !interactive.contains("answer from a headless run"),
+            "PTY-backed replay must NOT re-render Message prose (it's in the PTY):\n{interactive}"
         );
     }
 
@@ -6591,7 +6737,7 @@ mod tests {
         let mut history = crate::pty_render::ItemHistory::new();
         let mut editor: Option<EditorState> = None;
         let mut status = None;
-        apply_transcript_to_local_state(&events, &mut history, &mut editor, &mut status);
+        apply_transcript_to_local_state(&events, &mut history, &mut editor, &mut status, false);
 
         let screen_rows = 24u16;
         let screen_cols = 80u16;
@@ -6648,7 +6794,7 @@ mod tests {
             started_at_ms,
             status: "Working".into(),
         });
-        apply_transcript_to_local_state(&events, &mut history, &mut editor, &mut status);
+        apply_transcript_to_local_state(&events, &mut history, &mut editor, &mut status, false);
 
         assert!(
             status.is_none(),
@@ -6785,6 +6931,7 @@ mod tests {
             &mut history,
             &mut editor_state,
             &mut agent_status,
+            false,
         );
 
         let state = editor_state
