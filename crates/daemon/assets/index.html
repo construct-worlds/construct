@@ -19,39 +19,28 @@
 <script src="static/xterm-addon-fit.js" defer></script>
 <style>
   :root {
-    --bg: #0e1014;
-    --bg-elev: #161a20;
-    --bg-elev-2: #1f242c;
-    --border: #262c36;
-    --fg: #e5e7eb;
-    --fg-dim: #98a2b3;
-    --fg-faint: #6b7280;
-    --accent: #6ea8fe;
-    --ok: #5cd1a6;
-    --warn: #f4b860;
-    --err: #f47c7c;
-    --bubble-user: #1a2c4a;
-    --bubble-assistant: #1c2027;
-    --bubble-system: #1a1a1f;
-    --session-scrollbar-track: rgba(229, 231, 235, 0.30);
-    --session-scrollbar-thumb: rgba(229, 231, 235, 0.80);
-  }
-  @media (prefers-color-scheme: light) {
-    :root {
-      --bg: #f7f8fa;
-      --bg-elev: #ffffff;
-      --bg-elev-2: #eef0f4;
-      --border: #dfe3ea;
-      --fg: #11161e;
-      --fg-dim: #4b5563;
-      --fg-faint: #8a93a4;
-      --accent: #2563eb;
-      --bubble-user: #dceaff;
-      --bubble-assistant: #f2f3f6;
-      --bubble-system: #ebecf0;
-      --session-scrollbar-track: rgba(17, 22, 30, 0.30);
-      --session-scrollbar-thumb: rgba(17, 22, 30, 0.80);
-    }
+    --bg: #020805;
+    --bg-elev: #06150c;
+    --bg-elev-2: #0a2112;
+    --border: #186030;
+    --border-faint: rgba(24, 96, 48, 0.46);
+    --fg: #beffcd;
+    --fg-dim: #4c965c;
+    --fg-faint: #20703a;
+    --accent: #39ff88;
+    --accent-alt: #5ce1ff;
+    --modeline-bg: #082e18;
+    --ok: #7dff73;
+    --warn: #ffd75c;
+    --err: #ff5f5a;
+    --bubble-user: rgba(8, 46, 24, 0.82);
+    --bubble-assistant: rgba(6, 21, 12, 0.86);
+    --bubble-system: rgba(4, 14, 8, 0.90);
+    --session-scrollbar-track: rgba(190, 255, 205, 0.30);
+    --session-scrollbar-thumb: rgba(190, 255, 205, 0.80);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --glow-soft: 0 0 18px rgba(57, 255, 136, 0.12);
+    --glow-hard: 0 0 14px rgba(57, 255, 136, 0.28);
   }
   * { box-sizing: border-box; }
   html, body {
@@ -61,8 +50,9 @@
     overscroll-behavior: none;
     background: var(--bg);
     color: var(--fg);
-    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
-          system-ui, sans-serif;
+    font: 13px/1.45 var(--mono);
+    letter-spacing: 0.01em;
+    text-shadow: 0 0 10px rgba(57, 255, 136, 0.10);
     -webkit-text-size-adjust: 100%;
   }
   body {
@@ -73,31 +63,53 @@
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
   }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 2000;
+    background:
+      linear-gradient(rgba(190, 255, 205, 0.025) 50%, rgba(0, 0, 0, 0.08) 50%),
+      radial-gradient(circle at 16% 8%, rgba(57, 255, 136, 0.10), transparent 30%),
+      radial-gradient(circle at 88% 14%, rgba(92, 225, 255, 0.07), transparent 34%);
+    background-size: 100% 4px, 100% 100%, 100% 100%;
+    mix-blend-mode: screen;
+    opacity: 0.70;
+  }
   header {
-    --header-h: 42px;
+    --header-h: 36px;
     flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: 8px;
     min-height: var(--header-h);
-    padding: 0 0 0 14px;
-    background: var(--bg-elev);
+    padding: 0 0 0 10px;
+    background: linear-gradient(90deg, var(--modeline-bg, #082e18), #04140a 70%);
     border-bottom: 1px solid var(--border);
+    box-shadow: inset 0 -1px 0 rgba(57, 255, 136, 0.16), var(--glow-soft);
   }
   .mini-matrix {
     flex: 0 0 auto;
     align-self: stretch;
-    width: 96px;
+    width: 104px;
     height: auto;
     min-height: var(--header-h);
     display: block;
-    border-radius: 4px;
-    background: #050806;
+    border-left: 1px solid var(--border);
+    border-radius: 0;
+    background: #020805;
+    box-shadow: inset 0 0 18px rgba(57, 255, 136, 0.14);
   }
   @media (max-width: 720px) {
     .mini-matrix { width: 84px; }
   }
-  header .meta { color: var(--fg-dim); font-size: 12px; }
+  header .meta {
+    color: var(--fg);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
   .conn {
     margin-left: auto;
     display: inline-flex;
@@ -142,22 +154,33 @@
   .session-list {
     overflow-y: auto;
     border-right: 1px solid var(--border);
-    background: var(--bg-elev);
-    padding: 6px 0;
+    background:
+      linear-gradient(90deg, rgba(57, 255, 136, 0.05), transparent 36%),
+      var(--bg-elev);
+    padding: 4px 0;
     border-bottom: 1px solid var(--border);
   }
   .session-list .item {
-    padding: 8px 14px;
+    margin: 1px 6px;
+    padding: 7px 9px;
     cursor: pointer;
+    border: 1px solid transparent;
     border-left: 3px solid transparent;
     display: flex;
     align-items: center;
     gap: 4px;
   }
-  .session-list .item:hover { background: var(--bg-elev-2); }
+  .session-list .item:hover {
+    background: rgba(57, 255, 136, 0.07);
+    border-color: var(--border-faint);
+  }
   .session-list .item.active {
-    background: var(--bg-elev-2);
-    border-left-color: var(--accent);
+    background: var(--accent);
+    color: #06160c;
+    border-color: var(--accent);
+    border-left-color: var(--accent-alt);
+    text-shadow: none;
+    box-shadow: var(--glow-hard);
   }
   .session-list .item .row-main {
     flex: 1;
@@ -190,12 +213,18 @@
   }
   .session-list .item .sub {
     color: var(--fg-faint);
-    font-size: 11px;
+    font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.08em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .session-list .item.active .sub,
+  .session-list .item.active .state,
+  .session-list .item.active .pin-indicator,
+  .session-list .item.active .disclosure {
+    color: #06160c;
   }
   .session-list .item .state {
     flex: 0 0 14px;
@@ -321,6 +350,9 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
+    background:
+      radial-gradient(circle at 70% 0%, rgba(57, 255, 136, 0.06), transparent 36%),
+      #020805;
   }
   .transcript {
     flex: 1 1 0;
@@ -360,28 +392,36 @@
     letter-spacing: 0.02em;
   }
   .bubble {
-    border-radius: 10px;
-    padding: 8px 12px;
+    border-radius: 0;
+    padding: 8px 10px;
     white-space: pre-wrap;
-    max-width: min(720px, 95%);
+    max-width: min(820px, 95%);
+    border: 1px solid var(--border-faint);
+    box-shadow: inset 0 0 18px rgba(57, 255, 136, 0.045);
   }
   .role-user .bubble {
     background: var(--bubble-user);
     align-self: flex-end;
+    border-color: rgba(92, 225, 255, 0.42);
+    color: #e1ffe6;
   }
   .role-user { align-items: flex-end; }
-  .role-assistant .bubble { background: var(--bubble-assistant); }
+  .role-assistant .bubble {
+    background: var(--bubble-assistant);
+    border-left: 3px solid var(--accent);
+  }
   .role-system .bubble {
     background: var(--bubble-system);
     color: var(--fg-dim);
     font-size: 13px;
+    border-style: dashed;
   }
   .tool {
     border-left: 3px solid var(--accent);
     background: var(--bg-elev);
     padding: 6px 10px;
-    border-radius: 4px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    border-radius: 0;
+    font-family: var(--mono);
     font-size: 12.5px;
     color: var(--fg-dim);
   }
@@ -428,7 +468,7 @@
     font-size: 13px;
   }
   .pty {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-family: var(--mono);
     font-size: 12.5px;
     color: var(--fg);
     background: var(--bg-elev);
@@ -497,7 +537,7 @@
     padding: 6px 10px;
     border-top: 1px solid var(--border);
     background: var(--bg-elev);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-family: var(--mono);
     font-size: 12.5px;
     color: var(--fg);
   }
@@ -537,10 +577,11 @@
     flex: 0 0 auto;
     display: flex;
     gap: 8px;
-    padding: 10px 12px;
+    padding: 8px 10px;
     border-top: 1px solid var(--border);
-    background: var(--bg-elev);
+    background: linear-gradient(90deg, var(--modeline-bg), #031006);
     align-items: end;
+    box-shadow: inset 0 1px 0 rgba(57, 255, 136, 0.12);
   }
   .composer textarea {
     flex: 1;
@@ -549,11 +590,12 @@
     max-height: 30vh;
     padding: 8px 10px;
     border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg);
+    border-radius: 0;
+    background: #020805;
     color: var(--fg);
     font: inherit;
     line-height: 1.4;
+    box-shadow: inset 0 0 12px rgba(57, 255, 136, 0.08);
     /* iOS: keep font ≥16px to suppress auto-zoom on focus */
     font-size: 16px;
   }
@@ -564,13 +606,18 @@
   .composer button {
     flex: 0 0 auto;
     padding: 8px 14px;
-    border-radius: 8px;
-    border: none;
+    border-radius: 0;
+    border: 1px solid var(--accent);
     background: var(--accent);
-    color: white;
-    font-weight: 500;
-    font-size: 14px;
+    color: #06160c;
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
     cursor: pointer;
+    text-shadow: none;
+    box-shadow: var(--glow-soft);
   }
   .composer button:disabled {
     opacity: 0.4;
@@ -580,7 +627,7 @@
      the "type but don't submit" path), so muted background to
      differentiate from the accent-colored Enter. */
   .composer #insertBtn {
-    background: var(--bg-elev-2);
+    background: transparent;
     color: var(--fg);
   }
 
@@ -608,6 +655,8 @@
     overscroll-behavior: contain;
     touch-action: pan-y;
     padding: 6px 0 0 6px;
+    border: 1px solid var(--border);
+    box-shadow: inset 0 0 22px rgba(57, 255, 136, 0.08);
     /* iOS safe-area inset on the right edge for landscape with notch. */
     padding-right: env(safe-area-inset-right);
   }
@@ -861,7 +910,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-family: var(--mono);
     font-size: 12.5px;
     color: var(--fg);
     white-space: pre-wrap;
@@ -918,18 +967,21 @@
     min-height: 0;
     border-right: 1px solid var(--border);
     background: var(--bg-elev);
+    box-shadow: inset -1px 0 0 rgba(57, 255, 136, 0.10);
   }
   .new-session-btn {
     appearance: none;
     flex: 0 0 auto;
     margin: 6px 8px;
-    padding: 8px 12px;
-    border-radius: 6px;
+    padding: 7px 10px;
+    border-radius: 0;
     border: 1px dashed var(--border);
     background: transparent;
     color: var(--fg-dim);
     font: inherit;
-    font-size: 13px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
   }
@@ -955,7 +1007,7 @@
     gap: 6px;
     padding: 6px 8px;
     border-top: 1px solid var(--border);
-    background: var(--bg-elev);
+    background: var(--modeline-bg);
   }
   .list-toolbar .row-action {
     /* Override the per-row sizing — toolbar gets slightly larger
