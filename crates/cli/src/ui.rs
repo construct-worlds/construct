@@ -94,6 +94,7 @@ fn clear_pane_side_borders(f: &mut Frame, area: Rect, app: &App) {
 pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.browser_preview_area = None;
     app.layout.browser_preview_close = None;
+    app.layout.terminal_scrollbar = None;
     let area = f.area();
     match app.zoom {
         ZoomMode::View => {
@@ -2386,6 +2387,7 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
     let preview = app.browser_previews.get(&id).cloned();
     app.layout.browser_preview_area = None;
     app.layout.browser_preview_close = None;
+    app.layout.terminal_scrollbar = None;
     let row_offset = area.height.saturating_sub(chat_area.height);
     let out = history.replay(area.width, area.height, scroll);
     app.view_scrollback = out.screen.scrollback();
@@ -2432,7 +2434,7 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
         id,
         translate_block_hits(out.blocks, row_offset, chat_area.height),
     );
-    render_terminal_scrollbar(
+    app.layout.terminal_scrollbar = render_terminal_scrollbar(
         f,
         chat_area,
         &app.theme,
@@ -2471,17 +2473,17 @@ fn render_terminal_scrollbar(
     visible_until: Option<Instant>,
     rendered_scrollback: usize,
     max_scrollback: usize,
-) {
+) -> Option<crate::app::TerminalScrollbarHit> {
     if area.height < 3 || area.width < 2 || max_scrollback == 0 {
-        return;
+        return None;
     }
     let at_bottom = rendered_scrollback == 0;
     if at_bottom {
         let Some(visible_until) = visible_until else {
-            return;
+            return None;
         };
         if Instant::now() >= visible_until {
-            return;
+            return None;
         }
     }
 
@@ -2499,6 +2501,18 @@ fn render_terminal_scrollbar(
     };
 
     let x0 = area.x + area.width.saturating_sub(2);
+    let scrollbar_area = Rect {
+        x: x0,
+        y: area.y,
+        width: 2,
+        height: area.height,
+    };
+    let thumb = Rect {
+        x: x0,
+        y: area.y + thumb_top as u16,
+        width: 2,
+        height: thumb_h as u16,
+    };
     let style = Style::default()
         .fg(theme.highlight_fg)
         .bg(theme.highlight_bg)
@@ -2507,6 +2521,11 @@ fn render_terminal_scrollbar(
         let y = area.y + (thumb_top + row) as u16;
         f.buffer_mut().set_string(x0, y, "██", style);
     }
+    Some(crate::app::TerminalScrollbarHit {
+        area: scrollbar_area,
+        thumb,
+        max_scrollback,
+    })
 }
 
 fn render_browser_preview_overlay(
