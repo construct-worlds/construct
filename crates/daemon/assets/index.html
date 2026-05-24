@@ -117,13 +117,18 @@
   }
 
   main {
+    --session-list-width: 240px;
     flex: 1 1 0;
     min-height: 0;
     display: grid;
-    grid-template-columns: 240px 1fr;
+    grid-template-columns: var(--session-list-width) 1fr;
+  }
+  main.session-list-hidden {
+    grid-template-columns: 0 1fr;
   }
   @media (max-width: 720px) {
-    main {
+    main,
+    main.session-list-hidden {
       grid-template-columns: 1fr;
       /* Bound the list track directly via `minmax`. Setting
          `min-height` on the wrap (a grid item) wasn't enough —
@@ -655,9 +660,7 @@
     cursor: pointer;
     font-size: 12px;
   }
-  @media (max-width: 720px) {
-    .toggle-list { display: inline-block; }
-  }
+  .toggle-list { display: inline-block; }
 
   .terminal-wrap {
     flex: 1 1 0;
@@ -1008,9 +1011,46 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    position: relative;
     border-right: 1px solid var(--border);
     background: var(--bg-elev);
     box-shadow: inset -1px 0 0 rgba(57, 255, 136, 0.10);
+  }
+  main.session-list-hidden .session-list-wrap {
+    overflow: hidden;
+    border-right: none;
+    box-shadow: none;
+  }
+  .session-list-resizer {
+    position: absolute;
+    top: 0;
+    right: -4px;
+    bottom: 0;
+    width: 8px;
+    z-index: 8;
+    cursor: col-resize;
+    touch-action: none;
+    background: transparent;
+  }
+  .session-list-resizer::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 3px;
+    bottom: 0;
+    width: 1px;
+    background: transparent;
+  }
+  .session-list-resizer:hover::after,
+  .session-list-resizer.is-dragging::after {
+    background: var(--accent);
+    box-shadow: var(--glow-hard);
+  }
+  main.session-list-hidden .session-list-resizer {
+    display: none;
+  }
+  @media (max-width: 720px) {
+    .session-list-resizer { display: none; }
   }
   .session-list-sr-label {
     position: absolute;
@@ -1142,6 +1182,9 @@
         selection (or when the selection isn't eligible for that
         action — restart only enables on terminal-state sessions).
       -->
+      <div class="session-list-resizer" id="sessionListResizer"
+           role="separator" aria-orientation="vertical"
+           aria-label="resize session list" tabindex="0"></div>
       <div class="list-toolbar" id="listToolbar">
         <button type="button" class="row-action" data-action="move-up"
                 id="toolbarUpBtn" aria-label="move selected up" disabled>↑</button>
@@ -1339,7 +1382,9 @@
 
 const $ = (id) => document.getElementById(id);
 const transcriptEl = $("transcript");
+const mainEl = document.querySelector("main");
 const sessionListEl = $("sessionList");
+const sessionListResizerEl = $("sessionListResizer");
 const sessionTitleEl = $("sessionTitle");
 const connEl = $("conn");
 const miniMatrixEl = $("miniMatrix");
@@ -1443,6 +1488,11 @@ const state = {
 const LARGE_TEXT_PASTE_CHARS = 16 * 1024;
 const WEB_PTY_ENGAGEMENT_MS = 3000;
 const WEB_PTY_RESIZE_DEBOUNCE_MS = 120;
+const SESSION_LIST_WIDTH_KEY = "agentd.web.sessionListWidth";
+const SESSION_LIST_VISIBLE_KEY = "agentd.web.sessionListVisible";
+const SESSION_LIST_DEFAULT_WIDTH = 240;
+const SESSION_LIST_MIN_WIDTH = 180;
+const SESSION_LIST_MAX_WIDTH = 520;
 
 const miniMatrixActivity = {
   intensity: 0,
@@ -2169,8 +2219,8 @@ async function selectSession(id) {
   sessionTitleEl.textContent = s ? sessionViewTitle(s) : "";
   renderBrowserPreviewForSession(id);
   // Hide the session list on narrow screens after selection.
-  if (window.matchMedia("(max-width: 720px)").matches) {
-    sessionListEl.classList.add("collapsed");
+  if (isNarrowLayout()) {
+    setSessionListVisible(false, false);
   }
   if (isTerminalSession(s)) {
     await enterTerminalMode(id);
@@ -2928,8 +2978,99 @@ if (vkbdEl) {
   vkbdEl.addEventListener("click", handleVkbdClick);
 }
 
+function isNarrowLayout() {
+  return window.matchMedia("(max-width: 720px)").matches;
+}
+
+function clampSessionListWidth(width) {
+  const maxByViewport = Math.max(
+    SESSION_LIST_MIN_WIDTH,
+    Math.min(SESSION_LIST_MAX_WIDTH, Math.floor(window.innerWidth * 0.65))
+  );
+  return Math.max(SESSION_LIST_MIN_WIDTH, Math.min(width, maxByViewport));
+}
+
+function setSessionListWidth(width, persist = true) {
+  const clamped = clampSessionListWidth(width);
+  mainEl.style.setProperty("--session-list-width", `${clamped}px`);
+  if (sessionListResizerEl) {
+    sessionListResizerEl.setAttribute("aria-valuemin", String(SESSION_LIST_MIN_WIDTH));
+    sessionListResizerEl.setAttribute("aria-valuemax", String(clampSessionListWidth(9999)));
+    sessionListResizerEl.setAttribute("aria-valuenow", String(clamped));
+  }
+  if (persist) localStorage.setItem(SESSION_LIST_WIDTH_KEY, String(clamped));
+  return clamped;
+}
+
+function setSessionListVisible(visible, persist = true) {
+  if (isNarrowLayout()) {
+    sessionListEl.classList.toggle("collapsed", !visible);
+  } else {
+    mainEl.classList.toggle("session-list-hidden", !visible);
+    sessionListEl.classList.remove("collapsed");
+    if (visible) setSessionListWidth(currentSessionListWidth(), false);
+  }
+  toggleListBtn.setAttribute("aria-expanded", visible ? "true" : "false");
+  toggleListBtn.title = visible ? "hide session list" : "show session list";
+  if (persist) localStorage.setItem(SESSION_LIST_VISIBLE_KEY, visible ? "1" : "0");
+  if (state.mode === "terminal") requestAnimationFrame(refitTerminal);
+}
+
+function isSessionListVisible() {
+  return isNarrowLayout()
+    ? !sessionListEl.classList.contains("collapsed")
+    : !mainEl.classList.contains("session-list-hidden");
+}
+
+function currentSessionListWidth() {
+  const stored = Number(localStorage.getItem(SESSION_LIST_WIDTH_KEY));
+  if (Number.isFinite(stored) && stored > 0) return stored;
+  return SESSION_LIST_DEFAULT_WIDTH;
+}
+
+function initSessionListLayout() {
+  setSessionListWidth(currentSessionListWidth(), false);
+  const storedVisible = localStorage.getItem(SESSION_LIST_VISIBLE_KEY);
+  setSessionListVisible(storedVisible !== "0", false);
+}
+
+initSessionListLayout();
+
 toggleListBtn.addEventListener("click", () => {
-  sessionListEl.classList.toggle("collapsed");
+  setSessionListVisible(!isSessionListVisible());
+});
+
+if (sessionListResizerEl) {
+  sessionListResizerEl.addEventListener("pointerdown", (ev) => {
+    if (isNarrowLayout() || !isSessionListVisible()) return;
+    ev.preventDefault();
+    sessionListResizerEl.classList.add("is-dragging");
+    sessionListResizerEl.setPointerCapture(ev.pointerId);
+    const onMove = (moveEv) => setSessionListWidth(moveEv.clientX);
+    const onEnd = () => {
+      sessionListResizerEl.classList.remove("is-dragging");
+      sessionListResizerEl.removeEventListener("pointermove", onMove);
+      sessionListResizerEl.removeEventListener("pointerup", onEnd);
+      sessionListResizerEl.removeEventListener("pointercancel", onEnd);
+      if (state.mode === "terminal") requestAnimationFrame(refitTerminal);
+    };
+    sessionListResizerEl.addEventListener("pointermove", onMove);
+    sessionListResizerEl.addEventListener("pointerup", onEnd);
+    sessionListResizerEl.addEventListener("pointercancel", onEnd);
+  });
+  sessionListResizerEl.addEventListener("keydown", (ev) => {
+    if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+    ev.preventDefault();
+    const delta = ev.key === "ArrowRight" ? 16 : -16;
+    setSessionListWidth(currentSessionListWidth() + delta);
+    if (state.mode === "terminal") requestAnimationFrame(refitTerminal);
+  });
+}
+
+window.addEventListener("resize", () => {
+  setSessionListWidth(currentSessionListWidth(), false);
+  const storedVisible = localStorage.getItem(SESSION_LIST_VISIBLE_KEY);
+  setSessionListVisible(storedVisible !== "0", false);
 });
 
 // --- Transcript rendering -------------------------------------------------
