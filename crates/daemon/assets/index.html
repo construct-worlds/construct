@@ -542,7 +542,8 @@
     flex-direction: column;
     gap: 4px;
     padding: 6px 10px;
-    border-top: 1px solid var(--border);
+    border: 1px solid var(--border);
+    border-top: none;
     background: var(--bg-elev);
     font-family: var(--mono);
     font-size: 12.5px;
@@ -672,6 +673,7 @@
     touch-action: pan-y;
     padding: 6px 0 0 6px;
     border: 1px solid var(--border);
+    border-bottom: none;
     box-shadow:
       inset 0 0 28px rgba(57, 255, 136, 0.12),
       inset 0 0 90px rgba(0, 0, 0, 0.52),
@@ -699,6 +701,9 @@
   }
   .terminal-host .xterm .xterm-screen canvas {
     filter: saturate(1.18) contrast(1.08);
+  }
+  .terminal-host.hide-xterm-cursor .xterm-cursor {
+    visibility: hidden !important;
   }
   .terminal-host .xterm,
   .terminal-host .xterm .xterm-viewport,
@@ -2187,6 +2192,7 @@ function enterChatMode() {
   transcriptEl.hidden = false;
   composerEl.hidden = false;
   terminalWrapEl.hidden = true;
+  terminalEl.classList.remove("hide-xterm-cursor");
   terminalScrollOverlayEl.hidden = true;
   renderEditorState(null);
   // Virtual keyboard only makes sense over xterm — chat sessions
@@ -2207,6 +2213,8 @@ async function enterTerminalMode(id) {
   terminalWrapEl.hidden = false;
   terminalScrollOverlayEl.hidden = false;
   vkbdEl.hidden = false;
+  const session = state.sessions.find((x) => x.id === id);
+  terminalEl.classList.toggle("hide-xterm-cursor", isStructuredToolSession(session));
   renderEditorStateForSession(id);
   // Build the keyboard markup once per session-switch; cheap, and
   // makes future per-session layout customization easy if it ever
