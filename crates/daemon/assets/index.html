@@ -1240,6 +1240,13 @@ const state = {
   // `session.pty_resize` on every paint when nothing actually
   // changed (ResizeObserver fires generously).
   lastReportedSize: { cols: 0, rows: 0 },
+  // Web PTY ownership is explicit and short-lived. Passive browser
+  // layout churn should not steal the OS PTY size from an active TUI,
+  // but recent web interaction should keep xterm and the real PTY in
+  // sync, including row-only changes.
+  webPtyEngagedUntil: 0,
+  ptyResizeTimer: null,
+  pendingPtyResize: null,
   // Some PTY apps repaint after SIGWINCH by emitting a large redraw
   // after the browser-side fit already returned. If the user was
   // following bottom when we sent the resize, keep following briefly
@@ -1259,6 +1266,8 @@ const state = {
 };
 
 const LARGE_TEXT_PASTE_CHARS = 16 * 1024;
+const WEB_PTY_ENGAGEMENT_MS = 3000;
+const WEB_PTY_RESIZE_DEBOUNCE_MS = 120;
 
 const miniMatrixActivity = {
   intensity: 0,
@@ -2047,7 +2056,7 @@ async function enterTerminalMode(id) {
   // the daemon's active-wins policy. Reset the dedup so this
   // refit always fires `pty_resize`.
   state.lastReportedSize = { cols: 0, rows: 0 };
-  refitTerminal();
+  refitTerminal({ claim: true, immediate: true });
   state.term.focus();
 }
 
@@ -2212,6 +2221,7 @@ function initTerminal() {
   // input round-trips cleanly.
   state.term.onData((s) => {
     if (state.mode !== "terminal" || !state.currentId) return;
+    claimTerminalGeometryNow();
     const data = encodeBase64Utf8(s);
     rpc("session.pty_input", { session_id: state.currentId, data })
       .catch((e) => console.error("pty_input failed:", e));
@@ -2227,12 +2237,27 @@ function initTerminal() {
 
   // Tapping the terminal area focuses xterm's helper textarea, which
   // is what summons the soft keyboard on iOS/Android.
-  terminalEl.addEventListener("click", () => state.term && state.term.focus());
+  terminalEl.addEventListener("click", () => {
+    noteWebPtyEngagement();
+    refitTerminal({ claim: true, immediate: true });
+    state.term && state.term.focus();
+  });
 }
 
-function refitTerminal() {
+function noteWebPtyEngagement() {
+  state.webPtyEngagedUntil = performance.now() + WEB_PTY_ENGAGEMENT_MS;
+}
+
+function webPtyRecentlyEngaged() {
+  return performance.now() <= state.webPtyEngagedUntil;
+}
+
+function refitTerminal(options = {}) {
   if (!state.term || !state.fitAddon) return;
   if (state.mode !== "terminal") return;
+  const claim = !!options.claim;
+  const immediate = !!options.immediate;
+  if (claim) noteWebPtyEngagement();
   const wasAtBottom = terminalIsAtBottom();
   if (!fitTerminalPreservingScroll(wasAtBottom)) return;
   const cols = state.term.cols;
@@ -2244,22 +2269,45 @@ function refitTerminal() {
   if (!colsChanged && !rowsChanged) {
     return;
   }
-  if (!colsChanged) {
-    // Height-only changes are common when the phone's native keyboard or
-    // the web virtual keyboard appears. Resizing local xterm rows is enough
-    // for the browser viewport; sending SIGWINCH to codex/claude/zarvis here
-    // makes those full-screen PTY apps repaint their transcript, which looks
-    // like history replaying from the beginning and can leave scrollback at
-    // the top after repeated keyboard toggles.
+  if (!claim && !webPtyRecentlyEngaged()) {
+    // Passive browser layout churn (background tab, phone keyboard,
+    // viewport settle) should refit local xterm but must not steal the
+    // single OS PTY geometry from an active TUI. Once the web terminal
+    // is clicked/typed into, recent engagement lets row-only changes
+    // claim the PTY too, keeping full-screen apps like codex aligned.
     state.resizeFollowBottomUntil = 0;
     return;
   }
-  state.lastReportedSize = { cols, rows };
-  if (state.currentId) {
-    if (wasAtBottom) state.resizeFollowBottomUntil = performance.now() + 1500;
-    rpc("session.pty_resize", { session_id: state.currentId, cols, rows })
-      .catch((e) => console.warn("pty_resize failed:", e));
+  if (immediate) {
+    sendTerminalPtyResize(cols, rows, wasAtBottom);
+  } else {
+    scheduleTerminalPtyResize(cols, rows, wasAtBottom);
   }
+}
+
+function scheduleTerminalPtyResize(cols, rows, wasAtBottom) {
+  state.pendingPtyResize = { sessionId: state.currentId, cols, rows, wasAtBottom };
+  state.lastReportedSize = { cols, rows };
+  if (state.ptyResizeTimer) clearTimeout(state.ptyResizeTimer);
+  state.ptyResizeTimer = setTimeout(() => {
+    state.ptyResizeTimer = null;
+    const pending = state.pendingPtyResize;
+    state.pendingPtyResize = null;
+    if (!pending) return;
+    sendTerminalPtyResize(pending.cols, pending.rows, pending.wasAtBottom, pending.sessionId);
+  }, WEB_PTY_RESIZE_DEBOUNCE_MS);
+}
+
+function sendTerminalPtyResize(cols, rows, wasAtBottom, sessionId = state.currentId) {
+  state.lastReportedSize = { cols, rows };
+  if (!sessionId || sessionId !== state.currentId) return;
+  if (wasAtBottom) state.resizeFollowBottomUntil = performance.now() + 1500;
+  rpc("session.pty_resize", { session_id: sessionId, cols, rows })
+    .catch((e) => console.warn("pty_resize failed:", e));
+}
+
+function claimTerminalGeometryNow() {
+  refitTerminal({ claim: true, immediate: true });
 }
 
 function terminalIsAtBottom() {
@@ -2500,6 +2548,7 @@ function cycleModifierState(s) {
  *  the user typed on-screen. */
 function sendPtyBytes(s) {
   if (!state.currentId || state.mode !== "terminal") return;
+  claimTerminalGeometryNow();
   const data = encodeBase64Utf8(s);
   rpc("session.pty_input", { session_id: state.currentId, data })
     .catch((e) => console.warn("vkbd pty_input failed:", e));
@@ -3221,6 +3270,7 @@ async function submitComposer({ enter }) {
   resetInputHeight();
   const pty = currentSessionHasPty();
   if (pty) {
+    if (state.mode === "terminal") claimTerminalGeometryNow();
     const payload = enter ? text + "\r" : text;
     const data = encodeBase64Utf8(payload);
     try {

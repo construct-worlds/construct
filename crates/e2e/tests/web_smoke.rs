@@ -560,7 +560,11 @@ async fn web_client_loads_and_websocket_connects() {
               const oldCurrent = state.currentId;
               const oldSize = state.lastReportedSize;
               const oldFollow = state.resizeFollowBottomUntil;
+              const oldEngaged = state.webPtyEngagedUntil;
+              const oldTimer = state.ptyResizeTimer;
+              const oldPending = state.pendingPtyResize;
               const oldRpc = rpc;
+              if (state.ptyResizeTimer) clearTimeout(state.ptyResizeTimer);
               const calls = [];
               rpc = async (method, params) => {
                 calls.push({ method, params });
@@ -591,7 +595,7 @@ async fn web_client_loads_and_websocket_connects() {
                   bottom.baseY = 80;
                 },
               };
-              refitTerminal();
+              refitTerminal({ claim: true, immediate: true });
               renderEvent({ type: 'pty', data: btoa('resize repaint') });
               await new Promise((resolve) => requestAnimationFrame(resolve));
 
@@ -623,6 +627,7 @@ async fn web_client_loads_and_websocket_connects() {
 
               const rowOnly = { viewportY: 20, baseY: 20 };
               state.lastReportedSize = { cols: 100, rows: 40 };
+              state.webPtyEngagedUntil = 0;
               state.resizeFollowBottomUntil = 0;
               state.term = {
                 cols: 100,
@@ -645,12 +650,40 @@ async fn web_client_loads_and_websocket_connects() {
               refitTerminal();
               await new Promise((resolve) => requestAnimationFrame(resolve));
 
+              const activeRowOnly = { viewportY: 20, baseY: 20 };
+              state.lastReportedSize = { cols: 100, rows: 40 };
+              state.resizeFollowBottomUntil = 0;
+              state.term = {
+                cols: 100,
+                rows: 25,
+                buffer: { active: activeRowOnly },
+                scrollToBottom: () => {
+                  calls.push('active-row-only-bottom');
+                  activeRowOnly.viewportY = activeRowOnly.baseY;
+                },
+                write: (_chunk, cb) => {
+                  calls.push('active-row-only-write');
+                  if (cb) cb();
+                },
+              };
+              state.fitAddon = {
+                fit: () => {
+                  calls.push('fit-active-row-only');
+                },
+              };
+              refitTerminal({ claim: true, immediate: true });
+              await new Promise((resolve) => requestAnimationFrame(resolve));
+
               state.term = oldTerm;
               state.fitAddon = oldFit;
               state.mode = oldMode;
               state.currentId = oldCurrent;
               state.lastReportedSize = oldSize;
               state.resizeFollowBottomUntil = oldFollow;
+              state.webPtyEngagedUntil = oldEngaged;
+              if (state.ptyResizeTimer) clearTimeout(state.ptyResizeTimer);
+              state.ptyResizeTimer = oldTimer;
+              state.pendingPtyResize = oldPending;
               rpc = oldRpc;
               return { calls, bottom, scrolledUp };
             })()
@@ -679,13 +712,26 @@ async fn web_client_loads_and_websocket_connects() {
             .any(|v| v.as_str() == Some("unexpected-bottom")),
         "refit incorrectly forced a manually-scrolled terminal to bottom: {fit_scroll:?}"
     );
-    assert!(
-        !calls.iter().any(|v| {
+    let row_resize_count = calls
+        .iter()
+        .filter(|v| {
             v["method"].as_str() == Some("session.pty_resize")
                 && v["params"]["cols"].as_i64() == Some(100)
                 && v["params"]["rows"].as_i64() == Some(25)
+        })
+        .count();
+    assert_eq!(
+        row_resize_count, 1,
+        "only the engaged row-only fit should send pty_resize: {fit_scroll:?}"
+    );
+    assert!(
+        calls.iter().any(|v| {
+            v["method"].as_str() == Some("session.pty_resize")
+                && v["params"]["session_id"].as_str() == Some("s-fit")
+                && v["params"]["cols"].as_i64() == Some(100)
+                && v["params"]["rows"].as_i64() == Some(25)
         }),
-        "row-only terminal fits should not send pty_resize/SIGWINCH: {fit_scroll:?}"
+        "engaged row-only terminal fits should claim matching PTY size: {fit_scroll:?}"
     );
     assert_eq!(
         fit_scroll["bottom"]["viewportY"],
