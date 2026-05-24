@@ -20,7 +20,7 @@ use futures::{FutureExt, StreamExt};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Stdout, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -46,6 +46,8 @@ pub enum ListItem {
     Session {
         summary: SessionSummary,
         indented: bool,
+        has_children: bool,
+        children_expanded: bool,
     },
     GroupHeader {
         group: GroupSummary,
@@ -53,8 +55,28 @@ pub enum ListItem {
     },
 }
 
-fn is_list_visible_session(s: &SessionSummary) -> bool {
+fn is_user_list_session(s: &SessionSummary) -> bool {
     matches!(s.kind, agentd_protocol::SessionKind::User)
+}
+
+fn is_subagent_session(s: &SessionSummary) -> bool {
+    matches!(s.kind, agentd_protocol::SessionKind::Subagent)
+}
+
+pub(crate) fn list_session_indent_cells(
+    s: &SessionSummary,
+    indented: bool,
+    has_children: bool,
+) -> u16 {
+    if is_subagent_session(s) {
+        4
+    } else if indented && has_children {
+        1
+    } else if indented {
+        2
+    } else {
+        0
+    }
 }
 
 impl ListItem {
@@ -224,6 +246,7 @@ pub struct App {
     pub groups: Vec<GroupSummary>,
     pub selection: Selection,
     pub focus: PaneFocus,
+    pub subagent_collapsed: HashSet<String>,
     pub transcript: Vec<TimestampedEvent>,
     pub transcript_session: Option<String>,
     pub transcript_scroll: u16,
@@ -1017,13 +1040,13 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         .and_then(|id| {
             sessions
                 .iter()
-                .find(|s| s.id == *id && is_list_visible_session(s))
+                .find(|s| s.id == *id && is_user_list_session(s))
                 .map(|s| Selection::Session(s.id.clone()))
         })
         .or_else(|| {
             sessions
                 .iter()
-                .find(|s| is_list_visible_session(s))
+                .find(|s| is_user_list_session(s))
                 .map(|s| Selection::Session(s.id.clone()))
         })
         .unwrap_or(Selection::None);
@@ -1040,6 +1063,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         // what the user wants to interact with first. List navigation
         // is one `C-x o` / `Tab` away.
         focus: initial_focus,
+        subagent_collapsed: HashSet::new(),
         transcript: Vec::new(),
         transcript_session: None,
         transcript_scroll: 0,
@@ -1676,6 +1700,14 @@ impl App {
         self.groups.iter().find(|g| g.id == id)
     }
 
+    fn selected_session_has_subagents(&self) -> Option<String> {
+        let id = self.selection.session_id()?;
+        self.sessions
+            .iter()
+            .any(|s| s.parent_session_id.as_deref() == Some(id))
+            .then(|| id.to_string())
+    }
+
     pub fn selected_id(&self) -> Option<String> {
         self.selected_session().map(|s| s.id.clone())
     }
@@ -1753,20 +1785,59 @@ impl App {
     /// Materialize the rendered list: ungrouped sessions (sorted by
     /// position) on top, then groups in position order with each group's
     /// members indented underneath (skipped entirely when the group is
-    /// collapsed).
+    /// collapsed). Subagents are nested under their parent session and are
+    /// expanded by default.
     pub fn list_items(&self) -> Vec<ListItem> {
         let mut out: Vec<ListItem> = Vec::new();
 
         let orch_id = self.orchestrator_id.as_deref();
+        let mut subagents_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
+        for s in self.sessions.iter().filter(|s| is_subagent_session(s)) {
+            if let Some(parent) = s.parent_session_id.as_deref() {
+                subagents_by_parent.entry(parent).or_default().push(s);
+            }
+        }
+        for children in subagents_by_parent.values_mut() {
+            children.sort_by(|a, b| {
+                a.position
+                    .cmp(&b.position)
+                    .then_with(|| b.created_at.cmp(&a.created_at))
+            });
+        }
+
+        let push_session = |out: &mut Vec<ListItem>, s: &SessionSummary, indented: bool| {
+            let children = subagents_by_parent.get(s.id.as_str());
+            let has_children = children.map(|v| !v.is_empty()).unwrap_or(false);
+            let children_expanded = has_children && !self.subagent_collapsed.contains(&s.id);
+            out.push(ListItem::Session {
+                summary: s.clone(),
+                indented,
+                has_children,
+                children_expanded,
+            });
+            if children_expanded {
+                if let Some(children) = children {
+                    for child in children {
+                        out.push(ListItem::Session {
+                            summary: (*child).clone(),
+                            indented: true,
+                            has_children: false,
+                            children_expanded: false,
+                        });
+                    }
+                }
+            }
+        };
+
         let mut ungrouped: Vec<&SessionSummary> = self
             .sessions
             .iter()
             .filter(|s| s.group_id.is_none())
             // Hide the orchestrator from the list — it's rendered in
-            // the minibuffer instead. Subagents are implementation
-            // details of their parent Zarvis task surface.
+            // the minibuffer instead. Subagents render only as children
+            // of their parent session.
             .filter(|s| Some(s.id.as_str()) != orch_id)
-            .filter(|s| is_list_visible_session(s))
+            .filter(|s| is_user_list_session(s))
             .collect();
         ungrouped.sort_by(|a, b| {
             a.position
@@ -1774,10 +1845,7 @@ impl App {
                 .then_with(|| b.created_at.cmp(&a.created_at))
         });
         for s in ungrouped {
-            out.push(ListItem::Session {
-                summary: s.clone(),
-                indented: false,
-            });
+            push_session(&mut out, s, false);
         }
 
         let mut groups: Vec<&GroupSummary> = self.groups.iter().collect();
@@ -1787,7 +1855,7 @@ impl App {
                 .sessions
                 .iter()
                 .filter(|s| s.group_id.as_deref() == Some(g.id.as_str()))
-                .filter(|s| is_list_visible_session(s))
+                .filter(|s| is_user_list_session(s))
                 .collect();
             members.sort_by_key(|s| s.position);
             out.push(ListItem::GroupHeader {
@@ -1796,10 +1864,7 @@ impl App {
             });
             if !g.collapsed {
                 for s in members {
-                    out.push(ListItem::Session {
-                        summary: s.clone(),
-                        indented: true,
-                    });
+                    push_session(&mut out, s, true);
                 }
             }
         }
@@ -3293,14 +3358,26 @@ impl App {
         if idx >= items.len() {
             return;
         }
-        // The 4-cell gutter to the left of the session name —
-        //   [diamond][ ][status-circle][ ]
-        // — toggles the pin instead of selecting the row. Wider than
-        // the bare diamond so it's easy to click. Must stay in lockstep
-        // with `hovered_diamond` in ui.rs.
-        if let ListItem::Session { summary, indented } = &items[idx] {
-            let indent = if *indented { 2 } else { 0 };
-            let zone_start = list.x + 1 + indent;
+        // Session rows reserve disclosure before the 4-cell pin/status gutter.
+        // Disclosure clicks toggle subagents; the gutter toggles pinning.
+        // Must stay in lockstep with `hovered_diamond` in ui.rs.
+        if let ListItem::Session {
+            summary,
+            indented,
+            has_children,
+            ..
+        } = &items[idx]
+        {
+            let indent = list_session_indent_cells(summary, *indented, *has_children);
+            let disclosure_col = list.x + 1 + indent;
+            if *has_children && col == disclosure_col {
+                let id = summary.id.clone();
+                if !self.subagent_collapsed.insert(id.clone()) {
+                    self.subagent_collapsed.remove(&id);
+                }
+                return;
+            }
+            let zone_start = disclosure_col + u16::from(*has_children);
             let zone_end = zone_start + 4;
             if col >= zone_start && col < zone_end {
                 let id = summary.id.clone();
@@ -3869,6 +3946,10 @@ impl App {
                     if let Err(e) = self.client.set_group_collapsed(&id, false).await {
                         self.set_status(format!("expand failed: {e}"));
                     }
+                } else if self.focus == PaneFocus::List {
+                    if let Some(id) = self.selected_session_has_subagents() {
+                        self.subagent_collapsed.remove(&id);
+                    }
                 }
             }
             CollapseGroup => {
@@ -3876,6 +3957,10 @@ impl App {
                     let id = g.id.clone();
                     if let Err(e) = self.client.set_group_collapsed(&id, true).await {
                         self.set_status(format!("collapse failed: {e}"));
+                    }
+                } else if self.focus == PaneFocus::List {
+                    if let Some(id) = self.selected_session_has_subagents() {
+                        self.subagent_collapsed.insert(id);
                     }
                 }
             }
@@ -4268,6 +4353,7 @@ impl App {
                     env: HashMap::new(),
                     args: Vec::new(),
                     kind: agentd_protocol::SessionKind::User,
+                    parent_session_id: None,
                     group_id,
                 };
                 match self.client.create(params).await {
@@ -5150,6 +5236,7 @@ mod tests {
             groups: Vec::new(),
             selection: Selection::Session("s1".into()),
             focus: PaneFocus::View,
+            subagent_collapsed: HashSet::new(),
             transcript: Vec::new(),
             transcript_session: None,
             transcript_scroll: 0,
@@ -5249,6 +5336,7 @@ mod tests {
             pinned: false,
             position: 0,
             group_id: None,
+            parent_session_id: None,
             last_pty_at_ms: None,
             automode: false,
             kind,
@@ -5806,15 +5894,108 @@ mod tests {
 
     #[test]
     fn only_user_sessions_are_visible_list_items() {
-        assert!(is_list_visible_session(&summary_with_kind(
+        assert!(is_user_list_session(&summary_with_kind(
             agentd_protocol::SessionKind::User
         )));
-        assert!(!is_list_visible_session(&summary_with_kind(
+        assert!(!is_user_list_session(&summary_with_kind(
             agentd_protocol::SessionKind::Orchestrator
         )));
-        assert!(!is_list_visible_session(&summary_with_kind(
+        assert!(!is_user_list_session(&summary_with_kind(
             agentd_protocol::SessionKind::Subagent
         )));
+    }
+
+    #[tokio::test]
+    async fn subagents_render_under_parent_and_default_expanded() {
+        use tokio::net::UnixListener;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("agentd.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let _server = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut parent = summary_with_kind(agentd_protocol::SessionKind::User);
+        parent.id = "sparent".into();
+        parent.position = 0;
+        let mut child = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        child.id = "schild".into();
+        child.parent_session_id = Some("sparent".into());
+        child.position = 1;
+        let mut orphan = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        orphan.id = "sorphan".into();
+        orphan.position = -1;
+
+        let mut app = test_app(client, vec![orphan, child, parent]);
+        let items = app.list_items();
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            ListItem::Session {
+                summary,
+                indented,
+                has_children,
+                children_expanded,
+            } => {
+                assert_eq!(summary.id, "sparent");
+                assert!(!indented);
+                assert!(*has_children);
+                assert!(*children_expanded);
+            }
+            _ => panic!("expected parent session"),
+        }
+        match &items[1] {
+            ListItem::Session {
+                summary,
+                indented,
+                has_children,
+                ..
+            } => {
+                assert_eq!(summary.id, "schild");
+                assert!(*indented);
+                assert!(!has_children);
+            }
+            _ => panic!("expected subagent session"),
+        }
+
+        app.selection = Selection::Session("sparent".into());
+        app.focus = PaneFocus::List;
+        app.run_action(KeyAction::CollapseGroup).await;
+        let collapsed_by_key = app.list_items();
+        assert_eq!(collapsed_by_key.len(), 1);
+        app.run_action(KeyAction::ExpandGroup).await;
+        assert_eq!(app.list_items().len(), 2);
+
+        app.subagent_collapsed.insert("sparent".into());
+        let collapsed = app.list_items();
+        assert_eq!(collapsed.len(), 1);
+        match &collapsed[0] {
+            ListItem::Session {
+                summary,
+                has_children,
+                children_expanded,
+                ..
+            } => {
+                assert_eq!(summary.id, "sparent");
+                assert!(*has_children);
+                assert!(!children_expanded);
+            }
+            _ => panic!("expected collapsed parent session"),
+        }
+    }
+
+    #[test]
+    fn list_session_indent_policy_distinguishes_subagents_and_grouped_parents() {
+        let user = summary_with_kind(agentd_protocol::SessionKind::User);
+        let subagent = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+
+        assert_eq!(list_session_indent_cells(&user, false, false), 0);
+        assert_eq!(list_session_indent_cells(&user, true, false), 2);
+        assert_eq!(list_session_indent_cells(&user, true, true), 1);
+        assert_eq!(list_session_indent_cells(&subagent, true, false), 4);
     }
 
     #[tokio::test]

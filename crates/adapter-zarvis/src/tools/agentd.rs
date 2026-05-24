@@ -231,6 +231,7 @@ impl Tool for CreateSession {
             // Sessions created via the agentd-control tool are always
             // user sessions — the orchestrator is daemon-internal only.
             kind: agentd_protocol::SessionKind::User,
+            parent_session_id: None,
             group_id: input
                 .get("group_id")
                 .and_then(|s| s.as_str())

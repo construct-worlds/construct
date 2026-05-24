@@ -453,16 +453,22 @@ fn hovered_diamond(app: &App) -> Option<(u16, u16, &SessionSummary)> {
     let row = (my - list_area.y - 1) as usize;
     let items = app.list_items();
     let item = items.into_iter().nth(row)?;
-    let (summary, indented) = match item {
-        AppListItem::Session { summary, indented } => (summary, indented),
+    let (summary, indented, has_children) = match item {
+        AppListItem::Session {
+            summary,
+            indented,
+            has_children,
+            ..
+        } => (summary, indented, has_children),
         _ => return None,
     };
-    let indent: u16 = if indented { 2 } else { 0 };
-    // Hit zone is the 4-cell gutter to the left of the session name:
-    //   [diamond][ ][status-circle][ ]   ← then the name starts
+    let indent = crate::app::list_session_indent_cells(&summary, indented, has_children);
+    // Hit zone is the 4-cell gutter to the left of the session name, after
+    // the disclosure column when this row has one:
+    //   [disclosure][diamond][ ][status-circle][ ]   ← then the name starts
     // Wider than the bare diamond glyph so it's easier to click —
     // the visual overlay still anchors on the diamond cell itself.
-    let zone_start = list_area.x + 1 + indent;
+    let zone_start = list_area.x + 1 + indent + u16::from(has_children);
     let zone_end = zone_start + 4; // exclusive
     if mx < zone_start || mx >= zone_end {
         return None;
@@ -1103,11 +1109,26 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 AppListItem::Session {
                     summary: s,
                     indented,
+                    has_children,
+                    children_expanded,
                 } => {
+                    let expand_glyph = if *has_children {
+                        Some(if *children_expanded { "▼" } else { "▶" })
+                    } else {
+                        None
+                    };
                     let pin_glyph = if s.pinned { "⬩" } else { " " };
-                    let indent_prefix = if *indented { "  " } else { "" };
-                    // Fixed-width left side: indent + pin (1) + " glyph " (3).
-                    let prefix_w = indent_prefix.chars().count() + 1 + 3;
+                    let indent_prefix = " ".repeat(crate::app::list_session_indent_cells(
+                        s,
+                        *indented,
+                        *has_children,
+                    ) as usize);
+                    // Fixed-width left side: indent + optional disclosure (1)
+                    // + pin (1) + " glyph " (3).
+                    let prefix_w = indent_prefix.chars().count()
+                        + usize::from(expand_glyph.is_some())
+                        + 1
+                        + 3;
                     let harness = harness_label(s);
                     let harness_w = harness.chars().count();
                     // Always leave at least one cell of gap between the name
@@ -1124,8 +1145,14 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     let name_display_w = name_display.chars().count();
                     let gap = row_w.saturating_sub(prefix_w + name_display_w + harness_w);
                     let gap_str: String = " ".repeat(gap);
-                    ListItem::new(Line::from(vec![
-                        Span::raw(indent_prefix.to_string()),
+                    let mut spans = vec![Span::raw(indent_prefix.to_string())];
+                    if let Some(expand_glyph) = expand_glyph {
+                        spans.push(Span::styled(
+                            expand_glyph.to_string(),
+                            Style::default().fg(app.theme.group),
+                        ));
+                    }
+                    spans.extend([
                         Span::styled(pin_glyph.to_string(), Style::default().fg(app.theme.accent)),
                         Span::styled(
                             format!(" {} ", session_status_glyph(app, s)),
@@ -1134,7 +1161,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         Span::styled(name_display, Style::default().fg(app.theme.text)),
                         Span::raw(gap_str),
                         Span::styled(harness, harness_style(&app.theme)),
-                    ]))
+                    ]);
+                    ListItem::new(Line::from(spans))
                 }
                 AppListItem::GroupHeader {
                     group,

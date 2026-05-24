@@ -719,6 +719,11 @@ pub struct SessionSummary {
     /// the group's header, below the ungrouped region).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// Parent session for internal child sessions such as Zarvis subagents.
+    /// Clients can render these under the owning user session instead of as
+    /// ordinary top-level sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     /// Unix epoch ms of the most recent PTY byte received from the adapter,
     /// or `None` if this session has never produced PTY output. Clients use
     /// `now - last_pty_at_ms < quiescence_window` as a "session looks busy"
@@ -946,6 +951,9 @@ pub struct CreateSessionParams {
     /// passes `Orchestrator`.
     #[serde(default)]
     pub kind: SessionKind,
+    /// Parent session for internal child sessions such as Zarvis subagents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     /// Group to file the new session under. `None` (default) creates
     /// an ungrouped session. The TUI uses this to auto-join the new
     /// session to whichever group is currently selected (or contains
