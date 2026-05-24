@@ -931,9 +931,6 @@ impl SessionManager {
         let mut out = Vec::with_capacity(guard.len());
         for entry in guard.values() {
             let summary = entry.summary().await;
-            if summary.kind == agentd_protocol::SessionKind::Subagent {
-                continue;
-            }
             out.push(summary);
         }
         // Primary: user-controlled position ASC. Tiebreaker: newer first.
@@ -1051,6 +1048,10 @@ impl SessionManager {
             // Negative timestamp so newer sessions sort to the top by default.
             position: -now.timestamp_millis(),
             group_id: params.group_id.clone(),
+            parent_session_id: params
+                .parent_session_id
+                .clone()
+                .or_else(|| params.env.get("AGENTD_PARENT_SESSION_ID").cloned()),
             last_pty_at_ms: None,
             automode: false,
             kind: params.kind,
@@ -1254,6 +1255,7 @@ impl SessionManager {
             env: Default::default(),
             args: Vec::new(),
             kind: agentd_protocol::SessionKind::Orchestrator,
+            parent_session_id: None,
             group_id: None,
         };
         match self.create(params).await {
@@ -3232,6 +3234,7 @@ mod tests {
                 pinned: false,
                 position,
                 group_id: None,
+                parent_session_id: None,
                 last_pty_at_ms: None,
                 automode: false,
                 kind,
@@ -3290,7 +3293,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_hides_subagent_sessions() {
+    async fn list_includes_subagent_sessions_for_clients_to_nest() {
         use tempfile::tempdir;
 
         let tmp = tempdir().expect("tempdir");
@@ -3312,9 +3315,13 @@ mod tests {
         );
 
         let sessions = mgr.list().await;
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].id, "suser");
-        assert_eq!(sessions[0].kind, agentd_protocol::SessionKind::User);
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions
+            .iter()
+            .any(|s| s.id == "suser" && s.kind == agentd_protocol::SessionKind::User));
+        assert!(sessions
+            .iter()
+            .any(|s| s.id == "ssub" && s.kind == agentd_protocol::SessionKind::Subagent));
     }
 
     /// Browser previews are ephemeral, live-only UI (a base64 PNG shown as
@@ -3429,6 +3436,7 @@ mod tests {
             pinned: false,
             position: 0,
             group_id: None,
+            parent_session_id: None,
             last_pty_at_ms: None,
             automode: false,
             kind: agentd_protocol::SessionKind::User,
@@ -3511,6 +3519,7 @@ mod tests {
             env: Default::default(),
             args: Vec::new(),
             kind: agentd_protocol::SessionKind::User,
+            parent_session_id: None,
             group_id: None,
         }
     }

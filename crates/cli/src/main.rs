@@ -206,6 +206,7 @@ async fn main() -> Result<()> {
                     env: Default::default(),
                     args: Vec::new(),
                     kind: agentd_protocol::SessionKind::User,
+                    parent_session_id: None,
                     group_id: None,
                 })
                 .await?;

@@ -317,6 +317,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 env: Default::default(),
                 args: Vec::new(),
                 kind: agentd_protocol::SessionKind::User,
+                parent_session_id: None,
                 group_id: arg_str(&args, "group_id").ok(),
             };
             let sid = client.create(params).await?;
