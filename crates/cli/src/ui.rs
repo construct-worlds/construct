@@ -2500,26 +2500,36 @@ fn render_terminal_scrollbar(
         ((max_scrollback.saturating_sub(rendered_scrollback)) * max_thumb_top) / max_scrollback
     };
 
-    let x0 = area.x + area.width.saturating_sub(2);
+    const SCROLLBAR_W: u16 = 4;
+    let bar_w = area.width.min(SCROLLBAR_W);
+    let x0 = area.x + area.width.saturating_sub(bar_w);
     let scrollbar_area = Rect {
         x: x0,
         y: area.y,
-        width: 2,
+        width: bar_w,
         height: area.height,
     };
     let thumb = Rect {
         x: x0,
         y: area.y + thumb_top as u16,
-        width: 2,
+        width: bar_w,
         height: thumb_h as u16,
     };
-    let style = Style::default()
-        .fg(theme.highlight_fg)
-        .bg(theme.highlight_bg)
+    let track_color = blend_color(Color::Black, theme.accent, 0.20);
+    let track_style = Style::default().fg(track_color).bg(track_color);
+    let thumb_style = Style::default()
+        .fg(theme.accent)
+        .bg(theme.accent)
         .add_modifier(Modifier::BOLD);
+    for row in 0..track_h {
+        let y = area.y + row as u16;
+        f.buffer_mut()
+            .set_string(x0, y, " ".repeat(bar_w as usize), track_style);
+    }
     for row in 0..thumb_h {
         let y = area.y + (thumb_top + row) as u16;
-        f.buffer_mut().set_string(x0, y, "██", style);
+        f.buffer_mut()
+            .set_string(x0, y, " ".repeat(bar_w as usize), thumb_style);
     }
     Some(crate::app::TerminalScrollbarHit {
         area: scrollbar_area,
