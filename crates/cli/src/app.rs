@@ -3762,7 +3762,7 @@ impl App {
         }
     }
 
-    fn is_orchestrator_panel_open(&self) -> bool {
+    pub(crate) fn is_orchestrator_panel_open(&self) -> bool {
         matches!(
             self.minibuffer.as_ref().map(|m| &m.intent),
             Some(MinibufferIntent::Orchestrator)
