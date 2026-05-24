@@ -2432,6 +2432,14 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
         id,
         translate_block_hits(out.blocks, row_offset, chat_area.height),
     );
+    render_terminal_scrollbar(
+        f,
+        chat_area,
+        &app.theme,
+        app.terminal_scrollbar_visible_until,
+        app.view_scrollback,
+        out.screen.scrollback(),
+    );
     if let Some(area) = editor_area {
         // Also clear the editor area (defensive)
         f.render_widget(Clear, area);
@@ -2453,6 +2461,48 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
             &app.theme,
             true,
         );
+    }
+}
+
+fn render_terminal_scrollbar(
+    f: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    visible_until: Option<Instant>,
+    current_scrollback: usize,
+    max_scrollback: usize,
+) {
+    if area.height < 3 || area.width < 2 || max_scrollback == 0 {
+        return;
+    }
+    let Some(visible_until) = visible_until else {
+        return;
+    };
+    if Instant::now() >= visible_until {
+        return;
+    }
+
+    let track_h = area.height as usize;
+    let viewport_h = area.height as usize;
+    let total_h = max_scrollback.saturating_add(viewport_h).max(1);
+    let thumb_h = ((viewport_h * track_h + total_h - 1) / total_h)
+        .clamp(1, track_h)
+        .max((track_h / 8).max(1));
+    let max_thumb_top = track_h.saturating_sub(thumb_h);
+    let thumb_top = if max_scrollback == 0 {
+        0
+    } else {
+        ((max_scrollback.saturating_sub(current_scrollback)) * max_thumb_top) / max_scrollback
+    };
+
+    let x0 = area.x + area.width.saturating_sub(2);
+    let style = Style::default()
+        .fg(theme.highlight_fg)
+        .bg(theme.highlight_bg)
+        .add_modifier(Modifier::BOLD);
+    for row in 0..thumb_h {
+        let y = area.y + (thumb_top + row) as u16;
+        f.buffer_mut().set_string(x0, y, "██", style);
     }
 }
 

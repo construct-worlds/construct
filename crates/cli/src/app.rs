@@ -25,7 +25,10 @@ use std::io::{Stdout, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
 use tokio::sync::mpsc;
+
+pub const TERMINAL_SCROLLBAR_TTL: Duration = Duration::from_millis(1200);
 
 /// Which pane currently owns the keyboard. `View` covers both the transcript
 /// and the terminal renderer — when the view shows a PTY-backed session and
@@ -307,6 +310,10 @@ pub struct App {
     /// decreased by mouse-wheel down. Reset to 0 on user keystroke into
     /// the PTY or on session change.
     pub view_scrollback: usize,
+    /// Show the terminal scrollback overlay until this instant. Refreshed by
+    /// wheel/key scrollback input and hidden automatically after a short idle
+    /// delay, similar to editor overlay scrollbars.
+    pub terminal_scrollbar_visible_until: Option<Instant>,
     /// Set by an event handler when the just-handled event produced
     /// no local display change that needs an immediate repaint — the
     /// canonical case being a keystroke forwarded straight to a PTY,
@@ -1102,6 +1109,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         zoom: initial_zoom,
         list_scroll_offset: 0,
         view_scrollback: 0,
+        terminal_scrollbar_visible_until: None,
         skip_redraw_after_event: false,
         hydrating_sessions: HashSet::new(),
         orchestrator_scrollback: 0,
@@ -3636,6 +3644,11 @@ impl App {
             return;
         }
         self.view_scrollback = adjusted_scrollback(self.view_scrollback, delta);
+        self.show_terminal_scrollbar();
+    }
+
+    fn show_terminal_scrollbar(&mut self) {
+        self.terminal_scrollbar_visible_until = Some(Instant::now() + TERMINAL_SCROLLBAR_TTL);
     }
 
     fn mouse_scrollback_step(&self) -> i32 {
@@ -3685,6 +3698,7 @@ impl App {
         }
         if self.view == ViewMode::Terminal && self.in_pty_session() {
             self.view_scrollback = adjusted_scrollback(self.view_scrollback, delta);
+            self.show_terminal_scrollbar();
         }
     }
 
@@ -3808,6 +3822,9 @@ impl App {
                 // type "into the past" while reading scrollback.
                 let was_scrolled = self.view_scrollback != 0;
                 self.view_scrollback = 0;
+                if was_scrolled {
+                    self.show_terminal_scrollbar();
+                }
                 if let Some(bytes) = encode_key_to_bytes(key) {
                     if let Some(id) = self.selected_id() {
                         self.queue_pty_input(id, bytes, "pty_input");
@@ -4171,6 +4188,7 @@ impl App {
                         self.orchestrator_scrollback = SCROLLBACK_MAX;
                     } else {
                         self.view_scrollback = SCROLLBACK_MAX;
+                        self.show_terminal_scrollbar();
                     }
                 } else {
                     self.transcript_scroll = 0;
@@ -4182,6 +4200,7 @@ impl App {
                         self.orchestrator_scrollback = 0;
                     } else {
                         self.view_scrollback = 0;
+                        self.show_terminal_scrollbar();
                     }
                 } else {
                     self.transcript_scroll = u16::MAX;
@@ -5448,6 +5467,7 @@ mod tests {
             zoom: ZoomMode::None,
             list_scroll_offset: 0,
             view_scrollback: 0,
+            terminal_scrollbar_visible_until: None,
             skip_redraw_after_event: false,
             hydrating_sessions: HashSet::new(),
             orchestrator_scrollback: 0,
@@ -5757,6 +5777,10 @@ mod tests {
         assert_eq!(
             app.view_scrollback, 10,
             "mouse wheel outside the list should scroll codex PTY history by a partial page"
+        );
+        assert!(
+            app.terminal_scrollbar_visible_until.is_some(),
+            "mouse-wheel scroll should reveal the terminal scrollbar overlay"
         );
     }
 
