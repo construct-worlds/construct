@@ -4275,9 +4275,17 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
     // the bottom of the panel so the `❯` and live typing are always
     // visible — otherwise this panel rendered only the PTY scrollback
     // and the editor was invisible (zarvis stopped painting it).
+    //
+    // On a fresh TUI attach, the user can open the orchestrator panel
+    // before the adapter's initial `EditorState` notification has
+    // reached us. Still reserve one fallback input row in that first
+    // frame so the prompt/cursor render in the right place instead of
+    // showing an empty panel with the terminal cursor at the origin.
+    let has_editor_state = app.editor_states.contains_key(&id);
     let editor_state = app.editor_states.get(&id).cloned();
     let agent_status = app.agent_statuses.get(&id).cloned();
-    let (chat_area, editor_area) = if editor_state.is_some() || agent_status.is_some() {
+    let force_input_pane = !has_editor_state && app.is_orchestrator_panel_open();
+    let (chat_area, editor_area) = if editor_state.is_some() || agent_status.is_some() || force_input_pane {
         let raw_rows = editor_pane_rows(editor_state.as_ref(), agent_status.as_ref(), inner.width);
         let editor_rows: u16 = (raw_rows as u16).min(inner.height.saturating_sub(1));
         let chat_height = inner.height.saturating_sub(editor_rows);
