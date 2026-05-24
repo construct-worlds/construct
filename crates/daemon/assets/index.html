@@ -148,7 +148,7 @@
     border-left: 3px solid transparent;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
   }
   .session-list .item:hover { background: var(--bg-elev-2); }
   .session-list .item.active {
@@ -174,10 +174,15 @@
     gap: 6px;
   }
   .session-list .item .pin-indicator {
-    flex: 0 0 auto;
+    flex: 0 0 10px;
+    width: 10px;
     color: var(--accent);
     font-size: 12px;
     line-height: 1;
+    text-align: center;
+  }
+  .session-list .item .pin-indicator.is-empty {
+    color: transparent;
   }
   .session-list .item .sub {
     color: var(--fg-faint);
@@ -189,8 +194,8 @@
     white-space: nowrap;
   }
   .session-list .item .state {
-    flex: 0 0 18px;
-    width: 18px;
+    flex: 0 0 14px;
+    width: 14px;
     text-align: center;
     font-size: 10px;
     line-height: 1;
@@ -226,21 +231,28 @@
     -webkit-tap-highlight-color: transparent;
   }
   .session-list .group-header:hover { background: var(--bg-elev-2); }
-  .session-list .group-glyph { color: var(--fg-faint); }
+  .session-list .group-glyph {
+    flex: 0 0 31px;
+    width: 31px;
+    color: var(--fg-faint);
+    font-size: 18px;
+    line-height: 1;
+    text-align: center;
+  }
   /* Sessions belonging to a group get a bit of left-padding so they
      read as members under the header above them. */
   .session-list .item.indent {
-    padding-left: 24px;
+    padding-left: 8px;
   }
   .session-list .item.is-subagent {
     opacity: 0.92;
-    padding-left: 42px;
+    padding-left: 40px;
   }
   .session-list .item .disclosure {
-    flex: 0 0 12px;
-    width: 12px;
+    flex: 0 0 20px;
+    width: 20px;
     color: var(--fg-faint);
-    font-size: 10px;
+    font-size: 18px;
     line-height: 1;
     text-align: center;
   }
@@ -1822,8 +1834,8 @@ function renderSessions() {
       if (item.isGod) {
         return `
           <div class="item is-god ${active}" data-id="${attr(s.id)}">
-            <div class="name">god</div>
             ${sessionStatusHtml(s)}
+            <div class="name">god</div>
           </div>`;
       }
       // Two-line row: title on top, dim harness sub-line below.
@@ -1834,16 +1846,17 @@ function renderSessions() {
       const harness = s.harness ? `<div class="sub">${escape(sessionHarnessLabel(s))}</div>` : "";
       const pin = s.pinned
         ? `<span class="pin-indicator" title="pinned" aria-label="pinned">★</span>`
-        : "";
+        : `<span class="pin-indicator is-empty" aria-hidden="true"></span>`;
       const pinnedClass = s.pinned ? "is-pinned" : "";
       return `
         <div class="item ${active} ${indent} ${subagentClass} ${pinnedClass}" data-id="${attr(s.id)}">
           ${disclosure}
+          ${pin}
+          ${sessionStatusHtml(s)}
           <div class="row-main">
-            <div class="name-line">${pin}<div class="name">${escape(title)}</div></div>
+            <div class="name-line"><div class="name">${escape(title)}</div></div>
             ${harness}
           </div>
-          ${sessionStatusHtml(s)}
         </div>`;
     })
     .join("");
