@@ -1373,6 +1373,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn drain_steering_is_none_when_no_input_queued() {
+        let mut q: VecDeque<String> = VecDeque::new();
+        assert_eq!(drain_steering(&mut q), None);
+    }
+
+    #[test]
+    fn drain_steering_joins_entries_and_empties_the_queue() {
+        let mut q: VecDeque<String> = VecDeque::new();
+        q.push_back("first".to_string());
+        q.push_back("second".to_string());
+        assert_eq!(drain_steering(&mut q).as_deref(), Some("first\nsecond"));
+        assert!(q.is_empty(), "queue must be emptied after draining");
+        assert_eq!(drain_steering(&mut q), None, "second drain finds nothing");
+    }
+
+    #[test]
+    fn mid_turn_submissions_drain_as_a_single_steering_message() {
+        // `enqueue_line` coalesces consecutive submits into one entry, so a
+        // step-boundary drain yields exactly the combined text the user typed
+        // while the agent was working.
+        let mut q: VecDeque<String> = VecDeque::new();
+        let mut ed = editor();
+        enqueue_line(&mut q, &mut ed, "focus on the parser".to_string());
+        enqueue_line(&mut q, &mut ed, "skip the docs for now".to_string());
+        enqueue_line(&mut q, &mut ed, "   ".to_string()); // whitespace ignored
+        assert_eq!(
+            drain_steering(&mut q).as_deref(),
+            Some("focus on the parser\nskip the docs for now")
+        );
+        assert!(q.is_empty());
+    }
+
     fn submit_line(ed: &mut LineEditor, bytes: &[u8]) -> Option<String> {
         let (_, evs) = ed.feed_bytes(bytes);
         for ev in evs {
@@ -2682,6 +2715,37 @@ pub async fn run(
             if matches!(turn.stop_reason, StopReason::MaxTokens) {
                 break;
             }
+
+            // Mid-turn steering: if the user typed while the model streamed
+            // or tools ran, those lines were enqueued (not abandoned). Fold
+            // them into the conversation NOW — as a user message right after
+            // this step's tool results — so the next model step incorporates
+            // the new guidance instead of holding it until the whole turn
+            // ends. This is additive steering, not an interrupt: in-flight
+            // work isn't aborted (Stop/Interrupt remain the way to do that).
+            // `drive_with_input_silent` runs silently, so the typed lines
+            // were never echoed live — back-fill them into the chat history
+            // exactly like the outer loop's queued-input path.
+            if let Some(steer) = drain_steering(&mut queue) {
+                editor.set_queued_recall(None);
+                term.echo_consumed_line(&steer);
+                queued_rows = 0;
+                emit_editor_state(&emit, &editor, &queue);
+                push_msg!(
+                    messages,
+                    persist,
+                    Message {
+                        role: Role::User,
+                        content: Content::Text {
+                            text: steer.clone()
+                        },
+                    }
+                );
+                emit.emit(SessionEvent::Message {
+                    role: agentd_protocol::MessageRole::User,
+                    text: steer,
+                });
+            }
         }
 
         finish_agent_status(&emit, turn_started_at_ms, final_status);
@@ -3706,6 +3770,17 @@ fn enqueue_line(queue: &mut VecDeque<String>, editor: &mut LineEditor, line: Str
         queue.push_back(line.clone());
         editor.set_queued_recall(Some(line));
     }
+}
+
+/// Drain everything the user enqueued during the current turn into a single
+/// newline-joined steering message, or `None` if the queue is empty. Used at
+/// a turn's step boundary to fold live user input into the conversation so
+/// the agent can be steered mid-task without waiting for the turn to finish.
+fn drain_steering(queue: &mut VecDeque<String>) -> Option<String> {
+    if queue.is_empty() {
+        return None;
+    }
+    Some(queue.drain(..).collect::<Vec<_>>().join("\n"))
 }
 
 /// Outcome of [`drive_with_input`]: either the wrapped future completed,
