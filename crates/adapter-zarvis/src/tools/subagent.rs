@@ -203,6 +203,7 @@ impl Tool for Create {
             env,
             args: Vec::new(),
             kind: agentd_protocol::SessionKind::Subagent,
+            parent_session_id: Some(ctx.session_id.clone()),
             group_id: None,
         };
         let c = client(ctx).await?;

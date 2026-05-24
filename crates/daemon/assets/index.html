@@ -232,6 +232,22 @@
   .session-list .item.indent {
     padding-left: 24px;
   }
+  .session-list .item.is-subagent {
+    opacity: 0.92;
+    padding-left: 42px;
+  }
+  .session-list .item .disclosure {
+    flex: 0 0 12px;
+    width: 12px;
+    color: var(--fg-faint);
+    font-size: 10px;
+    line-height: 1;
+    text-align: center;
+  }
+  .session-list .item .disclosure.can-toggle {
+    cursor: pointer;
+    color: var(--fg-dim);
+  }
   /* God / orchestrator row — pinned at the top, name in the
      accent color so it stands out as the special "fleet
      dispatcher" session. */
@@ -1209,6 +1225,7 @@ const state = {
   sessions: [], // [{id, title, harness, state, group_id, position, ...}]
   harnesses: [],
   groups: [],   // [{id, name, position, collapsed}], TUI-style ordering
+  subagentCollapsed: new Set(),
   currentId: null,
   // Per-session transcript items (the rows we've rendered). Keyed by
   // session_id so switching sessions is just a re-render of cached
@@ -1665,7 +1682,37 @@ function orderedItems() {
   // from the position-sorted user sessions. No reorder or
   // restart actions on this row — the daemon owns its lifecycle.
   const god = state.sessions.find((s) => s.kind === "orchestrator");
-  const userSessions = state.sessions.filter((s) => s.kind !== "orchestrator");
+  const userSessions = state.sessions.filter((s) => s.kind === "user" || !s.kind);
+  const subagentsByParent = new Map();
+  for (const s of state.sessions.filter((s) => s.kind === "subagent")) {
+    const parent = s.parent_session_id;
+    if (!parent) continue;
+    const list = subagentsByParent.get(parent) || [];
+    list.push(s);
+    subagentsByParent.set(parent, list);
+  }
+  for (const list of subagentsByParent.values()) {
+    list.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  }
+
+  function pushSession(items, session, indented = false) {
+    const children = subagentsByParent.get(session.id) || [];
+    const hasChildren = children.length > 0;
+    const expanded = hasChildren && !state.subagentCollapsed.has(session.id);
+    items.push({
+      kind: "session",
+      session,
+      indented,
+      hasChildren,
+      childrenExpanded: expanded,
+    });
+    if (expanded) {
+      for (const child of children) {
+        items.push({ kind: "session", session: child, indented: true, isSubagent: true });
+      }
+    }
+  }
+
   const ungrouped = userSessions
     .filter((s) => !s.group_id)
     .slice()
@@ -1675,7 +1722,7 @@ function orderedItems() {
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   const items = [];
   if (god) items.push({ kind: "session", session: god, isGod: true });
-  for (const s of ungrouped) items.push({ kind: "session", session: s });
+  for (const s of ungrouped) pushSession(items, s);
   for (const g of groups) {
     items.push({ kind: "group", group: g });
     if (g.collapsed) continue;
@@ -1684,7 +1731,7 @@ function orderedItems() {
       .slice()
       .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
     for (const s of members) {
-      items.push({ kind: "session", session: s, indented: true });
+      pushSession(items, s, true);
     }
   }
   return items;
@@ -1756,6 +1803,10 @@ function renderSessions() {
       const s = item.session;
       const active = s.id === state.currentId ? "active" : "";
       const indent = item.indented ? "indent" : "";
+      const subagentClass = item.isSubagent ? "is-subagent" : "";
+      const disclosure = item.hasChildren
+        ? `<span class="disclosure can-toggle" data-parent-id="${attr(s.id)}">${item.childrenExpanded ? "▾" : "▸"}</span>`
+        : `<span class="disclosure"></span>`;
       // God / orchestrator session is rendered with a fixed
       // "god" label. Lifecycle is daemon-owned so no action
       // affordances ever apply.
@@ -1777,7 +1828,8 @@ function renderSessions() {
         : "";
       const pinnedClass = s.pinned ? "is-pinned" : "";
       return `
-        <div class="item ${active} ${indent} ${pinnedClass}" data-id="${attr(s.id)}">
+        <div class="item ${active} ${indent} ${subagentClass} ${pinnedClass}" data-id="${attr(s.id)}">
+          ${disclosure}
           <div class="row-main">
             <div class="name-line">${pin}<div class="name">${escape(title)}</div></div>
             ${harness}
@@ -1789,6 +1841,12 @@ function renderSessions() {
   sessionListEl.innerHTML = html;
   sessionListEl.querySelectorAll(".group-header").forEach((el) => {
     el.addEventListener("click", () => toggleGroupCollapsed(el.dataset.groupId));
+  });
+  sessionListEl.querySelectorAll(".disclosure.can-toggle").forEach((el) => {
+    el.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      toggleSubagentCollapsed(el.dataset.parentId);
+    });
   });
   sessionListEl.querySelectorAll(".item").forEach((el) => {
     el.addEventListener("click", () => selectSession(el.dataset.id));
@@ -1890,6 +1948,13 @@ async function toggleGroupCollapsed(groupId) {
   } catch (e) {
     appendError(`toggle group failed: ${e.message}`);
   }
+}
+
+function toggleSubagentCollapsed(parentId) {
+  if (!parentId) return;
+  if (state.subagentCollapsed.has(parentId)) state.subagentCollapsed.delete(parentId);
+  else state.subagentCollapsed.add(parentId);
+  renderSessions();
 }
 
 /** Dispatch a session action by name. Wired up to the shared

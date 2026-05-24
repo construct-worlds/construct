@@ -48,6 +48,7 @@ async fn repeated_key_latency() {
             env: std::collections::HashMap::new(),
             args: Vec::new(),
             kind: Default::default(),
+            parent_session_id: None,
             group_id: None,
         })
         .await
