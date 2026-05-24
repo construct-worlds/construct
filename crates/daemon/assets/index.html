@@ -739,7 +739,7 @@
   .terminal-scroll-overlay button {
     pointer-events: auto;
     appearance: none;
-    border: 1px solid rgba(57, 255, 136, 0.62);
+    border: 1px solid transparent;
     border-radius: 0;
     padding: 2px 7px;
     background: rgba(2, 8, 5, 0.78);
@@ -760,14 +760,14 @@
   .terminal-scroll-overlay button:hover,
   .terminal-scroll-overlay button:focus-visible {
     background: rgba(57, 255, 136, 0.18);
-    border-color: var(--accent);
+    border-color: transparent;
     color: #e1ffe6;
     outline: none;
     box-shadow: var(--glow-hard);
   }
   .terminal-scroll-overlay button:active {
     background: var(--accent);
-    border-color: var(--accent-alt);
+    border-color: transparent;
     color: #06160c;
     text-shadow: none;
   }
