@@ -135,10 +135,10 @@
       grid-template-rows: minmax(300px, 50vh) 1fr;
     }
     /* When the inner aside is collapsed via the `≡` toggle,
-       drop the track to `auto` so only the new-session button
-       remains (~40px) and the view pane gets the rest. */
+       collapse the whole list track so the terminal/view pane gets
+       the full remaining height. */
     main:has(.session-list.collapsed) {
-      grid-template-rows: auto 1fr;
+      grid-template-rows: 0 1fr;
     }
     .session-list.collapsed { max-height: 0; padding: 0; border-bottom: none; }
     /* Hide the shared reorder / restart toolbar when the list is
@@ -146,6 +146,13 @@
        there's no list visible to pick a session from. Leaving
        them visible just wastes vertical space and lets the user
        fire move-up / down on a row they can't see. */
+    .session-list-wrap:has(.session-list.collapsed) {
+      min-height: 0;
+      overflow: hidden;
+      border-right: none;
+      border-bottom: none;
+    }
+    .session-list-wrap:has(.session-list.collapsed) .new-session-btn,
     .session-list-wrap:has(.session-list.collapsed) .list-toolbar {
       display: none;
     }
