@@ -429,12 +429,15 @@ pub struct App {
     /// Latest browser preview per session, fed by `SessionEvent::BrowserPreview`
     /// and rendered as a top-right overlay in the terminal view.
     pub browser_previews: HashMap<String, BrowserPreviewState>,
-    /// Adapter-owned dynamic UI panels, keyed by session id then panel id.
-    /// Rendered as a session-anchored popover opened from the view title bar;
-    /// actions route back as normal session input.
+    /// Adapter/file-backed dynamic UI panels, keyed by session id then panel id.
+    /// Actions route back as normal session input.
     pub ui_panels: HashMap<String, HashMap<String, agentd_protocol::UiPanel>>,
-    /// Currently pinned/open dynamic UI popover session, if any.
+    /// Currently open widget selector dropdown session, if any.
     pub dynamic_ui_popover_open: Option<String>,
+    /// Widgets explicitly selected by the user. Default state is hidden.
+    pub dynamic_ui_selected: HashSet<(String, String)>,
+    /// Widgets temporarily shown after create/update. Hover extends this deadline.
+    pub dynamic_ui_temporary_until: HashMap<(String, String), Instant>,
     /// MRU cache of resized preview images shared by the terminal-view
     /// overlay and the matrix-rain wallpaper — avoids re-downscaling the
     /// screenshot every frame. See [`ImageResizeCache`].
@@ -931,7 +934,37 @@ pub struct DynamicUiActionHit {
     pub end_col: u16,
 }
 
+#[derive(Debug, Clone)]
+pub struct DynamicUiWidgetHit {
+    pub session_id: String,
+    pub panel_id: String,
+    pub row: u16,
+    pub start_col: u16,
+    pub end_col: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct DynamicUiPanelCloseHit {
+    pub session_id: String,
+    pub panel_id: String,
+    pub row: u16,
+    pub start_col: u16,
+    pub end_col: u16,
+}
+
 impl DynamicUiActionHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
+impl DynamicUiWidgetHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
+impl DynamicUiPanelCloseHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         row == self.row && col >= self.start_col && col < self.end_col
     }
@@ -1000,9 +1033,11 @@ pub struct LayoutSnapshot {
     pub terminal_scrollbar: Option<TerminalScrollbarHit>,
     /// Dynamic UI action hitboxes from the last frame.
     pub dynamic_ui_action_hits: Vec<DynamicUiActionHit>,
+    pub dynamic_ui_widget_hits: Vec<DynamicUiWidgetHit>,
+    pub dynamic_ui_panel_close_hits: Vec<DynamicUiPanelCloseHit>,
     /// Dynamic UI title-bar affordance bounds: `(x_start, x_end, y, session_id)`.
     pub dynamic_ui_trigger: Option<(u16, u16, u16, String)>,
-    /// Dynamic UI popover bounds from the last frame.
+    /// Dynamic UI dropdown/panel bounds from the last frame.
     pub dynamic_ui_popover_area: Option<ratatui::layout::Rect>,
 }
 
@@ -1204,6 +1239,8 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         browser_previews: HashMap::new(),
         ui_panels: HashMap::new(),
         dynamic_ui_popover_open: None,
+        dynamic_ui_selected: HashSet::new(),
+        dynamic_ui_temporary_until: HashMap::new(),
         image_resize_cache: Vec::new(),
         session_transition: None,
         pin_transitions: HashMap::new(),
@@ -2606,6 +2643,10 @@ impl App {
                                     .entry(payload.session_id.clone())
                                     .or_default()
                                     .insert(panel.id.clone(), panel.clone());
+                                self.dynamic_ui_temporary_until.insert(
+                                    (payload.session_id.clone(), panel.id.clone()),
+                                    Instant::now() + Duration::from_secs(10),
+                                );
                             }
                             SessionEvent::UiDelete { id } => {
                                 if let Some(panels) = self.ui_panels.get_mut(&payload.session_id) {
@@ -2614,6 +2655,9 @@ impl App {
                                         self.ui_panels.remove(&payload.session_id);
                                     }
                                 }
+                                let key = (payload.session_id.clone(), id.clone());
+                                self.dynamic_ui_selected.remove(&key);
+                                self.dynamic_ui_temporary_until.remove(&key);
                             }
                             _ => {}
                         }
@@ -3380,6 +3424,16 @@ impl App {
                         .await;
                     return;
                 }
+                if let Some(hit) = self
+                    .layout
+                    .dynamic_ui_panel_close_hits
+                    .iter()
+                    .find(|hit| hit.contains(col, row))
+                    .cloned()
+                {
+                    self.hide_dynamic_ui_panel(hit.session_id, hit.panel_id);
+                    return;
+                }
                 if let Some((x_start, x_end, y, session_id)) =
                     self.layout.dynamic_ui_trigger.clone()
                 {
@@ -3395,16 +3449,31 @@ impl App {
                     }
                 }
                 if self.dynamic_ui_popover_open.is_some() {
-                    if self.try_dynamic_ui_action_click(col, row).await {
-                        return;
-                    }
-                    if let Some(popover) = self.layout.dynamic_ui_popover_area {
-                        if !contains(popover, col, row) {
-                            self.dynamic_ui_popover_open = None;
-                            return;
+                    if let Some(hit) = self
+                        .layout
+                        .dynamic_ui_widget_hits
+                        .iter()
+                        .find(|hit| hit.contains(col, row))
+                        .cloned()
+                    {
+                        let key = (hit.session_id, hit.panel_id);
+                        if self.dynamic_ui_selected.contains(&key) {
+                            self.dynamic_ui_selected.remove(&key);
+                        } else {
+                            self.dynamic_ui_selected.insert(key.clone());
+                            self.dynamic_ui_temporary_until.remove(&key);
                         }
                         return;
                     }
+                    if let Some(popover) = self.layout.dynamic_ui_popover_area {
+                        if contains(popover, col, row) {
+                            return;
+                        }
+                        self.dynamic_ui_popover_open = None;
+                    }
+                }
+                if self.try_dynamic_ui_action_click(col, row).await {
+                    return;
                 }
                 // Inner area: same Rect minus the 1-cell border on
                 // each side. The render path stores hit ranges
@@ -4126,6 +4195,21 @@ impl App {
             Ok(()) => self.set_status(format!("ui action: {label}")),
             Err(e) => self.set_status(format!("ui action failed: {e}")),
         }
+    }
+
+    pub fn dynamic_ui_panel_visible(&self, session_id: &str, panel_id: &str) -> bool {
+        let key = (session_id.to_string(), panel_id.to_string());
+        self.dynamic_ui_selected.contains(&key)
+            || self
+                .dynamic_ui_temporary_until
+                .get(&key)
+                .is_some_and(|until| *until > Instant::now())
+    }
+
+    fn hide_dynamic_ui_panel(&mut self, session_id: String, panel_id: String) {
+        let key = (session_id, panel_id);
+        self.dynamic_ui_selected.remove(&key);
+        self.dynamic_ui_temporary_until.remove(&key);
     }
 
     async fn try_dynamic_ui_action_click(&mut self, col: u16, row: u16) -> bool {
@@ -5790,6 +5874,8 @@ mod tests {
             browser_preview_close: None,
             terminal_scrollbar: None,
             dynamic_ui_action_hits: Vec::new(),
+            dynamic_ui_widget_hits: Vec::new(),
+            dynamic_ui_panel_close_hits: Vec::new(),
             dynamic_ui_trigger: None,
             dynamic_ui_popover_area: None,
         }
@@ -5858,6 +5944,8 @@ mod tests {
             browser_previews: HashMap::new(),
             ui_panels: HashMap::new(),
             dynamic_ui_popover_open: None,
+            dynamic_ui_selected: HashSet::new(),
+            dynamic_ui_temporary_until: HashMap::new(),
             image_resize_cache: Vec::new(),
             session_transition: None,
             pin_transitions: HashMap::new(),

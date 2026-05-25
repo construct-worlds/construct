@@ -96,6 +96,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.browser_preview_close = None;
     app.layout.terminal_scrollbar = None;
     app.layout.dynamic_ui_action_hits.clear();
+    app.layout.dynamic_ui_widget_hits.clear();
+    app.layout.dynamic_ui_panel_close_hits.clear();
     app.layout.dynamic_ui_trigger = None;
     app.layout.dynamic_ui_popover_area = None;
     let area = f.area();
@@ -2205,7 +2207,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
             .map(|_| s.id.clone())
     });
     let ui_trigger_hovered = ui_session_id.as_ref().is_some_and(|_| {
-        let (x_start, x_end, y) = dynamic_ui_trigger_range(area, show_close, 3);
+        let (x_start, x_end, y) = dynamic_ui_trigger_range(area, show_close, 7);
         app.mouse_pos
             .map(|(mx, my)| my == y && mx >= x_start && mx < x_end)
             .unwrap_or(false)
@@ -2217,12 +2219,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         Style::default().fg(app.theme.text)
     };
-    let ui_count = ui_session_id
-        .as_ref()
-        .and_then(|session_id| app.ui_panels.get(session_id))
-        .map(|panels| panels.len())
-        .unwrap_or(0);
-    let ui_trigger_label = format!("[{ui_count}]");
+    let ui_trigger_label = "widgets".to_string();
     let ui_trigger = ui_session_id.as_ref().map(|session_id| {
         let (x_start, x_end, y) =
             dynamic_ui_trigger_range(area, show_close, ui_trigger_label.len() as u16);
@@ -2260,12 +2257,12 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     // to the left, then the close button SECOND so it lands at the
     // rightmost edge (matching `view_close_button_range`, which
     // hit-tests the last 3 cells of the top border).
-    if let Some(h) = harness_right {
-        block = block.title(h);
-    }
     if let Some((session_id, x_start, x_end, y, ui)) = ui_trigger {
         app.layout.dynamic_ui_trigger = Some((x_start, x_end, y, session_id));
         block = block.title(ui);
+    }
+    if let Some(h) = harness_right {
+        block = block.title(h);
     }
     if show_close {
         block = block.title(close);
@@ -2520,8 +2517,9 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
         out.max_scrollback,
     );
     if app.dynamic_ui_popover_open.as_deref() == Some(id.as_str()) && !panels.is_empty() {
-        render_dynamic_ui_popover(f, area, app, &panels);
+        render_dynamic_ui_dropdown(f, area, app, &panels);
     }
+    render_visible_dynamic_ui_panels(f, area, app, &panels);
 
     if let Some(area) = editor_area {
         // Also clear the editor area (defensive)
@@ -2570,12 +2568,94 @@ fn dynamic_ui_rows(panels: &[agentd_protocol::UiPanel], _width: u16) -> u16 {
     rows
 }
 
-fn render_dynamic_ui_popover(
+fn render_dynamic_ui_dropdown(
     f: &mut Frame,
     session_area: Rect,
     app: &mut App,
     panels: &[agentd_protocol::UiPanel],
 ) {
+    let width = panels
+        .iter()
+        .filter_map(dynamic_ui_panel_title)
+        .map(|t| t.chars().count() as u16 + 6)
+        .max()
+        .unwrap_or(16)
+        .clamp(16, session_area.width.saturating_sub(2).max(16));
+    let height = (panels.len() as u16).saturating_add(2).max(3);
+    let area = Rect {
+        x: session_area.x + session_area.width.saturating_sub(width + 1),
+        y: session_area.y,
+        width,
+        height: height.min(session_area.height.max(1)),
+    };
+    app.layout.dynamic_ui_popover_area = Some(area);
+    f.render_widget(Clear, area);
+    let session_id = app.selected_id().unwrap_or_default();
+    let mut lines = Vec::new();
+    for panel in panels.iter().take(area.height.saturating_sub(2) as usize) {
+        let selected = app
+            .dynamic_ui_selected
+            .contains(&(session_id.clone(), panel.id.clone()));
+        let mark = if selected { "✓" } else { " " };
+        let title = dynamic_ui_panel_title(panel).unwrap_or_else(|| panel.id.clone());
+        let row = area.y + 1 + lines.len() as u16;
+        app.layout
+            .dynamic_ui_widget_hits
+            .push(crate::app::DynamicUiWidgetHit {
+                session_id: session_id.clone(),
+                panel_id: panel.id.clone(),
+                row,
+                start_col: area.x + 1,
+                end_col: area.x + area.width.saturating_sub(1),
+            });
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {mark} "), Style::default().fg(app.theme.text)),
+            Span::raw(title),
+        ]));
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.text))
+        .title(" widgets ");
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_visible_dynamic_ui_panels(
+    f: &mut Frame,
+    session_area: Rect,
+    app: &mut App,
+    panels: &[agentd_protocol::UiPanel],
+) {
+    let Some(session_id) = app.selected_id() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    app.dynamic_ui_temporary_until
+        .retain(|_, until| *until > now);
+    let visible: Vec<_> = panels
+        .iter()
+        .filter(|panel| app.dynamic_ui_panel_visible(&session_id, &panel.id))
+        .cloned()
+        .collect();
+    if visible.is_empty() {
+        return;
+    }
+    if let Some((mx, my)) = app.mouse_pos {
+        let panel_area = dynamic_ui_panel_area(session_area, &visible);
+        if contains_rect(panel_area, mx, my) {
+            for panel in &visible {
+                let key = (session_id.clone(), panel.id.clone());
+                if app.dynamic_ui_temporary_until.contains_key(&key) {
+                    app.dynamic_ui_temporary_until
+                        .insert(key, now + std::time::Duration::from_secs(10));
+                }
+            }
+        }
+    }
+    render_dynamic_ui_panels(f, session_area, app, &visible);
+}
+
+fn dynamic_ui_panel_area(session_area: Rect, panels: &[agentd_protocol::UiPanel]) -> Rect {
     let max_w = ((session_area.width as f32) * 0.70).round() as u16;
     let width = max_w.clamp(32, session_area.width.saturating_sub(2).max(1));
     let content_rows = dynamic_ui_rows(panels, width).saturating_sub(2);
@@ -2586,33 +2666,39 @@ fn render_dynamic_ui_popover(
             .max(3)
             .min(session_area.height.saturating_sub(1).max(3)),
     );
-    let area = Rect {
+    Rect {
         x: session_area.x + session_area.width.saturating_sub(width + 1),
         y: session_area.y,
         width,
         height,
-    };
-    app.layout.dynamic_ui_popover_area = Some(area);
-    render_dynamic_ui_panels(f, area, app, panels);
+    }
 }
 
 fn render_dynamic_ui_panels(
     f: &mut Frame,
-    area: Rect,
+    session_area: Rect,
     app: &mut App,
     panels: &[agentd_protocol::UiPanel],
 ) {
+    let area = dynamic_ui_panel_area(session_area, panels);
+    app.layout.dynamic_ui_popover_area = Some(area);
     f.render_widget(Clear, area);
     let mut lines: Vec<Line> = Vec::new();
     let hover = app.mouse_pos;
     let session_id = app.selected_id();
+    let content_area = Rect {
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(2),
+    };
     for panel in panels {
         let suppress_first_heading = leading_markdown_heading(&panel.markdown).is_some();
         lines.extend(render_agentd_markdown_lines(
             &panel.markdown,
             &app.theme,
             hover,
-            area,
+            content_area,
             session_id.as_deref(),
             Some(panel.id.as_str()),
             &mut app.layout.dynamic_ui_action_hits,
@@ -2624,14 +2710,37 @@ fn render_dynamic_ui_panels(
         .iter()
         .find_map(dynamic_ui_panel_title)
         .unwrap_or("dynamic session ui".to_string());
+    if let Some(session_id) = session_id.as_ref() {
+        for (idx, panel) in panels.iter().enumerate() {
+            let y = area.y + idx as u16;
+            let x_end = area.x + area.width.saturating_sub(1);
+            app.layout
+                .dynamic_ui_panel_close_hits
+                .push(crate::app::DynamicUiPanelCloseHit {
+                    session_id: session_id.clone(),
+                    panel_id: panel.id.clone(),
+                    row: y,
+                    start_col: x_end.saturating_sub(3),
+                    end_col: x_end,
+                });
+        }
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.text))
-        .title(format!(" {title} "));
+        .title(format!(" {title} "))
+        .title(
+            Line::from(Span::styled(" - ", Style::default().fg(app.theme.text)))
+                .alignment(ratatui::layout::Alignment::Right),
+        );
     let para = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false });
     f.render_widget(para, area);
+}
+
+fn contains_rect(area: Rect, col: u16, row: u16) -> bool {
+    col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
 }
 
 fn dynamic_ui_panel_title(panel: &agentd_protocol::UiPanel) -> Option<String> {
