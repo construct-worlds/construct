@@ -179,6 +179,7 @@ impl LlmProvider for OpenAi {
 
         while let Some(ev) = stream.next().await {
             let ev = ev.context("openai SSE stream")?;
+            sink.progress();
             if ev.data == "[DONE]" {
                 break;
             }

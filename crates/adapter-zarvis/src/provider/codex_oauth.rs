@@ -593,6 +593,9 @@ impl LlmProvider for CodexOauth {
 
         while let Some(ev) = stream.next().await {
             let ev = ev.context("codex-oauth SSE stream")?;
+            // Liveness: any received SSE event (even text-less) keeps the
+            // idle watchdog from firing mid-stream.
+            sink.progress();
             // The Codex Responses transport uses `event:` SSE names;
             // `data:` carries the JSON body. eventsource_stream
             // surfaces both as fields on the event.
