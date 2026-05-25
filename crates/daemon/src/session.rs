@@ -16,7 +16,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use chrono::Utc;
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,6 +36,7 @@ const MAX_CLIPBOARD_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const ENV_GLOBAL_MEMORY_FILE: &str = "AGENTD_GLOBAL_MEMORY_FILE";
 const ENV_PROJECT_MEMORY_FILE: &str = "AGENTD_PROJECT_MEMORY_FILE";
 const ENV_PROJECT_ID: &str = "AGENTD_PROJECT_ID";
+const WIDGET_WATCH_INTERVAL: Duration = Duration::from_millis(700);
 
 fn should_resume_on_startup(state: SessionState) -> bool {
     !matches!(state, SessionState::Done)
@@ -395,6 +396,19 @@ impl GroupEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WidgetSnapshot {
+    files: HashMap<String, String>,
+}
+
+impl WidgetSnapshot {
+    fn read(storage: &Storage, session_id: &str) -> Self {
+        let dir = storage.widgets_dir(session_id);
+        let files = read_widget_files(&dir);
+        Self { files }
+    }
+}
+
 pub struct SessionManager {
     storage: Arc<Storage>,
     config: Arc<Config>,
@@ -451,6 +465,7 @@ pub struct SessionManager {
     /// `AGENTD_ASSETS_DIR` env var at boot. Lets you iterate on the web
     /// UI in a worktree against a running daemon without rebuilding.
     dev_assets: std::sync::Mutex<Option<PathBuf>>,
+    widget_snapshots: tokio::sync::Mutex<HashMap<String, WidgetSnapshot>>,
 }
 
 /// Payload of a `daemon.restart` request, sent from the IPC
@@ -492,6 +507,27 @@ pub fn capture_startup_exe() {
 /// exists, is a regular file, and is executable. Returns the canonical
 /// path to exec, or an error that's surfaced to the caller so a typo
 /// never leaves the daemon trying to exec() a missing binary.
+fn read_widget_files(dir: &Path) -> HashMap<String, String> {
+    let mut files = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(markdown) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        files.insert(stem.to_string(), markdown);
+    }
+    files
+}
+
 fn validate_restart_exe(path: &std::path::Path) -> Result<PathBuf> {
     let abs = std::fs::canonicalize(path)
         .with_context(|| format!("restart binary not found: {}", path.display()))?;
@@ -644,6 +680,10 @@ impl SessionManager {
         } else {
             None
         };
+        let widget_snapshots = session_ids
+            .iter()
+            .map(|id| (id.clone(), WidgetSnapshot::read(&storage, id)))
+            .collect();
         Ok((
             Self {
                 storage,
@@ -659,6 +699,7 @@ impl SessionManager {
                 remote_snapshot_path,
                 restart_tx,
                 dev_assets: std::sync::Mutex::new(dev_assets),
+                widget_snapshots: tokio::sync::Mutex::new(widget_snapshots),
             },
             remote_rx,
             restart_rx,
@@ -755,6 +796,69 @@ impl SessionManager {
 
     pub fn subscribe(&self) -> broadcast::Receiver<BroadcastMsg> {
         self.broadcast.subscribe()
+    }
+
+    pub fn spawn_widget_watcher(self: &Arc<Self>) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(WIDGET_WATCH_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                manager.poll_widget_files().await;
+            }
+        });
+    }
+
+    async fn poll_widget_files(&self) {
+        let session_ids: Vec<String> = self.sessions.read().await.keys().cloned().collect();
+        let mut snapshots = self.widget_snapshots.lock().await;
+        for session_id in &session_ids {
+            let next = WidgetSnapshot::read(&self.storage, session_id);
+            let previous = snapshots
+                .get(session_id)
+                .cloned()
+                .unwrap_or_else(|| WidgetSnapshot {
+                    files: HashMap::new(),
+                });
+            if previous == next {
+                continue;
+            }
+            for (id, markdown) in &next.files {
+                if previous.files.get(id) == Some(markdown) {
+                    continue;
+                }
+                let panel = agentd_protocol::UiPanel {
+                    id: id.clone(),
+                    source: Some(format!("{id}.md")),
+                    title: Some(id.replace(['-', '_'], " ")),
+                    placement: agentd_protocol::UiPlacement::Sticky,
+                    markdown: markdown.clone(),
+                };
+                self.broadcast_widget_event(&session_id, SessionEvent::UiPanel(panel));
+            }
+            for id in previous.files.keys() {
+                if !next.files.contains_key(id) {
+                    self.broadcast_widget_event(
+                        &session_id,
+                        SessionEvent::UiDelete { id: id.clone() },
+                    );
+                }
+            }
+            snapshots.insert(session_id.clone(), next);
+        }
+        snapshots.retain(|id, _| session_ids.contains(id));
+    }
+
+    fn broadcast_widget_event(&self, session_id: &str, event: SessionEvent) {
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::Event(EventNotificationPayload {
+                session_id: session_id.to_string(),
+                at: Utc::now(),
+                event,
+                seq: 0,
+            }));
     }
 
     /// Send a `remote/state` broadcast announcing the current remote-
