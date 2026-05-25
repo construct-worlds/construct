@@ -50,7 +50,7 @@ async fn test_reconnect_flow() {
                                 ipc_method::SESSION_LIST => {
                                     serde_json::json!({"jsonrpc":"2.0","id": id, "result": []})
                                 }
-                                ipc_method::GROUP_LIST => {
+                                ipc_method::GROUP_LIST | ipc_method::PROJECT_LIST => {
                                     serde_json::json!({"jsonrpc":"2.0","id": id, "result": []})
                                 }
                                 ipc_method::HARNESS_LIST => {

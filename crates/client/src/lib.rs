@@ -4,12 +4,14 @@ use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
     ipc_method, transport, CreateSessionParams, DiffResult, ErrorObject, GroupCreateParams,
     GroupDeleteParams, GroupMoveParams, GroupRenameParams, GroupSetCollapsedParams, GroupSummary,
-    HarnessInfo, MoveDirection, Notification, PingResult, PtyReplayResult, Request, Response,
-    SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
-    SessionEmitEventParams, SessionIdParams, SessionInputParams, SessionMoveParams,
-    SessionPtyInputParams, SessionPtyResizeParams, SessionSetAutomodeParams,
-    SessionSetPinnedParams, SessionSetTitleParams, SessionSummary, SessionToolDecisionParams,
-    SubscribeParams, TranscriptParams, TranscriptResult,
+    HarnessInfo, MoveDirection, Notification, PingResult, ProjectCreateParams, ProjectCreateResult,
+    ProjectDeleteParams, ProjectMoveParams, ProjectRenameParams, ProjectSetCollapsedParams,
+    ProjectSummary, PtyReplayResult, Request, Response, SessionAttachClipboardParams,
+    SessionAttachClipboardResult, SessionDetail, SessionEmitEventParams, SessionIdParams,
+    SessionInputParams, SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams,
+    SessionSetAutomodeParams, SessionSetPinnedParams, SessionSetProjectParams,
+    SessionSetTitleParams, SessionSummary, SessionToolDecisionParams, SubscribeParams,
+    TranscriptParams, TranscriptResult,
 };
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
@@ -586,8 +588,31 @@ impl Client {
             .await?;
         Ok(())
     }
+    /// Project-named alias for `set_session_group`.
+    pub async fn set_session_project(
+        &self,
+        id: &str,
+        project_id: Option<String>,
+        position: agentd_protocol::SessionGroupPosition,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::SESSION_SET_PROJECT,
+                &SessionSetProjectParams {
+                    session_id: id.to_string(),
+                    project_id,
+                    position,
+                },
+            )
+            .await?;
+        Ok(())
+    }
     pub async fn list_groups(&self) -> Result<Vec<GroupSummary>> {
         self.request(ipc_method::GROUP_LIST, &serde_json::Value::Null)
+            .await
+    }
+    pub async fn list_projects(&self) -> Result<Vec<ProjectSummary>> {
+        self.request(ipc_method::PROJECT_LIST, &serde_json::Value::Null)
             .await
     }
     pub async fn create_group(&self, name: &str) -> Result<String> {
@@ -605,12 +630,35 @@ impl Client {
             .await?;
         Ok(r.group_id)
     }
+    pub async fn create_project(&self, name: &str) -> Result<String> {
+        let r: ProjectCreateResult = self
+            .request(
+                ipc_method::PROJECT_CREATE,
+                &ProjectCreateParams {
+                    name: name.to_string(),
+                },
+            )
+            .await?;
+        Ok(r.project_id)
+    }
     pub async fn rename_group(&self, id: &str, name: &str) -> Result<()> {
         let _: serde_json::Value = self
             .request(
                 ipc_method::GROUP_RENAME,
                 &GroupRenameParams {
                     group_id: id.to_string(),
+                    name: name.to_string(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+    pub async fn rename_project(&self, id: &str, name: &str) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::PROJECT_RENAME,
+                &ProjectRenameParams {
+                    project_id: id.to_string(),
                     name: name.to_string(),
                 },
             )
@@ -634,6 +682,18 @@ impl Client {
             .await?;
         Ok(())
     }
+    pub async fn delete_project(&self, id: &str, delete_members: bool) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::PROJECT_DELETE,
+                &ProjectDeleteParams {
+                    project_id: id.to_string(),
+                    delete_members,
+                },
+            )
+            .await?;
+        Ok(())
+    }
     pub async fn set_group_collapsed(&self, id: &str, collapsed: bool) -> Result<()> {
         let _: serde_json::Value = self
             .request(
@@ -646,12 +706,36 @@ impl Client {
             .await?;
         Ok(())
     }
+    pub async fn set_project_collapsed(&self, id: &str, collapsed: bool) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::PROJECT_SET_COLLAPSED,
+                &ProjectSetCollapsedParams {
+                    project_id: id.to_string(),
+                    collapsed,
+                },
+            )
+            .await?;
+        Ok(())
+    }
     pub async fn move_group(&self, id: &str, direction: MoveDirection) -> Result<()> {
         let _: serde_json::Value = self
             .request(
                 ipc_method::GROUP_MOVE,
                 &GroupMoveParams {
                     group_id: id.to_string(),
+                    direction,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+    pub async fn move_project(&self, id: &str, direction: MoveDirection) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::PROJECT_MOVE,
+                &ProjectMoveParams {
+                    project_id: id.to_string(),
                     direction,
                 },
             )
