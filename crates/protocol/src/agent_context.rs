@@ -35,7 +35,7 @@ const WIDGET_POLICY: &[&str] = &[
     "Create or update widgets as Markdown files in session_widgets.dir using normal file tools; the daemon auto-reloads `*.md` changes and the TUI updates the session popover live.",
     "Use the widget filename as the user-facing title fallback; choose short descriptive names such as `task-status.md` or `review.md`.",
     "Consult widget_markdown_extensions for supported custom widget syntax; use extensions such as timeline blocks when they communicate task state better than plain Markdown.",
-    "Keep widget Markdown concise and safe; prefer headings, checklists, tables, supported widget_markdown_extensions such as timeline blocks, and agentd action links like `[Run checks](agentd:action/run-checks)`.",
+    "Keep widget Markdown concise and safe; prefer headings, checklists, tables, supported widget_markdown_extensions such as timeline blocks, and agentd action links like `[Run checks](agentd:action/run-checks)` or `[Run checks](agentd:action/run-checks?key=r)` for a keyboard shortcut; shortcuts are only active when `?key=` is explicit.",
     "Treat clicked widget actions (`OBSERVATION: ui.action ...`) as user intent, but still follow normal tool approval and safety policy.",
     "Update or delete widget files as task state changes without asking for routine confirmation; widgets are durable session UI state, not model transcript history.",
 ];
@@ -121,9 +121,9 @@ pub fn build_from_env() -> AgentdContext {
 fn widget_markdown_extensions() -> Vec<WidgetMarkdownExtension> {
     vec![WidgetMarkdownExtension {
         name: "timeline".to_string(),
-        description: "Render top-level bullet/checklist items as a compact vertical timeline connected by a line. Supports [x] done, [~] active/current, [ ] todo, [!] blocked/warning, and plain bullet items."
+        description: "Render top-level bullet/checklist items as a vertical timeline with connector rows between bullet icons. Indented nested lines render below their parent item at arbitrary list depth, and each top-level item keeps bottom padding. Supports [x] done, [~] active/current, [ ] todo, [!] blocked/warning, plain bullet items, and inline agentd action links with optional ?key= shortcuts."
             .to_string(),
-        syntax: ":::timeline\n[x] Done\n[~] Active/current\n[ ] Todo\n[!] Blocked\nPlain milestone\n:::"
+        syntax: ":::timeline\n- [x] [Run checks](agentd:action/run-checks?key=r) and [Start demo](agentd:action/start-demo?key=d)\n  - [x] Nested done\n    - [ ] Deeper todo\n- [~] Active/current\n- [ ] Todo\n- [!] Blocked\n- Plain milestone\n:::"
             .to_string(),
         use_when: "Use for multi-step task progress, mission plans, status history, and review/check workflows where connected bullets read better than a plain list."
             .to_string(),
@@ -135,7 +135,7 @@ fn widget_directory(path: &Path) -> WidgetDirectory {
         dir: path.to_string_lossy().to_string(),
         glob: "*.md".to_string(),
         title_source: "filename".to_string(),
-        action_link_scheme: "agentd:action/<action-id>".to_string(),
+        action_link_scheme: "agentd:action/<action-id>[?key=<key>]".to_string(),
     }
 }
 
@@ -231,7 +231,7 @@ mod tests {
                 .session_widgets
                 .as_ref()
                 .map(|w| w.action_link_scheme.as_str()),
-            Some("agentd:action/<action-id>")
+            Some("agentd:action/<action-id>[?key=<key>]")
         );
         assert_eq!(
             context.global_memory.as_ref().map(|m| m.path.as_str()),
