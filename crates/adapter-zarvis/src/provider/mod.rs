@@ -143,6 +143,15 @@ pub trait TextSink: Send {
     /// a no-op so providers and sinks that don't care about
     /// reasoning don't have to opt out.
     fn reasoning_delta(&mut self, _text: &str) {}
+    /// Liveness ping: the provider received *some* stream event from
+    /// upstream (any SSE event / NDJSON chunk), even one that carries
+    /// no text — `response.created`, tool-call argument deltas, usage,
+    /// keepalives, etc. Providers should call this once per received
+    /// stream item so the idle watchdog measures "no bytes from
+    /// upstream" rather than "no assistant text", and so a turn that's
+    /// streaming only tool-call arguments isn't killed as idle. Default
+    /// no-op; `delta` / `reasoning_delta` already imply progress.
+    fn progress(&mut self) {}
 }
 
 /// Sentinel error for "the input you sent is over the model's
