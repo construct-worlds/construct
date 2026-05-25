@@ -5,7 +5,10 @@
 
 use super::{Tool, ToolCtx, ToolOutcome};
 use agentd_client::Client;
-use agentd_protocol::{agent_context, paths::Paths, CreateSessionParams, PtySize, ToolRisk};
+use agentd_protocol::{
+    agent_context, paths::Paths, CreateSessionParams, PtySize, SessionEvent, ToolRisk, UiPanel,
+    UiPlacement,
+};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use base64::Engine;
@@ -31,15 +34,96 @@ fn need_str(input: &Value, k: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("missing `{k}`"))
 }
 
+fn target_session_id(input: &Value, ctx: &ToolCtx) -> String {
+    input
+        .get("session_id")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| ctx.session_id.clone())
+}
+
+fn parse_ui_placement(input: &Value, default: UiPlacement) -> UiPlacement {
+    match input
+        .get("placement")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+    {
+        "inline" => UiPlacement::Inline,
+        "sticky" => UiPlacement::Sticky,
+        _ => default,
+    }
+}
+
+fn panel_from_input(input: &Value, existing: Option<UiPanel>) -> Result<UiPanel> {
+    let id = need_str(input, "id")?;
+    let title = input
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| existing.as_ref().and_then(|p| p.title.clone()));
+    let placement = parse_ui_placement(
+        input,
+        existing.as_ref().map(|p| p.placement).unwrap_or_default(),
+    );
+    let mut markdown = input
+        .get("markdown")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| existing.as_ref().map(|p| p.markdown.clone()))
+        .ok_or_else(|| anyhow!("missing `markdown` and no existing panel `{id}` to patch"))?;
+    apply_search_replace_patch(input, &mut markdown)?;
+    Ok(UiPanel {
+        id,
+        source: None,
+        title,
+        placement,
+        markdown,
+    })
+}
+
+fn apply_search_replace_patch(input: &Value, markdown: &mut String) -> Result<()> {
+    let Some(find) = input.get("find").and_then(|v| v.as_str()) else {
+        return Ok(());
+    };
+    let replace = input.get("replace").and_then(|v| v.as_str()).unwrap_or("");
+    let count = markdown.matches(find).count();
+    match count {
+        0 => Err(anyhow!("`find` did not match panel markdown")),
+        1 => {
+            *markdown = markdown.replacen(find, replace, 1);
+            Ok(())
+        }
+        _ => Err(anyhow!(
+            "`find` matched panel markdown {count} times; refine the search text"
+        )),
+    }
+}
+
+fn latest_panel(events: Vec<agentd_protocol::TimestampedEvent>, id: &str) -> Option<UiPanel> {
+    events.into_iter().fold(None, |current, ev| match ev.event {
+        SessionEvent::UiPanel(panel) if panel.id == id => Some(panel),
+        SessionEvent::UiDelete { id: deleted } if deleted == id => None,
+        _ => current,
+    })
+}
+
 // ---------- read ----------
 
 pub struct Context;
 #[async_trait]
 impl Tool for Context {
-    fn name(&self) -> &str { agent_context::TOOL_NAME }
-    fn description(&self) -> &str { agent_context::TOOL_DESCRIPTION }
-    fn schema(&self) -> Value { json!({ "type": "object", "properties": {} }) }
-    fn risk(&self) -> ToolRisk { ToolRisk::Safe }
+    fn name(&self) -> &str {
+        agent_context::TOOL_NAME
+    }
+    fn description(&self) -> &str {
+        agent_context::TOOL_DESCRIPTION
+    }
+    fn schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
     async fn run(&self, _input: Value, _ctx: &ToolCtx) -> Result<ToolOutcome> {
         Ok(ToolOutcome {
             ok: true,
@@ -51,13 +135,19 @@ impl Tool for Context {
 pub struct Whoami;
 #[async_trait]
 impl Tool for Whoami {
-    fn name(&self) -> &str { "agentd_whoami" }
+    fn name(&self) -> &str {
+        "agentd_whoami"
+    }
     fn description(&self) -> &str {
         "Returns the session id of the agentd session this agent is running inside, \
          or null if not inside one. Use this to avoid acting on yourself."
     }
-    fn schema(&self) -> Value { json!({ "type": "object", "properties": {} }) }
-    fn risk(&self) -> ToolRisk { ToolRisk::Safe }
+    fn schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
     async fn run(&self, _input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
         Ok(ToolOutcome {
             ok: true,
@@ -69,15 +159,21 @@ impl Tool for Whoami {
 pub struct ListSessions;
 #[async_trait]
 impl Tool for ListSessions {
-    fn name(&self) -> &str { "agentd_list_sessions" }
+    fn name(&self) -> &str {
+        "agentd_list_sessions"
+    }
     fn description(&self) -> &str {
         "List every agentd session (running and finished). Each entry includes the \
          session id, harness, state, cwd, pinned flag, automode flag, last_pty_at_ms \
          (use `now - last_pty_at_ms < 600ms` as a 'is the agent currently busy?' \
          signal), and group info when applicable."
     }
-    fn schema(&self) -> Value { json!({ "type": "object", "properties": {} }) }
-    fn risk(&self) -> ToolRisk { ToolRisk::Safe }
+    fn schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
     async fn run(&self, _input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
         let c = client(ctx).await?;
         let sessions = c.list().await?;
@@ -91,24 +187,35 @@ impl Tool for ListSessions {
 pub struct GetSession;
 #[async_trait]
 impl Tool for GetSession {
-    fn name(&self) -> &str { "agentd_get_session" }
-    fn description(&self) -> &str { "Fetch the full summary + structured transcript for one session." }
+    fn name(&self) -> &str {
+        "agentd_get_session"
+    }
+    fn description(&self) -> &str {
+        "Fetch the full summary + structured transcript for one session."
+    }
     fn schema(&self) -> Value {
         json!({ "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"] })
     }
-    fn risk(&self) -> ToolRisk { ToolRisk::Safe }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
     async fn run(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
         let sid = need_str(&input, "session_id")?;
         let c = client(ctx).await?;
         let det = c.get(&sid).await?;
-        Ok(ToolOutcome { ok: true, output: serde_json::to_string(&det)? })
+        Ok(ToolOutcome {
+            ok: true,
+            output: serde_json::to_string(&det)?,
+        })
     }
 }
 
 pub struct GetTranscript;
 #[async_trait]
 impl Tool for GetTranscript {
-    fn name(&self) -> &str { "agentd_get_transcript" }
+    fn name(&self) -> &str {
+        "agentd_get_transcript"
+    }
     fn description(&self) -> &str {
         "Fetch a slice of the session's structured event log. `from` is a 1-based seq; \
          `limit` bounds the count."
@@ -124,21 +231,31 @@ impl Tool for GetTranscript {
             "required": ["session_id"]
         })
     }
-    fn risk(&self) -> ToolRisk { ToolRisk::Safe }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
     async fn run(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
         let sid = need_str(&input, "session_id")?;
         let from = input.get("from").and_then(|n| n.as_u64()).unwrap_or(0);
-        let limit = input.get("limit").and_then(|n| n.as_u64()).map(|n| n as usize);
+        let limit = input
+            .get("limit")
+            .and_then(|n| n.as_u64())
+            .map(|n| n as usize);
         let c = client(ctx).await?;
         let res = c.transcript(&sid, from, limit).await?;
-        Ok(ToolOutcome { ok: true, output: serde_json::to_string(&res)? })
+        Ok(ToolOutcome {
+            ok: true,
+            output: serde_json::to_string(&res)?,
+        })
     }
 }
 
 pub struct GetOutput;
 #[async_trait]
 impl Tool for GetOutput {
-    fn name(&self) -> &str { "agentd_get_output" }
+    fn name(&self) -> &str {
+        "agentd_get_output"
+    }
     fn description(&self) -> &str {
         "Fetch the session's recent PTY scrollback as text (UTF-8 lossy). Use for \
          reading what's on the screen of a PTY-backed session."
@@ -146,7 +263,9 @@ impl Tool for GetOutput {
     fn schema(&self) -> Value {
         json!({ "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"] })
     }
-    fn risk(&self) -> ToolRisk { ToolRisk::Safe }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
     async fn run(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
         let sid = need_str(&input, "session_id")?;
         let c = client(ctx).await?;
@@ -155,38 +274,61 @@ impl Tool for GetOutput {
             .decode(&snap.data)
             .unwrap_or_default();
         let text = String::from_utf8_lossy(&bytes).to_string();
-        Ok(ToolOutcome { ok: true, output: text })
+        Ok(ToolOutcome {
+            ok: true,
+            output: text,
+        })
     }
 }
 
 pub struct GetDiff;
 #[async_trait]
 impl Tool for GetDiff {
-    fn name(&self) -> &str { "agentd_get_diff" }
-    fn description(&self) -> &str { "`git diff HEAD` for the session's worktree (empty if not a git repo)." }
+    fn name(&self) -> &str {
+        "agentd_get_diff"
+    }
+    fn description(&self) -> &str {
+        "`git diff HEAD` for the session's worktree (empty if not a git repo)."
+    }
     fn schema(&self) -> Value {
         json!({ "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"] })
     }
-    fn risk(&self) -> ToolRisk { ToolRisk::Safe }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
     async fn run(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
         let sid = need_str(&input, "session_id")?;
         let c = client(ctx).await?;
         let d = c.diff(&sid).await?;
-        Ok(ToolOutcome { ok: true, output: serde_json::to_string(&d)? })
+        Ok(ToolOutcome {
+            ok: true,
+            output: serde_json::to_string(&d)?,
+        })
     }
 }
 
 pub struct ListHarnesses;
 #[async_trait]
 impl Tool for ListHarnesses {
-    fn name(&self) -> &str { "agentd_list_harnesses" }
-    fn description(&self) -> &str { "List available adapter harnesses (shell, claude, codex, zarvis, …)." }
-    fn schema(&self) -> Value { json!({ "type": "object", "properties": {} }) }
-    fn risk(&self) -> ToolRisk { ToolRisk::Safe }
+    fn name(&self) -> &str {
+        "agentd_list_harnesses"
+    }
+    fn description(&self) -> &str {
+        "List available adapter harnesses (shell, claude, codex, zarvis, …)."
+    }
+    fn schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
     async fn run(&self, _input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
         let c = client(ctx).await?;
         let h = c.harnesses().await?;
-        Ok(ToolOutcome { ok: true, output: serde_json::to_string(&h)? })
+        Ok(ToolOutcome {
+            ok: true,
+            output: serde_json::to_string(&h)?,
+        })
     }
 }
 
@@ -195,7 +337,9 @@ impl Tool for ListHarnesses {
 pub struct CreateSession;
 #[async_trait]
 impl Tool for CreateSession {
-    fn name(&self) -> &str { "agentd_create_session" }
+    fn name(&self) -> &str {
+        "agentd_create_session"
+    }
     fn description(&self) -> &str {
         "Spawn a new session. `harness` must match `agentd_list_harnesses`. `cwd` \
          defaults to the daemon process cwd. `worktree:true` starts in an isolated \
@@ -215,7 +359,9 @@ impl Tool for CreateSession {
             "required": ["harness"]
         })
     }
-    fn risk(&self) -> ToolRisk { ToolRisk::Risky }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Risky
+    }
     fn args_summary(&self, input: &Value) -> String {
         let h = input.get("harness").and_then(|s| s.as_str()).unwrap_or("?");
         let p = input.get("prompt").and_then(|s| s.as_str()).unwrap_or("");
@@ -235,12 +381,27 @@ impl Tool for CreateSession {
         let params = CreateSessionParams {
             harness,
             cwd,
-            prompt: input.get("prompt").and_then(|s| s.as_str()).map(|s| s.to_string()),
+            prompt: input
+                .get("prompt")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string()),
             model: None,
-            title: input.get("title").and_then(|s| s.as_str()).map(|s| s.to_string()),
-            mode: input.get("mode").and_then(|s| s.as_str()).map(|s| s.to_string()),
-            pty_size: Some(PtySize { cols: 100, rows: 30 }),
-            worktree: input.get("worktree").and_then(|v| v.as_bool()).unwrap_or(false),
+            title: input
+                .get("title")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string()),
+            mode: input
+                .get("mode")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string()),
+            pty_size: Some(PtySize {
+                cols: 100,
+                rows: 30,
+            }),
+            worktree: input
+                .get("worktree")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             env: Default::default(),
             args: Vec::new(),
             // Sessions created via the agentd-control tool are always
@@ -254,7 +415,10 @@ impl Tool for CreateSession {
         };
         let c = client(ctx).await?;
         let sid = c.create(params).await?;
-        Ok(ToolOutcome { ok: true, output: json!({ "session_id": sid }).to_string() })
+        Ok(ToolOutcome {
+            ok: true,
+            output: json!({ "session_id": sid }).to_string(),
+        })
     }
 }
 
@@ -307,7 +471,8 @@ simple_write_tool!(
         let text = need_str(input, "text").unwrap_or_default();
         let c = c.clone();
         let sid = sid.to_string();
-        Box::pin(async move { c.send_input(&sid, text).await }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        Box::pin(async move { c.send_input(&sid, text).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
     },
     "text"
 );
@@ -330,6 +495,122 @@ simple_write_tool!(
     "bytes_b64"
 );
 
+pub struct UiCreate;
+#[async_trait]
+impl Tool for UiCreate {
+    fn name(&self) -> &str {
+        "agentd_ui_create"
+    }
+    fn description(&self) -> &str {
+        "Create or replace a dynamic session UI panel. The body is safe agentd-markdown: normal markdown plus action links like `[Run checks](agentd:action/run-checks)`. Use for compact task status, checklists, decisions, and command decks when it materially helps the user. Defaults to this session when `session_id` is omitted."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string" },
+                "id": { "type": "string" },
+                "title": { "type": "string" },
+                "placement": { "type": "string", "enum": ["sticky", "inline"] },
+                "markdown": { "type": "string" }
+            },
+            "required": ["id", "markdown"]
+        })
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
+    async fn run(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
+        let sid = target_session_id(&input, ctx);
+        let panel = panel_from_input(&input, None)?;
+        let c = client(ctx).await?;
+        c.emit_event(&sid, SessionEvent::UiPanel(panel.clone()))
+            .await?;
+        Ok(ToolOutcome {
+            ok: true,
+            output: json!({ "ok": true, "session_id": sid, "panel": panel }).to_string(),
+        })
+    }
+}
+
+pub struct UiPatch;
+#[async_trait]
+impl Tool for UiPatch {
+    fn name(&self) -> &str {
+        "agentd_ui_patch"
+    }
+    fn description(&self) -> &str {
+        "Patch a dynamic session UI panel. MVP semantics replace `markdown` and/or `title` on an existing panel id while preserving omitted fields. Defaults to this session when `session_id` is omitted."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string" },
+                "id": { "type": "string" },
+                "title": { "type": "string" },
+                "placement": { "type": "string", "enum": ["sticky", "inline"] },
+                "markdown": { "type": "string", "description": "Optional full markdown replacement." },
+                "find": { "type": "string", "description": "Optional exact substring to replace in the current/new markdown. Must occur exactly once." },
+                "replace": { "type": "string", "description": "Replacement text for `find`; defaults to empty string when `find` is set." }
+            },
+            "required": ["id"]
+        })
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
+    async fn run(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
+        let sid = target_session_id(&input, ctx);
+        let id = need_str(&input, "id")?;
+        let c = client(ctx).await?;
+        let detail = c.get(&sid).await?;
+        let existing = latest_panel(detail.events, &id);
+        let panel = panel_from_input(&input, existing)?;
+        c.emit_event(&sid, SessionEvent::UiPanel(panel.clone()))
+            .await?;
+        Ok(ToolOutcome {
+            ok: true,
+            output: json!({ "ok": true, "session_id": sid, "panel": panel }).to_string(),
+        })
+    }
+}
+
+pub struct UiDelete;
+#[async_trait]
+impl Tool for UiDelete {
+    fn name(&self) -> &str {
+        "agentd_ui_delete"
+    }
+    fn description(&self) -> &str {
+        "Delete a dynamic session UI panel by id. Defaults to this session when `session_id` is omitted."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string" },
+                "id": { "type": "string" }
+            },
+            "required": ["id"]
+        })
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
+    async fn run(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
+        let sid = target_session_id(&input, ctx);
+        let id = need_str(&input, "id")?;
+        let c = client(ctx).await?;
+        c.emit_event(&sid, SessionEvent::UiDelete { id: id.clone() })
+            .await?;
+        Ok(ToolOutcome {
+            ok: true,
+            output: json!({ "ok": true, "session_id": sid, "id": id }).to_string(),
+        })
+    }
+}
+
 simple_write_tool!(
     InterruptSession,
     "agentd_interrupt_session",
@@ -339,7 +620,8 @@ simple_write_tool!(
     |c: &Arc<Client>, sid: &str, _input: &Value| {
         let c = c.clone();
         let sid = sid.to_string();
-        Box::pin(async move { c.interrupt(&sid).await }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        Box::pin(async move { c.interrupt(&sid).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
     },
     ""
 );
@@ -353,7 +635,8 @@ simple_write_tool!(
     |c: &Arc<Client>, sid: &str, _input: &Value| {
         let c = c.clone();
         let sid = sid.to_string();
-        Box::pin(async move { c.stop(&sid).await }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        Box::pin(async move { c.stop(&sid).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
     },
     ""
 );
@@ -367,7 +650,8 @@ simple_write_tool!(
     |c: &Arc<Client>, sid: &str, _input: &Value| {
         let c = c.clone();
         let sid = sid.to_string();
-        Box::pin(async move { c.kill(&sid).await }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        Box::pin(async move { c.kill(&sid).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
     },
     ""
 );
@@ -381,7 +665,8 @@ simple_write_tool!(
     |c: &Arc<Client>, sid: &str, _input: &Value| {
         let c = c.clone();
         let sid = sid.to_string();
-        Box::pin(async move { c.delete(&sid).await }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        Box::pin(async move { c.delete(&sid).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
     },
     ""
 );
@@ -393,10 +678,14 @@ simple_write_tool!(
     vec![("pinned", json!({ "type": "boolean" }))],
     json!(["session_id", "pinned"]),
     |c: &Arc<Client>, sid: &str, input: &Value| {
-        let pinned = input.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+        let pinned = input
+            .get("pinned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let c = c.clone();
         let sid = sid.to_string();
-        Box::pin(async move { c.set_pinned(&sid, pinned).await }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        Box::pin(async move { c.set_pinned(&sid, pinned).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
     },
     ""
 );
@@ -408,10 +697,14 @@ simple_write_tool!(
     vec![("title", json!({ "type": "string" }))],
     json!(["session_id"]),
     |c: &Arc<Client>, sid: &str, input: &Value| {
-        let title = input.get("title").and_then(|s| s.as_str()).map(|s| s.to_string());
+        let title = input
+            .get("title")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
         let c = c.clone();
         let sid = sid.to_string();
-        Box::pin(async move { c.set_title(&sid, title).await }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        Box::pin(async move { c.set_title(&sid, title).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
     },
     "title"
 );
@@ -423,7 +716,10 @@ simple_write_tool!(
      `position` is \"top\" or \"bottom\" of the target region (default \"bottom\").",
     vec![
         ("group_id", json!({ "type": ["string", "null"] })),
-        ("position", json!({ "type": "string", "enum": ["top", "bottom"] }))
+        (
+            "position",
+            json!({ "type": "string", "enum": ["top", "bottom"] })
+        )
     ],
     json!(["session_id"]),
     |c: &Arc<Client>, sid: &str, input: &Value| {
@@ -453,10 +749,17 @@ simple_write_tool!(
     "agentd_move_session",
     "Reorder a session within its region — `direction` `up` swaps with the session above (or \
      exits into the previous region at its top edge), `down` is symmetric.",
-    vec![("direction", json!({ "type": "string", "enum": ["up", "down"] }))],
+    vec![(
+        "direction",
+        json!({ "type": "string", "enum": ["up", "down"] })
+    )],
     json!(["session_id", "direction"]),
     |c: &Arc<Client>, sid: &str, input: &Value| {
-        let dir = match input.get("direction").and_then(|v| v.as_str()).unwrap_or("down") {
+        let dir = match input
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .unwrap_or("down")
+        {
             "up" => agentd_protocol::MoveDirection::Up,
             _ => agentd_protocol::MoveDirection::Down,
         };
@@ -480,7 +783,9 @@ fn calling_session_id() -> Option<String> {
 pub struct LoopCreate;
 #[async_trait]
 impl Tool for LoopCreate {
-    fn name(&self) -> &str { "agentd_loop_create" }
+    fn name(&self) -> &str {
+        "agentd_loop_create"
+    }
     fn description(&self) -> &str {
         "Create a recurring prompt that fires into a session at a regular interval. \
          `interval_seconds` sets the cadence (clamped to host bounds — default 30s..86400s). \
@@ -500,9 +805,14 @@ impl Tool for LoopCreate {
             "required": ["interval_seconds", "prompt"]
         })
     }
-    fn risk(&self) -> ToolRisk { ToolRisk::Risky }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Risky
+    }
     fn args_summary(&self, input: &Value) -> String {
-        let secs = input.get("interval_seconds").and_then(|v| v.as_u64()).unwrap_or(0);
+        let secs = input
+            .get("interval_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
         let preview: String = prompt.chars().take(40).collect();
         format!("{secs}s — {preview}")
@@ -520,9 +830,8 @@ impl Tool for LoopCreate {
             .ok_or_else(|| anyhow!("interval_seconds required"))?;
         let prompt = need_str(&input, "prompt")?;
         let expires_in = input.get("expires_in_seconds").and_then(|v| v.as_u64());
-        let expires_at_ms = expires_in.map(|d| {
-            chrono::Utc::now().timestamp_millis() + (d as i64) * 1000
-        });
+        let expires_at_ms =
+            expires_in.map(|d| chrono::Utc::now().timestamp_millis() + (d as i64) * 1000);
         let c = client(ctx).await?;
         let l = c
             .loop_create(agentd_protocol::LoopCreateParams {
@@ -542,7 +851,9 @@ impl Tool for LoopCreate {
 pub struct LoopList;
 #[async_trait]
 impl Tool for LoopList {
-    fn name(&self) -> &str { "agentd_loop_list" }
+    fn name(&self) -> &str {
+        "agentd_loop_list"
+    }
     fn description(&self) -> &str {
         "List recurring prompts (loops) attached to a session, or to all sessions when \
          `session_id` is omitted. Returns metadata + next fire time."
@@ -553,19 +864,29 @@ impl Tool for LoopList {
             "properties": { "session_id": { "type": "string" } }
         })
     }
-    fn risk(&self) -> ToolRisk { ToolRisk::Safe }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Safe
+    }
     async fn run(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
-        let sid = input.get("session_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let sid = input
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let c = client(ctx).await?;
         let loops = c.loop_list(sid.as_deref()).await?;
-        Ok(ToolOutcome { ok: true, output: serde_json::to_string(&loops)? })
+        Ok(ToolOutcome {
+            ok: true,
+            output: serde_json::to_string(&loops)?,
+        })
     }
 }
 
 pub struct LoopUpdate;
 #[async_trait]
 impl Tool for LoopUpdate {
-    fn name(&self) -> &str { "agentd_loop_update" }
+    fn name(&self) -> &str {
+        "agentd_loop_update"
+    }
     fn description(&self) -> &str {
         "Update a loop's interval / prompt / expiry. Omitted fields keep their current value."
     }
@@ -581,14 +902,19 @@ impl Tool for LoopUpdate {
             "required": ["loop_id"]
         })
     }
-    fn risk(&self) -> ToolRisk { ToolRisk::Risky }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Risky
+    }
     async fn run(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
         let loop_id = need_str(&input, "loop_id")?;
         let spec = input
             .get("interval_seconds")
             .and_then(|v| v.as_u64())
             .map(|s| agentd_protocol::LoopSpec::Interval { seconds: s });
-        let prompt = input.get("prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let prompt = input
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let expires_at_ms = input.get("expires_at_ms").and_then(|v| v.as_i64());
         let c = client(ctx).await?;
         let l = c
@@ -599,14 +925,19 @@ impl Tool for LoopUpdate {
                 expires_at_ms,
             })
             .await?;
-        Ok(ToolOutcome { ok: true, output: serde_json::to_string(&l)? })
+        Ok(ToolOutcome {
+            ok: true,
+            output: serde_json::to_string(&l)?,
+        })
     }
 }
 
 pub struct LoopRemove;
 #[async_trait]
 impl Tool for LoopRemove {
-    fn name(&self) -> &str { "agentd_loop_remove" }
+    fn name(&self) -> &str {
+        "agentd_loop_remove"
+    }
     fn description(&self) -> &str {
         "Remove a recurring prompt by loop_id. Stops future firings."
     }
@@ -617,11 +948,16 @@ impl Tool for LoopRemove {
             "required": ["loop_id"]
         })
     }
-    fn risk(&self) -> ToolRisk { ToolRisk::Risky }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Risky
+    }
     async fn run(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
         let loop_id = need_str(&input, "loop_id")?;
         let c = client(ctx).await?;
         c.loop_remove(&loop_id).await?;
-        Ok(ToolOutcome { ok: true, output: format!("removed {loop_id}") })
+        Ok(ToolOutcome {
+            ok: true,
+            output: format!("removed {loop_id}"),
+        })
     }
 }

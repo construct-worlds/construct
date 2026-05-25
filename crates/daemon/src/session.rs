@@ -988,9 +988,14 @@ impl SessionManager {
             .ok_or_else(|| anyhow!("session not found: {}", id))?;
         let summary = entry.summary().await;
         let transcript = self.storage.read_transcript(id, 0, None)?;
+        let ui_panels = self.storage.read_widgets(id).unwrap_or_else(|e| {
+            tracing::warn!(session = %id, error = ?e, "read widgets failed");
+            Vec::new()
+        });
         Ok(SessionDetail {
             summary,
             events: transcript.events,
+            ui_panels,
         })
     }
 
@@ -1120,9 +1125,18 @@ impl SessionManager {
         for (k, v) in &params.env {
             env_with_meta.insert(k.clone(), v.clone());
         }
+        let session_dir = self.storage.session_dir(&id);
+        let widgets_dir = self.storage.ensure_widgets_dir(&id).unwrap_or_else(|e| {
+            tracing::warn!(session = %id, error = ?e, "ensure widgets dir failed");
+            self.storage.widgets_dir(&id)
+        });
         env_with_meta.insert(
             "AGENTD_SESSION_DATA_DIR".to_string(),
-            self.storage.session_dir(&id).to_string_lossy().to_string(),
+            session_dir.to_string_lossy().to_string(),
+        );
+        env_with_meta.insert(
+            "AGENTD_SESSION_WIDGETS_DIR".to_string(),
+            widgets_dir.to_string_lossy().to_string(),
         );
         env_with_meta.insert(
             "AGENTD_SESSION_KIND".to_string(),
@@ -1374,6 +1388,14 @@ impl SessionManager {
             s.group_id.clone()
         };
         self.install_memory_env(&mut start_params.env, project_id.as_deref());
+        let widgets_dir = self.storage.ensure_widgets_dir(id).unwrap_or_else(|e| {
+            tracing::warn!(session = %id, error = ?e, "ensure widgets dir failed");
+            self.storage.widgets_dir(id)
+        });
+        start_params.env.insert(
+            "AGENTD_SESSION_WIDGETS_DIR".to_string(),
+            widgets_dir.to_string_lossy().to_string(),
+        );
         // Use the last-known PTY size so the resumed adapter (which
         // sizes its PTY off start_params on session.start) doesn't draw
         // its banner / resume content at the stale creation default.
@@ -1868,6 +1890,8 @@ impl SessionManager {
                 | SessionEvent::TaskEnd { .. }
                 | SessionEvent::ContextCompacted { .. }
                 | SessionEvent::BrowserPreview(_)
+                | SessionEvent::UiPanel(_)
+                | SessionEvent::UiDelete { .. }
                 | SessionEvent::EditorState { .. } => {
                     // Task-lifecycle, editor-state, and compaction
                     // events are recorded by other handlers — they

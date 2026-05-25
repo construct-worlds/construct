@@ -305,6 +305,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/rename",
     "/send",
     "/tasks",
+    "/ui-demo",
     "/zoom",
 ];
 
