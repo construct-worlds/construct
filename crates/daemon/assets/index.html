@@ -1875,15 +1875,16 @@ function rpc(method, params) {
 
 async function refreshSessions() {
   try {
-    // Fetch sessions + groups in parallel. Groups arrive as
-    // `group.list -> Vec<GroupSummary>`; sessions reference them
-    // via `group_id`. Both can change live via `session/state`,
-    // `session/deleted`, `group/state`, `group/deleted` — the
+    // Fetch sessions + projects in parallel. Projects arrive as
+    // `project.list -> Vec<ProjectSummary>`; sessions still reference
+    // them via the legacy `group_id` field while storage migrates.
+    // Both can change live via `session/state`, `session/deleted`,
+    // `project/state`, `project/deleted` — the
     // existing `handleNotification` path updates the caches and
     // re-renders.
     const [list, groups] = await Promise.all([
       rpc("session.list", null),
-      rpc("group.list", null).catch(() => []),
+      rpc("project.list", null).catch(() => []),
     ]);
     state.sessions = Array.isArray(list) ? list : [];
     // The orchestrator session ("god") used to be filtered out
@@ -2179,18 +2180,18 @@ browserPreviewCloseEl.addEventListener("click", () => {
   clearBrowserPreview(state.currentId);
 });
 
-/** Flip a group's collapsed bit on the daemon side. The
- *  `group/state` broadcast triggers a re-render. */
+/** Flip a project's collapsed bit on the daemon side. The
+ *  `project/state` broadcast triggers a re-render. */
 async function toggleGroupCollapsed(groupId) {
   const g = state.groups.find((x) => x.id === groupId);
   if (!g) return;
   try {
-    await rpc("group.set_collapsed", {
-      group_id: groupId,
+    await rpc("project.set_collapsed", {
+      project_id: groupId,
       collapsed: !g.collapsed,
     });
   } catch (e) {
-    appendError(`toggle group failed: ${e.message}`);
+    appendError(`toggle project failed: ${e.message}`);
   }
 }
 
@@ -3289,15 +3290,16 @@ function handleNotification(method, params) {
       sessionTitleEl.textContent = "";
       refreshListToolbar();
     }
-  } else if (method === "group/state") {
-    const { group } = params;
+  } else if (method === "group/state" || method === "project/state") {
+    const group = params.group || params.project;
     if (!group) return;
     const i = state.groups.findIndex((g) => g.id === group.id);
     if (i >= 0) state.groups[i] = group;
     else state.groups.push(group);
     renderSessions();
-  } else if (method === "group/deleted") {
-    state.groups = state.groups.filter((g) => g.id !== params.group_id);
+  } else if (method === "group/deleted" || method === "project/deleted") {
+    const deletedId = params.group_id || params.project_id;
+    state.groups = state.groups.filter((g) => g.id !== deletedId);
     renderSessions();
   }
 }
