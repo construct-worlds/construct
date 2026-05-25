@@ -17,11 +17,12 @@ use std::time::Duration;
 
 const ENV_PROVIDER_IDLE_TIMEOUT_SECS: &str = "AGENTD_ZARVIS_PROVIDER_IDLE_TIMEOUT_SECS";
 /// Idle = no stream activity from upstream (see `WatchdogSink`: any
-/// `delta` / `reasoning_delta` / `progress` ping resets it). 60s is long
-/// enough for a healthy first-token wait on a large context but short
-/// enough that a stalled connection surfaces quickly instead of freezing
-/// the turn for minutes. Override with the env var (`0` disables).
-const DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS: u64 = 60;
+/// `delta` / `reasoning_delta` / `progress` ping resets it). 90s leaves
+/// headroom for the gap between the first event and the first content on
+/// a large context under load (and cold local-model loads) while still
+/// surfacing a stalled connection in ~1.5 min instead of freezing the
+/// turn for minutes. Override with the env var (`0` disables).
+const DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS: u64 = 90;
 
 pub async fn complete(
     provider: &dyn LlmProvider,
