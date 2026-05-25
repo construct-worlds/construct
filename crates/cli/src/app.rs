@@ -1411,56 +1411,17 @@ async fn run_loop(
             }
         }
         tokio::select! {
-            hydrated = hydration_tasks.join_next(), if !hydration_tasks.is_empty() => {
-                match hydrated {
-                    Some(Ok((id, Ok(h)))) => {
-                        hydration_sessions.remove(&id);
-                        app.apply_session_hydration(h).await;
-                    }
-                    Some(Ok((id, Err(e)))) => {
-                        hydration_sessions.remove(&id);
-                        app.hydrating_sessions.remove(&id);
-                        app.set_status(format!("load transcript: {e}"));
-                    }
-                    Some(Err(e)) if e.is_cancelled() => {
-                        // The JoinSet was explicitly aborted during reconnect or shutdown;
-                        // `hydration_sessions` is cleared alongside `abort_all`.
-                    }
-                    Some(Err(e)) => {
-                        app.set_status(format!("load transcript task failed: {e}"));
-                    }
-                    None => {}
-                }
-            }
-            pinned_hydrated = async {
-                match pinned_hydration_task.as_mut() {
-                    Some(task) => task.await,
-                    None => futures::future::pending().await,
-                }
-            }, if pinned_hydration_task.is_some() => {
-                pinned_hydration_task = None;
-                let completed_session = pinned_hydration_session.take();
-                match pinned_hydrated {
-                    Ok(Ok(h)) => app.apply_pinned_session_hydration(h).await,
-                    Ok(Err(e)) => {
-                        if let Some(id) = completed_session.as_ref() {
-                            app.hydrating_sessions.remove(id);
-                        }
-                        app.set_status(format!("load pinned transcript: {e}"));
-                    }
-                    Err(e) if e.is_cancelled() => {
-                        if let Some(id) = completed_session.as_ref() {
-                            app.hydrating_sessions.remove(id);
-                        }
-                    }
-                    Err(e) => {
-                        if let Some(id) = completed_session.as_ref() {
-                            app.hydrating_sessions.remove(id);
-                        }
-                        app.set_status(format!("load pinned transcript task failed: {e}"));
-                    }
-                }
-            }
+            // Poll arms top-to-bottom by priority rather than at
+            // random: a ready keystroke is handled before we drain the
+            // background notification batch below. When several
+            // sessions flood PTY output, `notifications.recv()` is
+            // almost always ready, so an unbiased `select!` would
+            // service the feed work as often as input — adding
+            // keystroke→render latency in the focused session. Input is
+            // bursty (human-paced), so giving it top priority can't
+            // starve the lower arms: between keystrokes `input_stream`
+            // is Pending and the notification/tick arms run as before.
+            biased;
             ev = input_stream.next() => {
                 match ev {
                     Some(Ok(ev)) => {
@@ -1513,6 +1474,56 @@ async fn run_loop(
                         app.set_status(format!("input error: {e}"));
                     }
                     None => break,
+                }
+            }
+            hydrated = hydration_tasks.join_next(), if !hydration_tasks.is_empty() => {
+                match hydrated {
+                    Some(Ok((id, Ok(h)))) => {
+                        hydration_sessions.remove(&id);
+                        app.apply_session_hydration(h).await;
+                    }
+                    Some(Ok((id, Err(e)))) => {
+                        hydration_sessions.remove(&id);
+                        app.hydrating_sessions.remove(&id);
+                        app.set_status(format!("load transcript: {e}"));
+                    }
+                    Some(Err(e)) if e.is_cancelled() => {
+                        // The JoinSet was explicitly aborted during reconnect or shutdown;
+                        // `hydration_sessions` is cleared alongside `abort_all`.
+                    }
+                    Some(Err(e)) => {
+                        app.set_status(format!("load transcript task failed: {e}"));
+                    }
+                    None => {}
+                }
+            }
+            pinned_hydrated = async {
+                match pinned_hydration_task.as_mut() {
+                    Some(task) => task.await,
+                    None => futures::future::pending().await,
+                }
+            }, if pinned_hydration_task.is_some() => {
+                pinned_hydration_task = None;
+                let completed_session = pinned_hydration_session.take();
+                match pinned_hydrated {
+                    Ok(Ok(h)) => app.apply_pinned_session_hydration(h).await,
+                    Ok(Err(e)) => {
+                        if let Some(id) = completed_session.as_ref() {
+                            app.hydrating_sessions.remove(id);
+                        }
+                        app.set_status(format!("load pinned transcript: {e}"));
+                    }
+                    Err(e) if e.is_cancelled() => {
+                        if let Some(id) = completed_session.as_ref() {
+                            app.hydrating_sessions.remove(id);
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(id) = completed_session.as_ref() {
+                            app.hydrating_sessions.remove(id);
+                        }
+                        app.set_status(format!("load pinned transcript task failed: {e}"));
+                    }
                 }
             }
             notif = notifications.recv() => {
@@ -5502,6 +5513,47 @@ fn byte_pos(s: &str, char_idx: usize) -> usize {
 mod tests {
     use super::*;
     use ratatui::layout::Rect;
+
+    /// Regression guard for the input-priority optimization (#2).
+    ///
+    /// Under heavy background PTY output `notifications.recv()` is
+    /// almost always ready, so an unbiased `select!` services that
+    /// feed work about as often as input — adding keystroke→render
+    /// latency in the focused session (the "cursor hangs then jumps
+    /// 3-5 chars" report). The fix biases the loop toward input:
+    /// `biased;` with the input arm polled before the notification
+    /// arm.
+    ///
+    /// That benefit is a tokio scheduling property with no stable
+    /// runtime probe — the latency delta lives in a narrow, noisy,
+    /// hardware-dependent load window (see the `multi_session_latency`
+    /// benchmark in crates/e2e, which reports it but can't gate on
+    /// it). So assert the structural invariant that produces the
+    /// behavior instead: drop `biased;` or reorder the arms and this
+    /// fails.
+    #[test]
+    fn run_loop_select_biases_input_ahead_of_notifications() {
+        let src = include_str!("app.rs");
+        let select_at = src
+            .find("tokio::select! {")
+            .expect("run_loop should contain a tokio::select!");
+        // Bound the search to the run_loop region so the arm strings
+        // quoted in this very test (far below) can't be matched.
+        let body = &src[select_at..(select_at + 8000).min(src.len())];
+        let biased = body
+            .find("biased;")
+            .expect("the event-loop select! must be `biased;` so a ready keystroke wins ties");
+        let input = body.find("ev = input_stream.next()").expect("input arm");
+        let notif = body
+            .find("notif = notifications.recv()")
+            .expect("notification arm");
+        assert!(biased < input, "`biased;` must precede the input arm");
+        assert!(
+            input < notif,
+            "input arm must be polled before the notification-drain arm \
+             (bias toward input under background feed load)"
+        );
+    }
 
     fn test_layout() -> LayoutSnapshot {
         LayoutSnapshot {
