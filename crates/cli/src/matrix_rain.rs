@@ -38,6 +38,14 @@ const PTY_WORD_MAX_LEN: usize = 12;
 /// without unbounded growth.
 const PTY_WORD_POOL_MAX: usize = 32;
 
+/// Only the tail of each PTY chunk is scanned for words. The reveal
+/// surfaces the most-recent word, so the words near the end of a
+/// chunk are the only ones that can matter; scanning a whole
+/// (possibly multi-KB) flood chunk on every notification was wasted
+/// work that competed with focused-session input handling. 512 bytes
+/// comfortably covers several `PTY_WORD_MAX_LEN`-capped words.
+const PTY_HARVEST_TAIL_BYTES: usize = 512;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlashTone {
     Work,
@@ -208,7 +216,12 @@ impl MatrixRain {
                 .pty_word_pool
                 .entry(session_id.to_string())
                 .or_default();
-            extract_pty_words(bytes, pool);
+            // Scan only the tail — the reveal uses the most-recent
+            // word, so earlier bytes can't surface anyway, and a
+            // flooding background session would otherwise make this an
+            // O(chunk) scan on the main loop for every notification.
+            let tail = &bytes[bytes.len().saturating_sub(PTY_HARVEST_TAIL_BYTES)..];
+            extract_pty_words(tail, pool);
         }
         if let Some(prev) = self.pty_throttle.get(session_id) {
             if now.duration_since(*prev) < PTY_REVEAL_GAP {
@@ -764,6 +777,50 @@ mod tests {
             "expected extracted word, got fallback {word:?}"
         );
         assert_eq!(word, "Editing");
+    }
+
+    #[test]
+    fn pty_activity_harvest_scans_only_the_chunk_tail() {
+        // Regression guard for the harvest-cost optimization: the
+        // reveal only ever surfaces the most-recent word, so
+        // `observe_pty_activity` scans just the last
+        // `PTY_HARVEST_TAIL_BYTES` of each chunk instead of the whole
+        // (possibly multi-KB) buffer. A flooding background session
+        // would otherwise turn this into an O(chunk) scan on the main
+        // event loop for every PTY notification, adding keystroke
+        // latency in the focused session.
+        //
+        // Construct a chunk whose only extractable word sits *before*
+        // the tail window, with the tail itself carrying nothing but
+        // digits (exactly what a `seq`-style flood emits — no
+        // alphabetic words). The bounded harvest never sees the word,
+        // so the reveal falls back to a rotation word. A full-chunk
+        // scan (the pre-optimization behavior) would surface the word
+        // here, failing this test.
+        let needle = "needle";
+        assert!(
+            !PTY_ACTIVITY_WORDS.contains(&needle),
+            "test word must not collide with the rotation fallback"
+        );
+        let mut chunk = needle.as_bytes().to_vec();
+        chunk.push(b' ');
+        // Pad with digits well past the tail window so `needle` is
+        // outside the last PTY_HARVEST_TAIL_BYTES bytes.
+        chunk.resize(chunk.len() + PTY_HARVEST_TAIL_BYTES + 64, b'1');
+
+        let mut rain = MatrixRain::default();
+        let now = Instant::now();
+        rain.observe_pty_activity("sess-a", &chunk, now, 1.0);
+        let word = rain.active_reveal(now).map(|w| w.text.clone());
+        assert_ne!(
+            word.as_deref(),
+            Some(needle),
+            "word before the tail window must not be harvested (full-chunk scan regressed)"
+        );
+        assert!(
+            word.as_deref().map(|w| PTY_ACTIVITY_WORDS.contains(&w)).unwrap_or(false),
+            "expected rotation fallback when the tail carries no word, got {word:?}"
+        );
     }
 
     #[test]
