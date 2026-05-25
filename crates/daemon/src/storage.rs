@@ -14,6 +14,11 @@ use anyhow::{Context, Result};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+const GLOBAL_MEMORY_TEMPLATE: &str =
+    "# Global Memory\n\n## Preferences\n\n## Workflows\n\n## Pitfalls\n";
+const PROJECT_MEMORY_TEMPLATE: &str =
+    "# Project Memory\n\n## Overview\n\n## Architecture\n\n## Workflows\n\n## Decisions\n\n## Pitfalls\n";
+
 pub struct Storage {
     data_dir: PathBuf,
 }
@@ -22,9 +27,37 @@ impl Storage {
     pub fn new(data_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(data_dir.join("sessions"))
             .with_context(|| format!("create {}", data_dir.display()))?;
-        std::fs::create_dir_all(data_dir.join("groups"))
-            .with_context(|| format!("create {}", data_dir.join("groups").display()))?;
+        std::fs::create_dir_all(data_dir.join("projects"))
+            .with_context(|| format!("create {}", data_dir.join("projects").display()))?;
         Ok(Self { data_dir })
+    }
+
+    pub fn global_memory_path(&self) -> PathBuf {
+        self.data_dir.join("global").join("memory.md")
+    }
+
+    pub fn projects_root(&self) -> PathBuf {
+        self.data_dir.join("projects")
+    }
+
+    pub fn project_dir(&self, id: &str) -> PathBuf {
+        self.projects_root().join(safe_memory_segment(id))
+    }
+
+    pub fn project_meta_path(&self, id: &str) -> PathBuf {
+        self.project_dir(id).join("meta.json")
+    }
+
+    pub fn project_memory_path(&self, project_id: &str) -> PathBuf {
+        self.project_dir(project_id).join("memory.md")
+    }
+
+    pub fn ensure_global_memory(&self) -> Result<PathBuf> {
+        ensure_memory_file(&self.global_memory_path(), GLOBAL_MEMORY_TEMPLATE)
+    }
+
+    pub fn ensure_project_memory(&self, project_id: &str) -> Result<PathBuf> {
+        ensure_memory_file(&self.project_memory_path(project_id), PROJECT_MEMORY_TEMPLATE)
     }
 
     pub fn groups_root(&self) -> PathBuf {
@@ -36,8 +69,8 @@ impl Storage {
     }
 
     pub fn save_group(&self, g: &GroupSummary) -> Result<()> {
-        std::fs::create_dir_all(self.groups_root())?;
-        let path = self.group_path(&g.id);
+        std::fs::create_dir_all(self.project_dir(&g.id))?;
+        let path = self.project_meta_path(&g.id);
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(g)?;
         std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
@@ -47,21 +80,55 @@ impl Storage {
 
     pub fn load_groups(&self) -> Result<Vec<GroupSummary>> {
         let mut out = Vec::new();
-        let root = self.groups_root();
-        if !root.exists() {
-            return Ok(out);
-        }
-        for entry in std::fs::read_dir(&root)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
+        let root = self.projects_root();
+        if root.exists() {
+            for entry in std::fs::read_dir(&root)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let path = entry.path().join("meta.json");
+                if !path.exists() {
+                    continue;
+                }
+                match std::fs::read(&path)
+                    .and_then(|b| serde_json::from_slice::<GroupSummary>(&b).map_err(Into::into))
+                {
+                    Ok(g) => out.push(g),
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e, "skip unreadable project")
+                    }
+                }
             }
-            match std::fs::read(&path)
-                .and_then(|b| serde_json::from_slice::<GroupSummary>(&b).map_err(Into::into))
-            {
-                Ok(g) => out.push(g),
-                Err(e) => tracing::warn!(path = %path.display(), error = %e, "skip unreadable group"),
+        }
+
+        // Compatibility migration from the pre-project layout:
+        // `<data>/groups/<id>.json` -> `<data>/projects/<id>/meta.json`.
+        let legacy_root = self.groups_root();
+        if legacy_root.exists() {
+            for entry in std::fs::read_dir(&legacy_root)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                match std::fs::read(&path)
+                    .and_then(|b| serde_json::from_slice::<GroupSummary>(&b).map_err(Into::into))
+                {
+                    Ok(g) => {
+                        if !out.iter().any(|existing| existing.id == g.id) {
+                            if let Err(e) = self.save_group(&g) {
+                                tracing::warn!(project = %g.id, error = ?e, "project migration save failed");
+                            } else if let Err(e) = std::fs::remove_file(&path) {
+                                tracing::warn!(path = %path.display(), error = ?e, "legacy group cleanup failed");
+                            }
+                            out.push(g);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e, "skip unreadable legacy group")
+                    }
+                }
             }
         }
         out.sort_by_key(|g| g.position);
@@ -69,9 +136,13 @@ impl Storage {
     }
 
     pub fn remove_group(&self, id: &str) -> Result<()> {
-        let p = self.group_path(id);
+        let p = self.project_meta_path(id);
         if p.exists() {
             std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
+        }
+        let legacy = self.group_path(id);
+        if legacy.exists() {
+            std::fs::remove_file(&legacy).with_context(|| format!("remove {}", legacy.display()))?;
         }
         Ok(())
     }
@@ -345,5 +416,118 @@ impl Storage {
                 .with_context(|| format!("remove {}", dir.display()))?;
         }
         Ok(())
+    }
+}
+
+fn ensure_memory_file(path: &Path, template: &str) -> Result<PathBuf> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    if !path.exists() {
+        std::fs::write(path, template)
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(path.to_path_buf())
+}
+
+fn safe_memory_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn creates_default_memory_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+
+        let global = storage.ensure_global_memory().unwrap();
+        let project = storage.ensure_project_memory("g123").unwrap();
+
+        assert_eq!(global, tmp.path().join("data/global/memory.md"));
+        assert_eq!(
+            project,
+            tmp.path().join("data/projects/g123/memory.md")
+        );
+        assert!(std::fs::read_to_string(global)
+            .unwrap()
+            .contains("## Preferences"));
+        assert!(std::fs::read_to_string(project)
+            .unwrap()
+            .contains("## Architecture"));
+    }
+
+    #[test]
+    fn project_memory_path_sanitizes_project_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+
+        let path = storage.project_memory_path("../bad/project");
+
+        assert_eq!(
+            path,
+            tmp.path().join("data/projects/___bad_project/memory.md")
+        );
+    }
+
+    #[test]
+    fn group_metadata_migrates_to_project_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        std::fs::create_dir_all(storage.groups_root()).unwrap();
+        let group = GroupSummary {
+            id: "g123".into(),
+            name: "Agentd".into(),
+            created_at: chrono::Utc::now(),
+            position: 7,
+            collapsed: true,
+        };
+        std::fs::write(
+            storage.group_path(&group.id),
+            serde_json::to_string_pretty(&group).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = storage.load_groups().unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "g123");
+        assert!(storage.project_meta_path("g123").exists());
+        assert!(!storage.group_path("g123").exists());
+    }
+
+    #[test]
+    fn removing_project_metadata_preserves_memory_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        let group = GroupSummary {
+            id: "g123".into(),
+            name: "Agentd".into(),
+            created_at: chrono::Utc::now(),
+            position: 7,
+            collapsed: true,
+        };
+        storage.save_group(&group).unwrap();
+        storage.ensure_project_memory(&group.id).unwrap();
+
+        storage.remove_group(&group.id).unwrap();
+
+        assert!(!storage.project_meta_path(&group.id).exists());
+        assert!(storage.project_memory_path(&group.id).exists());
     }
 }

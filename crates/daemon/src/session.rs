@@ -33,6 +33,9 @@ const PTY_RING_CAP: usize = 256 * 1024;
 /// painted by the time they navigate to it.
 const RESPAWN_REDRAW_DELAY: Duration = Duration::from_millis(250);
 const MAX_CLIPBOARD_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
+const ENV_GLOBAL_MEMORY_FILE: &str = "AGENTD_GLOBAL_MEMORY_FILE";
+const ENV_PROJECT_MEMORY_FILE: &str = "AGENTD_PROJECT_MEMORY_FILE";
+const ENV_PROJECT_ID: &str = "AGENTD_PROJECT_ID";
 
 fn should_resume_on_startup(state: SessionState) -> bool {
     !matches!(state, SessionState::Done)
@@ -662,6 +665,38 @@ impl SessionManager {
         ))
     }
 
+    fn install_memory_env(&self, env: &mut HashMap<String, String>, project_id: Option<&str>) {
+        env.remove(ENV_GLOBAL_MEMORY_FILE);
+        env.remove(ENV_PROJECT_MEMORY_FILE);
+        env.remove(ENV_PROJECT_ID);
+
+        match self.storage.ensure_global_memory() {
+            Ok(path) => {
+                env.insert(
+                    ENV_GLOBAL_MEMORY_FILE.to_string(),
+                    path.to_string_lossy().to_string(),
+                );
+            }
+            Err(e) => tracing::warn!(error = ?e, "global memory file setup failed"),
+        }
+
+        let Some(project_id) = project_id else {
+            return;
+        };
+        match self.storage.ensure_project_memory(project_id) {
+            Ok(path) => {
+                env.insert(ENV_PROJECT_ID.to_string(), project_id.to_string());
+                env.insert(
+                    ENV_PROJECT_MEMORY_FILE.to_string(),
+                    path.to_string_lossy().to_string(),
+                );
+            }
+            Err(e) => {
+                tracing::warn!(project_id, error = ?e, "project memory file setup failed");
+            }
+        }
+    }
+
     /// The dev-mode web-UI asset directory, if one is active. `None`
     /// means serve the embedded assets.
     pub fn dev_assets(&self) -> Option<PathBuf> {
@@ -1098,6 +1133,7 @@ impl SessionManager {
             }
             .to_string(),
         );
+        self.install_memory_env(&mut env_with_meta, params.group_id.as_deref());
 
         let (adapter, info) = Adapter::spawn_reconnectable(
             params.harness.clone(),
@@ -1333,6 +1369,11 @@ impl SessionManager {
             "AGENTD_SESSION_DATA_DIR".to_string(),
             self.storage.session_dir(id).to_string_lossy().to_string(),
         );
+        let project_id = {
+            let s = entry.summary.read().await;
+            s.group_id.clone()
+        };
+        self.install_memory_env(&mut start_params.env, project_id.as_deref());
         // Use the last-known PTY size so the resumed adapter (which
         // sizes its PTY off start_params on session.start) doesn't draw
         // its banner / resume content at the stale creation default.
@@ -1423,6 +1464,7 @@ impl SessionManager {
             for (k, v) in &start_params.env {
                 e.insert(k.clone(), v.clone());
             }
+            self.install_memory_env(&mut e, project_id.as_deref());
             e
         };
 
@@ -3251,6 +3293,65 @@ mod tests {
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
             pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
         })
+    }
+
+    #[tokio::test]
+    async fn install_memory_env_sets_global_and_project_paths() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage.clone(), config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        let mut env = HashMap::new();
+
+        mgr.install_memory_env(&mut env, Some("g123"));
+
+        assert_eq!(
+            env.get(ENV_GLOBAL_MEMORY_FILE),
+            Some(&storage.global_memory_path().to_string_lossy().to_string())
+        );
+        assert_eq!(
+            env.get(ENV_PROJECT_MEMORY_FILE),
+            Some(
+                &storage
+                    .project_memory_path("g123")
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
+        assert_eq!(env.get(ENV_PROJECT_ID).map(String::as_str), Some("g123"));
+    }
+
+    #[tokio::test]
+    async fn install_memory_env_ungrouped_sets_global_only() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        let mut env = HashMap::from([
+            (ENV_PROJECT_ID.to_string(), "old".to_string()),
+            (
+                ENV_PROJECT_MEMORY_FILE.to_string(),
+                "/old/memory.md".to_string(),
+            ),
+        ]);
+
+        mgr.install_memory_env(&mut env, None);
+
+        assert!(env.contains_key(ENV_GLOBAL_MEMORY_FILE));
+        assert!(!env.contains_key(ENV_PROJECT_MEMORY_FILE));
+        assert!(!env.contains_key(ENV_PROJECT_ID));
     }
 
     #[tokio::test]
