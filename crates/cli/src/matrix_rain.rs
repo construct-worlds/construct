@@ -780,6 +780,50 @@ mod tests {
     }
 
     #[test]
+    fn pty_activity_harvest_scans_only_the_chunk_tail() {
+        // Regression guard for the harvest-cost optimization: the
+        // reveal only ever surfaces the most-recent word, so
+        // `observe_pty_activity` scans just the last
+        // `PTY_HARVEST_TAIL_BYTES` of each chunk instead of the whole
+        // (possibly multi-KB) buffer. A flooding background session
+        // would otherwise turn this into an O(chunk) scan on the main
+        // event loop for every PTY notification, adding keystroke
+        // latency in the focused session.
+        //
+        // Construct a chunk whose only extractable word sits *before*
+        // the tail window, with the tail itself carrying nothing but
+        // digits (exactly what a `seq`-style flood emits — no
+        // alphabetic words). The bounded harvest never sees the word,
+        // so the reveal falls back to a rotation word. A full-chunk
+        // scan (the pre-optimization behavior) would surface the word
+        // here, failing this test.
+        let needle = "needle";
+        assert!(
+            !PTY_ACTIVITY_WORDS.contains(&needle),
+            "test word must not collide with the rotation fallback"
+        );
+        let mut chunk = needle.as_bytes().to_vec();
+        chunk.push(b' ');
+        // Pad with digits well past the tail window so `needle` is
+        // outside the last PTY_HARVEST_TAIL_BYTES bytes.
+        chunk.resize(chunk.len() + PTY_HARVEST_TAIL_BYTES + 64, b'1');
+
+        let mut rain = MatrixRain::default();
+        let now = Instant::now();
+        rain.observe_pty_activity("sess-a", &chunk, now, 1.0);
+        let word = rain.active_reveal(now).map(|w| w.text.clone());
+        assert_ne!(
+            word.as_deref(),
+            Some(needle),
+            "word before the tail window must not be harvested (full-chunk scan regressed)"
+        );
+        assert!(
+            word.as_deref().map(|w| PTY_ACTIVITY_WORDS.contains(&w)).unwrap_or(false),
+            "expected rotation fallback when the tail carries no word, got {word:?}"
+        );
+    }
+
+    #[test]
     fn pty_activity_throttles_repeated_calls_within_gap() {
         // A burst of PTY events from a single session should produce
         // exactly one reveal, not one per byte chunk.

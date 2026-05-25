@@ -5514,6 +5514,47 @@ mod tests {
     use super::*;
     use ratatui::layout::Rect;
 
+    /// Regression guard for the input-priority optimization (#2).
+    ///
+    /// Under heavy background PTY output `notifications.recv()` is
+    /// almost always ready, so an unbiased `select!` services that
+    /// feed work about as often as input — adding keystroke→render
+    /// latency in the focused session (the "cursor hangs then jumps
+    /// 3-5 chars" report). The fix biases the loop toward input:
+    /// `biased;` with the input arm polled before the notification
+    /// arm.
+    ///
+    /// That benefit is a tokio scheduling property with no stable
+    /// runtime probe — the latency delta lives in a narrow, noisy,
+    /// hardware-dependent load window (see the `multi_session_latency`
+    /// benchmark in crates/e2e, which reports it but can't gate on
+    /// it). So assert the structural invariant that produces the
+    /// behavior instead: drop `biased;` or reorder the arms and this
+    /// fails.
+    #[test]
+    fn run_loop_select_biases_input_ahead_of_notifications() {
+        let src = include_str!("app.rs");
+        let select_at = src
+            .find("tokio::select! {")
+            .expect("run_loop should contain a tokio::select!");
+        // Bound the search to the run_loop region so the arm strings
+        // quoted in this very test (far below) can't be matched.
+        let body = &src[select_at..(select_at + 8000).min(src.len())];
+        let biased = body
+            .find("biased;")
+            .expect("the event-loop select! must be `biased;` so a ready keystroke wins ties");
+        let input = body.find("ev = input_stream.next()").expect("input arm");
+        let notif = body
+            .find("notif = notifications.recv()")
+            .expect("notification arm");
+        assert!(biased < input, "`biased;` must precede the input arm");
+        assert!(
+            input < notif,
+            "input arm must be polled before the notification-drain arm \
+             (bias toward input under background feed load)"
+        );
+    }
+
     fn test_layout() -> LayoutSnapshot {
         LayoutSnapshot {
             list_area: Some(Rect::new(0, 0, 20, 10)),
