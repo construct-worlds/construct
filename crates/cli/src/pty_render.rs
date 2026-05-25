@@ -893,7 +893,23 @@ impl ItemHistory {
         //     caused is now fixed at the render-loop level by
         //     coalescing PTY-chunk bursts before draw, so the rebuild
         //     cost is paid once per resize instead of per chunk.)
-        if cache.cols != cols {
+        if cache.cols != cols && cache.parser.screen().alternate_screen() {
+            // Alt-screen app (codex / vim / htop): the grid has no
+            // scrollback to reflow, and the app repaints itself on
+            // the resize SIGWINCH the pane-size change triggers. A
+            // full re-feed here would be wasted O(history) work AND
+            // unsafe to bound — the `ESC[?1049h` alt-screen-enter
+            // escape lives at the very start of the stream, so a
+            // truncated tail would render into the normal screen.
+            // Just resize the grid in place and let the app's
+            // repaint settle the content.
+            cache
+                .parser
+                .screen_mut()
+                .set_size(rows.max(VT100_MIN_DIM), cols.max(VT100_MIN_DIM));
+            cache.cols = cols;
+            cache.rows = rows;
+        } else if cache.cols != cols {
             cache.parser = vt100::Parser::new(
                 rows.max(VT100_MIN_DIM),
                 cols.max(VT100_MIN_DIM),
@@ -901,8 +917,24 @@ impl ItemHistory {
             );
             cache.cols = cols;
             cache.rows = rows;
-            cache.processed_count = 0;
-            cache.pending_consumed = 0;
+            // Re-feed only the tail that survives the parser's
+            // SCROLLBACK_MAX-line ring at the new width. A non-tool
+            // session's whole history accumulates in one unbounded
+            // `pending_chunk`, so the old `pending_consumed = 0`
+            // re-parsed the entire buffer on the UI thread on every
+            // width change — the zoom/resize freeze (#230). When the
+            // pending tail alone covers the retained window, skip the
+            // (older) items entirely and re-feed only that tail.
+            let pending_offset =
+                reflow_tail_offset(&self.pending_chunk, reflow_budget_lines(rows));
+            if pending_offset > 0 {
+                cache.processed_count = self.items.len();
+                cache.pending_consumed = pending_offset;
+            } else {
+                // Short session: feed everything (cheap), as before.
+                cache.processed_count = 0;
+                cache.pending_consumed = 0;
+            }
         } else if cache.rows != rows {
             cache
                 .parser
@@ -950,12 +982,20 @@ impl ItemHistory {
                 pending_visible_lines: 0,
                 item_layouts: Vec::new(),
             };
-            for item in &self.items {
-                if let Item::PtyChunk(b) = item {
-                    cache.parser.process(b);
+            // Same scrollback-tail bound as the width-change rebuild:
+            // only re-feed the pending tail that survives the ring.
+            let pending_offset =
+                reflow_tail_offset(&self.pending_chunk, reflow_budget_lines(rows));
+            if pending_offset > 0 {
+                cache.processed_count = self.items.len();
+            } else {
+                for item in &self.items {
+                    if let Item::PtyChunk(b) = item {
+                        cache.parser.process(b);
+                    }
                 }
             }
-            cache.parser.process(&self.pending_chunk);
+            cache.parser.process(&self.pending_chunk[pending_offset..]);
             cache.processed_count = self.items.len();
             cache.pending_consumed = self.pending_chunk.len();
         }
@@ -1223,6 +1263,52 @@ fn shadow_byte_may_paint(b: u8) -> bool {
 /// undercount; combining marks overcount. Good enough for click
 /// hit-testing — off-by-one is acceptable since blocks span
 /// multiple rows.
+/// Extra lines re-fed beyond `SCROLLBACK_MAX` when rebuilding the
+/// parser at a new width, as a "warmup" margin. The parser only
+/// keeps `SCROLLBACK_MAX` lines, so the oldest re-fed lines scroll
+/// off and are discarded — feeding a margin before the retained
+/// window means the retained scrollback is parsed from terminal
+/// state (SGR, cursor, modes) that the margin already
+/// re-established, rather than cold from an arbitrary mid-stream
+/// cut. 1024 lines is generous (a persistent escape effect almost
+/// never spans that far in normal output) and cheap to re-parse.
+const REFLOW_WARMUP_LINES: usize = 1024;
+
+/// Lines to retain (scrollback + viewport + warmup) when
+/// rebuilding the parser at a new width. The parser's ring keeps
+/// `SCROLLBACK_MAX`; the rest is viewport + reflow warmup.
+fn reflow_budget_lines(rows: u16) -> usize {
+    super::app::SCROLLBACK_MAX + rows as usize + REFLOW_WARMUP_LINES
+}
+
+/// Byte offset into a raw PTY buffer such that `buf[offset..]`
+/// contains at least `budget_lines` newline-delimited lines.
+/// Used to bound the re-feed when rebuilding the parser at a new
+/// width (zoom / list-toggle / resize): a non-tool session's
+/// entire history accumulates in one unbounded `pending_chunk`,
+/// and re-feeding all of it re-parsed megabytes on the UI thread
+/// — the zoom/resize freeze (issue #230). Everything older than
+/// the budget produces lines the `SCROLLBACK_MAX` ring discards
+/// immediately, so it's wasted work. Counting newlines (not
+/// wrapped rows) is a safe lower bound on visible rows — wrapping
+/// only adds rows, so the suffix always covers at least the
+/// retained window. Returns 0 when the buffer has fewer lines, so
+/// short sessions behave exactly as before.
+fn reflow_tail_offset(buf: &[u8], budget_lines: usize) -> usize {
+    let mut seen = 0usize;
+    let mut i = buf.len();
+    while i > 0 {
+        i -= 1;
+        if buf[i] == b'\n' {
+            seen += 1;
+            if seen > budget_lines {
+                return i + 1; // start just after this newline
+            }
+        }
+    }
+    0
+}
+
 fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
     let mut lines = 0usize;
     let mut col = 0usize;
@@ -1596,6 +1682,111 @@ mod tests {
             .map(|c| c.contents())
             .unwrap_or_default();
         assert_eq!(cell, "h");
+    }
+
+    // --- zoom/resize freeze regression guards (issue #230) ---
+
+    /// The tail-offset bound truncates a long buffer to ~budget
+    /// lines from the end. Guards the core of the
+    /// re-feed-only-the-tail fix.
+    #[test]
+    fn reflow_tail_offset_bounds_long_buffer() {
+        let mut buf = Vec::new();
+        for i in 0..100_000u32 {
+            buf.extend_from_slice(format!("line{i}\n").as_bytes());
+        }
+        let budget = 6_000;
+        let off = reflow_tail_offset(&buf, budget);
+        assert!(off > 0, "a 100k-line buffer must be truncated for re-feed");
+        let suffix_lines = buf[off..].iter().filter(|&&b| b == b'\n').count();
+        assert!(
+            suffix_lines <= budget + 1,
+            "suffix must be bounded to ~budget lines, got {suffix_lines}"
+        );
+        // The retained tail must still end with the newest line.
+        assert!(buf[off..].ends_with(b"line99999\n"));
+    }
+
+    /// A buffer with fewer than `budget` lines is fed whole
+    /// (offset 0) — short sessions are unaffected by the bound.
+    #[test]
+    fn reflow_tail_offset_keeps_short_buffer_whole() {
+        assert_eq!(reflow_tail_offset(b"a\nb\nc\n", 6_000), 0);
+    }
+
+    /// After a width change on a long streaming session, the
+    /// bounded re-feed must still render the true tail (the newest
+    /// lines), not drop content. Correctness guard for the bound.
+    #[test]
+    fn resize_long_history_renders_correct_tail() {
+        let mut h = ItemHistory::new();
+        // 20k fixed-width markers (7 cols, no wrap at width 50).
+        for i in 1..=20_000u32 {
+            h.feed_pty(format!("L{i:06}\r\n").as_bytes());
+        }
+        // Warm at one width, then force a width-change rebuild.
+        let _ = h.replay(80, 24, 0);
+        let screen = h.replay(50, 24, 0).screen.contents();
+        assert!(
+            screen.contains("L020000"),
+            "newest line missing after resize; screen:\n{screen}"
+        );
+        assert!(
+            screen.contains("L019999"),
+            "second-newest line missing after resize"
+        );
+    }
+
+    /// An alt-screen app (codex / vim / htop) must stay in
+    /// alt-screen across a width change — the bounded re-feed must
+    /// NOT be applied to it, because the `ESC[?1049h` enter escape
+    /// lives at the very start of the (long) stream and truncating
+    /// it would drop the parser back to the normal screen. Long
+    /// enough to exceed the re-feed budget so the unconditional
+    /// bound would visibly break it.
+    #[test]
+    fn resize_in_alt_screen_keeps_alt_grid() {
+        let mut h = ItemHistory::new();
+        h.feed_pty(b"\x1b[?1049h"); // enter alt-screen once, at the start
+        for i in 0..8_000u32 {
+            h.feed_pty(format!("frame line {i}\r\n").as_bytes());
+        }
+        h.feed_pty(b"\x1b[HALT_MARKER"); // home + marker on the grid
+        let _ = h.replay(80, 24, 0);
+        let out = h.replay(50, 24, 0); // width change
+        assert!(
+            out.screen.alternate_screen(),
+            "must stay in alt-screen after resize (enter escape not truncated)"
+        );
+        assert!(
+            out.screen.contents().contains("ALT_MARKER"),
+            "alt-screen content lost after resize"
+        );
+    }
+
+    /// PERF regression: the width-change rebuild must NOT re-parse
+    /// the entire (unbounded) history — that was the zoom/resize
+    /// freeze. With the scrollback-tail bound the rebuild is
+    /// constant regardless of history size; without it this blows
+    /// the budget. Measures only the resize replay (the flood is
+    /// warmup). Generous budget to stay non-flaky in debug CI while
+    /// still failing by multiples if the bound is removed.
+    #[test]
+    fn resize_long_history_rebuild_is_bounded() {
+        let mut h = ItemHistory::new();
+        for i in 1..=300_000u32 {
+            h.feed_pty(format!("L{i}\r\n").as_bytes());
+        }
+        let _ = h.replay(80, 24, 0); // warmup: initial full parse
+        let _ = h.replay(80, 24, 0); // cached
+        let t = std::time::Instant::now();
+        let _ = h.replay(120, 30, 0); // width change → bounded rebuild
+        let us = t.elapsed().as_micros();
+        assert!(
+            us < 120_000,
+            "resize on a 300k-line history took {us} µs — bound removed? \
+             (should re-feed only the scrollback tail, not all history)"
+        );
     }
 
     #[test]
