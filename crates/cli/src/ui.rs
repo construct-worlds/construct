@@ -649,11 +649,13 @@ pub fn dynamic_ui_trigger_range(
     view_area: Rect,
     close_shown: bool,
     label_width: u16,
+    reserved_right_width: u16,
 ) -> (u16, u16, u16) {
     let right = view_area
         .x
         .saturating_add(view_area.width)
-        .saturating_sub(if close_shown { 4 } else { 1 });
+        .saturating_sub(if close_shown { 4 } else { 1 })
+        .saturating_sub(reserved_right_width);
     (right.saturating_sub(label_width), right, view_area.y)
 }
 
@@ -2192,9 +2194,14 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     // close button (or at the right edge when no close is shown).
     // Color matches the border so harness reads as part of the
     // title bar's frame, not as a separately-styled badge.
-    let harness_right = summary.as_ref().map(|s| {
+    let harness_label_text = summary.as_ref().map(|s| format!(" {} ", harness_label(s)));
+    let harness_width = harness_label_text
+        .as_deref()
+        .map(UnicodeWidthStr::width)
+        .unwrap_or(0) as u16;
+    let harness_right = harness_label_text.as_ref().map(|text| {
         Line::from(Span::styled(
-            format!(" {} ", harness_label(s)),
+            text.clone(),
             pane_border_style(&app.theme, focused),
         ))
         .alignment(ratatui::layout::Alignment::Right)
@@ -2206,8 +2213,11 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
             .filter(|panels| !panels.is_empty())
             .map(|_| s.id.clone())
     });
+    let ui_trigger_label = " widgets ".to_string();
+    let ui_trigger_width = ui_trigger_label.width() as u16;
     let ui_trigger_hovered = ui_session_id.as_ref().is_some_and(|_| {
-        let (x_start, x_end, y) = dynamic_ui_trigger_range(area, show_close, 7);
+        let (x_start, x_end, y) =
+            dynamic_ui_trigger_range(area, show_close, ui_trigger_width, harness_width);
         app.mouse_pos
             .map(|(mx, my)| my == y && mx >= x_start && mx < x_end)
             .unwrap_or(false)
@@ -2219,10 +2229,9 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         Style::default().fg(app.theme.text)
     };
-    let ui_trigger_label = " widgets ".to_string();
     let ui_trigger = ui_session_id.as_ref().map(|session_id| {
         let (x_start, x_end, y) =
-            dynamic_ui_trigger_range(area, show_close, ui_trigger_label.len() as u16);
+            dynamic_ui_trigger_range(area, show_close, ui_trigger_width, harness_width);
         (
             session_id.clone(),
             x_start,

@@ -2991,6 +2991,9 @@ impl App {
                 if self.begin_terminal_scrollbar_drag_or_jump(ev.column, ev.row) {
                     return;
                 }
+                if self.is_over_dynamic_ui_overlay(ev.column, ev.row) {
+                    return;
+                }
                 // Matrix-rain panel: the title bar doubles as a height
                 // handle. The panel is bottom-anchored, so dragging the top
                 // edge upward grows it and dragging downward shrinks it.
@@ -3058,6 +3061,8 @@ impl App {
                 } else if let Some((grab_offset, max_scrollback)) = self.dragging_terminal_scrollbar
                 {
                     self.drag_terminal_scrollbar_to_row(ev.row, grab_offset, max_scrollback);
+                } else if self.is_over_dynamic_ui_overlay(ev.column, ev.row) {
+                    self.text_selection = None;
                 } else if let Some(sel) = self.text_selection.as_mut() {
                     sel.head = ScreenPoint {
                         col: ev.column,
@@ -3289,6 +3294,70 @@ impl App {
         false
     }
 
+    fn is_over_dynamic_ui_overlay(&self, col: u16, row: u16) -> bool {
+        fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
+            c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
+        }
+        self.layout
+            .dynamic_ui_popover_area
+            .is_some_and(|area| contains(area, col, row))
+    }
+
+    async fn handle_dynamic_ui_overlay_click(&mut self, col: u16, row: u16) -> bool {
+        fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
+            c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
+        }
+        if let Some(hit) = self
+            .layout
+            .dynamic_ui_panel_close_hits
+            .iter()
+            .find(|hit| hit.contains(col, row))
+            .cloned()
+        {
+            self.hide_dynamic_ui_panel(hit.session_id, hit.panel_id);
+            return true;
+        }
+        if let Some((x_start, x_end, y, session_id)) = self.layout.dynamic_ui_trigger.clone() {
+            if row == y && col >= x_start && col < x_end {
+                self.dynamic_ui_popover_open =
+                    if self.dynamic_ui_popover_open.as_deref() == Some(session_id.as_str()) {
+                        None
+                    } else {
+                        Some(session_id)
+                    };
+                return true;
+            }
+        }
+        if self.dynamic_ui_popover_open.is_some() {
+            if let Some(hit) = self
+                .layout
+                .dynamic_ui_widget_hits
+                .iter()
+                .find(|hit| hit.contains(col, row))
+                .cloned()
+            {
+                let key = (hit.session_id, hit.panel_id);
+                if self.dynamic_ui_selected.contains(&key) {
+                    self.dynamic_ui_selected.remove(&key);
+                } else {
+                    self.dynamic_ui_selected.insert(key.clone());
+                    self.dynamic_ui_temporary_until.remove(&key);
+                }
+                return true;
+            }
+            if let Some(popover) = self.layout.dynamic_ui_popover_area {
+                if contains(popover, col, row) {
+                    return true;
+                }
+                self.dynamic_ui_popover_open = None;
+            }
+        }
+        if self.try_dynamic_ui_action_click(col, row).await {
+            return true;
+        }
+        self.is_over_dynamic_ui_overlay(col, row)
+    }
+
     /// Hit-test a left-click against the last frame's pane geometry.
     /// - Inside the **minibuffer**: position the cursor within the
     ///   typed input when one is open, or open the command palette
@@ -3316,6 +3385,9 @@ impl App {
                 Ok(()) => self.set_status(format!("opened {}", hit.url)),
                 Err(e) => self.set_status(format!("open URL failed: {e}")),
             }
+            return;
+        }
+        if self.handle_dynamic_ui_overlay_click(col, row).await {
             return;
         }
         // Matrix-rain horizontal reveal word: jump to the session that
@@ -3424,55 +3496,7 @@ impl App {
                         .await;
                     return;
                 }
-                if let Some(hit) = self
-                    .layout
-                    .dynamic_ui_panel_close_hits
-                    .iter()
-                    .find(|hit| hit.contains(col, row))
-                    .cloned()
-                {
-                    self.hide_dynamic_ui_panel(hit.session_id, hit.panel_id);
-                    return;
-                }
-                if let Some((x_start, x_end, y, session_id)) =
-                    self.layout.dynamic_ui_trigger.clone()
-                {
-                    if row == y && col >= x_start && col < x_end {
-                        self.dynamic_ui_popover_open = if self.dynamic_ui_popover_open.as_deref()
-                            == Some(session_id.as_str())
-                        {
-                            None
-                        } else {
-                            Some(session_id)
-                        };
-                        return;
-                    }
-                }
-                if self.dynamic_ui_popover_open.is_some() {
-                    if let Some(hit) = self
-                        .layout
-                        .dynamic_ui_widget_hits
-                        .iter()
-                        .find(|hit| hit.contains(col, row))
-                        .cloned()
-                    {
-                        let key = (hit.session_id, hit.panel_id);
-                        if self.dynamic_ui_selected.contains(&key) {
-                            self.dynamic_ui_selected.remove(&key);
-                        } else {
-                            self.dynamic_ui_selected.insert(key.clone());
-                            self.dynamic_ui_temporary_until.remove(&key);
-                        }
-                        return;
-                    }
-                    if let Some(popover) = self.layout.dynamic_ui_popover_area {
-                        if contains(popover, col, row) {
-                            return;
-                        }
-                        self.dynamic_ui_popover_open = None;
-                    }
-                }
-                if self.try_dynamic_ui_action_click(col, row).await {
+                if self.handle_dynamic_ui_overlay_click(col, row).await {
                     return;
                 }
                 // Inner area: same Rect minus the 1-cell border on
