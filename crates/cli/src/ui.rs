@@ -2597,7 +2597,7 @@ fn render_dynamic_ui_dropdown(
         let selected = app
             .dynamic_ui_selected
             .contains(&(session_id.clone(), panel.id.clone()));
-        let mark = if selected { "✓" } else { " " };
+        let mark = if selected { "✓" } else { "·" };
         let title = dynamic_ui_panel_title(panel).unwrap_or_else(|| panel.id.clone());
         let row = area.y + lines.len() as u16;
         app.layout
