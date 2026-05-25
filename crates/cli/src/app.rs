@@ -5592,7 +5592,7 @@ mod tests {
             matrix_rain_foreground_epoch: now,
             matrix_rain_active_drops: HashMap::new(),
             matrix_rain_hidden: false,
-            hide_pane_side_borders: false,
+            hide_pane_side_borders: true,
             frame_text: Vec::new(),
             text_selection: None,
             selected_text: None,
