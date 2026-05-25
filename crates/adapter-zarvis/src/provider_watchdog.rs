@@ -16,7 +16,13 @@ use std::sync::{
 use std::time::Duration;
 
 const ENV_PROVIDER_IDLE_TIMEOUT_SECS: &str = "AGENTD_ZARVIS_PROVIDER_IDLE_TIMEOUT_SECS";
-const DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS: u64 = 600;
+/// Idle = no stream activity from upstream (see `WatchdogSink`: any
+/// `delta` / `reasoning_delta` / `progress` ping resets it). 90s leaves
+/// headroom for the gap between the first event and the first content on
+/// a large context under load (and cold local-model loads) while still
+/// surfacing a stalled connection in ~1.5 min instead of freezing the
+/// turn for minutes. Override with the env var (`0` disables).
+const DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS: u64 = 90;
 
 pub async fn complete(
     provider: &dyn LlmProvider,
@@ -94,6 +100,14 @@ impl TextSink for WatchdogSink<'_> {
         self.last_activity_ms.store(now_ms(), Ordering::Relaxed);
         self.inner.reasoning_delta(text);
     }
+
+    fn progress(&mut self) {
+        // Any stream event (even text-less ones) counts as liveness, so a
+        // turn streaming only tool-call arguments — or just upstream
+        // keepalives — isn't mistaken for a stall.
+        self.last_activity_ms.store(now_ms(), Ordering::Relaxed);
+        self.inner.progress();
+    }
 }
 
 fn now_ms() -> u64 {
@@ -155,6 +169,41 @@ mod tests {
         }
     }
 
+    /// Streams only `progress()` pings (no text/reasoning) `pings` times
+    /// at `interval`, then completes — models a turn that's alive on the
+    /// wire (e.g. streaming tool-call args / keepalives) but emits no text.
+    struct ProgressOnlyProvider {
+        pings: u32,
+        interval: Duration,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ProgressOnlyProvider {
+        fn name(&self) -> &str {
+            "stub"
+        }
+
+        async fn complete(
+            &self,
+            _model: &str,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            sink: &mut dyn TextSink,
+        ) -> Result<ProviderTurn> {
+            for _ in 0..self.pings {
+                tokio::time::sleep(self.interval).await;
+                sink.progress();
+            }
+            Ok(ProviderTurn {
+                text: Some("ok".into()),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            })
+        }
+    }
+
     struct NullSink;
 
     impl TextSink for NullSink {
@@ -200,6 +249,31 @@ mod tests {
             &[],
             &mut sink,
             None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(turn.text.as_deref(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn progress_pings_keep_a_text_less_stream_alive() {
+        // Pings every 10ms for ~100ms — far past the 30ms idle timeout —
+        // with no text/reasoning deltas. Because each gap is under the
+        // timeout, the watchdog must treat the turn as live and let it
+        // finish, not kill it as idle.
+        let provider = ProgressOnlyProvider {
+            pings: 10,
+            interval: Duration::from_millis(10),
+        };
+        let mut sink = NullSink;
+        let turn = complete_with_idle_timeout(
+            &provider,
+            "model",
+            "system",
+            &messages(),
+            &[],
+            &mut sink,
+            Some(Duration::from_millis(30)),
         )
         .await
         .unwrap();

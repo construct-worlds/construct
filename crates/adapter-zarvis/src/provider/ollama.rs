@@ -166,6 +166,7 @@ impl LlmProvider for Ollama {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("ollama NDJSON stream")?;
+            sink.progress();
             buf.extend_from_slice(&chunk);
             // Process complete lines.
             while let Some(nl) = buf.iter().position(|b| *b == b'\n') {

@@ -175,6 +175,7 @@ impl LlmProvider for Anthropic {
 
         while let Some(ev) = stream.next().await {
             let ev = ev.context("anthropic SSE stream")?;
+            sink.progress();
             if ev.data.is_empty() {
                 continue;
             }
