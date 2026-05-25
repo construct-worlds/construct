@@ -2590,7 +2590,7 @@ fn render_dynamic_ui_dropdown(
         .max()
         .unwrap_or(16)
         .clamp(16, session_area.width.saturating_sub(2).max(16));
-    let height = (panels.len() as u16).saturating_add(2).max(3);
+    let height = (panels.len() as u16).saturating_add(3).max(4);
     let (trigger_start, trigger_end, trigger_y) = app
         .layout
         .dynamic_ui_trigger
@@ -2615,14 +2615,14 @@ fn render_dynamic_ui_dropdown(
     app.layout.dynamic_ui_dropdown_area = Some(area);
     f.render_widget(Clear, area);
     let session_id = app.selected_id().unwrap_or_default();
-    let mut lines = Vec::new();
+    let mut lines = vec![Line::raw("")];
     for panel in panels.iter().take(area.height.saturating_sub(2) as usize) {
         let selected = app
             .dynamic_ui_selected
             .contains(&(session_id.clone(), panel.id.clone()));
         let mark = if selected { "✓" } else { " " };
         let title = dynamic_ui_panel_title(panel).unwrap_or_else(|| panel.id.clone());
-        let row = area.y + 1 + lines.len() as u16;
+        let row = area.y + lines.len() as u16;
         app.layout
             .dynamic_ui_widget_hits
             .push(crate::app::DynamicUiWidgetHit {
