@@ -1049,7 +1049,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
 
     // Initial fetches.
     let sessions = client.list().await.unwrap_or_default();
-    let groups = client.list_groups().await.unwrap_or_default();
+    let groups = client.list_projects().await.unwrap_or_default();
     let harnesses = client.harnesses().await.unwrap_or_default();
     let (theme, theme_warning) = crate::theme::Theme::load_or_default();
     let initial_orch_id = sessions
@@ -1579,7 +1579,7 @@ impl App {
             .await
             .context("notifications channel already taken")?;
         let sessions = client.list().await.unwrap_or_default();
-        let groups = client.list_groups().await.unwrap_or_default();
+        let groups = client.list_projects().await.unwrap_or_default();
         let harnesses = client.harnesses().await.unwrap_or_default();
         let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
 
@@ -2197,7 +2197,7 @@ impl App {
                     .cloned()
                     .collect();
                 if members.is_empty() {
-                    self.set_status("group has no members".into());
+                    self.set_status("project has no members".into());
                     return;
                 }
                 let all_pinned = members.iter().all(|s| s.pinned);
@@ -2236,7 +2236,7 @@ impl App {
                 // Daemon broadcasts will reconcile positions/groups.
             }
             Selection::Group(id) => {
-                if let Err(e) = self.client.move_group(&id, dir).await {
+                if let Err(e) = self.client.move_project(&id, dir).await {
                     self.set_status(format!("move failed: {e}"));
                 }
             }
@@ -2249,9 +2249,9 @@ impl App {
             Ok(list) => self.sessions = list,
             Err(e) => self.set_status(format!("list failed: {e}")),
         }
-        match self.client.list_groups().await {
+        match self.client.list_projects().await {
             Ok(list) => self.groups = list,
-            Err(e) => self.set_status(format!("group list failed: {e}")),
+            Err(e) => self.set_status(format!("project list failed: {e}")),
         }
         self.refresh_orchestrator_id();
         self.ensure_selection_valid();
@@ -2607,6 +2607,16 @@ impl App {
                     }
                 }
             }
+            m if m == agentd_protocol::ipc_notif::PROJECT_STATE => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        agentd_protocol::ProjectStateNotificationPayload,
+                    >(p)
+                    {
+                        self.on_group_state(payload.project).await;
+                    }
+                }
+            }
             m if m == agentd_protocol::ipc_notif::GROUP_DELETED => {
                 if let Some(p) = n.params {
                     if let Ok(payload) = serde_json::from_value::<
@@ -2614,6 +2624,16 @@ impl App {
                     >(p)
                     {
                         self.on_group_deleted(&payload.group_id).await;
+                    }
+                }
+            }
+            m if m == agentd_protocol::ipc_notif::PROJECT_DELETED => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        agentd_protocol::ProjectDeletedNotificationPayload,
+                    >(p)
+                    {
+                        self.on_group_deleted(&payload.project_id).await;
                     }
                 }
             }
@@ -3602,7 +3622,7 @@ impl App {
                 {
                     self.select_group(id.clone());
                 }
-                if let Err(e) = self.client.set_group_collapsed(&id, next).await {
+                if let Err(e) = self.client.set_project_collapsed(&id, next).await {
                     self.set_status(format!("collapse failed: {e}"));
                 }
             }
@@ -3978,9 +3998,10 @@ impl App {
                     .filter(|h| h.available)
                     .map(|h| h.name.as_str())
                     .collect();
-                // `group` is a synthetic option that creates a group instead
-                // of a session — surfaced in the same wizard for discovery.
-                names.push("group");
+                // `project` is a synthetic option that creates a project
+                // instead of a session — surfaced in the same wizard for
+                // discovery.
+                names.push("project");
                 let hint = names.join("|");
                 self.minibuffer = Some(Minibuffer {
                     prompt: format!("New [{hint}] (Tab completes): "),
@@ -4012,7 +4033,7 @@ impl App {
                     let current = g.name.clone();
                     let cursor = current.chars().count();
                     self.minibuffer = Some(Minibuffer {
-                        prompt: "Rename group to: ".to_string(),
+                        prompt: "Rename project to: ".to_string(),
                         input: current,
                         cursor,
                         intent: MinibufferIntent::GroupRename { group_id: id },
@@ -4043,7 +4064,7 @@ impl App {
                         .unwrap_or_default();
                     self.minibuffer = Some(Minibuffer {
                         prompt: format!(
-                            "Delete group '{}'? (y = orphan members / type 'all' to delete sessions too / N = cancel): ",
+                            "Delete project '{}'? (y = orphan members / type 'all' to delete sessions too / N = cancel): ",
                             name
                         ),
                         input: String::new(),
@@ -4197,7 +4218,7 @@ impl App {
             ExpandGroup => {
                 if let Some(g) = self.selected_group() {
                     let id = g.id.clone();
-                    if let Err(e) = self.client.set_group_collapsed(&id, false).await {
+                    if let Err(e) = self.client.set_project_collapsed(&id, false).await {
                         self.set_status(format!("expand failed: {e}"));
                     }
                 } else if self.focus == PaneFocus::List {
@@ -4209,7 +4230,7 @@ impl App {
             CollapseGroup => {
                 if let Some(g) = self.selected_group() {
                     let id = g.id.clone();
-                    if let Err(e) = self.client.set_group_collapsed(&id, true).await {
+                    if let Err(e) = self.client.set_project_collapsed(&id, true).await {
                         self.set_status(format!("collapse failed: {e}"));
                     }
                 } else if self.focus == PaneFocus::List {
@@ -4366,6 +4387,7 @@ impl App {
                 .filter(|h| h.available)
                 .map(|h| h.name.clone())
                 .collect();
+            v.push("project".to_string());
             v.push("group".to_string());
             v
         } else {
@@ -4567,11 +4589,12 @@ impl App {
                 if harness.is_empty() {
                     return;
                 }
-                // 'group' is a synthetic option in the harness picker that
-                // redirects to the group-create flow.
-                if harness == "group" {
+                // `project` is a synthetic option in the harness picker that
+                // redirects to the project-create flow. Keep `group` as a
+                // compatibility alias for muscle memory.
+                if harness == "project" || harness == "group" {
                     self.minibuffer = Some(Minibuffer {
-                        prompt: "Group name: ".to_string(),
+                        prompt: "Project name: ".to_string(),
                         input: String::new(),
                         cursor: 0,
                         intent: MinibufferIntent::NewGroupName,
@@ -4638,53 +4661,53 @@ impl App {
                 let choice = parse_group_delete_choice(&input);
                 let delete_members = match choice {
                     GroupDeleteChoice::Cancel => {
-                        self.set_status("group delete cancelled".to_string());
+                        self.set_status("project delete cancelled".to_string());
                         return;
                     }
                     GroupDeleteChoice::OrphanMembers => false,
                     GroupDeleteChoice::DeleteMembers => true,
                 };
-                match self.client.delete_group(&group_id, delete_members).await {
+                match self.client.delete_project(&group_id, delete_members).await {
                     Ok(()) => {
                         let msg = if delete_members {
-                            "group + all sessions deleted"
+                            "project + all sessions deleted"
                         } else {
-                            "group deleted (members orphaned)"
+                            "project deleted (members orphaned)"
                         };
                         self.set_status(msg.into());
                     }
-                    Err(e) => self.set_status(format!("group delete failed: {e}")),
+                    Err(e) => self.set_status(format!("project delete failed: {e}")),
                 }
             }
             MinibufferIntent::GroupRename { group_id } => {
                 let trimmed = input.trim().to_string();
                 if trimmed.is_empty() {
-                    self.set_status("group rename cancelled (empty)".into());
+                    self.set_status("project rename cancelled (empty)".into());
                     return;
                 }
-                match self.client.rename_group(&group_id, &trimmed).await {
+                match self.client.rename_project(&group_id, &trimmed).await {
                     Ok(()) => {
                         if let Some(g) = self.groups.iter_mut().find(|g| g.id == group_id) {
                             g.name = trimmed.clone();
                         }
-                        self.set_status(format!("renamed group → {trimmed}"));
+                        self.set_status(format!("renamed project -> {trimmed}"));
                     }
-                    Err(e) => self.set_status(format!("group rename failed: {e}")),
+                    Err(e) => self.set_status(format!("project rename failed: {e}")),
                 }
             }
             MinibufferIntent::NewGroupName => {
                 let trimmed = input.trim().to_string();
                 if trimmed.is_empty() {
-                    self.set_status("group name empty".into());
+                    self.set_status("project name empty".into());
                     return;
                 }
-                match self.client.create_group(&trimmed).await {
+                match self.client.create_project(&trimmed).await {
                     Ok(id) => {
-                        self.set_status(format!("created group '{trimmed}'"));
+                        self.set_status(format!("created project '{trimmed}'"));
                         self.refresh_sessions().await; // also refreshes groups
                         self.select_group(id);
                     }
-                    Err(e) => self.set_status(format!("group create failed: {e}")),
+                    Err(e) => self.set_status(format!("project create failed: {e}")),
                 }
             }
             MinibufferIntent::Rename { session_id } => {

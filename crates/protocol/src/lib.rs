@@ -588,12 +588,19 @@ pub mod ipc_method {
     pub const LOOP_REMOVE: &str = "loop.remove";
     pub const SESSION_MOVE: &str = "session.move";
     pub const SESSION_SET_GROUP: &str = "session.set_group";
+    pub const SESSION_SET_PROJECT: &str = "session.set_project";
     pub const GROUP_LIST: &str = "group.list";
     pub const GROUP_CREATE: &str = "group.create";
     pub const GROUP_RENAME: &str = "group.rename";
     pub const GROUP_DELETE: &str = "group.delete";
     pub const GROUP_SET_COLLAPSED: &str = "group.set_collapsed";
     pub const GROUP_MOVE: &str = "group.move";
+    pub const PROJECT_LIST: &str = "project.list";
+    pub const PROJECT_CREATE: &str = "project.create";
+    pub const PROJECT_RENAME: &str = "project.rename";
+    pub const PROJECT_DELETE: &str = "project.delete";
+    pub const PROJECT_SET_COLLAPSED: &str = "project.set_collapsed";
+    pub const PROJECT_MOVE: &str = "project.move";
     pub const SESSION_DIFF: &str = "session.diff";
     pub const SESSION_TRANSCRIPT: &str = "session.transcript";
     pub const SUBSCRIBE_EVENTS: &str = "subscribe.events";
@@ -638,6 +645,8 @@ pub mod ipc_notif {
     pub const DELETED: &str = "session/deleted";
     pub const GROUP_STATE: &str = "group/state";
     pub const GROUP_DELETED: &str = "group/deleted";
+    pub const PROJECT_STATE: &str = "project/state";
+    pub const PROJECT_DELETED: &str = "project/deleted";
     /// Aggregate state for the daemon's remote WebSocket transport:
     /// how many remote clients are currently attached. Broadcast on
     /// every connect / disconnect so the local TUI can render a
@@ -781,6 +790,19 @@ pub struct SessionSetGroupParams {
     /// `None` ungroups the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    #[serde(default)]
+    pub position: SessionGroupPosition,
+}
+
+/// Project-named compatibility shape for `session.set_project`.
+/// Internally this still maps to the session's persisted `group_id`
+/// until the storage model is renamed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSetProjectParams {
+    pub session_id: String,
+    /// `None` removes the session from its project.
+    #[serde(default, alias = "group_id", skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     #[serde(default)]
     pub position: SessionGroupPosition,
 }
@@ -1159,10 +1181,17 @@ pub struct GroupSummary {
     pub collapsed: bool,
 }
 
+/// Project is the product name for the same persisted organizer that
+/// older clients know as a group. Keep the wire payload identical
+/// while clients migrate method and notification names.
+pub type ProjectSummary = GroupSummary;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupCreateParams {
     pub name: String,
 }
+
+pub type ProjectCreateParams = GroupCreateParams;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupCreateResult {
@@ -1170,8 +1199,19 @@ pub struct GroupCreateResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectCreateResult {
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupIdParams {
     pub group_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectIdParams {
+    #[serde(alias = "group_id")]
+    pub project_id: String,
 }
 
 /// Parameters for `group.delete`. `delete_members` defaults to false
@@ -1189,8 +1229,25 @@ pub struct GroupDeleteParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDeleteParams {
+    #[serde(alias = "group_id")]
+    pub project_id: String,
+    /// When true, cascade-delete every member session before removing
+    /// the project. When false (default), members are orphaned.
+    #[serde(default)]
+    pub delete_members: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupRenameParams {
     pub group_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectRenameParams {
+    #[serde(alias = "group_id")]
+    pub project_id: String,
     pub name: String,
 }
 
@@ -1201,8 +1258,22 @@ pub struct GroupSetCollapsedParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSetCollapsedParams {
+    #[serde(alias = "group_id")]
+    pub project_id: String,
+    pub collapsed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupMoveParams {
     pub group_id: String,
+    pub direction: MoveDirection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMoveParams {
+    #[serde(alias = "group_id")]
+    pub project_id: String,
     pub direction: MoveDirection,
 }
 
@@ -1212,12 +1283,59 @@ pub struct GroupStateNotificationPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectStateNotificationPayload {
+    pub project: ProjectSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupDeletedNotificationPayload {
     pub group_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDeletedNotificationPayload {
+    pub project_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PingResult {
     pub pong: bool,
     pub version: String,
+}
+
+#[cfg(test)]
+mod project_compat_tests {
+    use super::*;
+
+    #[test]
+    fn project_params_accept_legacy_group_id_fields() {
+        let p: SessionSetProjectParams = serde_json::from_value(serde_json::json!({
+            "session_id": "s1",
+            "group_id": "g1"
+        }))
+        .unwrap();
+        assert_eq!(p.project_id.as_deref(), Some("g1"));
+
+        let p: ProjectRenameParams = serde_json::from_value(serde_json::json!({
+            "group_id": "g1",
+            "name": "Project"
+        }))
+        .unwrap();
+        assert_eq!(p.project_id, "g1");
+    }
+
+    #[test]
+    fn project_results_use_project_id_on_the_wire() {
+        let v = serde_json::to_value(ProjectCreateResult {
+            project_id: "p1".into(),
+        })
+        .unwrap();
+        assert_eq!(v, serde_json::json!({ "project_id": "p1" }));
+
+        let v = serde_json::to_value(ProjectDeletedNotificationPayload {
+            project_id: "p1".into(),
+        })
+        .unwrap();
+        assert_eq!(v, serde_json::json!({ "project_id": "p1" }));
+    }
 }

@@ -820,7 +820,7 @@ fn render_harness_unavailable_tooltip(f: &mut Frame, app: &App) {
 /// `app.layout.minibuffer_harness_hits` so the click handler can
 /// submit the picked name without the user having to type it.
 fn render_harness_picker(f: &mut Frame, area: Rect, app: &mut App, mb: &Minibuffer) {
-    // Show every registered harness plus the synthetic `group` op.
+    // Show every registered harness plus the synthetic `project` op.
     // Unavailable harnesses (binary not on PATH) render dimmed and
     // strike-through; clicking them no-ops + drops a status note;
     // hover surfaces a "not installed" tooltip.
@@ -829,7 +829,7 @@ fn render_harness_picker(f: &mut Frame, area: Rect, app: &mut App, mb: &Minibuff
         .iter()
         .map(|h| (h.name.clone(), h.available))
         .collect();
-    entries.push(("group".to_string(), true));
+    entries.push(("project".to_string(), true));
 
     let (hovered_x, hovered_y) = app.mouse_pos.unwrap_or((u16::MAX, u16::MAX));
     let base_available = Style::default()
@@ -2157,7 +2157,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
             session_status_glyph(app, s),
             truncate_to_width(&primary_label(s), label_budget),
         ),
-        (None, Some(g)) => format!(" group: {} ", g.name),
+        (None, Some(g)) => format!(" project: {} ", g.name),
         (None, None) => " no session ".to_string(),
     };
     // Harness name right-aligned on the top border so it visually
@@ -2292,7 +2292,7 @@ fn render_group_overview(
         .collect();
     let mut lines: Vec<Line> = Vec::with_capacity(members.len() + 3);
     lines.push(Line::from(vec![Span::styled(
-        format!("Group: {}", group.name),
+        format!("Project: {}", group.name),
         group_name_style(&app.theme),
     )]));
     lines.push(Line::from(format!(
@@ -2303,7 +2303,7 @@ fn render_group_overview(
     lines.push(Line::from(""));
     if members.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  (empty — move sessions into this group)",
+            "  (empty - move sessions into this project)",
             Style::default().fg(app.theme.dim),
         )));
     } else {
