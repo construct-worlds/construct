@@ -64,3 +64,14 @@ agentd-client = { path = "crates/client" }
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Optimize dependencies even in dev builds. The TUI's per-byte hot
+# path (PTY OSC/ANSI state machine + the `vt100` shadow parser) lives
+# largely in dependency code, and at `opt-level = 0` those un-inlined
+# per-byte loops are ~10x slower — enough that a debug build saturates
+# the single-threaded feed+render loop under multi-session load while
+# release stays snappy. `package."*"` applies only to dependencies,
+# not workspace members, so our own crates keep compiling unoptimized
+# (fast incremental rebuilds, full debuggability).
+[profile.dev.package."*"]
+opt-level = 3
