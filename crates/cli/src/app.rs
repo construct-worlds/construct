@@ -438,6 +438,8 @@ pub struct App {
     pub dynamic_ui_selected: HashSet<(String, String)>,
     /// Widgets temporarily shown after create/update. Hover extends this deadline.
     pub dynamic_ui_temporary_until: HashMap<(String, String), Instant>,
+    /// The one widget panel currently focused for keyboard handling.
+    pub dynamic_ui_focused: Option<(String, String)>,
     /// MRU cache of resized preview images shared by the terminal-view
     /// overlay and the matrix-rain wallpaper — avoids re-downscaling the
     /// screenshot every frame. See [`ImageResizeCache`].
@@ -1037,8 +1039,10 @@ pub struct LayoutSnapshot {
     pub dynamic_ui_panel_close_hits: Vec<DynamicUiPanelCloseHit>,
     /// Dynamic UI title-bar affordance bounds: `(x_start, x_end, y, session_id)`.
     pub dynamic_ui_trigger: Option<(u16, u16, u16, String)>,
-    /// Dynamic UI dropdown/panel bounds from the last frame.
+    /// Dynamic UI widget panel bounds from the last frame.
     pub dynamic_ui_popover_area: Option<ratatui::layout::Rect>,
+    /// Dynamic UI dropdown bounds from the last frame.
+    pub dynamic_ui_dropdown_area: Option<ratatui::layout::Rect>,
 }
 
 #[derive(Debug, Clone)]
@@ -1241,6 +1245,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         dynamic_ui_popover_open: None,
         dynamic_ui_selected: HashSet::new(),
         dynamic_ui_temporary_until: HashMap::new(),
+        dynamic_ui_focused: None,
         image_resize_cache: Vec::new(),
         session_transition: None,
         pin_transitions: HashMap::new(),
@@ -2658,6 +2663,9 @@ impl App {
                                 let key = (payload.session_id.clone(), id.clone());
                                 self.dynamic_ui_selected.remove(&key);
                                 self.dynamic_ui_temporary_until.remove(&key);
+                                if self.dynamic_ui_focused.as_ref() == Some(&key) {
+                                    self.dynamic_ui_focused = None;
+                                }
                             }
                             _ => {}
                         }
@@ -3301,6 +3309,43 @@ impl App {
         self.layout
             .dynamic_ui_popover_area
             .is_some_and(|area| contains(area, col, row))
+            || self
+                .layout
+                .dynamic_ui_dropdown_area
+                .is_some_and(|area| contains(area, col, row))
+    }
+
+    fn focus_dynamic_ui_panel_at(&mut self, _col: u16, row: u16) {
+        let Some(session_id) = self.selected_id() else {
+            self.dynamic_ui_focused = None;
+            return;
+        };
+        let Some(panels) = self.ui_panels.get(&session_id) else {
+            self.dynamic_ui_focused = None;
+            return;
+        };
+        let mut visible: Vec<_> = panels
+            .values()
+            .filter(|panel| self.dynamic_ui_panel_visible(&session_id, &panel.id))
+            .collect();
+        visible.sort_by(|a, b| a.id.cmp(&b.id));
+        let Some(area) = self.layout.dynamic_ui_popover_area else {
+            self.dynamic_ui_focused = None;
+            return;
+        };
+        if row <= area.y || row >= area.y.saturating_add(area.height).saturating_sub(1) {
+            return;
+        }
+        let rel_row = row.saturating_sub(area.y + 1) as usize;
+        let mut offset = 0usize;
+        for panel in visible {
+            let panel_rows = markdown_display_rows(&panel.markdown).saturating_add(1);
+            if rel_row < offset.saturating_add(panel_rows) {
+                self.dynamic_ui_focused = Some((session_id, panel.id.clone()));
+                return;
+            }
+            offset = offset.saturating_add(panel_rows);
+        }
     }
 
     async fn handle_dynamic_ui_overlay_click(&mut self, col: u16, row: u16) -> bool {
@@ -3315,6 +3360,18 @@ impl App {
             .cloned()
         {
             self.hide_dynamic_ui_panel(hit.session_id, hit.panel_id);
+            return true;
+        }
+        if let Some(hit) = self
+            .layout
+            .dynamic_ui_action_hits
+            .iter()
+            .find(|hit| hit.contains(col, row))
+            .cloned()
+        {
+            self.dynamic_ui_focused = Some((hit.session_id.clone(), hit.panel_id.clone()));
+            self.dispatch_dynamic_ui_action(hit.session_id, Some(hit.panel_id), hit.action)
+                .await;
             return true;
         }
         if let Some((x_start, x_end, y, session_id)) = self.layout.dynamic_ui_trigger.clone() {
@@ -3345,17 +3402,24 @@ impl App {
                 }
                 return true;
             }
+            if let Some(dropdown) = self.layout.dynamic_ui_dropdown_area {
+                if contains(dropdown, col, row) {
+                    return true;
+                }
+            }
             if let Some(popover) = self.layout.dynamic_ui_popover_area {
                 if contains(popover, col, row) {
+                    self.focus_dynamic_ui_panel_at(col, row);
                     return true;
                 }
                 self.dynamic_ui_popover_open = None;
             }
         }
-        if self.try_dynamic_ui_action_click(col, row).await {
+        if self.is_over_dynamic_ui_overlay(col, row) {
+            self.focus_dynamic_ui_panel_at(col, row);
             return true;
         }
-        self.is_over_dynamic_ui_overlay(col, row)
+        false
     }
 
     /// Hit-test a left-click against the last frame's pane geometry.
@@ -3462,6 +3526,7 @@ impl App {
         }
         if let Some(view) = self.layout.view_area {
             if contains(view, col, row) {
+                self.dynamic_ui_focused = None;
                 if let Some((x_start, x_end, y)) = self.layout.browser_preview_close {
                     if row == y && col >= x_start && col < x_end {
                         if let Some(id) = self.selected_id() {
@@ -3499,6 +3564,7 @@ impl App {
                 if self.handle_dynamic_ui_overlay_click(col, row).await {
                     return;
                 }
+                self.dynamic_ui_focused = None;
                 // Inner area: same Rect minus the 1-cell border on
                 // each side. The render path stores hit ranges
                 // relative to the inner area's top — translate
@@ -4188,7 +4254,12 @@ impl App {
         let Some(action) = self.dynamic_ui_action_for_key(&session_id, c) else {
             return false;
         };
-        self.dispatch_dynamic_ui_action(session_id, None, action)
+        let panel_id = self
+            .dynamic_ui_focused
+            .as_ref()
+            .filter(|(focused_session, _)| focused_session == &session_id)
+            .map(|(_, panel_id)| panel_id.clone());
+        self.dispatch_dynamic_ui_action(session_id, panel_id, action)
             .await;
         true
     }
@@ -4234,21 +4305,9 @@ impl App {
         let key = (session_id, panel_id);
         self.dynamic_ui_selected.remove(&key);
         self.dynamic_ui_temporary_until.remove(&key);
-    }
-
-    async fn try_dynamic_ui_action_click(&mut self, col: u16, row: u16) -> bool {
-        let Some(hit) = self
-            .layout
-            .dynamic_ui_action_hits
-            .iter()
-            .find(|hit| hit.contains(col, row))
-            .cloned()
-        else {
-            return false;
-        };
-        self.dispatch_dynamic_ui_action(hit.session_id, Some(hit.panel_id), hit.action)
-            .await;
-        true
+        if self.dynamic_ui_focused.as_ref() == Some(&key) {
+            self.dynamic_ui_focused = None;
+        }
     }
 
     fn dynamic_ui_action_for_key(
@@ -4257,7 +4316,16 @@ impl App {
         key: char,
     ) -> Option<agentd_protocol::UiAction> {
         let panels = self.ui_panels.get(session_id)?;
-        let mut panel_ids: Vec<_> = panels.keys().collect();
+        let focused_panel = self
+            .dynamic_ui_focused
+            .as_ref()
+            .filter(|(focused_session, _)| focused_session == session_id)
+            .map(|(_, panel_id)| panel_id.clone());
+        let mut panel_ids: Vec<_> = if let Some(focused_panel) = focused_panel.as_ref() {
+            vec![focused_panel]
+        } else {
+            panels.keys().collect()
+        };
         panel_ids.sort();
         let mut action_index = 1u32;
         for panel_id in panel_ids {
@@ -5902,6 +5970,7 @@ mod tests {
             dynamic_ui_panel_close_hits: Vec::new(),
             dynamic_ui_trigger: None,
             dynamic_ui_popover_area: None,
+            dynamic_ui_dropdown_area: None,
         }
     }
 
@@ -5970,6 +6039,7 @@ mod tests {
             dynamic_ui_popover_open: None,
             dynamic_ui_selected: HashSet::new(),
             dynamic_ui_temporary_until: HashMap::new(),
+            dynamic_ui_focused: None,
             image_resize_cache: Vec::new(),
             session_transition: None,
             pin_transitions: HashMap::new(),
@@ -7866,6 +7936,24 @@ fn json_escape(s: &str) -> String {
         .unwrap_or_else(|_| "\"\"".to_string())
         .trim_matches('"')
         .to_string()
+}
+
+fn markdown_display_rows(markdown: &str) -> usize {
+    let mut rows = 0usize;
+    let mut pending_actions = false;
+    for raw in markdown.lines() {
+        let line = raw.trim_end();
+        if line.contains("](agentd:action/") {
+            if !pending_actions {
+                pending_actions = true;
+                rows = rows.saturating_add(1);
+            }
+            continue;
+        }
+        pending_actions = false;
+        rows = rows.saturating_add(1);
+    }
+    rows
 }
 
 fn markdown_actions(markdown: &str) -> Vec<agentd_protocol::UiAction> {

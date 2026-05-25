@@ -2525,10 +2525,10 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
         out.screen.scrollback(),
         out.max_scrollback,
     );
+    render_visible_dynamic_ui_panels(f, area, app, &panels);
     if app.dynamic_ui_popover_open.as_deref() == Some(id.as_str()) && !panels.is_empty() {
         render_dynamic_ui_dropdown(f, area, app, &panels);
     }
-    render_visible_dynamic_ui_panels(f, area, app, &panels);
 
     if let Some(area) = editor_area {
         // Also clear the editor area (defensive)
@@ -2591,13 +2591,28 @@ fn render_dynamic_ui_dropdown(
         .unwrap_or(16)
         .clamp(16, session_area.width.saturating_sub(2).max(16));
     let height = (panels.len() as u16).saturating_add(2).max(3);
+    let (trigger_start, trigger_end, trigger_y) = app
+        .layout
+        .dynamic_ui_trigger
+        .as_ref()
+        .map(|(start, end, y, _)| (*start, *end, *y))
+        .unwrap_or((
+            session_area.x + session_area.width.saturating_sub(width + 1),
+            session_area.x + session_area.width.saturating_sub(1),
+            session_area.y,
+        ));
+    let trigger_width = trigger_end.saturating_sub(trigger_start).max(1);
+    let width = width.max(trigger_width).min(session_area.width.saturating_sub(2).max(1));
+    let x = trigger_start
+        .min(session_area.x + session_area.width.saturating_sub(width + 1))
+        .max(session_area.x.saturating_add(1));
     let area = Rect {
-        x: session_area.x + session_area.width.saturating_sub(width + 1),
-        y: session_area.y,
+        x,
+        y: trigger_y.saturating_add(1),
         width,
-        height: height.min(session_area.height.max(1)),
+        height: height.min(session_area.height.saturating_sub(1).max(1)),
     };
-    app.layout.dynamic_ui_popover_area = Some(area);
+    app.layout.dynamic_ui_dropdown_area = Some(area);
     f.render_widget(Clear, area);
     let session_id = app.selected_id().unwrap_or_default();
     let mut lines = Vec::new();
@@ -2623,9 +2638,8 @@ fn render_dynamic_ui_dropdown(
         ]));
     }
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.text))
-        .title(" widgets ");
+        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+        .border_style(Style::default().fg(app.theme.text));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -2734,12 +2748,20 @@ fn render_dynamic_ui_panels(
                 });
         }
     }
+    let focused = panels.iter().any(|panel| {
+        app.dynamic_ui_focused.as_ref()
+            == session_id
+                .as_ref()
+                .map(|session_id| (session_id.clone(), panel.id.clone()))
+                .as_ref()
+    });
+    let border_color = if focused { app.theme.text } else { app.theme.dim };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.text))
+        .border_style(Style::default().fg(border_color))
         .title(format!(" {title} "))
         .title(
-            Line::from(Span::styled(" - ", Style::default().fg(app.theme.text)))
+            Line::from(Span::styled(" - ", Style::default().fg(border_color)))
                 .alignment(ratatui::layout::Alignment::Right),
         );
     let para = Paragraph::new(lines)
