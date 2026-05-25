@@ -12,7 +12,11 @@ use std::path::PathBuf;
 use agentd_protocol::paths::Paths;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+fn default_hide_pane_side_borders() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiState {
     #[serde(default)]
     pub last_selected_session_id: Option<String>,
@@ -30,8 +34,24 @@ pub struct TuiState {
     pub list_collapsed: bool,
     #[serde(default)]
     pub matrix_rain_hidden: bool,
-    #[serde(default)]
+    #[serde(default = "default_hide_pane_side_borders")]
     pub hide_pane_side_borders: bool,
+}
+
+impl Default for TuiState {
+    fn default() -> Self {
+        Self {
+            last_selected_session_id: None,
+            zoom: crate::app::ZoomMode::default(),
+            list_panel_w: None,
+            pin_strip_h: None,
+            orchestrator_panel_h: None,
+            matrix_rain_h: None,
+            list_collapsed: false,
+            matrix_rain_hidden: false,
+            hide_pane_side_borders: default_hide_pane_side_borders(),
+        }
+    }
 }
 
 fn state_path() -> PathBuf {
@@ -54,5 +74,30 @@ pub fn save(state: &TuiState) {
     }
     if let Ok(json) = serde_json::to_vec_pretty(state) {
         let _ = std::fs::write(&path, json);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TuiState;
+
+    #[test]
+    fn defaults_to_hiding_pane_side_borders() {
+        assert!(TuiState::default().hide_pane_side_borders);
+    }
+
+    #[test]
+    fn missing_border_preference_uses_new_default() {
+        let state: TuiState = serde_json::from_str("{}").expect("valid empty state");
+
+        assert!(state.hide_pane_side_borders);
+    }
+
+    #[test]
+    fn persisted_border_preference_still_round_trips() {
+        let state: TuiState =
+            serde_json::from_str(r#"{"hide_pane_side_borders":false}"#).expect("valid state");
+
+        assert!(!state.hide_pane_side_borders);
     }
 }
