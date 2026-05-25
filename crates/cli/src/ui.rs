@@ -2859,7 +2859,7 @@ fn render_agentd_markdown_lines(
     for raw in markdown.lines() {
         let line = raw.trim_end();
         if let Some(timeline) = in_timeline.as_mut() {
-            if line.trim() == "```" {
+            if line.trim() == ":::" {
                 lines.extend(render_timeline_block(timeline, theme));
                 in_timeline = None;
             } else {
@@ -2997,8 +2997,8 @@ struct TimelineBlock {
 fn parse_timeline_open(line: &str) -> Option<Option<String>> {
     let trimmed = line.trim();
     let rest = trimmed
-        .strip_prefix("```timeline")
-        .or_else(|| trimmed.strip_prefix("```agentd-timeline"))?;
+        .strip_prefix(":::timeline")
+        .or_else(|| trimmed.strip_prefix(":::agentd-timeline"))?;
     let title = rest.trim();
     if title.is_empty() {
         return Some(None);

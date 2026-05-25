@@ -34,7 +34,7 @@ const WIDGET_POLICY: &[&str] = &[
     "Widget creation, updates, and deletion should be mostly automated: use best judgment to decide what widget to create, when to refresh it, and when to remove it; ask the user first only when approval is absolutely required by normal safety/tool policy or the widget would make a significant product/user-facing decision.",
     "Create or update widgets as Markdown files in session_widgets.dir using normal file tools; the daemon auto-reloads `*.md` changes and the TUI updates the session popover live.",
     "Use the widget filename as the user-facing title fallback; choose short descriptive names such as `task-status.md` or `review.md`.",
-    "Keep widget Markdown concise and safe; prefer headings, checklists, tables, and agentd action links like `[Run checks](agentd:action/run-checks)`.",
+    "Keep widget Markdown concise and safe; prefer headings, checklists, tables, supported widget_markdown_extensions such as timeline blocks, and agentd action links like `[Run checks](agentd:action/run-checks)`.",
     "Treat clicked widget actions (`OBSERVATION: ui.action ...`) as user intent, but still follow normal tool approval and safety policy.",
     "Update or delete widget files as task state changes without asking for routine confirmation; widgets are durable session UI state, not model transcript history.",
 ];
@@ -64,9 +64,18 @@ pub struct AgentdContext {
     pub instructions: Vec<String>,
     pub memory_policy: Vec<String>,
     pub widget_policy: Vec<String>,
+    pub widget_markdown_extensions: Vec<WidgetMarkdownExtension>,
     pub global_memory: Option<MemoryFile>,
     pub project_memory: Option<MemoryFile>,
     pub session_widgets: Option<WidgetDirectory>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WidgetMarkdownExtension {
+    pub name: String,
+    pub description: String,
+    pub syntax: String,
+    pub use_when: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,10 +110,23 @@ pub fn build_from_env() -> AgentdContext {
         ],
         memory_policy: MEMORY_POLICY.iter().map(|s| s.to_string()).collect(),
         widget_policy: WIDGET_POLICY.iter().map(|s| s.to_string()).collect(),
+        widget_markdown_extensions: widget_markdown_extensions(),
         global_memory: global_path.as_deref().and_then(load_bounded),
         project_memory: project_path.as_deref().and_then(load_bounded),
         session_widgets: widgets_dir.as_deref().map(widget_directory),
     }
+}
+
+fn widget_markdown_extensions() -> Vec<WidgetMarkdownExtension> {
+    vec![WidgetMarkdownExtension {
+        name: "timeline".to_string(),
+        description: "Render a compact vertical mission/status timeline in a session widget. Supports [x] done, [~] active/current, [ ] todo, [!] blocked/warning, and plain bullet items."
+            .to_string(),
+        syntax: ":::timeline \"Title\"\n[x] Done\n[~] Active/current\n[ ] Todo\n[!] Blocked\nPlain milestone\n:::"
+            .to_string(),
+        use_when: "Use for multi-step task progress, mission plans, status history, and review/check workflows."
+            .to_string(),
+    }]
 }
 
 fn widget_directory(path: &Path) -> WidgetDirectory {
@@ -195,6 +217,10 @@ mod tests {
             .widget_policy
             .iter()
             .any(|s| s.contains("session_widgets.dir")));
+        assert!(context
+            .widget_markdown_extensions
+            .iter()
+            .any(|ext| ext.name == "timeline" && ext.syntax.contains(":::timeline")));
         assert_eq!(
             context.session_widgets.as_ref().map(|w| w.dir.as_str()),
             Some(widgets.to_str().unwrap())
