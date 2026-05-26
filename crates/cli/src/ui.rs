@@ -2766,17 +2766,32 @@ fn render_dynamic_ui_stack_lines(
         let title = dynamic_ui_panel_title(panel).unwrap_or_else(|| "widget".to_string());
         let focused =
             app.dynamic_ui_focused.as_ref() == Some(&(session_id.to_string(), panel.id.clone()));
-        let title_style = Style::default()
-            .fg(if focused {
-                app.theme.text
-            } else {
-                app.theme.accent
-            })
-            .add_modifier(Modifier::BOLD);
+        let title_style = if focused {
+            Style::default()
+                .fg(app.theme.highlight_fg)
+                .bg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        };
+        let close_style = if focused {
+            Style::default()
+                .fg(app.theme.highlight_fg)
+                .bg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.dim)
+        };
+        let title_pad = content_w.saturating_sub(
+            UnicodeWidthStr::width(title.as_str()) as u16 + UnicodeWidthStr::width(" [-]") as u16,
+        ) as usize;
         rows.push(Line::from(vec![
+            Span::styled(if focused { "▌ " } else { "  " }, title_style),
             Span::styled(title, title_style),
-            Span::raw(" "),
-            Span::styled("[-]", Style::default().fg(app.theme.dim)),
+            Span::styled(" ".repeat(title_pad.saturating_add(1)), title_style),
+            Span::styled("[-]", close_style),
         ]));
         app.layout
             .dynamic_ui_panel_close_hits
@@ -2805,7 +2820,12 @@ fn render_dynamic_ui_stack_lines(
             suppress_first_heading,
         );
         for line in &mut lines {
-            line.spans.insert(0, Span::raw(" "));
+            if focused {
+                line.spans
+                    .insert(0, Span::styled("▌", Style::default().fg(app.theme.accent)));
+            } else {
+                line.spans.insert(0, Span::raw(" "));
+            }
         }
         rows.extend(lines);
         rows.push(Line::raw(""));
