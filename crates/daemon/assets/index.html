@@ -480,9 +480,10 @@
   .widgets-menu-item:hover, .widgets-menu-item:focus { background: var(--bg-elev); outline: none; }
   .widgets-menu-mark { color: var(--accent); width: 1em; }
   .widget-stack { display: grid; gap: 8px; }
-  .widget-card { border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--bg) 72%, transparent); overflow: hidden; }
+  .widget-card { border: 0; border-radius: 0; background: transparent; overflow: hidden; }
+  .widget-card + .widget-card { border-top: 1px solid var(--border); padding-top: 8px; }
   .widget-card:focus { outline: 1px solid var(--accent); outline-offset: 2px; }
-  .widget-title { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--accent); font-weight: 600; }
+  .widget-title { padding: 2px 0 6px; border-bottom: 1px solid var(--border); color: var(--accent); font-weight: 600; }
   .widget-body { padding: 8px; font-size: 13px; line-height: 1.35; }
   .widget-body p { margin: 0 0 8px; }
   .widget-body h1, .widget-body h2, .widget-body h3 { margin: 0 0 8px; font-size: 13px; color: var(--accent); }
