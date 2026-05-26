@@ -2754,11 +2754,12 @@ fn render_dynamic_ui_stack_lines(
 ) -> Vec<Line<'static>> {
     let hover = app.mouse_pos;
     let mut rows = Vec::new();
-    let content_w = area.width.saturating_sub(2);
+    let row_w = area.width.saturating_sub(1);
+    let content_w = row_w.saturating_sub(2);
     for (idx, panel) in panels.iter().enumerate() {
         if idx > 0 {
             rows.push(Line::from(Span::styled(
-                "─".repeat(content_w as usize),
+                "─".repeat(row_w as usize),
                 Style::default().fg(app.theme.dim),
             )));
         }
@@ -2783,14 +2784,20 @@ fn render_dynamic_ui_stack_lines(
         } else {
             Style::default().fg(app.theme.dim)
         };
-        let title_pad = content_w.saturating_sub(
-            UnicodeWidthStr::width(title.as_str()) as u16 + UnicodeWidthStr::width(" [-]") as u16,
-        ) as usize;
+        let edge_style = Style::default().fg(if focused {
+            app.theme.border_focused
+        } else {
+            app.theme.dim
+        });
+        let title_w = UnicodeWidthStr::width(title.as_str()) as u16;
+        let close_w = UnicodeWidthStr::width("[-]") as u16;
+        let title_pad = content_w.saturating_sub(title_w + close_w + 1) as usize;
         rows.push(Line::from(vec![
-            Span::styled(if focused { "▌ " } else { "  " }, title_style),
+            Span::styled("│", edge_style),
             Span::styled(title, title_style),
             Span::styled(" ".repeat(title_pad.saturating_add(1)), title_style),
             Span::styled("[-]", close_style),
+            Span::styled("│", edge_style),
         ]));
         app.layout
             .dynamic_ui_panel_close_hits
@@ -2798,8 +2805,8 @@ fn render_dynamic_ui_stack_lines(
                 session_id: session_id.to_string(),
                 panel_id: panel.id.clone(),
                 row: area.y.saturating_add(rows.len().saturating_sub(1) as u16),
-                start_col: area.x.saturating_add(content_w.saturating_sub(3)),
-                end_col: area.x.saturating_add(content_w),
+                start_col: area.x.saturating_add(content_w.saturating_sub(5)),
+                end_col: area.x.saturating_add(content_w.saturating_sub(2)),
             });
         let content_area = Rect {
             x: area.x.saturating_add(1),
@@ -2819,12 +2826,8 @@ fn render_dynamic_ui_stack_lines(
             suppress_first_heading,
         );
         for line in &mut lines {
-            if focused {
-                line.spans
-                    .insert(0, Span::styled("▌", Style::default().fg(app.theme.accent)));
-            } else {
-                line.spans.insert(0, Span::raw(" "));
-            }
+            line.spans.insert(0, Span::styled("│", edge_style));
+            line.spans.push(Span::styled("│", edge_style));
         }
         rows.extend(lines);
         rows.push(Line::raw(""));
@@ -2849,9 +2852,6 @@ fn render_dynamic_ui_stack_scrollbar(
     let max_top = area.height.saturating_sub(thumb_h) as usize;
     let max_scroll = content_rows.saturating_sub(viewport_rows).max(1);
     let thumb_top = ((scroll * max_top + max_scroll / 2) / max_scroll) as u16;
-    for y in area.y..area.y.saturating_add(area.height) {
-        buf.set_string(track_x, y, "│", Style::default().fg(Color::DarkGray));
-    }
     for y in
         area.y.saturating_add(thumb_top)..area.y.saturating_add(thumb_top).saturating_add(thumb_h)
     {
