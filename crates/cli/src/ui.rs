@@ -2652,16 +2652,24 @@ fn render_visible_dynamic_ui_panels(
             for panel in &visible {
                 let key = (session_id.clone(), panel.id.clone());
                 if app.dynamic_ui_temporary_until.contains_key(&key) {
-                    app.dynamic_ui_temporary_until
-                        .insert(key, now + std::time::Duration::from_secs(10));
+                    app.dynamic_ui_temporary_until.insert(
+                        key,
+                        now + std::time::Duration::from_secs(crate::app::DYNAMIC_UI_AUTOHIDE_SECS),
+                    );
                 }
             }
         }
     }
 
-    let mut rendered = render_dynamic_ui_stack_lines(area, app, &session_id, &visible);
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let mut rendered = render_dynamic_ui_stack_lines(inner, app, &session_id, &visible);
     let content_rows = rendered.len();
-    let viewport_rows = area.height as usize;
+    let viewport_rows = inner.height as usize;
     let max_scroll = content_rows.saturating_sub(viewport_rows);
     let offset = app
         .dynamic_ui_scroll_offsets
@@ -2669,7 +2677,7 @@ fn render_visible_dynamic_ui_panels(
         .or_insert(0);
     *offset = (*offset).min(max_scroll);
     let scroll = *offset;
-    translate_dynamic_ui_hits_for_scroll(app, area, scroll, viewport_rows);
+    translate_dynamic_ui_hits_for_scroll(app, inner, scroll, viewport_rows);
     rendered.extend(std::iter::repeat(Line::raw("")).take(viewport_rows));
     let visible_lines: Vec<_> = rendered
         .into_iter()
@@ -2678,11 +2686,24 @@ fn render_visible_dynamic_ui_panels(
         .collect();
 
     f.render_widget(Clear, area);
+    let focused = app.dynamic_ui_focused.is_some();
+    let border_color = if focused {
+        app.theme.text
+    } else {
+        app.theme.dim
+    };
     f.render_widget(
-        Paragraph::new(visible_lines).wrap(Wrap { trim: false }),
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .title(" widgets "),
         area,
     );
-    render_dynamic_ui_stack_scrollbar(f.buffer_mut(), area, scroll, content_rows);
+    f.render_widget(
+        Paragraph::new(visible_lines).wrap(Wrap { trim: false }),
+        inner,
+    );
+    render_dynamic_ui_stack_scrollbar(f.buffer_mut(), inner, scroll, content_rows);
     app.layout.dynamic_ui_popover_area = Some(area);
     app.layout.dynamic_ui_scroll_metrics = Some((session_id, content_rows, viewport_rows));
 }

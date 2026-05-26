@@ -29,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 pub const TERMINAL_SCROLLBAR_TTL: Duration = Duration::from_millis(1200);
+pub(crate) const DYNAMIC_UI_AUTOHIDE_SECS: u64 = 15;
 
 /// Which pane currently owns the keyboard. `View` covers both the transcript
 /// and the terminal renderer — when the view shows a PTY-backed session and
@@ -2678,7 +2679,7 @@ impl App {
                                     .insert(panel.id.clone(), panel.clone());
                                 self.dynamic_ui_temporary_until.insert(
                                     (payload.session_id.clone(), panel.id.clone()),
-                                    Instant::now() + Duration::from_secs(10),
+                                    Instant::now() + Duration::from_secs(DYNAMIC_UI_AUTOHIDE_SECS),
                                 );
                             }
                             SessionEvent::UiDelete { id } => {
