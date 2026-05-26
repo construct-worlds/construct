@@ -461,8 +461,9 @@
     top: 40px;
     right: calc(86px + env(safe-area-inset-right));
     z-index: 20;
-    width: min(420px, calc(100% - 24px));
-    max-height: min(64vh, 520px);
+    width: min(420px, 80%);
+    max-width: 80%;
+    max-height: 80%;
     overflow: auto;
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
@@ -496,8 +497,8 @@
   .widget-action:hover, .widget-action:focus { color: var(--ok); outline: none; background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .widget-timeline { display: grid; gap: 0; }
   .timeline-item { position: relative; display: grid; grid-template-columns: 1.25rem 1fr; column-gap: 6px; padding-bottom: 10px; }
-  .timeline-item:not(:last-child)::after { content: ""; position: absolute; left: .62rem; top: 1.35rem; bottom: 0; width: 1px; background: var(--border); }
-  .timeline-marker { z-index: 1; text-align: center; color: var(--accent); background: var(--bg); }
+  .timeline-item:not(:last-child)::after { content: ""; position: absolute; left: calc(.625rem - .5px); top: 1.2rem; bottom: -2px; width: 1px; background: color-mix(in srgb, var(--accent) 50%, var(--border)); z-index: 0; }
+  .timeline-marker { z-index: 1; text-align: center; color: var(--accent); background: var(--bg-elev); border-radius: 999px; }
   .timeline-marker.done { color: var(--ok); }
   .timeline-marker.todo { color: var(--fg-faint); }
   .timeline-marker.warn { color: var(--warn); }
@@ -3900,12 +3901,13 @@ function renderWidgetCard(sessionId, panel) {
   const id = normalizePanelId(panel);
   return `<article class="widget-card" tabindex="0" data-widget-id="${attr(id)}">
     <div class="widget-title">${escape(widgetTitle(panel))}</div>
-    <div class="widget-body">${renderWidgetMarkdown(panel.markdown || "", sessionId, id)}</div>
+    <div class="widget-body">${renderWidgetMarkdown(panel.markdown || "", sessionId, id, { skipFirstHeading: true })}</div>
   </article>`;
 }
 
-function renderWidgetMarkdown(markdown, sessionId, panelId) {
+function renderWidgetMarkdown(markdown, sessionId, panelId, options = {}) {
   const lines = String(markdown || "").split(/\r?\n/);
+  let skippedFirstHeading = false;
   const html = [];
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
@@ -3922,6 +3924,10 @@ function renderWidgetMarkdown(markdown, sessionId, panelId) {
     if (!line.trim()) continue;
     const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+)$/);
     if (heading) {
+      if (options.skipFirstHeading && !skippedFirstHeading) {
+        skippedFirstHeading = true;
+        continue;
+      }
       const level = Math.min(3, heading[1].length);
       html.push(`<h${level}>${escape(stripMarkdownEmphasis(heading[2]))}</h${level}>`);
       continue;
