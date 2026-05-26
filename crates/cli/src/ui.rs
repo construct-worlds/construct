@@ -2695,8 +2695,7 @@ fn render_visible_dynamic_ui_panels(
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .title(" widgets "),
+            .border_style(Style::default().fg(border_color)),
         area,
     );
     f.render_widget(
