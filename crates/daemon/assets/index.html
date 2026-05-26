@@ -1586,6 +1586,7 @@ const state = {
   // `session.get().ui_panels` and updated by live ui_panel/ui_delete events.
   widgetsById: new Map(),
   widgetsDropdownOpen: false,
+  widgetTemporaryUntilById: new Map(),
   focusedWidgetPanelId: null,
   // FIFO queue of pending tool-approval requests for the active
   // session. The bottom-sheet shows the head; each decision pops
@@ -1604,6 +1605,8 @@ const SESSION_LIST_DEFAULT_WIDTH = 240;
 const SESSION_LIST_MIN_WIDTH = 180;
 const SESSION_LIST_MAX_WIDTH = 520;
 const WIDGET_VISIBILITY_KEY_PREFIX = "agentd.web.widgets.visible.";
+const WIDGET_AUTOHIDE_MS = 15000;
+let widgetAutohideTimer = null;
 
 const miniMatrixActivity = {
   intensity: 0,
@@ -3863,6 +3866,7 @@ function applyWidgetPanel(sessionId, panel) {
   const next = panels.filter((p) => normalizePanelId(p) !== id);
   next.push(panel);
   state.widgetsById.set(sessionId, next.sort((a, b) => normalizePanelId(a).localeCompare(normalizePanelId(b))));
+  showWidgetsTemporarily(sessionId);
   if (sessionId === state.currentId) renderWidgets();
 }
 
@@ -3870,7 +3874,56 @@ function removeWidgetPanel(sessionId, panelId) {
   if (!sessionId || !panelId) return;
   const panels = (state.widgetsById.get(sessionId) || []).filter((p) => normalizePanelId(p) !== panelId);
   state.widgetsById.set(sessionId, panels);
+  if (panels.length === 0) state.widgetTemporaryUntilById.delete(sessionId);
   if (sessionId === state.currentId) renderWidgets();
+}
+
+function showWidgetsTemporarily(sessionId) {
+  if (!sessionId) return;
+  state.widgetTemporaryUntilById.set(sessionId, performance.now() + WIDGET_AUTOHIDE_MS);
+  if (sessionId === state.currentId) {
+    state.widgetsDropdownOpen = true;
+    scheduleWidgetAutohide();
+  }
+}
+
+function extendWidgetTemporaryVisibility(sessionId) {
+  if (!sessionId || !state.widgetTemporaryUntilById.has(sessionId)) return;
+  state.widgetTemporaryUntilById.set(sessionId, performance.now() + WIDGET_AUTOHIDE_MS);
+  scheduleWidgetAutohide();
+}
+
+function stopWidgetTemporaryVisibility(sessionId) {
+  if (!sessionId) return;
+  state.widgetTemporaryUntilById.delete(sessionId);
+  scheduleWidgetAutohide();
+}
+
+function scheduleWidgetAutohide() {
+  clearTimeout(widgetAutohideTimer);
+  const sessionId = state.currentId;
+  if (!sessionId || !state.widgetsDropdownOpen) return;
+  const until = state.widgetTemporaryUntilById.get(sessionId);
+  if (!until) return;
+  const remaining = until - performance.now();
+  if (remaining <= 0) {
+    if (!isWidgetPopoverPinned()) {
+      state.widgetTemporaryUntilById.delete(sessionId);
+      state.widgetsDropdownOpen = false;
+      renderWidgets();
+    } else {
+      extendWidgetTemporaryVisibility(sessionId);
+    }
+    return;
+  }
+  widgetAutohideTimer = setTimeout(scheduleWidgetAutohide, remaining);
+}
+
+function isWidgetPopoverPinned() {
+  return sessionWidgetsEl.matches(":hover")
+    || widgetsTriggerBtn.matches(":hover")
+    || terminalWidgetsProxyBtn.matches(":hover")
+    || sessionWidgetsEl.contains(document.activeElement);
 }
 
 function renderWidgets() {
@@ -3881,9 +3934,17 @@ function renderWidgets() {
     terminalWidgetsProxyBtn.hidden = true;
     terminalWidgetControlsEl.hidden = true;
     state.widgetsDropdownOpen = false;
+    state.widgetTemporaryUntilById.delete(sessionId);
+    scheduleWidgetAutohide();
     sessionWidgetsEl.hidden = true;
     sessionWidgetsEl.innerHTML = "";
     return;
+  }
+  const temporaryUntil = state.widgetTemporaryUntilById.get(sessionId) || 0;
+  if (temporaryUntil > performance.now()) {
+    state.widgetsDropdownOpen = true;
+  } else if (temporaryUntil) {
+    state.widgetTemporaryUntilById.delete(sessionId);
   }
   const visible = visibleWidgetIds(sessionId, panels);
   const visiblePanels = panels.filter((panel) => visible.has(normalizePanelId(panel)));
@@ -3894,6 +3955,7 @@ function renderWidgets() {
   widgetsTriggerBtn.setAttribute("aria-expanded", state.widgetsDropdownOpen ? "true" : "false");
   terminalWidgetsProxyBtn.setAttribute("aria-expanded", state.widgetsDropdownOpen ? "true" : "false");
   sessionWidgetsEl.hidden = !state.widgetsDropdownOpen;
+  scheduleWidgetAutohide();
   sessionWidgetsEl.innerHTML = `
     <div class="widgets-menu" role="menu">
       ${panels.map((panel) => {
@@ -4100,6 +4162,7 @@ insertBtn.addEventListener("click", (ev) => {
 function toggleWidgetsPopover(ev) {
   if (ev) ev.preventDefault();
   state.widgetsDropdownOpen = !state.widgetsDropdownOpen;
+  if (!state.widgetsDropdownOpen) stopWidgetTemporaryVisibility(state.currentId);
   renderWidgets();
 }
 
@@ -4132,7 +4195,15 @@ sessionWidgetsEl.addEventListener("click", (ev) => {
 sessionWidgetsEl.addEventListener("focusin", (ev) => {
   const card = ev.target.closest && ev.target.closest(".widget-card");
   state.focusedWidgetPanelId = card ? card.dataset.widgetId : null;
+  extendWidgetTemporaryVisibility(state.currentId);
 });
+sessionWidgetsEl.addEventListener("mouseenter", () => extendWidgetTemporaryVisibility(state.currentId));
+sessionWidgetsEl.addEventListener("mouseleave", scheduleWidgetAutohide);
+sessionWidgetsEl.addEventListener("focusout", scheduleWidgetAutohide);
+widgetsTriggerBtn.addEventListener("mouseenter", () => extendWidgetTemporaryVisibility(state.currentId));
+widgetsTriggerBtn.addEventListener("mouseleave", scheduleWidgetAutohide);
+terminalWidgetsProxyBtn.addEventListener("mouseenter", () => extendWidgetTemporaryVisibility(state.currentId));
+terminalWidgetsProxyBtn.addEventListener("mouseleave", scheduleWidgetAutohide);
 
 sessionWidgetsEl.addEventListener("keydown", (ev) => {
   if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.isComposing) return;
@@ -4153,6 +4224,7 @@ document.addEventListener("click", (ev) => {
   if (!state.widgetsDropdownOpen) return;
   if (sessionWidgetsEl.contains(ev.target) || widgetsTriggerBtn.contains(ev.target) || terminalWidgetsProxyBtn.contains(ev.target)) return;
   state.widgetsDropdownOpen = false;
+  stopWidgetTemporaryVisibility(state.currentId);
   renderWidgets();
 });
 

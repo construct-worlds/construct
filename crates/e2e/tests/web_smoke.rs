@@ -1139,6 +1139,84 @@ async fn web_client_loads_and_websocket_connects() {
         "message event was rendered in terminal mode — prose would double up:\n{replay}"
     );
 
+    // Web widgets mirror the TUI's temporary reveal behavior: a live
+    // ui_panel update opens the widget popover for the active session,
+    // then the autohide deadline closes it unless the user pins it by
+    // hover/focus. Updates for background sessions keep their deadline
+    // and reveal if the user switches there before it expires.
+    let widget_autoshow: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const panel = document.getElementById('sessionWidgets');
+              state.currentId = 'sWidget';
+              state.mode = 'chat';
+              state.widgetsById.delete('sWidget');
+              state.widgetsById.delete('sBgWidget');
+              state.widgetTemporaryUntilById.delete('sWidget');
+              state.widgetTemporaryUntilById.delete('sBgWidget');
+              state.widgetsDropdownOpen = false;
+
+              applyWidgetPanel('sWidget', {
+                id: 'progress',
+                source: 'progress.md',
+                markdown: '# Progress\n- [~] Working'
+              });
+              const out = {
+                shownAfterUpdate: !panel.hidden,
+                expandedAfterUpdate: document.getElementById('widgetsTrigger').getAttribute('aria-expanded'),
+                hasTemporaryDeadline: state.widgetTemporaryUntilById.has('sWidget'),
+                renderedText: panel.textContent,
+              };
+
+              state.widgetTemporaryUntilById.set('sWidget', performance.now() - 1);
+              scheduleWidgetAutohide();
+              out.hiddenAfterDeadline = panel.hidden;
+              out.closedAfterDeadline = !state.widgetsDropdownOpen;
+
+              state.currentId = 'sOther';
+              state.widgetsDropdownOpen = false;
+              renderWidgets();
+              applyWidgetPanel('sBgWidget', {
+                id: 'background',
+                source: 'background.md',
+                markdown: '# Background\n- [~] Updated'
+              });
+              out.backgroundDidNotStealView = state.currentId === 'sOther' && panel.hidden;
+              state.currentId = 'sBgWidget';
+              renderWidgets();
+              out.backgroundShownOnSwitch = !panel.hidden;
+              out.backgroundText = panel.textContent;
+              return out;
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate widget autoshow")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(widget_autoshow["shownAfterUpdate"], true);
+    assert_eq!(widget_autoshow["expandedAfterUpdate"], "true");
+    assert_eq!(widget_autoshow["hasTemporaryDeadline"], true);
+    assert!(
+        widget_autoshow["renderedText"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Working"),
+        "updated widget body was not rendered: {widget_autoshow:?}"
+    );
+    assert_eq!(widget_autoshow["hiddenAfterDeadline"], true);
+    assert_eq!(widget_autoshow["closedAfterDeadline"], true);
+    assert_eq!(widget_autoshow["backgroundDidNotStealView"], true);
+    assert_eq!(widget_autoshow["backgroundShownOnSwitch"], true);
+    assert!(
+        widget_autoshow["backgroundText"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Updated"),
+        "background widget was not rendered after switching sessions: {widget_autoshow:?}"
+    );
+
     // Browser preview (issue: TUI parity). Delivered by the LIVE WS
     // notification path (`handleNotification`), stored per session, and
     // shown as a top-right overlay ANCHORED OVER THE TERMINAL (a child of
@@ -1196,14 +1274,23 @@ async fn web_client_loads_and_websocket_connects() {
         .into_value::<serde_json::Value>()
         .expect("json object");
     assert_eq!(browser_preview["shown"], true);
-    assert_eq!(browser_preview["parentId"], "terminalWrap", "overlay anchored over the terminal");
+    assert_eq!(
+        browser_preview["parentId"], "terminalWrap",
+        "overlay anchored over the terminal"
+    );
     assert_eq!(browser_preview["position"], "absolute");
     assert_eq!(browser_preview["top"], "8px", "top-right corner");
     assert_eq!(browser_preview["srcPrefix"], "data:image/png;base64");
     assert_eq!(browser_preview["caption"], "Example Preview");
     assert_eq!(browser_preview["hasClose"], true);
-    assert_eq!(browser_preview["hiddenAfterClose"], true, "× dismisses the overlay");
-    assert_eq!(browser_preview["storedAfterClose"], false, "× forgets the stored preview");
+    assert_eq!(
+        browser_preview["hiddenAfterClose"], true,
+        "× dismisses the overlay"
+    );
+    assert_eq!(
+        browser_preview["storedAfterClose"], false,
+        "× forgets the stored preview"
+    );
     assert_eq!(
         browser_preview["shownAfterReplay"], false,
         "transcript replay must not resurrect a closed/ephemeral preview"
