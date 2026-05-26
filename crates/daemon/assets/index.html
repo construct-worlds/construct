@@ -459,7 +459,7 @@
   .session-widgets {
     position: absolute;
     top: 40px;
-    right: calc(86px + env(safe-area-inset-right));
+    right: calc(8px + env(safe-area-inset-right));
     z-index: 20;
     width: min(420px, 80%);
     max-width: 80%;
@@ -497,8 +497,9 @@
   .widget-action:hover, .widget-action:focus { color: var(--ok); outline: none; background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .widget-timeline { display: grid; gap: 0; }
   .timeline-item { position: relative; display: grid; grid-template-columns: 1.25rem 1fr; column-gap: 6px; padding-bottom: 10px; }
-  .timeline-item:not(:last-child)::after { content: ""; position: absolute; left: calc(.625rem - .5px); top: 1.2rem; bottom: -2px; width: 1px; background: color-mix(in srgb, var(--accent) 50%, var(--border)); z-index: 0; }
-  .timeline-marker { z-index: 1; text-align: center; color: var(--accent); background: var(--bg-elev); border-radius: 999px; }
+  .timeline-rail { position: relative; grid-row: 1 / span 2; min-height: 100%; }
+  .timeline-item:not(:last-child) .timeline-rail::after { content: ""; position: absolute; left: calc(.625rem - .5px); top: 1.2rem; bottom: -12px; width: 1px; background: color-mix(in srgb, var(--accent) 50%, var(--border)); z-index: 0; }
+  .timeline-marker { position: relative; display: block; z-index: 1; text-align: center; color: var(--accent); background: var(--bg-elev); border-radius: 999px; }
   .timeline-marker.done { color: var(--ok); }
   .timeline-marker.todo { color: var(--fg-faint); }
   .timeline-marker.warn { color: var(--warn); }
@@ -1304,6 +1305,7 @@
       <div class="terminal-wrap" id="terminalWrap" hidden>
         <div class="terminal-host" id="terminal"></div>
         <div class="terminal-scroll-overlay" id="terminalScrollOverlay" hidden>
+          <button type="button" id="terminalWidgetsProxy" aria-label="toggle widgets" hidden>widgets</button>
           <button type="button" id="terminalTopBtn" aria-label="scroll terminal to top">top</button>
           <button type="button" id="terminalBottomBtn" aria-label="scroll terminal to bottom">bottom</button>
         </div>
@@ -1491,6 +1493,7 @@ const terminalLoadingEl = $("terminalLoading");
 const terminalScrollOverlayEl = $("terminalScrollOverlay");
 const terminalWidgetControlsEl = $("terminalWidgetControls");
 const widgetsTriggerBtn = $("widgetsTrigger");
+const terminalWidgetsProxyBtn = $("terminalWidgetsProxy");
 const terminalTopBtn = $("terminalTopBtn");
 const terminalBottomBtn = $("terminalBottomBtn");
 const browserPreviewEl = $("browserPreview");
@@ -2380,6 +2383,7 @@ function enterChatMode() {
   terminalWrapEl.hidden = true;
   terminalEl.classList.remove("hide-xterm-cursor");
   terminalScrollOverlayEl.hidden = true;
+  renderWidgets();
   renderEditorState(null);
   // Virtual keyboard only makes sense over xterm — chat sessions
   // have a text-style editor instead.
@@ -2428,6 +2432,7 @@ async function enterTerminalMode(id, options = {}) {
   composerEl.hidden = false;
   terminalWrapEl.hidden = false;
   terminalScrollOverlayEl.hidden = false;
+  renderWidgets();
   vkbdEl.hidden = false;
   const session = state.sessions.find((x) => x.id === id);
   terminalEl.classList.toggle("hide-xterm-cursor", isStructuredToolSession(session));
@@ -3872,6 +3877,7 @@ function renderWidgets() {
   const panels = sessionId ? (state.widgetsById.get(sessionId) || []) : [];
   if (!sessionId || panels.length === 0) {
     widgetsTriggerBtn.hidden = true;
+    terminalWidgetsProxyBtn.hidden = true;
     terminalWidgetControlsEl.hidden = true;
     state.widgetsDropdownOpen = false;
     sessionWidgetsEl.hidden = true;
@@ -3880,9 +3886,12 @@ function renderWidgets() {
   }
   const visible = visibleWidgetIds(sessionId, panels);
   const visiblePanels = panels.filter((panel) => visible.has(normalizePanelId(panel)));
-  widgetsTriggerBtn.hidden = false;
+  const terminalMode = state.mode === "terminal" && !terminalWrapEl.hidden;
+  widgetsTriggerBtn.hidden = terminalMode;
+  terminalWidgetControlsEl.hidden = terminalMode;
+  terminalWidgetsProxyBtn.hidden = !terminalMode;
   widgetsTriggerBtn.setAttribute("aria-expanded", state.widgetsDropdownOpen ? "true" : "false");
-  terminalWidgetControlsEl.hidden = false;
+  terminalWidgetsProxyBtn.setAttribute("aria-expanded", state.widgetsDropdownOpen ? "true" : "false");
   sessionWidgetsEl.hidden = !state.widgetsDropdownOpen;
   sessionWidgetsEl.innerHTML = `
     <div class="widgets-menu" role="menu">
@@ -3959,7 +3968,7 @@ function renderTimeline(rawLines, sessionId, panelId) {
   }
   return `<div class="widget-timeline">${items.map((item) => {
     const parsed = parseWidgetListItem(item.raw) || { glyph: "•", state: "bullet", text: stripPlainBullet(item.raw.trim()), indent: 0 };
-    return `<div class="timeline-item"><div class="timeline-marker ${attr(parsed.state)}">${escape(parsed.glyph)}</div><div class="timeline-main"><div>${renderInlineActions(parsed.text, sessionId, panelId)}</div><div class="timeline-nested">${item.children.map((child) => renderWidgetLine(parseWidgetListItem(child) || { glyph: "•", state: "bullet", text: stripPlainBullet(child.trim()), indent: indentDepth(child) }, sessionId, panelId)).join("")}</div></div></div>`;
+    return `<div class="timeline-item"><div class="timeline-rail"><span class="timeline-marker ${attr(parsed.state)}">${escape(parsed.glyph)}</span></div><div class="timeline-main"><div>${renderInlineActions(parsed.text, sessionId, panelId)}</div><div class="timeline-nested">${item.children.map((child) => renderWidgetLine(parseWidgetListItem(child) || { glyph: "•", state: "bullet", text: stripPlainBullet(child.trim()), indent: indentDepth(child) }, sessionId, panelId)).join("")}</div></div></div>`;
   }).join("")}</div>`;
 }
 
@@ -4087,11 +4096,14 @@ insertBtn.addEventListener("click", (ev) => {
   submitComposer({ enter: false });
 });
 
-widgetsTriggerBtn.addEventListener("click", (ev) => {
-  ev.preventDefault();
+function toggleWidgetsPopover(ev) {
+  if (ev) ev.preventDefault();
   state.widgetsDropdownOpen = !state.widgetsDropdownOpen;
   renderWidgets();
-});
+}
+
+widgetsTriggerBtn.addEventListener("click", toggleWidgetsPopover);
+terminalWidgetsProxyBtn.addEventListener("click", toggleWidgetsPopover);
 
 sessionWidgetsEl.addEventListener("click", (ev) => {
   const item = ev.target.closest && ev.target.closest(".widgets-menu-item");
@@ -4138,7 +4150,7 @@ sessionWidgetsEl.addEventListener("keydown", (ev) => {
 
 document.addEventListener("click", (ev) => {
   if (!state.widgetsDropdownOpen) return;
-  if (sessionWidgetsEl.contains(ev.target) || widgetsTriggerBtn.contains(ev.target)) return;
+  if (sessionWidgetsEl.contains(ev.target) || widgetsTriggerBtn.contains(ev.target) || terminalWidgetsProxyBtn.contains(ev.target)) return;
   state.widgetsDropdownOpen = false;
   renderWidgets();
 });
