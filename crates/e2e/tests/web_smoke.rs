@@ -1168,6 +1168,7 @@ async fn web_client_loads_and_websocket_connects() {
                 hasTemporaryDeadline: state.widgetTemporaryUntilById.has('sWidget'),
                 renderedText: panel.textContent,
                 hideButtonText: panel.querySelector('.widget-hide')?.textContent || '',
+                menuDisplay: getComputedStyle(panel.querySelector('.widgets-menu')).display,
               };
               panel.querySelector('.widget-hide').click();
               out.hiddenByButton = !panel.textContent.includes('Working');
@@ -1213,6 +1214,7 @@ async fn web_client_loads_and_websocket_connects() {
         "updated widget body was not rendered: {widget_autoshow:?}"
     );
     assert_eq!(widget_autoshow["hideButtonText"], "[-]");
+    assert_eq!(widget_autoshow["menuDisplay"], "grid");
     assert_eq!(widget_autoshow["hiddenByButton"], true);
     assert_eq!(widget_autoshow["menuUncheckedAfterHide"], "false");
     assert_eq!(
