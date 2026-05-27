@@ -1170,6 +1170,15 @@ async fn web_client_loads_and_websocket_connects() {
                 hideButtonText: panel.querySelector('.widget-hide')?.textContent || '',
                 menuDisplay: getComputedStyle(panel.querySelector('.widgets-menu')).display,
               };
+              panel.querySelector('.widgets-menu-item[data-widget-id="progress"]').click();
+              out.openAfterMenuUncheck = !panel.hidden;
+              out.expandedAfterMenuUncheck = document.getElementById('widgetsTrigger').getAttribute('aria-expanded');
+              out.hiddenAfterMenuUncheck = !panel.textContent.includes('Working');
+              out.menuUncheckedAfterMenuUncheck = panel.querySelector('.widgets-menu-item[data-widget-id="progress"]')?.getAttribute('aria-checked');
+              panel.querySelector('.widgets-menu-item[data-widget-id="progress"]').click();
+              out.openAfterMenuRecheck = !panel.hidden;
+              out.visibleAfterMenuRecheck = panel.textContent.includes('Working');
+              out.menuCheckedAfterMenuRecheck = panel.querySelector('.widgets-menu-item[data-widget-id="progress"]')?.getAttribute('aria-checked');
               panel.querySelector('.widget-hide').click();
               out.hiddenByButton = !panel.textContent.includes('Working');
               out.menuUncheckedAfterHide = panel.querySelector('.widgets-menu-item[data-widget-id="progress"]')?.getAttribute('aria-checked');
@@ -1215,6 +1224,13 @@ async fn web_client_loads_and_websocket_connects() {
     );
     assert_eq!(widget_autoshow["hideButtonText"], "[-]");
     assert_eq!(widget_autoshow["menuDisplay"], "grid");
+    assert_eq!(widget_autoshow["openAfterMenuUncheck"], true);
+    assert_eq!(widget_autoshow["expandedAfterMenuUncheck"], "true");
+    assert_eq!(widget_autoshow["hiddenAfterMenuUncheck"], true);
+    assert_eq!(widget_autoshow["menuUncheckedAfterMenuUncheck"], "false");
+    assert_eq!(widget_autoshow["openAfterMenuRecheck"], true);
+    assert_eq!(widget_autoshow["visibleAfterMenuRecheck"], true);
+    assert_eq!(widget_autoshow["menuCheckedAfterMenuRecheck"], "true");
     assert_eq!(widget_autoshow["hiddenByButton"], true);
     assert_eq!(widget_autoshow["menuUncheckedAfterHide"], "false");
     assert_eq!(

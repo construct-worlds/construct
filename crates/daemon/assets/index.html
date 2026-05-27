@@ -4183,6 +4183,8 @@ sessionWidgetsEl.addEventListener("click", (ev) => {
   }
   const item = ev.target.closest && ev.target.closest(".widgets-menu-item");
   if (item && state.currentId) {
+    ev.preventDefault();
+    ev.stopPropagation();
     const panels = state.widgetsById.get(state.currentId) || [];
     const visible = visibleWidgetIds(state.currentId, panels);
     const id = item.dataset.widgetId;
