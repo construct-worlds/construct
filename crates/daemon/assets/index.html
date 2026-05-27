@@ -1580,6 +1580,11 @@ const state = {
   // following bottom when we sent the resize, keep following briefly
   // while that delayed repaint lands.
   resizeFollowBottomUntil: 0,
+  // Composer textarea auto-grow/shrink changes the xterm host's row
+  // count. Do not turn that incidental layout change into SIGWINCH:
+  // full-screen PTY apps like codex repaint on resize, which looks
+  // like terminal history replaying from the top after Insert.
+  composerResizeSuppressPtyResizeUntil: 0,
   // PTY events that arrived during the `pty_replay` round-trip get
   // queued here, then drained after the snapshot is written. Keeps
   // history-before-live ordering correct without a race window.
@@ -1602,6 +1607,7 @@ const state = {
 const LARGE_TEXT_PASTE_CHARS = 16 * 1024;
 const WEB_PTY_ENGAGEMENT_MS = 3000;
 const WEB_PTY_RESIZE_DEBOUNCE_MS = 120;
+const COMPOSER_RESIZE_SUPPRESS_PTY_RESIZE_MS = 350;
 const SESSION_LIST_WIDTH_KEY = "agentd.web.sessionListWidth";
 const SESSION_LIST_VISIBLE_KEY = "agentd.web.sessionListVisible";
 const SESSION_LIST_DEFAULT_WIDTH = 240;
@@ -2802,6 +2808,10 @@ function refitTerminal(options = {}) {
   if (!colsChanged && !rowsChanged) {
     return;
   }
+  if (!claim && !colsChanged && rowsChanged && shouldSuppressComposerRowResize()) {
+    state.resizeFollowBottomUntil = 0;
+    return;
+  }
   if (!claim && !webPtyRecentlyEngaged()) {
     // Passive browser layout churn (background tab, phone keyboard,
     // viewport settle) should refit local xterm but must not steal the
@@ -2880,6 +2890,16 @@ function shouldFollowResizeBottom() {
 
 function cancelResizeFollowBottom() {
   state.resizeFollowBottomUntil = 0;
+}
+
+function suppressComposerRowResize() {
+  if (state.mode !== "terminal") return;
+  state.composerResizeSuppressPtyResizeUntil =
+    performance.now() + COMPOSER_RESIZE_SUPPRESS_PTY_RESIZE_MS;
+}
+
+function shouldSuppressComposerRowResize() {
+  return performance.now() <= state.composerResizeSuppressPtyResizeUntil;
 }
 
 function writeLivePtyToTerm(bytes) {
@@ -4260,7 +4280,7 @@ inputEl.addEventListener("keydown", (ev) => {
 inputEl.addEventListener("input", () => {
   // Auto-grow the textarea so multi-line composing isn't a tiny
   // single-row box.
-  resetInputHeight();
+  resetInputHeightPreservingTerminalScroll();
 });
 
 inputEl.addEventListener("paste", (ev) => {
@@ -4270,6 +4290,13 @@ inputEl.addEventListener("paste", (ev) => {
 function resetInputHeight() {
   inputEl.style.height = "auto";
   inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.3) + "px";
+}
+
+function resetInputHeightPreservingTerminalScroll() {
+  const wasAtBottom = state.mode === "terminal" && terminalIsAtBottom();
+  suppressComposerRowResize();
+  resetInputHeight();
+  if (wasAtBottom) requestAnimationFrame(() => restoreTerminalBottom(true));
 }
 
 async function handleComposerPaste(ev) {
@@ -4356,10 +4383,9 @@ async function submitComposer({ enter }) {
   // meaningful (sends a bare `\r`), so allow it there.
   if (!text && !(enter && currentSessionHasPty())) return;
   inputEl.value = "";
-  resetInputHeight();
+  resetInputHeightPreservingTerminalScroll();
   const pty = currentSessionHasPty();
   if (pty) {
-    if (state.mode === "terminal") claimTerminalGeometryNow();
     const payload = enter ? text + "\r" : text;
     const data = encodeBase64Utf8(payload);
     try {

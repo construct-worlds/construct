@@ -705,9 +705,11 @@ async fn web_client_loads_and_websocket_connects() {
               const oldFit = state.fitAddon;
               const oldMode = state.mode;
               const oldCurrent = state.currentId;
+              const oldSessions = state.sessions;
               const oldSize = state.lastReportedSize;
               const oldFollow = state.resizeFollowBottomUntil;
               const oldEngaged = state.webPtyEngagedUntil;
+              const oldComposerSuppress = state.composerResizeSuppressPtyResizeUntil;
               const oldTimer = state.ptyResizeTimer;
               const oldPending = state.pendingPtyResize;
               const oldRpc = rpc;
@@ -821,18 +823,76 @@ async fn web_client_loads_and_websocket_connects() {
               refitTerminal({ claim: true, immediate: true });
               await new Promise((resolve) => requestAnimationFrame(resolve));
 
+              const composerBottom = { viewportY: 42, baseY: 42 };
+              state.term = {
+                cols: 100,
+                rows: 25,
+                buffer: { active: composerBottom },
+                scrollToBottom: () => {
+                  calls.push('composer-bottom');
+                  composerBottom.viewportY = composerBottom.baseY;
+                },
+              };
+              input.value = 'line one\nline two';
+              resetInputHeightPreservingTerminalScroll();
+              await new Promise((resolve) => requestAnimationFrame(resolve));
+
+              const composerScrolledUp = { viewportY: 12, baseY: 42 };
+              state.term = {
+                cols: 100,
+                rows: 25,
+                buffer: { active: composerScrolledUp },
+                scrollToBottom: () => {
+                  calls.push('unexpected-composer-bottom');
+                  composerScrolledUp.viewportY = composerScrolledUp.baseY;
+                },
+              };
+              input.value = 'line one\nline two\nline three';
+              resetInputHeightPreservingTerminalScroll();
+              await new Promise((resolve) => requestAnimationFrame(resolve));
+
+              const composerSuppressed = { viewportY: 55, baseY: 55 };
+              state.lastReportedSize = { cols: 100, rows: 40 };
+              state.webPtyEngagedUntil = performance.now() + 1000;
+              state.term = {
+                cols: 100,
+                rows: 25,
+                buffer: { active: composerSuppressed },
+                scrollToBottom: () => {
+                  calls.push('composer-suppressed-bottom');
+                  composerSuppressed.viewportY = composerSuppressed.baseY;
+                },
+              };
+              state.fitAddon = {
+                fit: () => {
+                  calls.push('fit-composer-suppressed');
+                },
+              };
+              input.value = 'line one\nline two';
+              resetInputHeightPreservingTerminalScroll();
+              refitTerminal();
+              await new Promise((resolve) => requestAnimationFrame(resolve));
+
+              state.sessions = [{ id: 's-fit', has_pty: true, mode: 'interactive' }];
+              state.lastReportedSize = { cols: 100, rows: 40 };
+              state.webPtyEngagedUntil = performance.now() + 1000;
+              input.value = 'inserted text';
+              await submitComposer({ enter: false });
+
               state.term = oldTerm;
               state.fitAddon = oldFit;
               state.mode = oldMode;
               state.currentId = oldCurrent;
+              state.sessions = oldSessions;
               state.lastReportedSize = oldSize;
               state.resizeFollowBottomUntil = oldFollow;
               state.webPtyEngagedUntil = oldEngaged;
+              state.composerResizeSuppressPtyResizeUntil = oldComposerSuppress;
               if (state.ptyResizeTimer) clearTimeout(state.ptyResizeTimer);
               state.ptyResizeTimer = oldTimer;
               state.pendingPtyResize = oldPending;
               rpc = oldRpc;
-              return { calls, bottom, scrolledUp };
+              return { calls, bottom, scrolledUp, composerBottom, composerScrolledUp, composerSuppressed };
             })()
             "#,
         )
@@ -887,6 +947,40 @@ async fn web_client_loads_and_websocket_connects() {
     assert_ne!(
         fit_scroll["scrolledUp"]["viewportY"], fit_scroll["scrolledUp"]["baseY"],
         "manual scroll position should not be forced to bottom: {fit_scroll:?}"
+    );
+    assert!(
+        calls.iter().any(|v| v.as_str() == Some("composer-bottom")),
+        "composer resize should preserve a bottom-following terminal: {fit_scroll:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|v| v.as_str() == Some("unexpected-composer-bottom")),
+        "composer resize incorrectly forced a manually-scrolled terminal to bottom: {fit_scroll:?}"
+    );
+    assert_eq!(
+        fit_scroll["composerBottom"]["viewportY"],
+        fit_scroll["composerBottom"]["baseY"]
+    );
+    assert_ne!(
+        fit_scroll["composerScrolledUp"]["viewportY"], fit_scroll["composerScrolledUp"]["baseY"],
+        "composer resize should preserve manual terminal scroll position: {fit_scroll:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|v| v.as_str() == Some("fit-composer-suppressed")),
+        "composer-triggered terminal refit should still run locally: {fit_scroll:?}"
+    );
+    assert_eq!(
+        fit_scroll["composerSuppressed"]["viewportY"],
+        fit_scroll["composerSuppressed"]["baseY"]
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|v| v["method"].as_str() == Some("session.pty_input")),
+        "Insert should still send PTY input: {fit_scroll:?}"
     );
 
     // Reconnect regression: mobile keyboard show/hide can churn the browser's
