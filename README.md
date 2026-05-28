@@ -15,8 +15,8 @@ you. Remote control from your phone when you're in motion.
 
   <img src="https://raw.githubusercontent.com/zarvis-ai/agentd/f8fae6e5227ccd0b2140c35ce6e2ad16349da848/demos/new-session.gif" alt="agentd new session demo" width="50%">
 - **A delightful way to manage multiple Claude Code and Codex sessions** —
-  spawn helpers, pin important work, interrupt stuck runs, inspect diffs, and
-  send follow-up input mid-turn.
+  switch sessions instantly, pin multiple sessions to monitor, or let an agent
+  observe all your sessions across different harnesses.
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
   output, spawn helpers, send input, inspect diffs, and drive Chrome.
 - **Generative widgets for live agent status** — sessions can render compact
