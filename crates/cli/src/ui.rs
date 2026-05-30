@@ -4529,10 +4529,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
         let mut spans = vec![Span::raw(mb.prompt.clone()), Span::raw(mb.input.clone())];
         if let Some(err) = &mb.error {
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                err.clone(),
-                Style::default().fg(app.theme.danger),
-            ));
+            spans.push(Span::styled(err.clone(), minibuffer_hint_style(app, mb)));
         }
         let para = Paragraph::new(Line::from(spans));
         f.render_widget(para, area);
@@ -4614,6 +4611,14 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
     }
     let para = Paragraph::new(Line::from(spans));
     f.render_widget(para, area);
+}
+
+fn minibuffer_hint_style(app: &App, mb: &Minibuffer) -> Style {
+    if matches!(mb.intent, MinibufferIntent::SwitchSession) {
+        Style::default().fg(app.theme.muted)
+    } else {
+        Style::default().fg(app.theme.danger)
+    }
 }
 
 fn render_help(f: &mut Frame, area: Rect, theme: &Theme) -> Rect {

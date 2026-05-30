@@ -6362,14 +6362,7 @@ fn switch_session_hint_from(sessions: &[SessionSummary], query: &str) -> String 
     let labels: Vec<String> = matches
         .into_iter()
         .take(5)
-        .map(|s| {
-            format!(
-                "{} [{} {}]",
-                session_switch_label(s),
-                s.harness,
-                short_id(&s.id)
-            )
-        })
+        .map(session_switch_label)
         .collect();
     format!("matches: {}", labels.join(", "))
 }
