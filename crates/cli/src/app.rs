@@ -194,6 +194,7 @@ pub enum MinibufferIntent {
     RestartConfirm {
         session_id: String,
     },
+    SwitchSession,
     Rename {
         session_id: String,
     },
@@ -2112,6 +2113,13 @@ impl App {
         if let Some(msg) = hydration.status_messages.last() {
             self.set_status(msg.clone());
         }
+    }
+
+    fn user_sessions(&self) -> Vec<&SessionSummary> {
+        self.sessions
+            .iter()
+            .filter(|s| is_user_list_session(s))
+            .collect()
     }
 
     /// Materialize the rendered list: ungrouped sessions (sorted by
@@ -4671,6 +4679,7 @@ impl App {
                 | KeyAction::ToggleZoom
                 | KeyAction::ToggleHelp
                 | KeyAction::OpenCommandPalette
+                | KeyAction::OpenSwitchSession
                 | KeyAction::OpenNewSession
                 | KeyAction::Refresh
                 | KeyAction::Quit),
@@ -4994,6 +5003,9 @@ impl App {
             OpenCommandPalette => {
                 self.open_minibuffer_for_command();
             }
+            OpenSwitchSession => {
+                self.open_minibuffer_for_switch_session();
+            }
             FocusView => {
                 // Enter on a *terminated* session opens a restart
                 // confirmation instead of drilling in. Typing into
@@ -5297,6 +5309,15 @@ impl App {
             self.minibuffer.as_ref().map(|m| &m.intent),
             Some(MinibufferIntent::NewSessionHarness)
         );
+        let is_switch_session = matches!(
+            self.minibuffer.as_ref().map(|m| &m.intent),
+            Some(MinibufferIntent::SwitchSession)
+        );
+        let switch_sessions: Vec<SessionSummary> = if is_switch_session {
+            self.user_sessions().into_iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
         let available_harnesses: Vec<String> = if is_new_harness {
             let mut v: Vec<String> = self
                 .harnesses
@@ -5413,6 +5434,16 @@ impl App {
             KeyCode::Tab => {
                 if is_new_harness {
                     apply_harness_completion(mb, &available_harnesses);
+                } else if matches!(mb.intent, MinibufferIntent::SwitchSession) {
+                    let input = mb.input.clone();
+                    let matches = match_switch_sessions_from(&switch_sessions, &input);
+                    if let Some(s) = matches.first() {
+                        mb.input = session_switch_label(s);
+                        mb.cursor = mb.input.chars().count();
+                        mb.error = Some(switch_session_hint_from(&switch_sessions, &mb.input));
+                    } else {
+                        mb.error = Some(format!("no match for {input}"));
+                    }
                 }
                 return;
             }
@@ -5485,6 +5516,9 @@ impl App {
             // the input.
             KeyCode::Char(c) if !ctrl && !alt => {
                 insert_minibuffer_text(mb, &c.to_string());
+                if matches!(mb.intent, MinibufferIntent::SwitchSession) {
+                    mb.error = Some(switch_session_hint_from(&switch_sessions, &mb.input));
+                }
             }
             _ => {}
         }
@@ -5500,6 +5534,19 @@ impl App {
                     Ok(()) => self.set_status("input sent".to_string()),
                     Err(e) => self.set_status(format!("send failed: {e}")),
                 }
+            }
+            MinibufferIntent::SwitchSession => {
+                let matches = self.match_switch_sessions(&input);
+                let Some(session) = matches.first() else {
+                    self.set_status(format!("no session matches {}", input.trim()));
+                    return;
+                };
+                let session_id = session.id.clone();
+                let label = session_switch_label(session);
+                self.select_session(session_id);
+                self.sync_active_window_selection();
+                self.focus = PaneFocus::View;
+                self.set_status(format!("window → {label}"));
             }
             MinibufferIntent::NewSessionHarness => {
                 let harness = input.trim().to_string();
@@ -6032,6 +6079,30 @@ impl App {
     /// keybind (`M-x` / `C-x x` / click on the prompt). Prefers the
     /// orchestrator panel when an orchestrator session is available;
     /// falls back to the static command palette.
+    fn match_switch_sessions(&self, query: &str) -> Vec<&SessionSummary> {
+        let sessions = self.user_sessions();
+        match_switch_sessions_refs(sessions, query)
+    }
+
+    fn switch_session_hint(&self, query: &str) -> String {
+        let sessions: Vec<SessionSummary> = self.user_sessions().into_iter().cloned().collect();
+        switch_session_hint_from(&sessions, query)
+    }
+
+    pub fn open_minibuffer_for_switch_session(&mut self) {
+        if self.user_sessions().is_empty() {
+            self.set_status("no sessions".to_string());
+            return;
+        }
+        self.minibuffer = Some(Minibuffer {
+            prompt: "Switch session: ".to_string(),
+            input: String::new(),
+            cursor: 0,
+            intent: MinibufferIntent::SwitchSession,
+            error: Some(self.switch_session_hint("")),
+        });
+    }
+
     pub fn open_minibuffer_for_command(&mut self) {
         if self.orchestrator_id.is_some() {
             self.orchestrator_scrollback = 0;
@@ -6203,6 +6274,104 @@ pub fn summarize_tool_args(args: &serde_json::Value) -> String {
 pub fn short_id(id: &str) -> &str {
     let n = id.len().min(10);
     &id[..n]
+}
+
+fn session_switch_label(s: &SessionSummary) -> String {
+    s.title
+        .as_ref()
+        .filter(|t| !t.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| short_id(&s.id).to_string())
+}
+
+fn session_switch_haystack(s: &SessionSummary) -> String {
+    format!(
+        "{} {} {} {}",
+        session_switch_label(s),
+        s.id,
+        short_id(&s.id),
+        s.harness
+    )
+    .to_lowercase()
+}
+
+fn fuzzy_match(query: &str, haystack: &str) -> bool {
+    let mut chars = haystack.chars();
+    query
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .all(|needle| chars.by_ref().any(|hay| hay == needle))
+}
+
+fn switch_session_match_score(s: &SessionSummary, query: &str) -> Option<i32> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let label = session_switch_label(s).to_lowercase();
+    let id = s.id.to_lowercase();
+    let short = short_id(&s.id).to_lowercase();
+    let harness = s.harness.to_lowercase();
+    if label == q || id == q || short == q {
+        Some(100)
+    } else if label.starts_with(&q) {
+        Some(90)
+    } else if short.starts_with(&q) || id.starts_with(&q) {
+        Some(85)
+    } else if harness.starts_with(&q) {
+        Some(75)
+    } else if label.contains(&q) || id.contains(&q) || harness.contains(&q) {
+        Some(65)
+    } else if fuzzy_match(&q, &session_switch_haystack(s)) {
+        Some(40)
+    } else {
+        None
+    }
+}
+
+fn match_switch_sessions_from<'a>(
+    sessions: &'a [SessionSummary],
+    query: &str,
+) -> Vec<&'a SessionSummary> {
+    let mut scored: Vec<(i32, chrono::DateTime<chrono::Utc>, &SessionSummary)> = sessions
+        .iter()
+        .filter_map(|s| switch_session_match_score(s, query).map(|score| (score, s.created_at, s)))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    scored.into_iter().map(|(_, _, s)| s).collect()
+}
+
+fn match_switch_sessions_refs<'a>(
+    sessions: Vec<&'a SessionSummary>,
+    query: &str,
+) -> Vec<&'a SessionSummary> {
+    let mut scored: Vec<(i32, chrono::DateTime<chrono::Utc>, &SessionSummary)> = sessions
+        .into_iter()
+        .filter_map(|s| switch_session_match_score(s, query).map(|score| (score, s.created_at, s)))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    scored.into_iter().map(|(_, _, s)| s).collect()
+}
+
+fn switch_session_hint_from(sessions: &[SessionSummary], query: &str) -> String {
+    let matches = match_switch_sessions_from(sessions, query);
+    if matches.is_empty() {
+        return "no matches".to_string();
+    }
+    let labels: Vec<String> = matches
+        .into_iter()
+        .take(5)
+        .map(|s| {
+            format!(
+                "{} [{} {}]",
+                session_switch_label(s),
+                s.harness,
+                short_id(&s.id)
+            )
+        })
+        .collect();
+    format!("matches: {}", labels.join(", "))
 }
 
 fn normalized_points(a: ScreenPoint, b: ScreenPoint) -> (ScreenPoint, ScreenPoint) {
@@ -6651,6 +6820,36 @@ mod tests {
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(app.active_window_id, 1);
         server.abort();
+    }
+
+    #[test]
+    fn switch_session_matches_title_id_harness_and_fuzzy() {
+        let mut shell = summary_with_kind(agentd_protocol::SessionKind::User);
+        shell.id = "shell-session-abcdef".into();
+        shell.harness = "shell".into();
+        shell.title = Some("Build logs".into());
+        let mut codex = summary_with_kind(agentd_protocol::SessionKind::User);
+        codex.id = "codex-session-abcdef".into();
+        codex.harness = "codex".into();
+        codex.title = Some("Review PR".into());
+        let sessions = vec![shell, codex];
+
+        assert_eq!(
+            match_switch_sessions_from(&sessions, "Build")[0].id,
+            "shell-session-abcdef"
+        );
+        assert_eq!(
+            match_switch_sessions_from(&sessions, "codex-session")[0].id,
+            "codex-session-abcdef"
+        );
+        assert_eq!(
+            match_switch_sessions_from(&sessions, "codex")[0].id,
+            "codex-session-abcdef"
+        );
+        assert_eq!(
+            match_switch_sessions_from(&sessions, "rvpr")[0].id,
+            "codex-session-abcdef"
+        );
     }
 
     #[tokio::test]

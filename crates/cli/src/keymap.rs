@@ -22,6 +22,7 @@ pub enum KeyAction {
     OpenDiff,
     Interrupt,
     OpenCommandPalette,
+    OpenSwitchSession,
     SplitWindowBelow,
     SplitWindowRight,
     DeleteWindow,
@@ -215,6 +216,7 @@ fn emacs() -> Keymap {
         (Chord(vec![ctrl('x'), ch('z')]), ToggleZoom),
         // Session actions
         (Chord(vec![ctrl('x'), ctrl('f')]), OpenNewSession),
+        (Chord(vec![ctrl('x'), ch('b')]), OpenSwitchSession),
         (Chord(vec![ctrl('x'), ch('k')]), OpenDeleteConfirm),
         (Chord(vec![ctrl('x'), ch('d')]), OpenDiff),
         (Chord(vec![ctrl('x'), ch('i')]), OpenSendInput),
@@ -272,6 +274,7 @@ fn vim() -> Keymap {
         (Chord(vec![key(KeyCode::Up)]), PrevSession),
         (Chord(vec![ch('i')]), OpenSendInput),
         (Chord(vec![ch('n')]), OpenNewSession),
+        (Chord(vec![ctrl('x'), ch('b')]), OpenSwitchSession),
         (Chord(vec![shift('K')]), OpenDeleteConfirm),
         (Chord(vec![ch('d')]), OpenDiff),
         (Chord(vec![ctrl('c')]), Interrupt),

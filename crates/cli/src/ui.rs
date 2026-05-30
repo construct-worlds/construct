@@ -4686,6 +4686,7 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
 
   session actions
     C-x C-f         new session
+    C-x b           switch focused window to an existing session
     C-x i           send input to selected session
     C-x k           delete selected session (confirms; kills if running)
     C-x d           show diff
