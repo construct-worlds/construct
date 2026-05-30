@@ -403,11 +403,13 @@ pub struct App {
     /// top. Mouse wheel over the list adjusts this; keyboard selection still
     /// lets ratatui pull the selected item back into view when needed.
     pub list_scroll_offset: usize,
-    /// Scrollback offset (in rows) applied to the *focused* session's PTY
-    /// parser when rendering. 0 = live view. Increased by mouse-wheel up,
-    /// decreased by mouse-wheel down. Reset to 0 on user keystroke into
-    /// the PTY or on session change.
+    /// Scrollback offset (in rows) applied to the active/focused session's PTY
+    /// parser when rendering zoomed or single-window views. Split windows keep
+    /// their own offsets in `window_scrollback` so mouse-wheel scrolling one
+    /// split does not move its siblings. 0 = live view.
     pub view_scrollback: usize,
+    /// Per-split-window PTY scrollback offsets, keyed by main-window id.
+    pub window_scrollback: HashMap<u64, usize>,
     /// Show the terminal scrollback overlay until this instant. Refreshed by
     /// wheel/key scrollback input and hidden automatically after a short idle
     /// delay, similar to editor overlay scrollbars.
@@ -1106,6 +1108,7 @@ pub struct TerminalScrollbarHit {
 pub struct WindowPaneHit {
     pub id: u64,
     pub area: ratatui::layout::Rect,
+    pub inner_area: ratatui::layout::Rect,
 }
 
 /// Last-frame geometry for hit-testing mouse clicks.
@@ -1354,6 +1357,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         zoom: initial_zoom,
         list_scroll_offset: 0,
         view_scrollback: 0,
+        window_scrollback: HashMap::new(),
         terminal_scrollbar_visible_until: None,
         skip_redraw_after_event: false,
         hydrating_sessions: HashSet::new(),
@@ -2017,7 +2021,8 @@ impl App {
                 }
             }
             None if self.is_pty_captured() => {
-                self.view_scrollback = 0;
+                let active_window = self.is_split_layout().then_some(self.active_window_id);
+                self.set_scrollback_for_window(active_window, 0);
                 if let Some(id) = self.selected_id() {
                     self.queue_pty_input(id, text.into_bytes(), "pty_input");
                 }
@@ -2052,7 +2057,8 @@ impl App {
         self.transcript.clear();
         self.transcript_session = None;
         self.transcript_scroll = u16::MAX;
-        self.view_scrollback = 0;
+        let active_window = self.is_split_layout().then_some(self.active_window_id);
+        self.set_scrollback_for_window(active_window, 0);
         self.view = if self.selected_session().map(|s| s.has_pty).unwrap_or(false) {
             ViewMode::Terminal
         } else {
@@ -2068,7 +2074,8 @@ impl App {
         self.transcript.clear();
         self.transcript_session = None;
         self.transcript_scroll = u16::MAX;
-        self.view_scrollback = 0;
+        let active_window = self.is_split_layout().then_some(self.active_window_id);
+        self.set_scrollback_for_window(active_window, 0);
     }
 
     pub fn prune_finished_transitions(&mut self) {
@@ -2342,8 +2349,10 @@ impl App {
         if self.transcript_session.as_deref() == Some(&id) {
             return;
         }
-        // Switching sessions snaps to live for the new one.
-        self.view_scrollback = 0;
+        // Switching sessions in single-pane mode snaps to live for the new one.
+        if !self.is_split_layout() {
+            self.view_scrollback = 0;
+        }
         match self.client.transcript(&id, 0, None).await {
             Ok(t) => {
                 self.transcript = t.events;
@@ -2635,6 +2644,28 @@ impl App {
         find(&self.main_windows, target)
     }
 
+    pub fn scrollback_for_window(&self, window_id: Option<u64>) -> usize {
+        window_id
+            .and_then(|id| self.window_scrollback.get(&id).copied())
+            .unwrap_or(self.view_scrollback)
+    }
+
+    pub fn set_scrollback_for_window(&mut self, window_id: Option<u64>, scrollback: usize) {
+        if let Some(id) = window_id {
+            if scrollback == 0 {
+                self.window_scrollback.remove(&id);
+            } else {
+                self.window_scrollback.insert(id, scrollback);
+            }
+        } else {
+            self.view_scrollback = scrollback;
+        }
+    }
+
+    pub fn is_split_layout(&self) -> bool {
+        matches!(self.main_windows, MainWindowTree::Split { .. })
+    }
+
     fn leaf_window_ids(&self) -> Vec<u64> {
         fn collect(node: &MainWindowTree, out: &mut Vec<u64>) {
             match node {
@@ -2659,7 +2690,9 @@ impl App {
             if changed_selection {
                 self.transcript.clear();
                 self.transcript_session = None;
-                self.view_scrollback = 0;
+                if !self.is_split_layout() {
+                    self.view_scrollback = 0;
+                }
                 self.view = if self.selected_session().map(|s| s.has_pty).unwrap_or(false) {
                     ViewMode::Terminal
                 } else {
@@ -4450,7 +4483,9 @@ impl App {
         if self.view != ViewMode::Terminal || !self.in_pty_session() {
             return;
         }
-        self.view_scrollback = adjusted_scrollback(self.view_scrollback, delta);
+        let active_window = self.is_split_layout().then_some(self.active_window_id);
+        let next = adjusted_scrollback(self.scrollback_for_window(active_window), delta);
+        self.set_scrollback_for_window(active_window, next);
         self.show_terminal_scrollbar();
     }
 
@@ -4505,7 +4540,8 @@ impl App {
             .saturating_sub(hit.area.y)
             .min(hit.area.height.saturating_sub(hit.thumb.height)) as usize;
         let from_top = (thumb_top * max_scrollback + max_thumb_top / 2) / max_thumb_top;
-        self.view_scrollback = max_scrollback.saturating_sub(from_top);
+        let active_window = self.is_split_layout().then_some(self.active_window_id);
+        self.set_scrollback_for_window(active_window, max_scrollback.saturating_sub(from_top));
         self.show_terminal_scrollbar();
     }
 
@@ -4562,7 +4598,7 @@ impl App {
         );
     }
 
-    fn adjust_mouse_scrollback(&mut self, col: u16, row: u16, delta: i32) {
+    pub(crate) fn adjust_mouse_scrollback(&mut self, col: u16, row: u16, delta: i32) {
         if self.is_orchestrator_panel_open() {
             if let Some(area) = self.layout.minibuffer_area {
                 if col >= area.x
@@ -4576,8 +4612,19 @@ impl App {
                 }
             }
         }
+        let target_window = self
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|hit| Self::rect_contains(hit.inner_area, col, row))
+            .map(|hit| hit.id);
+        if let Some(window_id) = target_window {
+            self.focus_main_window(window_id);
+        }
         if self.view == ViewMode::Terminal && self.in_pty_session() {
-            self.view_scrollback = adjusted_scrollback(self.view_scrollback, delta);
+            let scroll_window = self.is_split_layout().then_some(self.active_window_id);
+            let next = adjusted_scrollback(self.scrollback_for_window(scroll_window), delta);
+            self.set_scrollback_for_window(scroll_window, next);
             self.show_terminal_scrollbar();
         }
     }
@@ -4715,8 +4762,9 @@ impl App {
             if self.chord_state.is_empty() && !is_ctrl_x {
                 // Typing snaps the view back to live: it's confusing to
                 // type "into the past" while reading scrollback.
-                let was_scrolled = self.view_scrollback != 0;
-                self.view_scrollback = 0;
+                let active_window = self.is_split_layout().then_some(self.active_window_id);
+                let was_scrolled = self.scrollback_for_window(active_window) != 0;
+                self.set_scrollback_for_window(active_window, 0);
                 if was_scrolled {
                     self.show_terminal_scrollbar();
                 }
@@ -5323,7 +5371,8 @@ impl App {
                     if self.is_orchestrator_panel_open() {
                         self.orchestrator_scrollback = SCROLLBACK_MAX;
                     } else {
-                        self.view_scrollback = SCROLLBACK_MAX;
+                        let active_window = self.is_split_layout().then_some(self.active_window_id);
+                        self.set_scrollback_for_window(active_window, SCROLLBACK_MAX);
                         self.show_terminal_scrollbar();
                     }
                 } else {
@@ -5335,7 +5384,8 @@ impl App {
                     if self.is_orchestrator_panel_open() {
                         self.orchestrator_scrollback = 0;
                     } else {
-                        self.view_scrollback = 0;
+                        let active_window = self.is_split_layout().then_some(self.active_window_id);
+                        self.set_scrollback_for_window(active_window, 0);
                         self.show_terminal_scrollbar();
                     }
                 } else {
@@ -6758,6 +6808,7 @@ mod tests {
             main_window_areas: vec![WindowPaneHit {
                 id: 1,
                 area: Rect::new(20, 0, 80, 20),
+                inner_area: Rect::new(21, 1, 78, 18),
             }],
             pin_strip_area: Some(Rect::new(20, 20, 80, 8)),
             matrix_rain_area: None,
@@ -6821,6 +6872,7 @@ mod tests {
             zoom: ZoomMode::None,
             list_scroll_offset: 0,
             view_scrollback: 0,
+            window_scrollback: HashMap::new(),
             terminal_scrollbar_visible_until: None,
             skip_redraw_after_event: false,
             hydrating_sessions: HashSet::new(),
@@ -6976,6 +7028,51 @@ mod tests {
             .insert("s1".into(), crate::pty_render::ItemHistory::new());
 
         assert_eq!(app.main_window_sessions_needing_hydration(), vec!["s2"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mouse_scrollback_targets_only_hovered_split() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut second = summary_with_kind(agentd_protocol::SessionKind::User);
+        second.id = "s2".into();
+        second.has_pty = true;
+        app.sessions.push(second);
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        app.view = ViewMode::Terminal;
+        app.layout.main_window_areas = vec![
+            WindowPaneHit {
+                id: 1,
+                area: Rect::new(20, 0, 40, 20),
+                inner_area: Rect::new(21, 1, 38, 18),
+            },
+            WindowPaneHit {
+                id: 2,
+                area: Rect::new(60, 0, 40, 20),
+                inner_area: Rect::new(61, 1, 38, 18),
+            },
+        ];
+
+        app.adjust_mouse_scrollback(65, 5, 10);
+
+        assert_eq!(app.active_window_id, 2);
+        assert_eq!(app.selection, Selection::Session("s2".into()));
+        assert_eq!(app.scrollback_for_window(Some(1)), 0);
+        assert_eq!(app.scrollback_for_window(Some(2)), 10);
+        assert_eq!(app.view_scrollback, 0);
         server.abort();
     }
 
