@@ -2537,17 +2537,21 @@ impl App {
 
     fn focus_main_window(&mut self, id: u64) {
         if let Some(selection) = self.selection_for_window(id) {
+            let changed_selection = self.selection != selection;
             self.active_window_id = id;
             self.selection = selection;
             self.focus = PaneFocus::View;
-            self.transcript.clear();
-            self.transcript_session = None;
-            self.view_scrollback = 0;
-            self.view = if self.selected_session().map(|s| s.has_pty).unwrap_or(false) {
-                ViewMode::Terminal
-            } else {
-                ViewMode::Transcript
-            };
+            if changed_selection {
+                self.start_session_transition();
+                self.transcript.clear();
+                self.transcript_session = None;
+                self.view_scrollback = 0;
+                self.view = if self.selected_session().map(|s| s.has_pty).unwrap_or(false) {
+                    ViewMode::Terminal
+                } else {
+                    ViewMode::Transcript
+                };
+            }
         }
     }
 
@@ -6807,11 +6811,16 @@ mod tests {
         };
         app.active_window_id = 2;
         app.focus = PaneFocus::List;
+        app.session_transition = None;
 
         app.run_action(KeyAction::SwitchFocus).await;
 
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(app.active_window_id, 1);
+        assert!(
+            app.session_transition.is_none(),
+            "focus-only changes must not glitch"
+        );
         server.abort();
     }
 
