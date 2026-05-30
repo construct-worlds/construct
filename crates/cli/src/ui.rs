@@ -2125,8 +2125,11 @@ fn render_glitch_overlay(f: &mut Frame, area: Rect, theme: &Theme, seed: u64, am
     }
 }
 
-fn render_main_transition(f: &mut Frame, area: Rect, app: &App) {
-    let Some(t) = app.session_transition.as_ref() else {
+fn render_main_transition(f: &mut Frame, area: Rect, app: &App, window_id: Option<u64>) {
+    let Some(window_id) = window_id else {
+        return;
+    };
+    let Some(t) = app.session_transitions.get(&window_id) else {
         return;
     };
     let Some(amount) = transition_amount(t.started_at) else {
@@ -2334,14 +2337,14 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
     }
     if let Some(g) = app.selected_group() {
         render_group_overview(f, inner, app, g);
-        render_main_transition(f, inner, app);
+        render_main_transition(f, inner, app, window_id);
         return;
     }
     match app.view {
         ViewMode::Terminal => render_terminal(f, inner, app),
         ViewMode::Transcript => render_transcript(f, inner, app),
     }
-    render_main_transition(f, inner, app);
+    render_main_transition(f, inner, app, window_id);
 }
 
 fn render_empty_session_state(f: &mut Frame, area: Rect, app: &App) {

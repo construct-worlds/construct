@@ -478,9 +478,10 @@ pub struct App {
     /// overlay and the matrix-rain wallpaper — avoids re-downscaling the
     /// screenshot every frame. See [`ImageResizeCache`].
     pub image_resize_cache: ImageResizeCache,
-    /// Short visual transition when the main view switches to a different
-    /// session.
-    pub session_transition: Option<SessionTransition>,
+    /// Short visual transition when a window explicitly switches to a
+    /// different session. Keyed per main-window id so split panes don't
+    /// glitch together.
+    pub session_transitions: HashMap<u64, SessionTransition>,
     /// Short visual transitions for newly visible pinned-session tiles.
     pub pin_transitions: HashMap<String, Instant>,
     /// Ambient Matrix-rain panel state for empty rows in the session list.
@@ -1312,7 +1313,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         dynamic_ui_focused: None,
         dynamic_ui_scroll_offsets: HashMap::new(),
         image_resize_cache: Vec::new(),
-        session_transition: None,
+        session_transitions: HashMap::new(),
         pin_transitions: HashMap::new(),
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
         matrix_rain_intensity: 0.0,
@@ -1936,9 +1937,16 @@ impl App {
     }
 
     pub fn start_session_transition(&mut self) {
-        self.session_transition = Some(SessionTransition {
-            started_at: Instant::now(),
-        });
+        self.start_window_transition(self.active_window_id);
+    }
+
+    pub fn start_window_transition(&mut self, window_id: u64) {
+        self.session_transitions.insert(
+            window_id,
+            SessionTransition {
+                started_at: Instant::now(),
+            },
+        );
     }
 
     pub fn start_pin_transition(&mut self, session_id: impl Into<String>) {
@@ -1975,14 +1983,8 @@ impl App {
 
     pub fn prune_finished_transitions(&mut self) {
         let done = |started: Instant| started.elapsed().as_millis() >= SESSION_TRANSITION_MS;
-        if self
-            .session_transition
-            .as_ref()
-            .map(|t| done(t.started_at))
-            .unwrap_or(false)
-        {
-            self.session_transition = None;
-        }
+        self.session_transitions
+            .retain(|_, transition| !done(transition.started_at));
         self.pin_transitions.retain(|_, started| !done(*started));
     }
 
@@ -5621,6 +5623,7 @@ impl App {
                                 .insert(id.clone(), crate::pty_render::ItemHistory::new());
                         }
                         self.select_session(id);
+                        self.sync_active_window_selection();
                         self.focus = PaneFocus::View;
                     }
                     Err(e) => self.set_status(format!("create failed: {e}")),
@@ -6738,7 +6741,7 @@ mod tests {
             dynamic_ui_focused: None,
             dynamic_ui_scroll_offsets: HashMap::new(),
             image_resize_cache: Vec::new(),
-            session_transition: None,
+            session_transitions: HashMap::new(),
             pin_transitions: HashMap::new(),
             matrix_rain: crate::matrix_rain::MatrixRain::default(),
             matrix_rain_intensity: 0.0,
@@ -6812,14 +6815,14 @@ mod tests {
         };
         app.active_window_id = 2;
         app.focus = PaneFocus::List;
-        app.session_transition = None;
+        app.session_transitions.clear();
 
         app.run_action(KeyAction::SwitchFocus).await;
 
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(app.active_window_id, 1);
         assert!(
-            app.session_transition.is_none(),
+            app.session_transitions.is_empty(),
             "window focus changes must not glitch"
         );
         server.abort();
