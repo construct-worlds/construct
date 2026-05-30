@@ -4011,6 +4011,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pty_replay_returns_empty_when_pty_log_missing() {
+        use base64::Engine;
+        use tempfile::tempdir;
+
+        // No bytes have ever been written for this session. pty_replay must
+        // return an empty body (not error) and surface the stored PTY size
+        // so the TUI can still size its parsers on attach.
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let id = "snopty";
+        mgr.sessions.write().await.insert(
+            id.into(),
+            synthetic_entry(id, agentd_protocol::SessionKind::User, 0),
+        );
+
+        let result = mgr.pty_replay(id).await.expect("pty_replay");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&result.data)
+            .expect("base64 decode");
+        assert!(
+            decoded.is_empty(),
+            "no pty.log → empty replay, got {} bytes",
+            decoded.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn pty_replay_preserves_pty_size_through_round_trip() {
+        use tempfile::tempdir;
+
+        // Refactor moved pty_replay off `PtyState` for the bytes but it
+        // still reads `size` from the same lock. Lock that the change
+        // didn't accidentally start returning None.
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let id = "ssize";
+        let entry = synthetic_entry(id, agentd_protocol::SessionKind::User, 0);
+        mgr.sessions.write().await.insert(id.into(), entry.clone());
+        entry.pty.lock().await.size = Some(PtySize { cols: 132, rows: 50 });
+
+        let result = mgr.pty_replay(id).await.expect("pty_replay");
+        assert_eq!(result.size, Some(PtySize { cols: 132, rows: 50 }));
+    }
+
+    #[tokio::test]
     async fn pty_replay_caps_at_replay_max_for_huge_logs() {
         use base64::Engine;
         use tempfile::tempdir;
