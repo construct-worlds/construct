@@ -22,6 +22,14 @@ pub enum KeyAction {
     OpenDiff,
     Interrupt,
     OpenCommandPalette,
+    OpenSwitchSession,
+    SplitWindowBelow,
+    SplitWindowRight,
+    DeleteWindow,
+    DeleteOtherWindows,
+    EnlargeWindow,
+    EnlargeWindowHorizontally,
+    ShrinkWindowHorizontally,
     /// Cycle keyboard focus across the panes (list ↔ view). Bound to `C-x o`
     /// in the emacs profile, matching `other-window`.
     SwitchFocus,
@@ -191,11 +199,24 @@ fn emacs() -> Keymap {
         // Enter from the list "drills in" to the session view; Tab is
         // intentionally left unbound for future use (e.g. completion).
         (Chord(vec![ctrl('x'), ch('o')]), SwitchFocus),
+        (Chord(vec![ctrl('x'), ch('2')]), SplitWindowBelow),
+        (Chord(vec![ctrl('x'), ch('3')]), SplitWindowRight),
+        (Chord(vec![ctrl('x'), ch('0')]), DeleteWindow),
+        (Chord(vec![ctrl('x'), ch('1')]), DeleteOtherWindows),
+        (Chord(vec![ctrl('x'), ch('^')]), EnlargeWindow),
+        (Chord(vec![ctrl('x'), ch('}')]), EnlargeWindowHorizontally),
+        (
+            Chord(vec![ctrl('x'), shift('}')]),
+            EnlargeWindowHorizontally,
+        ),
+        (Chord(vec![ctrl('x'), ch('{')]), ShrinkWindowHorizontally),
+        (Chord(vec![ctrl('x'), shift('{')]), ShrinkWindowHorizontally),
         (Chord(vec![key(KeyCode::Enter)]), FocusView),
         (Chord(vec![ctrl('x'), ch('t')]), ToggleView),
         (Chord(vec![ctrl('x'), ch('z')]), ToggleZoom),
         // Session actions
         (Chord(vec![ctrl('x'), ctrl('f')]), OpenNewSession),
+        (Chord(vec![ctrl('x'), ch('b')]), OpenSwitchSession),
         (Chord(vec![ctrl('x'), ch('k')]), OpenDeleteConfirm),
         (Chord(vec![ctrl('x'), ch('d')]), OpenDiff),
         (Chord(vec![ctrl('x'), ch('i')]), OpenSendInput),
@@ -227,10 +248,6 @@ fn emacs() -> Keymap {
         // Scroll
         (Chord(vec![ctrl('x'), ch('[')]), ScrollPageUp),
         (Chord(vec![ctrl('x'), ch(']')]), ScrollPageDown),
-        (Chord(vec![ctrl('x'), ch('{')]), ScrollTop),
-        (Chord(vec![ctrl('x'), shift('{')]), ScrollTop),
-        (Chord(vec![ctrl('x'), ch('}')]), ScrollBottom),
-        (Chord(vec![ctrl('x'), shift('}')]), ScrollBottom),
         (Chord(vec![ctrl('v')]), ScrollPageDown),
         (Chord(vec![alt('v')]), ScrollPageUp),
         (Chord(vec![ch('g'), ch('g')]), ScrollTop),
@@ -257,6 +274,7 @@ fn vim() -> Keymap {
         (Chord(vec![key(KeyCode::Up)]), PrevSession),
         (Chord(vec![ch('i')]), OpenSendInput),
         (Chord(vec![ch('n')]), OpenNewSession),
+        (Chord(vec![ctrl('x'), ch('b')]), OpenSwitchSession),
         (Chord(vec![shift('K')]), OpenDeleteConfirm),
         (Chord(vec![ch('d')]), OpenDiff),
         (Chord(vec![ctrl('c')]), Interrupt),
@@ -283,6 +301,18 @@ fn vim() -> Keymap {
         // PTY-mode escape: C-x is the universal prefix here too, so `C-x o`
         // cycles focus and `C-x C-c` quits even when the PTY is capturing.
         (Chord(vec![ctrl('x'), ch('o')]), SwitchFocus),
+        (Chord(vec![ctrl('x'), ch('2')]), SplitWindowBelow),
+        (Chord(vec![ctrl('x'), ch('3')]), SplitWindowRight),
+        (Chord(vec![ctrl('x'), ch('0')]), DeleteWindow),
+        (Chord(vec![ctrl('x'), ch('1')]), DeleteOtherWindows),
+        (Chord(vec![ctrl('x'), ch('^')]), EnlargeWindow),
+        (Chord(vec![ctrl('x'), ch('}')]), EnlargeWindowHorizontally),
+        (
+            Chord(vec![ctrl('x'), shift('}')]),
+            EnlargeWindowHorizontally,
+        ),
+        (Chord(vec![ctrl('x'), ch('{')]), ShrinkWindowHorizontally),
+        (Chord(vec![ctrl('x'), shift('{')]), ShrinkWindowHorizontally),
         (Chord(vec![ctrl('x'), ctrl('c')]), Quit),
         (Chord(vec![ctrl('x'), ch('t')]), ToggleView),
         (Chord(vec![ctrl('x'), ch('[')]), ScrollPageUp),
@@ -358,19 +388,19 @@ mod tests {
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), ch('{')]),
-            KeymapResult::Action(KeyAction::ScrollTop)
+            KeymapResult::Action(KeyAction::ShrinkWindowHorizontally)
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), shift('{')]),
-            KeymapResult::Action(KeyAction::ScrollTop)
+            KeymapResult::Action(KeyAction::ShrinkWindowHorizontally)
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), ch('}')]),
-            KeymapResult::Action(KeyAction::ScrollBottom)
+            KeymapResult::Action(KeyAction::EnlargeWindowHorizontally)
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), shift('}')]),
-            KeymapResult::Action(KeyAction::ScrollBottom)
+            KeymapResult::Action(KeyAction::EnlargeWindowHorizontally)
         ));
     }
 

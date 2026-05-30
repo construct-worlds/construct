@@ -1,8 +1,9 @@
 //! Ratatui rendering for the TUI.
 
 use crate::app::{
-    App, HarnessHit, HintZone, ListItem as AppListItem, Minibuffer, MinibufferIntent, PaneFocus,
-    ScreenPoint, Selection, TextSelectionRange, ViewMode, ZoomMode,
+    App, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
+    MinibufferIntent, PaneFocus, ScreenPoint, Selection, TextSelectionRange, ViewMode,
+    WindowPaneHit, WindowSplitDirection, ZoomMode,
 };
 use crate::keymap::KeyAction;
 use crate::theme::Theme;
@@ -101,6 +102,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_panel_close_hits.clear();
     app.layout.dynamic_ui_inline_hit = None;
     app.layout.dynamic_ui_trigger = None;
+    app.layout.dynamic_ui_triggers.clear();
+    app.layout.main_window_areas.clear();
     app.layout.dynamic_ui_popover_area = None;
     app.layout.dynamic_ui_scroll_metrics = None;
     let area = f.area();
@@ -222,7 +225,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if list_w > 0 {
         render_sessions(f, cols[0], app);
     }
-    render_detail(f, detail_area, app);
+    render_main_windows(f, detail_area, app);
     if let Some(strip) = pin_strip_area {
         render_pin_strip(f, strip, app, &pinned_ids);
     }
@@ -2122,8 +2125,11 @@ fn render_glitch_overlay(f: &mut Frame, area: Rect, theme: &Theme, seed: u64, am
     }
 }
 
-fn render_main_transition(f: &mut Frame, area: Rect, app: &App) {
-    let Some(t) = app.session_transition.as_ref() else {
+fn render_main_transition(f: &mut Frame, area: Rect, app: &App, window_id: Option<u64>) {
+    let Some(window_id) = window_id else {
+        return;
+    };
+    let Some(t) = app.session_transitions.get(&window_id) else {
         return;
     };
     let Some(amount) = transition_amount(t.started_at) else {
@@ -2147,8 +2153,47 @@ fn render_pin_transition(f: &mut Frame, area: Rect, app: &App, session_id: &str)
     render_glitch_overlay(f, area, &app.theme, hash_str(session_id) ^ 0x70696e, amount);
 }
 
-fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == PaneFocus::View;
+fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
+    fn render_node(f: &mut Frame, area: Rect, app: &mut App, node: &MainWindowTree) {
+        match node {
+            MainWindowTree::Leaf { id, selection } => {
+                let old_selection = app.selection.clone();
+                app.selection = selection.clone();
+                app.layout
+                    .main_window_areas
+                    .push(WindowPaneHit { id: *id, area });
+                render_detail(f, area, app, Some(*id));
+                app.selection = old_selection;
+            }
+            MainWindowTree::Split {
+                direction,
+                ratio_percent,
+                first,
+                second,
+            } => {
+                let first_pct = (*ratio_percent).clamp(10, 90);
+                let chunks = Layout::default()
+                    .direction(match direction {
+                        WindowSplitDirection::Below => Direction::Vertical,
+                        WindowSplitDirection::Right => Direction::Horizontal,
+                    })
+                    .constraints([
+                        Constraint::Percentage(first_pct),
+                        Constraint::Percentage(100 - first_pct),
+                    ])
+                    .split(area);
+                render_node(f, chunks[0], app, first);
+                render_node(f, chunks[1], app, second);
+            }
+        }
+    }
+    let tree = app.main_windows.clone();
+    render_node(f, area, app, &tree);
+}
+
+fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64>) {
+    let focused =
+        app.focus == PaneFocus::View && window_id.is_none_or(|id| id == app.active_window_id);
     if let Some(diff) = &app.last_diff {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -2270,7 +2315,10 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     // rightmost edge (matching `view_close_button_range`, which
     // hit-tests the last 3 cells of the top border).
     if let Some((session_id, x_start, x_end, y, ui)) = ui_trigger {
-        app.layout.dynamic_ui_trigger = Some((x_start, x_end, y, session_id));
+        app.layout.dynamic_ui_trigger = Some((x_start, x_end, y, session_id.clone()));
+        app.layout
+            .dynamic_ui_triggers
+            .push((x_start, x_end, y, session_id));
         block = block.title(ui);
     }
     if let Some(h) = harness_right {
@@ -2289,14 +2337,14 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     }
     if let Some(g) = app.selected_group() {
         render_group_overview(f, inner, app, g);
-        render_main_transition(f, inner, app);
+        render_main_transition(f, inner, app, window_id);
         return;
     }
     match app.view {
         ViewMode::Terminal => render_terminal(f, inner, app),
         ViewMode::Transcript => render_transcript(f, inner, app),
     }
-    render_main_transition(f, inner, app);
+    render_main_transition(f, inner, app, window_id);
 }
 
 fn render_empty_session_state(f: &mut Frame, area: Rect, app: &App) {
@@ -4484,10 +4532,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
         let mut spans = vec![Span::raw(mb.prompt.clone()), Span::raw(mb.input.clone())];
         if let Some(err) = &mb.error {
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                err.clone(),
-                Style::default().fg(app.theme.danger),
-            ));
+            spans.push(Span::styled(err.clone(), minibuffer_hint_style(app, mb)));
         }
         let para = Paragraph::new(Line::from(spans));
         f.render_widget(para, area);
@@ -4571,6 +4616,14 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(para, area);
 }
 
+fn minibuffer_hint_style(app: &App, mb: &Minibuffer) -> Style {
+    if matches!(mb.intent, MinibufferIntent::SwitchSession) {
+        Style::default().fg(app.theme.muted)
+    } else {
+        Style::default().fg(app.theme.danger)
+    }
+}
+
 fn render_help(f: &mut Frame, area: Rect, theme: &Theme) -> Rect {
     // Target a comfortable reading width — long enough to keep each
     // command line on one row without wrapping, capped so it doesn't
@@ -4628,8 +4681,12 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
     Use C-x x for the command palette when you forget a shortcut.
 
   focus + view
-    C-x o           switch focus (list ↔ view)
+    C-x o           other window (list → windows → list)
     RET (on list)   focus the selected session's view
+    C-x 2 / C-x 3   split current main window below / right
+    C-x 0 / C-x 1   delete current window / delete other windows
+    C-x ^           make current window taller
+    C-x } / C-x {   make current window wider / narrower
     C-x t           toggle transcript ↔ terminal view
     C-x z           zoom: fill the screen with the session view
     C-n / down      next session
@@ -4637,6 +4694,7 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
 
   session actions
     C-x C-f         new session
+    C-x b           switch focused window to an existing session
     C-x i           send input to selected session
     C-x k           delete selected session (confirms; kills if running)
     C-x d           show diff
@@ -4645,7 +4703,6 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
 
   scrollback
     C-x [ / C-x ]   scroll page up/down
-    C-x { / C-x }   scroll top / bottom
     C-v / M-v       scroll page down/up
     g g / G         scroll top / bottom
 

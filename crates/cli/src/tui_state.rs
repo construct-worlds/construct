@@ -44,6 +44,10 @@ pub struct TuiState {
     #[serde(default = "default_hide_pane_side_borders")]
     pub hide_pane_side_borders: bool,
     #[serde(default)]
+    pub main_windows: Option<crate::app::MainWindowTree>,
+    #[serde(default)]
+    pub active_window_id: Option<u64>,
+    #[serde(default)]
     pub widgets: HashMap<String, WidgetState>,
 }
 
@@ -59,6 +63,8 @@ impl Default for TuiState {
             list_collapsed: false,
             matrix_rain_hidden: false,
             hide_pane_side_borders: default_hide_pane_side_borders(),
+            main_windows: None,
+            active_window_id: None,
             widgets: HashMap::new(),
         }
     }

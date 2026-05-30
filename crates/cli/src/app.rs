@@ -67,6 +67,49 @@ fn is_subagent_session(s: &SessionSummary) -> bool {
     matches!(s.kind, agentd_protocol::SessionKind::Subagent)
 }
 
+fn selection_is_valid_for_sessions(
+    selection: &Selection,
+    sessions: &[SessionSummary],
+    groups: &[GroupSummary],
+) -> bool {
+    match selection {
+        Selection::None => true,
+        Selection::Session(id) => sessions
+            .iter()
+            .any(|s| s.id == *id && is_user_list_session(s)),
+        Selection::Group(id) => groups.iter().any(|g| g.id == *id),
+    }
+}
+
+fn prune_window_tree(
+    tree: MainWindowTree,
+    sessions: &[SessionSummary],
+    groups: &[GroupSummary],
+    fallback: &Selection,
+) -> MainWindowTree {
+    match tree {
+        MainWindowTree::Leaf { id, selection } => MainWindowTree::Leaf {
+            id,
+            selection: if selection_is_valid_for_sessions(&selection, sessions, groups) {
+                selection
+            } else {
+                fallback.clone()
+            },
+        },
+        MainWindowTree::Split {
+            direction,
+            ratio_percent,
+            first,
+            second,
+        } => MainWindowTree::Split {
+            direction,
+            ratio_percent,
+            first: Box::new(prune_window_tree(*first, sessions, groups, fallback)),
+            second: Box::new(prune_window_tree(*second, sessions, groups, fallback)),
+        },
+    }
+}
+
 pub(crate) fn list_session_indent_cells(
     s: &SessionSummary,
     indented: bool,
@@ -94,7 +137,7 @@ impl ListItem {
 }
 
 /// What's currently focused in the list pane.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Selection {
     #[default]
     None,
@@ -123,6 +166,56 @@ impl Selection {
 pub enum PaneFocus {
     List,
     View,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowSplitDirection {
+    Below,
+    Right,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MainWindowTree {
+    Leaf {
+        id: u64,
+        selection: Selection,
+    },
+    Split {
+        direction: WindowSplitDirection,
+        ratio_percent: u16,
+        first: Box<MainWindowTree>,
+        second: Box<MainWindowTree>,
+    },
+}
+
+impl MainWindowTree {
+    fn single(id: u64, selection: Selection) -> Self {
+        Self::Leaf { id, selection }
+    }
+
+    fn max_id(&self) -> u64 {
+        match self {
+            Self::Leaf { id, .. } => *id,
+            Self::Split { first, second, .. } => first.max_id().max(second.max_id()),
+        }
+    }
+
+    fn first_leaf_id(&self) -> Option<u64> {
+        match self {
+            Self::Leaf { id, .. } => Some(*id),
+            Self::Split { first, .. } => first.first_leaf_id(),
+        }
+    }
+
+    fn find_selection(&self, target: u64) -> Option<&Selection> {
+        match self {
+            Self::Leaf { id, selection } if *id == target => Some(selection),
+            Self::Leaf { .. } => None,
+            Self::Split { first, second, .. } => first
+                .find_selection(target)
+                .or_else(|| second.find_selection(target)),
+        }
+    }
 }
 
 /// What the right pane is currently showing for the selected session.
@@ -168,6 +261,7 @@ pub enum MinibufferIntent {
     RestartConfirm {
         session_id: String,
     },
+    SwitchSession,
     Rename {
         session_id: String,
     },
@@ -250,6 +344,9 @@ pub struct App {
     pub groups: Vec<GroupSummary>,
     pub selection: Selection,
     pub focus: PaneFocus,
+    pub main_windows: MainWindowTree,
+    pub active_window_id: u64,
+    pub next_window_id: u64,
     pub subagent_collapsed: HashSet<String>,
     pub transcript: Vec<TimestampedEvent>,
     pub transcript_session: Option<String>,
@@ -448,9 +545,10 @@ pub struct App {
     /// overlay and the matrix-rain wallpaper — avoids re-downscaling the
     /// screenshot every frame. See [`ImageResizeCache`].
     pub image_resize_cache: ImageResizeCache,
-    /// Short visual transition when the main view switches to a different
-    /// session.
-    pub session_transition: Option<SessionTransition>,
+    /// Short visual transition when a window explicitly switches to a
+    /// different session. Keyed per main-window id so split panes don't
+    /// glitch together.
+    pub session_transitions: HashMap<u64, SessionTransition>,
     /// Short visual transitions for newly visible pinned-session tiles.
     pub pin_transitions: HashMap<String, Instant>,
     /// Ambient Matrix-rain panel state for empty rows in the session list.
@@ -1004,11 +1102,18 @@ pub struct TerminalScrollbarHit {
     pub max_scrollback: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowPaneHit {
+    pub id: u64,
+    pub area: ratatui::layout::Rect,
+}
+
 /// Last-frame geometry for hit-testing mouse clicks.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutSnapshot {
     pub list_area: Option<ratatui::layout::Rect>,
     pub view_area: Option<ratatui::layout::Rect>,
+    pub main_window_areas: Vec<WindowPaneHit>,
     pub pin_strip_area: Option<ratatui::layout::Rect>,
     pub matrix_rain_area: Option<ratatui::layout::Rect>,
     pub minibuffer_area: Option<ratatui::layout::Rect>,
@@ -1051,6 +1156,7 @@ pub struct LayoutSnapshot {
     pub dynamic_ui_inline_hit: Option<DynamicUiInlineHit>,
     /// Dynamic UI title-bar affordance bounds: `(x_start, x_end, y, session_id)`.
     pub dynamic_ui_trigger: Option<(u16, u16, u16, String)>,
+    pub dynamic_ui_triggers: Vec<(u16, u16, u16, String)>,
     /// Dynamic UI widget panel bounds from the last frame.
     pub dynamic_ui_popover_area: Option<ratatui::layout::Rect>,
     /// Dynamic UI dropdown bounds from the last frame.
@@ -1190,6 +1296,19 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
                 .map(|s| Selection::Session(s.id.clone()))
         })
         .unwrap_or(Selection::None);
+    let initial_main_windows = persisted
+        .main_windows
+        .clone()
+        .map(|tree| prune_window_tree(tree, &sessions, &groups, &initial_sel))
+        .unwrap_or_else(|| MainWindowTree::single(1, initial_sel.clone()));
+    let initial_active_window_id = persisted
+        .active_window_id
+        .filter(|id| initial_main_windows.find_selection(*id).is_some())
+        .unwrap_or_else(|| initial_main_windows.first_leaf_id().unwrap_or(1));
+    let initial_window_sel = initial_main_windows
+        .find_selection(initial_active_window_id)
+        .cloned()
+        .unwrap_or_else(|| initial_sel.clone());
 
     let now = Instant::now();
     let socket = client.socket_path().to_path_buf();
@@ -1198,11 +1317,14 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         client: client.clone(),
         sessions,
         groups,
-        selection: initial_sel,
+        selection: initial_window_sel,
         // Default focus is the view — the selected session is usually
         // what the user wants to interact with first. List navigation
         // is one `C-x o` / `Tab` away.
         focus: initial_focus,
+        next_window_id: initial_main_windows.max_id().saturating_add(1),
+        active_window_id: initial_active_window_id,
+        main_windows: initial_main_windows,
         subagent_collapsed: HashSet::new(),
         transcript: Vec::new(),
         transcript_session: None,
@@ -1271,7 +1393,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         dynamic_ui_focused: None,
         dynamic_ui_scroll_offsets: HashMap::new(),
         image_resize_cache: Vec::new(),
-        session_transition: None,
+        session_transitions: HashMap::new(),
         pin_transitions: HashMap::new(),
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
         matrix_rain_intensity: 0.0,
@@ -1317,7 +1439,11 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
             app.hydrating_sessions.insert(id.to_string());
         }
     }
-    for id in app.pinned_sessions_needing_hydration() {
+    for id in app
+        .main_window_sessions_needing_hydration()
+        .into_iter()
+        .chain(app.pinned_sessions_needing_hydration())
+    {
         app.hydrating_sessions.insert(id);
     }
 
@@ -1368,6 +1494,8 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         list_collapsed: app.list_collapsed,
         matrix_rain_hidden: app.matrix_rain_hidden,
         hide_pane_side_borders: app.hide_pane_side_borders,
+        main_windows: Some(app.main_windows.clone()),
+        active_window_id: Some(app.active_window_id),
         widgets,
     });
 
@@ -1484,7 +1612,11 @@ async fn run_loop(
         }
 
         let selected_hydrating = &hydration_sessions;
-        for id in app.pinned_sessions_needing_hydration() {
+        for id in app
+            .main_window_sessions_needing_hydration()
+            .into_iter()
+            .chain(app.pinned_sessions_needing_hydration())
+        {
             if selected_hydrating.contains(&id)
                 || pinned_hydration_session.as_deref() == Some(id.as_str())
                 || pinned_hydration_queue.iter().any(|queued| queued == &id)
@@ -1895,9 +2027,16 @@ impl App {
     }
 
     pub fn start_session_transition(&mut self) {
-        self.session_transition = Some(SessionTransition {
-            started_at: Instant::now(),
-        });
+        self.start_window_transition(self.active_window_id);
+    }
+
+    pub fn start_window_transition(&mut self, window_id: u64) {
+        self.session_transitions.insert(
+            window_id,
+            SessionTransition {
+                started_at: Instant::now(),
+            },
+        );
     }
 
     pub fn start_pin_transition(&mut self, session_id: impl Into<String>) {
@@ -1934,14 +2073,8 @@ impl App {
 
     pub fn prune_finished_transitions(&mut self) {
         let done = |started: Instant| started.elapsed().as_millis() >= SESSION_TRANSITION_MS;
-        if self
-            .session_transition
-            .as_ref()
-            .map(|t| done(t.started_at))
-            .unwrap_or(false)
-        {
-            self.session_transition = None;
-        }
+        self.session_transitions
+            .retain(|_, transition| !done(transition.started_at));
         self.pin_transitions.retain(|_, started| !done(*started));
     }
 
@@ -2015,6 +2148,33 @@ impl App {
         }
     }
 
+    fn main_window_sessions_needing_hydration(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        fn collect(node: &MainWindowTree, out: &mut Vec<String>) {
+            match node {
+                MainWindowTree::Leaf { selection, .. } => {
+                    if let Some(id) = selection.session_id() {
+                        if !out.iter().any(|existing| existing == id) {
+                            out.push(id.to_string());
+                        }
+                    }
+                }
+                MainWindowTree::Split { first, second, .. } => {
+                    collect(first, out);
+                    collect(second, out);
+                }
+            }
+        }
+        collect(&self.main_windows, &mut ids);
+        ids.into_iter()
+            .filter(|id| {
+                self.sessions
+                    .iter()
+                    .any(|s| s.id == *id && s.has_pty && !self.histories.contains_key(&s.id))
+            })
+            .collect()
+    }
+
     fn pinned_sessions_needing_hydration(&self) -> Vec<String> {
         self.sessions
             .iter()
@@ -2032,11 +2192,7 @@ impl App {
             return;
         }
 
-        let session_id = hydration.session_id.clone();
         self.apply_hydration_state(hydration, true).await;
-        if self.selection.session_id() == Some(session_id.as_str()) {
-            self.start_session_transition();
-        }
     }
 
     async fn apply_pinned_session_hydration(&mut self, hydration: SessionHydration) {
@@ -2072,6 +2228,13 @@ impl App {
         if let Some(msg) = hydration.status_messages.last() {
             self.set_status(msg.clone());
         }
+    }
+
+    fn user_sessions(&self) -> Vec<&SessionSummary> {
+        self.sessions
+            .iter()
+            .filter(|s| is_user_list_session(s))
+            .collect()
     }
 
     /// Materialize the rendered list: ungrouped sessions (sorted by
@@ -2433,6 +2596,209 @@ impl App {
             .map(|s| s.id.clone());
     }
 
+    fn sync_active_window_selection(&mut self) {
+        fn update(node: &mut MainWindowTree, id: u64, selection: &Selection) -> bool {
+            match node {
+                MainWindowTree::Leaf {
+                    id: leaf_id,
+                    selection: leaf_selection,
+                } => {
+                    if *leaf_id == id {
+                        *leaf_selection = selection.clone();
+                        true
+                    } else {
+                        false
+                    }
+                }
+                MainWindowTree::Split { first, second, .. } => {
+                    update(first, id, selection) || update(second, id, selection)
+                }
+            }
+        }
+        update(
+            &mut self.main_windows,
+            self.active_window_id,
+            &self.selection,
+        );
+    }
+
+    fn selection_for_window(&self, target: u64) -> Option<Selection> {
+        fn find(node: &MainWindowTree, target: u64) -> Option<Selection> {
+            match node {
+                MainWindowTree::Leaf { id, selection } if *id == target => Some(selection.clone()),
+                MainWindowTree::Leaf { .. } => None,
+                MainWindowTree::Split { first, second, .. } => {
+                    find(first, target).or_else(|| find(second, target))
+                }
+            }
+        }
+        find(&self.main_windows, target)
+    }
+
+    fn leaf_window_ids(&self) -> Vec<u64> {
+        fn collect(node: &MainWindowTree, out: &mut Vec<u64>) {
+            match node {
+                MainWindowTree::Leaf { id, .. } => out.push(*id),
+                MainWindowTree::Split { first, second, .. } => {
+                    collect(first, out);
+                    collect(second, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        collect(&self.main_windows, &mut out);
+        out
+    }
+
+    fn focus_main_window(&mut self, id: u64) {
+        if let Some(selection) = self.selection_for_window(id) {
+            let changed_selection = self.selection != selection;
+            self.active_window_id = id;
+            self.selection = selection;
+            self.focus = PaneFocus::View;
+            if changed_selection {
+                self.transcript.clear();
+                self.transcript_session = None;
+                self.view_scrollback = 0;
+                self.view = if self.selected_session().map(|s| s.has_pty).unwrap_or(false) {
+                    ViewMode::Terminal
+                } else {
+                    ViewMode::Transcript
+                };
+            }
+        }
+    }
+
+    fn split_active_window(&mut self, direction: WindowSplitDirection) {
+        fn split(
+            node: &mut MainWindowTree,
+            target: u64,
+            new_id: u64,
+            direction: WindowSplitDirection,
+        ) -> bool {
+            match node {
+                MainWindowTree::Leaf { id, selection } if *id == target => {
+                    let old_id = *id;
+                    let sel = selection.clone();
+                    *node = MainWindowTree::Split {
+                        direction,
+                        ratio_percent: 50,
+                        first: Box::new(MainWindowTree::Leaf {
+                            id: old_id,
+                            selection: sel.clone(),
+                        }),
+                        second: Box::new(MainWindowTree::Leaf {
+                            id: new_id,
+                            selection: sel,
+                        }),
+                    };
+                    true
+                }
+                MainWindowTree::Leaf { .. } => false,
+                MainWindowTree::Split { first, second, .. } => {
+                    split(first, target, new_id, direction)
+                        || split(second, target, new_id, direction)
+                }
+            }
+        }
+        let new_id = self.next_window_id;
+        self.next_window_id = self.next_window_id.saturating_add(1);
+        self.sync_active_window_selection();
+        if split(
+            &mut self.main_windows,
+            self.active_window_id,
+            new_id,
+            direction,
+        ) {
+            self.focus_main_window(new_id);
+            self.set_status(
+                match direction {
+                    WindowSplitDirection::Below => "split below — C-x o cycles windows",
+                    WindowSplitDirection::Right => "split right — C-x o cycles windows",
+                }
+                .into(),
+            );
+        }
+    }
+
+    fn delete_active_window(&mut self) {
+        fn remove(node: &mut MainWindowTree, target: u64) -> bool {
+            match node {
+                MainWindowTree::Leaf { id, .. } => *id == target,
+                MainWindowTree::Split { first, second, .. } => {
+                    if remove(first, target) {
+                        *node = (**second).clone();
+                        true
+                    } else if remove(second, target) {
+                        *node = (**first).clone();
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
+        if self.leaf_window_ids().len() <= 1 {
+            self.set_status("only one window".into());
+            return;
+        }
+        let target = self.active_window_id;
+        if remove(&mut self.main_windows, target) {
+            if let Some(id) = self.leaf_window_ids().first().copied() {
+                self.focus_main_window(id);
+            }
+            self.set_status("window deleted".into());
+        }
+    }
+
+    fn delete_other_windows(&mut self) {
+        self.sync_active_window_selection();
+        let selection = self.selection.clone();
+        self.main_windows = MainWindowTree::single(self.active_window_id, selection);
+        self.set_status("only current window".into());
+    }
+
+    fn resize_active_window(&mut self, delta: i16, direction: WindowSplitDirection) {
+        fn resize(
+            node: &mut MainWindowTree,
+            target: u64,
+            delta: i16,
+            want: WindowSplitDirection,
+        ) -> bool {
+            match node {
+                MainWindowTree::Leaf { id, .. } => *id == target,
+                MainWindowTree::Split {
+                    direction,
+                    ratio_percent,
+                    first,
+                    second,
+                } => {
+                    if resize(first, target, delta, want) {
+                        if *direction == want {
+                            *ratio_percent = (*ratio_percent as i16 + delta).clamp(10, 90) as u16;
+                        }
+                        true
+                    } else if resize(second, target, delta, want) {
+                        if *direction == want {
+                            *ratio_percent = (*ratio_percent as i16 - delta).clamp(10, 90) as u16;
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
+        if resize(
+            &mut self.main_windows,
+            self.active_window_id,
+            delta,
+            direction,
+        ) {
+            self.set_status("window resized".into());
+        }
+    }
+
     /// Move the selection up or down by one row in the materialized list,
     /// wrapping at the ends. No-op if the list is empty.
     async fn step_selection(&mut self, delta: i32) {
@@ -2450,6 +2816,7 @@ impl App {
             ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
             ListItem::GroupHeader { group, .. } => self.select_group(group.id.clone()),
         }
+        self.sync_active_window_selection();
     }
 
     /// After any list mutation, make sure `self.selection` still refers to
@@ -3478,7 +3845,7 @@ impl App {
             }
             return true;
         }
-        if let Some((x_start, x_end, y, session_id)) = self.layout.dynamic_ui_trigger.clone() {
+        for (x_start, x_end, y, session_id) in self.layout.dynamic_ui_triggers.clone() {
             if row == y && col >= x_start && col < x_end {
                 self.dynamic_ui_popover_open =
                     if self.dynamic_ui_popover_open.as_deref() == Some(session_id.as_str()) {
@@ -3633,7 +4000,15 @@ impl App {
                 return;
             }
         }
-        if let Some(view) = self.layout.view_area {
+        if let Some(hit) = self
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|hit| contains(hit.area, col, row))
+            .copied()
+        {
+            let view = hit.area;
+            self.focus_main_window(hit.id);
             if contains(view, col, row) {
                 self.dynamic_ui_focused = None;
                 if let Some((x_start, x_end, y)) = self.layout.browser_preview_close {
@@ -4000,6 +4375,7 @@ impl App {
         match &items[idx] {
             ListItem::Session { summary, .. } => {
                 self.select_session(summary.id.clone());
+                self.sync_active_window_selection();
             }
             ListItem::GroupHeader { group, .. } => {
                 let id = group.id.clone();
@@ -4011,6 +4387,7 @@ impl App {
                     .unwrap_or(true)
                 {
                     self.select_group(id.clone());
+                    self.sync_active_window_selection();
                 }
                 if let Err(e) = self.client.set_project_collapsed(&id, next).await {
                     self.set_status(format!("collapse failed: {e}"));
@@ -4410,11 +4787,19 @@ impl App {
                 action @ (KeyAction::NextSession
                 | KeyAction::PrevSession
                 | KeyAction::SwitchFocus
+                | KeyAction::SplitWindowBelow
+                | KeyAction::SplitWindowRight
+                | KeyAction::DeleteWindow
+                | KeyAction::DeleteOtherWindows
+                | KeyAction::EnlargeWindow
+                | KeyAction::EnlargeWindowHorizontally
+                | KeyAction::ShrinkWindowHorizontally
                 | KeyAction::FocusView
                 | KeyAction::ToggleView
                 | KeyAction::ToggleZoom
                 | KeyAction::ToggleHelp
                 | KeyAction::OpenCommandPalette
+                | KeyAction::OpenSwitchSession
                 | KeyAction::OpenNewSession
                 | KeyAction::Refresh
                 | KeyAction::Quit),
@@ -4738,6 +5123,9 @@ impl App {
             OpenCommandPalette => {
                 self.open_minibuffer_for_command();
             }
+            OpenSwitchSession => {
+                self.open_minibuffer_for_switch_session();
+            }
             FocusView => {
                 // Enter on a *terminated* session opens a restart
                 // confirmation instead of drilling in. Typing into
@@ -4779,8 +5167,8 @@ impl App {
             }
             SwitchFocus => {
                 // In a zoomed layout `C-x o` swaps which pane is
-                // zoomed (and focused). In normal layout it just
-                // swaps focus.
+                // zoomed (and focused). In normal layout it cycles
+                // list plus all visible main windows.
                 self.collapse_orchestrator_panel_on_focus_change();
                 match self.zoom {
                     ZoomMode::List => {
@@ -4791,19 +5179,43 @@ impl App {
                         self.zoom = ZoomMode::List;
                         self.focus = PaneFocus::List;
                     }
-                    ZoomMode::None => {
-                        self.focus = match self.focus {
-                            PaneFocus::List => PaneFocus::View,
-                            PaneFocus::View => PaneFocus::List,
-                        };
-                    }
+                    ZoomMode::None => match self.focus {
+                        PaneFocus::List => {
+                            if let Some(id) = self.leaf_window_ids().first().copied() {
+                                self.focus_main_window(id);
+                            } else {
+                                self.focus = PaneFocus::View;
+                            }
+                        }
+                        PaneFocus::View => {
+                            let ids = self.leaf_window_ids();
+                            if let Some(pos) =
+                                ids.iter().position(|id| *id == self.active_window_id)
+                            {
+                                if pos + 1 < ids.len() {
+                                    self.focus_main_window(ids[pos + 1]);
+                                } else {
+                                    self.focus = PaneFocus::List;
+                                }
+                            } else {
+                                self.focus = PaneFocus::List;
+                            }
+                        }
+                    },
                 }
                 let label = match self.focus {
-                    PaneFocus::List => "focus: list",
-                    PaneFocus::View => "focus: view",
+                    PaneFocus::List => "focus: list".to_string(),
+                    PaneFocus::View => format!("focus: window {}", self.active_window_id),
                 };
-                self.set_status(label.into());
+                self.set_status(label);
             }
+            SplitWindowBelow => self.split_active_window(WindowSplitDirection::Below),
+            SplitWindowRight => self.split_active_window(WindowSplitDirection::Right),
+            DeleteWindow => self.delete_active_window(),
+            DeleteOtherWindows => self.delete_other_windows(),
+            EnlargeWindow => self.resize_active_window(5, WindowSplitDirection::Below),
+            EnlargeWindowHorizontally => self.resize_active_window(5, WindowSplitDirection::Right),
+            ShrinkWindowHorizontally => self.resize_active_window(-5, WindowSplitDirection::Right),
             ToggleZoom => {
                 // Zoom the currently-focused pane; if anything is
                 // already zoomed, unzoom back to the split layout.
@@ -5017,6 +5429,15 @@ impl App {
             self.minibuffer.as_ref().map(|m| &m.intent),
             Some(MinibufferIntent::NewSessionHarness)
         );
+        let is_switch_session = matches!(
+            self.minibuffer.as_ref().map(|m| &m.intent),
+            Some(MinibufferIntent::SwitchSession)
+        );
+        let switch_sessions: Vec<SessionSummary> = if is_switch_session {
+            self.user_sessions().into_iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
         let available_harnesses: Vec<String> = if is_new_harness {
             let mut v: Vec<String> = self
                 .harnesses
@@ -5133,6 +5554,16 @@ impl App {
             KeyCode::Tab => {
                 if is_new_harness {
                     apply_harness_completion(mb, &available_harnesses);
+                } else if matches!(mb.intent, MinibufferIntent::SwitchSession) {
+                    let input = mb.input.clone();
+                    let matches = match_switch_sessions_from(&switch_sessions, &input);
+                    if let Some(s) = matches.first() {
+                        mb.input = session_switch_label(s);
+                        mb.cursor = mb.input.chars().count();
+                        mb.error = Some(switch_session_hint_from(&switch_sessions, &mb.input));
+                    } else {
+                        mb.error = Some(format!("no match for {input}"));
+                    }
                 }
                 return;
             }
@@ -5205,6 +5636,9 @@ impl App {
             // the input.
             KeyCode::Char(c) if !ctrl && !alt => {
                 insert_minibuffer_text(mb, &c.to_string());
+                if matches!(mb.intent, MinibufferIntent::SwitchSession) {
+                    mb.error = Some(switch_session_hint_from(&switch_sessions, &mb.input));
+                }
             }
             _ => {}
         }
@@ -5220,6 +5654,19 @@ impl App {
                     Ok(()) => self.set_status("input sent".to_string()),
                     Err(e) => self.set_status(format!("send failed: {e}")),
                 }
+            }
+            MinibufferIntent::SwitchSession => {
+                let matches = self.match_switch_sessions(&input);
+                let Some(session) = matches.first() else {
+                    self.set_status(format!("no session matches {}", input.trim()));
+                    return;
+                };
+                let session_id = session.id.clone();
+                let label = session_switch_label(session);
+                self.select_session(session_id);
+                self.sync_active_window_selection();
+                self.focus = PaneFocus::View;
+                self.set_status(format!("window → {label}"));
             }
             MinibufferIntent::NewSessionHarness => {
                 let harness = input.trim().to_string();
@@ -5289,6 +5736,7 @@ impl App {
                                 .insert(id.clone(), crate::pty_render::ItemHistory::new());
                         }
                         self.select_session(id);
+                        self.sync_active_window_selection();
                         self.focus = PaneFocus::View;
                     }
                     Err(e) => self.set_status(format!("create failed: {e}")),
@@ -5752,6 +6200,30 @@ impl App {
     /// keybind (`M-x` / `C-x x` / click on the prompt). Prefers the
     /// orchestrator panel when an orchestrator session is available;
     /// falls back to the static command palette.
+    fn match_switch_sessions(&self, query: &str) -> Vec<&SessionSummary> {
+        let sessions = self.user_sessions();
+        match_switch_sessions_refs(sessions, query)
+    }
+
+    fn switch_session_hint(&self, query: &str) -> String {
+        let sessions: Vec<SessionSummary> = self.user_sessions().into_iter().cloned().collect();
+        switch_session_hint_from(&sessions, query)
+    }
+
+    pub fn open_minibuffer_for_switch_session(&mut self) {
+        if self.user_sessions().is_empty() {
+            self.set_status("no sessions".to_string());
+            return;
+        }
+        self.minibuffer = Some(Minibuffer {
+            prompt: "Switch session: ".to_string(),
+            input: String::new(),
+            cursor: 0,
+            intent: MinibufferIntent::SwitchSession,
+            error: Some(self.switch_session_hint("")),
+        });
+    }
+
     pub fn open_minibuffer_for_command(&mut self) {
         if self.orchestrator_id.is_some() {
             self.orchestrator_scrollback = 0;
@@ -5923,6 +6395,97 @@ pub fn summarize_tool_args(args: &serde_json::Value) -> String {
 pub fn short_id(id: &str) -> &str {
     let n = id.len().min(10);
     &id[..n]
+}
+
+fn session_switch_label(s: &SessionSummary) -> String {
+    s.title
+        .as_ref()
+        .filter(|t| !t.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| short_id(&s.id).to_string())
+}
+
+fn session_switch_haystack(s: &SessionSummary) -> String {
+    format!(
+        "{} {} {} {}",
+        session_switch_label(s),
+        s.id,
+        short_id(&s.id),
+        s.harness
+    )
+    .to_lowercase()
+}
+
+fn fuzzy_match(query: &str, haystack: &str) -> bool {
+    let mut chars = haystack.chars();
+    query
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .all(|needle| chars.by_ref().any(|hay| hay == needle))
+}
+
+fn switch_session_match_score(s: &SessionSummary, query: &str) -> Option<i32> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let label = session_switch_label(s).to_lowercase();
+    let id = s.id.to_lowercase();
+    let short = short_id(&s.id).to_lowercase();
+    let harness = s.harness.to_lowercase();
+    if label == q || id == q || short == q {
+        Some(100)
+    } else if label.starts_with(&q) {
+        Some(90)
+    } else if short.starts_with(&q) || id.starts_with(&q) {
+        Some(85)
+    } else if harness.starts_with(&q) {
+        Some(75)
+    } else if label.contains(&q) || id.contains(&q) || harness.contains(&q) {
+        Some(65)
+    } else if fuzzy_match(&q, &session_switch_haystack(s)) {
+        Some(40)
+    } else {
+        None
+    }
+}
+
+fn match_switch_sessions_from<'a>(
+    sessions: &'a [SessionSummary],
+    query: &str,
+) -> Vec<&'a SessionSummary> {
+    let mut scored: Vec<(i32, chrono::DateTime<chrono::Utc>, &SessionSummary)> = sessions
+        .iter()
+        .filter_map(|s| switch_session_match_score(s, query).map(|score| (score, s.created_at, s)))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    scored.into_iter().map(|(_, _, s)| s).collect()
+}
+
+fn match_switch_sessions_refs<'a>(
+    sessions: Vec<&'a SessionSummary>,
+    query: &str,
+) -> Vec<&'a SessionSummary> {
+    let mut scored: Vec<(i32, chrono::DateTime<chrono::Utc>, &SessionSummary)> = sessions
+        .into_iter()
+        .filter_map(|s| switch_session_match_score(s, query).map(|score| (score, s.created_at, s)))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    scored.into_iter().map(|(_, _, s)| s).collect()
+}
+
+fn switch_session_hint_from(sessions: &[SessionSummary], query: &str) -> String {
+    let matches = match_switch_sessions_from(sessions, query);
+    if matches.is_empty() {
+        return "no matches".to_string();
+    }
+    let labels: Vec<String> = matches
+        .into_iter()
+        .take(5)
+        .map(session_switch_label)
+        .collect();
+    format!("matches: {}", labels.join(", "))
 }
 
 fn normalized_points(a: ScreenPoint, b: ScreenPoint) -> (ScreenPoint, ScreenPoint) {
@@ -6192,6 +6755,10 @@ mod tests {
         LayoutSnapshot {
             list_area: Some(Rect::new(0, 0, 20, 10)),
             view_area: Some(Rect::new(20, 0, 80, 20)),
+            main_window_areas: vec![WindowPaneHit {
+                id: 1,
+                area: Rect::new(20, 0, 80, 20),
+            }],
             pin_strip_area: Some(Rect::new(20, 20, 80, 8)),
             matrix_rain_area: None,
             minibuffer_area: Some(Rect::new(0, 29, 100, 4)),
@@ -6209,6 +6776,7 @@ mod tests {
             dynamic_ui_panel_close_hits: Vec::new(),
             dynamic_ui_inline_hit: None,
             dynamic_ui_trigger: None,
+            dynamic_ui_triggers: Vec::new(),
             dynamic_ui_popover_area: None,
             dynamic_ui_dropdown_area: None,
             dynamic_ui_scroll_metrics: None,
@@ -6224,6 +6792,9 @@ mod tests {
             groups: Vec::new(),
             selection: Selection::Session("s1".into()),
             focus: PaneFocus::View,
+            main_windows: MainWindowTree::single(1, Selection::Session("s1".into())),
+            active_window_id: 1,
+            next_window_id: 2,
             subagent_collapsed: HashSet::new(),
             transcript: Vec::new(),
             transcript_session: None,
@@ -6283,7 +6854,7 @@ mod tests {
             dynamic_ui_focused: None,
             dynamic_ui_scroll_offsets: HashMap::new(),
             image_resize_cache: Vec::new(),
-            session_transition: None,
+            session_transitions: HashMap::new(),
             pin_transitions: HashMap::new(),
             matrix_rain: crate::matrix_rain::MatrixRain::default(),
             matrix_rain_intensity: 0.0,
@@ -6338,6 +6909,218 @@ mod tests {
             automode: false,
             kind,
         }
+    }
+
+    #[test]
+    fn prune_window_tree_replaces_stale_sessions_and_preserves_splits() {
+        let mut s2 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s2.id = "s2".into();
+        let tree = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 35,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 4,
+                selection: Selection::Session("missing".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 7,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+
+        let restored = prune_window_tree(tree, &[s2], &[], &Selection::Session("s2".into()));
+
+        match restored {
+            MainWindowTree::Split {
+                ratio_percent,
+                first,
+                second,
+                ..
+            } => {
+                assert_eq!(ratio_percent, 35);
+                assert_eq!(
+                    first.find_selection(4),
+                    Some(&Selection::Session("s2".into()))
+                );
+                assert_eq!(
+                    second.find_selection(7),
+                    Some(&Selection::Session("s2".into()))
+                );
+                assert_eq!(second.max_id(), 7);
+            }
+            MainWindowTree::Leaf { .. } => panic!("split layout should be preserved"),
+        }
+    }
+
+    #[tokio::test]
+    async fn main_window_sessions_needing_hydration_includes_inactive_splits() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut second = summary_with_kind(agentd_protocol::SessionKind::User);
+        second.id = "s2".into();
+        second.has_pty = true;
+        app.sessions.push(second);
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.histories
+            .insert("s1".into(), crate::pty_render::ItemHistory::new());
+
+        assert_eq!(app.main_window_sessions_needing_hydration(), vec!["s2"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mouse_list_click_updates_active_split_selection() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut second = summary_with_kind(agentd_protocol::SessionKind::User);
+        second.id = "s2".into();
+        second.position = 1;
+        app.sessions.push(second);
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s1".into()),
+            }),
+        };
+        app.active_window_id = 2;
+        app.layout = test_layout();
+        app.layout.list_row_count = app.list_items().len();
+        app.layout.list_items_area = Some(Rect::new(1, 1, 18, 8));
+
+        app.click_list(Rect::new(0, 0, 20, 10), 5, 2).await;
+
+        assert_eq!(app.selection, Selection::Session("s2".into()));
+        assert_eq!(
+            app.selection_for_window(2),
+            Some(Selection::Session("s2".into()))
+        );
+        assert_eq!(
+            app.selection_for_window(1),
+            Some(Selection::Session("s1".into()))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn switch_focus_cycles_list_then_first_split_window() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s1".into()),
+            }),
+        };
+        app.active_window_id = 2;
+        app.focus = PaneFocus::List;
+        app.session_transitions.clear();
+
+        app.run_action(KeyAction::SwitchFocus).await;
+
+        assert_eq!(app.focus, PaneFocus::View);
+        assert_eq!(app.active_window_id, 1);
+        assert!(
+            app.session_transitions.is_empty(),
+            "window focus changes must not glitch"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn applying_selected_hydration_does_not_start_transition() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.selection = Selection::Session("s1".into());
+        app.session_transitions.clear();
+        let hydration = SessionHydration {
+            session_id: "s1".into(),
+            transcript: Vec::new(),
+            history: Some(crate::pty_render::ItemHistory::new()),
+            editor_state: None,
+            agent_status: None,
+            ui_panels: HashMap::new(),
+            status_messages: Vec::new(),
+        };
+
+        app.apply_session_hydration(hydration).await;
+
+        assert!(app.session_transitions.is_empty());
+        assert!(app.histories.contains_key("s1"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_transition_is_scoped_to_active_split() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s1".into()),
+            }),
+        };
+        app.active_window_id = 2;
+
+        app.start_session_transition();
+
+        assert!(!app.session_transitions.contains_key(&1));
+        assert!(app.session_transitions.contains_key(&2));
+        server.abort();
+    }
+
+    #[test]
+    fn switch_session_matches_title_id_harness_and_fuzzy() {
+        let mut shell = summary_with_kind(agentd_protocol::SessionKind::User);
+        shell.id = "shell-session-abcdef".into();
+        shell.harness = "shell".into();
+        shell.title = Some("Build logs".into());
+        let mut codex = summary_with_kind(agentd_protocol::SessionKind::User);
+        codex.id = "codex-session-abcdef".into();
+        codex.harness = "codex".into();
+        codex.title = Some("Review PR".into());
+        let sessions = vec![shell, codex];
+
+        assert_eq!(
+            match_switch_sessions_from(&sessions, "Build")[0].id,
+            "shell-session-abcdef"
+        );
+        assert_eq!(
+            match_switch_sessions_from(&sessions, "codex-session")[0].id,
+            "codex-session-abcdef"
+        );
+        assert_eq!(
+            match_switch_sessions_from(&sessions, "codex")[0].id,
+            "codex-session-abcdef"
+        );
+        assert_eq!(
+            match_switch_sessions_from(&sessions, "rvpr")[0].id,
+            "codex-session-abcdef"
+        );
     }
 
     #[tokio::test]
