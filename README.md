@@ -131,6 +131,8 @@ For an optimized build, use `cargo build --workspace --release` and replace
   approvals, automode, and hooks.
 - [Unified tool layer](docs/unified-tool-layer.md) — MCP servers and shared tools for
   fleet control, browser automation, and agent coordination.
+- [Controller workflows](docs/workflows.md) — dynamic planning with a
+  controller session, visible worker subagents, widgets, and approval queues.
 - [Generative widgets](docs/generative-widgets.md) — agent-generated Markdown UI
   for compact session-scoped task state, timelines, and action links.
 - [Memory](docs/memory.md) — durable Markdown context for project workflows,
