@@ -9,7 +9,7 @@ use crate::keymap::KeyAction;
 use crate::theme::Theme;
 use agentd_protocol::{MessageRole, SessionEvent, SessionState, SessionSummary, TimestampedEvent};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
@@ -2159,9 +2159,14 @@ fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
             MainWindowTree::Leaf { id, selection } => {
                 let old_selection = app.selection.clone();
                 app.selection = selection.clone();
-                app.layout
-                    .main_window_areas
-                    .push(WindowPaneHit { id: *id, area });
+                app.layout.main_window_areas.push(WindowPaneHit {
+                    id: *id,
+                    area,
+                    inner_area: area.inner(Margin {
+                        horizontal: 1,
+                        vertical: 1,
+                    }),
+                });
                 render_detail(f, area, app, Some(*id));
                 app.selection = old_selection;
             }
@@ -2341,7 +2346,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         return;
     }
     match app.view {
-        ViewMode::Terminal => render_terminal(f, inner, app),
+        ViewMode::Terminal => render_terminal_for_window(f, inner, app, window_id),
         ViewMode::Transcript => render_transcript(f, inner, app),
     }
     render_main_transition(f, inner, app, window_id);
@@ -2447,6 +2452,10 @@ fn render_group_overview(
 }
 
 fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
+    render_terminal_for_window(f, area, app, None)
+}
+
+fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64>) {
     let Some(id) = app.selected_id() else {
         return;
     };
@@ -2470,7 +2479,7 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some(panel) = inline_panel.as_ref() {
         app.dynamic_ui_focused = Some((id.clone(), panel.id.clone()));
     }
-    let scroll = app.view_scrollback;
+    let scroll = app.scrollback_for_window(window_id);
     // Only adapters that publish `SessionEvent::EditorState` (currently
     // zarvis interactive) get the fixed editor pane at the bottom.
     // claude / codex / shell render their own input prompt inside the
@@ -2554,7 +2563,7 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.terminal_scrollbar = None;
     let row_offset = area.height.saturating_sub(chat_area.height);
     let out = history.replay(area.width, area.height, scroll);
-    app.view_scrollback = out.screen.scrollback();
+    let clamped_scrollback = out.screen.scrollback();
     // Hide the chat pane's cursor block if we have our own editor pane
     // — otherwise the chat's vt100 cursor would render as a stray
     // block. For non-editor-pane sessions (claude / codex / shell)
@@ -2587,14 +2596,16 @@ fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
         id.clone(),
         translate_block_hits(out.blocks, row_offset, chat_area.height),
     );
-    app.layout.terminal_scrollbar = render_terminal_scrollbar(
+    let terminal_scrollbar = render_terminal_scrollbar(
         f,
         chat_area,
         &app.theme,
         app.terminal_scrollbar_visible_until,
-        out.screen.scrollback(),
+        clamped_scrollback,
         out.max_scrollback,
     );
+    app.set_scrollback_for_window(window_id, clamped_scrollback);
+    app.layout.terminal_scrollbar = terminal_scrollbar;
     render_visible_dynamic_ui_panels(f, area, app, &sticky_panels);
     if app.dynamic_ui_popover_open.as_deref() == Some(id.as_str()) && !sticky_panels.is_empty() {
         render_dynamic_ui_dropdown(f, area, app, &sticky_panels);
