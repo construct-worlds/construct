@@ -2542,7 +2542,6 @@ impl App {
             self.selection = selection;
             self.focus = PaneFocus::View;
             if changed_selection {
-                self.start_session_transition();
                 self.transcript.clear();
                 self.transcript_session = None;
                 self.view_scrollback = 0;
@@ -6821,7 +6820,7 @@ mod tests {
         assert_eq!(app.active_window_id, 1);
         assert!(
             app.session_transition.is_none(),
-            "focus-only changes must not glitch"
+            "window focus changes must not glitch"
         );
         server.abort();
     }
