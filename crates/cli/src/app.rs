@@ -125,6 +125,32 @@ pub enum PaneFocus {
     View,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowSplitDirection {
+    Below,
+    Right,
+}
+
+#[derive(Debug, Clone)]
+pub enum MainWindowTree {
+    Leaf {
+        id: u64,
+        selection: Selection,
+    },
+    Split {
+        direction: WindowSplitDirection,
+        ratio_percent: u16,
+        first: Box<MainWindowTree>,
+        second: Box<MainWindowTree>,
+    },
+}
+
+impl MainWindowTree {
+    fn single(id: u64, selection: Selection) -> Self {
+        Self::Leaf { id, selection }
+    }
+}
+
 /// What the right pane is currently showing for the selected session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
@@ -250,6 +276,9 @@ pub struct App {
     pub groups: Vec<GroupSummary>,
     pub selection: Selection,
     pub focus: PaneFocus,
+    pub main_windows: MainWindowTree,
+    pub active_window_id: u64,
+    pub next_window_id: u64,
     pub subagent_collapsed: HashSet<String>,
     pub transcript: Vec<TimestampedEvent>,
     pub transcript_session: Option<String>,
@@ -1004,11 +1033,18 @@ pub struct TerminalScrollbarHit {
     pub max_scrollback: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowPaneHit {
+    pub id: u64,
+    pub area: ratatui::layout::Rect,
+}
+
 /// Last-frame geometry for hit-testing mouse clicks.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutSnapshot {
     pub list_area: Option<ratatui::layout::Rect>,
     pub view_area: Option<ratatui::layout::Rect>,
+    pub main_window_areas: Vec<WindowPaneHit>,
     pub pin_strip_area: Option<ratatui::layout::Rect>,
     pub matrix_rain_area: Option<ratatui::layout::Rect>,
     pub minibuffer_area: Option<ratatui::layout::Rect>,
@@ -1051,6 +1087,7 @@ pub struct LayoutSnapshot {
     pub dynamic_ui_inline_hit: Option<DynamicUiInlineHit>,
     /// Dynamic UI title-bar affordance bounds: `(x_start, x_end, y, session_id)`.
     pub dynamic_ui_trigger: Option<(u16, u16, u16, String)>,
+    pub dynamic_ui_triggers: Vec<(u16, u16, u16, String)>,
     /// Dynamic UI widget panel bounds from the last frame.
     pub dynamic_ui_popover_area: Option<ratatui::layout::Rect>,
     /// Dynamic UI dropdown bounds from the last frame.
@@ -1198,11 +1235,14 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         client: client.clone(),
         sessions,
         groups,
-        selection: initial_sel,
+        selection: initial_sel.clone(),
         // Default focus is the view — the selected session is usually
         // what the user wants to interact with first. List navigation
         // is one `C-x o` / `Tab` away.
         focus: initial_focus,
+        main_windows: MainWindowTree::single(1, initial_sel),
+        active_window_id: 1,
+        next_window_id: 2,
         subagent_collapsed: HashSet::new(),
         transcript: Vec::new(),
         transcript_session: None,
@@ -2433,6 +2473,206 @@ impl App {
             .map(|s| s.id.clone());
     }
 
+    fn sync_active_window_selection(&mut self) {
+        fn update(node: &mut MainWindowTree, id: u64, selection: &Selection) -> bool {
+            match node {
+                MainWindowTree::Leaf {
+                    id: leaf_id,
+                    selection: leaf_selection,
+                } => {
+                    if *leaf_id == id {
+                        *leaf_selection = selection.clone();
+                        true
+                    } else {
+                        false
+                    }
+                }
+                MainWindowTree::Split { first, second, .. } => {
+                    update(first, id, selection) || update(second, id, selection)
+                }
+            }
+        }
+        update(
+            &mut self.main_windows,
+            self.active_window_id,
+            &self.selection,
+        );
+    }
+
+    fn selection_for_window(&self, target: u64) -> Option<Selection> {
+        fn find(node: &MainWindowTree, target: u64) -> Option<Selection> {
+            match node {
+                MainWindowTree::Leaf { id, selection } if *id == target => Some(selection.clone()),
+                MainWindowTree::Leaf { .. } => None,
+                MainWindowTree::Split { first, second, .. } => {
+                    find(first, target).or_else(|| find(second, target))
+                }
+            }
+        }
+        find(&self.main_windows, target)
+    }
+
+    fn leaf_window_ids(&self) -> Vec<u64> {
+        fn collect(node: &MainWindowTree, out: &mut Vec<u64>) {
+            match node {
+                MainWindowTree::Leaf { id, .. } => out.push(*id),
+                MainWindowTree::Split { first, second, .. } => {
+                    collect(first, out);
+                    collect(second, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        collect(&self.main_windows, &mut out);
+        out
+    }
+
+    fn focus_main_window(&mut self, id: u64) {
+        if let Some(selection) = self.selection_for_window(id) {
+            self.active_window_id = id;
+            self.selection = selection;
+            self.focus = PaneFocus::View;
+            self.transcript.clear();
+            self.transcript_session = None;
+            self.view_scrollback = 0;
+            self.view = if self.selected_session().map(|s| s.has_pty).unwrap_or(false) {
+                ViewMode::Terminal
+            } else {
+                ViewMode::Transcript
+            };
+        }
+    }
+
+    fn split_active_window(&mut self, direction: WindowSplitDirection) {
+        fn split(
+            node: &mut MainWindowTree,
+            target: u64,
+            new_id: u64,
+            direction: WindowSplitDirection,
+        ) -> bool {
+            match node {
+                MainWindowTree::Leaf { id, selection } if *id == target => {
+                    let old_id = *id;
+                    let sel = selection.clone();
+                    *node = MainWindowTree::Split {
+                        direction,
+                        ratio_percent: 50,
+                        first: Box::new(MainWindowTree::Leaf {
+                            id: old_id,
+                            selection: sel.clone(),
+                        }),
+                        second: Box::new(MainWindowTree::Leaf {
+                            id: new_id,
+                            selection: sel,
+                        }),
+                    };
+                    true
+                }
+                MainWindowTree::Leaf { .. } => false,
+                MainWindowTree::Split { first, second, .. } => {
+                    split(first, target, new_id, direction)
+                        || split(second, target, new_id, direction)
+                }
+            }
+        }
+        let new_id = self.next_window_id;
+        self.next_window_id = self.next_window_id.saturating_add(1);
+        self.sync_active_window_selection();
+        if split(
+            &mut self.main_windows,
+            self.active_window_id,
+            new_id,
+            direction,
+        ) {
+            self.focus_main_window(new_id);
+            self.set_status(
+                match direction {
+                    WindowSplitDirection::Below => "split below — C-x o cycles windows",
+                    WindowSplitDirection::Right => "split right — C-x o cycles windows",
+                }
+                .into(),
+            );
+        }
+    }
+
+    fn delete_active_window(&mut self) {
+        fn remove(node: &mut MainWindowTree, target: u64) -> bool {
+            match node {
+                MainWindowTree::Leaf { id, .. } => *id == target,
+                MainWindowTree::Split { first, second, .. } => {
+                    if remove(first, target) {
+                        *node = (**second).clone();
+                        true
+                    } else if remove(second, target) {
+                        *node = (**first).clone();
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
+        if self.leaf_window_ids().len() <= 1 {
+            self.set_status("only one window".into());
+            return;
+        }
+        let target = self.active_window_id;
+        if remove(&mut self.main_windows, target) {
+            if let Some(id) = self.leaf_window_ids().first().copied() {
+                self.focus_main_window(id);
+            }
+            self.set_status("window deleted".into());
+        }
+    }
+
+    fn delete_other_windows(&mut self) {
+        self.sync_active_window_selection();
+        let selection = self.selection.clone();
+        self.main_windows = MainWindowTree::single(self.active_window_id, selection);
+        self.set_status("only current window".into());
+    }
+
+    fn resize_active_window(&mut self, delta: i16, direction: WindowSplitDirection) {
+        fn resize(
+            node: &mut MainWindowTree,
+            target: u64,
+            delta: i16,
+            want: WindowSplitDirection,
+        ) -> bool {
+            match node {
+                MainWindowTree::Leaf { id, .. } => *id == target,
+                MainWindowTree::Split {
+                    direction,
+                    ratio_percent,
+                    first,
+                    second,
+                } => {
+                    if resize(first, target, delta, want) {
+                        if *direction == want {
+                            *ratio_percent = (*ratio_percent as i16 + delta).clamp(10, 90) as u16;
+                        }
+                        true
+                    } else if resize(second, target, delta, want) {
+                        if *direction == want {
+                            *ratio_percent = (*ratio_percent as i16 - delta).clamp(10, 90) as u16;
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
+        if resize(
+            &mut self.main_windows,
+            self.active_window_id,
+            delta,
+            direction,
+        ) {
+            self.set_status("window resized".into());
+        }
+    }
+
     /// Move the selection up or down by one row in the materialized list,
     /// wrapping at the ends. No-op if the list is empty.
     async fn step_selection(&mut self, delta: i32) {
@@ -2450,6 +2690,7 @@ impl App {
             ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
             ListItem::GroupHeader { group, .. } => self.select_group(group.id.clone()),
         }
+        self.sync_active_window_selection();
     }
 
     /// After any list mutation, make sure `self.selection` still refers to
@@ -3478,7 +3719,7 @@ impl App {
             }
             return true;
         }
-        if let Some((x_start, x_end, y, session_id)) = self.layout.dynamic_ui_trigger.clone() {
+        for (x_start, x_end, y, session_id) in self.layout.dynamic_ui_triggers.clone() {
             if row == y && col >= x_start && col < x_end {
                 self.dynamic_ui_popover_open =
                     if self.dynamic_ui_popover_open.as_deref() == Some(session_id.as_str()) {
@@ -3633,7 +3874,15 @@ impl App {
                 return;
             }
         }
-        if let Some(view) = self.layout.view_area {
+        if let Some(hit) = self
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|hit| contains(hit.area, col, row))
+            .copied()
+        {
+            let view = hit.area;
+            self.focus_main_window(hit.id);
             if contains(view, col, row) {
                 self.dynamic_ui_focused = None;
                 if let Some((x_start, x_end, y)) = self.layout.browser_preview_close {
@@ -4410,6 +4659,13 @@ impl App {
                 action @ (KeyAction::NextSession
                 | KeyAction::PrevSession
                 | KeyAction::SwitchFocus
+                | KeyAction::SplitWindowBelow
+                | KeyAction::SplitWindowRight
+                | KeyAction::DeleteWindow
+                | KeyAction::DeleteOtherWindows
+                | KeyAction::EnlargeWindow
+                | KeyAction::EnlargeWindowHorizontally
+                | KeyAction::ShrinkWindowHorizontally
                 | KeyAction::FocusView
                 | KeyAction::ToggleView
                 | KeyAction::ToggleZoom
@@ -4779,8 +5035,8 @@ impl App {
             }
             SwitchFocus => {
                 // In a zoomed layout `C-x o` swaps which pane is
-                // zoomed (and focused). In normal layout it just
-                // swaps focus.
+                // zoomed (and focused). In normal layout it cycles
+                // list plus all visible main windows.
                 self.collapse_orchestrator_panel_on_focus_change();
                 match self.zoom {
                     ZoomMode::List => {
@@ -4791,19 +5047,37 @@ impl App {
                         self.zoom = ZoomMode::List;
                         self.focus = PaneFocus::List;
                     }
-                    ZoomMode::None => {
-                        self.focus = match self.focus {
-                            PaneFocus::List => PaneFocus::View,
-                            PaneFocus::View => PaneFocus::List,
-                        };
-                    }
+                    ZoomMode::None => match self.focus {
+                        PaneFocus::List => self.focus = PaneFocus::View,
+                        PaneFocus::View => {
+                            let ids = self.leaf_window_ids();
+                            if let Some(pos) =
+                                ids.iter().position(|id| *id == self.active_window_id)
+                            {
+                                if pos + 1 < ids.len() {
+                                    self.focus_main_window(ids[pos + 1]);
+                                } else {
+                                    self.focus = PaneFocus::List;
+                                }
+                            } else {
+                                self.focus = PaneFocus::List;
+                            }
+                        }
+                    },
                 }
                 let label = match self.focus {
-                    PaneFocus::List => "focus: list",
-                    PaneFocus::View => "focus: view",
+                    PaneFocus::List => "focus: list".to_string(),
+                    PaneFocus::View => format!("focus: window {}", self.active_window_id),
                 };
-                self.set_status(label.into());
+                self.set_status(label);
             }
+            SplitWindowBelow => self.split_active_window(WindowSplitDirection::Below),
+            SplitWindowRight => self.split_active_window(WindowSplitDirection::Right),
+            DeleteWindow => self.delete_active_window(),
+            DeleteOtherWindows => self.delete_other_windows(),
+            EnlargeWindow => self.resize_active_window(5, WindowSplitDirection::Below),
+            EnlargeWindowHorizontally => self.resize_active_window(5, WindowSplitDirection::Right),
+            ShrinkWindowHorizontally => self.resize_active_window(-5, WindowSplitDirection::Right),
             ToggleZoom => {
                 // Zoom the currently-focused pane; if anything is
                 // already zoomed, unzoom back to the split layout.
@@ -6192,6 +6466,10 @@ mod tests {
         LayoutSnapshot {
             list_area: Some(Rect::new(0, 0, 20, 10)),
             view_area: Some(Rect::new(20, 0, 80, 20)),
+            main_window_areas: vec![WindowPaneHit {
+                id: 1,
+                area: Rect::new(20, 0, 80, 20),
+            }],
             pin_strip_area: Some(Rect::new(20, 20, 80, 8)),
             matrix_rain_area: None,
             minibuffer_area: Some(Rect::new(0, 29, 100, 4)),
@@ -6209,6 +6487,7 @@ mod tests {
             dynamic_ui_panel_close_hits: Vec::new(),
             dynamic_ui_inline_hit: None,
             dynamic_ui_trigger: None,
+            dynamic_ui_triggers: Vec::new(),
             dynamic_ui_popover_area: None,
             dynamic_ui_dropdown_area: None,
             dynamic_ui_scroll_metrics: None,
@@ -6224,6 +6503,9 @@ mod tests {
             groups: Vec::new(),
             selection: Selection::Session("s1".into()),
             focus: PaneFocus::View,
+            main_windows: MainWindowTree::single(1, Selection::Session("s1".into())),
+            active_window_id: 1,
+            next_window_id: 2,
             subagent_collapsed: HashSet::new(),
             transcript: Vec::new(),
             transcript_session: None,
