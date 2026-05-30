@@ -4261,6 +4261,7 @@ impl App {
         match &items[idx] {
             ListItem::Session { summary, .. } => {
                 self.select_session(summary.id.clone());
+                self.sync_active_window_selection();
             }
             ListItem::GroupHeader { group, .. } => {
                 let id = group.id.clone();
@@ -4272,6 +4273,7 @@ impl App {
                     .unwrap_or(true)
                 {
                     self.select_group(id.clone());
+                    self.sync_active_window_selection();
                 }
                 if let Err(e) = self.client.set_project_collapsed(&id, next).await {
                     self.set_status(format!("collapse failed: {e}"));
