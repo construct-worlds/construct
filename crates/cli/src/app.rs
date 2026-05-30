@@ -1224,10 +1224,18 @@ fn selection_bounds_for_layout(
         }
     }
 
-    if let Some(view) = layout.view_area {
-        let view_inner = inner(view);
-        if contains(view_inner, col, row) {
-            return Some(view_inner);
+    for hit in &layout.main_window_areas {
+        if contains(hit.inner_area, col, row) {
+            return Some(hit.inner_area);
+        }
+    }
+
+    if layout.main_window_areas.is_empty() {
+        if let Some(view) = layout.view_area {
+            let view_inner = inner(view);
+            if contains(view_inner, col, row) {
+                return Some(view_inner);
+            }
         }
     }
 
@@ -7574,6 +7582,37 @@ mod tests {
             text.push('\n');
         }
         text
+    }
+
+    #[test]
+    fn selection_bounds_use_split_window_inner_area() {
+        let mut layout = test_layout();
+        layout.main_window_areas = vec![
+            WindowPaneHit {
+                id: 1,
+                area: Rect::new(20, 0, 40, 20),
+                inner_area: Rect::new(21, 1, 38, 18),
+            },
+            WindowPaneHit {
+                id: 2,
+                area: Rect::new(60, 0, 40, 20),
+                inner_area: Rect::new(61, 1, 38, 18),
+            },
+        ];
+
+        assert_eq!(
+            selection_bounds_for_layout(&layout, 0, false, 65, 5),
+            Some(Rect::new(61, 1, 38, 18))
+        );
+        assert_eq!(
+            selection_bounds_for_layout(&layout, 0, false, 60, 5),
+            None,
+            "split borders should not be selectable text"
+        );
+        assert_eq!(
+            selection_bounds_for_layout(&layout, 0, false, 55, 5),
+            Some(Rect::new(21, 1, 38, 18))
+        );
     }
 
     #[tokio::test]
