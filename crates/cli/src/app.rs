@@ -67,6 +67,49 @@ fn is_subagent_session(s: &SessionSummary) -> bool {
     matches!(s.kind, agentd_protocol::SessionKind::Subagent)
 }
 
+fn selection_is_valid_for_sessions(
+    selection: &Selection,
+    sessions: &[SessionSummary],
+    groups: &[GroupSummary],
+) -> bool {
+    match selection {
+        Selection::None => true,
+        Selection::Session(id) => sessions
+            .iter()
+            .any(|s| s.id == *id && is_user_list_session(s)),
+        Selection::Group(id) => groups.iter().any(|g| g.id == *id),
+    }
+}
+
+fn prune_window_tree(
+    tree: MainWindowTree,
+    sessions: &[SessionSummary],
+    groups: &[GroupSummary],
+    fallback: &Selection,
+) -> MainWindowTree {
+    match tree {
+        MainWindowTree::Leaf { id, selection } => MainWindowTree::Leaf {
+            id,
+            selection: if selection_is_valid_for_sessions(&selection, sessions, groups) {
+                selection
+            } else {
+                fallback.clone()
+            },
+        },
+        MainWindowTree::Split {
+            direction,
+            ratio_percent,
+            first,
+            second,
+        } => MainWindowTree::Split {
+            direction,
+            ratio_percent,
+            first: Box::new(prune_window_tree(*first, sessions, groups, fallback)),
+            second: Box::new(prune_window_tree(*second, sessions, groups, fallback)),
+        },
+    }
+}
+
 pub(crate) fn list_session_indent_cells(
     s: &SessionSummary,
     indented: bool,
@@ -94,7 +137,7 @@ impl ListItem {
 }
 
 /// What's currently focused in the list pane.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Selection {
     #[default]
     None,
@@ -125,13 +168,13 @@ pub enum PaneFocus {
     View,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WindowSplitDirection {
     Below,
     Right,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MainWindowTree {
     Leaf {
         id: u64,
@@ -148,6 +191,30 @@ pub enum MainWindowTree {
 impl MainWindowTree {
     fn single(id: u64, selection: Selection) -> Self {
         Self::Leaf { id, selection }
+    }
+
+    fn max_id(&self) -> u64 {
+        match self {
+            Self::Leaf { id, .. } => *id,
+            Self::Split { first, second, .. } => first.max_id().max(second.max_id()),
+        }
+    }
+
+    fn first_leaf_id(&self) -> Option<u64> {
+        match self {
+            Self::Leaf { id, .. } => Some(*id),
+            Self::Split { first, .. } => first.first_leaf_id(),
+        }
+    }
+
+    fn find_selection(&self, target: u64) -> Option<&Selection> {
+        match self {
+            Self::Leaf { id, selection } if *id == target => Some(selection),
+            Self::Leaf { .. } => None,
+            Self::Split { first, second, .. } => first
+                .find_selection(target)
+                .or_else(|| second.find_selection(target)),
+        }
     }
 }
 
@@ -1229,6 +1296,19 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
                 .map(|s| Selection::Session(s.id.clone()))
         })
         .unwrap_or(Selection::None);
+    let initial_main_windows = persisted
+        .main_windows
+        .clone()
+        .map(|tree| prune_window_tree(tree, &sessions, &groups, &initial_sel))
+        .unwrap_or_else(|| MainWindowTree::single(1, initial_sel.clone()));
+    let initial_active_window_id = persisted
+        .active_window_id
+        .filter(|id| initial_main_windows.find_selection(*id).is_some())
+        .unwrap_or_else(|| initial_main_windows.first_leaf_id().unwrap_or(1));
+    let initial_window_sel = initial_main_windows
+        .find_selection(initial_active_window_id)
+        .cloned()
+        .unwrap_or_else(|| initial_sel.clone());
 
     let now = Instant::now();
     let socket = client.socket_path().to_path_buf();
@@ -1237,14 +1317,14 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         client: client.clone(),
         sessions,
         groups,
-        selection: initial_sel.clone(),
+        selection: initial_window_sel,
         // Default focus is the view — the selected session is usually
         // what the user wants to interact with first. List navigation
         // is one `C-x o` / `Tab` away.
         focus: initial_focus,
-        main_windows: MainWindowTree::single(1, initial_sel),
-        active_window_id: 1,
-        next_window_id: 2,
+        next_window_id: initial_main_windows.max_id().saturating_add(1),
+        active_window_id: initial_active_window_id,
+        main_windows: initial_main_windows,
         subagent_collapsed: HashSet::new(),
         transcript: Vec::new(),
         transcript_session: None,
@@ -1410,6 +1490,8 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         list_collapsed: app.list_collapsed,
         matrix_rain_hidden: app.matrix_rain_hidden,
         hide_pane_side_borders: app.hide_pane_side_borders,
+        main_windows: Some(app.main_windows.clone()),
+        active_window_id: Some(app.active_window_id),
         widgets,
     });
 
@@ -6795,6 +6877,47 @@ mod tests {
             last_pty_at_ms: None,
             automode: false,
             kind,
+        }
+    }
+
+    #[test]
+    fn prune_window_tree_replaces_stale_sessions_and_preserves_splits() {
+        let mut s2 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s2.id = "s2".into();
+        let tree = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 35,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 4,
+                selection: Selection::Session("missing".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 7,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+
+        let restored = prune_window_tree(tree, &[s2], &[], &Selection::Session("s2".into()));
+
+        match restored {
+            MainWindowTree::Split {
+                ratio_percent,
+                first,
+                second,
+                ..
+            } => {
+                assert_eq!(ratio_percent, 35);
+                assert_eq!(
+                    first.find_selection(4),
+                    Some(&Selection::Session("s2".into()))
+                );
+                assert_eq!(
+                    second.find_selection(7),
+                    Some(&Selection::Session("s2".into()))
+                );
+                assert_eq!(second.max_id(), 7);
+            }
+            MainWindowTree::Leaf { .. } => panic!("split layout should be preserved"),
         }
     }
 
