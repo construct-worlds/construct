@@ -2645,12 +2645,16 @@ impl App {
     }
 
     pub fn scrollback_for_window(&self, window_id: Option<u64>) -> usize {
-        window_id
-            .and_then(|id| self.window_scrollback.get(&id).copied())
-            .unwrap_or(self.view_scrollback)
+        match window_id {
+            Some(id) => self.window_scrollback.get(&id).copied().unwrap_or(0),
+            None => self.view_scrollback,
+        }
     }
 
     pub fn set_scrollback_for_window(&mut self, window_id: Option<u64>, scrollback: usize) {
+        if window_id == Some(self.active_window_id) {
+            self.view_scrollback = scrollback;
+        }
         if let Some(id) = window_id {
             if scrollback == 0 {
                 self.window_scrollback.remove(&id);
@@ -7072,7 +7076,7 @@ mod tests {
         assert_eq!(app.selection, Selection::Session("s2".into()));
         assert_eq!(app.scrollback_for_window(Some(1)), 0);
         assert_eq!(app.scrollback_for_window(Some(2)), 10);
-        assert_eq!(app.view_scrollback, 0);
+        assert_eq!(app.view_scrollback, 10);
         server.abort();
     }
 
