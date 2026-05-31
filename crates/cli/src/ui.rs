@@ -98,6 +98,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.browser_preview_close = None;
     app.layout.terminal_scrollbar = None;
     app.layout.dynamic_ui_action_hits.clear();
+    app.layout.dynamic_ui_url_hits.clear();
     app.layout.dynamic_ui_widget_hits.clear();
     app.layout.dynamic_ui_panel_close_hits.clear();
     app.layout.dynamic_ui_inline_hit = None;
@@ -2753,6 +2754,7 @@ fn inline_widget_rows(
     };
     let suppress_first_heading = leading_markdown_heading(&panel.markdown).is_some();
     let mut throwaway_hits = Vec::new();
+    let mut throwaway_url_hits = Vec::new();
     let lines = render_agentd_markdown_lines(
         &panel.markdown,
         theme,
@@ -2761,6 +2763,7 @@ fn inline_widget_rows(
         None,
         None,
         &mut throwaway_hits,
+        &mut throwaway_url_hits,
         suppress_first_heading,
     );
     let body_rows = visual_line_count(lines.iter(), content_width) as u16;
@@ -2812,6 +2815,7 @@ fn render_inline_dynamic_ui_panel(
         Some(session_id),
         Some(panel.id.as_str()),
         &mut app.layout.dynamic_ui_action_hits,
+        &mut app.layout.dynamic_ui_url_hits,
         suppress_first_heading,
     );
     f.render_widget(
@@ -3042,6 +3046,13 @@ fn translate_dynamic_ui_hits_for_scroll(
         hit.row = row;
         hit.row >= top && hit.row < bottom
     });
+    app.layout.dynamic_ui_url_hits.retain_mut(|hit| {
+        let Some(row) = hit.row.checked_sub(scroll as u16) else {
+            return false;
+        };
+        hit.row = row;
+        hit.row >= top && hit.row < bottom
+    });
     app.layout.dynamic_ui_panel_close_hits.retain_mut(|hit| {
         let Some(row) = hit.row.checked_sub(scroll as u16) else {
             return false;
@@ -3121,6 +3132,7 @@ fn render_dynamic_ui_stack_lines(
             Some(session_id),
             Some(panel.id.as_str()),
             &mut app.layout.dynamic_ui_action_hits,
+            &mut app.layout.dynamic_ui_url_hits,
             suppress_first_heading,
         );
         rows.extend(lines);
@@ -3220,6 +3232,7 @@ fn render_agentd_markdown_lines(
     session_id: Option<&str>,
     panel_id: Option<&str>,
     hits: &mut Vec<crate::app::DynamicUiActionHit>,
+    url_hits: &mut Vec<crate::app::DynamicUiUrlHit>,
     suppress_first_heading: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -3241,6 +3254,7 @@ fn render_agentd_markdown_lines(
                     session_id,
                     panel_id,
                     hits,
+                    url_hits,
                 );
                 rendered_rows += visual_line_count(rendered.iter(), panel_area.width);
                 lines.extend(rendered);
@@ -3361,10 +3375,31 @@ fn render_agentd_markdown_lines(
             session_id,
             panel_id,
             hits,
+            url_hits,
         ) {
             lines.push(line);
         } else {
-            lines.push(Line::raw(strip_markdown_emphasis(line)));
+            // Paragraph fallback: route through `render_inline_action_spans`
+            // so `[text](https?://…)` URLs register as `DynamicUiUrlHit`s
+            // and get the underline affordance. Lines containing only
+            // `agentd:action/...` links are caught by the dedicated
+            // action-line branch above; this catch-all picks up the mixed
+            // paragraph case ("See [docs](https://…) for details.") that
+            // would otherwise render the URL as inert text.
+            let start_col = panel_area.x.saturating_add(1);
+            let row = panel_area.y.saturating_add(rendered_rows as u16);
+            let spans = render_inline_action_spans(
+                line,
+                theme,
+                hover,
+                row,
+                start_col,
+                session_id,
+                panel_id,
+                hits,
+                url_hits,
+            );
+            lines.push(Line::from(spans));
         }
         if before_normal_lines < lines.len() {
             rendered_rows +=
@@ -3384,6 +3419,7 @@ fn render_agentd_markdown_lines(
             session_id,
             panel_id,
             hits,
+            url_hits,
         ));
     }
     lines
@@ -3428,6 +3464,7 @@ fn render_timeline_block(
     session_id: Option<&str>,
     panel_id: Option<&str>,
     hits: &mut Vec<crate::app::DynamicUiActionHit>,
+    url_hits: &mut Vec<crate::app::DynamicUiUrlHit>,
 ) -> Vec<Line<'static>> {
     let items = timeline_items(&block.items);
     let mut lines = Vec::new();
@@ -3458,6 +3495,7 @@ fn render_timeline_block(
             session_id,
             panel_id,
             hits,
+            url_hits,
         ));
         lines.push(Line::from(spans));
         for nested in &item.nested {
@@ -3472,6 +3510,7 @@ fn render_timeline_block(
                 session_id,
                 panel_id,
                 hits,
+                url_hits,
             );
         }
         if is_last {
@@ -3526,6 +3565,7 @@ fn render_timeline_nested_line(
     session_id: Option<&str>,
     panel_id: Option<&str>,
     hits: &mut Vec<crate::app::DynamicUiActionHit>,
+    url_hits: &mut Vec<crate::app::DynamicUiUrlHit>,
 ) {
     let connector = if continue_line { "│  " } else { "   " };
     let indent_cols = nested_indent_cols(nested).saturating_sub(2);
@@ -3561,6 +3601,7 @@ fn render_timeline_nested_line(
         session_id,
         panel_id,
         hits,
+        url_hits,
     ));
     lines.push(Line::from(spans));
 }
@@ -3626,6 +3667,7 @@ fn parse_checkline(
     session_id: Option<&str>,
     panel_id: Option<&str>,
     hits: &mut Vec<crate::app::DynamicUiActionHit>,
+    url_hits: &mut Vec<crate::app::DynamicUiUrlHit>,
 ) -> Option<Line<'static>> {
     let indent = line
         .chars()
@@ -3667,6 +3709,7 @@ fn parse_checkline(
         session_id,
         panel_id,
         hits,
+        url_hits,
     ));
     Some(Line::from(spans))
 }
@@ -3680,6 +3723,7 @@ fn render_inline_action_spans(
     session_id: Option<&str>,
     panel_id: Option<&str>,
     hits: &mut Vec<crate::app::DynamicUiActionHit>,
+    url_hits: &mut Vec<crate::app::DynamicUiUrlHit>,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = text;
@@ -3699,7 +3743,12 @@ fn render_inline_action_spans(
         };
         let label = &after_open[..label_end];
         let after_label = &after_open[label_end + 1..];
-        let Some(after_action_open) = after_label.strip_prefix("(agentd:action/") else {
+        // Try to peel the `(target)` part out of `[label](target)`. If it
+        // isn't there, render `[label]` literally.
+        let parens = after_label.strip_prefix('(').and_then(|s| {
+            s.find(')').map(|end| (&s[..end], &s[end + 1..]))
+        });
+        let Some((target, after_close)) = parens else {
             let literal = &rest[label_start..label_start + label_end + 2];
             let rendered = strip_markdown_emphasis(literal);
             col = col.saturating_add(UnicodeWidthStr::width(rendered.as_str()) as u16);
@@ -3707,48 +3756,87 @@ fn render_inline_action_spans(
             rest = after_label;
             continue;
         };
-        let Some(action_end) = after_action_open.find(')') else {
-            let rendered = strip_markdown_emphasis(&rest[label_start..]);
-            spans.push(Span::styled(rendered, Style::default().fg(theme.text)));
-            return spans;
-        };
-        let (action_id, key, close) = parse_action_target(&after_action_open[..action_end]);
-        let prefix = key
-            .as_ref()
-            .map(|key| format!("[{key}] "))
-            .unwrap_or_default();
-        let display = format!("{prefix}{label}");
-        let end_col = col.saturating_add(UnicodeWidthStr::width(display.as_str()) as u16);
-        let is_hovered = hover
-            .map(|(mx, my)| my == row && mx >= col && mx < end_col)
-            .unwrap_or(false);
-        let mut style = Style::default().fg(if is_hovered {
-            theme.matrix_flash_good
-        } else {
-            theme.accent
-        });
-        if is_hovered {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
-        if let (Some(session_id), Some(panel_id)) = (session_id, panel_id) {
-            hits.push(crate::app::DynamicUiActionHit {
-                session_id: session_id.to_string(),
-                panel_id: panel_id.to_string(),
-                action: agentd_protocol::UiAction {
-                    id: action_id,
-                    label: label.to_string(),
-                    key,
-                    style: None,
-                    close,
-                },
-                row,
-                start_col: col,
-                end_col,
+        // Branch by URL scheme: agentd:action/ → in-app action hit;
+        // http(s):// → external URL hit (opens via `open_url` on click);
+        // anything else → fall through and render the literal text.
+        if let Some(action_target) = target.strip_prefix("agentd:action/") {
+            let (action_id, key, close) = parse_action_target(action_target);
+            let prefix = key
+                .as_ref()
+                .map(|key| format!("[{key}] "))
+                .unwrap_or_default();
+            let display = format!("{prefix}{label}");
+            let end_col = col.saturating_add(UnicodeWidthStr::width(display.as_str()) as u16);
+            let is_hovered = hover
+                .map(|(mx, my)| my == row && mx >= col && mx < end_col)
+                .unwrap_or(false);
+            let mut style = Style::default().fg(if is_hovered {
+                theme.matrix_flash_good
+            } else {
+                theme.accent
             });
+            if is_hovered {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            if let (Some(session_id), Some(panel_id)) = (session_id, panel_id) {
+                hits.push(crate::app::DynamicUiActionHit {
+                    session_id: session_id.to_string(),
+                    panel_id: panel_id.to_string(),
+                    action: agentd_protocol::UiAction {
+                        id: action_id,
+                        label: label.to_string(),
+                        key,
+                        style: None,
+                        close,
+                    },
+                    row,
+                    start_col: col,
+                    end_col,
+                });
+            }
+            spans.push(Span::styled(display, style));
+            col = end_col;
+            rest = after_close;
+        } else if target.starts_with("http://") || target.starts_with("https://") {
+            let display = label.to_string();
+            let end_col = col.saturating_add(UnicodeWidthStr::width(display.as_str()) as u16);
+            let is_hovered = hover
+                .map(|(mx, my)| my == row && mx >= col && mx < end_col)
+                .unwrap_or(false);
+            // Always underline external URLs so they read as links even
+            // without a pointer; flip to REVERSED on hover so the hit area
+            // is unambiguous before the user clicks (matches the action
+            // link affordance above).
+            let mut style = Style::default()
+                .fg(if is_hovered {
+                    theme.matrix_flash_good
+                } else {
+                    theme.accent
+                })
+                .add_modifier(Modifier::UNDERLINED);
+            if is_hovered {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            if let (Some(session_id), Some(panel_id)) = (session_id, panel_id) {
+                url_hits.push(crate::app::DynamicUiUrlHit {
+                    session_id: session_id.to_string(),
+                    panel_id: panel_id.to_string(),
+                    url: target.to_string(),
+                    row,
+                    start_col: col,
+                    end_col,
+                });
+            }
+            spans.push(Span::styled(display, style));
+            col = end_col;
+            rest = after_close;
+        } else {
+            let literal = &rest[label_start..label_start + label_end + 2];
+            let rendered = strip_markdown_emphasis(literal);
+            col = col.saturating_add(UnicodeWidthStr::width(rendered.as_str()) as u16);
+            spans.push(Span::styled(rendered, Style::default().fg(theme.text)));
+            rest = after_label;
         }
-        spans.push(Span::styled(display, style));
-        col = end_col;
-        rest = &after_action_open[action_end + 1..];
     }
     if !rest.is_empty() {
         spans.push(Span::styled(
@@ -6044,6 +6132,7 @@ mod tests {
     #[test]
     fn timeline_renders_nested_actions_and_depth() {
         let mut hits = Vec::new();
+        let mut url_hits = Vec::new();
         let markdown = "# Timeline demo\n\n:::timeline\n- [~] [Start demo](agentd:action/start-demo?key=d)\n  - [x] Prepare demo workspace\n    - [ ] Record demo\n- [ ] [Run checks](agentd:action/run-checks?key=r)\n- Plain milestone\n:::";
         let lines = render_agentd_markdown_lines(
             markdown,
@@ -6053,6 +6142,7 @@ mod tests {
             Some("session"),
             Some("panel"),
             &mut hits,
+            &mut url_hits,
             true,
         );
         let rendered: Vec<_> = lines.iter().map(line_text).collect();
@@ -6081,6 +6171,7 @@ mod tests {
     #[test]
     fn checklist_action_links_keep_list_layout_and_optional_keys() {
         let mut hits = Vec::new();
+        let mut url_hits = Vec::new();
         let markdown = "- [x] [Run checks](agentd:action/run-checks?key=r) and [Start demo](agentd:action/start-demo)";
         let lines = render_agentd_markdown_lines(
             markdown,
@@ -6090,12 +6181,125 @@ mod tests {
             Some("session"),
             Some("panel"),
             &mut hits,
+            &mut url_hits,
             false,
         );
         assert_eq!(line_text(&lines[0]), "✓ [r] Run checks and Start demo");
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].action.key.as_deref(), Some("r"));
         assert_eq!(hits[1].action.key, None);
+    }
+
+    /// Regression: an http(s) URL link inside a widget must register a
+    /// `DynamicUiUrlHit` (with the URL + visible hit geometry) so the
+    /// click handler can dispatch it through `open_url`. Before the URL
+    /// hit list existed, these rendered as plain text and clicks were
+    /// silently swallowed even though the hover underline implied they
+    /// were active.
+    #[test]
+    fn http_link_in_widget_registers_url_hit() {
+        let mut hits = Vec::new();
+        let mut url_hits = Vec::new();
+        let markdown = "See [docs](https://example.com/x) for details.";
+        render_agentd_markdown_lines(
+            markdown,
+            &Theme::default(),
+            None,
+            Rect::new(0, 0, 80, 10),
+            Some("session"),
+            Some("panel"),
+            &mut hits,
+            &mut url_hits,
+            false,
+        );
+        assert!(
+            hits.is_empty(),
+            "an external URL must not register as an action hit"
+        );
+        assert_eq!(url_hits.len(), 1);
+        assert_eq!(url_hits[0].url, "https://example.com/x");
+        assert_eq!(url_hits[0].session_id, "session");
+        assert_eq!(url_hits[0].panel_id, "panel");
+        // Hit width should cover the visible label "docs" (4 cols), not the
+        // raw URL — clicks land where the text actually renders.
+        assert_eq!(url_hits[0].end_col - url_hits[0].start_col, 4);
+    }
+
+    /// `http://` URLs are also clickable, and the link's hit geometry
+    /// follows where the label appears in the rendered line (here the
+    /// label is in a checklist item, so it's offset by the glyph and
+    /// leading indent).
+    #[test]
+    fn http_link_in_checklist_is_clickable_and_offset_correctly() {
+        let mut hits = Vec::new();
+        let mut url_hits = Vec::new();
+        let markdown = "- [ ] visit [home](http://example.com)";
+        render_agentd_markdown_lines(
+            markdown,
+            &Theme::default(),
+            None,
+            Rect::new(0, 0, 80, 10),
+            Some("session"),
+            Some("panel"),
+            &mut hits,
+            &mut url_hits,
+            false,
+        );
+        assert!(hits.is_empty());
+        assert_eq!(url_hits.len(), 1);
+        assert_eq!(url_hits[0].url, "http://example.com");
+        // Label width "home" = 4 cols regardless of where it lands.
+        assert_eq!(url_hits[0].end_col - url_hits[0].start_col, 4);
+    }
+
+    /// Mixed widgets — action links on one line, an http link in the
+    /// following paragraph — must each land in their own hit list. The
+    /// existing dedicated action-line branch only accepts lines that are
+    /// purely action links, so a real-world widget uses separate lines.
+    #[test]
+    fn mixed_action_and_url_links_partition_correctly() {
+        let mut hits = Vec::new();
+        let mut url_hits = Vec::new();
+        let markdown = "[Run](agentd:action/run)\n\nSee [docs](https://example.com) for details.";
+        render_agentd_markdown_lines(
+            markdown,
+            &Theme::default(),
+            None,
+            Rect::new(0, 0, 80, 10),
+            Some("session"),
+            Some("panel"),
+            &mut hits,
+            &mut url_hits,
+            false,
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].action.id, "run");
+        assert_eq!(url_hits.len(), 1);
+        assert_eq!(url_hits[0].url, "https://example.com");
+    }
+
+    /// Schemes other than http(s) / agentd:action are not turned into
+    /// hits — they render as plain text. This is the guard against
+    /// dispatching `mailto:`, `file://`, etc., which would need explicit
+    /// handling and a security review.
+    #[test]
+    fn non_http_link_schemes_do_not_register_url_hits() {
+        let mut hits = Vec::new();
+        let mut url_hits = Vec::new();
+        let markdown = "[email](mailto:me@example.com) and [file](file:///etc/passwd)";
+        render_agentd_markdown_lines(
+            markdown,
+            &Theme::default(),
+            None,
+            Rect::new(0, 0, 80, 10),
+            Some("session"),
+            Some("panel"),
+            &mut hits,
+            &mut url_hits,
+            false,
+        );
+        assert!(hits.is_empty());
+        assert!(url_hits.is_empty());
     }
 
     #[test]
