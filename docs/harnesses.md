@@ -1,155 +1,136 @@
-# Harnesses and session modes
+# Harnesses
 
-## Per-adapter modes
+A **harness** is the engine that runs a session. agentd gives each harness the
+same outer shape — sessions, transcripts, approvals, widgets, restart behavior,
+and remote control — while the harness decides how the actual assistant or shell
+runs.
 
-Each session has a **mode**: `interactive` (PTY-attached, default when the
-TUI is creating sessions) or `headless` (structured stream, default for
-non-PTY-aware clients). Pick explicitly with `agent new ... --mode <m>` or
-the per-adapter env var (`AGENTD_CLAUDE_MODE`, `AGENTD_CODEX_MODE`, `AGENTD_ANTIGRAVITY_MODE`, `AGENTD_ZARVIS_MODE`).
+You can mix harnesses in one fleet. For example, keep a shell open, run Codex in
+one pane, ask Claude in another, and use Zarvis as the built-in agent that can
+coordinate them.
 
-- **`shell`** — always PTY. Empty prompt → `$SHELL -il` (interactive login
-  shell). Non-empty prompt → `$SHELL -lc <prompt>` (one-shot).
-- **`claude`** —
-  - *interactive*: spawns `claude` (no `-p`) under a PTY → full Claude TUI in
-    the right pane (`/resume`, slash commands, all of it).
-  - *headless*: per-turn `claude -p --input-format stream-json --output-format
-    stream-json --verbose` with `--resume <session_id>` for follow-ups. Emits
-    structured `Message`/`ToolUse`/`Cost` events.
-- **`codex`** —
-  - *interactive*: spawns `codex` under a PTY.
-  - *headless*: per-turn `codex exec`. Set `AGENTD_CODEX_RESUME_FLAG`
-    (e.g. `--session-id`) if your codex build supports cross-turn resumption.
-- **`antigravity`** —
-  - *interactive*: spawns `agy` under a PTY.
-  - *headless*: uses the Antigravity CLI transcript stream where available.
-- **`zarvis`** — agentd's built-in agent. Talks to model APIs directly,
-  no vendor CLI needed. See [Zarvis built-in agent](zarvis.md).
-  - *interactive (default in the TUI)*: chat-style REPL synthesized
-    into the session's PTY pane — colored prompt, streaming assistant
-    text, inline tool blocks, inline approval prompts (`y`/`n`/`a`).
-  - *headless (default for non-PTY clients)*: structured event stream
-    (`Message` / `ToolUse` / `ToolResult` / `Cost`). Approvals come
-    from the TUI minibuffer / `agent` IPC.
-  - Override with `--mode interactive|headless` or
-    `AGENTD_ZARVIS_MODE`.
+## Available harnesses
 
-## Auto-approval policy
+| Harness | What it is | Best for |
+| --- | --- | --- |
+| `zarvis` | agentd's built-in agent | Native tool use, session orchestration, widgets, and model-provider routing without a separate CLI. |
+| `shell` | Your local shell | Long-running commands, logs, REPLs, and manual debugging. |
+| `claude` | The Claude CLI | Using Claude Code exactly as installed on your machine, inside the agentd fleet. |
+| `codex` | The Codex CLI | Using Codex exactly as installed on your machine, inside the agentd fleet. |
+| `antigravity` | The Antigravity CLI | Using Antigravity sessions inside the same UI and daemon. |
 
-agentd defines a single auto-approval policy per session and exposes it
-to adapters via the `AGENTD_AUTO_APPROVE_PATHS` env var (colon-separated
-absolute directories). A file-mutating tool whose target path is under
-any of those directories may run without prompting the user. The daemon
-currently seeds it with the per-session widgets dir
-(`$AGENTD_SESSION_WIDGETS_DIR`) so harnesses can refresh widgets without
-a permission prompt each time. The abstraction lives in
-`agentd_protocol::adapter::policy::AutoApprovePolicy`.
+Create a session with:
 
-Each adapter translates the policy into its harness's native mechanism.
-agentd doesn't sit in the tool-call loop for the wrapper harnesses
-(Claude / Codex / Antigravity make tool calls inside their own
-processes), so the only lever is what each upstream CLI accepts at
-spawn time:
+```sh
+agent new zarvis "review this repo"
+agent new shell ""
+agent new codex "implement the failing test"
+```
 
-- **zarvis (native)** — `tools::effective_risk` downgrades a Risky
-  `write_file` / `edit_file` to Safe when the target path is covered.
-  Used both at the approval gate and the Safe/Risky partition, so
-  auto-approved calls also batch in the parallel group.
-- **claude (wrapper)** — translates to repeated `--allowed-tools
-  "Write(<dir>/**)" / "Edit(...)" / "MultiEdit(...)"` patterns appended
-  at spawn (interactive + headless).
-- **codex (wrapper)** — **gap**: upstream `codex` exposes only
-  mode-based (`approval_policy`) and sandbox-based knobs, no
-  path-scoped allow-list. The adapter reads the policy but has nothing
-  to translate it into, so widget writes still prompt. Tracked
-  separately for upstream/workaround follow-up.
-- **antigravity (wrapper)** — **gap**: `agy` exposes only a global
-  `--dangerously-skip-permissions` (already used by the headless mode,
-  which is why headless doesn't prompt); no path-scoped knob for
-  interactive. Same upstream gap as codex.
+## Interactive and headless sessions
 
-## Session resume across daemon restarts
+Most harnesses can run in two modes:
 
-When the daemon restarts, sessions that were alive at the time of the
-last shutdown are automatically re-spawned. The daemon persists the
-original `SessionStartParams` to disk at create time and sets
-`AGENTD_RESUME=1` + `AGENTD_SESSION_DATA_DIR=<session-dir>` in the
-adapter's env on re-spawn; each adapter decides what "resume" means
-for its harness:
+- **Interactive**: the harness owns a PTY, so its normal terminal UI appears in
+  the agentd pane. This is the default when you create sessions from the TUI.
+- **Headless**: the harness emits structured events instead of a terminal UI.
+  This is useful for automation and non-PTY clients.
 
-- **shell** — respawns a fresh `$SHELL -il` in the original cwd. The
-  PTY scrollback from the previous incarnation is still in
-  `pty.log` (visible in the terminal pane), but any in-progress
-  command is gone.
-- **claude (interactive)** — mints a fresh UUID at first spawn,
-  passes it as `--session-id <uuid>` to claude, and persists it under
-  `<session-dir>/claude_session_id.txt`. On respawn we pass
-  `--resume <uuid>` so the claude conversation continues.
-- **codex (interactive)** — codex doesn't let the client assign a
-  session id, so we tag the spawn with a unique `originator` via
-  codex's internal env override
-  (`CODEX_INTERNAL_ORIGINATOR_OVERRIDE=agentd:<session-id>`) and watch
-  the codex sessions dir (`$CODEX_HOME/sessions` or
-  `~/.codex/sessions`) for the rollout that bears that tag. When we
-  find it, we read codex's UUID from `payload.id` and write it to
-  `<session-dir>/codex_session_id.txt`. On respawn we run
-  `codex resume <uuid>` to reattach. `AGENTD_CODEX_RESUME_ID`
-  overrides the captured id. The watcher polls for the session's full
-  lifetime — codex flushes its rollout lazily (sometimes only after
-  the first turn completes), so a short timeout would just miss it.
-  If no id has been captured yet when the daemon restarts, the
-  respawn starts a *fresh* codex rather than `codex resume --last`
-  — `--last` resolves globally across every codex session on the
-  machine, so using it as a fallback conflates multiple agentd codex
-  sessions into the same upstream conversation.
+Choose explicitly when needed:
 
-  Known limitation: using codex's own `/resume` slash command
-  inside an agentd-managed codex session won't survive a daemon
-  restart. Codex appends the resumed conversation to the original
-  rollout file and leaves its `originator` unchanged, so our
-  originator-tagged watcher can't detect the switch and we keep
-  pointing at the *first* UUID we captured. On daemon restart you'll
-  reattach to the original conversation, not the one you `/resume`d
-  to. Create a separate agentd session instead if you want to work
-  on a different codex conversation.
-- **zarvis** — appends each `Message` to
-  `<session-dir>/zarvis.jsonl` as the agent loop runs. On respawn
-  the loop reads the file back into memory before waiting for new
-  input, so the conversation history is intact across daemon
-  restarts.
+```sh
+agent new claude --mode interactive ""
+agent new zarvis --mode headless "summarize the last run"
+```
 
-  Zarvis also has opt-in command hooks, configured explicitly with
-  `AGENTD_ZARVIS_HOOKS_CONFIG=/path/to/hooks.json` or inline via
-  `AGENTD_ZARVIS_HOOKS_JSON`. Hooks are not auto-loaded from a
-  repository checkout because they execute local commands with the
-  user's permissions. Config shape:
+`zarvis`, `claude`, `codex`, and `antigravity` support both modes. `shell` is
+always interactive because it is a terminal program.
 
-  ```json
-  {
-    "hooks": {
-      "session_start": [{ "command": "jq . >> /tmp/zarvis-hooks.log" }],
-      "user_prompt_mutate": [{ "command": "jq '.prompt += \"\\n\\nRemember to cite files.\"'" }],
-      "user_prompt_submit": [{ "command": "jq .prompt >> /tmp/zarvis-prompts.log" }],
-      "pre_tool_use_mutate": [{ "command": "jq .", "timeout_ms": 5000 }],
-      "pre_tool_use": [{ "command": "jq . >> /tmp/zarvis-tools.log", "timeout_ms": 5000 }],
-      "post_tool_use": [{ "command": "jq . >> /tmp/zarvis-tools.log" }],
-      "tool_approval_request": [{ "command": "jq . >> /tmp/zarvis-approvals.log" }],
-      "session_stop": [{ "command": "jq . >> /tmp/zarvis-hooks.log" }]
-    }
-  }
-  ```
+## What agentd provides to every harness
 
-  Each hook command runs under `$AGENTD_SHELL_BIN -lc` (default
-  `/bin/sh -lc`) in the session cwd, receives one JSON payload on
-  stdin, and gets `AGENTD_ZARVIS_HOOK_EVENT` in its environment.
-  Notification hooks ignore stdout. Mutating hooks are separate:
-  `user_prompt_mutate` can return `{"prompt":"..."}` on stdout before
-  the user message is sent to the model, and `pre_tool_use_mutate` can
-  return `{"args":{...}}` before the tool is displayed, approved, or
-  executed. Mutating hooks run in config order and each returned JSON
-  object is merged into the next hook's payload. Hook failures,
-  timeouts, invalid JSON, or non-object stdout are logged and the
-  current payload continues unchanged.
+agentd is not just a process launcher. It provides a shared **session contract**
+for every harness:
 
-Sessions whose adapter binary is missing, whose start params can't
-be loaded, or whose harness rejects the respawn are marked `Errored`
-(transcript + scrollback remain readable).
+- **One session model**: every harness appears as a session with an id, title,
+  state, transcript, scrollback, cwd, and lifecycle.
+- **One UI surface**: sessions show in the same TUI, Web UI, and remote-control
+  APIs, even when their internal CLIs are different.
+- **One approval flow**: risky actions surface through agentd's approval UI when
+  the harness exposes enough control for agentd to mediate them.
+- **One widget system**: harnesses can publish compact Markdown status panels and
+  action links through the session widgets directory.
+- **One persistence story**: transcripts and PTY logs stay readable after a
+  restart; adapters resume their upstream harness when that harness supports it.
+- **One configuration layer**: agentd passes common environment and policy into
+  harnesses so user-facing features can be defined once and reused.
+
+A useful term for this is **capability injection**: define a capability once at
+the agentd layer, and agentd injects it into the harness in the form that harness
+understands.
+
+Examples:
+
+- Define skills once, and agentd can include the relevant skill instructions in
+  Zarvis prompts. Wrapper harnesses still run their own upstream CLIs, but they
+  receive the same session context and environment where applicable.
+- Define a session widget once, and every client renders it the same way.
+- Define an auto-approval policy once, and adapters translate it into their
+  harness's native allow-list when the upstream CLI supports that.
+- Define session metadata once — cwd, title, mode, worktree, environment — and
+  every harness starts with the same agentd-managed context.
+
+The adapter is the translation layer between this shared contract and a specific
+harness.
+
+## Built-in vs wrapper harnesses
+
+There are two kinds of harnesses:
+
+### Built-in harness
+
+`zarvis` is native to agentd. Because it runs inside the agentd adapter, it can
+use agentd features directly: tools, approvals, skills, widgets, background
+tasks, and structured status updates.
+
+See [Zarvis built-in agent](zarvis.md) for details.
+
+### Wrapper harnesses
+
+`claude`, `codex`, and `antigravity` wrap existing CLIs. agentd starts the CLI,
+connects it to a session, records its output, and injects the common session
+context it can provide.
+
+Wrapper harnesses keep their native behavior. If an upstream CLI does not expose
+a setting — for example, path-scoped tool auto-approval — agentd cannot always
+force that behavior from outside the process. In those cases the session still
+gets the shared UI, transcript, lifecycle, and environment, but the upstream CLI
+keeps control of its own internals.
+
+## Resume after restart
+
+When agentd restarts, it restores sessions from saved start parameters:
+
+- PTY scrollback and transcripts remain readable.
+- `shell` starts a fresh shell in the original cwd.
+- `zarvis` reloads its persisted conversation state.
+- Wrapper harnesses resume when their upstream CLI provides a reliable session id
+  or resume command.
+
+If a harness cannot be restarted — for example, its binary is missing — agentd
+marks the session errored while keeping the transcript available.
+
+## Common knobs
+
+You normally do not need these, but they are useful for scripting and debugging:
+
+| Setting | Purpose |
+| --- | --- |
+| `--mode interactive\|headless` | Choose the session mode at creation time. |
+| `AGENTD_ZARVIS_MODE`, `AGENTD_CLAUDE_MODE`, `AGENTD_CODEX_MODE`, `AGENTD_ANTIGRAVITY_MODE` | Default mode per harness. |
+| `AGENTD_*_CMD` | Override the full command used for a built-in wrapper harness. |
+| `AGENTD_*_BIN` | Override just the binary path when no full command override is set. |
+| `AGENTD_AUTO_APPROVE_PATHS` | Path allow-list injected into adapters that can translate it. |
+| `AGENTD_SESSION_WIDGETS_DIR` | Directory where a session writes Markdown widgets. |
+
+Prefer the normal `agent new ...` flow unless you are integrating agentd into a
+larger script or testing a custom harness setup.
