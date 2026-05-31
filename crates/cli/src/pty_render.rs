@@ -271,6 +271,9 @@ struct CachedParser {
 struct ItemLayout {
     /// Visible row count this item contributes (incl. soft wraps).
     lines: usize,
+    /// Cursor column after this item renders. Line counting needs this
+    /// because a later item may start on a partially-filled row.
+    end_col: usize,
     /// Tool-block hit-rect metadata, empty for plain PTY chunks.
     blocks: Vec<BlockLayout>,
 }
@@ -1213,14 +1216,22 @@ impl ItemHistory {
             cache.processed_count
         };
         let reuse_upto = cache.item_layouts.len().min(self.items.len());
+        let mut cursor_col = cache
+            .item_layouts
+            .last()
+            .map(|layout| layout.end_col)
+            .unwrap_or(0);
         for (idx, item) in self.items.iter().enumerate().skip(reuse_upto) {
             let layout = match item {
                 Item::PtyChunk(b) => {
                     if idx >= start_processing_at {
                         cache.parser.process(b);
                     }
+                    let metrics = visible_metrics_from_col(b, cols, cursor_col);
+                    cursor_col = metrics.end_col;
                     ItemLayout {
-                        lines: count_visible_lines(b, cols),
+                        lines: metrics.lines,
+                        end_col: metrics.end_col,
                         blocks: Vec::new(),
                     }
                 }
@@ -1229,13 +1240,15 @@ impl ItemHistory {
                     if idx >= start_processing_at {
                         cache.parser.process(&synth.bytes);
                     }
-                    let lines = count_visible_lines(&synth.bytes, cols);
+                    let metrics = visible_metrics_from_col(&synth.bytes, cols, cursor_col);
+                    cursor_col = metrics.end_col;
                     ItemLayout {
-                        lines,
+                        lines: metrics.lines,
+                        end_col: metrics.end_col,
                         blocks: vec![BlockLayout {
                             call_id: block.call_id.clone(),
                             row_start_offset: 0,
-                            row_end_offset: lines,
+                            row_end_offset: metrics.lines,
                             status_row_offset: synth.status_row_offset.map(|off| off as usize),
                             bg_cols: synth.bg_button_cols,
                             kill_cols: synth.kill_button_cols,
@@ -1247,9 +1260,13 @@ impl ItemHistory {
                     if idx >= start_processing_at {
                         cache.parser.process(&synth.bytes);
                     }
+                    let metrics = visible_metrics_from_col(&synth.bytes, cols, cursor_col);
+                    let layouts = group_block_layouts(group, &synth, cols, cursor_col);
+                    cursor_col = metrics.end_col;
                     ItemLayout {
-                        lines: count_visible_lines(&synth.bytes, cols),
-                        blocks: group_block_layouts(group, &synth, cols),
+                        lines: metrics.lines,
+                        end_col: metrics.end_col,
+                        blocks: layouts,
                     }
                 }
                 Item::Message {
@@ -1261,8 +1278,11 @@ impl ItemHistory {
                     if idx >= start_processing_at {
                         cache.parser.process(&bytes);
                     }
+                    let metrics = visible_metrics_from_col(&bytes, cols, cursor_col);
+                    cursor_col = metrics.end_col;
                     ItemLayout {
-                        lines: count_visible_lines(&bytes, cols),
+                        lines: metrics.lines,
+                        end_col: metrics.end_col,
                         blocks: Vec::new(),
                     }
                 }
@@ -1446,22 +1466,26 @@ fn reflow_tail_offset(buf: &[u8], budget_lines: usize) -> usize {
     0
 }
 
-fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VisibleMetrics {
+    lines: usize,
+    end_col: usize,
+}
+
+fn visible_metrics_from_col(bytes: &[u8], cols: u16, start_col: usize) -> VisibleMetrics {
     let mut lines = 0usize;
-    let mut col = 0usize;
+    let mut col = start_col;
     let cols = cols.max(VT100_MIN_DIM) as usize;
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
         i += 1;
         if b == 0x1b {
-            // Skip CSI / OSC / SS3 / single-char ESC sequences.
             if i >= bytes.len() {
                 break;
             }
             match bytes[i] {
                 b'[' => {
-                    // CSI: digits / ; / ? / final byte in 0x40..=0x7e.
                     i += 1;
                     while i < bytes.len() {
                         let c = bytes[i];
@@ -1472,7 +1496,6 @@ fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
                     }
                 }
                 b']' => {
-                    // OSC: until BEL (0x07) or ST (\x1b\\).
                     i += 1;
                     while i < bytes.len() {
                         if bytes[i] == 0x07 {
@@ -1483,7 +1506,7 @@ fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
                     }
                 }
                 b'O' => {
-                    i += 2; // SS3 + one final byte
+                    i += 2;
                 }
                 _ => i += 1,
             }
@@ -1495,7 +1518,6 @@ fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
                 col = 0;
             }
             b'\r' => col = 0,
-            // Other control chars: ignore for width.
             0x00..=0x08 | 0x0b..=0x1f | 0x7f => {}
             _ => {
                 col += 1;
@@ -1506,7 +1528,18 @@ fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
             }
         }
     }
-    lines
+    VisibleMetrics {
+        lines,
+        end_col: col,
+    }
+}
+
+fn count_visible_lines_from_col(bytes: &[u8], cols: u16, start_col: usize) -> usize {
+    visible_metrics_from_col(bytes, cols, start_col).lines
+}
+
+fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
+    count_visible_lines_from_col(bytes, cols, 0)
 }
 
 /// Build the byte sequence representing a tool block at its current
@@ -1614,8 +1647,13 @@ fn indent_synth_bytes(bytes: &[u8], spaces: usize) -> Vec<u8> {
     out
 }
 
-fn group_block_layouts(group: &ToolGroup, synth: &SynthOutput, cols: u16) -> Vec<BlockLayout> {
-    let lines = count_visible_lines(&synth.bytes, cols);
+fn group_block_layouts(
+    group: &ToolGroup,
+    synth: &SynthOutput,
+    cols: u16,
+    start_col: usize,
+) -> Vec<BlockLayout> {
+    let lines = count_visible_lines_from_col(&synth.bytes, cols, start_col);
     let mut layouts = vec![BlockLayout {
         call_id: group.call_id(),
         // The synthesized group starts with a separator CRLF before
