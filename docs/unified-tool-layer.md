@@ -1,11 +1,14 @@
 # Unified tool layer
 
+This page is the detailed reference for the **Unified tools** capability in
+[Harnesses](harnesses.md#fleet-wide-capabilities).
+
 agentd exposes one shared tool surface across supported agents. The same
 capabilities are available to built-in Zarvis directly and to MCP-capable
 harnesses through `agentd-mcp`, so agents can coordinate the fleet without
 shelling out to ad-hoc CLI commands.
 
-## MCP server injection
+## Harness support
 
 | Harness | Server/config | Status | Notes |
 |---|---|---|---|
