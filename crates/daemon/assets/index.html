@@ -896,6 +896,10 @@
   }
   .terminal-host:focus,
   .terminal-host .xterm:focus { outline: none; }
+  /* Passive wide-PTY mode: the owning client made the terminal wider than our
+     viewport, so render at full width and scroll horizontally instead of
+     wrapping (see applyPassiveTerminalWidth). */
+  .terminal-host.pty-wide { overflow-x: auto; touch-action: pan-x pan-y; }
   /* xterm.js paints into the host element; ensure it fills the wrap. */
   .terminal-host .xterm,
   .terminal-host .xterm .xterm-viewport,
@@ -1729,6 +1733,9 @@ const state = {
   term: null,
   fitAddon: null,
   terminalById: new Map(),
+  // Current PTY size per session (cols/rows the daemon reports) so a passive
+  // web viewer can render at the real width instead of wrapping wide output.
+  ptySizeById: new Map(),
   // Last cols/rows we reported to the daemon, to avoid spamming
   // `session.pty_resize` on every paint when nothing actually
   // changed (ResizeObserver fires generously).
@@ -2790,6 +2797,7 @@ async function enterTerminalMode(id, options = {}) {
           // Daemon's last-known size wins as the initial geometry; we
           // refit below in case the phone screen is narrower.
           state.term.resize(r.size.cols, r.size.rows);
+          state.ptySizeById.set(id, { cols: r.size.cols, rows: r.size.rows });
         }
         // Hand xterm the raw bytes (not a decoded string) so its
         // built-in streaming UTF-8 decoder owns boundary handling
@@ -3120,12 +3128,51 @@ function refitTerminal(options = {}) {
     // is clicked/typed into, recent engagement lets row-only changes
     // claim the PTY too, keeping full-screen apps like codex aligned.
     state.resizeFollowBottomUntil = 0;
+    // Passive: if the owning client made the PTY wider than our viewport,
+    // render at the real width (horizontal scroll) instead of wrapping.
+    applyPassiveTerminalWidth();
     return;
   }
+  // Active/claim path: we own geometry now, so render at our own fit.
+  const host = state.term.element && state.term.element.closest(".terminal-host");
+  if (host) host.classList.remove("pty-wide");
   if (immediate) {
     sendTerminalPtyResize(cols, rows, wasAtBottom);
   } else {
     scheduleTerminalPtyResize(cols, rows, wasAtBottom);
+  }
+}
+
+// Passive width handling: when this web terminal does NOT own the PTY
+// geometry and the owning client (e.g. the TUI) made it wider than our
+// viewport, size xterm to the PTY's columns so output isn't wrapped and let
+// `.terminal-host` scroll horizontally. Snap back to our own fit when we take
+// over or the PTY is no longer wider. Rows are left to the local fit.
+function applyPassiveTerminalWidth() {
+  if (!state.term || !state.fitAddon || state.mode !== "terminal") return;
+  const host = state.term.element && state.term.element.closest(".terminal-host");
+  if (!host) return;
+  const sz = state.currentId ? state.ptySizeById.get(state.currentId) : null;
+  const ptyCols = sz && sz.cols;
+  let proposed = null;
+  try { proposed = state.fitAddon.proposeDimensions(); } catch (_) {}
+  const fitCols = (proposed && proposed.cols) || state.term.cols;
+  const fitRows = (proposed && proposed.rows) || state.term.rows;
+  if (!webPtyRecentlyEngaged() && ptyCols && fitCols && ptyCols > fitCols) {
+    if (state.term.cols !== ptyCols || state.term.rows !== fitRows) {
+      const wasAtBottom = terminalIsAtBottom();
+      state.term.resize(ptyCols, fitRows);
+      restoreTerminalBottom(wasAtBottom);
+    }
+    host.classList.add("pty-wide");
+  } else if (host.classList.contains("pty-wide")) {
+    // Leaving wide mode — snap xterm back to the container fit.
+    host.classList.remove("pty-wide");
+    if (proposed) {
+      const wasAtBottom = terminalIsAtBottom();
+      state.term.resize(proposed.cols, proposed.rows);
+      restoreTerminalBottom(wasAtBottom);
+    }
   }
 }
 
@@ -3849,6 +3896,14 @@ function handleNotification(method, params) {
     }
     if (event && event.type === "ui_delete") {
       removeWidgetPanel(session_id, event.id);
+      return;
+    }
+    if (event && event.type === "pty_resize") {
+      // The PTY was resized by whichever client owns geometry (e.g. the TUI).
+      // Track it so a passive web viewer renders at the real width instead of
+      // wrapping wide output.
+      state.ptySizeById.set(session_id, { cols: event.cols, rows: event.rows });
+      if (session_id === state.currentId) applyPassiveTerminalWidth();
       return;
     }
     if (event && event.type === "pty") observeSessionPtyActivity(session_id, params.at);
