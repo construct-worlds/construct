@@ -1,32 +1,31 @@
 # Unified tool layer
 
 This page is the detailed reference for the **Unified tools** capability in
-[Harnesses](harnesses.md#fleet-wide-capabilities).
+[Harnesses](harnesses.md#what-agentd-gives-every-harness).
 
-agentd exposes one shared tool surface across supported agents. The same
-capabilities are available to built-in Zarvis directly and to MCP-capable
-harnesses through `agentd-mcp`, so agents can coordinate the fleet without
-shelling out to ad-hoc CLI commands.
+Unified tools let agents inspect, control, and coordinate the agentd fleet. For
+example:
+
+- A review agent can read the implementer's diff before commenting.
+- A coordinator can spawn a shell session to run tests.
+- An agent can open a browser, inspect the page, and show the preview in the TUI.
+- A session can publish a status widget without knowing whether the user is in
+  the TUI or Web UI.
+
+Zarvis uses these tools natively. MCP-capable harnesses receive the same tools
+through `agentd-mcp`, so they can coordinate the fleet without shelling out to
+ad-hoc `agent` CLI commands.
 
 ## Harness support
 
 | Harness | Server/config | Status | Notes |
 |---|---|---|---|
+| Zarvis | Native tool layer | Built in | Uses the same tool set without an external MCP process. |
 | Claude Code | `agentd-mcp` via generated MCP config | Enabled by default | Adapter writes `$STATE_DIR/mcp/<session_id>.json` and passes `--mcp-config <path>`. |
-| Codex | `agentd-mcp` via generated MCP config | Enabled by default | Adapter writes `$STATE_DIR/mcp/<session_id>.json` and passes `--mcp-config <path>`. |
-| Zarvis | Native tool layer | Built in | Uses the same tool surface without an external MCP process. |
+| Codex | `agentd-mcp` via inline MCP config | Enabled by default | Adapter passes Codex a `-c mcp_servers.agentd=...` TOML override. |
 | Antigravity | Pending upstream support | Not injected yet | Receives `AGENTD_SESSION_ID`; browser/tools can be injected once `agy` exposes an MCP config flag. |
 
 Opt out of MCP injection with `AGENTD_INJECT_MCP=0` in the daemon environment.
-
-## Environment passed to child agents
-
-| Variable | Purpose |
-|---|---|
-| `AGENTD_SESSION_ID` | Identifies the calling session, so tools can avoid acting on themselves. |
-| `AGENTD_RUNTIME_DIR` / `AGENTD_STATE_DIR` / `AGENTD_DATA_DIR` / `AGENTD_CONFIG_DIR` | Point tools at the same daemon and storage layout as the parent session. |
-| `AGENTD_GLOBAL_MEMORY_FILE` / `AGENTD_PROJECT_MEMORY_FILE` / `AGENTD_PROJECT_ID` | Point `agentd_context` at the Markdown memory files for the session. |
-| `AGENTD_SESSION_WIDGETS_DIR` | Points agents at the current session's file-backed widget directory. Prefer reading it from `agentd_context` so the agent also sees widget policy and supported Markdown extensions. |
 
 ## Fleet-control tools
 
@@ -62,6 +61,23 @@ Opt out of MCP injection with `AGENTD_INJECT_MCP=0` in the daemon environment.
 Browser tools emit a `BrowserPreview` event back to the calling session, so the
 TUI thumbnail updates for MCP-capable harnesses the same way it does for
 Zarvis-native browser calls.
+
+## Memory and session context
+
+`agentd_context` is the high-level way for an agent to load its current context:
+global/project memory, memory file paths, session widget paths, widget policy,
+supported widget Markdown extensions, and memory maintenance policy.
+
+The environment variables below are the low-level view of that same context.
+They are passed to child agents so tools know which daemon and session they
+belong to.
+
+| Variable | Purpose |
+|---|---|
+| `AGENTD_SESSION_ID` | Identifies the calling session, so tools can avoid acting on themselves. |
+| `AGENTD_RUNTIME_DIR` / `AGENTD_STATE_DIR` / `AGENTD_DATA_DIR` / `AGENTD_CONFIG_DIR` | Point tools at the same daemon and storage layout as the parent session. |
+| `AGENTD_GLOBAL_MEMORY_FILE` / `AGENTD_PROJECT_MEMORY_FILE` / `AGENTD_PROJECT_ID` | Point `agentd_context` at the Markdown memory files for the session. |
+| `AGENTD_SESSION_WIDGETS_DIR` | Points agents at the current session's file-backed widget directory. Prefer reading it from `agentd_context` so the agent also sees widget policy and supported Markdown extensions. |
 
 ## Generative widgets
 
