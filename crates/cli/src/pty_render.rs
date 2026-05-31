@@ -183,8 +183,9 @@ pub struct ItemHistory {
     /// of the main parser.
     shadow_parser: vt100::Parser,
     shadow_in_alt_screen: bool,
-    shadow_last_snapshot: Vec<String>,
+    shadow_last_snapshot: Vec<ShadowSnapshotLine>,
     shadow_dirty_since_snapshot: bool,
+    shadow_snapshot_worthy_since_snapshot: bool,
     /// Last cols/rows the shadow was sized to, so we only call
     /// `set_size` when the dims actually changed (matches the
     /// main-parser caching idiom).
@@ -232,6 +233,12 @@ pub struct ItemHistory {
 /// Cached parser + the items-count it was last advanced to. The
 /// parser also remembers its (cols, rows); on a size mismatch
 /// `replay` calls `screen_mut().set_size()` instead of rebuilding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ShadowSnapshotLine {
+    Text(String),
+    Blank,
+}
+
 struct CachedParser {
     parser: vt100::Parser,
     cols: u16,
@@ -408,6 +415,7 @@ impl ItemHistory {
             shadow_in_alt_screen: false,
             shadow_last_snapshot: Vec::new(),
             shadow_dirty_since_snapshot: false,
+            shadow_snapshot_worthy_since_snapshot: false,
             shadow_cols: 80,
             shadow_rows: 24,
             items: Vec::new(),
@@ -457,6 +465,7 @@ impl ItemHistory {
         let cols = cols.max(VT100_MIN_DIM);
         let rows = rows.max(VT100_MIN_DIM);
         if self.shadow_cols != cols || self.shadow_rows != rows {
+            self.snapshot_shadow_viewport();
             self.shadow_parser.screen_mut().set_size(rows, cols);
             self.shadow_cols = cols;
             self.shadow_rows = rows;
@@ -530,6 +539,9 @@ impl ItemHistory {
                 }
                 if let Some(len) = csi_sequence_len(&bytes[i..]) {
                     self.shadow_parser.process(&bytes[i..i + len]);
+                    if shadow_csi_is_snapshot_worthy(&bytes[i..i + len]) {
+                        self.shadow_snapshot_worthy_since_snapshot = true;
+                    }
                     i += len;
                     continue;
                 }
@@ -537,13 +549,16 @@ impl ItemHistory {
                 if shadow_byte_may_paint(bytes[i]) {
                     self.shadow_dirty_since_snapshot = true;
                 }
+                if shadow_byte_is_snapshot_worthy(bytes[i]) {
+                    self.shadow_snapshot_worthy_since_snapshot = true;
+                }
             }
             i += 1;
         }
     }
 
     fn snapshot_shadow_viewport(&mut self) {
-        if !self.shadow_dirty_since_snapshot {
+        if !self.shadow_dirty_since_snapshot || !self.shadow_snapshot_worthy_since_snapshot {
             return;
         }
         let screen = self.shadow_parser.screen();
@@ -557,18 +572,34 @@ impl ItemHistory {
                 }
             }
             let trimmed = line.trim_end().to_string();
-            if !trimmed.is_empty() {
-                lines.push(trimmed);
+            if trimmed.is_empty() {
+                lines.push(ShadowSnapshotLine::Blank);
+            } else {
+                lines.push(ShadowSnapshotLine::Text(trimmed));
             }
+        }
+        trim_outer_blank_snapshot_lines(&mut lines);
+        let text_rows = lines
+            .iter()
+            .filter(|line| matches!(line, ShadowSnapshotLine::Text(_)))
+            .count();
+        if !self.shadow_snapshot_worthy_since_snapshot && text_rows < 2 {
+            self.shadow_dirty_since_snapshot = false;
+            return;
         }
         if lines.is_empty() || lines == self.shadow_last_snapshot {
             self.shadow_dirty_since_snapshot = false;
+            self.shadow_snapshot_worthy_since_snapshot = false;
             return;
         }
         self.shadow_last_snapshot = lines.clone();
         self.shadow_dirty_since_snapshot = false;
+        self.shadow_snapshot_worthy_since_snapshot = false;
         for line in lines {
-            self.shadow_parser.process(line.as_bytes());
+            match line {
+                ShadowSnapshotLine::Text(text) => self.shadow_parser.process(text.as_bytes()),
+                ShadowSnapshotLine::Blank => {}
+            }
             self.shadow_parser.process(b"\r\n");
         }
     }
@@ -1406,6 +1437,23 @@ impl Default for ItemHistory {
     }
 }
 
+fn trim_outer_blank_snapshot_lines(lines: &mut Vec<ShadowSnapshotLine>) {
+    let first_text = lines
+        .iter()
+        .position(|line| matches!(line, ShadowSnapshotLine::Text(_)));
+    let Some(first_text) = first_text else {
+        lines.clear();
+        return;
+    };
+    let last_text = lines
+        .iter()
+        .rposition(|line| matches!(line, ShadowSnapshotLine::Text(_)))
+        .unwrap_or(first_text);
+    if first_text > 0 || last_text + 1 < lines.len() {
+        *lines = lines[first_text..=last_text].to_vec();
+    }
+}
+
 fn shadow_byte_starts_destructive_redraw(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x1b[H")
         || bytes.starts_with(b"\x1b[1;1H")
@@ -1427,6 +1475,14 @@ fn csi_sequence_len(bytes: &[u8]) -> Option<usize> {
 
 fn shadow_byte_may_paint(b: u8) -> bool {
     b == b'\n' || b == b'\r' || b >= 0x20
+}
+
+fn shadow_byte_is_snapshot_worthy(b: u8) -> bool {
+    b == b'\n' || b == b'\r'
+}
+
+fn shadow_csi_is_snapshot_worthy(seq: &[u8]) -> bool {
+    matches!(seq.last().copied(), Some(b'H' | b'f'))
 }
 
 /// Approximate "visible row" count for a byte slice — counts `\n`
@@ -4403,6 +4459,61 @@ mod tests {
         assert!(
             scrolled.contains("turn 0") || scrolled.contains("turn 1"),
             "scrolled view should include older redraw frames, got:\n{scrolled}"
+        );
+    }
+
+    /// Codex-style repaint snapshots used to drop every empty row
+    /// before appending the frame into shadow scrollback. That made
+    /// older pages look like a compact list of text with no visual
+    /// spacing between prompt / assistant / tool sections.
+    #[test]
+    fn codex_shadow_snapshot_preserves_internal_blank_rows() {
+        let mut h = ItemHistory::new();
+        h.feed_pty(b"\x1b[1;1H");
+        h.feed_pty(b"User prompt");
+        h.feed_pty(b"\x1b[3;1H");
+        h.feed_pty(b"Assistant reply");
+        h.feed_pty(b"\x1b[5;1H");
+        h.feed_pty(b"Tool result");
+
+        // Trigger snapshot of the current viewport before Codex-style
+        // full-screen repaint. The blank rows between text rows should
+        // be copied into the shadow history rather than compacted away.
+        h.feed_pty(b"\r\n");
+        h.feed_pty(b"\x1b[1;1H");
+        h.feed_pty(b"Next frame");
+
+        let scrolled = screen_text(h.replay(80, 10, 1).screen, 10, 80);
+        let expected = "User prompt\n\nAssistant reply\n\nTool result";
+        assert!(
+            scrolled.contains(expected),
+            "scrolled snapshot should preserve internal blank rows, got:\n{scrolled}"
+        );
+    }
+
+    #[test]
+    fn codex_shadow_does_not_duplicate_single_row_repaints() {
+        let mut h = ItemHistory::new();
+        h.feed_pty(b"\x1b[1;1HTop message");
+        h.feed_pty(b"\x1b[1;1HTop message extended");
+        h.feed_pty(b"\x1b[1;1HTop message extended again");
+
+        let scrolled = screen_text(h.replay(80, 10, 1).screen, 10, 80);
+        assert!(
+            !scrolled.contains("Top message\nTop message extended"),
+            "single-row repaint prefixes should not be snapshotted as duplicate scrollback rows, got:\n{scrolled}"
+        );
+    }
+
+    #[test]
+    fn codex_shadow_snapshots_on_resize_before_reflow() {
+        let mut h = ItemHistory::new();
+        h.feed_pty(b"line before resize\r\n");
+        h.set_pty_size(100, 20);
+        let scrolled = screen_text(h.replay(100, 10, 1).screen, 10, 100);
+        assert!(
+            scrolled.contains("line before resize"),
+            "resize should snapshot pending line-based history before changing shadow geometry, got:\n{scrolled}"
         );
     }
 
