@@ -2759,7 +2759,7 @@ async function switchCurrentViewMode(mode) {
   } else {
     rememberActiveTerminalState();
     enterChatMode();
-    await loadTranscript(id);
+    await loadTranscript(id, { force: true });
   }
   setComposerEnabled(!!(state.ws && state.ws.readyState === 1 && state.currentId));
 }
@@ -3955,6 +3955,11 @@ function clearTranscriptPane(id) {
   }
 }
 
+function markTranscriptStale(id) {
+  const pane = state.transcriptPaneById.get(id);
+  if (pane) delete pane.dataset.loaded;
+}
+
 function transcriptTarget(sessionId = state.currentId) {
   if (activeTranscriptEl) return activeTranscriptEl;
   if (sessionId) return transcriptPaneForSession(sessionId);
@@ -4003,8 +4008,9 @@ function updateTranscriptProgressBanner(el, loaded, total) {
   el.textContent = `Loading older history… ${loaded.toLocaleString()} / ${total.toLocaleString()} (${pct}%)`;
 }
 
-async function loadTranscript(id) {
+async function loadTranscript(id, opts = {}) {
   const pane = showTranscriptPane(id);
+  if (opts.force) delete pane.dataset.loaded;
   if (pane.dataset.loaded === "true") return; // already built — instant re-select
   // Delayed skeleton: only show it if the fetch is slow enough to notice
   // (avoids a skeleton flash on fast local loads). The pane is otherwise
@@ -4148,6 +4154,9 @@ function handleNotification(method, params) {
     if (event && event.type === "agent_status") {
       if (event.active) state.agentStatusById.set(session_id, event);
       else state.agentStatusById.delete(session_id);
+    }
+    if (eventInvalidatesCachedTranscript(event) && !(session_id === state.currentId && state.mode === "chat")) {
+      markTranscriptStale(session_id);
     }
     if (session_id !== state.currentId) return;
     if (state.mode === "chat") showTranscriptPane(session_id);
@@ -4322,6 +4331,21 @@ function renderEvent(event, at) {
     default:
       // Skip silently.
       break;
+  }
+}
+
+function eventInvalidatesCachedTranscript(event) {
+  if (!event || !event.type) return false;
+  switch (event.type) {
+    case "message":
+    case "tool_use":
+    case "tool_result":
+    case "tool_approval_request":
+    case "error":
+    case "reset":
+      return true;
+    default:
+      return false;
   }
 }
 
@@ -5271,10 +5295,13 @@ async function submitComposer({ enter }) {
   resetInputHeightPreservingTerminalScroll();
   const pty = currentSessionHasPty();
   if (pty) {
-    const payload = enter ? text + "\r" : text;
-    const data = encodeBase64Utf8(payload);
     try {
-      await rpc("session.pty_input", { session_id: sid, data });
+      if (text) {
+        await rpc("session.pty_input", { session_id: sid, data: encodeBase64Utf8(text) });
+      }
+      if (enter) {
+        await rpc("session.pty_input", { session_id: sid, data: encodeBase64Utf8("\r") });
+      }
     } catch (e) {
       appendError(`pty_input failed: ${e.message}`);
       restoreComposerText(text, sid);
