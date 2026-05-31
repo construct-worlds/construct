@@ -183,7 +183,7 @@ pub struct ItemHistory {
     /// of the main parser.
     shadow_parser: vt100::Parser,
     shadow_in_alt_screen: bool,
-    shadow_last_snapshot: Vec<String>,
+    shadow_last_snapshot: Vec<ShadowSnapshotLine>,
     shadow_dirty_since_snapshot: bool,
     /// Last cols/rows the shadow was sized to, so we only call
     /// `set_size` when the dims actually changed (matches the
@@ -232,6 +232,12 @@ pub struct ItemHistory {
 /// Cached parser + the items-count it was last advanced to. The
 /// parser also remembers its (cols, rows); on a size mismatch
 /// `replay` calls `screen_mut().set_size()` instead of rebuilding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ShadowSnapshotLine {
+    Text(String),
+    Blank,
+}
+
 struct CachedParser {
     parser: vt100::Parser,
     cols: u16,
@@ -557,10 +563,13 @@ impl ItemHistory {
                 }
             }
             let trimmed = line.trim_end().to_string();
-            if !trimmed.is_empty() {
-                lines.push(trimmed);
+            if trimmed.is_empty() {
+                lines.push(ShadowSnapshotLine::Blank);
+            } else {
+                lines.push(ShadowSnapshotLine::Text(trimmed));
             }
         }
+        trim_outer_blank_snapshot_lines(&mut lines);
         if lines.is_empty() || lines == self.shadow_last_snapshot {
             self.shadow_dirty_since_snapshot = false;
             return;
@@ -568,7 +577,10 @@ impl ItemHistory {
         self.shadow_last_snapshot = lines.clone();
         self.shadow_dirty_since_snapshot = false;
         for line in lines {
-            self.shadow_parser.process(line.as_bytes());
+            match line {
+                ShadowSnapshotLine::Text(text) => self.shadow_parser.process(text.as_bytes()),
+                ShadowSnapshotLine::Blank => {}
+            }
             self.shadow_parser.process(b"\r\n");
         }
     }
@@ -1403,6 +1415,23 @@ impl ItemHistory {
 impl Default for ItemHistory {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn trim_outer_blank_snapshot_lines(lines: &mut Vec<ShadowSnapshotLine>) {
+    let first_text = lines
+        .iter()
+        .position(|line| matches!(line, ShadowSnapshotLine::Text(_)));
+    let Some(first_text) = first_text else {
+        lines.clear();
+        return;
+    };
+    let last_text = lines
+        .iter()
+        .rposition(|line| matches!(line, ShadowSnapshotLine::Text(_)))
+        .unwrap_or(first_text);
+    if first_text > 0 || last_text + 1 < lines.len() {
+        *lines = lines[first_text..=last_text].to_vec();
     }
 }
 
@@ -4403,6 +4432,34 @@ mod tests {
         assert!(
             scrolled.contains("turn 0") || scrolled.contains("turn 1"),
             "scrolled view should include older redraw frames, got:\n{scrolled}"
+        );
+    }
+
+    /// Codex-style repaint snapshots used to drop every empty row
+    /// before appending the frame into shadow scrollback. That made
+    /// older pages look like a compact list of text with no visual
+    /// spacing between prompt / assistant / tool sections.
+    #[test]
+    fn codex_shadow_snapshot_preserves_internal_blank_rows() {
+        let mut h = ItemHistory::new();
+        h.feed_pty(b"\x1b[1;1H");
+        h.feed_pty(b"User prompt");
+        h.feed_pty(b"\x1b[3;1H");
+        h.feed_pty(b"Assistant reply");
+        h.feed_pty(b"\x1b[5;1H");
+        h.feed_pty(b"Tool result");
+
+        // Trigger snapshot of the current viewport before Codex-style
+        // full-screen repaint. The blank rows between text rows should
+        // be copied into the shadow history rather than compacted away.
+        h.feed_pty(b"\x1b[1;1H");
+        h.feed_pty(b"Next frame");
+
+        let scrolled = screen_text(h.replay(80, 10, 1).screen, 10, 80);
+        let expected = "User prompt\n\nAssistant reply\n\nTool result";
+        assert!(
+            scrolled.contains(expected),
+            "scrolled snapshot should preserve internal blank rows, got:\n{scrolled}"
         );
     }
 
