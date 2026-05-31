@@ -51,6 +51,11 @@ pub enum Item {
     /// events; PTY bytes between the corresponding OSC `7700`
     /// markers are discarded.
     ToolBlock(ToolBlock),
+    /// Adjacent tool calls with the same tool name, rendered as one
+    /// collapsible presentation group. This is derived client-side
+    /// from the normal event stream; individual blocks are still kept
+    /// so results, status, and expansion remain inspectable.
+    ToolGroup(ToolGroup),
     /// A structured chat message from a session that emits no PTY for
     /// its conversation (headless harnesses). Rendered as synthesized,
     /// role-styled text. Streaming deltas arrive as many consecutive
@@ -61,6 +66,13 @@ pub enum Item {
         text: String,
         break_before: bool,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolGroup {
+    pub tool: String,
+    pub blocks: Vec<ToolBlock>,
+    pub expanded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -286,6 +298,12 @@ enum ItemSig {
         /// block has output — the synth bytes are stable.
         running_elapsed: Option<u64>,
     },
+    Group {
+        tool: String,
+        count: usize,
+        expanded: bool,
+        blocks: Vec<ItemSig>,
+    },
     /// Message items are immutable once pushed (streaming appends new
     /// items rather than growing one), so the text length + kind fully
     /// identify the synthesized bytes.
@@ -294,6 +312,15 @@ enum ItemSig {
         len: usize,
         break_before: bool,
     },
+}
+
+impl ToolGroup {
+    fn call_id(&self) -> String {
+        self.blocks
+            .first()
+            .map(|b| format!("group:{}", b.call_id))
+            .unwrap_or_else(|| format!("group:{}", self.tool))
+    }
 }
 
 impl ItemSig {
@@ -310,6 +337,26 @@ impl ItemSig {
                 } else {
                     Some(b.started_at.elapsed().as_secs())
                 },
+            },
+            Item::ToolGroup(g) => ItemSig::Group {
+                tool: g.tool.clone(),
+                count: g.blocks.len(),
+                expanded: g.expanded,
+                blocks: g
+                    .blocks
+                    .iter()
+                    .map(|b| ItemSig::Block {
+                        call_id: b.call_id.clone(),
+                        has_output: b.output.is_some(),
+                        ok: b.ok,
+                        expanded: b.expanded,
+                        running_elapsed: if b.output.is_some() {
+                            None
+                        } else {
+                            Some(b.started_at.elapsed().as_secs())
+                        },
+                    })
+                    .collect(),
             },
             Item::Message {
                 kind,
@@ -637,7 +684,11 @@ impl ItemHistory {
             block.output = Some(output);
             block.ok = ok;
         }
-        self.items.push(Item::ToolBlock(block));
+        if block.tool.is_some() {
+            self.push_tool_block_grouped(block);
+        } else {
+            self.items.push(Item::ToolBlock(block));
+        }
         self.in_block = true;
     }
 
@@ -655,6 +706,62 @@ impl ItemHistory {
         }
     }
 
+    fn push_tool_block_grouped(&mut self, block: ToolBlock) {
+        let tool = block.tool.clone().unwrap_or_else(|| "?".to_string());
+        if let Some(last) = self.items.last_mut() {
+            match last {
+                Item::ToolBlock(prev) if prev.tool.as_deref() == Some(tool.as_str()) => {
+                    let prev = prev.clone();
+                    *last = Item::ToolGroup(ToolGroup {
+                        tool,
+                        blocks: vec![prev, block],
+                        expanded: false,
+                    });
+                    return;
+                }
+                Item::ToolGroup(group) if group.tool == tool => {
+                    group.blocks.push(block);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.items.push(Item::ToolBlock(block));
+    }
+
+    fn regroup_tool_block_at(&mut self, idx: usize) {
+        if idx >= self.items.len() {
+            return;
+        }
+        let Item::ToolBlock(block) = &self.items[idx] else {
+            return;
+        };
+        let Some(tool) = block.tool.clone() else {
+            return;
+        };
+        if idx == 0 {
+            return;
+        }
+        let block = match self.items.remove(idx) {
+            Item::ToolBlock(block) => block,
+            _ => return,
+        };
+        match self.items.get_mut(idx - 1) {
+            Some(Item::ToolBlock(prev)) if prev.tool.as_deref() == Some(tool.as_str()) => {
+                let prev = prev.clone();
+                self.items[idx - 1] = Item::ToolGroup(ToolGroup {
+                    tool,
+                    blocks: vec![prev, block],
+                    expanded: false,
+                });
+            }
+            Some(Item::ToolGroup(group)) if group.tool == tool => {
+                group.blocks.push(block);
+            }
+            _ => self.items.insert(idx, Item::ToolBlock(block)),
+        }
+    }
+
     /// Apply a `ToolUse` event. The protocol's `ToolUse` carries no
     /// `call_id`, so pairing is FIFO. If an earlier OSC-open or
     /// `TaskStart` already created a block awaiting hydration,
@@ -663,8 +770,9 @@ impl ItemHistory {
     pub fn feed_tool_use(&mut self, tool: String, args_summary: String) {
         if let Some(idx) = self.pending_block_hydrations.pop_front() {
             if let Some(Item::ToolBlock(b)) = self.items.get_mut(idx) {
-                b.tool = Some(tool);
-                b.args_summary = Some(args_summary);
+                b.tool = Some(tool.clone());
+                b.args_summary = Some(args_summary.clone());
+                self.regroup_tool_block_at(idx);
                 self.dirty = true;
                 return;
             }
@@ -709,7 +817,7 @@ impl ItemHistory {
             block.output = Some(output);
             block.ok = ok;
         }
-        self.items.push(Item::ToolBlock(block));
+        self.push_tool_block_grouped(block);
         self.dirty = true;
     }
 
@@ -756,6 +864,7 @@ impl ItemHistory {
     fn find_block_mut(&mut self, call_id: &str) -> Option<&mut ToolBlock> {
         self.items.iter_mut().rev().find_map(|it| match it {
             Item::ToolBlock(b) if b.call_id == call_id => Some(b),
+            Item::ToolGroup(g) => g.blocks.iter_mut().rev().find(|b| b.call_id == call_id),
             _ => None,
         })
     }
@@ -763,6 +872,14 @@ impl ItemHistory {
     /// Toggle the expand state of a block. Returns true when a
     /// matching block was found (and toggled), false otherwise.
     pub fn toggle_block(&mut self, call_id: &str) -> bool {
+        if let Some(group) = self.items.iter_mut().rev().find_map(|it| match it {
+            Item::ToolGroup(g) if g.call_id() == call_id => Some(g),
+            _ => None,
+        }) {
+            group.expanded = !group.expanded;
+            self.dirty = true;
+            return true;
+        }
         if let Some(block) = self.find_block_mut(call_id) {
             block.expanded = !block.expanded;
             self.dirty = true;
@@ -925,8 +1042,7 @@ impl ItemHistory {
             // width change — the zoom/resize freeze (#230). When the
             // pending tail alone covers the retained window, skip the
             // (older) items entirely and re-feed only that tail.
-            let pending_offset =
-                reflow_tail_offset(&self.pending_chunk, reflow_budget_lines(rows));
+            let pending_offset = reflow_tail_offset(&self.pending_chunk, reflow_budget_lines(rows));
             if pending_offset > 0 {
                 cache.processed_count = self.items.len();
                 cache.pending_consumed = pending_offset;
@@ -984,8 +1100,7 @@ impl ItemHistory {
             };
             // Same scrollback-tail bound as the width-change rebuild:
             // only re-feed the pending tail that survives the ring.
-            let pending_offset =
-                reflow_tail_offset(&self.pending_chunk, reflow_budget_lines(rows));
+            let pending_offset = reflow_tail_offset(&self.pending_chunk, reflow_budget_lines(rows));
             if pending_offset > 0 {
                 cache.processed_count = self.items.len();
             } else {
@@ -1109,6 +1224,21 @@ impl ItemHistory {
                         lines: count_visible_lines(&synth.bytes, cols),
                         block: Some(BlockLayout {
                             call_id: block.call_id.clone(),
+                            status_row_offset: synth.status_row_offset.map(|off| off as usize),
+                            bg_cols: synth.bg_button_cols,
+                            kill_cols: synth.kill_button_cols,
+                        }),
+                    }
+                }
+                Item::ToolGroup(group) => {
+                    let synth = synth_group(group, cols);
+                    if idx >= start_processing_at {
+                        cache.parser.process(&synth.bytes);
+                    }
+                    ItemLayout {
+                        lines: count_visible_lines(&synth.bytes, cols),
+                        block: Some(BlockLayout {
+                            call_id: group.call_id(),
                             status_row_offset: synth.status_row_offset.map(|off| off as usize),
                             bg_cols: synth.bg_button_cols,
                             kill_cols: synth.kill_button_cols,
@@ -1421,6 +1551,110 @@ fn synth_message(kind: MessageKind, text: &str, break_before: bool) -> Vec<u8> {
             push_text_crlf(&mut out, text);
             out.extend_from_slice(b"\x1b[0m");
         }
+    }
+    out
+}
+
+fn synth_group(group: &ToolGroup, cols: u16) -> SynthOutput {
+    let mut out: Vec<u8> = Vec::with_capacity(256);
+    out.extend_from_slice(b"\r\n");
+    let summary = summarize_group(group);
+    out.extend_from_slice(
+        format!(
+            "\x1b[2;32m→ \x1b[0m\x1b[1;92m{}\x1b[0m\x1b[2m × {} · {}\x1b[0m\r\n",
+            group.tool,
+            group.blocks.len(),
+            summary
+        )
+        .as_bytes(),
+    );
+
+    if group.expanded {
+        for block in &group.blocks {
+            let synth = synth_block(block, cols);
+            out.extend_from_slice(&synth.bytes);
+        }
+        out.extend_from_slice(b"     \x1b[2;36m[click to collapse group]\x1b[0m\r\n");
+    } else {
+        let status = group_status(group);
+        if !status.is_empty() {
+            out.extend_from_slice(format!("  \x1b[2m{}\x1b[0m\r\n", status).as_bytes());
+        }
+        out.extend_from_slice(b"     \x1b[2;36m[click to expand group]\x1b[0m\r\n");
+    }
+
+    SynthOutput {
+        bytes: out,
+        status_row_offset: None,
+        bg_button_cols: None,
+        kill_button_cols: None,
+    }
+}
+
+fn summarize_group(group: &ToolGroup) -> String {
+    let items: Vec<String> = group
+        .blocks
+        .iter()
+        .filter_map(|b| b.args_summary.as_deref())
+        .filter_map(primary_arg_summary)
+        .take(4)
+        .collect();
+    if items.is_empty() {
+        format!("{} calls", group.blocks.len())
+    } else {
+        let more = group.blocks.len().saturating_sub(items.len());
+        if more > 0 {
+            format!("{}{}", items.join(", "), format!(", +{more} more"))
+        } else {
+            items.join(", ")
+        }
+    }
+}
+
+fn group_status(group: &ToolGroup) -> String {
+    let running = group.blocks.iter().filter(|b| b.output.is_none()).count();
+    let failed = group
+        .blocks
+        .iter()
+        .filter(|b| b.output.is_some() && !b.ok)
+        .count();
+    let completed = group.blocks.iter().filter(|b| b.output.is_some()).count();
+    let mut parts = Vec::new();
+    if completed > 0 {
+        parts.push(format!("{completed} completed"));
+    }
+    if running > 0 {
+        parts.push(format!("{running} running"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    parts.join(", ")
+}
+
+fn primary_arg_summary(args: &str) -> Option<String> {
+    let compact = compact_tool_args(args);
+    if compact.is_empty() {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&compact) {
+        for key in ["path", "cwd", "url", "session_id", "command"] {
+            if let Some(value) = value.get(key).and_then(|v| v.as_str()) {
+                return Some(truncate_summary(value, 48));
+            }
+        }
+    }
+    Some(truncate_summary(&compact, 48))
+}
+
+fn truncate_summary(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= max_chars {
+            out.push('…');
+            return out;
+        }
+        out.push(ch);
     }
     out
 }
