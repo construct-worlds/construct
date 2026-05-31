@@ -4834,6 +4834,8 @@ fn format_event(theme: &Theme, ev: &TimestampedEvent) -> Line<'static> {
 
 fn format_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>> {
     match ev {
+        // UI-only geometry hint; never rendered as a transcript line.
+        SessionEvent::PtyResize { .. } => Vec::new(),
         SessionEvent::Message { role, text } => {
             let role_label = match role {
                 MessageRole::User => "user",
@@ -5514,6 +5516,7 @@ fn shorten(s: &str, max: usize) -> String {
 
 pub fn short_event_label(ev: &SessionEvent) -> String {
     match ev {
+        SessionEvent::PtyResize { cols, rows } => format!("pty_resize {cols}x{rows}"),
         SessionEvent::Message { role, text } => format!("msg:{:?} {}", role, shorten(text, 60)),
         SessionEvent::Reasoning { text } => format!("reasoning {}", shorten(text, 60)),
         SessionEvent::ToolUse { tool, .. } => format!("tool {tool}"),

@@ -2029,6 +2029,7 @@ impl SessionManager {
                 | SessionEvent::ToolResult { .. }
                 | SessionEvent::Diff { .. }
                 | SessionEvent::Pty { .. }
+                | SessionEvent::PtyResize { .. }
                 | SessionEvent::ToolApprovalRequest { .. }
                 | SessionEvent::TaskStart { .. }
                 | SessionEvent::TaskBackgrounded { .. }
@@ -2415,6 +2416,11 @@ impl SessionManager {
         if let Err(e) = self.storage.save_pty_size(id, size) {
             tracing::warn!(session = %id, error = ?e, "save_pty_size failed");
         }
+        // Tell other attached clients the new geometry (transient, not
+        // persisted) so a passive viewer (e.g. a narrower web terminal) can
+        // render at the real width instead of wrapping. Only fires on an
+        // actual change — the dedup above already returned for a no-op.
+        self.broadcast_widget_event(id, SessionEvent::PtyResize { cols, rows });
         let adapter = entry
             .adapter
             .lock()

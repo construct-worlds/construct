@@ -566,6 +566,7 @@ fn word_for_event(event: &SessionEvent) -> Option<(&'static str, FlashTone, u8)>
         | SessionEvent::Cost { .. }
         | SessionEvent::Diff { .. }
         | SessionEvent::Pty { .. }
+        | SessionEvent::PtyResize { .. }
         | SessionEvent::EditorState { .. }
         | SessionEvent::BrowserPreview(_)
         | SessionEvent::UiPanel(_)
