@@ -1256,17 +1256,36 @@ impl ItemHistory {
                     }
                 }
                 Item::ToolGroup(group) => {
-                    let synth = synth_group(group, cols);
+                    let header = synth_group_header(group);
+                    let body = synth_group_body(group, cols);
                     if idx >= start_processing_at {
-                        cache.parser.process(&synth.bytes);
+                        cache.parser.process(&header);
                     }
-                    let metrics = visible_metrics_from_col(&synth.bytes, cols, cursor_col);
-                    let layouts = group_block_layouts(group, &synth, cols, cursor_col);
-                    cursor_col = metrics.end_col;
+                    let header_metrics = visible_metrics_from_col(&header, cols, cursor_col);
+                    let group_row_start = 0;
+                    let group_row_end = header_metrics.lines;
+                    cursor_col = header_metrics.end_col;
+
+                    if idx >= start_processing_at {
+                        cache.parser.process(&body);
+                    }
+                    let body_metrics = visible_metrics_from_col(&body, cols, cursor_col);
+                    let child_layouts =
+                        group_child_block_layouts(group, cols, cursor_col, group_row_end);
+                    cursor_col = body_metrics.end_col;
+                    let mut blocks = vec![BlockLayout {
+                        call_id: group.call_id(),
+                        row_start_offset: group_row_start,
+                        row_end_offset: group_row_end,
+                        status_row_offset: None,
+                        bg_cols: None,
+                        kill_cols: None,
+                    }];
+                    blocks.extend(child_layouts);
                     ItemLayout {
-                        lines: metrics.lines,
-                        end_col: metrics.end_col,
-                        blocks: layouts,
+                        lines: header_metrics.lines + body_metrics.lines,
+                        end_col: body_metrics.end_col,
+                        blocks,
                     }
                 }
                 Item::Message {
@@ -1336,42 +1355,19 @@ impl ItemHistory {
         let max_scrollback = cache.parser.screen().scrollback();
         cache.parser.screen_mut().set_scrollback(scrollback);
 
-        // Snap group header hit rects to the rendered screen rows. This
-        // keeps mouse geometry tied to vt100's actual layout instead of
-        // a parallel row-counting approximation.
-        let mut group_header_rows: HashMap<String, u16> = HashMap::new();
-        for item in &self.items {
-            if let Item::ToolGroup(group) = item {
-                if let Some(header_row) = rendered_row_for_text(
-                    cache.parser.screen(),
-                    &format!("{} × {}", group.tool, group.blocks.len()),
-                    rows,
-                    cols,
-                ) {
-                    group_header_rows.insert(group.call_id(), header_row);
-                }
-            }
-        }
-
         // Map absolute-line ranges to current-frame screen rows.
         let total_lines = abs_line;
         let visible_top = total_lines.saturating_sub(rows as usize + scrollback);
         let mut blocks: Vec<BlockHitRect> = Vec::new();
         for span in block_spans {
-            let snapped_group_row = group_header_rows.get(&span.call_id).copied();
-            if snapped_group_row.is_none() && span.abs_end <= visible_top {
+            if span.abs_end <= visible_top {
                 continue;
             }
-            let row_start = snapped_group_row.unwrap_or_else(|| {
-                span.abs_start
-                    .saturating_sub(visible_top)
-                    .min(rows as usize) as u16
-            });
-            let row_end = snapped_group_row
-                .map(|row| (row + 1).min(rows))
-                .unwrap_or_else(|| {
-                    span.abs_end.saturating_sub(visible_top).min(rows as usize) as u16
-                });
+            let row_start = span
+                .abs_start
+                .saturating_sub(visible_top)
+                .min(rows as usize) as u16;
+            let row_end = span.abs_end.saturating_sub(visible_top).min(rows as usize) as u16;
             if row_end <= row_start {
                 continue;
             }
@@ -1580,25 +1576,6 @@ fn visible_metrics_from_col(bytes: &[u8], cols: u16, start_col: usize) -> Visibl
     }
 }
 
-fn rendered_row_for_text(screen: &vt100::Screen, text: &str, rows: u16, cols: u16) -> Option<u16> {
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    for r in 0..rows {
-        let mut line = String::new();
-        for c in 0..cols {
-            if let Some(cell) = screen.cell(r, c) {
-                line.push_str(cell.contents());
-            }
-        }
-        if line.contains(text) {
-            return Some(r);
-        }
-    }
-    None
-}
-
 fn count_visible_lines_from_col(bytes: &[u8], cols: u16, start_col: usize) -> usize {
     visible_metrics_from_col(bytes, cols, start_col).lines
 }
@@ -1660,21 +1637,20 @@ fn synth_message(kind: MessageKind, text: &str, break_before: bool) -> Vec<u8> {
     out
 }
 
-fn synth_group(group: &ToolGroup, cols: u16) -> SynthOutput {
-    let mut out: Vec<u8> = Vec::with_capacity(256);
-    out.extend_from_slice(b"\r\n");
+fn synth_group_header(group: &ToolGroup) -> Vec<u8> {
     let summary = summarize_group(group);
     let chevron = if group.expanded { "▾" } else { "▸" };
-    out.extend_from_slice(
-        format!(
-            "\x1b[2;32m{chevron} \x1b[0m\x1b[1;92m{}\x1b[0m\x1b[2m × {} · {}\x1b[0m\r\n",
-            group.tool,
-            group.blocks.len(),
-            summary
-        )
-        .as_bytes(),
-    );
+    format!(
+        "\r\n\x1b[2;32m{chevron} \x1b[0m\x1b[1;92m{}\x1b[0m\x1b[2m × {} · {}\x1b[0m\r\n",
+        group.tool,
+        group.blocks.len(),
+        summary
+    )
+    .into_bytes()
+}
 
+fn synth_group_body(group: &ToolGroup, cols: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128);
     if group.expanded {
         for block in &group.blocks {
             let synth = synth_block(block, cols.saturating_sub(2));
@@ -1686,13 +1662,7 @@ fn synth_group(group: &ToolGroup, cols: u16) -> SynthOutput {
             out.extend_from_slice(format!("  \x1b[2m{}\x1b[0m\r\n", status).as_bytes());
         }
     }
-
-    SynthOutput {
-        bytes: out,
-        status_row_offset: None,
-        bg_button_cols: None,
-        kill_button_cols: None,
-    }
+    out
 }
 
 fn indent_synth_bytes(bytes: &[u8], spaces: usize) -> Vec<u8> {
@@ -1712,42 +1682,30 @@ fn indent_synth_bytes(bytes: &[u8], spaces: usize) -> Vec<u8> {
     out
 }
 
-fn group_block_layouts(
+fn group_child_block_layouts(
     group: &ToolGroup,
-    synth: &SynthOutput,
     cols: u16,
     start_col: usize,
+    row_offset: usize,
 ) -> Vec<BlockLayout> {
-    let lines = count_visible_lines_from_col(&synth.bytes, cols, start_col);
-    let mut layouts = vec![BlockLayout {
-        call_id: group.call_id(),
-        // The synthesized group starts with a separator CRLF before
-        // the header. vt100/counting disagree by one row depending
-        // on whether the prior item ended at column 0, so accept
-        // both the separator row and the header row as the group
-        // toggle target. Child block hit rects still start after
-        // the header, so expanded child footers remain independent.
-        row_start_offset: 0,
-        row_end_offset: 2.min(lines),
-        status_row_offset: None,
-        bg_cols: None,
-        kill_cols: None,
-    }];
+    let mut layouts = Vec::new();
     if group.expanded {
-        let mut offset = 2;
+        let mut offset = row_offset;
+        let mut cursor_col = start_col;
         for block in &group.blocks {
             let child = synth_block(block, cols.saturating_sub(2));
             let indented = indent_synth_bytes(&child.bytes, 2);
-            let child_lines = count_visible_lines(&indented, cols);
+            let metrics = visible_metrics_from_col(&indented, cols, cursor_col);
             layouts.push(BlockLayout {
                 call_id: block.call_id.clone(),
                 row_start_offset: offset,
-                row_end_offset: offset + child_lines,
+                row_end_offset: offset + metrics.lines,
                 status_row_offset: child.status_row_offset.map(|off| offset + off as usize),
                 bg_cols: child.bg_button_cols,
                 kill_cols: child.kill_button_cols,
             });
-            offset += child_lines;
+            offset += metrics.lines;
+            cursor_col = metrics.end_col;
         }
     }
     layouts
