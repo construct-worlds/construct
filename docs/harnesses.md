@@ -82,6 +82,72 @@ Examples:
 The adapter is the translation layer between this shared contract and a specific
 harness.
 
+## Common abstraction layer
+
+agentd's common abstraction layer is the set of features you define once at the
+agentd/session level and then reuse across harnesses where possible.
+
+Use it when you want a fleet-wide behavior instead of configuring each harness by
+hand. For example: "make these skills available," "allow writes under this
+session widget directory," or "show this status widget in every client."
+
+| Abstraction | How to use it | Support |
+| --- | --- | --- |
+| Session identity and lifecycle | Create sessions with `agent new <harness> ...`. agentd assigns ids, tracks state, persists start params, and exposes the same list/status APIs. | All harnesses. |
+| Transcript and scrollback | Use the TUI/Web UI or `agent` APIs to view session history. PTY output and structured events are stored by agentd. | All harnesses. Fidelity depends on whether the harness emits PTY bytes, structured events, or both. |
+| Cwd, environment, and worktree context | Start a session in the desired cwd, optionally with a worktree. agentd passes session env such as `AGENTD_SESSION_ID`, data dirs, widget dirs, and resume flags to the adapter. | All harnesses receive the context; each upstream CLI decides what to do with it. |
+| Skills | Install or define skills in the normal agentd/Zarvis skill locations. Zarvis loads matching skills and injects their instructions into the model context when relevant. | Native in `zarvis`. Wrapper harnesses (`claude`, `codex`, `antigravity`) keep using their own skill/plugin systems; agentd does not rewrite their prompts today. |
+| Widgets | Write Markdown files to `AGENTD_SESSION_WIDGETS_DIR`. agentd renders them in the TUI/Web UI and supports action links. | All harnesses can write widgets if they know the directory. `zarvis` has first-class tool support; wrappers can write files through their own tools or shell commands. |
+| Approval policy | Configure path-scoped auto-approval through agentd's approval policy. agentd injects `AGENTD_AUTO_APPROVE_PATHS`; adapters translate it to the harness's native allow-list when available. | Native in `zarvis`; translated for `claude`; limited by upstream support for `codex` and `antigravity`. |
+| Tool/event display | Harnesses emit PTY output and/or structured events. agentd renders common session chrome, tool status, grouped tool calls, approvals, and errors where it has structured data. | Best for `zarvis`; wrapper detail depends on what the upstream CLI exposes. |
+| Resume | agentd stores session start params and provides per-session data dirs. Adapters persist upstream ids when the upstream CLI supports resume. | `zarvis` resumes from agentd state; `shell` restarts in the same cwd; wrappers resume when their CLI exposes a reliable resume mechanism. |
+
+### Example: make skills available
+
+For the built-in agent, define skills once and let Zarvis load them as part of
+its context selection:
+
+```sh
+agent new zarvis "use the repo's release skill to cut the next version"
+```
+
+That skill setup is shared at the agentd/Zarvis layer: you do not need to copy the
+same instructions into every Zarvis session manually.
+
+For wrapper harnesses, use the upstream system for that CLI. agentd still manages
+the session, cwd, transcript, widgets, and lifecycle, but it does not currently
+inject agentd/Zarvis skills into Claude, Codex, or Antigravity prompts.
+
+### Example: share an approval policy
+
+agentd can define one path-scoped policy, then adapters apply it where possible.
+The most common built-in use is the session widget directory: harnesses should be
+able to update their own widget Markdown without asking every time.
+
+The support is intentionally adapter-specific:
+
+- `zarvis` enforces the policy directly because its tools run through agentd.
+- `claude` receives equivalent allowed-tool patterns when it starts.
+- `codex` and `antigravity` currently expose less path-scoped approval control,
+  so agentd can pass the policy but cannot always force the upstream CLI to honor
+  it.
+
+### Example: publish one widget to every client
+
+A harness can write:
+
+```sh
+cat > "$AGENTD_SESSION_WIDGETS_DIR/status.md" <<'MD'
+# Status
+
+- [~] Working
+- [ ] Run tests
+MD
+```
+
+agentd then renders that widget in every client that supports widgets. The
+harness does not need separate TUI and Web UI code.
+
 ## Built-in vs wrapper harnesses
 
 There are two kinds of harnesses:
