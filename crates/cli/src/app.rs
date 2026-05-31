@@ -1078,6 +1078,31 @@ impl DynamicUiActionHit {
     }
 }
 
+/// A click target inside a widget panel that opens an external URL when
+/// the user clicks it. Populated for `[label](http://…)` / `[label](https://…)`
+/// links by `render_inline_action_spans`; dispatched by
+/// `handle_dynamic_ui_overlay_click` via [`open_url`]. Kept in a parallel
+/// list rather than folded into [`DynamicUiActionHit`] so the action type
+/// (which lives in `agentd_protocol::UiAction`) doesn't have to grow a
+/// URL variant — widgets that mix action links and plain http links work
+/// independently.
+#[derive(Debug, Clone)]
+pub struct DynamicUiUrlHit {
+    pub session_id: String,
+    pub panel_id: String,
+    pub url: String,
+    pub row: u16,
+    pub start_col: u16,
+    /// Exclusive end column.
+    pub end_col: u16,
+}
+
+impl DynamicUiUrlHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
 impl DynamicUiWidgetHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         row == self.row && col >= self.start_col && col < self.end_col
@@ -1173,6 +1198,10 @@ pub struct LayoutSnapshot {
     pub terminal_scrollbar: Option<TerminalScrollbarHit>,
     /// Dynamic UI action hitboxes from the last frame.
     pub dynamic_ui_action_hits: Vec<DynamicUiActionHit>,
+    /// External-URL hitboxes from the last frame for widget panels.
+    /// Parallels `dynamic_ui_action_hits`; populated by markdown rendering
+    /// and dispatched by `handle_dynamic_ui_overlay_click` via `open_url`.
+    pub dynamic_ui_url_hits: Vec<DynamicUiUrlHit>,
     pub dynamic_ui_widget_hits: Vec<DynamicUiWidgetHit>,
     pub dynamic_ui_panel_close_hits: Vec<DynamicUiPanelCloseHit>,
     pub dynamic_ui_inline_hit: Option<DynamicUiInlineHit>,
@@ -3957,6 +3986,17 @@ impl App {
                 }
                 return true;
             }
+            if let Some(hit) = self
+                .layout
+                .dynamic_ui_url_hits
+                .iter()
+                .find(|hit| hit.contains(col, row))
+                .cloned()
+            {
+                self.dynamic_ui_focused = Some((hit.session_id, hit.panel_id));
+                open_url(&hit.url);
+                return true;
+            }
             if Self::rect_contains(inline.area, col, row) {
                 return true;
             }
@@ -3990,6 +4030,17 @@ impl App {
                 self.delete_dynamic_ui_panel(hit.session_id, hit.panel_id)
                     .await;
             }
+            return true;
+        }
+        if let Some(hit) = self
+            .layout
+            .dynamic_ui_url_hits
+            .iter()
+            .find(|hit| hit.contains(col, row))
+            .cloned()
+        {
+            self.dynamic_ui_focused = Some((hit.session_id, hit.panel_id));
+            open_url(&hit.url);
             return true;
         }
         for (x_start, x_end, y, session_id) in self.layout.dynamic_ui_triggers.clone() {
@@ -6969,6 +7020,7 @@ mod tests {
             browser_preview_close: None,
             terminal_scrollbar: None,
             dynamic_ui_action_hits: Vec::new(),
+            dynamic_ui_url_hits: Vec::new(),
             dynamic_ui_widget_hits: Vec::new(),
             dynamic_ui_panel_close_hits: Vec::new(),
             dynamic_ui_inline_hit: None,
