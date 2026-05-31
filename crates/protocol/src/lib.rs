@@ -356,6 +356,14 @@ pub enum SessionEvent {
     Pty {
         data: String,
     },
+    /// The session's single PTY was resized to `cols` x `rows` (by whichever
+    /// client last claimed geometry — TUI or web). UI-only and transient
+    /// (never persisted/replayed): lets a passive viewer whose viewport is
+    /// narrower render at the real width instead of wrapping the output.
+    PtyResize {
+        cols: u16,
+        rows: u16,
+    },
     /// Adapter is asking the user to approve (or deny) a pending tool call.
     /// The adapter parks the agent loop until a [`SessionToolDecisionParams`]
     /// arrives on the inbox referencing the same `call_id`. The `risk` field
