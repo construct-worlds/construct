@@ -71,7 +71,7 @@ pub fn catalog() -> Vec<Value> {
         // ----- Write -----
         tool(
             "agentd_create_session",
-            "Spawn a new session. `harness` must match an available harness name (see agentd_list_harnesses). `cwd` defaults to the daemon's process cwd. Set `worktree:true` to start the session in an isolated git worktree.",
+            "Spawn a new top-level/visible session in the fleet. Use this when the user asks for a new session or independent session. If the user says subagent, use agentd_subagent_create instead so the child is parented to the current session. `harness` must match an available harness name (see agentd_list_harnesses). `cwd` defaults to the caller's cwd when provided by the adapter, otherwise the daemon's process cwd. Set `worktree:true` to start the session in an isolated git worktree.",
             json!({
                 "type": "object",
                 "properties": {
@@ -176,7 +176,9 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "agentd_subagent_create",
-            "Create a subagent owned by the current agentd session. The subagent is backed by any \
+            "Create a subagent: a child agent owned by the current agentd session. Use this \
+             by default when the user says subagent, asks to split work, or asks to \
+             parallelize bounded review/research tasks. The subagent is backed by any \
              registered harness and appears nested under the parent session in clients.",
             json!({
                 "type": "object",

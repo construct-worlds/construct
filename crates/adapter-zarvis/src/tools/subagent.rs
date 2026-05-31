@@ -127,9 +127,10 @@ impl Tool for Create {
         "agentd_subagent_create"
     }
     fn description(&self) -> &str {
-        "Create a hidden subagent backed by any agentd harness. The returned \
-         subagent_id is used with agentd_subagent_* tools; it does not appear \
-         in the main session list."
+        "Create a subagent: a hidden child agent parented to the current session and \
+         backed by any agentd harness. Use this by default when the user says \
+         subagent, asks to split work, or asks to parallelize bounded review/research \
+         tasks. The returned subagent_id is used with agentd_subagent_* tools."
     }
     fn schema(&self) -> Value {
         json!({
