@@ -1336,19 +1336,42 @@ impl ItemHistory {
         let max_scrollback = cache.parser.screen().scrollback();
         cache.parser.screen_mut().set_scrollback(scrollback);
 
+        // Snap group header hit rects to the rendered screen rows. This
+        // keeps mouse geometry tied to vt100's actual layout instead of
+        // a parallel row-counting approximation.
+        let mut group_header_rows: HashMap<String, u16> = HashMap::new();
+        for item in &self.items {
+            if let Item::ToolGroup(group) = item {
+                if let Some(header_row) = rendered_row_for_text(
+                    cache.parser.screen(),
+                    &format!("{} × {}", group.tool, group.blocks.len()),
+                    rows,
+                    cols,
+                ) {
+                    group_header_rows.insert(group.call_id(), header_row);
+                }
+            }
+        }
+
         // Map absolute-line ranges to current-frame screen rows.
         let total_lines = abs_line;
         let visible_top = total_lines.saturating_sub(rows as usize + scrollback);
         let mut blocks: Vec<BlockHitRect> = Vec::new();
         for span in block_spans {
-            if span.abs_end <= visible_top {
+            let snapped_group_row = group_header_rows.get(&span.call_id).copied();
+            if snapped_group_row.is_none() && span.abs_end <= visible_top {
                 continue;
             }
-            let row_start = span
-                .abs_start
-                .saturating_sub(visible_top)
-                .min(rows as usize) as u16;
-            let row_end = span.abs_end.saturating_sub(visible_top).min(rows as usize) as u16;
+            let row_start = snapped_group_row.unwrap_or_else(|| {
+                span.abs_start
+                    .saturating_sub(visible_top)
+                    .min(rows as usize) as u16
+            });
+            let row_end = snapped_group_row
+                .map(|row| (row + 1).min(rows))
+                .unwrap_or_else(|| {
+                    span.abs_end.saturating_sub(visible_top).min(rows as usize) as u16
+                });
             if row_end <= row_start {
                 continue;
             }
@@ -1479,8 +1502,8 @@ fn visible_metrics_from_col(bytes: &[u8], cols: u16, start_col: usize) -> Visibl
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        i += 1;
         if b == 0x1b {
+            i += 1;
             if i >= bytes.len() {
                 break;
             }
@@ -1502,13 +1525,15 @@ fn visible_metrics_from_col(bytes: &[u8], cols: u16, start_col: usize) -> Visibl
                             i += 1;
                             break;
                         }
+                        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                            i += 2;
+                            break;
+                        }
                         i += 1;
                     }
                 }
-                b'O' => {
-                    i += 2;
-                }
-                _ => i += 1,
+                b'O' => i = (i + 2).min(bytes.len()),
+                _ => i = (i + 1).min(bytes.len()),
             }
             continue;
         }
@@ -1516,11 +1541,32 @@ fn visible_metrics_from_col(bytes: &[u8], cols: u16, start_col: usize) -> Visibl
             b'\n' => {
                 lines += 1;
                 col = 0;
+                i += 1;
             }
-            b'\r' => col = 0,
-            0x00..=0x08 | 0x0b..=0x1f | 0x7f => {}
+            b'\r' => {
+                col = 0;
+                i += 1;
+            }
+            0x00..=0x08 | 0x0b..=0x1f | 0x7f => {
+                i += 1;
+            }
             _ => {
-                col += 1;
+                let Ok(s) = std::str::from_utf8(&bytes[i..]) else {
+                    break;
+                };
+                let Some(ch) = s.chars().next() else {
+                    break;
+                };
+                i += ch.len_utf8();
+                let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if width == 0 {
+                    continue;
+                }
+                if col + width > cols {
+                    lines += 1;
+                    col = 0;
+                }
+                col += width;
                 if col >= cols {
                     lines += 1;
                     col = 0;
@@ -1532,6 +1578,25 @@ fn visible_metrics_from_col(bytes: &[u8], cols: u16, start_col: usize) -> Visibl
         lines,
         end_col: col,
     }
+}
+
+fn rendered_row_for_text(screen: &vt100::Screen, text: &str, rows: u16, cols: u16) -> Option<u16> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    for r in 0..rows {
+        let mut line = String::new();
+        for c in 0..cols {
+            if let Some(cell) = screen.cell(r, c) {
+                line.push_str(cell.contents());
+            }
+        }
+        if line.contains(text) {
+            return Some(r);
+        }
+    }
+    None
 }
 
 fn count_visible_lines_from_col(bytes: &[u8], cols: u16, start_col: usize) -> usize {
