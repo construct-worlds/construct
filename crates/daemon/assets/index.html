@@ -565,6 +565,8 @@
     border-color: rgba(92, 225, 255, 0.42);
     color: #e1ffe6;
   }
+  .row.optimistic .bubble { opacity: 0.78; }
+  .row.optimistic .meta::after { content: " · sending"; color: var(--fg-faint); }
   .role-user { align-items: flex-end; }
   .role-assistant .bubble {
     background: var(--bubble-assistant);
@@ -1763,6 +1765,11 @@ const state = {
   // mounted avoids repainting long headless sessions from the beginning when
   // the user switches away and back.
   transcriptPaneById: new Map(),
+  // User messages rendered immediately from the web composer before the
+  // daemon's canonical transcript event round-trips back. The live event
+  // reconciles these rows so chat mode feels instant without duplicates.
+  optimisticMessagesById: new Map(),
+  renderingTranscriptHistory: false,
   // Latest Zarvis editor_state by session id. Claude/Codex/shell do not
   // emit this and continue to rely on their PTY UI echoing input.
   editorById: new Map(),
@@ -3954,6 +3961,7 @@ function clearTranscriptPane(id) {
     pane.innerHTML = "";
     delete pane.dataset.loaded;
   }
+  state.optimisticMessagesById.delete(id);
 }
 
 function markTranscriptStale(id) {
@@ -3987,11 +3995,14 @@ const TRANSCRIPT_OLDER_PAGE = 500;
 
 function renderEventsInto(targetEl, events) {
   const prevActive = activeTranscriptEl;
+  const prevHistorical = state.renderingTranscriptHistory;
   activeTranscriptEl = targetEl;
+  state.renderingTranscriptHistory = true;
   try {
     for (const te of events) renderEvent(te.event, te.at);
   } finally {
     activeTranscriptEl = prevActive;
+    state.renderingTranscriptHistory = prevHistorical;
   }
 }
 
@@ -4282,11 +4293,15 @@ function renderEvent(event, at) {
     return;
   }
   switch (event.type) {
-    case "message":
-      if (shouldRenderChatMessage(event.role || "assistant", event.text || "")) {
-        appendMessage(event.role || "assistant", event.text || "");
+    case "message": {
+      const role = event.role || "assistant";
+      const text = event.text || "";
+      if (shouldRenderChatMessage(role, text)) {
+        if (role === "user" && consumeOptimisticMessage(state.currentId, role, text)) break;
+        appendMessage(role, text);
       }
       break;
+    }
     case "tool_use":
       appendToolUse(event.tool, event.args);
       break;
@@ -4400,7 +4415,7 @@ function editorLineHtml(prompt, text, cursor, queued) {
   return `<div class="${cls}"><span class="editor-prompt">${escape(prompt)}</span><span class="editor-text">${body}</span></div>`;
 }
 
-function appendMessage(role, text) {
+function appendMessage(role, text, opts = {}) {
   resetTermToolGroup();
   const target = transcriptTarget();
   const normalizedRole = role || "assistant";
@@ -4418,6 +4433,10 @@ function appendMessage(role, text) {
   }
   const row = document.createElement("div");
   row.className = `row role-${escape(normalizedRole)}`;
+  if (opts.optimisticId) {
+    row.classList.add("optimistic");
+    row.dataset.optimisticId = opts.optimisticId;
+  }
   row.dataset.kind = "message";
   row.dataset.role = normalizedRole;
   row.innerHTML = `
@@ -4425,6 +4444,47 @@ function appendMessage(role, text) {
     <div class="bubble"></div>`;
   row.querySelector(".bubble").textContent = text;
   target.appendChild(row);
+  return row;
+}
+
+function appendOptimisticUserMessage(sessionId, text) {
+  if (!sessionId || state.mode !== "chat" || !text || state.renderingTranscriptHistory) return null;
+  if (!shouldRenderChatMessage("user", text)) return null;
+  showTranscriptPane(sessionId);
+  const optimisticId = `opt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const row = appendMessage("user", text, { optimisticId });
+  const entry = { id: optimisticId, role: "user", text, row, createdAt: Date.now() };
+  const list = state.optimisticMessagesById.get(sessionId) || [];
+  list.push(entry);
+  state.optimisticMessagesById.set(sessionId, list);
+  scrollToBottom();
+  return entry;
+}
+
+function markOptimisticMessageSent(entry) {
+  if (!entry || !entry.row) return;
+  entry.row.classList.remove("optimistic");
+}
+
+function removeOptimisticMessage(sessionId, entry) {
+  if (!sessionId || !entry) return;
+  const list = state.optimisticMessagesById.get(sessionId) || [];
+  const next = list.filter((x) => x !== entry);
+  if (next.length) state.optimisticMessagesById.set(sessionId, next);
+  else state.optimisticMessagesById.delete(sessionId);
+  if (entry.row && entry.row.isConnected) entry.row.remove();
+}
+
+function consumeOptimisticMessage(sessionId, role, text) {
+  if (state.renderingTranscriptHistory || role !== "user" || !sessionId) return false;
+  const list = state.optimisticMessagesById.get(sessionId) || [];
+  const idx = list.findIndex((entry) => entry.role === role && entry.text === text);
+  if (idx < 0) return false;
+  const [entry] = list.splice(idx, 1);
+  if (list.length) state.optimisticMessagesById.set(sessionId, list);
+  else state.optimisticMessagesById.delete(sessionId);
+  markOptimisticMessageSent(entry);
+  return true;
 }
 
 function currentSession() {
@@ -5309,6 +5369,7 @@ async function submitComposer({ enter }) {
   const pty = currentSessionHasPty();
   const harness = currentSessionHarness();
   if (pty) {
+    const optimistic = enter ? appendOptimisticUserMessage(sid, text) : null;
     try {
       if (text) {
         await rpc("session.pty_input", { session_id: sid, data: encodeBase64Utf8(text) });
@@ -5323,19 +5384,23 @@ async function submitComposer({ enter }) {
       if (enter) {
         await rpc("session.pty_input", { session_id: sid, data: encodeBase64Utf8("\r") });
       }
+      markOptimisticMessageSent(optimistic);
     } catch (e) {
+      removeOptimisticMessage(sid, optimistic);
       appendError(`pty_input failed: ${e.message}`);
       restoreComposerText(text, sid);
     }
   } else {
-    // Non-PTY chat sessions: only `session.input` makes sense.
-    // Insert and Enter both submit. The daemon persists and broadcasts
-    // the canonical user message; rendering an optimistic copy here
-    // duplicates that row in headless sessions.
+    // Non-PTY chat sessions: only `session.input` makes sense. Insert and
+    // Enter both submit; the live transcript event reconciles the optimistic
+    // row below so the user sees their message immediately without duplicates.
     if (!text.trim()) return;
+    const optimistic = appendOptimisticUserMessage(sid, text);
     try {
       await rpc("session.input", { session_id: sid, text });
+      markOptimisticMessageSent(optimistic);
     } catch (e) {
+      removeOptimisticMessage(sid, optimistic);
       appendError(`send failed: ${e.message}`);
       restoreComposerText(text, sid);
     }

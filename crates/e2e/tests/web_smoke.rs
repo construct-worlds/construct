@@ -1153,6 +1153,79 @@ async fn web_client_loads_and_websocket_connects() {
         "Codex composer submit should let Codex flush paste-burst detection before Enter: {codex_submit_delay:?}"
     );
 
+    let optimistic_send: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const oldCurrent = state.currentId;
+              const oldSessions = state.sessions;
+              const oldMode = state.mode;
+              const oldRpc = rpc;
+              const oldSleep = sleep;
+              const input = document.getElementById('input');
+              state.currentId = 's-codex-optimistic';
+              state.mode = 'chat';
+              state.sessions = [{ id: 's-codex-optimistic', harness: 'codex', has_pty: true, mode: 'interactive' }];
+              const pane = showTranscriptPane('s-codex-optimistic');
+              pane.replaceChildren();
+              state.optimisticMessagesById.delete('s-codex-optimistic');
+              const calls = [];
+              const resolvers = [];
+              rpc = async (method, params) => new Promise((resolve) => {
+                calls.push({ method, data: atob(params.data) });
+                resolvers.push(resolve);
+              });
+              sleep = async (ms) => { calls.push({ sleep: ms }); };
+              input.value = 'instant codex';
+              const submit = submitComposer({ enter: true });
+              const immediateRow = pane.querySelector('.row[data-role="user"]');
+              const immediate = {
+                text: immediateRow && immediateRow.querySelector('.bubble').textContent,
+                optimistic: immediateRow && immediateRow.classList.contains('optimistic'),
+                calls: calls.slice(),
+                inputValue: input.value,
+              };
+              resolvers.shift()(null);
+              await new Promise((resolve) => setTimeout(resolve, 0));
+              resolvers.shift()(null);
+              await submit;
+              const afterRpcRow = pane.querySelector('.row[data-role="user"]');
+              renderEvent({ type: 'message', role: 'user', text: 'instant codex' });
+              const rows = Array.from(pane.querySelectorAll('.row[data-role="user"] .bubble')).map((el) => el.textContent);
+              const result = {
+                immediate,
+                afterRpcOptimistic: afterRpcRow && afterRpcRow.classList.contains('optimistic'),
+                rows,
+                pending: (state.optimisticMessagesById.get('s-codex-optimistic') || []).length,
+              };
+              rpc = oldRpc;
+              sleep = oldSleep;
+              state.currentId = oldCurrent;
+              state.sessions = oldSessions;
+              state.mode = oldMode;
+              state.optimisticMessagesById.delete('s-codex-optimistic');
+              pane.remove();
+              state.transcriptPaneById.delete('s-codex-optimistic');
+              showTranscriptPane(oldCurrent);
+              return result;
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate optimistic send")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(optimistic_send["immediate"]["text"], "instant codex");
+    assert_eq!(optimistic_send["immediate"]["optimistic"], true);
+    assert_eq!(optimistic_send["immediate"]["inputValue"], "");
+    assert_eq!(
+        optimistic_send["immediate"]["calls"],
+        serde_json::json!([{ "method": "session.pty_input", "data": "instant codex" }])
+    );
+    assert_eq!(optimistic_send["afterRpcOptimistic"], false);
+    assert_eq!(optimistic_send["rows"], serde_json::json!(["instant codex"]));
+    assert_eq!(optimistic_send["pending"], 0);
+
     // Reconnect regression: mobile keyboard show/hide can churn the browser's
     // viewport and, on some devices, the websocket. Reconnect must not hydrate
     // the selected terminal session through transcript/PTY replay, because that
