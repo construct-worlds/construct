@@ -265,9 +265,11 @@ impl Tool for CreateSession {
         "agentd_create_session"
     }
     fn description(&self) -> &str {
-        "Spawn a new session. `harness` must match `agentd_list_harnesses`. `cwd` \
-         defaults to the daemon process cwd. `worktree:true` starts in an isolated \
-         git worktree."
+        "Spawn a new top-level/visible session in the fleet. Use this when the user asks \
+         for a new session or independent session. If the user says subagent, use \
+         agentd_subagent_create instead so the child is parented to the current \
+         session. `harness` must match `agentd_list_harnesses`. `cwd` defaults to \
+         the current session cwd. `worktree:true` starts in an isolated git worktree."
     }
     fn schema(&self) -> Value {
         json!({
