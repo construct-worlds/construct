@@ -2,7 +2,8 @@
 
 A **harness** is an agent or shell runner inside agentd. Harnesses let you run
 Zarvis, Claude, Codex, Antigravity, and local shells side by side while agentd
-gives them one UI, history, approval flow, widget system, and control plane.
+gives them one UI, history, widgets, control plane, and shared approval surface
+where supported.
 
 A **fleet** is the set of sessions managed by one agentd daemon. For example,
 you can keep a shell running tests, ask Codex to implement a fix, ask Claude to
@@ -26,18 +27,21 @@ agent new shell ""
 agent new codex "implement the failing test"
 ```
 
+CLI-backed harnesses require the matching CLI to be installed and discoverable on
+`PATH`. Use the `*_BIN` or `*_CMD` environment variables below when you need to
+point agentd at a specific binary or command.
+
 ## What agentd gives every harness
 
-agentd does more than launch processes. It gives every harness the same shared
-session model and then lets each adapter translate that model into the underlying
-agent or shell.
+agentd gives every harness the same shared session model, then lets each adapter
+translate that model into the underlying agent or shell.
 
 | Capability | Why it matters | Support and details |
 | --- | --- | --- |
 | Session identity and lifecycle | Every harness has the same id, title, state, cwd, mode, transcript, and lifecycle. | All harnesses. |
 | Transcript and scrollback | You can inspect session history from the TUI, Web UI, and remote APIs, even after restart. | All harnesses; fidelity depends on what the harness emits. |
 | Shared UI | Different CLIs appear in one session list instead of separate terminals. | All harnesses. |
-| Approval flow | Risky actions can use agentd's approval UI instead of each session inventing its own workflow. | Native in `zarvis`; translated where wrapper CLIs expose enough control. |
+| Approval flow | Risky actions can use agentd's approval UI instead of each session inventing its own workflow. | Native in `zarvis`; translated where CLI-backed harnesses expose enough control. |
 | Widgets | Agents can publish Markdown status/action panels once and every client can render them. | All harnesses can write widgets via `AGENTD_SESSION_WIDGETS_DIR`; see [Generative widgets](generative-widgets.md). |
 | Session context | Sessions receive shared cwd, environment, data dirs, widget dirs, memory pointers, and resume flags. | All harnesses receive the context; each upstream CLI decides what to do with it. |
 | Skills | Reusable instructions can be defined once for the built-in agent. | Native in `zarvis`; CLI-backed harnesses use their own upstream skill/plugin systems today. |
@@ -54,9 +58,9 @@ There are two kinds of harnesses:
 
 ### Built-in harness
 
-`zarvis` is native to agentd. Use it when you want the deepest integration with
-agentd features: tools, approvals, skills, widgets, background tasks, and
-structured status updates.
+`zarvis` is native to agentd. Use it when you want access to the most agentd
+features: tools, approvals, skills, widgets, background tasks, and structured
+status updates.
 
 See [Zarvis built-in agent](zarvis.md) for details.
 
@@ -81,7 +85,9 @@ Most harnesses can run in two modes:
 - **Headless**: the harness emits structured events instead of a terminal UI.
   This is useful for automation and non-PTY clients.
 
-Choose explicitly when needed:
+Sessions created from the TUI default to interactive mode. CLI/API-created
+sessions may run headless unless you pass `--mode interactive`. Choose explicitly
+when the mode matters:
 
 ```sh
 agent new claude --mode interactive ""
@@ -117,6 +123,10 @@ You normally do not need these, but they are useful for scripting and debugging:
 | `AGENTD_ZARVIS_MODEL` | Default model for the built-in Zarvis harness. |
 | `AGENTD_AUTO_APPROVE_PATHS` | Path allow-list injected into adapters that can translate it. |
 | `AGENTD_SESSION_WIDGETS_DIR` | Directory where a session writes Markdown widgets. |
+| `AGENTD_INJECT_MCP=0` | Disable automatic MCP tool injection for MCP-capable harnesses. |
+
+Set these in the daemon environment, or in whatever process starts `agentd`. See
+[Configuration](configuration.md) for general configuration patterns.
 
 Prefer the normal `agent new ...` flow unless you are integrating agentd into a
 larger script or testing a custom harness setup.

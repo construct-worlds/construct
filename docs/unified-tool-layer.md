@@ -16,16 +16,25 @@ Zarvis uses these tools natively. MCP-capable harnesses receive the same tools
 through `agentd-mcp`, so they can coordinate the fleet without shelling out to
 ad-hoc `agent` CLI commands.
 
+## Using unified tools
+
+There is usually nothing to configure. Zarvis sees these tools natively. Claude
+Code and Codex receive them automatically when agentd can find `agentd-mcp`; set
+`AGENTD_INJECT_MCP=0` in the daemon environment to opt out.
+
+Agents invoke these tools during tasks, just like their other tools. A quick way
+to verify injection is to ask a Claude or Codex session to list available agentd
+sessions; it should be able to use `agentd_list_sessions` without running the
+`agent` CLI in a shell.
+
 ## Harness support
 
-| Harness | Server/config | Status | Notes |
-|---|---|---|---|
-| Zarvis | Native tool layer | Built in | Uses the same tool set without an external MCP process. |
-| Claude Code | `agentd-mcp` via generated MCP config | Enabled by default | Adapter writes `$STATE_DIR/mcp/<session_id>.json` and passes `--mcp-config <path>`. |
-| Codex | `agentd-mcp` via inline MCP config | Enabled by default | Adapter passes Codex a `-c mcp_servers.agentd=...` TOML override. |
-| Antigravity | Pending upstream support | Not injected yet | Receives `AGENTD_SESSION_ID`; browser/tools can be injected once `agy` exposes an MCP config flag. |
-
-Opt out of MCP injection with `AGENTD_INJECT_MCP=0` in the daemon environment.
+| Harness | User-facing status | Implementation notes |
+|---|---|---|
+| Zarvis | Built in. | Uses the same tool set without an external MCP process. |
+| Claude Code | Enabled by default when `agentd-mcp` is available. | Adapter writes a config under `AGENTD_STATE_DIR` and passes `--mcp-config <path>`. |
+| Codex | Enabled by default when `agentd-mcp` is available. | Adapter passes Codex a `-c mcp_servers.agentd=...` TOML override. |
+| Antigravity | Not injected yet. | Receives `AGENTD_SESSION_ID`; browser/tools can be injected once `agy` exposes an MCP config flag. |
 
 ## Fleet-control tools
 
@@ -40,7 +49,7 @@ Opt out of MCP injection with `AGENTD_INJECT_MCP=0` in the daemon environment.
 | `agentd_get_diff` | Read `git diff HEAD` for the session worktree. |
 | `agentd_list_harnesses` | Show available harness adapters. |
 | `agentd_create_session` | Spawn a new session, optionally in an isolated worktree. |
-| `agentd_send_input` | Send line-oriented input to a session. |
+| `agentd_send_input` | Send a line of text to a session. |
 | `agentd_send_keys` | Send raw PTY bytes, such as control keys. |
 | `agentd_interrupt_session` | Interrupt the active turn/process. |
 | `agentd_stop_session` | Ask a session to wind down cleanly. |
@@ -48,6 +57,9 @@ Opt out of MCP injection with `AGENTD_INJECT_MCP=0` in the daemon environment.
 | `agentd_delete_session` | Delete a session and its stored transcript/worktree. |
 | `agentd_pin_session` | Toggle the pinned flag. |
 | `agentd_rename_session` | Set a user-facing title. |
+| `agentd_set_session_group` | Move a session into, out of, or within a group. |
+| `agentd_move_session` | Reorder a session in the visible session list. |
+| `agentd_loop_create` / `agentd_loop_list` / `agentd_loop_update` / `agentd_loop_remove` | Manage recurring prompts attached to sessions. |
 
 ## Browser tools
 
@@ -82,6 +94,8 @@ belong to.
 ## Generative widgets
 
 Agents can create session-scoped UI widgets by writing Markdown files into the
-`session_widgets.dir` returned by `agentd_context`. See
+`session_widgets.dir` returned by `agentd_context`. The same directory is also
+available as `AGENTD_SESSION_WIDGETS_DIR`, but `agentd_context` is preferred
+because it includes widget policy and supported Markdown extensions. See
 [Generative widgets](generative-widgets.md) for the file format, lifecycle,
 rendering behavior, and action-link semantics.
