@@ -64,6 +64,11 @@ impl AutoReviewContext {
 
 const APPROVAL_HISTORY_LIMIT: usize = 20;
 
+/// Consecutive tool-call rounds with no successful tool result before the
+/// harness nudges the model to change approach instead of thrashing.
+/// Purely a function of observed progress — model- and provider-agnostic.
+const NONPRODUCTIVE_STREAK_LIMIT: usize = 4;
+
 fn record_approval_history(
     history: &mut VecDeque<ApprovalHistoryEntry>,
     decision: impl Into<String>,
@@ -521,9 +526,47 @@ pub async fn run(
             detail: None,
         });
 
+        // Loop/thrash guard (model-agnostic): bound a runaway turn and nudge
+        // the model when it stops making progress. The caps are opt-in via env
+        // (0 = unlimited) so default behavior is unchanged; the non-progress
+        // nudge is always on. `AGENTD_ZARVIS_MAX_STEPS` caps model calls per
+        // turn; `AGENTD_ZARVIS_MAX_TURN_SECS` caps wall-clock per turn (lets a
+        // session stop itself gracefully before an external timeout SIGKILL).
+        let max_steps: usize = std::env::var("AGENTD_ZARVIS_MAX_STEPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let max_turn_secs: i64 = std::env::var("AGENTD_ZARVIS_MAX_TURN_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let turn_started_ms = chrono::Utc::now().timestamp_millis();
+        let mut step: usize = 0;
+        let mut nonproductive_streak: usize = 0;
+
         // Inner step loop: feed tool results back until the model
         // produces an end-of-turn response.
         loop {
+            step += 1;
+            // Stop a runaway turn gracefully (vs. an external timeout SIGKILL):
+            // partial work stays in the tree and the session parks awaiting input.
+            let over_steps = max_steps > 0 && step > max_steps;
+            let over_time = max_turn_secs > 0
+                && (chrono::Utc::now().timestamp_millis() - turn_started_ms)
+                    >= max_turn_secs * 1000;
+            if over_steps || over_time {
+                let why = if over_steps {
+                    format!("step budget reached ({max_steps} model calls in one turn)")
+                } else {
+                    format!("time budget reached ({max_turn_secs}s in one turn)")
+                };
+                emit.emit(SessionEvent::Error {
+                    message: format!(
+                        "{why}; stopping to avoid a runaway loop. Any partial work remains in the working tree."
+                    ),
+                });
+                break;
+            }
             // Compute the per-call token budget. Three states:
             //   1. We have a *learned* limit (from a prior overflow
             //      or probe) → use that * UTILIZATION.
@@ -812,6 +855,7 @@ pub async fn run(
             }
 
             // Append messages in the model-expected order.
+            let mut any_ok = false;
             for i in 0..turn.tool_calls.len() {
                 let call = &turn.tool_calls[i];
                 let outcome = match outcomes.remove(&i) {
@@ -825,6 +869,7 @@ pub async fn run(
                 };
                 match outcome {
                     Ok(o) => {
+                        any_ok |= o.ok;
                         let truncated = truncate_for_model(&o.output, TOOL_OUTPUT_BUDGET);
                         push_msg!(
                             messages,
@@ -860,6 +905,36 @@ pub async fn run(
                     .run("session_stop", &cwd, &emit, base_hook_payload.clone())
                     .await;
                 return Ok(());
+            }
+
+            // Non-progress guard: when several consecutive tool rounds produce
+            // no successful result, the model is likely stuck repeating a
+            // failing action. Inject a one-shot step-back nudge rather than let
+            // it thrash; the model then decides — re-check state, change
+            // approach, or stop.
+            if any_ok {
+                nonproductive_streak = 0;
+            } else {
+                nonproductive_streak += 1;
+                if nonproductive_streak >= NONPRODUCTIVE_STREAK_LIMIT {
+                    push_msg!(
+                        messages,
+                        persist,
+                        Message {
+                            role: Role::User,
+                            content: Content::Text {
+                                text: format!(
+                                    "OBSERVATION (from the agentd harness, not the user): the last \
+                                     {nonproductive_streak} tool rounds produced no successful result, so the \
+                                     current approach appears stuck. Step back and reconsider — verify the actual \
+                                     state (e.g. run the project's build or tests), try a different approach, or \
+                                     stop and explain what's blocking. Do not repeat the same failing action."
+                                ),
+                            },
+                        }
+                    );
+                    nonproductive_streak = 0;
+                }
             }
 
             // If the provider explicitly said max_tokens, drop back to user.
