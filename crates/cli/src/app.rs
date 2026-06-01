@@ -2199,7 +2199,15 @@ impl App {
     }
 
     pub fn select_session(&mut self, id: String) {
-        if self.selection.session_id() != Some(id.as_str()) {
+        self.select_session_inner(id, true);
+    }
+
+    fn select_session_without_transition(&mut self, id: String) {
+        self.select_session_inner(id, false);
+    }
+
+    fn select_session_inner(&mut self, id: String, transition: bool) {
+        if transition && self.selection.session_id() != Some(id.as_str()) {
             self.start_session_transition();
         }
         self.selection = Selection::Session(id);
@@ -4753,8 +4761,11 @@ impl App {
                 }
                 return;
             }
-            // Body click: select + drop focus into the view.
-            self.select_session(id.clone());
+            // Body click: focus the pinned preview for input, but do not
+            // replace the active main-window session. Main-window session
+            // changes still use the normal glitch transition; clicking a live
+            // pinned tile is only a focus handoff to that tile.
+            self.select_session_without_transition(id.clone());
             self.collapse_orchestrator_panel_on_focus_change();
             self.focus = PaneFocus::View;
             return;
@@ -7581,6 +7592,38 @@ mod tests {
         assert_eq!(
             app.selection_for_window(1),
             Some(Selection::Session("s1".into()))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mouse_pin_strip_click_focuses_tile_without_changing_main_window_or_glitching() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].pinned = true;
+        let mut second = summary_with_kind(agentd_protocol::SessionKind::User);
+        second.id = "s2".into();
+        second.position = 1;
+        second.pinned = true;
+        app.sessions.push(second);
+        app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
+        app.active_window_id = 1;
+        app.layout = test_layout();
+        app.session_transitions.clear();
+
+        // Second tile in an 80-cell, two-tile pin strip starts at x=60; click
+        // inside its body, not on the top-border unpin diamond.
+        app.click_pin_strip(Rect::new(20, 20, 80, 8), 62, 22).await;
+
+        assert_eq!(app.focus, PaneFocus::View);
+        assert_eq!(app.selection, Selection::Session("s2".into()));
+        assert_eq!(
+            app.selection_for_window(1),
+            Some(Selection::Session("s1".into())),
+            "pin-strip clicks focus the tile for input without replacing the main pane"
+        );
+        assert!(
+            app.session_transitions.is_empty(),
+            "clicking a live pinned preview should not paint the main-pane glitch overlay"
         );
         server.abort();
     }
