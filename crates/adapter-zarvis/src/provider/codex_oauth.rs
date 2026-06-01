@@ -1176,7 +1176,10 @@ impl LlmProvider for CodexOauth {
     }
 }
 
-/// [P0 spike] Open a Responses WebSocket connection with codex-style auth.
+/// Open a Responses WebSocket connection with codex-style auth. Honors an HTTP
+/// CONNECT proxy (`HTTPS_PROXY` / `ALL_PROXY`) — the air-gapped sandbox forces
+/// all egress through one, and `connect_async` would otherwise dial directly
+/// and be blocked.
 async fn connect_codex_ws(access_token: &str, account_id: &str) -> Result<WsStream> {
     use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue};
     let mut req = CODEX_RESPONSES_WS_URL
@@ -1198,9 +1201,82 @@ async fn connect_codex_ws(access_token: &str, account_id: &str) -> Result<WsStre
     if !account_id.is_empty() {
         set(h, "ChatGPT-Account-ID", account_id.to_string())?;
     }
+
+    let proxy = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()));
+    if let Some(proxy) = proxy {
+        return connect_codex_ws_via_proxy(req, &proxy).await;
+    }
     let (ws, _resp) = tokio_tungstenite::connect_async(req)
         .await
         .context("codex-oauth ws: connect")?;
+    Ok(ws)
+}
+
+/// CONNECT-tunnel a WebSocket through an HTTP proxy, then do the wss upgrade
+/// over the tunnel. Used inside the sandbox, whose egress is an authenticated
+/// Squid proxy (credentials carried in the proxy URL).
+async fn connect_codex_ws_via_proxy<R>(req: R, proxy: &str) -> Result<WsStream>
+where
+    R: IntoClientRequest + Unpin,
+{
+    use base64::Engine as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let purl = reqwest::Url::parse(proxy).with_context(|| format!("parse proxy url {proxy}"))?;
+    let phost = purl.host_str().context("proxy url has no host")?.to_string();
+    let pport = purl.port_or_known_default().unwrap_or(80);
+
+    let turl = reqwest::Url::parse(CODEX_RESPONSES_WS_URL).context("ws url")?;
+    let thost = turl.host_str().context("ws url has no host")?.to_string();
+    let tport = turl.port_or_known_default().unwrap_or(443);
+
+    let mut tcp = tokio::net::TcpStream::connect((phost.as_str(), pport))
+        .await
+        .with_context(|| format!("codex-oauth ws: connect proxy {phost}:{pport}"))?;
+
+    let mut connect = format!("CONNECT {thost}:{tport} HTTP/1.1\r\nHost: {thost}:{tport}\r\n");
+    if !purl.username().is_empty() {
+        let creds = format!("{}:{}", purl.username(), purl.password().unwrap_or(""));
+        let token = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
+        connect.push_str(&format!("Proxy-Authorization: Basic {token}\r\n"));
+    }
+    connect.push_str("\r\n");
+    tcp.write_all(connect.as_bytes())
+        .await
+        .context("codex-oauth ws: send CONNECT")?;
+
+    // Read the proxy's response headers up to the blank line. The client speaks
+    // first in TLS, so the proxy sends nothing past the headers — reading one
+    // byte at a time avoids swallowing any of the tunneled TLS stream.
+    let mut head = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    loop {
+        let n = tcp
+            .read(&mut byte)
+            .await
+            .context("codex-oauth ws: read CONNECT response")?;
+        if n == 0 {
+            return Err(anyhow!("codex-oauth ws: proxy closed during CONNECT"));
+        }
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if head.len() > 16 * 1024 {
+            return Err(anyhow!("codex-oauth ws: oversized CONNECT response"));
+        }
+    }
+    let head = String::from_utf8_lossy(&head);
+    let status_line = head.lines().next().unwrap_or_default();
+    if !status_line.contains(" 200") {
+        return Err(anyhow!("codex-oauth ws: proxy CONNECT failed: {status_line}"));
+    }
+
+    let (ws, _resp) = tokio_tungstenite::client_async_tls(req, tcp)
+        .await
+        .context("codex-oauth ws: tls/upgrade over proxy")?;
     Ok(ws)
 }
 
