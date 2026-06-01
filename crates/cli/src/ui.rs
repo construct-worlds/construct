@@ -5003,7 +5003,11 @@ fn chat_lines(theme: &Theme, events: &[TimestampedEvent]) -> Vec<Line<'static>> 
         if kind == ChatEventKind::AssistantMessage
             && previous_kind == ChatEventKind::AssistantMessage
         {
-            append_assistant_message_chunk(&mut lines, &ev.event);
+            append_chat_text_chunk(&mut lines, &ev.event);
+            continue;
+        }
+        if kind == ChatEventKind::Reasoning && previous_kind == ChatEventKind::Reasoning {
+            append_chat_text_chunk(&mut lines, &ev.event);
             continue;
         }
         if !lines.is_empty() && chat_event_needs_gap(previous_kind, kind) {
@@ -5016,12 +5020,17 @@ fn chat_lines(theme: &Theme, events: &[TimestampedEvent]) -> Vec<Line<'static>> 
     lines
 }
 
-fn append_assistant_message_chunk(lines: &mut [Line<'static>], event: &SessionEvent) {
+fn append_chat_text_chunk(lines: &mut [Line<'static>], event: &SessionEvent) {
     let Some(last) = lines.last_mut() else {
         return;
     };
-    if let SessionEvent::Message { text, .. } = event {
-        last.spans.push(Span::raw(text.clone()));
+    match event {
+        SessionEvent::Message { text, .. } => last.spans.push(Span::raw(text.clone())),
+        SessionEvent::Reasoning { text } => {
+            let style = last.spans.last().map(|span| span.style).unwrap_or_default();
+            last.spans.push(Span::styled(text.clone(), style));
+        }
+        _ => {}
     }
 }
 
@@ -6265,6 +6274,30 @@ mod tests {
         let lines = chat_lines(&Theme::default(), &events);
         assert_eq!(lines.len(), 1);
         assert!(line_text(&lines[0]).contains("agent: hello"));
+    }
+
+    #[test]
+    fn chat_mode_aggregates_streaming_reasoning_chunks() {
+        let at = chrono::Utc::now();
+        let events = vec![
+            TimestampedEvent {
+                seq: 1,
+                at,
+                event: SessionEvent::Reasoning {
+                    text: "thin".into(),
+                },
+            },
+            TimestampedEvent {
+                seq: 2,
+                at,
+                event: SessionEvent::Reasoning {
+                    text: "king".into(),
+                },
+            },
+        ];
+        let lines = chat_lines(&Theme::default(), &events);
+        assert_eq!(lines.len(), 1);
+        assert!(line_text(&lines[0]).contains("thinking: thinking"));
     }
 
     #[test]

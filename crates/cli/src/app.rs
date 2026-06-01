@@ -2497,10 +2497,11 @@ impl App {
             if kind == ChatScrollKind::Hidden {
                 continue;
             }
-            if kind == ChatScrollKind::AssistantMessage
-                && previous == ChatScrollKind::AssistantMessage
+            if (kind == ChatScrollKind::AssistantMessage
+                && previous == ChatScrollKind::AssistantMessage)
+                || (kind == ChatScrollKind::Reasoning && previous == ChatScrollKind::Reasoning)
             {
-                // Streaming assistant chunks render as one aggregated chat row.
+                // Streaming assistant/reasoning chunks render as one aggregated chat row.
                 continue;
             }
             if count > 0 && chat_scroll_needs_gap(previous, kind) {
