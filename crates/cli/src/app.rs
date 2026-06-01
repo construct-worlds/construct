@@ -4,8 +4,8 @@ use crate::keymap::{self, ChordState, KeyAction, Keymap, KeymapResult, Profile};
 use crate::ui;
 use agentd_client::Client;
 use agentd_protocol::{
-    EventNotificationPayload, GroupSummary, HarnessInfo, Notification, Request, SessionEvent,
-    SessionSummary, StateNotificationPayload, TimestampedEvent,
+    EventNotificationPayload, GroupSummary, HarnessInfo, MessageRole, Notification, Request,
+    SessionEvent, SessionSummary, StateNotificationPayload, TimestampedEvent,
 };
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -225,6 +225,84 @@ pub enum ViewMode {
     Chat,
     /// Live PTY emulator (default for sessions whose adapter has supports_pty).
     Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatScrollKind {
+    Hidden,
+    AssistantMessage,
+    Message,
+    Reasoning,
+    Tool,
+    Metadata,
+}
+
+fn chat_scroll_kind(ev: &SessionEvent) -> ChatScrollKind {
+    match ev {
+        SessionEvent::Pty { .. }
+        | SessionEvent::PtyResize { .. }
+        | SessionEvent::EditorState { .. }
+        | SessionEvent::AgentStatus(_) => ChatScrollKind::Hidden,
+        SessionEvent::Message { role, text }
+            if should_render_chat_message_for_scroll(*role, text) =>
+        {
+            if *role == MessageRole::Assistant {
+                ChatScrollKind::AssistantMessage
+            } else {
+                ChatScrollKind::Message
+            }
+        }
+        SessionEvent::Message { .. } => ChatScrollKind::Hidden,
+        SessionEvent::Reasoning { .. } => ChatScrollKind::Reasoning,
+        SessionEvent::ToolUse { .. }
+        | SessionEvent::ToolResult { .. }
+        | SessionEvent::ToolApprovalRequest { .. }
+        | SessionEvent::TaskStart { .. }
+        | SessionEvent::TaskBackgrounded { .. }
+        | SessionEvent::TaskEnd { .. } => ChatScrollKind::Tool,
+        SessionEvent::Status { .. }
+        | SessionEvent::AwaitingInput { .. }
+        | SessionEvent::Cost { .. }
+        | SessionEvent::Diff { .. }
+        | SessionEvent::Error { .. }
+        | SessionEvent::Reset
+        | SessionEvent::Done { .. }
+        | SessionEvent::UiPanel(_)
+        | SessionEvent::UiDelete { .. }
+        | SessionEvent::BrowserPreview(_)
+        | SessionEvent::ContextCompacted { .. } => ChatScrollKind::Metadata,
+    }
+}
+
+fn chat_scroll_needs_gap(previous: ChatScrollKind, current: ChatScrollKind) -> bool {
+    !matches!(
+        (previous, current),
+        (ChatScrollKind::Tool, ChatScrollKind::Tool)
+            | (ChatScrollKind::Metadata, ChatScrollKind::Metadata)
+            | (ChatScrollKind::Reasoning, ChatScrollKind::Reasoning)
+            | (
+                ChatScrollKind::AssistantMessage,
+                ChatScrollKind::AssistantMessage
+            )
+    )
+}
+
+fn should_render_chat_message_for_scroll(role: MessageRole, text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if role == MessageRole::Assistant && trimmed.starts_with("<permissions instructions>") {
+        return false;
+    }
+    if role == MessageRole::User
+        && trimmed.starts_with("# AGENTS.md instructions for ")
+        && trimmed.contains("\n<INSTRUCTIONS>")
+    {
+        return false;
+    }
+    true
+}
+
+fn transcript_scroll_pos(value: usize) -> u16 {
+    value.min((u16::MAX - 1) as usize) as u16
 }
 
 /// Which pane (if any) currently takes the entire screen. Zoom mirrors
@@ -2409,6 +2487,47 @@ impl App {
     pub fn selected_list_index(&self) -> Option<usize> {
         let items = self.list_items();
         items.iter().position(|it| it.matches(&self.selection))
+    }
+
+    fn chat_scroll_line_count(&self) -> usize {
+        let mut count = 0usize;
+        let mut previous = ChatScrollKind::Hidden;
+        for ev in &self.transcript {
+            let kind = chat_scroll_kind(&ev.event);
+            if kind == ChatScrollKind::Hidden {
+                continue;
+            }
+            if kind == ChatScrollKind::AssistantMessage
+                && previous == ChatScrollKind::AssistantMessage
+            {
+                // Streaming assistant chunks render as one aggregated chat row.
+                continue;
+            }
+            if count > 0 && chat_scroll_needs_gap(previous, kind) {
+                count += 1;
+            }
+            count += 1;
+            previous = kind;
+        }
+        count.max(1)
+    }
+
+    fn chat_scroll_max(&self) -> u16 {
+        transcript_scroll_pos(self.chat_scroll_line_count().saturating_sub(1))
+    }
+
+    fn adjust_chat_scroll(&mut self, delta: i32) {
+        let max = self.chat_scroll_max();
+        let current = if self.transcript_scroll == u16::MAX {
+            max
+        } else {
+            self.transcript_scroll.min(max)
+        };
+        self.transcript_scroll = if delta > 0 {
+            current.saturating_sub(delta as u16)
+        } else {
+            current.saturating_add(delta.unsigned_abs() as u16).min(max)
+        };
     }
 
     async fn refresh_selected_transcript(&mut self) {
@@ -4796,6 +4915,8 @@ impl App {
             let next = adjusted_scrollback(self.scrollback_for_window(scroll_window), delta);
             self.set_scrollback_for_window(scroll_window, next);
             self.show_terminal_scrollbar();
+        } else if self.view == ViewMode::Chat {
+            self.adjust_chat_scroll(delta);
         }
     }
 
@@ -5542,31 +5663,29 @@ impl App {
             ScrollUp => {
                 if self.can_scroll_pty_history() {
                     self.adjust_scrollback(1);
-                } else if self.transcript_scroll != u16::MAX {
-                    self.transcript_scroll = self.transcript_scroll.saturating_sub(1);
+                } else if self.view == ViewMode::Chat {
+                    self.adjust_chat_scroll(1);
                 }
             }
             ScrollDown => {
                 if self.can_scroll_pty_history() {
                     self.adjust_scrollback(-1);
-                } else if self.transcript_scroll != u16::MAX {
-                    self.transcript_scroll = self.transcript_scroll.saturating_add(1);
+                } else if self.view == ViewMode::Chat {
+                    self.adjust_chat_scroll(-1);
                 }
             }
             ScrollPageUp => {
                 if self.can_scroll_pty_history() {
                     self.adjust_scrollback(10);
-                } else if self.transcript_scroll == u16::MAX {
-                    self.transcript_scroll = 0;
-                } else {
-                    self.transcript_scroll = self.transcript_scroll.saturating_sub(10);
+                } else if self.view == ViewMode::Chat {
+                    self.adjust_chat_scroll(10);
                 }
             }
             ScrollPageDown => {
                 if self.can_scroll_pty_history() {
                     self.adjust_scrollback(-10);
-                } else if self.transcript_scroll != u16::MAX {
-                    self.transcript_scroll = self.transcript_scroll.saturating_add(10);
+                } else if self.view == ViewMode::Chat {
+                    self.adjust_chat_scroll(-10);
                 }
             }
             ScrollTop => {

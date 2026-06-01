@@ -4580,12 +4580,8 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     // terminal-derived snapshots; Terminal view owns terminal rendering. C-x t
     // and headless sessions both use this path so transcript inspection and
     // non-PTY sessions share the same chat presentation.
-    let chat_events: Vec<&TimestampedEvent> = app
-        .transcript
-        .iter()
-        .filter(|ev| chat_event_kind(&ev.event) != ChatEventKind::Hidden)
-        .collect();
-    let total = chat_events.len();
+    let chat_lines = chat_lines(&app.theme, &app.transcript);
+    let total = chat_lines.len();
     let height = area.height as usize;
     let max_scroll = total.saturating_sub(height);
     let scroll_start = if app.transcript_scroll == u16::MAX {
@@ -4594,16 +4590,7 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
         (app.transcript_scroll as usize).min(max_scroll)
     };
     let end = (scroll_start + height).min(total);
-    let mut lines = Vec::new();
-    let mut previous_kind = ChatEventKind::Hidden;
-    for ev in &chat_events[scroll_start..end] {
-        let kind = chat_event_kind(&ev.event);
-        if !lines.is_empty() && chat_event_needs_gap(previous_kind, kind) {
-            lines.push(Line::raw(""));
-        }
-        lines.push(format_chat_event(&app.theme, ev));
-        previous_kind = kind;
-    }
+    let mut lines = chat_lines[scroll_start..end].to_vec();
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "No structured chat events for this session. Use Terminal Mode to view PTY output.",
@@ -4935,6 +4922,7 @@ an agentd command without changing focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChatEventKind {
     Hidden,
+    AssistantMessage,
     Message(MessageRole),
     Reasoning,
     Tool,
@@ -4948,7 +4936,11 @@ fn chat_event_kind(ev: &SessionEvent) -> ChatEventKind {
         | SessionEvent::EditorState { .. }
         | SessionEvent::AgentStatus(_) => ChatEventKind::Hidden,
         SessionEvent::Message { role, text } if should_render_chat_message(*role, text) => {
-            ChatEventKind::Message(*role)
+            if *role == MessageRole::Assistant {
+                ChatEventKind::AssistantMessage
+            } else {
+                ChatEventKind::Message(*role)
+            }
         }
         SessionEvent::Message { .. } => ChatEventKind::Hidden,
         SessionEvent::Reasoning { .. } => ChatEventKind::Reasoning,
@@ -4978,6 +4970,10 @@ fn chat_event_needs_gap(previous: ChatEventKind, current: ChatEventKind) -> bool
         (ChatEventKind::Tool, ChatEventKind::Tool)
             | (ChatEventKind::Metadata, ChatEventKind::Metadata)
             | (ChatEventKind::Reasoning, ChatEventKind::Reasoning)
+            | (
+                ChatEventKind::AssistantMessage,
+                ChatEventKind::AssistantMessage
+            )
     )
 }
 
@@ -4993,6 +4989,40 @@ fn should_render_chat_message(role: MessageRole, text: &str) -> bool {
         return false;
     }
     true
+}
+
+fn chat_lines(theme: &Theme, events: &[TimestampedEvent]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut previous_kind = ChatEventKind::Hidden;
+
+    for ev in events {
+        let kind = chat_event_kind(&ev.event);
+        if kind == ChatEventKind::Hidden {
+            continue;
+        }
+        if kind == ChatEventKind::AssistantMessage
+            && previous_kind == ChatEventKind::AssistantMessage
+        {
+            append_assistant_message_chunk(&mut lines, &ev.event);
+            continue;
+        }
+        if !lines.is_empty() && chat_event_needs_gap(previous_kind, kind) {
+            lines.push(Line::raw(""));
+        }
+        lines.push(format_chat_event(theme, ev));
+        previous_kind = kind;
+    }
+
+    lines
+}
+
+fn append_assistant_message_chunk(lines: &mut [Line<'static>], event: &SessionEvent) {
+    let Some(last) = lines.last_mut() else {
+        return;
+    };
+    if let SessionEvent::Message { text, .. } = event {
+        last.spans.push(Span::raw(text.clone()));
+    }
 }
 
 fn format_chat_event(theme: &Theme, ev: &TimestampedEvent) -> Line<'static> {
@@ -6207,8 +6237,34 @@ mod tests {
                 role: MessageRole::Assistant,
                 text: "hello".into(),
             }),
-            ChatEventKind::Message(MessageRole::Assistant)
+            ChatEventKind::AssistantMessage
         );
+    }
+
+    #[test]
+    fn chat_mode_aggregates_streaming_assistant_chunks() {
+        let at = chrono::Utc::now();
+        let events = vec![
+            TimestampedEvent {
+                seq: 1,
+                at,
+                event: SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text: "hel".into(),
+                },
+            },
+            TimestampedEvent {
+                seq: 2,
+                at,
+                event: SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text: "lo".into(),
+                },
+            },
+        ];
+        let lines = chat_lines(&Theme::default(), &events);
+        assert_eq!(lines.len(), 1);
+        assert!(line_text(&lines[0]).contains("agent: hello"));
     }
 
     #[test]
