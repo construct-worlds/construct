@@ -32,6 +32,29 @@ projects/<project-id>/
 Legacy `groups/<project-id>.json` files are migrated to
 `projects/<project-id>/meta.json` when loaded.
 
+## Local web UI
+
+The daemon always serves a browser UI on localhost (no auth — this is local-only;
+the public, token-protected path is `/remote-control`, see
+[remote-control.md](remote-control.md)).
+
+| Use | Default | Override |
+|---|---|---|
+| Web UI port | `5746` (binds `http://127.0.0.1:5746/`) | `AGENTD_WEBUI_PORT` |
+
+`agent paths` (and `agentd paths`) print the resolved URL on the `webui:` line, so
+you don't have to dig it out of the daemon log:
+
+```text
+$ agent paths
+config:  ~/.config/agentd
+state:   ~/.local/state/agentd
+data:    ~/.local/share/agentd
+runtime: ~/.local/state/agentd
+socket:  ~/.local/state/agentd/agentd.sock
+webui:   http://127.0.0.1:5746/
+```
+
 ## Built-in harness child command overrides
 
 Built-in adapters spawn their underlying CLI directly (no shell). For a

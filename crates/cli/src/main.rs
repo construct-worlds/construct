@@ -131,6 +131,7 @@ async fn main() -> Result<()> {
             println!("data:    {}", p.data_dir.display());
             println!("runtime: {}", p.runtime_dir.display());
             println!("socket:  {}", p.socket().display());
+            println!("webui:   {}", agentd_protocol::paths::local_webui_url());
             Ok(())
         }
         Command::Ping => {

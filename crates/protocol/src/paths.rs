@@ -90,6 +90,25 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// Default port for the localhost-only browser UI. Override with the
+/// `AGENTD_WEBUI_PORT` env var. The daemon binds `127.0.0.1:<port>`; the
+/// CLI's `agent paths` prints the resolved URL.
+pub const DEFAULT_WEBUI_PORT: u16 = 5746;
+
+/// Resolve the localhost web-UI port from `AGENTD_WEBUI_PORT`, falling back
+/// to [`DEFAULT_WEBUI_PORT`] when the var is unset or unparseable.
+pub fn local_webui_port() -> u16 {
+    std::env::var("AGENTD_WEBUI_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_WEBUI_PORT)
+}
+
+/// The resolved localhost web-UI URL (`http://127.0.0.1:<port>/`).
+pub fn local_webui_url() -> String {
+    format!("http://127.0.0.1:{}/", local_webui_port())
+}
+
 /// Resolve a sibling binary (an adapter, `agentd-mcp`, etc.) by name.
 /// Search order: absolute path → next to the current executable → `$PATH`.
 /// Returns `None` if not found. Used by the daemon to find adapter
