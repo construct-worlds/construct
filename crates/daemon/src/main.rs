@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
             println!("data:    {}", p.data_dir.display());
             println!("runtime: {}", p.runtime_dir.display());
             println!("socket:  {}", p.socket().display());
+            println!("webui:   {}", agentd_protocol::paths::local_webui_url());
             Ok(())
         }
         Command::DefaultConfig => {
@@ -133,10 +134,7 @@ async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     // credentials. This is intentionally local-only: `/remote-control`
     // remains the opt-in public tunnel path and still layers token +
     // Basic auth on top.
-    let local_webui_port = std::env::var("AGENTD_WEBUI_PORT")
-        .ok()
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(5746);
+    let local_webui_port = agentd_protocol::paths::local_webui_port();
     {
         let mgr = manager.clone();
         tokio::spawn(async move {

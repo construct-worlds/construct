@@ -85,17 +85,33 @@ Most harnesses can run in two modes:
 - **Headless**: the harness emits structured events instead of a terminal UI.
   This is useful for automation and non-PTY clients.
 
-Sessions created from the TUI default to interactive mode. CLI/API-created
-sessions may run headless unless you pass `--mode interactive`. Choose explicitly
-when the mode matters:
+**How the mode is chosen.** An explicit `--mode` always wins. Otherwise the mode
+is *interactive* when the creating client supplied a PTY size and *headless* when
+it did not. The TUI always supplies one, so TUI sessions default to interactive.
+The `agent new` CLI never supplies one, so **every `agent new` session is headless
+unless you pass `--mode interactive`** — regardless of the prompt.
+
+**The initial prompt does not pick the mode.** `agent new <harness> "<prompt>"`
+and `agent new <harness> ""` are both headless from the CLI; the prompt only
+decides what the session does once it starts:
+
+- A non-empty prompt is recorded as the first user turn and run immediately. For
+  non-PTY clients this is the headless, structured-output path (for example,
+  `shell` runs `$SHELL -lc "<prompt>"` once and exits).
+- An empty prompt launches the harness's interactive program (for example,
+  `shell` runs `$SHELL -il`), which you can attach to and type into — even though
+  the session's mode label is still `headless`.
+
+Pass `--mode` to choose explicitly (optionally alongside a seed prompt):
 
 ```sh
 agent new claude --mode interactive ""
 agent new zarvis --mode headless "summarize the last run"
 ```
 
-`zarvis`, `claude`, `codex`, and `antigravity` support both modes. `shell` is
-always interactive because it is a terminal program.
+`zarvis`, `claude`, `codex`, and `antigravity` support both modes. `shell` always
+owns a PTY (there is no structured "headless" shell), so it presents a terminal
+regardless of the mode label.
 
 ## Resume after restart
 
