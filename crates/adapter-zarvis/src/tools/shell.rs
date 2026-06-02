@@ -23,7 +23,9 @@ impl Tool for Shell {
          Honors a per-call timeout (default 30s); a one-off command that exceeds it is \
          killed. Use this for everything filesystem- and system-related: read files \
          (`cat`/`sed -n`), search (`grep`/`rg`), list (`ls`), run tests, git, etc. \
-         Batch independent reads into one call (or issue them as parallel tool calls). \
+         Batch independent reads into one call, or issue them as several parallel `shell` \
+         calls each marked `read_only: true` so they run concurrently instead of one at a \
+         time. \
          Set `interactive: true` to start a long-lived process (a REPL or a command \
          that prompts for input) instead of killing it at the timeout: the call returns \
          a `session_id` after a brief wait, and you then drive it with `write_stdin`."
@@ -35,7 +37,8 @@ impl Tool for Shell {
                 "command":     { "type": "string", "description": "Shell command line; passed to `bash -lc`." },
                 "timeout_sec": { "type": "integer", "minimum": 1, "maximum": 600, "default": 30, "description": "Kill the (non-interactive) command after this many seconds." },
                 "cwd":         { "type": "string", "description": "Working directory (defaults to the session's cwd)." },
-                "interactive": { "type": "boolean", "default": false, "description": "Keep the process alive as a session for use with write_stdin, instead of killing it at the timeout." }
+                "interactive": { "type": "boolean", "default": false, "description": "Keep the process alive as a session for use with write_stdin, instead of killing it at the timeout." },
+                "read_only":   { "type": "boolean", "default": false, "description": "Set true ONLY when the command is provably side-effect-free — a pure read/inspection such as cat/sed -n, rg/grep, ls/find, head/tail/wc, or git log/diff/show, with NO redirects (>, >>, tee), NO $(...)/backticks, NO writes, and NO chaining (;, &&, |) into a mutator. Read-only calls fan out concurrently with other reads and skip the approval gate, so several read_only calls in one turn run in parallel. Ignored when interactive is true. When in any doubt, leave it false." }
             },
             "required": ["command"]
         })
@@ -376,6 +379,33 @@ mod tests {
             done.output.contains("exit_code: 0"),
             "closing stdin should let cat exit: {}",
             done.output
+        );
+    }
+
+    /// In the spirit of codex's `tool_parallelism` suite: two read-only shell
+    /// calls classify as Safe (so the agent loop fans them out) and, run
+    /// concurrently, finish in ~1s rather than the ~2s a serial pair would
+    /// take.
+    #[tokio::test]
+    async fn read_only_shell_calls_are_safe_and_run_concurrently() {
+        let ctx = ctx_with_cwd(std::env::temp_dir());
+        let call = json!({ "command": "sleep 1", "read_only": true });
+
+        // Flagged read_only → Safe, i.e. partitioned into the concurrent bucket.
+        assert!(matches!(
+            crate::tools::effective_risk(&Shell, &call, &ctx.cwd),
+            ToolRisk::Safe
+        ));
+
+        let start = std::time::Instant::now();
+        let (a, b) = tokio::join!(Shell.run(call.clone(), &ctx), Shell.run(call.clone(), &ctx));
+        let elapsed = start.elapsed();
+
+        assert!(a.expect("run ok").ok);
+        assert!(b.expect("run ok").ok);
+        assert!(
+            elapsed < Duration::from_millis(1800),
+            "two concurrent read-only sleeps should finish in ~1s, took {elapsed:?}"
         );
     }
 }

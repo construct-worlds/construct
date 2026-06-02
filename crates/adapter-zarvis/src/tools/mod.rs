@@ -47,10 +47,18 @@ pub trait Tool: Send + Sync {
 
 /// Effective risk for a single tool call, after applying the daemon-defined
 /// auto-approval policy. A tool whose intrinsic risk is [`ToolRisk::Risky`]
-/// is downgraded to [`ToolRisk::Safe`] when its target path is covered by
-/// [`agentd_protocol::adapter::policy::AutoApprovePolicy`] — that's how the
-/// "agentd defines the policy once, harnesses honor it" abstraction lands on
-/// zarvis. Other Risky calls keep their gate.
+/// is downgraded to [`ToolRisk::Safe`] when:
+///   - its target path is covered by
+///     [`agentd_protocol::adapter::policy::AutoApprovePolicy`] — that's how the
+///     "agentd defines the policy once, harnesses honor it" abstraction lands
+///     on zarvis; or
+///   - it is a `shell` call the model explicitly flagged `read_only: true`
+///     (see [`shell_read_only_optin`]).
+///
+/// Other Risky calls keep their gate. Safe is what lets a call fan out
+/// concurrently (the agent loop runs the Safe bucket via `join_all`) and skip
+/// the approval prompt, so both downgrades trade the per-call gate for
+/// throughput on calls deemed not to need it.
 pub fn effective_risk(tool: &dyn Tool, input: &Value, cwd: &std::path::Path) -> ToolRisk {
     if matches!(tool.risk(), ToolRisk::Safe) {
         return ToolRisk::Safe;
@@ -58,7 +66,37 @@ pub fn effective_risk(tool: &dyn Tool, input: &Value, cwd: &std::path::Path) -> 
     if auto_approve_covers(tool.name(), input, cwd) {
         return ToolRisk::Safe;
     }
+    if shell_read_only_optin(tool.name(), input) {
+        return ToolRisk::Safe;
+    }
     tool.risk()
+}
+
+/// A `shell` call the model explicitly tagged `read_only: true` is treated as
+/// Safe so independent reads in one turn fan out concurrently, mirroring the
+/// dedicated read-only inspection tools (`agentd_context`, `agentd_get_diff`,
+/// …) that are already Safe.
+///
+/// This is the deliberately model-trusting design (option 2 of #331): we honor
+/// the model's declaration rather than parsing the command line. It is scoped
+/// conservatively — only the `shell` tool, only when the flag is literally
+/// `true`, and never for `interactive: true` (which spawns a long-lived
+/// process that is not a bounded read). A mutating command the model
+/// mislabels would bypass the gate, so the flag's contract — provably
+/// side-effect-free only — lives in the tool's arg description.
+fn shell_read_only_optin(tool_name: &str, input: &Value) -> bool {
+    if tool_name != "shell" {
+        return false;
+    }
+    let read_only = input
+        .get("read_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let interactive = input
+        .get("interactive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    read_only && !interactive
 }
 
 fn auto_approve_covers(tool_name: &str, input: &Value, cwd: &std::path::Path) -> bool {
@@ -272,14 +310,58 @@ mod tests {
             ToolRisk::Risky
         ));
 
-        // Shell stays Risky regardless — auto-approve is path-scoped, not a
-        // blanket waiver for every Risky tool.
+        // Shell without read_only stays Risky regardless — path-scoped
+        // auto-approve is not a blanket waiver for every Risky tool.
         assert!(matches!(
-            effective_risk(&shell, &json!({ "cmd": "ls" }), &cwd),
+            effective_risk(&shell, &json!({ "command": "ls" }), &cwd),
             ToolRisk::Risky
         ));
 
         std::env::remove_var(ENV_AUTO_APPROVE_PATHS);
+    }
+
+    #[test]
+    fn effective_risk_downgrades_read_only_shell() {
+        use serde_json::json;
+        let cwd = std::path::PathBuf::from("/some/proj");
+        let shell = shell::Shell;
+
+        // read_only: true → Safe (fans out, skips the gate).
+        assert!(matches!(
+            effective_risk(&shell, &json!({ "command": "cat a.rs", "read_only": true }), &cwd),
+            ToolRisk::Safe
+        ));
+
+        // Absent or false → stays Risky.
+        assert!(matches!(
+            effective_risk(&shell, &json!({ "command": "cat a.rs" }), &cwd),
+            ToolRisk::Risky
+        ));
+        assert!(matches!(
+            effective_risk(&shell, &json!({ "command": "cat a.rs", "read_only": false }), &cwd),
+            ToolRisk::Risky
+        ));
+
+        // interactive overrides read_only — a long-lived process is not a
+        // bounded read, so it keeps the gate even if the model flags it.
+        assert!(matches!(
+            effective_risk(
+                &shell,
+                &json!({ "command": "python", "read_only": true, "interactive": true }),
+                &cwd,
+            ),
+            ToolRisk::Risky
+        ));
+
+        // The opt-in is scoped to `shell`: it does not leak to other tools.
+        assert!(matches!(
+            effective_risk(
+                &fs::EditFile,
+                &json!({ "path": "a.rs", "find": "x", "replace": "y", "read_only": true }),
+                &cwd,
+            ),
+            ToolRisk::Risky
+        ));
     }
 
     #[test]
