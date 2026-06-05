@@ -23,7 +23,7 @@ A boolean automode conflated two different needs: high-throughput trusted operat
 
 Clients should present approval mode as a session mode and use `unsafe_auto` terminology instead of generic “automode.” Adapters that do not gate tools may ignore approval-mode changes. `auto_review` is not a security boundary; it is a convenience review layer that must fall back to asking the user when uncertain. The reviewer prompt should encourage approving bounded routine development work, including ordinary file edits inside the active git worktree, while still asking the user for broad, ambiguous, unrelated, outside-worktree, or sensitive actions.
 
-Approval prompts must make clear that one decision applies to the whole pending tool call. For batched edit calls, the prompt summary should include affected file paths and edit-level hints rather than only aggregate counts.
+One approval decision applies to the whole pending tool call (including every hunk of a batched edit). The prompt conveys this through the call summary rather than the action labels: for batched edit calls the summary should include affected file paths and edit-level hints rather than only aggregate counts. Action labels stay simple verbs (`approve` / `deny` / `auto-review`) — not `approve all` / `deny all`, which read as approving or denying all *future* calls (the role of `unsafe_auto`) rather than the parts of the current one.
 
 ## Non-Goals
 
