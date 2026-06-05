@@ -2768,9 +2768,14 @@ async function switchCurrentViewMode(mode) {
   renderViewModeToggle(s);
 
   if (mode === "terminal") {
+    // Enter terminal exactly like a terminal→terminal session switch does
+    // (selectSession): no forceReload. forceReload reset the xterm and
+    // replayed the entire PTY backlog from the top on every chat→terminal
+    // toggle. Switching between terminal sessions never did that and worked
+    // fine, so match it — the cached xterm is revealed and the child repaints
+    // on the geometry claim.
     await enterTerminalMode(id, {
       focusTerminal: shouldFocusTerminalAfterSessionSwitch(),
-      forceReload: true,
     });
   } else {
     rememberActiveTerminalState();
@@ -4244,7 +4249,13 @@ function renderEvent(event, at) {
   // repaint/spinner frames do not become duplicated text.
   if (event.type === "pty") {
     resetTermToolGroup();
-    if (state.mode === "terminal" && state.term) {
+    // `!renderingTranscriptHistory`: loadTranscript renders older history
+    // pages in the background, and that render can still be running after the
+    // user switches chat→terminal. Routing those historical pty bytes to the
+    // live terminal re-dumps the entire backlog from the top — the "replay"
+    // bug. History rendering only builds the chat DOM; live events (this guard
+    // false) paint the terminal.
+    if (state.mode === "terminal" && state.term && !state.renderingTranscriptHistory) {
       // Bytes (not a pre-decoded string) so xterm's streaming
       // UTF-8 decoder owns multi-byte boundaries — critical at
       // narrow PTY widths where a single glyph can straddle two
@@ -4258,8 +4269,10 @@ function renderEvent(event, at) {
   // In terminal mode we deliberately skip the structured rendering
   // for everything except `reset` and `error` — those are useful
   // signals that wouldn't otherwise reach the terminal surface. The
-  // PTY itself already paints the rest.
-  if (state.mode === "terminal") {
+  // PTY itself already paints the rest. Skipped while replaying transcript
+  // history (see above) so a background history render that outlives the
+  // chat→terminal switch doesn't synthesize the whole backlog into xterm.
+  if (state.mode === "terminal" && !state.renderingTranscriptHistory) {
     if (event.type === "editor_state") {
       state.editorById.set(state.currentId, event);
       renderEditorStateForSession(state.currentId);
