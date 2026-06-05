@@ -92,7 +92,8 @@ impl TextSink for NullSink {
 
 const AUTO_REVIEW_SYSTEM_PROMPT: &str = r#"You are an approval reviewer for a local coding agent.
 Decide whether a pending risky tool call is reasonable, bounded, and clearly related to the current task.
-Return ONLY compact JSON: {"decision":"approve"|"deny"|"ask_user","reason":"..."}.
+Return ONLY compact JSON: {"decision":"approve"|"ask_user","reason":"..."}.
+You can only approve or defer to the user; you cannot reject an action yourself, so when in any doubt, ask.
 
 Use task context and recent user approval decisions as preference signals for similar actions, not as blanket permission.
 
@@ -105,8 +106,8 @@ Approve routine, expected development actions in the current task when they are 
 Do not ask the user merely because a shell command chains routine steps with `&&` or pipes read-only output into a bounded follow-up command.
 Do not ask the user merely because an edit changes files in the active git worktree; git makes those changes inspectable and reversible.
 
-Deny clearly destructive, secret-exfiltrating, unrelated, or user-hostile actions.
-Ask the user when context is insufficient, prior decisions conflict, the action targets broad/unscoped paths, touches secrets or credentials, mutates outside the active git worktree, changes user/home/system files, removes large amounts of data, or is ambiguous enough that a reasonable reviewer could not tell what will change."#;
+Never approve clearly destructive, secret-exfiltrating, unrelated, or user-hostile actions — ask the user, who makes the final call to reject.
+Also ask the user when context is insufficient, prior decisions conflict, the action targets broad/unscoped paths, touches secrets or credentials, mutates outside the active git worktree, changes user/home/system files, removes large amounts of data, or is ambiguous enough that a reasonable reviewer could not tell what will change."#;
 
 pub async fn auto_review_for_adapter(
     provider: &dyn LlmProvider,
@@ -1078,25 +1079,9 @@ async fn run_one_tool(
                     args_summary.clone(),
                 );
             }
-            AutoReviewResult::Deny => {
-                record_approval_history(
-                    approval_history,
-                    "auto_review:deny",
-                    call.name.clone(),
-                    args_summary.clone(),
-                );
-                let msg = "auto-review denied this action".to_string();
-                emit.emit(SessionEvent::ToolResult {
-                    tool: call.id.clone(),
-                    ok: false,
-                    output: msg.clone(),
-                });
-                return Ok(ToolOutcome {
-                    ok: false,
-                    output: msg,
-                });
-            }
-            AutoReviewResult::AskUser => {
+            // Auto-review never denies on its own; a deny verdict is
+            // surfaced to the user, who makes the final reject call.
+            AutoReviewResult::Deny | AutoReviewResult::AskUser => {
                 emit.log(format!(
                     "auto-review asked user for {}({})",
                     call.name, args_summary
@@ -1172,25 +1157,8 @@ async fn run_one_tool(
                                     );
                                     break;
                                 }
-                                AutoReviewResult::Deny => {
-                                    record_approval_history(
-                                        approval_history,
-                                        "auto_review:deny",
-                                        call.name.clone(),
-                                        args_summary.clone(),
-                                    );
-                                    let msg = "auto-review denied this action".to_string();
-                                    emit.emit(SessionEvent::ToolResult {
-                                        tool: call.id.clone(),
-                                        ok: false,
-                                        output: msg.clone(),
-                                    });
-                                    return Ok(ToolOutcome {
-                                        ok: false,
-                                        output: msg,
-                                    });
-                                }
-                                AutoReviewResult::AskUser => continue,
+                                // No outright deny: keep asking the user.
+                                AutoReviewResult::Deny | AutoReviewResult::AskUser => continue,
                             }
                         }
                         "unsafe_auto" => {
