@@ -16,7 +16,7 @@ use crate::persist::{self, Persist};
 use crate::provider::{self, Content, Message, Role, StopReason, TextSink, ToolCall};
 use crate::tools::{truncate_for_model, ToolCtx, ToolOutcome, ToolRegistry};
 use agentd_protocol::adapter::{AdapterContext, AdapterInboxMsg, EventEmitter};
-use agentd_protocol::{SessionEvent, SessionStartParams, SessionState, ToolRisk};
+use agentd_protocol::{ApprovalMode, SessionEvent, SessionStartParams, SessionState, ToolRisk};
 use anyhow::Result;
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
@@ -51,8 +51,11 @@ impl<'a> Terminal<'a> {
         self.write(b"\r\n\x1b[1;36m\xe2\x9d\xaf \x1b[0m");
     }
     /// Banner shown when the session starts.
-    fn banner(&self, provider: &str, model: &str, automode: bool) {
-        let mode_badge = if automode { "  [automode]" } else { "" };
+    fn banner(&self, provider: &str, model: &str, mode: ApprovalMode) {
+        let mode_badge = match mode.badge() {
+            Some(b) => format!("  [{b}]"),
+            None => String::new(),
+        };
         let banner = format!(
             "\r\n\x1b[1;35mzarvis\x1b[0m  \x1b[2m{provider}:{model}\x1b[0m{mode_badge}\r\n\
              \x1b[2mtype your prompt and press Enter. type `/` for commands, \
@@ -1395,12 +1398,13 @@ mod tests {
         ]))
         .await
         .unwrap();
-        let mut unsafe_auto = false;
+        let mut mode = ApprovalMode::Manual;
         assert_eq!(
-            wait_for_approval(&mut rx, "call-1", &mut unsafe_auto).await,
+            wait_for_approval(&mut rx, "call-1", &mut mode).await,
             ApprovalOutcome::AutoReview
         );
-        assert!(!unsafe_auto);
+        // `a` switches the session into auto-review mode, which persists.
+        assert_eq!(mode, ApprovalMode::AutoReview);
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         tx.send(agentd_protocol::adapter::AdapterInboxMsg::PtyInput(vec![
@@ -1408,12 +1412,12 @@ mod tests {
         ]))
         .await
         .unwrap();
-        let mut unsafe_auto = false;
+        let mut mode = ApprovalMode::Manual;
         assert_eq!(
-            wait_for_approval(&mut rx, "call-1", &mut unsafe_auto).await,
+            wait_for_approval(&mut rx, "call-1", &mut mode).await,
             ApprovalOutcome::UnsafeAuto
         );
-        assert!(unsafe_auto);
+        assert_eq!(mode, ApprovalMode::UnsafeAuto);
     }
 
     #[tokio::test]
@@ -1425,12 +1429,13 @@ mod tests {
         })
         .await
         .unwrap();
-        let mut unsafe_auto = false;
+        let mut mode = ApprovalMode::Manual;
         assert_eq!(
-            wait_for_approval(&mut rx, "call-1", &mut unsafe_auto).await,
+            wait_for_approval(&mut rx, "call-1", &mut mode).await,
             ApprovalOutcome::AutoReview
         );
-        assert!(!unsafe_auto);
+        // `auto_review` decision persists the auto-review mode too.
+        assert_eq!(mode, ApprovalMode::AutoReview);
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         tx.send(agentd_protocol::adapter::AdapterInboxMsg::ToolDecision {
@@ -1439,12 +1444,12 @@ mod tests {
         })
         .await
         .unwrap();
-        let mut unsafe_auto = false;
+        let mut mode = ApprovalMode::Manual;
         assert_eq!(
-            wait_for_approval(&mut rx, "call-1", &mut unsafe_auto).await,
+            wait_for_approval(&mut rx, "call-1", &mut mode).await,
             ApprovalOutcome::UnsafeAuto
         );
-        assert!(unsafe_auto);
+        assert_eq!(mode, ApprovalMode::UnsafeAuto);
     }
 
     #[test]
@@ -1828,7 +1833,11 @@ pub async fn run(
     let base_hook_payload = crate::hooks::base_payload(&session_id, &cwd, "interactive");
     let registry = std::sync::Arc::new(ToolRegistry::with_defaults());
     let specs = registry.specs();
-    let mut automode = std::env::var("AGENTD_ZARVIS_AUTOMODE").as_deref() == Ok("1");
+    let mut approval_mode = if std::env::var("AGENTD_ZARVIS_AUTOMODE").as_deref() == Ok("1") {
+        ApprovalMode::UnsafeAuto
+    } else {
+        ApprovalMode::Manual
+    };
     // Per-model learned input-token limits. Shared with `agent.rs`
     // via `state_dir/zarvis-model-limits.json`, so a context-overflow
     // learned in one session benefits every later session on the same
@@ -1870,7 +1879,7 @@ pub async fn run(
     // cleanly. (Pressing Enter on an empty line is also a no-op + fresh
     // prompt, so the user has an explicit "wake me up" escape hatch.)
     if !resuming {
-        term.banner(provider_name, &model, automode);
+        term.banner(provider_name, &model, approval_mode);
     }
     emit.emit(SessionEvent::Status {
         state: SessionState::Running,
@@ -1994,7 +2003,7 @@ pub async fn run(
                 &mut inbox,
                 &mut editor,
                 &term,
-                &mut automode,
+                &mut approval_mode,
                 &mut pty_width,
                 obs_rx.as_mut(),
                 &mut bg_completion_rx,
@@ -2159,7 +2168,7 @@ pub async fn run(
                             editor.reset_history();
                             queued_rows = 0;
                             emit.emit(SessionEvent::Reset);
-                            term.banner(provider_name, &model, automode);
+                            term.banner(provider_name, &model, approval_mode);
                             term.note("(session reset)");
                         }
                         CommandId::Compact => {
@@ -2397,7 +2406,7 @@ pub async fn run(
                 &mut inbox,
                 &mut editor,
                 &mut queue,
-                &mut automode,
+                &mut approval_mode,
                 &emit,
                 tasks.clone(),
                 async {
@@ -2451,7 +2460,7 @@ pub async fn run(
                             &mut inbox,
                             &mut editor,
                             &mut queue,
-                            &mut automode,
+                            &mut approval_mode,
                             &emit,
                             tasks.clone(),
                             async {
@@ -2696,7 +2705,7 @@ pub async fn run(
                     &term,
                     &mut queue,
                     &mut queued_rows,
-                    &mut automode,
+                    &mut approval_mode,
                     tasks.clone(),
                     render_fut,
                 )
@@ -2736,7 +2745,7 @@ pub async fn run(
                         &emit,
                         &term,
                         &mut inbox,
-                        &mut automode,
+                        &mut approval_mode,
                         &mut editor,
                         &mut queue,
                         &mut queued_rows,
@@ -2896,7 +2905,7 @@ async fn read_one_line(
     inbox: &mut tokio::sync::mpsc::Receiver<AdapterInboxMsg>,
     editor: &mut LineEditor,
     term: &Terminal<'_>,
-    automode: &mut bool,
+    approval_mode: &mut ApprovalMode,
     pty_width: &mut usize,
     mut obs_rx: Option<&mut tokio::sync::mpsc::UnboundedReceiver<crate::observe::Observation>>,
     bg_completion_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::tasks::BackgroundCompletion>,
@@ -2940,7 +2949,7 @@ async fn read_one_line(
                 return ReadOutcome::Line(t);
             }
             Some(AdapterInboxMsg::SetApprovalMode(mode)) => {
-                *automode = matches!(mode, agentd_protocol::ApprovalMode::UnsafeAuto)
+                *approval_mode = mode;
             }
             Some(AdapterInboxMsg::PtyInput(bytes)) => {
                 // PTY bytes only update editor state; nothing is
@@ -2994,7 +3003,7 @@ async fn run_one_tool(
     emit: &EventEmitter,
     term: &Terminal<'_>,
     inbox: &mut tokio::sync::mpsc::Receiver<AdapterInboxMsg>,
-    automode: &mut bool,
+    approval_mode: &mut ApprovalMode,
     editor: &mut LineEditor,
     queue: &mut VecDeque<String>,
     queued_rows: &mut usize,
@@ -3084,13 +3093,31 @@ async fn run_one_tool(
         args_summary: args_summary.clone(),
     });
 
-    let needs_approval = !*automode
-        && matches!(
-            crate::tools::effective_risk(tool, &call.input, &tool_ctx.cwd),
-            ToolRisk::Risky
-        );
-    if needs_approval {
-        term.approval(&call.name, &args_summary, tool.risk());
+    let is_risky = matches!(
+        crate::tools::effective_risk(tool, &call.input, &tool_ctx.cwd),
+        ToolRisk::Risky
+    );
+    // Decide whether this risky call needs a human prompt. In auto-review
+    // mode the reviewer vets it first and may defer to the user; it can
+    // only approve or ask — it never denies on its own, so the human
+    // always makes the final reject call.
+    let mut ask_user = is_risky && matches!(*approval_mode, ApprovalMode::Manual);
+    if is_risky && matches!(*approval_mode, ApprovalMode::AutoReview) {
+        match crate::agent::auto_review_for_adapter(
+            provider,
+            model,
+            call.name.as_str(),
+            &args_summary,
+            review_ctx,
+        )
+        .await
+        {
+            crate::agent::AutoReviewResult::Approve => {}
+            crate::agent::AutoReviewResult::Deny
+            | crate::agent::AutoReviewResult::AskUser => ask_user = true,
+        }
+    }
+    if ask_user {
         emit.emit(SessionEvent::ToolApprovalRequest {
             call_id: call.id.clone(),
             tool: call.name.clone(),
@@ -3114,67 +3141,53 @@ async fn run_one_tool(
                 ),
             )
             .await;
-        let decision = wait_for_approval(inbox, &call.id, automode).await;
-        match decision {
-            ApprovalOutcome::Stop => return Err("stop".into()),
-            ApprovalOutcome::Interrupt => return Err("interrupt".into()),
-            ApprovalOutcome::Deny => {
-                term.print("n\r\n");
-                let msg = "user denied this action".to_string();
-                emit.emit(SessionEvent::ToolResult {
-                    tool: call.id.clone(),
-                    ok: false,
-                    output: msg.clone(),
-                });
-                return Ok(ToolOutcome {
-                    ok: false,
-                    output: msg,
-                });
-            }
-            ApprovalOutcome::Approve => term.print("y\r\n"),
-            ApprovalOutcome::AutoReview => {
-                term.print("a\r\n");
-                match crate::agent::auto_review_for_adapter(
-                    provider,
-                    model,
-                    call.name.as_str(),
-                    &args_summary,
-                    review_ctx,
-                )
-                .await
-                {
-                    crate::agent::AutoReviewResult::Approve => {}
-                    crate::agent::AutoReviewResult::Deny => {
-                        let msg = "auto-review denied this action".to_string();
-                        emit.emit(SessionEvent::ToolResult {
-                            tool: call.id.clone(),
-                            ok: false,
-                            output: msg.clone(),
-                        });
-                        return Ok(ToolOutcome {
-                            ok: false,
-                            output: msg,
-                        });
-                    }
-                    crate::agent::AutoReviewResult::AskUser => {
-                        let msg =
-                            "auto-review could not decide; please approve or deny this action"
-                                .to_string();
-                        emit.emit(SessionEvent::ToolResult {
-                            tool: call.id.clone(),
-                            ok: false,
-                            output: msg.clone(),
-                        });
-                        return Ok(ToolOutcome {
-                            ok: false,
-                            output: msg,
-                        });
+        // Prompt until we reach a terminal decision. Pressing `a`
+        // switches the session into auto-review mode (which persists)
+        // and vets this call; if the reviewer still wants a human we
+        // loop and ask again.
+        loop {
+            term.approval(&call.name, &args_summary, tool.risk());
+            match wait_for_approval(inbox, &call.id, approval_mode).await {
+                ApprovalOutcome::Stop => return Err("stop".into()),
+                ApprovalOutcome::Interrupt => return Err("interrupt".into()),
+                ApprovalOutcome::Deny => {
+                    term.print("n\r\n");
+                    let msg = "user denied this action".to_string();
+                    emit.emit(SessionEvent::ToolResult {
+                        tool: call.id.clone(),
+                        ok: false,
+                        output: msg.clone(),
+                    });
+                    return Ok(ToolOutcome {
+                        ok: false,
+                        output: msg,
+                    });
+                }
+                ApprovalOutcome::Approve => {
+                    term.print("y\r\n");
+                    break;
+                }
+                ApprovalOutcome::UnsafeAuto => {
+                    term.print("f\r\n");
+                    break;
+                }
+                ApprovalOutcome::AutoReview => {
+                    term.print("a\r\n");
+                    match crate::agent::auto_review_for_adapter(
+                        provider,
+                        model,
+                        call.name.as_str(),
+                        &args_summary,
+                        review_ctx,
+                    )
+                    .await
+                    {
+                        crate::agent::AutoReviewResult::Approve => break,
+                        // Never deny outright — bounce back to the user.
+                        crate::agent::AutoReviewResult::Deny
+                        | crate::agent::AutoReviewResult::AskUser => continue,
                     }
                 }
-            }
-            ApprovalOutcome::UnsafeAuto => {
-                term.print("f\r\n");
-                *automode = true;
             }
         }
     }
@@ -3191,7 +3204,7 @@ async fn run_one_tool(
         term,
         queue,
         queued_rows,
-        automode,
+        approval_mode,
         tasks,
         bg_completion_tx,
         bg_after,
@@ -3282,7 +3295,7 @@ enum ApprovalOutcome {
 async fn wait_for_approval(
     inbox: &mut tokio::sync::mpsc::Receiver<AdapterInboxMsg>,
     call_id: &str,
-    automode: &mut bool,
+    approval_mode: &mut ApprovalMode,
 ) -> ApprovalOutcome {
     loop {
         match inbox.recv().await {
@@ -3290,9 +3303,11 @@ async fn wait_for_approval(
             Some(AdapterInboxMsg::Stop) => return ApprovalOutcome::Stop,
             Some(AdapterInboxMsg::Interrupt) => return ApprovalOutcome::Interrupt,
             Some(AdapterInboxMsg::SetApprovalMode(mode)) => {
-                *automode = matches!(mode, agentd_protocol::ApprovalMode::UnsafeAuto);
-                if *automode {
-                    return ApprovalOutcome::UnsafeAuto;
+                *approval_mode = mode;
+                match mode {
+                    ApprovalMode::UnsafeAuto => return ApprovalOutcome::UnsafeAuto,
+                    ApprovalMode::AutoReview => return ApprovalOutcome::AutoReview,
+                    ApprovalMode::Manual => {}
                 }
             }
             Some(AdapterInboxMsg::ToolDecision {
@@ -3301,9 +3316,12 @@ async fn wait_for_approval(
             }) if cid == call_id => {
                 return match decision.as_str() {
                     "approve" => ApprovalOutcome::Approve,
-                    "auto_review" => ApprovalOutcome::AutoReview,
+                    "auto_review" => {
+                        *approval_mode = ApprovalMode::AutoReview;
+                        ApprovalOutcome::AutoReview
+                    }
                     "unsafe_auto" => {
-                        *automode = true;
+                        *approval_mode = ApprovalMode::UnsafeAuto;
                         ApprovalOutcome::UnsafeAuto
                     }
                     _ => ApprovalOutcome::Deny,
@@ -3315,9 +3333,12 @@ async fn wait_for_approval(
                     match b {
                         b'y' | b'Y' | b'\r' | b'\n' => return ApprovalOutcome::Approve,
                         b'n' | b'N' | 0x1b | 0x07 => return ApprovalOutcome::Deny,
-                        b'a' | b'A' => return ApprovalOutcome::AutoReview,
+                        b'a' | b'A' => {
+                            *approval_mode = ApprovalMode::AutoReview;
+                            return ApprovalOutcome::AutoReview;
+                        }
                         b'f' | b'F' => {
-                            *automode = true;
+                            *approval_mode = ApprovalMode::UnsafeAuto;
                             return ApprovalOutcome::UnsafeAuto;
                         }
                         0x03 => return ApprovalOutcome::Deny,
@@ -3495,7 +3516,7 @@ async fn run_with_supervisor(
     term: &Terminal<'_>,
     queue: &mut VecDeque<String>,
     queued_rows: &mut usize,
-    automode: &mut bool,
+    approval_mode: &mut ApprovalMode,
     tasks: std::sync::Arc<crate::tasks::Tasks>,
     bg_completion_tx: crate::tasks::BgCompletionTx,
     bg_after: std::time::Duration,
@@ -3532,7 +3553,7 @@ async fn run_with_supervisor(
     // the inbox drain so user typing during a long tool run still
     // queues. Inbox `ToolAction` events get forwarded to the
     // supervisor's control channel; everything else flows through
-    // the editor / queue / automode handlers like before.
+    // the editor / queue / approval_mode handlers like before.
     let tasks_for_drive = tasks.clone();
     let mut supervisor = tokio::spawn(crate::tasks::supervise(
         call_id.clone(),
@@ -3549,7 +3570,7 @@ async fn run_with_supervisor(
         term,
         queue,
         queued_rows,
-        automode,
+        approval_mode,
         tasks_for_drive,
         &call_id,
         async { (&mut supervisor).await },
@@ -3626,7 +3647,7 @@ async fn drive_with_input_relaying<F>(
     term: &Terminal<'_>,
     queue: &mut VecDeque<String>,
     queued_rows: &mut usize,
-    automode: &mut bool,
+    approval_mode: &mut ApprovalMode,
     tasks: std::sync::Arc<crate::tasks::Tasks>,
     this_call_id: &str,
     fut: F,
@@ -3649,7 +3670,7 @@ where
                     None => return DriveExit::Channel,
                     Some(AdapterInboxMsg::Stop) => return DriveExit::Stop,
                     Some(AdapterInboxMsg::Interrupt) => return DriveExit::Interrupt,
-                    Some(AdapterInboxMsg::SetApprovalMode(mode)) => *automode = matches!(mode, agentd_protocol::ApprovalMode::UnsafeAuto),
+                    Some(AdapterInboxMsg::SetApprovalMode(mode)) => *approval_mode = mode,
                     Some(AdapterInboxMsg::Input(t)) => {
                         enqueue_line(queue, editor, t);
                         emit_editor_state(term.emit, editor, queue);
@@ -3988,7 +4009,7 @@ async fn drive_with_input<F>(
     term: &Terminal<'_>,
     queue: &mut VecDeque<String>,
     queued_rows: &mut usize,
-    automode: &mut bool,
+    approval_mode: &mut ApprovalMode,
     tasks: std::sync::Arc<crate::tasks::Tasks>,
     fut: F,
 ) -> DriveExit<F::Output>
@@ -4009,7 +4030,7 @@ where
                     None => return DriveExit::Channel,
                     Some(AdapterInboxMsg::Stop) => return DriveExit::Stop,
                     Some(AdapterInboxMsg::Interrupt) => return DriveExit::Interrupt,
-                    Some(AdapterInboxMsg::SetApprovalMode(mode)) => *automode = matches!(mode, agentd_protocol::ApprovalMode::UnsafeAuto),
+                    Some(AdapterInboxMsg::SetApprovalMode(mode)) => *approval_mode = mode,
                     Some(AdapterInboxMsg::Input(t)) => {
                         enqueue_line(queue, editor, t);
                         emit_editor_state(term.emit, editor, queue);
@@ -4069,7 +4090,7 @@ async fn drive_with_input_silent<F>(
     inbox: &mut tokio::sync::mpsc::Receiver<AdapterInboxMsg>,
     editor: &mut LineEditor,
     queue: &mut VecDeque<String>,
-    automode: &mut bool,
+    approval_mode: &mut ApprovalMode,
     emit: &EventEmitter,
     _tasks: std::sync::Arc<crate::tasks::Tasks>,
     fut: F,
@@ -4091,7 +4112,7 @@ where
                     None => return DriveExit::Channel,
                     Some(AdapterInboxMsg::Stop) => return DriveExit::Stop,
                     Some(AdapterInboxMsg::Interrupt) => return DriveExit::Interrupt,
-                    Some(AdapterInboxMsg::SetApprovalMode(mode)) => *automode = matches!(mode, agentd_protocol::ApprovalMode::UnsafeAuto),
+                    Some(AdapterInboxMsg::SetApprovalMode(mode)) => *approval_mode = mode,
                     Some(AdapterInboxMsg::Input(t)) => {
                         enqueue_line(queue, editor, t);
                         emit_editor_state(emit, editor, queue);
