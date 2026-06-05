@@ -1078,25 +1078,9 @@ async fn run_one_tool(
                     args_summary.clone(),
                 );
             }
-            AutoReviewResult::Deny => {
-                record_approval_history(
-                    approval_history,
-                    "auto_review:deny",
-                    call.name.clone(),
-                    args_summary.clone(),
-                );
-                let msg = "auto-review denied this action".to_string();
-                emit.emit(SessionEvent::ToolResult {
-                    tool: call.id.clone(),
-                    ok: false,
-                    output: msg.clone(),
-                });
-                return Ok(ToolOutcome {
-                    ok: false,
-                    output: msg,
-                });
-            }
-            AutoReviewResult::AskUser => {
+            // Auto-review never denies on its own; a deny verdict is
+            // surfaced to the user, who makes the final reject call.
+            AutoReviewResult::Deny | AutoReviewResult::AskUser => {
                 emit.log(format!(
                     "auto-review asked user for {}({})",
                     call.name, args_summary
@@ -1172,25 +1156,8 @@ async fn run_one_tool(
                                     );
                                     break;
                                 }
-                                AutoReviewResult::Deny => {
-                                    record_approval_history(
-                                        approval_history,
-                                        "auto_review:deny",
-                                        call.name.clone(),
-                                        args_summary.clone(),
-                                    );
-                                    let msg = "auto-review denied this action".to_string();
-                                    emit.emit(SessionEvent::ToolResult {
-                                        tool: call.id.clone(),
-                                        ok: false,
-                                        output: msg.clone(),
-                                    });
-                                    return Ok(ToolOutcome {
-                                        ok: false,
-                                        output: msg,
-                                    });
-                                }
-                                AutoReviewResult::AskUser => continue,
+                                // No outright deny: keep asking the user.
+                                AutoReviewResult::Deny | AutoReviewResult::AskUser => continue,
                             }
                         }
                         "unsafe_auto" => {
