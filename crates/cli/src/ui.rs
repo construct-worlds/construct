@@ -4915,6 +4915,27 @@ fn blit_image_quadrants(f: &mut Frame, area: Rect, img: &image::RgbaImage, cover
 /// - the active editor — one row per `\n`-separated buf line, cyan `❯`
 ///   on the first row, two-space indent on continuation rows.
 /// Cursor is placed on the active line/col that corresponds to `state.cursor`.
+const ZARVIS_READY_HINT: &str = "type your prompt and press Enter";
+
+fn editor_ready_hint(
+    state: Option<&crate::app::EditorState>,
+    agent_status: Option<&agentd_protocol::AgentStatus>,
+) -> Option<&'static str> {
+    if let Some(agent_status) = agent_status.filter(|s| s.active) {
+        if agent_status.active {
+            return None;
+        }
+    }
+
+    match state {
+        Some(s) if s.buf.is_empty() && s.queued.is_empty() && s.completions.is_empty() => {
+            Some(ZARVIS_READY_HINT)
+        }
+        None => Some(ZARVIS_READY_HINT),
+        _ => None,
+    }
+}
+
 fn render_editor_pane(
     f: &mut Frame,
     area: Rect,
@@ -4980,6 +5001,7 @@ fn render_editor_pane(
     }
 
     let text_width = area.width.saturating_sub(prompt_w).max(1) as usize;
+    let ready_hint = editor_ready_hint(Some(state), agent_status);
 
     // Queued entries — one `↑` per entry; wrapped/continuation rows
     // align under the prompt's text column with a two-space indent.
@@ -5046,9 +5068,41 @@ fn render_editor_pane(
         remaining -= 1;
     }
 
-    // Active editor — multiline and width-wrapped.
-    let buf_lines = split_preserve_empty_lines(&state.buf);
     let mut cursor_pos: Option<(u16, u16)> = None;
+
+    // Active editor — multiline and width-wrapped.
+    if let Some(hint) = ready_hint {
+        let wrapped = wrap_text(hint, text_width);
+        for visual in wrapped {
+            if remaining == 0 {
+                break;
+            }
+            let row = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: 1,
+            };
+            let para = Paragraph::new(Line::from(vec![
+                Span::styled("❯ ", active_glyph_style),
+                Span::styled(visual.text.clone(), Style::default().fg(theme.dim)),
+            ]));
+            f.render_widget(para, row);
+            y = y.saturating_add(1);
+            remaining -= 1;
+            if cursor_pos.is_none() && state.cursor == 0 {
+                cursor_pos = Some((area.x.saturating_add(prompt_w), row.y));
+            }
+        }
+        if set_cursor {
+            if let Some((x, y)) = cursor_pos {
+                render_editor_cursor(f, Position { x, y }, theme);
+            }
+        }
+        return;
+    }
+
+    let buf_lines = split_preserve_empty_lines(&state.buf);
     let mut char_seen = 0usize;
     let mut first_visual = true;
     'active: for logical in buf_lines {
@@ -5125,6 +5179,7 @@ fn editor_pane_rows(
     width: u16,
 ) -> usize {
     let text_width = width.saturating_sub(2).max(1) as usize;
+    let ready_hint = editor_ready_hint(state, agent_status);
     let queued_lines: usize = state
         .map(|s| {
             s.queued
@@ -5134,9 +5189,13 @@ fn editor_pane_rows(
         })
         .unwrap_or(0);
     let completion_lines = state.map(|s| s.completions.len()).unwrap_or(0);
-    let buf_lines = state
-        .map(|s| wrapped_text_rows(&s.buf, text_width))
-        .unwrap_or(1);
+    let buf_lines = if ready_hint.is_some() {
+        wrapped_text_rows(ZARVIS_READY_HINT, text_width)
+    } else {
+        state
+            .map(|s| wrapped_text_rows(&s.buf, text_width))
+            .unwrap_or(1)
+    };
     let status_lines = agent_status.filter(|s| s.active).map(|_| 3).unwrap_or(0);
     status_lines + queued_lines + 1 + completion_lines + buf_lines
 }
@@ -7739,6 +7798,44 @@ mod tests {
 
         assert_eq!(glyph_cell.style().fg, Some(theme.accent));
         assert_eq!(text_cell.style().fg, Some(theme.text));
+    }
+
+    #[test]
+    fn editor_pane_renders_ready_hint_when_idle() {
+        let state = crate::app::EditorState {
+            queued: Vec::new(),
+            buf: String::new(),
+            cursor: 0,
+            completions: Vec::new(),
+        };
+        let theme = Theme::default();
+        let backend = ratatui::backend::TestBackend::new(24, 3);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|f| {
+                render_editor_pane(f, Rect::new(0, 0, 24, 3), Some(&state), None, &theme, false);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let glyph_cell = buffer.cell((0, 1)).expect("glyph cell");
+        let hint_cell = buffer.cell((2, 1)).expect("hint cell");
+
+        assert_eq!(glyph_cell.style().fg, Some(theme.accent));
+        assert_eq!(hint_cell.symbol(), "t");
+        assert_eq!(hint_cell.style().fg, Some(theme.dim));
+    }
+
+    #[test]
+    fn editor_pane_rows_uses_ready_hint() {
+        let state = crate::app::EditorState {
+            queued: Vec::new(),
+            buf: String::new(),
+            cursor: 0,
+            completions: Vec::new(),
+        };
+        assert_eq!(editor_pane_rows(Some(&state), None, 24), 3);
     }
 
     #[test]
