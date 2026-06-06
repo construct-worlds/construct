@@ -8,12 +8,12 @@ use crate::app::{
 use crate::keymap::KeyAction;
 use crate::theme::Theme;
 use agentd_protocol::{MessageRole, SessionEvent, SessionState, SessionSummary, TimestampedEvent};
+use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthStr;
@@ -102,6 +102,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_widget_hits.clear();
     app.layout.dynamic_ui_panel_close_hits.clear();
     app.layout.dynamic_ui_inline_hit = None;
+    app.layout.matrix_operator_title_hit = None;
     app.layout.matrix_widget_hits.clear();
     app.layout.dynamic_ui_trigger = None;
     app.layout.dynamic_ui_triggers.clear();
@@ -595,6 +596,18 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
+    if let Some((xs, xe, y)) = app.layout.matrix_operator_title_hit {
+        if my == y && mx >= xs && mx < xe {
+            render_button_tooltip(
+                f,
+                &app.theme,
+                &format!(" Operator {} ", matrix_operator_status(app)),
+                xs,
+                y,
+            );
+            return;
+        }
+    }
     // Only when expanded — collapsed list has no `+` / `−`.
     if app.list_collapsed && app.focus != PaneFocus::List {
         return;
@@ -1789,8 +1802,8 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
     let panels = app.orchestrator_widget_panels();
     let widget_count = panels.len();
     let viewport_visible = app.matrix_widget_visible(now);
-    let status = matrix_operator_status(app);
-    let mut label = format!(" Operator · {status}");
+    let operator_text = "Operator";
+    let mut label = format!(" {operator_text}");
     if widget_count > 0 {
         let selected = selected_matrix_widget_index(app, &panels).unwrap_or(0) + 1;
         if viewport_visible {
@@ -1801,14 +1814,18 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
     }
     let max_label_w = area.width.saturating_sub(10) as usize;
     let label = truncate_to_width(&label, max_label_w);
+    let label_x = area.x.saturating_add(1);
     f.buffer_mut().set_string(
-        area.x.saturating_add(1),
+        label_x,
         area.y,
         label.as_str(),
         Style::default()
             .fg(app.theme.accent)
             .add_modifier(Modifier::BOLD),
     );
+    let operator_start = label_x.saturating_add(1);
+    let operator_end = operator_start.saturating_add(UnicodeWidthStr::width(operator_text) as u16);
+    app.layout.matrix_operator_title_hit = Some((operator_start, operator_end, area.y));
 
     if widget_count > 0 {
         let count_text = if viewport_visible {
@@ -2196,11 +2213,7 @@ fn render_pinned_letters_at(
         } else {
             let since_pin_ms = elapsed_ms.saturating_sub(pinned_at);
             let brightness = if elapsed_ms < fade_start {
-                if since_pin_ms < 220 {
-                    1.0
-                } else {
-                    0.76
-                }
+                if since_pin_ms < 220 { 1.0 } else { 0.76 }
             } else {
                 (0.12 + fade_level * 0.64).clamp(0.0, 1.0)
             };
@@ -6547,21 +6560,31 @@ mod tests {
             true,
         );
         let rendered: Vec<_> = lines.iter().map(line_text).collect();
-        assert!(rendered
-            .iter()
-            .any(|line| line.contains("◉ [d] Start demo")));
-        assert!(rendered
-            .iter()
-            .any(|line| line.contains("│  ✓ Prepare demo workspace")));
-        assert!(rendered
-            .iter()
-            .any(|line| line.contains("│    ○ Record demo")));
-        assert!(rendered
-            .iter()
-            .any(|line| line.contains("○ [r] Run checks")));
-        assert!(rendered
-            .iter()
-            .any(|line| line.contains("• Plain milestone")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("◉ [d] Start demo"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("│  ✓ Prepare demo workspace"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("│    ○ Record demo"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("○ [r] Run checks"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("• Plain milestone"))
+        );
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].action.id, "start-demo");
         assert_eq!(hits[0].action.key.as_deref(), Some("d"));
