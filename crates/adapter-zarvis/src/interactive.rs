@@ -10,11 +10,11 @@
 //! The TUI's `vt100`-backed terminal pane parses these bytes the same
 //! way it parses any other PTY-backed adapter's output.
 
-use crate::agent::{ResolvedModel, push_msg, system_prompt_for_env};
+use crate::agent::{push_msg, system_prompt_for_env, ResolvedModel};
 use crate::context;
 use crate::persist::{self, Persist};
 use crate::provider::{self, Content, Message, Role, StopReason, TextSink, ToolCall};
-use crate::tools::{ToolCtx, ToolOutcome, ToolRegistry, truncate_for_model};
+use crate::tools::{truncate_for_model, ToolCtx, ToolOutcome, ToolRegistry};
 use agentd_protocol::adapter::{AdapterContext, AdapterInboxMsg, EventEmitter};
 use agentd_protocol::{ApprovalMode, SessionEvent, SessionStartParams, SessionState, ToolRisk};
 use anyhow::Result;
@@ -1368,7 +1368,10 @@ mod tests {
         let s = String::from_utf8(observation_panel_echo(obs).unwrap()).unwrap();
         assert!(s.contains("ambient monitor flagged:"), "{s}");
         assert!(s.contains("s277 \"x\": blocked at prompt"), "{s}");
-        assert!(!s.contains("Decide whether to surface"), "boilerplate kept:\n{s}");
+        assert!(
+            !s.contains("Decide whether to surface"),
+            "boilerplate kept:\n{s}"
+        );
     }
 
     #[test]
@@ -1396,7 +1399,11 @@ mod tests {
         let now = chrono::Utc::now();
         let stale = now.timestamp_millis() - 15 * 60_000; // quiet 15m → idle
         let fresh = now.timestamp_millis();
-        fn summary(id: &str, state: &str, last_pty_ms: Option<i64>) -> agentd_protocol::SessionSummary {
+        fn summary(
+            id: &str,
+            state: &str,
+            last_pty_ms: Option<i64>,
+        ) -> agentd_protocol::SessionSummary {
             let mut v = serde_json::json!({
                 "id": id, "harness": "claude", "cwd": "/x",
                 "state": state, "created_at": "2026-06-06T00:00:00Z"
@@ -3202,9 +3209,11 @@ fn ambient_session_is_active(
     let recent_event = session
         .last_event_at
         .is_some_and(|last| (now - last).num_milliseconds().max(0) <= window_ms);
-    recent_pty || recent_event || session.state == agentd_protocol::SessionState::Running
-        && session.last_pty_at_ms.is_none()
-        && session.last_event_at.is_none()
+    recent_pty
+        || recent_event
+        || session.state == agentd_protocol::SessionState::Running
+            && session.last_pty_at_ms.is_none()
+            && session.last_event_at.is_none()
 }
 
 /// Build the ambient-tick observation text. Pulls a live fleet snapshot from
@@ -3377,7 +3386,10 @@ async fn fetch_session_preview(
         return None;
     }
     msgs.reverse();
-    Some(truncate_keep_tail(&format!("  {}", msgs.join("\n  ")), max_bytes))
+    Some(truncate_keep_tail(
+        &format!("  {}", msgs.join("\n  ")),
+        max_bytes,
+    ))
 }
 
 /// Render the recent PTY-log tail through a `vt100` parser and return the
@@ -3411,7 +3423,10 @@ async fn pty_screen_preview(
     if lines.is_empty() {
         return None;
     }
-    Some(truncate_keep_tail(&format!("  {}", lines.join("\n  ")), max_bytes))
+    Some(truncate_keep_tail(
+        &format!("  {}", lines.join("\n  ")),
+        max_bytes,
+    ))
 }
 
 /// Pure snapshot builder: counts active sessions by state (including idle
@@ -3484,7 +3499,11 @@ fn compute_ambient_snapshot(
                         format!("{} running but quiet {pm}m (idle/waiting?)", label(s)),
                     ));
                 } else {
-                    let ago = if pm < 0 { "?".to_string() } else { format!("{pm}m") };
+                    let ago = if pm < 0 {
+                        "?".to_string()
+                    } else {
+                        format!("{pm}m")
+                    };
                     active_list.push((
                         pm.max(0),
                         s.id.clone(),
@@ -3501,8 +3520,10 @@ fn compute_ambient_snapshot(
             }
             SessionState::Errored => {
                 errored += 1;
-                errored_list
-                    .push((s.id.clone(), format!("{} errored {}m ago", label(s), event_idle_min(s))));
+                errored_list.push((
+                    s.id.clone(),
+                    format!("{} errored {}m ago", label(s), event_idle_min(s)),
+                ));
             }
             _ => {}
         }

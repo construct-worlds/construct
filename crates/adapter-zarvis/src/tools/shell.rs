@@ -209,7 +209,10 @@ impl Tool for WriteStdin {
         ToolRisk::Risky
     }
     fn args_summary(&self, input: &Value) -> String {
-        let id = input.get("session_id").and_then(|s| s.as_str()).unwrap_or("?");
+        let id = input
+            .get("session_id")
+            .and_then(|s| s.as_str())
+            .unwrap_or("?");
         let data = input.get("data").and_then(|s| s.as_str()).unwrap_or("");
         let eof = input.get("eof").and_then(|b| b.as_bool()).unwrap_or(false);
         let preview: String = data.chars().take(60).collect();
@@ -372,7 +375,10 @@ mod tests {
         );
 
         let done = WriteStdin
-            .run(json!({"session_id": id, "eof": true, "timeout_sec": 1}), &ctx)
+            .run(
+                json!({"session_id": id, "eof": true, "timeout_sec": 1}),
+                &ctx,
+            )
             .await
             .expect("run returns Ok");
         assert!(

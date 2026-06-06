@@ -305,9 +305,7 @@ mod tests {
         let messages = vec![
             Message {
                 role: Role::User,
-                content: Content::Text {
-                    text: "hi".into(),
-                },
+                content: Content::Text { text: "hi".into() },
             },
             Message {
                 role: Role::Assistant,

@@ -60,9 +60,7 @@ fn provider_for(p: Provider) -> Result<Box<dyn LlmProvider>> {
         // emits openai/anthropic/ollama. Bail loudly if we ever get
         // here so the contract doesn't drift silently.
         Provider::CodexOauth => {
-            return Err(anyhow!(
-                "title-gen does not support codex-oauth provider"
-            ));
+            return Err(anyhow!("title-gen does not support codex-oauth provider"));
         }
     })
 }
@@ -83,7 +81,13 @@ pub async fn suggest_title(user_prompt: &str) -> Result<String> {
     let tools: Vec<ToolSpec> = Vec::new();
     let mut sink = CaptureSink::default();
     let _turn = provider
-        .complete(&spec.model, TITLE_SYSTEM_PROMPT, &messages, &tools, &mut sink)
+        .complete(
+            &spec.model,
+            TITLE_SYSTEM_PROMPT,
+            &messages,
+            &tools,
+            &mut sink,
+        )
         .await?;
     Ok(sanitize_title(&sink.text))
 }
@@ -94,9 +98,9 @@ pub async fn suggest_title(user_prompt: &str) -> Result<String> {
 /// safety buffer.
 fn sanitize_title(raw: &str) -> String {
     let line = raw.lines().next().unwrap_or("");
-    let mut s = line.trim().trim_matches(|c: char| {
-        c == '"' || c == '\'' || c == '`' || c == '*' || c == '#'
-    });
+    let mut s = line
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '*' || c == '#');
     // Strip a single pair of surrounding quotes after the trim-match above
     // catches the easy cases.
     while let (Some('"'), Some('"')) = (s.chars().next(), s.chars().last()) {
@@ -113,13 +117,19 @@ mod tests {
 
     #[test]
     fn sanitize_strips_quotes_and_markdown() {
-        assert_eq!(sanitize_title("\"Refactor Adapter Spawning\""), "Refactor Adapter Spawning");
+        assert_eq!(
+            sanitize_title("\"Refactor Adapter Spawning\""),
+            "Refactor Adapter Spawning"
+        );
         assert_eq!(sanitize_title("`Add Pty Logging`"), "Add Pty Logging");
         assert_eq!(sanitize_title("**Plan The Refactor**"), "Plan The Refactor");
     }
     #[test]
     fn sanitize_first_line_only() {
-        assert_eq!(sanitize_title("Title Here\nextra explanation"), "Title Here");
+        assert_eq!(
+            sanitize_title("Title Here\nextra explanation"),
+            "Title Here"
+        );
     }
     #[test]
     fn sanitize_caps_length() {

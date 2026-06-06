@@ -6,7 +6,7 @@
 use crate::context;
 use crate::persist::{self, Persist};
 use crate::provider::{self, Content, LlmProvider, Message, Role, StopReason, TextSink, ToolCall};
-use crate::tools::{ToolCtx, ToolOutcome, ToolRegistry, truncate_for_model};
+use crate::tools::{truncate_for_model, ToolCtx, ToolOutcome, ToolRegistry};
 use agentd_protocol::adapter::{AdapterContext, AdapterInboxMsg, EventEmitter};
 use agentd_protocol::{MessageRole, SessionEvent, SessionStartParams, SessionState, ToolRisk};
 use anyhow::Result;
@@ -1462,10 +1462,8 @@ mod tests {
     #[test]
     fn auto_review_prompt_guides_model_toward_routine_repo_work() {
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("active git worktree"));
-        assert!(
-            AUTO_REVIEW_SYSTEM_PROMPT
-                .contains("git makes those changes inspectable and reversible")
-        );
+        assert!(AUTO_REVIEW_SYSTEM_PROMPT
+            .contains("git makes those changes inspectable and reversible"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("cargo fmt --all"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("cargo test"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("git diff --name-only"));

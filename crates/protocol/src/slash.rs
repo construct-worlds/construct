@@ -284,14 +284,14 @@ pub const COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         id: CommandId::Agentd,
-        name: "/agentd",
-        aliases: &[],
+        name: "/construct",
+        aliases: &["agentd"],
         args: Args::Required,
         routing: Routing::Client,
         visibility: ModelVisibility::Hidden,
-        transcript: TranscriptPolicy::AuditOnly, // forensics: e.g. `/agentd restart`
+        transcript: TranscriptPolicy::AuditOnly, // forensics: e.g. `/construct restart`
         render: Render::SystemNote,
-        help: "Daemon control (e.g. /agentd restart)",
+        help: "Daemon control (e.g. /construct restart)",
         in_popup: true,
     },
     SlashCommand {
@@ -395,7 +395,11 @@ mod tests {
             // Name and every alias must resolve back to this exact row.
             assert_eq!(SlashCommand::resolve(c.name).map(|r| r.id), Some(c.id));
             for a in c.aliases {
-                assert_eq!(SlashCommand::resolve(a).map(|r| r.id), Some(c.id), "alias {a}");
+                assert_eq!(
+                    SlashCommand::resolve(a).map(|r| r.id),
+                    Some(c.id),
+                    "alias {a}"
+                );
             }
             assert_eq!(SlashCommand::by_id(c.id).name, c.name);
         }
@@ -403,9 +407,18 @@ mod tests {
 
     #[test]
     fn resolve_is_slash_and_case_insensitive() {
-        assert_eq!(SlashCommand::resolve("/Zoom").map(|c| c.id), Some(CommandId::Zoom));
-        assert_eq!(SlashCommand::resolve("zoom").map(|c| c.id), Some(CommandId::Zoom));
-        assert_eq!(SlashCommand::resolve("fullscreen").map(|c| c.id), Some(CommandId::Zoom));
+        assert_eq!(
+            SlashCommand::resolve("/Zoom").map(|c| c.id),
+            Some(CommandId::Zoom)
+        );
+        assert_eq!(
+            SlashCommand::resolve("zoom").map(|c| c.id),
+            Some(CommandId::Zoom)
+        );
+        assert_eq!(
+            SlashCommand::resolve("fullscreen").map(|c| c.id),
+            Some(CommandId::Zoom)
+        );
         assert!(SlashCommand::resolve("/definitely-not-a-command").is_none());
         assert!(SlashCommand::resolve("/").is_none());
     }

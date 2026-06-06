@@ -118,10 +118,7 @@ fn normalize(path: &Path) -> Vec<std::ffi::OsString> {
     out
 }
 
-fn starts_with_components(
-    path: &[std::ffi::OsString],
-    prefix: &[std::ffi::OsString],
-) -> bool {
+fn starts_with_components(path: &[std::ffi::OsString], prefix: &[std::ffi::OsString]) -> bool {
     path.len() >= prefix.len() && path.iter().zip(prefix).all(|(a, b)| a == b)
 }
 

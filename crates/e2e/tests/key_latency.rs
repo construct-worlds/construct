@@ -55,9 +55,8 @@ async fn repeated_key_latency() {
         .expect("create shell session");
     eprintln!("created shell session {session_id}");
 
-    let mut tui = Tui::spawn_with_recording(&d.socket, "key_latency")
-        .expect("spawn TUI");
-    tui.wait_for("agentd  focus:", Duration::from_secs(15))
+    let mut tui = Tui::spawn_with_recording(&d.socket, "key_latency").expect("spawn TUI");
+    tui.wait_for("construct  focus:", Duration::from_secs(15))
         .await
         .expect("modeline");
 
@@ -175,9 +174,13 @@ async fn measure_type_burst(tui: &mut Tui) -> Duration {
     for _ in 0..MARKER_LEN {
         tui.send(b"Z").ok();
     }
-    wait_until(tui, |s| count_char(s, 'Z') >= MARKER_LEN, Duration::from_secs(30))
-        .await
-        .expect("type burst never fully echoed");
+    wait_until(
+        tui,
+        |s| count_char(s, 'Z') >= MARKER_LEN,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("type burst never fully echoed");
     t0.elapsed()
 }
 
@@ -203,9 +206,13 @@ async fn measure_arrow_burst(tui: &mut Tui) -> Duration {
     for _ in 0..MARKER_LEN {
         tui.send(b"Y").ok();
     }
-    wait_until(tui, |s| count_char(s, 'Y') >= MARKER_LEN, Duration::from_secs(10))
-        .await
-        .expect("arrow marker never rendered");
+    wait_until(
+        tui,
+        |s| count_char(s, 'Y') >= MARKER_LEN,
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("arrow marker never rendered");
 
     let t0 = Instant::now();
     for _ in 0..MARKER_LEN {
@@ -234,4 +241,3 @@ async fn wait_until(
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }
-

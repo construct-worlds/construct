@@ -5,12 +5,12 @@ use crate::config::Config;
 use crate::storage::Storage;
 use crate::worktree;
 use agentd_protocol::{
-    ahp_method, ClientView, CreateSessionParams, DeletedNotificationPayload, EventNotificationPayload,
-    GroupDeletedNotificationPayload, GroupStateNotificationPayload, GroupSummary, HarnessInfo,
-    MessageRole, MoveDirection, PtyReplayResult, PtySize, SessionAttachClipboardParams,
-    SessionAttachClipboardResult, SessionDetail, SessionEmitEventParams, SessionEvent,
-    SessionStartParams, SessionState, SessionSummary, SessionWidgetDeleteParams,
-    StateNotificationPayload, TimestampedEvent, TranscriptResult,
+    ahp_method, ClientView, CreateSessionParams, DeletedNotificationPayload,
+    EventNotificationPayload, GroupDeletedNotificationPayload, GroupStateNotificationPayload,
+    GroupSummary, HarnessInfo, MessageRole, MoveDirection, PtyReplayResult, PtySize,
+    SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
+    SessionEmitEventParams, SessionEvent, SessionStartParams, SessionState, SessionSummary,
+    SessionWidgetDeleteParams, StateNotificationPayload, TimestampedEvent, TranscriptResult,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
@@ -422,6 +422,14 @@ struct PtyInputCapture {
 
 fn should_record_pty_user_message(harness: &str) -> bool {
     matches!(harness, "claude" | "antigravity")
+}
+
+fn smith_adapter_name(name: &str) -> &str {
+    if name == "zarvis" {
+        "smith"
+    } else {
+        name
+    }
 }
 
 impl SessionEntry {
@@ -1243,16 +1251,17 @@ impl SessionManager {
     }
 
     pub async fn create(self: &Arc<Self>, params: CreateSessionParams) -> Result<String> {
+        let harness = smith_adapter_name(&params.harness);
         let adapter_cfg = self
             .config
             .adapters
-            .get(&params.harness)
+            .get(harness)
             .ok_or_else(|| anyhow!("unknown harness: {}", params.harness))?
             .clone();
         let binary_spec = adapter_cfg
             .binary
             .clone()
-            .unwrap_or_else(|| params.harness.clone());
+            .unwrap_or_else(|| harness.to_string());
         let binary = locate_binary(&binary_spec)
             .ok_or_else(|| anyhow!("adapter binary not found: {}", binary_spec))?;
 
@@ -1279,7 +1288,7 @@ impl SessionManager {
 
         let mut summary = SessionSummary {
             id: id.clone(),
-            harness: params.harness.clone(),
+            harness: harness.to_string(),
             cwd: effective_cwd.to_string_lossy().to_string(),
             title: params.title.clone(),
             state: SessionState::Pending,
@@ -1368,7 +1377,7 @@ impl SessionManager {
         self.install_memory_env(&mut env_with_meta, params.group_id.as_deref());
 
         let (adapter, info) = Adapter::spawn_reconnectable(
-            params.harness.clone(),
+            harness.to_string(),
             binary,
             combined_args,
             env_with_meta.clone(),
@@ -1376,7 +1385,7 @@ impl SessionManager {
             msg_tx.clone(),
         )
         .await
-        .with_context(|| format!("spawn adapter for {}", params.harness))?;
+        .with_context(|| format!("spawn adapter for {}", harness))?;
 
         // Apply capability-derived info.
         if summary.model.is_none() {
@@ -1805,8 +1814,7 @@ impl SessionManager {
                 loop {
                     tokio::time::sleep(RESPAWN_REDRAW_POLL).await;
                     let last = entry_for_redraw.summary.read().await.last_pty_at_ms;
-                    if resume_redraw_ready(last, Utc::now().timestamp_millis(), started.elapsed())
-                    {
+                    if resume_redraw_ready(last, Utc::now().timestamp_millis(), started.elapsed()) {
                         break;
                     }
                 }
@@ -2353,10 +2361,16 @@ impl SessionManager {
         if prompt.trim().is_empty() {
             return;
         }
-        let Some(zarvis_cfg) = self.config.adapters.get("zarvis").cloned() else {
+        let Some(zi) = self
+            .config
+            .adapters
+            .get("smith")
+            .or_else(|| self.config.adapters.get("zarvis"))
+            .cloned()
+        else {
             return;
         };
-        let binary_spec = zarvis_cfg
+        let binary_spec = zi
             .binary
             .clone()
             .unwrap_or_else(|| "agentd-adapter-zarvis".to_string());
@@ -3430,7 +3444,7 @@ fn effective_mode(params: &CreateSessionParams) -> String {
 
 fn builtin_harness_capabilities(name: &str) -> agentd_protocol::Capabilities {
     match name {
-        "shell" | "claude" | "codex" | "zarvis" => agentd_protocol::Capabilities {
+        "shell" | "claude" | "codex" | "smith" | "zarvis" => agentd_protocol::Capabilities {
             supports_pty: true,
             ..Default::default()
         },
@@ -3597,11 +3611,23 @@ mod tests {
         // Nothing drawn yet, well under the cap → wait.
         assert!(!resume_redraw_ready(None, now, Duration::from_millis(0)));
         // Output 50ms ago (< settle) → still drawing, wait.
-        assert!(!resume_redraw_ready(Some(now - 50), now, Duration::from_secs(1)));
+        assert!(!resume_redraw_ready(
+            Some(now - 50),
+            now,
+            Duration::from_secs(1)
+        ));
         // Quiet for exactly the settle window → fire.
-        assert!(resume_redraw_ready(Some(now - settle), now, Duration::from_secs(1)));
+        assert!(resume_redraw_ready(
+            Some(now - settle),
+            now,
+            Duration::from_secs(1)
+        ));
         // Quiet well past settle → fire.
-        assert!(resume_redraw_ready(Some(now - 5_000), now, Duration::from_secs(1)));
+        assert!(resume_redraw_ready(
+            Some(now - 5_000),
+            now,
+            Duration::from_secs(1)
+        ));
         // Never settles (recent output) but hit the hard cap → fire anyway.
         assert!(resume_redraw_ready(Some(now), now, RESPAWN_REDRAW_MAX_WAIT));
         // Never drew anything, but hit the hard cap → fire anyway.

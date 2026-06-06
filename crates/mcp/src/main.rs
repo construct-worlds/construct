@@ -80,11 +80,7 @@ async fn run(client: Arc<Client>, session_id: Option<String>) -> Result<()> {
     }
 }
 
-async fn handle_request(
-    client: &Arc<Client>,
-    session_id: Option<&str>,
-    req: Request,
-) -> Response {
+async fn handle_request(client: &Arc<Client>, session_id: Option<&str>, req: Request) -> Response {
     let id = req.id.clone();
     let params = req.params.clone().unwrap_or(serde_json::Value::Null);
 

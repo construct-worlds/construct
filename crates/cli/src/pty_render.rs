@@ -1134,14 +1134,12 @@ impl ItemHistory {
                 return None;
             }
             match self.items.get(c.processed_count) {
-                Some(Item::PtyChunk(bytes)) if bytes.len() >= c.pending_consumed => {
-                    Some((
-                        c.processed_count,
-                        c.pending_consumed,
-                        c.pending_visible_lines,
-                        c.pending_end_col,
-                    ))
-                }
+                Some(Item::PtyChunk(bytes)) if bytes.len() >= c.pending_consumed => Some((
+                    c.processed_count,
+                    c.pending_consumed,
+                    c.pending_visible_lines,
+                    c.pending_end_col,
+                )),
                 _ => None,
             }
         });
@@ -3266,10 +3264,8 @@ mod tests {
             let mut chat = Vec::with_capacity(900);
             for j in 0..8 {
                 chat.extend_from_slice(
-                    format!(
-                        "\x1b[33mhistory {i}.{j} before the clicked tool block\x1b[0m\r\n"
-                    )
-                    .as_bytes(),
+                    format!("\x1b[33mhistory {i}.{j} before the clicked tool block\x1b[0m\r\n")
+                        .as_bytes(),
                 );
             }
             h.feed_pty(&chat);
@@ -3303,10 +3299,7 @@ mod tests {
         let expanded = h.replay(cols, rows, 0);
         let expand_us = expand_t.elapsed().as_micros();
         assert!(
-            expanded
-                .blocks
-                .iter()
-                .any(|hit| hit.call_id == target),
+            expanded.blocks.iter().any(|hit| hit.call_id == target),
             "expanded block hit rect should survive suffix rebuild: {:?}",
             expanded.blocks
         );
@@ -3316,10 +3309,7 @@ mod tests {
         let collapsed = h.replay(cols, rows, 0);
         let collapse_us = collapse_t.elapsed().as_micros();
         assert!(
-            collapsed
-                .blocks
-                .iter()
-                .any(|hit| hit.call_id == target),
+            collapsed.blocks.iter().any(|hit| hit.call_id == target),
             "collapsed block hit rect should survive suffix rebuild"
         );
 
@@ -3395,8 +3385,7 @@ mod tests {
             let mut chat = Vec::with_capacity(900);
             for j in 0..8 {
                 chat.extend_from_slice(
-                    format!("\x1b[33mhistory {i}.{j} before partial pending\x1b[0m\r\n")
-                        .as_bytes(),
+                    format!("\x1b[33mhistory {i}.{j} before partial pending\x1b[0m\r\n").as_bytes(),
                 );
             }
             h.feed_pty(&chat);

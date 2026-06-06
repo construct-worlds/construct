@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
-pub const DEFAULT_CONFIG_TOML: &str = r#"# agentd configuration
+pub const DEFAULT_CONFIG_TOML: &str = r#"# construct configuration
 # Each [adapters.<name>] entry registers a harness. The daemon looks up the
 # binary in PATH or alongside the daemon binary. Use `binary = "/abs/path"`
 # to override.
@@ -23,12 +23,14 @@ pub const DEFAULT_CONFIG_TOML: &str = r#"# agentd configuration
 # binary = "agentd-adapter-codex"
 # description = "OpenAI Codex"
 
-# [adapters.zarvis.env]
+# [adapters.smith.env]
 # # Per-harness env vars merged into every spawned session. Lets
 # # operators set defaults like the model from config.toml instead
 # # of needing to export them in the shell that launches the daemon.
 # # Per-session env (`agent new --env KEY=VAL`) takes precedence.
 # # AGENTD_ZARVIS_MODEL = "codex-oauth:gpt-5.5"
+# #
+# # "zarvis" remains supported as a compatibility alias.
 
 # [defaults]
 # worktree = false   # default value of session.worktree if not specified
@@ -49,7 +51,7 @@ pub struct OrchestratorConfig {
     /// Which harness backs the daemon-created orchestrator session.
     /// `None` (TOML: `harness = ""` or `enabled = false`) disables
     /// the orchestrator entirely — clients then fall back to the
-    /// static command palette. Default: `"zarvis"`.
+    /// static command palette. Default: `"smith"`.
     #[serde(default)]
     pub harness: Option<String>,
     /// Hard kill switch; set to `false` to disable the orchestrator
@@ -65,7 +67,7 @@ fn default_orchestrator_enabled() -> bool {
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
-            harness: Some("zarvis".to_string()),
+            harness: Some("smith".to_string()),
             enabled: true,
         }
     }
@@ -97,11 +99,13 @@ pub struct AdapterConfig {
     /// per-session env takes precedence so an explicit
     /// `agent new --env KEY=VAL` still overrides.
     ///
-    /// Example: pin every new zarvis session to use the Codex OAuth
+    /// Example: pin every new smith (formerly zarvis) session to use the
+    /// Codex OAuth path (subscription-billed) instead of the heuristic
+    /// fallback:
     /// path (subscription-billed) instead of the heuristic fallback:
     ///
     /// ```toml
-    /// [adapters.zarvis]
+    /// [adapters.smith]
     /// env = { AGENTD_ZARVIS_MODEL = "codex-oauth:gpt-5.5" }
     /// ```
     #[serde(default)]
@@ -142,9 +146,14 @@ pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
         description: "Google Antigravity (wraps the `agy` CLI)",
     },
     BuiltinAdapter {
-        name: "zarvis",
+        name: "smith",
         binary: "agentd-adapter-zarvis",
         description: "Built-in multi-provider agent (OpenAI / Anthropic / Ollama)",
+    },
+    BuiltinAdapter {
+        name: "zarvis",
+        binary: "agentd-adapter-zarvis",
+        description: "Compatibility alias for smith",
     },
 ];
 
@@ -154,8 +163,7 @@ impl Config {
         let mut cfg = if path.exists() {
             let s = std::fs::read_to_string(&path)
                 .with_context(|| format!("read {}", path.display()))?;
-            toml::from_str::<Config>(&s)
-                .with_context(|| format!("parse {}", path.display()))?
+            toml::from_str::<Config>(&s).with_context(|| format!("parse {}", path.display()))?
         } else {
             Self::default()
         };

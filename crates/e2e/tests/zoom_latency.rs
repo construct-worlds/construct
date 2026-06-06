@@ -50,9 +50,8 @@ async fn zoom_toggle_latency() {
         .await
         .expect("create shell session");
 
-    let mut tui = Tui::spawn_with_recording(&d.socket, "zoom_latency")
-        .expect("spawn TUI");
-    tui.wait_for("agentd  focus:", Duration::from_secs(15))
+    let mut tui = Tui::spawn_with_recording(&d.socket, "zoom_latency").expect("spawn TUI");
+    tui.wait_for("construct  focus:", Duration::from_secs(15))
         .await
         .expect("modeline");
 

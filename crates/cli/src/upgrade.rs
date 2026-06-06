@@ -98,7 +98,9 @@ async fn fetch_latest() -> Option<String> {
         .build()
         .ok()?;
     let resp = client
-        .get(format!("https://api.github.com/repos/{REPO}/releases/latest"))
+        .get(format!(
+            "https://api.github.com/repos/{REPO}/releases/latest"
+        ))
         .header("User-Agent", "agentd-cli")
         .header("Accept", "application/vnd.github+json")
         .send()
@@ -143,7 +145,7 @@ pub fn cached_update_notice() -> Option<String> {
 /// The notice string for `latest` vs `current`, or `None` when `latest` is
 /// not strictly newer (or unparseable).
 fn notice_for(latest: &str, current: &str) -> Option<String> {
-    is_newer(latest, current).then(|| format!("↑ agentd {latest} · agent upgrade"))
+    is_newer(latest, current).then(|| format!("↑ construct {latest} · agent upgrade"))
 }
 
 // --- `agent upgrade` -------------------------------------------------------
@@ -161,11 +163,15 @@ pub async fn run(
     if check {
         match fetch_latest().await {
             Some(latest) if is_newer(&latest, current) => {
-                println!("agentd {latest} available (you have {current}). Run `agent upgrade`.");
+                println!("construct {latest} available (you have {current}). Run `agent upgrade`.");
             }
-            Some(latest) => println!("up to date (agentd {current}; latest {latest})."),
+            Some(latest) => {
+                println!("up to date (construct {current}; latest {latest}).")
+            }
             None => {
-                println!("could not determine the latest version (offline, or no public release yet).")
+                println!(
+                    "could not determine the latest version (offline, or no public release yet)."
+                )
             }
         }
         return Ok(());
@@ -198,7 +204,7 @@ pub async fn run(
     }
 
     let target = version.as_deref().unwrap_or("latest");
-    println!("Upgrading agentd to {target} in {}", dir.display());
+    println!("Upgrading construct to {target} in {}", dir.display());
 
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg(script.path()).env("AGENTD_BIN_DIR", &dir);
@@ -222,7 +228,7 @@ pub async fn run(
             Err(_) => println!("Upgraded. (No running daemon to restart.)"),
         }
     } else {
-        println!("Upgraded. Run `/agentd restart` in the TUI (or restart the daemon) to apply.");
+        println!("Upgraded. Run `/construct restart` in the TUI (or restart the daemon) to apply.");
     }
     Ok(())
 }
@@ -257,7 +263,7 @@ mod tests {
     fn notice_only_when_a_newer_version_exists() {
         assert_eq!(
             notice_for("0.2.0", "0.1.0").as_deref(),
-            Some("↑ agentd 0.2.0 · agent upgrade")
+            Some("↑ construct 0.2.0 · agent upgrade")
         );
         assert_eq!(notice_for("0.1.0", "0.1.0"), None);
         assert_eq!(notice_for("0.1.0", "0.2.0"), None);

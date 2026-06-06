@@ -25,7 +25,9 @@ use agentd_e2e::{Daemon, Tui};
 /// runs the new bytes, with the PID preserved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_reloads_updated_binary() {
-    let d = Daemon::spawn_relocatable().await.expect("spawn relocatable daemon");
+    let d = Daemon::spawn_relocatable()
+        .await
+        .expect("spawn relocatable daemon");
     let pid = d.pid().expect("daemon pid");
 
     // On Linux we can directly observe which inode the process is
@@ -87,7 +89,9 @@ async fn restart_reloads_updated_binary() {
         // Non-Linux (local macOS dev): no /proc. The PID-preserved
         // + daemon-responsive checks above still demonstrate that
         // exec() of the on-disk path succeeded after the swap.
-        eprintln!("note: /proc unavailable; skipped inode assertion (PID + liveness checks passed)");
+        eprintln!(
+            "note: /proc unavailable; skipped inode assertion (PID + liveness checks passed)"
+        );
     }
 }
 
@@ -100,11 +104,10 @@ async fn restart_reloads_updated_binary() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tui_auto_reconnects_after_restart() {
     let d = Daemon::spawn().await.expect("spawn daemon");
-    let mut tui = Tui::spawn_with_recording(&d.socket, "restart_tui_reconnect")
-        .expect("spawn TUI");
+    let mut tui = Tui::spawn_with_recording(&d.socket, "restart_tui_reconnect").expect("spawn TUI");
 
     // Connected: modeline drawn.
-    tui.wait_for("agentd  focus:", Duration::from_secs(15))
+    tui.wait_for("construct  focus:", Duration::from_secs(15))
         .await
         .expect("modeline never rendered");
 
@@ -207,7 +210,10 @@ async fn web_client_reconnects_to_same_url_after_restart() {
         .expect("evaluate")
         .into_value::<bool>()
         .unwrap_or(false);
-    assert!(xterm_present, "web client lost its bundled xterm after reconnect");
+    assert!(
+        xterm_present,
+        "web client lost its bundled xterm after reconnect"
+    );
 }
 
 // ---------------------------------------------------------------------------

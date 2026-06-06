@@ -188,10 +188,7 @@ impl Daemon {
         let deadline = Instant::now() + Duration::from_secs(15);
         while !socket.exists() {
             if Instant::now() > deadline {
-                anyhow::bail!(
-                    "daemon did not bind {} within 15s",
-                    socket.display()
-                );
+                anyhow::bail!("daemon did not bind {} within 15s", socket.display());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -345,8 +342,7 @@ impl Tui {
             .map_err(|e| anyhow!("clone_reader: {e}"))?;
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(
-            size.rows,
-            size.cols,
+            size.rows, size.cols,
             // Scrollback budget: 1000 lines is plenty for any
             // assertion the tests do today and small enough not
             // to hold huge memory.
@@ -403,11 +399,8 @@ impl Tui {
                             // byte-for-byte log. Most PTY
                             // output is UTF-8 anyway.
                             let chunk = String::from_utf8_lossy(&buf[..n]);
-                            let event = serde_json::json!([
-                                start.elapsed().as_secs_f64(),
-                                "o",
-                                chunk,
-                            ]);
+                            let event =
+                                serde_json::json!([start.elapsed().as_secs_f64(), "o", chunk,]);
                             let _ = writeln!(w, "{event}");
                         }
                     }
@@ -545,15 +538,27 @@ fn bin_path(name: &str) -> Result<PathBuf> {
     // spawns release daemons/TUIs (which is what perf benchmarks
     // want — debug renders are an order of magnitude slower and
     // not representative of the real experience).
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     let p = target_dir().join(profile).join(&exe);
     if !p.exists() {
         anyhow::bail!(
             "expected {} — run `cargo build --workspace{}` before \
              `cargo test -p agentd-e2e{}`",
             p.display(),
-            if profile == "release" { " --release" } else { "" },
-            if profile == "release" { " --release" } else { "" },
+            if profile == "release" {
+                " --release"
+            } else {
+                ""
+            },
+            if profile == "release" {
+                " --release"
+            } else {
+                ""
+            },
         );
     }
     Ok(p)

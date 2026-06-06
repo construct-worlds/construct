@@ -137,5 +137,7 @@ pub fn locate_sibling_binary(name: &str) -> Option<PathBuf> {
 }
 
 fn env_dir(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
 }

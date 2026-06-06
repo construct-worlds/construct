@@ -57,11 +57,7 @@ impl TextSink for CaptureSink {
 
 /// Ask the model for an interval in seconds for this loop's prompt.
 /// Returns a clamped value; failures fall back to the lower bound.
-pub async fn suggest(
-    provider: &dyn LlmProvider,
-    model: &str,
-    user_prompt: &str,
-) -> Result<u64> {
+pub async fn suggest(provider: &dyn LlmProvider, model: &str, user_prompt: &str) -> Result<u64> {
     let messages = vec![Message {
         role: Role::User,
         content: Content::Text {
@@ -73,7 +69,9 @@ pub async fn suggest(
     let _turn = provider
         .complete(model, SYSTEM_PROMPT, &messages, &tools, &mut sink)
         .await?;
-    Ok(parse_secs(&sink.text).map(clamp).unwrap_or_else(|| bounds().0))
+    Ok(parse_secs(&sink.text)
+        .map(clamp)
+        .unwrap_or_else(|| bounds().0))
 }
 
 /// Extract the first run of digits in the response, parse it,

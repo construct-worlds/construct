@@ -3,17 +3,15 @@
 use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
     ipc_method, transport, ChatViewerActiveResult, ClientView, CreateSessionParams, DiffResult,
-    ErrorObject, GroupCreateParams,
-    GroupDeleteParams, GroupMoveParams, GroupRenameParams, GroupSetCollapsedParams, GroupSummary,
-    HarnessInfo, MoveDirection, Notification, PingResult, ProjectCreateParams, ProjectCreateResult,
-    ProjectDeleteParams, ProjectMoveParams, ProjectRenameParams, ProjectSetCollapsedParams,
-    ProjectSummary, PtyReplayResult, Request, Response, SessionAttachClipboardParams,
-    SessionAttachClipboardResult, SessionDetail, SessionEmitEventParams, SessionIdParams,
-    SessionInputParams, SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams,
-    SessionSetApprovalModeParams, SessionSetPinnedParams, SessionSetProjectParams,
-    SessionSetTitleParams, SessionSetViewParams, SessionSummary, SessionToolDecisionParams,
-    SubscribeParams,
-    TranscriptParams, TranscriptResult,
+    ErrorObject, GroupCreateParams, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
+    GroupSetCollapsedParams, GroupSummary, HarnessInfo, MoveDirection, Notification, PingResult,
+    ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams, ProjectMoveParams,
+    ProjectRenameParams, ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, Request,
+    Response, SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
+    SessionEmitEventParams, SessionIdParams, SessionInputParams, SessionMoveParams,
+    SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
+    SessionSetPinnedParams, SessionSetProjectParams, SessionSetTitleParams, SessionSetViewParams,
+    SessionSummary, SessionToolDecisionParams, SubscribeParams, TranscriptParams, TranscriptResult,
 };
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;

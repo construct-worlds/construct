@@ -374,7 +374,11 @@ mod tests {
 
         // read_only: true → Safe (fans out, skips the gate).
         assert!(matches!(
-            effective_risk(&shell, &json!({ "command": "cat a.rs", "read_only": true }), &cwd),
+            effective_risk(
+                &shell,
+                &json!({ "command": "cat a.rs", "read_only": true }),
+                &cwd
+            ),
             ToolRisk::Safe
         ));
 
@@ -384,7 +388,11 @@ mod tests {
             ToolRisk::Risky
         ));
         assert!(matches!(
-            effective_risk(&shell, &json!({ "command": "cat a.rs", "read_only": false }), &cwd),
+            effective_risk(
+                &shell,
+                &json!({ "command": "cat a.rs", "read_only": false }),
+                &cwd
+            ),
             ToolRisk::Risky
         ));
 

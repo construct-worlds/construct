@@ -265,9 +265,20 @@ async fn web_client_loads_and_websocket_connects() {
         .expect("evaluate terminal fast-open")
         .into_value()
         .expect("json value");
-    assert_eq!(fast_open["replayCalls"][0]["max_bytes"], 128 * 1024, "{fast_open:?}");
-    assert_eq!(fast_open["replayCalls"][1]["max_bytes"], 128 * 1024, "{fast_open:?}");
-    assert_eq!(fast_open["replayCalls"][1]["before_offset"], 1048576, "{fast_open:?}");
+    assert_eq!(
+        fast_open["replayCalls"][0]["max_bytes"],
+        128 * 1024,
+        "{fast_open:?}"
+    );
+    assert_eq!(
+        fast_open["replayCalls"][1]["max_bytes"],
+        128 * 1024,
+        "{fast_open:?}"
+    );
+    assert_eq!(
+        fast_open["replayCalls"][1]["before_offset"], 1048576,
+        "{fast_open:?}"
+    );
     assert_eq!(fast_open["afterInitialHidden"], false);
     assert_eq!(fast_open["afterOlderHidden"], true);
 

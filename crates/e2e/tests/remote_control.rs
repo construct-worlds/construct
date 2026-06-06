@@ -43,7 +43,10 @@ async fn remote_control_security_and_lifecycle() {
         "expected local URL, got {}",
         r.url
     );
-    assert!(!r.password.is_empty(), "auto-gen password should be non-empty");
+    assert!(
+        !r.password.is_empty(),
+        "auto-gen password should be non-empty"
+    );
 
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))

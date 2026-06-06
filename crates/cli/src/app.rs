@@ -14,11 +14,11 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures::{FutureExt, StreamExt};
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{Stdout, Write};
@@ -3854,9 +3854,10 @@ impl App {
             agentd_protocol::ApprovalMode::UnsafeAuto => agentd_protocol::ApprovalMode::Manual,
         };
         match self.client.set_approval_mode(&id, next).await {
-            Ok(()) if show_status => {
-                self.set_status(format!("approval mode {}", next.badge().unwrap_or("manual")))
-            }
+            Ok(()) if show_status => self.set_status(format!(
+                "approval mode {}",
+                next.badge().unwrap_or("manual")
+            )),
             Ok(()) => {}
             Err(e) => self.set_status(format!("set_approval_mode failed: {e}")),
         }
@@ -6764,6 +6765,7 @@ impl App {
             .split_once(char::is_whitespace)
             .map(|(v, a)| (v, a.trim()))
             .unwrap_or((cmd, ""));
+        let verb = verb.trim_start_matches('/');
         match verb {
             "" => {}
             "quit" | "exit" => self.should_quit = true,
@@ -6853,16 +6855,16 @@ impl App {
                     .collect();
                 self.set_status(format!("harnesses: {}", names.join(", ")));
             }
-            "agentd" => {
+            "agentd" | "construct" => {
                 // Subcommand dispatch:
                 //
-                //   /agentd restart [binary path]
+                //   /construct restart [binary path]
                 //       → daemon.restart; exec the daemon's own binary,
                 //         or the given one (e.g. a freshly-built worktree
                 //         binary). The path is validated daemon-side.
                 //
                 // Other subcommands are reserved for future use
-                // (e.g. `/agentd info` to print build version). The
+                // (e.g. `/construct info` to print build version). The
                 // daemon.restart RPC will close the IPC connection
                 // as the new process replaces the old; the TUI
                 // observes that as a "daemon disconnected" status
@@ -6875,8 +6877,8 @@ impl App {
                     "restart" => {
                         let exe = (!rest.is_empty()).then(|| rest.to_string());
                         match self.client.daemon_restart(exe).await {
-                            Ok(r) => self.set_status(format!(
-                                "agentd: restart requested (exe={}, pid={}) — reconnect when ready",
+                    Ok(r) => self.set_status(format!(
+                                "construct: restart requested (exe={}, pid={}) — reconnect when ready",
                                 r.exe, r.pid
                             )),
                             // BrokenPipe / connection closed is the
@@ -6891,17 +6893,17 @@ impl App {
                                     || msg.contains("closed")
                                 {
                                     self.set_status(
-                                        "agentd: restart in flight (socket closed) — reconnect when ready".to_string(),
+                                        "construct: restart in flight (socket closed) — reconnect when ready".to_string(),
                                     );
                                 } else {
-                                    self.set_status(format!("agentd restart failed: {e}"));
+                                    self.set_status(format!("construct restart failed: {e}"));
                                 }
                             }
                         }
                     }
-                    "" => self.set_status("agentd: subcommand required (e.g. `restart`)".into()),
+                    "" => self.set_status("construct: subcommand required (e.g. `restart`)".into()),
                     other => self.set_status(format!(
-                        "agentd: unknown subcommand '{other}'; try `restart`"
+                        "construct: unknown subcommand '{other}'; try `restart`"
                     )),
                 }
             }
@@ -8538,7 +8540,9 @@ mod tests {
         });
         let mut showing = false;
         terminal
-            .draw(|f| showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now()))
+            .draw(|f| {
+                showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now())
+            })
             .expect("draw");
         assert!(showing, "monolog should be showing mid-cycle");
         let screen = rendered_text(terminal.backend().buffer());
@@ -8552,10 +8556,15 @@ mod tests {
             started_at: Instant::now() - std::time::Duration::from_secs(30),
         });
         terminal
-            .draw(|f| showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now()))
+            .draw(|f| {
+                showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now())
+            })
             .expect("draw");
         assert!(!showing, "monolog should have expired");
-        assert!(app.operator_monolog.is_none(), "expired monolog not cleared");
+        assert!(
+            app.operator_monolog.is_none(),
+            "expired monolog not cleared"
+        );
 
         server.abort();
     }
@@ -8584,7 +8593,10 @@ mod tests {
             .expect("draw");
         assert!(!drew, "monolog should be skipped while the panel is open");
         let screen = rendered_text(terminal.backend().buffer());
-        assert!(!screen.contains("session"), "should not draw over rain:\n{screen}");
+        assert!(
+            !screen.contains("session"),
+            "should not draw over rain:\n{screen}"
+        );
         server.abort();
     }
 
@@ -8672,7 +8684,7 @@ mod tests {
 
         let screen = rendered_text(terminal.backend().buffer());
         assert!(
-            screen.contains("Welcome to agentd"),
+            screen.contains("Welcome to construct"),
             "missing welcome:\n{screen}"
         );
         assert!(
@@ -8688,7 +8700,7 @@ mod tests {
             "missing quit shortcut:\n{screen}"
         );
         assert!(
-            !screen.contains("q        exit agentd"),
+            !screen.contains("q        exit construct"),
             "empty state should not show q as the quit shortcut:\n{screen}"
         );
         assert!(
@@ -8704,37 +8716,33 @@ mod tests {
             "expected clickable shortcuts, got {:?}",
             app.layout.shortcut_hints
         );
-        assert!(
-            app.layout
-                .shortcut_hints
-                .iter()
-                .any(|h| h.action == KeyAction::OpenNewSession)
-        );
-        assert!(
-            app.layout
-                .shortcut_hints
-                .iter()
-                .any(|h| h.action == KeyAction::OpenCommandPalette)
-        );
-        assert!(
-            app.layout
-                .shortcut_hints
-                .iter()
-                .any(|h| h.action == KeyAction::ToggleHelp)
-        );
-        assert!(
-            app.layout
-                .shortcut_hints
-                .iter()
-                .any(|h| h.action == KeyAction::Quit)
-        );
+        assert!(app
+            .layout
+            .shortcut_hints
+            .iter()
+            .any(|h| h.action == KeyAction::OpenNewSession));
+        assert!(app
+            .layout
+            .shortcut_hints
+            .iter()
+            .any(|h| h.action == KeyAction::OpenCommandPalette));
+        assert!(app
+            .layout
+            .shortcut_hints
+            .iter()
+            .any(|h| h.action == KeyAction::ToggleHelp));
+        assert!(app
+            .layout
+            .shortcut_hints
+            .iter()
+            .any(|h| h.action == KeyAction::Quit));
         server.abort();
     }
 
     #[tokio::test]
     async fn update_notice_renders_right_aligned_in_modeline() {
         let (mut app, _dir, server) = empty_app().await;
-        app.update_notice = Some("↑ agentd 9.9.9 · agent upgrade".to_string());
+        app.update_notice = Some("↑ construct 9.9.9 · agent upgrade".to_string());
         let backend = ratatui::backend::TestBackend::new(120, 36);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
 
@@ -8745,7 +8753,7 @@ mod tests {
         let screen = rendered_text(terminal.backend().buffer());
         let modeline = screen
             .lines()
-            .find(|l| l.contains("↑ agentd 9.9.9 · agent upgrade"))
+            .find(|l| l.contains("↑ construct 9.9.9 · agent upgrade"))
             .expect("update notice should be on screen");
 
         // Right-aligned: only padding follows it to the right edge.
@@ -9372,10 +9380,8 @@ mod tests {
         app.sessions.push(orch);
         app.refresh_orchestrator_id();
         app.matrix_rain_hidden = false;
-        app.pending_tool_approvals.insert(
-            "orch".into(),
-            HashSet::from(["call-1".to_string()]),
-        );
+        app.pending_tool_approvals
+            .insert("orch".into(), HashSet::from(["call-1".to_string()]));
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -9709,7 +9715,7 @@ mod tests {
         use tempfile::tempdir;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
-        use tokio::sync::{Notify, mpsc};
+        use tokio::sync::{mpsc, Notify};
 
         let dir = tempdir().expect("tempdir");
         let sock = dir.path().join("agentd.sock");
@@ -9975,7 +9981,7 @@ mod tests {
         use tempfile::tempdir;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
-        use tokio::sync::{Notify, mpsc};
+        use tokio::sync::{mpsc, Notify};
 
         let dir = tempdir().expect("tempdir");
         let sock = dir.path().join("agentd.sock");
@@ -11104,8 +11110,8 @@ fn drainable_mouse_burst_kind(kind: &MouseEventKind) -> bool {
 #[cfg(test)]
 mod drain_gate_tests {
     use super::{
-        PaneFocus, ZoomMode, should_autofocus_view_from_list, should_drain_after, url_range_at_col,
-        url_ranges,
+        should_autofocus_view_from_list, should_drain_after, url_range_at_col, url_ranges,
+        PaneFocus, ZoomMode,
     };
     use crossterm::event::{
         Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
@@ -11353,7 +11359,7 @@ pub fn parse_group_delete_choice(input: &str) -> GroupDeleteChoice {
 
 #[cfg(test)]
 mod group_delete_prompt_tests {
-    use super::{GroupDeleteChoice, parse_group_delete_choice};
+    use super::{parse_group_delete_choice, GroupDeleteChoice};
 
     /// `y` / `yes` (any case, with whitespace) → orphan members
     /// (original pre-cascade behavior).

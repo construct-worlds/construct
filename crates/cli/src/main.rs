@@ -15,11 +15,7 @@ use agentd_client::Client;
 use agentd_protocol::paths::Paths;
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "agent",
-    about = "agent: TUI client for agentd",
-    version,
-)]
+#[command(name = "agent", about = "agent: TUI client for agentd", version)]
 struct Cli {
     /// Override the daemon socket path.
     #[arg(long, global = true)]
@@ -61,10 +57,7 @@ enum Command {
         worktree: bool,
     },
     /// Send input to a session.
-    Send {
-        session_id: String,
-        text: String,
-    },
+    Send { session_id: String, text: String },
     /// Internal: `PreToolUse` hook body for the AskUserQuestion chat-gate.
     /// Reads the hook payload on stdin; if a chat viewer is active for
     /// `$AGENTD_SESSION_ID`, prints a `deny` decision that degrades Claude's
@@ -118,7 +111,9 @@ enum Command {
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("warn")).unwrap();
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("warn"))
+        .unwrap();
     let _ = fmt().with_env_filter(filter).with_target(false).try_init();
 }
 
@@ -204,7 +199,11 @@ async fn main() -> Result<()> {
                 .create(agentd_protocol::CreateSessionParams {
                     harness,
                     cwd,
-                    prompt: if prompt.trim().is_empty() { None } else { Some(prompt) },
+                    prompt: if prompt.trim().is_empty() {
+                        None
+                    } else {
+                        Some(prompt)
+                    },
                     model,
                     title,
                     mode,

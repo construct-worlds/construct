@@ -1,10 +1,10 @@
-use tempfile::tempdir;
-use tokio::net::UnixListener;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, split};
-use serde_json::Value;
 use agentd_client::Client;
 use agentd_protocol::ipc_method;
+use serde_json::Value;
 use std::time::Instant;
+use tempfile::tempdir;
+use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 
 // Robust reconnect integration test using a mock Unix-socket daemon.
 // - Each mock server accepts one connection, replies to RPCs with
@@ -128,6 +128,6 @@ async fn test_reconnect_flow() {
     match res {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => panic!("test inner error: {e}"),
-        Err(_) => panic!("test timed out")
+        Err(_) => panic!("test timed out"),
     }
 }
