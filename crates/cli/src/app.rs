@@ -359,8 +359,8 @@ pub enum MinibufferIntent {
     /// the orchestrator session via `session.send_input`.
     Orchestrator,
     /// Approval prompt for a Risky tool call from an agent harness
-    /// (currently zarvis). Single-key dispatch: `y`/Enter approve,
-    /// `n`/Esc deny, `a` auto-review, `f` unsafe-auto.
+    /// without inline approval UI. Single-key dispatch: `y`/Enter
+    /// approve, `n`/Esc deny, `a` auto-review, `f` unsafe-auto.
     ApproveTool {
         session_id: String,
         call_id: String,
@@ -3685,11 +3685,11 @@ impl App {
         risk: agentd_protocol::ToolRisk,
         allow_auto_review: bool,
     ) {
-        // Orchestrator approvals are rendered inline in zarvis's PTY
+        // Zarvis approvals are rendered inline in the session PTY
         // (the `? approve [risk] tool(args) — y/n/a` row). The user
-        // responds with a single key inside the orchestrator panel,
+        // responds with a single key inside the session terminal,
         // not via a separate minibuffer prompt — so skip ours.
-        if self.orchestrator_id.as_deref() == Some(session_id.as_str()) {
+        if self.session_renders_approval_inline(&session_id) {
             return;
         }
         // Only surface the global minibuffer prompt for the session the
@@ -3732,6 +3732,14 @@ impl App {
             },
             error: None,
         });
+    }
+
+    fn session_renders_approval_inline(&self, session_id: &str) -> bool {
+        self.orchestrator_id.as_deref() == Some(session_id)
+            || self
+                .sessions
+                .iter()
+                .any(|s| s.id == session_id && s.harness == "zarvis")
     }
 
     /// Cycle the selected session's approval mode.
@@ -8167,6 +8175,48 @@ mod tests {
         assert!(prompt.contains("approve [risky] shell(echo hi)"));
         assert!(prompt.contains("y=approve"));
         assert!(prompt.contains("a=auto-review"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn approval_prompt_does_not_open_for_zarvis_session() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].harness = "zarvis".into();
+
+        app.maybe_open_approval_prompt(
+            "s1".into(),
+            "call-1".into(),
+            "shell".into(),
+            "echo hi".into(),
+            agentd_protocol::ToolRisk::Risky,
+            true,
+        );
+
+        assert!(
+            app.minibuffer.is_none(),
+            "zarvis renders approval inline in the session PTY"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn approval_prompt_does_not_open_for_orchestrator_session() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.orchestrator_id = Some("s1".into());
+
+        app.maybe_open_approval_prompt(
+            "s1".into(),
+            "call-1".into(),
+            "shell".into(),
+            "echo hi".into(),
+            agentd_protocol::ToolRisk::Risky,
+            true,
+        );
+
+        assert!(
+            app.minibuffer.is_none(),
+            "orchestrator renders approval inline in its PTY"
+        );
         server.abort();
     }
 
