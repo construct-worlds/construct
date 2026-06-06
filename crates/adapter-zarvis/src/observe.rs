@@ -13,8 +13,10 @@
 //!
 //! - **Self-loop guard**: events whose `session_id` matches the
 //!   orchestrator's own id are dropped before they reach the channel.
-//! - **Type allow-list**: only `Status{AwaitingInput|Errored|Done}`,
-//!   `Done{...}`, and `ToolApprovalRequest{...}` get through. The
+//! - **Type allow-list**: only `Status{AwaitingInput|Errored|Done}`
+//!   and `Done{...}` get through. Approval requests stay in the
+//!   requesting session's PTY so the orchestrator/minibuffer does not
+//!   duplicate or steal focus from the inline prompt. The
 //!   high-volume `Message`/`ToolUse`/`Cost`/`Pty` traffic is dropped.
 //!
 //! The interactive loop applies a separate sliding-window rate limit
@@ -144,11 +146,6 @@ fn format_observation(ev: &SessionEvent) -> Option<String> {
         SessionEvent::Done { exit_code } => {
             Some(format!("ended (exit={exit_code})"))
         }
-        SessionEvent::ToolApprovalRequest { tool, args_summary, .. } => {
-            let trimmed: String =
-                args_summary.chars().take(60).collect();
-            Some(format!("is asking approval for `{tool}({trimmed})`"))
-        }
         _ => None,
     }
 }
@@ -237,6 +234,13 @@ mod tests {
                 tokens_cached: 0,
             },
             SessionEvent::Pty { data: "".into() },
+            SessionEvent::ToolApprovalRequest {
+                call_id: "call-1".into(),
+                tool: "shell".into(),
+                args_summary: "echo hi".into(),
+                risk: agentd_protocol::ToolRisk::Risky,
+                allow_auto_review: true,
+            },
         ] {
             assert!(format_observation(&ev).is_none());
         }
