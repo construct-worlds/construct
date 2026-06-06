@@ -628,7 +628,7 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
         if let Some(rain) = app.layout.matrix_rain_area {
             if let Some((xs, xe, y)) = matrix_rain_close_button_range(rain) {
                 if my == y && mx >= xs && mx < xe {
-                    render_button_tooltip(f, &app.theme, " Hide matrix ", xs, y);
+                    render_button_tooltip(f, &app.theme, " Hide Operator ", xs, y);
                 }
             }
         }
