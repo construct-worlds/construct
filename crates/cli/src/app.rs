@@ -3364,7 +3364,11 @@ impl App {
                                 .histories
                                 .entry(payload.session_id.clone())
                                 .or_default();
-                            history.feed_tool_result(tool, *ok, output.clone());
+                            history.feed_tool_result(
+                                tool,
+                                *ok,
+                                crate::pty_render::tool_output_preview_for_history(output),
+                            );
                         }
                         // Headless sessions (any harness) emit their
                         // conversation as structured Message/Reasoning
@@ -6964,7 +6968,11 @@ pub fn apply_transcript_to_local_state(
                 }
             }
             SessionEvent::ToolResult { tool, ok, output } => {
-                history.feed_tool_result(tool, *ok, output.clone());
+                history.feed_tool_result(
+                    tool,
+                    *ok,
+                    crate::pty_render::tool_output_preview_for_history(output),
+                );
             }
             // Each new EditorState supersedes the prior one — the
             // adapter emits one on every buffer / cursor / queue /

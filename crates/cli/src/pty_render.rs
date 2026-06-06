@@ -333,6 +333,8 @@ enum ItemSig {
         tool: String,
         count: usize,
         expanded: bool,
+        summary: String,
+        status: String,
         blocks: Vec<ItemSig>,
     },
     /// Message items are immutable once pushed (streaming appends new
@@ -358,36 +360,18 @@ impl ItemSig {
     fn of(item: &Item) -> Self {
         match item {
             Item::PtyChunk(b) => ItemSig::Chunk(b.len()),
-            Item::ToolBlock(b) => ItemSig::Block {
-                call_id: b.call_id.clone(),
-                has_output: b.output.is_some(),
-                ok: b.ok,
-                expanded: b.expanded,
-                running_controls_ready: if b.output.is_some() {
-                    None
-                } else {
-                    Some(tool_block_controls_ready(b))
-                },
-            },
+            Item::ToolBlock(b) => block_sig(b),
             Item::ToolGroup(g) => ItemSig::Group {
                 tool: g.tool.clone(),
                 count: g.blocks.len(),
                 expanded: g.expanded,
-                blocks: g
-                    .blocks
-                    .iter()
-                    .map(|b| ItemSig::Block {
-                        call_id: b.call_id.clone(),
-                        has_output: b.output.is_some(),
-                        ok: b.ok,
-                        expanded: b.expanded,
-                        running_controls_ready: if b.output.is_some() {
-                            None
-                        } else {
-                            Some(tool_block_controls_ready(b))
-                        },
-                    })
-                    .collect(),
+                summary: summarize_group(g),
+                status: group_status(g),
+                blocks: if g.expanded {
+                    g.blocks.iter().map(block_sig).collect()
+                } else {
+                    Vec::new()
+                },
             },
             Item::Message {
                 kind,
@@ -399,6 +383,20 @@ impl ItemSig {
                 break_before: *break_before,
             },
         }
+    }
+}
+
+fn block_sig(b: &ToolBlock) -> ItemSig {
+    ItemSig::Block {
+        call_id: b.call_id.clone(),
+        has_output: b.output.is_some(),
+        ok: b.ok,
+        expanded: b.expanded,
+        running_controls_ready: if b.output.is_some() {
+            None
+        } else {
+            Some(tool_block_controls_ready(b))
+        },
     }
 }
 
@@ -421,6 +419,36 @@ pub const TOOL_BLOCK_COLLAPSED_LINES: usize = 5;
 pub const TOOL_BLOCK_EXPANDED_LINES: usize = 240;
 /// Per-line truncation in collapsed mode (mirrors zarvis).
 pub const TOOL_BLOCK_MAX_COLS: usize = 200;
+const TOOL_BLOCK_HISTORY_LINE_CHARS: usize = TOOL_BLOCK_MAX_COLS * 2;
+
+pub fn tool_output_preview_for_history(output: &str) -> String {
+    let mut preview = String::new();
+    let mut truncated = false;
+    for (idx, line) in output.lines().enumerate() {
+        if idx >= TOOL_BLOCK_EXPANDED_LINES {
+            truncated = true;
+            break;
+        }
+        if idx > 0 {
+            preview.push('\n');
+        }
+        let mut chars = line.chars();
+        for ch in chars.by_ref().take(TOOL_BLOCK_HISTORY_LINE_CHARS) {
+            preview.push(ch);
+        }
+        if chars.next().is_some() {
+            truncated = true;
+            preview.push_str(" ...");
+        }
+    }
+    if truncated {
+        if !preview.is_empty() {
+            preview.push('\n');
+        }
+        preview.push_str("[output truncated for TUI preview]");
+    }
+    preview
+}
 
 impl ItemHistory {
     pub fn new() -> Self {
@@ -737,7 +765,7 @@ impl ItemHistory {
             self.pending_block_hydrations.push_back(self.items.len());
         }
         if let Some((ok, output)) = self.pending_tool_results.remove(call_id) {
-            block.output = Some(output);
+            block.output = Some(tool_output_preview_for_history(&output));
             block.ok = ok;
         }
         if block.tool.is_some() {
@@ -870,7 +898,7 @@ impl ItemHistory {
             started_at: Instant::now(),
         };
         if let Some((ok, output)) = self.pending_tool_results.remove(&call_id) {
-            block.output = Some(output);
+            block.output = Some(tool_output_preview_for_history(&output));
             block.ok = ok;
         }
         self.push_tool_block_grouped(block);
@@ -881,6 +909,7 @@ impl ItemHistory {
     /// carries the *call_id* (zarvis convention), so we can match
     /// directly. If the OSC open hasn't arrived yet, stash for later.
     pub fn feed_tool_result(&mut self, call_id: &str, ok: bool, output: String) {
+        let output = tool_output_preview_for_history(&output);
         if let Some(block) = self.find_block_mut(call_id) {
             block.output = Some(output);
             block.ok = ok;
@@ -2681,6 +2710,23 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_history_preview_is_bounded() {
+        let huge = (0..10_000usize)
+            .map(|i| format!("line {i} {}", "x".repeat(2_000)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = tool_output_preview_for_history(&huge);
+        assert!(
+            preview.len() < 120_000,
+            "preview should be bounded, got {} bytes",
+            preview.len()
+        );
+        assert!(preview.contains("[output truncated for TUI preview]"));
+        assert!(preview.contains("line 0"));
+        assert!(!preview.contains("line 9999"));
+    }
+
+    #[test]
     fn osc_split_across_feeds_still_parses() {
         let mut h = ItemHistory::new();
         h.feed_pty(b"\x1b]7700;open;ca");
@@ -3626,6 +3672,52 @@ mod tests {
         assert!(
             tool_start_us < 80_000,
             "tool start replay too slow after pending flush: {tool_start_us} µs"
+        );
+    }
+
+    #[test]
+    fn collapsed_tool_group_update_stays_bounded() {
+        use std::time::Instant;
+        let mut h = ItemHistory::new();
+        let cols = 100u16;
+        let rows = 30u16;
+
+        for i in 0..2_000u32 {
+            let call = format!("g{i}");
+            h.feed_task_start(call.clone(), "shell".into(), format!("cmd {i}"));
+            h.feed_tool_result(&call, true, "ok".into());
+        }
+        let _ = h.replay(cols, rows, 0);
+        let _ = h.replay(cols, rows, 0);
+
+        let call = "group-new";
+        h.feed_task_start(call.into(), "shell".into(), "cmd new".into());
+        let start_t = Instant::now();
+        let started = h.replay(cols, rows, 0);
+        let start_us = start_t.elapsed().as_micros();
+        assert!(
+            started.blocks.iter().any(|hit| hit.call_id == "group:g0"),
+            "collapsed group hit rect should survive append"
+        );
+
+        h.feed_tool_result(call, true, "ok".into());
+        let result_t = Instant::now();
+        let finished = h.replay(cols, rows, 0);
+        let result_us = result_t.elapsed().as_micros();
+        assert!(
+            finished.blocks.iter().any(|hit| hit.call_id == "group:g0"),
+            "collapsed group hit rect should survive result"
+        );
+        eprintln!(
+            "collapsed group update after 2000 calls: start {start_us} µs, result {result_us} µs"
+        );
+        assert!(
+            start_us < 80_000,
+            "collapsed group start replay too slow: {start_us} µs"
+        );
+        assert!(
+            result_us < 80_000,
+            "collapsed group result replay too slow: {result_us} µs"
         );
     }
 
