@@ -6855,7 +6855,7 @@ impl App {
                     .collect();
                 self.set_status(format!("harnesses: {}", names.join(", ")));
             }
-            "agentd" | "construct" => {
+            "construct" => {
                 // Subcommand dispatch:
                 //
                 //   /construct restart [binary path]

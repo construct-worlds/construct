@@ -285,7 +285,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         id: CommandId::Agentd,
         name: "/construct",
-        aliases: &["agentd"],
+        aliases: &[],
         args: Args::Required,
         routing: Routing::Client,
         visibility: ModelVisibility::Hidden,
