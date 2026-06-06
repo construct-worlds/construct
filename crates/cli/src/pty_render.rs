@@ -152,6 +152,10 @@ fn buttons_after_ms() -> u64 {
         .unwrap_or(7_000)
 }
 
+fn tool_block_controls_ready(block: &ToolBlock) -> bool {
+    block.started_at.elapsed().as_millis() as u64 >= buttons_after_ms()
+}
+
 #[derive(Debug, Default)]
 enum OscState {
     #[default]
@@ -215,18 +219,17 @@ pub struct ItemHistory {
     /// open. Keyed by call_id (the `tool` field on `ToolResult`
     /// carries call_id by zarvis convention).
     pending_tool_results: HashMap<String, (bool, String)>,
-    /// Whether the next [`replay`] should rebuild from scratch.
-    /// Set by every mutation; cleared by `replay`. Future-proofing
-    /// for an incremental cache.
+    /// Whether the next [`replay`] should account for a mutation.
+    /// Set by every mutation; cleared by `replay`.
     pub dirty: bool,
     /// Persistent `vt100::Parser` reused across frames for sessions
     /// without tool blocks (claude / codex / shell) — these never
     /// have items mutate underfoot, so we can process only the
     /// items appended since the last replay and just `set_size` on
     /// resize instead of replaying the full history.
-    /// Sessions WITH tool blocks (zarvis) always rebuild because a
-    /// block's synth bytes change as state evolves (elapsed counter,
-    /// expand/collapse, output arrival).
+    /// Sessions with synthesized items (zarvis tool blocks and
+    /// headless messages) keep signatures so unchanged frames reuse
+    /// the parser and only mutations rebuild.
     cached: Option<CachedParser>,
 }
 
@@ -252,7 +255,7 @@ struct CachedParser {
     pending_consumed: usize,
     /// Per-item signature for `replay_full` — lets us detect when
     /// an existing item mutated (block hydrated, expanded toggled,
-    /// running counter ticked) vs. when the items list was only
+    /// running controls appeared) vs. when the items list was only
     /// appended to. On mutation we rebuild; on append-only we just
     /// process the new tail through the persistent parser.
     /// Empty for the non-tool-block fast path (which doesn't need it).
@@ -307,10 +310,10 @@ enum ItemSig {
         has_output: bool,
         ok: bool,
         expanded: bool,
-        /// `Some(elapsed_sec)` while the block is running (its
-        /// status row shows a live counter). `None` once the
-        /// block has output — the synth bytes are stable.
-        running_elapsed: Option<u64>,
+        /// `Some(controls_ready)` while the block is running. The
+        /// status row stays stable until the control hint appears;
+        /// a per-second elapsed counter forced full parser replays.
+        running_controls_ready: Option<bool>,
     },
     Group {
         tool: String,
@@ -346,10 +349,10 @@ impl ItemSig {
                 has_output: b.output.is_some(),
                 ok: b.ok,
                 expanded: b.expanded,
-                running_elapsed: if b.output.is_some() {
+                running_controls_ready: if b.output.is_some() {
                     None
                 } else {
-                    Some(b.started_at.elapsed().as_secs())
+                    Some(tool_block_controls_ready(b))
                 },
             },
             Item::ToolGroup(g) => ItemSig::Group {
@@ -364,10 +367,10 @@ impl ItemSig {
                         has_output: b.output.is_some(),
                         ok: b.ok,
                         expanded: b.expanded,
-                        running_elapsed: if b.output.is_some() {
+                        running_controls_ready: if b.output.is_some() {
                             None
                         } else {
-                            Some(b.started_at.elapsed().as_secs())
+                            Some(tool_block_controls_ready(b))
                         },
                     })
                     .collect(),
@@ -935,9 +938,10 @@ impl ItemHistory {
     /// Render the session's accumulated content into a `vt100::Screen`
     /// at the requested size. Two strategies:
     ///
-    /// 1. **Tool-block sessions (zarvis):** rebuild the parser from
-    ///    scratch every frame so tool blocks can reflect live state
-    ///    (elapsed counters, expand/collapse, in-flight output).
+    /// 1. **Tool-block sessions (zarvis):** use per-item signatures to
+    ///    reuse the parser across unchanged frames and rebuild only when
+    ///    synthesized state changes (control hints, expand/collapse,
+    ///    output arrival).
     /// 2. **Non-tool sessions (claude / codex / shell):** keep the
     ///    parser alive across frames. On resize, call `set_size` and
     ///    skip replay — matches what a real terminal does for those
@@ -1175,7 +1179,7 @@ impl ItemHistory {
     /// Tool-block-aware replay. Reuses the persistent parser when
     /// safe; falls back to a full rebuild only when an item
     /// mid-history actually mutated (block hydrated, expanded
-    /// toggled, running counter ticked to a new second). Append-only
+    /// toggled, running controls appeared). Append-only
     /// changes (new chunks, new blocks at the tail) just feed the
     /// new suffix through the live parser — same shape as
     /// `replay_cached` but with per-block signatures so we know
@@ -1646,7 +1650,7 @@ fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
 ///
 /// States rendered:
 /// - **Running** (`output == None`): header + status row with
-///   elapsed counter; a keyboard-control hint appears after the
+///   stable status row; a keyboard-control hint appears after the
 ///   `BUTTONS_AFTER_MS` threshold.
 /// - **Backgrounded** (`output == BG_PLACEHOLDER_OUTPUT`): header +
 ///   status row with "in background"; `Esc` kill hint only.
@@ -1877,15 +1881,14 @@ fn synth_block(block: &ToolBlock, cols: u16) -> SynthOutput {
 
     if is_running || is_backgrounded {
         status_row_offset = Some(1 + header_rows as u16);
-        let elapsed_secs = block.started_at.elapsed().as_secs();
-        let controls_ready = block.started_at.elapsed().as_millis() as u64 >= buttons_after_ms();
+        let controls_ready = tool_block_controls_ready(block);
 
         let mut line = String::new();
         line.push_str("  ");
         let status_text = if is_running {
-            format!("running {elapsed_secs}s")
+            "running"
         } else {
-            format!("in background {elapsed_secs}s")
+            "in background"
         };
         line.push_str(&format!("\x1b[2;33m{status_text}\x1b[0m"));
         if controls_ready {
@@ -4611,6 +4614,40 @@ mod tests {
             "button hit zones should not be exposed for text hints: {:?}",
             out.blocks
         );
+    }
+
+    #[test]
+    fn running_tool_signature_ignores_elapsed_seconds_until_controls_appear() {
+        let mut h = ItemHistory::new();
+        h.feed_task_start(
+            "t1".to_string(),
+            "shell".to_string(),
+            "sleep 60".to_string(),
+        );
+        let Item::ToolBlock(block) = h.items.last().expect("tool block") else {
+            panic!("expected tool block");
+        };
+        let mut fresh = block.clone();
+        let mut older = block.clone();
+        let threshold = buttons_after_ms();
+        let below_threshold = threshold.saturating_sub(1).min(1_000);
+        older.started_at = Instant::now() - std::time::Duration::from_millis(below_threshold);
+
+        assert_eq!(
+            ItemSig::of(&Item::ToolBlock(fresh.clone())),
+            ItemSig::of(&Item::ToolBlock(older)),
+            "elapsed seconds alone must not invalidate the tool-block parser cache"
+        );
+
+        if threshold > 0 {
+            fresh.started_at =
+                Instant::now() - std::time::Duration::from_millis(threshold.saturating_add(1));
+            assert_ne!(
+                ItemSig::of(&Item::ToolBlock(block.clone())),
+                ItemSig::of(&Item::ToolBlock(fresh)),
+                "the signature should change once the control hint becomes visible"
+            );
+        }
     }
 
     #[test]
