@@ -265,6 +265,9 @@ struct CachedParser {
     /// per frame for block-span row math — we just add the new
     /// tail's visible-line count.
     pending_visible_lines: usize,
+    /// Cursor column after the pending bytes already accounted for
+    /// by `pending_visible_lines`.
+    pending_end_col: usize,
     /// Per-item rendered layout for `replay_full` — the visible-line
     /// count and (for tool blocks) the hit-rect metadata. Parallel to
     /// `self.items`. Lets steady-state frames skip the O(history)
@@ -1043,6 +1046,7 @@ impl ItemHistory {
                 pending_consumed: 0,
                 signatures: Vec::new(),
                 pending_visible_lines: 0,
+                pending_end_col: 0,
                 item_layouts: Vec::new(),
             });
         }
@@ -1155,6 +1159,7 @@ impl ItemHistory {
                 pending_consumed: 0,
                 signatures: Vec::new(),
                 pending_visible_lines: 0,
+                pending_end_col: 0,
                 item_layouts: Vec::new(),
             };
             // Same scrollback-tail bound as the width-change rebuild:
@@ -1202,12 +1207,26 @@ impl ItemHistory {
         // no "undo bytes" API.
         let current_sigs: Vec<ItemSig> = self.items.iter().map(ItemSig::of).collect();
 
+        let flushed_pending_layout = self.cached.as_ref().and_then(|c| {
+            let pending_shrank = self.pending_chunk.len() < c.pending_consumed;
+            if !pending_shrank || !self.pending_chunk.is_empty() {
+                return None;
+            }
+            match self.items.get(c.processed_count) {
+                Some(Item::PtyChunk(bytes)) if bytes.len() == c.pending_consumed => {
+                    Some((c.processed_count, c.pending_visible_lines, c.pending_end_col))
+                }
+                _ => None,
+            }
+        });
+
         let rebuild_from = match &self.cached {
             None => true,
             Some(c) => {
                 c.cols != cols
                     || current_sigs.len() < c.signatures.len()
-                    || self.pending_chunk.len() < c.pending_consumed
+                    || (self.pending_chunk.len() < c.pending_consumed
+                        && flushed_pending_layout.is_none())
             }
         };
         let changed_idx = self.cached.as_ref().and_then(|c| {
@@ -1242,6 +1261,7 @@ impl ItemHistory {
                 pending_consumed: 0,
                 signatures: Vec::new(),
                 pending_visible_lines: 0,
+                pending_end_col: 0,
                 item_layouts: preserved_layouts,
             });
         }
@@ -1274,7 +1294,9 @@ impl ItemHistory {
         // We no longer re-scan the whole history with
         // `count_visible_lines` / `synth_block` every frame. That
         // O(history)-per-frame re-scan was the zarvis typing lag.
-        let start_processing_at = rebuild_from.unwrap_or(cache.processed_count);
+        let start_processing_at = flushed_pending_layout
+            .map(|(idx, _, _)| idx + 1)
+            .unwrap_or_else(|| rebuild_from.unwrap_or(cache.processed_count));
         let reuse_upto = cache.item_layouts.len().min(self.items.len());
         let mut cursor_col = cache
             .item_layouts
@@ -1284,15 +1306,36 @@ impl ItemHistory {
         for (idx, item) in self.items.iter().enumerate().skip(reuse_upto) {
             let layout = match item {
                 Item::PtyChunk(b) => {
-                    if idx >= start_processing_at {
+                    let uses_flushed_pending_layout = matches!(
+                        flushed_pending_layout,
+                        Some((flushed_idx, _, _)) if idx == flushed_idx
+                    );
+                    if uses_flushed_pending_layout {
+                        let (_, flushed_lines, flushed_end_col) =
+                            flushed_pending_layout.expect("checked above");
+                        cursor_col = flushed_end_col;
+                        ItemLayout {
+                            lines: flushed_lines,
+                            end_col: flushed_end_col,
+                            blocks: Vec::new(),
+                        }
+                    } else if idx >= start_processing_at {
                         cache.parser.process(b);
-                    }
-                    let metrics = visible_metrics_from_col(b, cols, cursor_col);
-                    cursor_col = metrics.end_col;
-                    ItemLayout {
-                        lines: metrics.lines,
-                        end_col: metrics.end_col,
-                        blocks: Vec::new(),
+                        let metrics = visible_metrics_from_col(b, cols, cursor_col);
+                        cursor_col = metrics.end_col;
+                        ItemLayout {
+                            lines: metrics.lines,
+                            end_col: metrics.end_col,
+                            blocks: Vec::new(),
+                        }
+                    } else {
+                        let metrics = visible_metrics_from_col(b, cols, cursor_col);
+                        cursor_col = metrics.end_col;
+                        ItemLayout {
+                            lines: metrics.lines,
+                            end_col: metrics.end_col,
+                            blocks: Vec::new(),
+                        }
                     }
                 }
                 Item::ToolBlock(block) => {
@@ -1393,14 +1436,20 @@ impl ItemHistory {
         // never re-iterate the whole pending buffer (otherwise long
         // sessions pay O(history) per frame just to position block
         // spans).
-        if rebuild_from.is_some() {
+        if rebuild_from.is_some() || flushed_pending_layout.is_some() {
             cache.pending_visible_lines = 0;
+            cache.pending_end_col = cursor_col;
         }
         let pending_start = cache.pending_consumed.min(self.pending_chunk.len());
+        if pending_start == 0 && cache.pending_visible_lines == 0 {
+            cache.pending_end_col = cursor_col;
+        }
         if pending_start < self.pending_chunk.len() {
             let suffix = &self.pending_chunk[pending_start..];
             cache.parser.process(suffix);
-            cache.pending_visible_lines += count_visible_lines(suffix, cols);
+            let metrics = visible_metrics_from_col(suffix, cols, cache.pending_end_col);
+            cache.pending_visible_lines += metrics.lines;
+            cache.pending_end_col = metrics.end_col;
         }
         abs_line += cache.pending_visible_lines;
 
@@ -1661,10 +1710,12 @@ fn visible_metrics_from_col(bytes: &[u8], cols: u16, start_col: usize) -> Visibl
     }
 }
 
+#[cfg(test)]
 fn count_visible_lines_from_col(bytes: &[u8], cols: u16, start_col: usize) -> usize {
     visible_metrics_from_col(bytes, cols, start_col).lines
 }
 
+#[cfg(test)]
 fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
     count_visible_lines_from_col(bytes, cols, 0)
 }
@@ -3527,6 +3578,54 @@ mod tests {
         assert!(
             collapse_us < 80_000,
             "tool collapse replay too slow after long history: {collapse_us} µs"
+        );
+    }
+
+    #[test]
+    fn zarvis_tool_start_reuses_already_rendered_pending_text() {
+        use std::time::Instant;
+        let mut h = ItemHistory::new();
+        let cols = 100u16;
+        let rows = 30u16;
+
+        for i in 0..800u32 {
+            let mut chat = Vec::with_capacity(900);
+            for j in 0..8 {
+                chat.extend_from_slice(
+                    format!("\x1b[33mhistory {i}.{j} before live pending text\x1b[0m\r\n")
+                        .as_bytes(),
+                );
+            }
+            h.feed_pty(&chat);
+            let call = format!("c{i}");
+            h.feed_task_start(call.clone(), "shell".into(), format!("cmd {i}"));
+            h.feed_tool_result(&call, true, "ok".into());
+        }
+        let _ = h.replay(cols, rows, 0);
+        let _ = h.replay(cols, rows, 0);
+
+        let mut live_pending = Vec::with_capacity(40_000);
+        for i in 0..900u32 {
+            live_pending.extend_from_slice(
+                format!("\x1b[36massistant live pending line {i}\x1b[0m\r\n").as_bytes(),
+            );
+        }
+        h.feed_pty(&live_pending);
+        let _ = h.replay(cols, rows, 0);
+
+        let target = "new-tool";
+        h.feed_task_start(target.into(), "read_file".into(), "src/main.rs".into());
+        let t = Instant::now();
+        let rendered = h.replay(cols, rows, 0);
+        let tool_start_us = t.elapsed().as_micros();
+        assert!(
+            rendered.blocks.iter().any(|hit| hit.call_id == target),
+            "new tool block hit rect should render after pending flush"
+        );
+        eprintln!("zarvis tool start after live pending: {tool_start_us} µs");
+        assert!(
+            tool_start_us < 80_000,
+            "tool start replay too slow after pending flush: {tool_start_us} µs"
         );
     }
 
