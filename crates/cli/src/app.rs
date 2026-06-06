@@ -14,11 +14,11 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::{FutureExt, StreamExt};
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{Stdout, Write};
@@ -1326,6 +1326,8 @@ pub struct LayoutSnapshot {
     pub dynamic_ui_widget_hits: Vec<DynamicUiWidgetHit>,
     pub dynamic_ui_panel_close_hits: Vec<DynamicUiPanelCloseHit>,
     pub dynamic_ui_inline_hit: Option<DynamicUiInlineHit>,
+    /// Matrix-rain title-bar Operator label bounds: `(x_start, x_end, y)`.
+    pub matrix_operator_title_hit: Option<(u16, u16, u16)>,
     /// Matrix-rain title-bar widget viewport affordances for the operator session.
     pub matrix_widget_hits: Vec<MatrixWidgetHit>,
     /// Dynamic UI title-bar affordance bounds: `(x_start, x_end, y, session_id)`.
@@ -7408,6 +7410,7 @@ mod tests {
             dynamic_ui_widget_hits: Vec::new(),
             dynamic_ui_panel_close_hits: Vec::new(),
             dynamic_ui_inline_hit: None,
+            matrix_operator_title_hit: None,
             matrix_widget_hits: Vec::new(),
             dynamic_ui_trigger: None,
             dynamic_ui_triggers: Vec::new(),
@@ -8220,21 +8223,24 @@ mod tests {
             "expected clickable shortcuts, got {:?}",
             app.layout.shortcut_hints
         );
-        assert!(app
-            .layout
-            .shortcut_hints
-            .iter()
-            .any(|h| h.action == KeyAction::OpenNewSession));
-        assert!(app
-            .layout
-            .shortcut_hints
-            .iter()
-            .any(|h| h.action == KeyAction::OpenCommandPalette));
-        assert!(app
-            .layout
-            .shortcut_hints
-            .iter()
-            .any(|h| h.action == KeyAction::ToggleHelp));
+        assert!(
+            app.layout
+                .shortcut_hints
+                .iter()
+                .any(|h| h.action == KeyAction::OpenNewSession)
+        );
+        assert!(
+            app.layout
+                .shortcut_hints
+                .iter()
+                .any(|h| h.action == KeyAction::OpenCommandPalette)
+        );
+        assert!(
+            app.layout
+                .shortcut_hints
+                .iter()
+                .any(|h| h.action == KeyAction::ToggleHelp)
+        );
         server.abort();
     }
 
@@ -8953,7 +8959,7 @@ mod tests {
         use tempfile::tempdir;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
-        use tokio::sync::{mpsc, Notify};
+        use tokio::sync::{Notify, mpsc};
 
         let dir = tempdir().expect("tempdir");
         let sock = dir.path().join("agentd.sock");
@@ -9219,7 +9225,7 @@ mod tests {
         use tempfile::tempdir;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
-        use tokio::sync::{mpsc, Notify};
+        use tokio::sync::{Notify, mpsc};
 
         let dir = tempdir().expect("tempdir");
         let sock = dir.path().join("agentd.sock");
@@ -10345,8 +10351,8 @@ fn drainable_mouse_burst_kind(kind: &MouseEventKind) -> bool {
 #[cfg(test)]
 mod drain_gate_tests {
     use super::{
-        should_autofocus_view_from_list, should_drain_after, url_range_at_col, url_ranges,
-        PaneFocus, ZoomMode,
+        PaneFocus, ZoomMode, should_autofocus_view_from_list, should_drain_after, url_range_at_col,
+        url_ranges,
     };
     use crossterm::event::{
         Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
@@ -10594,7 +10600,7 @@ pub fn parse_group_delete_choice(input: &str) -> GroupDeleteChoice {
 
 #[cfg(test)]
 mod group_delete_prompt_tests {
-    use super::{parse_group_delete_choice, GroupDeleteChoice};
+    use super::{GroupDeleteChoice, parse_group_delete_choice};
 
     /// `y` / `yes` (any case, with whitespace) → orphan members
     /// (original pre-cascade behavior).
