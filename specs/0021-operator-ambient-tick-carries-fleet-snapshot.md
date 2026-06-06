@@ -27,3 +27,36 @@ The tick now performs a cheap daemon round-trip (`session.list`) every interval;
 ## Non-Goals
 
 Does not change the loop interval, the orchestrator-only gate, or the fleet-event observation pipeline. Does not persist snapshot state across restarts. Does not grant the ambient loop extra authority.
+
+## Update (idle detection + selective previews)
+
+The snapshot also flags **idle running** sessions — `Running` with no PTY byte
+for `IDLE_RUNNING_MINS` (10m), detected from `last_pty_at_ms`. This closes a
+blind spot: interactive `claude`/`codex`/`shell` sessions never emit
+`AwaitingInput` (only their headless paths do) and the daemon doesn't infer
+idle from quiescence, so the Operator otherwise can't tell a finished/waiting
+session from a busy one. Idle running is the most common "needs attention" case
+for those harnesses.
+
+For the few most notable sessions (errored, then idle, then long-awaiting,
+capped at `PREVIEW_SESSIONS`), the tick attaches a short ANSI-free preview — the
+last few non-empty messages from the session's transcript tail — so the
+Operator has concrete content to judge. Previews are deliberately selective to
+keep the observation's input cost bounded on a large fleet.
+
+## Update (per-session previews refined)
+
+Previews use the **rendered PTY screen** (the recent pty.log tail run through a
+`vt100` parser), not the transcript tail — interactive claude/codex sessions
+emit thousands of `Pty` events and almost no `Message` events, so a transcript
+preview was usually empty for them. Headless / no-PTY sessions fall back to
+recent transcript messages.
+
+Each preview is bounded by a per-session byte budget (`PREVIEW_BYTES`, default
+800, env `AGENTD_OPERATOR_PREVIEW_BYTES`); when the kept lines exceed it the
+**older** part is truncated, keeping the most recent. Up to `PREVIEW_SESSIONS`
+(default 10, env `AGENTD_OPERATOR_PREVIEW_SESSIONS`) sessions are previewed,
+prioritized errored → idle → long-awaiting → recently-active. Each preview is
+headed by the session's full id, and the observation tells the Operator it can
+call `agentd_get_transcript` / `agentd_get_output` / `agentd_get_diff` (or
+`agentd_list_sessions`) to peek deeper when a preview isn't enough.

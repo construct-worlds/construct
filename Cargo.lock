@@ -104,6 +104,7 @@ dependencies = [
  "tracing",
  "unicode-width",
  "uuid",
+ "vt100",
 ]
 
 [[package]]
