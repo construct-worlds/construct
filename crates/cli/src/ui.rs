@@ -1591,11 +1591,7 @@ fn render_matrix_widget_viewport(f: &mut Frame, rain_area: Rect, app: &mut App, 
         height,
     };
     let title = dynamic_ui_panel_title(&panel).unwrap_or_else(|| "Operator widget".to_string());
-    let title = if panels.len() > 1 {
-        format!(" {}/{} · {} ", selected_idx + 1, panels.len(), title)
-    } else {
-        format!(" {} ", title)
-    };
+    let title = format!(" {} ", title);
     f.render_widget(Clear, area);
     f.render_widget(
         Block::default()
@@ -7337,6 +7333,7 @@ mod tests {
             id: "w".into(),
             source: None,
             title: None,
+            created_at_ms: 0,
             placement: agentd_protocol::UiPlacement::Inline,
             markdown: markdown.into(),
         }
