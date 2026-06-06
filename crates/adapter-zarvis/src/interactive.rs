@@ -1329,6 +1329,51 @@ mod tests {
     }
 
     #[test]
+    fn ambient_observation_counts_excludes_self_and_reports_deltas() {
+        fn summary(id: &str, state: &str) -> agentd_protocol::SessionSummary {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "harness": "zarvis", "cwd": "/x",
+                "state": state, "created_at": "2026-06-06T00:00:00Z"
+            }))
+            .unwrap()
+        }
+        let now = chrono::Utc::now();
+        let mut prev = HashMap::new();
+
+        // First tick: counts exclude the operator's own session; baseline only.
+        let sessions = vec![
+            summary("self0000", "running"),
+            summary("aaaa1111", "running"),
+            summary("bbbb2222", "awaiting_input"),
+            summary("cccc3333", "errored"),
+        ];
+        let first = format_ambient_observation(&sessions, "self0000", &mut prev, now);
+        assert!(
+            first.contains("1 running, 1 awaiting_input, 1 errored"),
+            "{first}"
+        );
+        assert!(first.contains("baseline only"), "{first}");
+
+        // Second tick: aaaa1111 running → errored should surface as a delta,
+        // and the counts update (running 0, errored 2).
+        let sessions2 = vec![
+            summary("self0000", "running"),
+            summary("aaaa1111", "errored"),
+            summary("bbbb2222", "awaiting_input"),
+            summary("cccc3333", "errored"),
+        ];
+        let second = format_ambient_observation(&sessions2, "self0000", &mut prev, now);
+        assert!(
+            second.contains("aaaa1111") && second.contains("→ errored"),
+            "{second}"
+        );
+        assert!(
+            second.contains("0 running, 1 awaiting_input, 2 errored"),
+            "{second}"
+        );
+    }
+
+    #[test]
     fn apply_pty_resize_updates_width_for_normal_columns() {
         let mut width = 80;
         apply_pty_resize(120, &mut width);
@@ -1985,6 +2030,10 @@ pub async fn run(
     };
     let mut obs_limiter = crate::observe::RateLimiter::new(5, std::time::Duration::from_secs(60));
     let ambient_loop = is_orchestrator.then(operator_ambient_loop_interval);
+    // Operator's own id (to exclude from the ambient fleet snapshot) and the
+    // prior-tick session states (for the per-tick delta).
+    let self_id_for_ambient = session_id.clone();
+    let mut prev_fleet: HashMap<String, agentd_protocol::SessionState> = HashMap::new();
 
     'outer: loop {
         // Wait for a user message — drain order: startup prompt
@@ -2037,7 +2086,7 @@ pub async fn run(
                     text
                 }
                 ReadOutcome::AmbientTick => {
-                    "OBSERVATION: ambient operator loop tick. Quietly inspect only if useful; update Operator widgets for helpful ambient status; reply exactly `noted` if nothing needs surfacing.".to_string()
+                    build_ambient_observation(&self_id_for_ambient, &mut prev_fleet).await
                 }
                 ReadOutcome::BackgroundCompletion(bc) => {
                     // Emit the real ToolResult so the transcript +
@@ -2908,6 +2957,117 @@ fn operator_ambient_loop_interval() -> Duration {
         .unwrap_or(300)
         .clamp(60, 86_400);
     Duration::from_secs(secs)
+}
+
+/// Bare ambient-tick prompt used when the daemon snapshot is unavailable.
+const AMBIENT_TICK_FALLBACK: &str = "OBSERVATION: ambient operator loop tick. Quietly inspect only if useful; update Operator widgets for helpful ambient status; reply exactly `noted` if nothing needs surfacing.";
+
+/// Build the ambient-tick observation text. Pulls a live fleet snapshot from
+/// the daemon and folds in what changed since the previous tick, so the
+/// Operator has concrete signal to react to instead of a blank "go look".
+/// Falls back to [`AMBIENT_TICK_FALLBACK`] if the daemon can't be reached.
+/// `prev` carries each session's last-seen state across ticks for the delta.
+async fn build_ambient_observation(
+    self_id: &str,
+    prev: &mut HashMap<String, agentd_protocol::SessionState>,
+) -> String {
+    let socket = agentd_protocol::paths::Paths::discover().socket();
+    let Ok(client) = agentd_client::Client::connect(&socket).await else {
+        return AMBIENT_TICK_FALLBACK.to_string();
+    };
+    let Ok(sessions) = client.list().await else {
+        return AMBIENT_TICK_FALLBACK.to_string();
+    };
+    format_ambient_observation(&sessions, self_id, prev, chrono::Utc::now())
+}
+
+/// Pure formatter for the ambient-tick observation: counts active sessions by
+/// state, lists what changed since the previous tick, flags what needs
+/// attention, and updates `prev` for the next delta. Split out from the daemon
+/// round-trip so it's testable.
+fn format_ambient_observation(
+    sessions: &[agentd_protocol::SessionSummary],
+    self_id: &str,
+    prev: &mut HashMap<String, agentd_protocol::SessionState>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    use agentd_protocol::SessionState;
+    let first_tick = prev.is_empty();
+    let label = |s: &agentd_protocol::SessionSummary| -> String {
+        let title = s.title.clone().unwrap_or_else(|| s.harness.clone());
+        let short: String = s.id.chars().take(8).collect();
+        format!("{short} \"{}\"", title.chars().take(32).collect::<String>())
+    };
+    let idle_min = |s: &agentd_protocol::SessionSummary| -> i64 {
+        s.last_event_at
+            .map(|t| (now - t).num_minutes().max(0))
+            .unwrap_or(0)
+    };
+
+    let (mut running, mut awaiting, mut errored) = (0usize, 0usize, 0usize);
+    let mut notable: Vec<String> = Vec::new();
+    let mut changes: Vec<String> = Vec::new();
+    let mut cur: HashMap<String, SessionState> = HashMap::new();
+
+    for s in sessions {
+        if s.id == self_id {
+            continue;
+        }
+        cur.insert(s.id.clone(), s.state);
+        if !first_tick && prev.get(&s.id) != Some(&s.state) {
+            match s.state {
+                SessionState::Errored => changes.push(format!("{} → errored", label(s))),
+                SessionState::AwaitingInput => {
+                    changes.push(format!("{} → awaiting_input", label(s)))
+                }
+                SessionState::Done => changes.push(format!("{} → done", label(s))),
+                _ => {}
+            }
+        }
+        match s.state {
+            SessionState::Running => running += 1,
+            SessionState::AwaitingInput => {
+                awaiting += 1;
+                let m = idle_min(s);
+                if m >= 30 {
+                    notable.push(format!("{} awaiting_input {m}m", label(s)));
+                }
+            }
+            SessionState::Errored => {
+                errored += 1;
+                notable.push(format!("{} errored {}m ago", label(s), idle_min(s)));
+            }
+            _ => {}
+        }
+    }
+    *prev = cur;
+
+    let cap = |mut v: Vec<String>, n: usize| -> String {
+        if v.is_empty() {
+            return "none".to_string();
+        }
+        let extra = v.len().saturating_sub(n);
+        v.truncate(n);
+        if extra > 0 {
+            v.push(format!("(+{extra} more)"));
+        }
+        v.join("; ")
+    };
+    let changes_line = if first_tick {
+        "(first tick — baseline only)".to_string()
+    } else {
+        cap(changes, 6)
+    };
+
+    format!(
+        "OBSERVATION: ambient operator loop tick.\n\
+         Fleet now: {running} running, {awaiting} awaiting_input, {errored} errored.\n\
+         Changes since last tick: {changes_line}.\n\
+         Needs attention: {}.\n\
+         If a session looks stuck, errored, or surprising, inspect it (transcript/diff/output) and \
+         surface one short sentence or update an Operator widget. Otherwise reply exactly `noted`.",
+        cap(notable, 6),
+    )
 }
 
 fn background_completion_observation_text(
