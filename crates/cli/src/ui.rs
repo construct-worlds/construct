@@ -107,6 +107,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_trigger = None;
     app.layout.dynamic_ui_triggers.clear();
     app.layout.shortcut_hints.clear();
+    app.layout.modeline_approval_mode_hit = None;
     app.layout.main_window_areas.clear();
     app.layout.main_window_dividers.clear();
     app.window_pane_sizes.clear();
@@ -253,6 +254,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_list_title_button_tooltips(f, app);
     render_view_uncollapse_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
+    render_modeline_approval_mode_tooltip(f, app);
     render_tasks_popup(f, app);
     render_remote_control_popup(f, app);
     if app.help_visible {
@@ -5172,7 +5174,7 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
-fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
+fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     let s = app.selected_session();
     let conn = if app.connected { "" } else { " disconnected!" };
     let focus_label = match app.focus {
@@ -5184,10 +5186,8 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
     } else {
         String::new()
     };
-    let approval_mode_badge = match s.and_then(|s| s.approval_mode.badge()) {
-        Some(badge) => format!("[{badge}]  "),
-        None => String::new(),
-    };
+    let approval_mode_label = s.and_then(approval_mode_modeline_label);
+    let approval_mode_badge = approval_mode_label.map(|badge| format!("[{badge}]"));
     // "● remote: N" badge when at least one phone / remote client is
     // attached to the daemon. Visible signal that another surface
     // is also driving sessions, so the local user doesn't get
@@ -5203,11 +5203,9 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
     } else {
         ""
     };
-    let modeline = format!(
-        " agentd  focus:{focus}  {sel}  {model}  {remote}{approval_mode}{scrollback}{chord}{empty_hint}{status}{conn} ",
+    let modeline_before_approval_mode = format!(
+        " agentd  focus:{focus}  {sel}  {model}  {remote}",
         focus = focus_label,
-        scrollback = scrollback_label,
-        approval_mode = approval_mode_badge,
         remote = remote_badge,
         sel = match s {
             Some(s) => format!("\"{}\"", primary_label(s)),
@@ -5217,6 +5215,32 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
             Some(s) => s.model.clone().unwrap_or_else(|| "-".into()),
             None => "-".into(),
         },
+    );
+    if approval_mode_label.is_some() {
+        let start_col = area
+            .x
+            .saturating_add(UnicodeWidthStr::width(modeline_before_approval_mode.as_str()) as u16);
+        let width = approval_mode_badge
+            .as_deref()
+            .map(UnicodeWidthStr::width)
+            .unwrap_or(0) as u16;
+        if width > 0 && start_col < area.x.saturating_add(area.width) {
+            let end_col = start_col
+                .saturating_add(width)
+                .min(area.x.saturating_add(area.width));
+            if end_col > start_col {
+                app.layout.modeline_approval_mode_hit =
+                    Some(crate::app::ModelineApprovalModeHit {
+                        row: area.y,
+                        start_col,
+                        end_col,
+                    });
+            }
+        }
+    }
+    let modeline_after_approval_mode = format!(
+        "{scrollback}{chord}{empty_hint}{status}{conn} ",
+        scrollback = scrollback_label,
         chord = if app.chord_label.is_empty() {
             String::new()
         } else {
@@ -5225,7 +5249,30 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
         empty_hint = empty_hint,
         status = status,
     );
-    let para = Paragraph::new(modeline).style(
+    let mut spans = Vec::new();
+    spans.push(Span::raw(modeline_before_approval_mode));
+    if let Some(badge) = approval_mode_badge {
+        let hovered = app
+            .mouse_pos
+            .zip(app.layout.modeline_approval_mode_hit)
+            .is_some_and(|((col, row), hit)| hit.contains(col, row));
+        let badge_style = Style::default()
+            .bg(app.theme.modeline_bg)
+            .fg(if hovered {
+                app.theme.text
+            } else {
+                app.theme.modeline_fg
+            })
+            .add_modifier(if hovered {
+                Modifier::BOLD | Modifier::UNDERLINED
+            } else {
+                Modifier::UNDERLINED
+            });
+        spans.push(Span::styled(badge, badge_style));
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::raw(modeline_after_approval_mode));
+    let para = Paragraph::new(Line::from(spans)).style(
         Style::default()
             .bg(app.theme.modeline_bg)
             .fg(app.theme.modeline_fg),
@@ -5254,6 +5301,37 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
             f.render_widget(np, nrect);
         }
     }
+}
+
+fn approval_mode_modeline_label(s: &SessionSummary) -> Option<&'static str> {
+    s.approval_mode
+        .badge()
+        .or_else(|| (s.harness == "zarvis").then_some("manual"))
+}
+
+fn render_modeline_approval_mode_tooltip(f: &mut Frame, app: &App) {
+    let Some(hit) = app.layout.modeline_approval_mode_hit else {
+        return;
+    };
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    if !hit.contains(mx, my) {
+        return;
+    }
+    let Some(s) = app.selected_session() else {
+        return;
+    };
+    let Some(label) = approval_mode_modeline_label(s) else {
+        return;
+    };
+    render_button_tooltip(
+        f,
+        &app.theme,
+        &format!(" Approval mode: {label}. Click to cycle "),
+        hit.start_col,
+        hit.row.saturating_sub(2),
+    );
 }
 
 /// Compute how many rows the minibuffer footer occupies this frame.
@@ -7678,6 +7756,25 @@ mod tests {
             "zarvis"
         );
         assert_eq!(harness_label(&summary_with_mode("shell", None)), "shell");
+    }
+
+    #[test]
+    fn approval_mode_modeline_label_shows_manual_for_zarvis() {
+        let s = summary_with_mode("zarvis", Some("interactive"));
+        assert_eq!(approval_mode_modeline_label(&s), Some("manual"));
+    }
+
+    #[test]
+    fn approval_mode_modeline_label_hides_manual_for_shell() {
+        let s = summary_with_mode("shell", Some("interactive"));
+        assert_eq!(approval_mode_modeline_label(&s), None);
+    }
+
+    #[test]
+    fn approval_mode_modeline_label_uses_non_manual_badge() {
+        let mut s = summary_with_mode("zarvis", Some("interactive"));
+        s.approval_mode = agentd_protocol::ApprovalMode::UnsafeAuto;
+        assert_eq!(approval_mode_modeline_label(&s), Some("unsafe-auto"));
     }
 
     #[test]
