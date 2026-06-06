@@ -1353,6 +1353,27 @@ mod tests {
     }
 
     #[test]
+    fn observation_panel_echo_shows_trigger_without_boilerplate() {
+        // Real user input echoes itself — no synthetic echo.
+        assert!(observation_panel_echo("hello operator").is_none());
+        // Fleet event: shown (dim), with the internal marker stripped.
+        let s = String::from_utf8(
+            observation_panel_echo("OBSERVATION: session ab12 entered errored (boom)").unwrap(),
+        )
+        .unwrap();
+        assert!(s.contains("session ab12 entered errored (boom)"), "{s}");
+        assert!(!s.contains("OBSERVATION:"), "marker not stripped:\n{s}");
+        // Ambient monitor: boilerplate stripped, findings kept under a label.
+        let obs = "OBSERVATION: ambient fleet monitor flagged the following. Decide whether to \
+                   surface it to the user or update an Operator widget; reply exactly `noted` if \
+                   it's not worth it.\ns277 \"x\": blocked at prompt";
+        let s = String::from_utf8(observation_panel_echo(obs).unwrap()).unwrap();
+        assert!(s.contains("ambient monitor flagged:"), "{s}");
+        assert!(s.contains("s277 \"x\": blocked at prompt"), "{s}");
+        assert!(!s.contains("Decide whether to surface"), "boilerplate kept:\n{s}");
+    }
+
+    #[test]
     fn parse_triage_finding_filters_nothing() {
         assert!(parse_triage_finding("nothing").is_none());
         assert!(parse_triage_finding("  Nothing.  ").is_none());
@@ -2485,7 +2506,13 @@ pub async fn run(
                 },
             }
         );
-        let ambient_turn = user_text.starts_with("OBSERVATION: ambient operator loop tick");
+        // Echo an OBSERVATION trigger into the panel (dim) before the response
+        // streams, so the user sees what a reply like `noted` is reacting to —
+        // an ambient monitor finding or a fleet event — instead of a bare reply
+        // with no context. Real user input echoes itself, so it's skipped.
+        if let Some(echo) = observation_panel_echo(&user_text) {
+            emit.emit(SessionEvent::pty(&echo));
+        }
         emit.emit(SessionEvent::Message {
             role: agentd_protocol::MessageRole::User,
             text: user_text,
@@ -2563,10 +2590,6 @@ pub async fn run(
             }
             let _pruned = context::prune_to_budget(&mut messages, budget);
             let mut sink = PtySink::new(&emit, pty_width, turn_started_at_ms);
-            if ambient_turn {
-                sink.emit_pty = false;
-                sink.emit_messages = false;
-            }
             // Wrap the provider call so user typing during the
             // stream is fed to the editor and pressed-Enter lines
             // join the pending-input queue instead of vanishing
@@ -2627,10 +2650,6 @@ pub async fn run(
                             )),
                         });
                         let mut sink2 = PtySink::new(&emit, pty_width, turn_started_at_ms);
-                        if ambient_turn {
-                            sink2.emit_pty = false;
-                            sink2.emit_messages = false;
-                        }
                         let drive2 = drive_with_input_silent(
                             &mut inbox,
                             &mut editor,
@@ -3074,6 +3093,31 @@ fn operator_ambient_loop_interval() -> Duration {
 
 /// Bare ambient-tick prompt used when the daemon snapshot is unavailable.
 const AMBIENT_TICK_FALLBACK: &str = "OBSERVATION: ambient operator loop tick. Quietly inspect only if useful; update Operator widgets for helpful ambient status; reply exactly `noted` if nothing needs surfacing.";
+
+/// Dim PTY echo of an `OBSERVATION:` trigger so the operator panel shows what a
+/// response (e.g. a bare `noted`) is reacting to — an ambient monitor finding
+/// or a fleet event — instead of an answer with no visible question. Returns
+/// `None` for non-observation turns (real user input echoes itself). The
+/// monitor's instruction boilerplate is stripped so only the substance shows.
+fn observation_panel_echo(user_text: &str) -> Option<Vec<u8>> {
+    let body = user_text.strip_prefix("OBSERVATION: ")?;
+    let display = match body.split_once('\n') {
+        Some((first, rest)) if first.starts_with("ambient fleet monitor flagged") => {
+            format!("ambient monitor flagged:\n{}", rest.trim_end())
+        }
+        _ => body.trim_end().to_string(),
+    };
+    if display.trim().is_empty() {
+        return None;
+    }
+    let mut out = String::from("\r\n");
+    for line in display.lines() {
+        out.push_str("\x1b[2m\u{2502} ");
+        out.push_str(line);
+        out.push_str("\x1b[0m\r\n");
+    }
+    Some(out.into_bytes())
+}
 
 /// Minutes a `Running` PTY session may go without output before the snapshot
 /// treats it as idle (likely waiting for input, or stuck). Interactive
