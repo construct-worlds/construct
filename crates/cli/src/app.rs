@@ -1261,6 +1261,20 @@ pub struct TerminalScrollbarHit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelineApprovalModeHit {
+    pub row: u16,
+    pub start_col: u16,
+    /// Exclusive end column.
+    pub end_col: u16,
+}
+
+impl ModelineApprovalModeHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowPaneHit {
     pub id: u64,
     pub area: ratatui::layout::Rect,
@@ -1286,6 +1300,8 @@ pub struct LayoutSnapshot {
     pub pin_strip_area: Option<ratatui::layout::Rect>,
     pub matrix_rain_area: Option<ratatui::layout::Rect>,
     pub minibuffer_area: Option<ratatui::layout::Rect>,
+    /// Clickable approval-mode badge in the modeline for the selected session.
+    pub modeline_approval_mode_hit: Option<ModelineApprovalModeHit>,
     /// Number of rows of the list pane currently in use (so a click
     /// past the last row is a no-op rather than selecting an
     /// out-of-range item). Mirrors `app.list_items().len()`.
@@ -3744,8 +3760,18 @@ impl App {
 
     /// Cycle the selected session's approval mode.
     pub async fn cycle_approval_mode(&mut self) {
+        self.cycle_approval_mode_with_status(true).await;
+    }
+
+    pub async fn cycle_approval_mode_silent(&mut self) {
+        self.cycle_approval_mode_with_status(false).await;
+    }
+
+    async fn cycle_approval_mode_with_status(&mut self, show_status: bool) {
         let Some(s) = self.selected_session() else {
-            self.set_status("no session selected".into());
+            if show_status {
+                self.set_status("no session selected".into());
+            }
             return;
         };
         let id = s.id.clone();
@@ -3755,10 +3781,10 @@ impl App {
             agentd_protocol::ApprovalMode::UnsafeAuto => agentd_protocol::ApprovalMode::Manual,
         };
         match self.client.set_approval_mode(&id, next).await {
-            Ok(()) => self.set_status(format!(
-                "approval mode {}",
-                next.badge().unwrap_or("manual")
-            )),
+            Ok(()) if show_status => {
+                self.set_status(format!("approval mode {}", next.badge().unwrap_or("manual")))
+            }
+            Ok(()) => {}
             Err(e) => self.set_status(format!("set_approval_mode failed: {e}")),
         }
     }
@@ -4488,6 +4514,14 @@ impl App {
             return;
         }
         if self.handle_dynamic_ui_overlay_click(col, row).await {
+            return;
+        }
+        if self
+            .layout
+            .modeline_approval_mode_hit
+            .is_some_and(|hit| hit.contains(col, row))
+        {
+            self.cycle_approval_mode_silent().await;
             return;
         }
         // Matrix-rain horizontal reveal word: jump to the session that
@@ -7562,6 +7596,7 @@ mod tests {
             pin_strip_area: Some(Rect::new(20, 20, 80, 8)),
             matrix_rain_area: None,
             minibuffer_area: Some(Rect::new(0, 29, 100, 4)),
+            modeline_approval_mode_hit: None,
             list_row_count: 0,
             list_items_area: None,
             list_scroll_offset: 0,
