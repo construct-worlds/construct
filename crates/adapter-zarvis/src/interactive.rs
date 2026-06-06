@@ -1329,6 +1329,16 @@ mod tests {
     }
 
     #[test]
+    fn truncate_keep_tail_keeps_recent_drops_older() {
+        assert_eq!(truncate_keep_tail("short", 100), "short");
+        let long = "0123456789".repeat(20); // 200 bytes
+        let out = truncate_keep_tail(&long, 50);
+        assert!(out.starts_with("…(older truncated) "), "{out}");
+        assert!(out.ends_with("0123456789"), "{out}"); // kept the most-recent tail
+        assert!(out.len() < 90, "len {}", out.len());
+    }
+
+    #[test]
     fn ambient_snapshot_counts_idle_deltas_and_preview_priority() {
         let now = chrono::Utc::now();
         let stale = now.timestamp_millis() - 15 * 60_000; // quiet 15m → idle
@@ -1366,9 +1376,11 @@ mod tests {
             snap.summary
         );
         assert!(snap.summary.contains("baseline only"), "{}", snap.summary);
-        // Preview priority: errored first, then idle.
+        // Preview priority: errored first, then idle; recently-active sessions
+        // (bbbb2222) are also previewable so the Operator sees live activity.
         assert_eq!(snap.preview_targets[0].0, "cccc3333");
         assert!(snap.preview_targets.iter().any(|(id, _)| id == "aaaa1111"));
+        assert!(snap.preview_targets.iter().any(|(id, _)| id == "bbbb2222"));
 
         // Second tick: aaaa1111 → done surfaces as a delta.
         let sessions2 = vec![
@@ -2979,9 +2991,37 @@ const AMBIENT_TICK_FALLBACK: &str = "OBSERVATION: ambient operator loop tick. Qu
 /// claude/codex/shell sessions never emit `AwaitingInput`, so PTY quiescence
 /// (`last_pty_at_ms`) is the only "is it waiting?" signal available for them.
 const IDLE_RUNNING_MINS: i64 = 10;
-/// How many notable sessions get an inline transcript preview each tick. Keeps
-/// the observation's input cost bounded even on a large fleet.
-const PREVIEW_SESSIONS: usize = 3;
+
+/// Max sessions previewed per tick. Override with `AGENTD_OPERATOR_PREVIEW_SESSIONS`.
+fn preview_session_cap() -> usize {
+    std::env::var("AGENTD_OPERATOR_PREVIEW_SESSIONS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(10)
+        .min(50)
+}
+/// Per-session preview byte budget. Override with `AGENTD_OPERATOR_PREVIEW_BYTES`.
+/// When the recent messages exceed it, the older part is truncated.
+fn preview_byte_cap() -> usize {
+    std::env::var("AGENTD_OPERATOR_PREVIEW_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(800)
+        .clamp(120, 8000)
+}
+
+/// Keep the tail (most recent) of `s` within `max_bytes`, truncating the older
+/// front and marking it. Char-boundary safe.
+fn truncate_keep_tail(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut start = s.len().saturating_sub(max_bytes);
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…(older truncated) {}", &s[start..])
+}
 
 struct AmbientSnapshot {
     summary: String,
@@ -3008,40 +3048,85 @@ async fn build_ambient_observation(
     };
     let snap = compute_ambient_snapshot(&sessions, self_id, prev, chrono::Utc::now());
     let mut out = snap.summary;
-    // Selectively attach a compact preview for only the top few notable
-    // sessions, so the Operator can judge them without ballooning context.
-    for (sid, label) in snap.preview_targets.iter().take(PREVIEW_SESSIONS) {
-        if let Some(preview) = fetch_session_preview(&client, sid).await {
-            out.push_str(&format!("\n\n{label} — recent:\n{preview}"));
+    // Attach a byte-bounded preview for the most relevant sessions (needs-
+    // attention first, then recently-active). Bounded count + per-session byte
+    // budget keep input context in check; the full session id in each heading
+    // lets the Operator drill in with agentd_get_transcript/output/diff.
+    let bytes = preview_byte_cap();
+    for (sid, label) in snap.preview_targets.iter().take(preview_session_cap()) {
+        if let Some(preview) = fetch_session_preview(&client, sid, bytes).await {
+            out.push_str(&format!("\n\n[{sid}] {label} — recent:\n{preview}"));
         }
     }
     out
 }
 
-/// Compact, ANSI-free preview of a session's recent activity: the last few
-/// non-empty messages from its transcript tail. Bounded by design (a small
-/// tail, a few messages, each truncated).
-async fn fetch_session_preview(client: &agentd_client::Client, sid: &str) -> Option<String> {
-    let tr = client.transcript_tail(sid, 24).await.ok()?;
-    let mut lines: Vec<String> = Vec::new();
+/// Compact, ANSI-free preview of a session's recent activity, byte-bounded
+/// (older part truncated past `max_bytes`). Prefers the rendered PTY screen —
+/// it works for PTY-heavy claude/codex sessions whose transcript tail is all
+/// `Pty` markers — and falls back to recent transcript messages for headless /
+/// no-PTY sessions.
+async fn fetch_session_preview(
+    client: &agentd_client::Client,
+    sid: &str,
+    max_bytes: usize,
+) -> Option<String> {
+    if let Some(screen) = pty_screen_preview(client, sid, max_bytes).await {
+        return Some(screen);
+    }
+    let tr = client.transcript_tail(sid, 40).await.ok()?;
+    let mut msgs: Vec<String> = Vec::new();
     for ev in tr.events.iter().rev() {
         if let agentd_protocol::SessionEvent::Message { role, text } = &ev.event {
-            let t = text.trim();
-            if t.is_empty() {
+            let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if collapsed.is_empty() {
                 continue;
             }
-            let one: String = t.chars().take(200).collect::<String>().replace('\n', " ");
-            lines.push(format!("  [{role:?}] {one}"));
-            if lines.len() >= 3 {
+            msgs.push(format!("[{role:?}] {collapsed}"));
+            if msgs.len() >= 8 {
                 break;
             }
         }
     }
+    if msgs.is_empty() {
+        return None;
+    }
+    msgs.reverse();
+    Some(truncate_keep_tail(&format!("  {}", msgs.join("\n  ")), max_bytes))
+}
+
+/// Render the recent PTY-log tail through a `vt100` parser and return the
+/// screen's non-blank lines (byte-bounded). `None` for sessions with no PTY.
+async fn pty_screen_preview(
+    client: &agentd_client::Client,
+    sid: &str,
+    max_bytes: usize,
+) -> Option<String> {
+    use base64::Engine as _;
+    let replay = client.pty_replay_tail(sid, 64 * 1024).await.ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(replay.data.as_bytes())
+        .ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let (rows, cols) = replay
+        .size
+        .map(|s| (s.rows.max(1), s.cols.max(1)))
+        .unwrap_or((30, 100));
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(&bytes);
+    let contents = parser.screen().contents();
+    // Keep lines with real content; drop blanks and pure box-drawing/separator
+    // rows that just eat the byte budget.
+    let lines: Vec<&str> = contents
+        .lines()
+        .filter(|l| l.chars().any(|c| c.is_alphanumeric()))
+        .collect();
     if lines.is_empty() {
         return None;
     }
-    lines.reverse();
-    Some(lines.join("\n"))
+    Some(truncate_keep_tail(&format!("  {}", lines.join("\n  ")), max_bytes))
 }
 
 /// Pure snapshot builder: counts active sessions by state (including idle
@@ -3077,10 +3162,14 @@ fn compute_ambient_snapshot(
     };
 
     let (mut running, mut awaiting, mut errored, mut idle) = (0usize, 0usize, 0usize, 0usize);
-    // (session_id, line) per category, in priority order for needs-attention + preview.
+    // (session_id, line) per category, in priority order for needs-attention.
     let mut errored_list: Vec<(String, String)> = Vec::new();
     let mut idle_list: Vec<(String, String)> = Vec::new();
     let mut awaiting_list: Vec<(String, String)> = Vec::new();
+    // Running sessions with recent PTY output — previewed (not "needs
+    // attention") so the Operator can see what's actively happening.
+    // (pty_idle_min, session_id, line); sorted most-recent-first below.
+    let mut active_list: Vec<(i64, String, String)> = Vec::new();
     let mut changes: Vec<String> = Vec::new();
     let mut cur: HashMap<String, SessionState> = HashMap::new();
 
@@ -3109,6 +3198,13 @@ fn compute_ambient_snapshot(
                         s.id.clone(),
                         format!("{} running but quiet {pm}m (idle/waiting?)", label(s)),
                     ));
+                } else {
+                    let ago = if pm < 0 { "?".to_string() } else { format!("{pm}m") };
+                    active_list.push((
+                        pm.max(0),
+                        s.id.clone(),
+                        format!("{} running, last output {ago} ago", label(s)),
+                    ));
                 }
             }
             SessionState::AwaitingInput => {
@@ -3128,10 +3224,20 @@ fn compute_ambient_snapshot(
     }
     *prev = cur;
 
-    let mut notable: Vec<(String, String)> = Vec::new();
-    notable.extend(errored_list);
-    notable.extend(idle_list);
-    notable.extend(awaiting_list);
+    // "Needs attention" = the concerning sessions only.
+    let mut attention: Vec<(String, String)> = Vec::new();
+    attention.extend(errored_list.iter().cloned());
+    attention.extend(idle_list.iter().cloned());
+    attention.extend(awaiting_list.iter().cloned());
+
+    // Preview targets = needs-attention sessions, then recently-active ones
+    // (most recent output first). Capped by the caller (preview_session_cap).
+    active_list.sort_by_key(|(pm, _, _)| *pm);
+    let mut preview_targets: Vec<(String, String)> = Vec::new();
+    preview_targets.extend(errored_list);
+    preview_targets.extend(idle_list);
+    preview_targets.extend(awaiting_list);
+    preview_targets.extend(active_list.into_iter().map(|(_, id, line)| (id, line)));
 
     let cap_lines = |v: &[(String, String)], n: usize| -> String {
         if v.is_empty() {
@@ -3163,15 +3269,17 @@ fn compute_ambient_snapshot(
          Changes since last tick: {changes_line}.\n\
          Needs attention: {}.\n\
          A 'running but quiet' session is likely waiting for the user or stuck — interactive \
-         claude/codex sessions don't signal awaiting_input, so judge them by the preview below.\n\
-         If a session looks stuck, errored, or worth surfacing, say one short sentence or update an \
-         Operator widget. Otherwise reply exactly `noted`.",
-        cap_lines(&notable, 6),
+         claude/codex sessions don't signal awaiting_input, so judge them by the previews.\n\
+         Recent-activity previews follow, each headed by its full session id. Call \
+         agentd_get_transcript / agentd_get_output / agentd_get_diff on a session id (or \
+         agentd_list_sessions) to inspect deeper. Surface one short sentence or update an Operator \
+         widget if useful, otherwise reply exactly `noted`.",
+        cap_lines(&attention, 6),
     );
 
     AmbientSnapshot {
         summary,
-        preview_targets: notable,
+        preview_targets,
     }
 }
 

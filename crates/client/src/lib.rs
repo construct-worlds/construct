@@ -385,6 +385,19 @@ impl Client {
         )
         .await
     }
+    /// Fetch up to `max_bytes` of the most recent PTY-log tail — bounded, for
+    /// rendering a compact screen preview without pulling the full replay cap.
+    pub async fn pty_replay_tail(&self, id: &str, max_bytes: usize) -> Result<PtyReplayResult> {
+        self.request(
+            ipc_method::SESSION_PTY_REPLAY,
+            &agentd_protocol::PtyReplayParams {
+                session_id: id.to_string(),
+                max_bytes: Some(max_bytes),
+                before_offset: None,
+            },
+        )
+        .await
+    }
     pub async fn interrupt(&self, id: &str) -> Result<()> {
         let _: serde_json::Value = self
             .request(
