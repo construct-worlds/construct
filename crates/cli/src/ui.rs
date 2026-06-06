@@ -2844,7 +2844,7 @@ fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
                 "C-x C-c",
                 if hovered[3] { hover_style } else { label_style },
             ),
-            Span::raw("  exit agentd"),
+            Span::raw("  exit TUI"),
         ]),
     ];
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });

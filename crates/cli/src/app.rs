@@ -8576,11 +8576,11 @@ mod tests {
             "missing create shortcut:\n{screen}"
         );
         assert!(
-            screen.contains("exit agentd"),
+            screen.contains("exit TUI"),
             "missing exit shortcut:\n{screen}"
         );
         assert!(
-            screen.contains("C-x C-c  exit agentd"),
+            screen.contains("C-x C-c  exit TUI"),
             "missing quit shortcut:\n{screen}"
         );
         assert!(
