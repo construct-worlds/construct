@@ -51,11 +51,6 @@ pub enum Item {
     /// events; PTY bytes between the corresponding OSC `7700`
     /// markers are discarded.
     ToolBlock(ToolBlock),
-    /// Adjacent tool calls with the same tool name, rendered as one
-    /// collapsible presentation group. This is derived client-side
-    /// from the normal event stream; individual blocks are still kept
-    /// so results, status, and expansion remain inspectable.
-    ToolGroup(ToolGroup),
     /// A structured chat message from a session that emits no PTY for
     /// its conversation (headless harnesses). Rendered as synthesized,
     /// role-styled text. Streaming deltas arrive as many consecutive
@@ -66,13 +61,6 @@ pub enum Item {
         text: String,
         break_before: bool,
     },
-}
-
-#[derive(Debug, Clone)]
-pub struct ToolGroup {
-    pub tool: String,
-    pub blocks: Vec<ToolBlock>,
-    pub expanded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -329,14 +317,6 @@ enum ItemSig {
         /// a per-second elapsed counter forced full parser replays.
         running_controls_ready: Option<bool>,
     },
-    Group {
-        tool: String,
-        count: usize,
-        expanded: bool,
-        summary: String,
-        status: String,
-        blocks: Vec<ItemSig>,
-    },
     /// Message items are immutable once pushed (streaming appends new
     /// items rather than growing one), so the text length + kind fully
     /// identify the synthesized bytes.
@@ -347,32 +327,11 @@ enum ItemSig {
     },
 }
 
-impl ToolGroup {
-    fn call_id(&self) -> String {
-        self.blocks
-            .first()
-            .map(|b| format!("group:{}", b.call_id))
-            .unwrap_or_else(|| format!("group:{}", self.tool))
-    }
-}
-
 impl ItemSig {
     fn of(item: &Item) -> Self {
         match item {
             Item::PtyChunk(b) => ItemSig::Chunk(b.len()),
             Item::ToolBlock(b) => block_sig(b),
-            Item::ToolGroup(g) => ItemSig::Group {
-                tool: g.tool.clone(),
-                count: g.blocks.len(),
-                expanded: g.expanded,
-                summary: summarize_group(g),
-                status: group_status(g),
-                blocks: if g.expanded {
-                    g.blocks.iter().map(block_sig).collect()
-                } else {
-                    Vec::new()
-                },
-            },
             Item::Message {
                 kind,
                 text,
@@ -769,7 +728,7 @@ impl ItemHistory {
             block.ok = ok;
         }
         if block.tool.is_some() {
-            self.push_tool_block_grouped(block);
+            self.push_tool_block(block);
         } else {
             self.items.push(Item::ToolBlock(block));
         }
@@ -790,67 +749,8 @@ impl ItemHistory {
         }
     }
 
-    fn push_tool_block_grouped(&mut self, block: ToolBlock) {
-        let tool = block.tool.clone().unwrap_or_else(|| "?".to_string());
-        if self.cached.is_some() {
-            self.items.push(Item::ToolBlock(block));
-            return;
-        }
-        if let Some(last) = self.items.last_mut() {
-            match last {
-                Item::ToolBlock(prev) if prev.tool.as_deref() == Some(tool.as_str()) => {
-                    let prev = prev.clone();
-                    *last = Item::ToolGroup(ToolGroup {
-                        tool,
-                        blocks: vec![prev, block],
-                        expanded: false,
-                    });
-                    return;
-                }
-                Item::ToolGroup(group) if group.tool == tool => {
-                    group.blocks.push(block);
-                    return;
-                }
-                _ => {}
-            }
-        }
+    fn push_tool_block(&mut self, block: ToolBlock) {
         self.items.push(Item::ToolBlock(block));
-    }
-
-    fn regroup_tool_block_at(&mut self, idx: usize) {
-        if idx >= self.items.len() {
-            return;
-        }
-        let Item::ToolBlock(block) = &self.items[idx] else {
-            return;
-        };
-        let Some(tool) = block.tool.clone() else {
-            return;
-        };
-        if idx == 0 {
-            return;
-        }
-        if self.cached.is_some() {
-            return;
-        }
-        let block = match self.items.remove(idx) {
-            Item::ToolBlock(block) => block,
-            _ => return,
-        };
-        match self.items.get_mut(idx - 1) {
-            Some(Item::ToolBlock(prev)) if prev.tool.as_deref() == Some(tool.as_str()) => {
-                let prev = prev.clone();
-                self.items[idx - 1] = Item::ToolGroup(ToolGroup {
-                    tool,
-                    blocks: vec![prev, block],
-                    expanded: false,
-                });
-            }
-            Some(Item::ToolGroup(group)) if group.tool == tool => {
-                group.blocks.push(block);
-            }
-            _ => self.items.insert(idx, Item::ToolBlock(block)),
-        }
     }
 
     /// Apply a `ToolUse` event. The protocol's `ToolUse` carries no
@@ -863,7 +763,6 @@ impl ItemHistory {
             if let Some(Item::ToolBlock(b)) = self.items.get_mut(idx) {
                 b.tool = Some(tool.clone());
                 b.args_summary = Some(args_summary.clone());
-                self.regroup_tool_block_at(idx);
                 self.dirty = true;
                 return;
             }
@@ -908,7 +807,7 @@ impl ItemHistory {
             block.output = Some(tool_output_preview_for_history(&output));
             block.ok = ok;
         }
-        self.push_tool_block_grouped(block);
+        self.push_tool_block(block);
         self.dirty = true;
     }
 
@@ -956,7 +855,6 @@ impl ItemHistory {
     fn find_block_mut(&mut self, call_id: &str) -> Option<&mut ToolBlock> {
         self.items.iter_mut().rev().find_map(|it| match it {
             Item::ToolBlock(b) if b.call_id == call_id => Some(b),
-            Item::ToolGroup(g) => g.blocks.iter_mut().rev().find(|b| b.call_id == call_id),
             _ => None,
         })
     }
@@ -964,19 +862,6 @@ impl ItemHistory {
     /// Toggle the expand state of a block. Returns true when a
     /// matching block was found (and toggled), false otherwise.
     pub fn toggle_block(&mut self, call_id: &str) -> bool {
-        if let Some(group) = self.items.iter_mut().rev().find_map(|it| match it {
-            Item::ToolGroup(g) if g.call_id() == call_id => Some(g),
-            _ => None,
-        }) {
-            group.expanded = !group.expanded;
-            if group.expanded {
-                for block in &mut group.blocks {
-                    block.expanded = false;
-                }
-            }
-            self.dirty = true;
-            return true;
-        }
         if let Some(block) = self.find_block_mut(call_id) {
             block.expanded = !block.expanded;
             self.dirty = true;
@@ -1411,39 +1296,6 @@ impl ItemHistory {
                         }],
                     }
                 }
-                Item::ToolGroup(group) => {
-                    let header = synth_group_header(group);
-                    let body = synth_group_body(group, cols);
-                    if idx >= start_processing_at {
-                        cache.parser.process(&header);
-                    }
-                    let header_metrics = visible_metrics_from_col(&header, cols, cursor_col);
-                    let group_row_start = 0;
-                    let group_row_end = header_metrics.lines;
-                    cursor_col = header_metrics.end_col;
-
-                    if idx >= start_processing_at {
-                        cache.parser.process(&body);
-                    }
-                    let body_metrics = visible_metrics_from_col(&body, cols, cursor_col);
-                    let child_layouts =
-                        group_child_block_layouts(group, cols, cursor_col, group_row_end);
-                    cursor_col = body_metrics.end_col;
-                    let mut blocks = vec![BlockLayout {
-                        call_id: group.call_id(),
-                        row_start_offset: group_row_start,
-                        row_end_offset: group_row_end,
-                        status_row_offset: None,
-                        bg_cols: None,
-                        kill_cols: None,
-                    }];
-                    blocks.extend(child_layouts);
-                    ItemLayout {
-                        lines: header_metrics.lines + body_metrics.lines,
-                        end_col: body_metrics.end_col,
-                        blocks,
-                    }
-                }
                 Item::Message {
                     kind,
                     text,
@@ -1837,148 +1689,6 @@ fn synth_message(kind: MessageKind, text: &str, break_before: bool) -> Vec<u8> {
     out
 }
 
-fn synth_group_header(group: &ToolGroup) -> Vec<u8> {
-    let summary = summarize_group(group);
-    let chevron = if group.expanded { "▾" } else { "▸" };
-    format!(
-        "\r\n\x1b[2;32m{chevron} \x1b[0m\x1b[1;92m{}\x1b[0m\x1b[2m × {} · {}\x1b[0m\r\n",
-        group.tool,
-        group.blocks.len(),
-        summary
-    )
-    .into_bytes()
-}
-
-fn synth_group_body(group: &ToolGroup, cols: u16) -> Vec<u8> {
-    let mut out = Vec::with_capacity(128);
-    if group.expanded {
-        for block in &group.blocks {
-            let synth = synth_block(block, cols.saturating_sub(2));
-            out.extend_from_slice(&indent_synth_bytes(&synth.bytes, 2));
-        }
-    } else {
-        let status = group_status(group);
-        if !status.is_empty() {
-            out.extend_from_slice(format!("  \x1b[2m{}\x1b[0m\r\n", status).as_bytes());
-        }
-    }
-    out
-}
-
-fn indent_synth_bytes(bytes: &[u8], spaces: usize) -> Vec<u8> {
-    let indent = vec![b' '; spaces];
-    let mut out = Vec::with_capacity(bytes.len() + spaces * 4);
-    let mut at_line_start = true;
-    for &b in bytes {
-        if at_line_start && b != b'\r' && b != b'\n' {
-            out.extend_from_slice(&indent);
-            at_line_start = false;
-        }
-        out.push(b);
-        if b == b'\n' {
-            at_line_start = true;
-        }
-    }
-    out
-}
-
-fn group_child_block_layouts(
-    group: &ToolGroup,
-    cols: u16,
-    start_col: usize,
-    row_offset: usize,
-) -> Vec<BlockLayout> {
-    let mut layouts = Vec::new();
-    if group.expanded {
-        let mut offset = row_offset;
-        let mut cursor_col = start_col;
-        for block in &group.blocks {
-            let child = synth_block(block, cols.saturating_sub(2));
-            let indented = indent_synth_bytes(&child.bytes, 2);
-            let metrics = visible_metrics_from_col(&indented, cols, cursor_col);
-            layouts.push(BlockLayout {
-                call_id: block.call_id.clone(),
-                row_start_offset: offset,
-                row_end_offset: offset + metrics.lines,
-                status_row_offset: child.status_row_offset.map(|off| offset + off as usize),
-                bg_cols: child.bg_button_cols,
-                kill_cols: child.kill_button_cols,
-            });
-            offset += metrics.lines;
-            cursor_col = metrics.end_col;
-        }
-    }
-    layouts
-}
-
-fn summarize_group(group: &ToolGroup) -> String {
-    let items: Vec<String> = group
-        .blocks
-        .iter()
-        .filter_map(|b| b.args_summary.as_deref())
-        .filter_map(primary_arg_summary)
-        .take(4)
-        .collect();
-    if items.is_empty() {
-        format!("{} calls", group.blocks.len())
-    } else {
-        let more = group.blocks.len().saturating_sub(items.len());
-        if more > 0 {
-            format!("{}{}", items.join(", "), format!(", +{more} more"))
-        } else {
-            items.join(", ")
-        }
-    }
-}
-
-fn group_status(group: &ToolGroup) -> String {
-    let running = group.blocks.iter().filter(|b| b.output.is_none()).count();
-    let failed = group
-        .blocks
-        .iter()
-        .filter(|b| b.output.is_some() && !b.ok)
-        .count();
-    let completed = group.blocks.iter().filter(|b| b.output.is_some()).count();
-    let mut parts = Vec::new();
-    if completed > 0 {
-        parts.push(format!("{completed} completed"));
-    }
-    if running > 0 {
-        parts.push(format!("{running} running"));
-    }
-    if failed > 0 {
-        parts.push(format!("{failed} failed"));
-    }
-    parts.join(", ")
-}
-
-fn primary_arg_summary(args: &str) -> Option<String> {
-    let compact = compact_tool_args(args);
-    if compact.is_empty() {
-        return None;
-    }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&compact) {
-        for key in ["path", "cwd", "url", "session_id", "command"] {
-            if let Some(value) = value.get(key).and_then(|v| v.as_str()) {
-                return Some(truncate_summary(value, 48));
-            }
-        }
-    }
-    Some(truncate_summary(&compact, 48))
-}
-
-fn truncate_summary(text: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (idx, ch) in text.chars().enumerate() {
-        if idx >= max_chars {
-            out.push('…');
-            return out;
-        }
-        out.push(ch);
-    }
-    out
-}
-
 fn synth_block(block: &ToolBlock, cols: u16) -> SynthOutput {
     /// Placeholder string the zarvis adapter writes into a tool's
     /// `output` when it auto-backgrounds. Kept in sync via the
@@ -2236,7 +1946,6 @@ mod tests {
     fn tool_block_ids(item: &Item) -> Vec<String> {
         match item {
             Item::ToolBlock(b) => vec![b.call_id.clone()],
-            Item::ToolGroup(g) => g.blocks.iter().map(|b| b.call_id.clone()).collect(),
             _ => Vec::new(),
         }
     }
@@ -2456,29 +2165,22 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_same_tool_task_starts_group() {
+    fn adjacent_same_tool_task_starts_stay_separate_blocks() {
         let mut h = ItemHistory::new();
         h.feed_task_start("A".into(), "read_file".into(), r#"{"path":"a.rs"}"#.into());
         h.feed_task_start("B".into(), "read_file".into(), r#"{"path":"b.rs"}"#.into());
         h.feed_tool_result("A", true, "a".into());
         h.feed_tool_result("B", false, "missing".into());
 
-        assert_eq!(h.items.len(), 1);
-        match &h.items[0] {
-            Item::ToolGroup(g) => {
-                assert_eq!(g.tool, "read_file");
-                assert_eq!(tool_block_ids(&h.items[0]), vec!["A", "B"]);
-                assert_eq!(g.blocks[0].output.as_deref(), Some("a"));
-                assert!(!g.blocks[1].ok);
-            }
-            other => panic!("expected tool group, got {other:?}"),
-        }
+        assert_eq!(h.items.len(), 2);
+        assert_eq!(tool_block_ids(&h.items[0]), vec!["A"]);
+        assert_eq!(tool_block_ids(&h.items[1]), vec!["B"]);
 
         let text = screen_text(h.replay(100, 20, 0).screen, 20, 100);
-        assert!(text.contains("▸ read_file × 2"), "{text}");
-        assert!(text.contains("a.rs, b.rs"), "{text}");
-        assert!(text.contains("2 completed"), "{text}");
-        assert!(text.contains("1 failed"), "{text}");
+        assert!(text.contains("→ read_file("), "{text}");
+        assert!(text.contains("a.rs"), "{text}");
+        assert!(text.contains("b.rs"), "{text}");
+        assert!(!text.contains("× 2"), "{text}");
     }
 
     #[test]
@@ -2496,46 +2198,29 @@ mod tests {
     }
 
     #[test]
-    fn expanded_group_exposes_child_hit_rects() {
+    fn adjacent_same_tool_blocks_expose_individual_hit_rects() {
         let mut h = ItemHistory::new();
         h.feed_task_start("A".into(), "shell".into(), "echo a".into());
         h.feed_task_start("B".into(), "shell".into(), "echo b".into());
         h.feed_tool_result("A", true, "a\nmore a\nstill a".into());
         h.feed_tool_result("B", true, "b\nmore b\nstill b".into());
 
-        let group_id = match &h.items[0] {
-            Item::ToolGroup(g) => g.call_id(),
-            other => panic!("expected tool group, got {other:?}"),
-        };
-        assert!(h.toggle_block(&group_id));
         let out = h.replay(100, 40, 0);
         let text = screen_text(out.screen, 40, 100);
-        assert!(
-            text.contains("  → shell"),
-            "expanded children should be indented:\n{text}"
-        );
+        assert!(text.contains("→ shell"), "{text}");
         let ids: Vec<&str> = out.blocks.iter().map(|b| b.call_id.as_str()).collect();
-        assert!(ids.contains(&group_id.as_str()), "{ids:?}");
         assert!(ids.contains(&"A"), "{ids:?}");
         assert!(ids.contains(&"B"), "{ids:?}");
-        let group_hit = out.blocks.iter().find(|b| b.call_id == group_id).unwrap();
-        assert!(
-            group_hit.row_end - group_hit.row_start <= 2,
-            "{group_hit:?}"
-        );
 
         assert!(h.toggle_block("A"));
         match &h.items[0] {
-            Item::ToolGroup(g) => {
-                assert!(g.expanded, "child toggle should not collapse the group");
-                assert!(g.blocks[0].expanded, "child output should expand");
-            }
-            other => panic!("expected tool group, got {other:?}"),
+            Item::ToolBlock(block) => assert!(block.expanded, "child output should expand"),
+            other => panic!("expected tool block, got {other:?}"),
         }
     }
 
     #[test]
-    fn late_tool_use_hydration_can_group_with_previous_block() {
+    fn late_tool_use_hydration_stays_separate_from_previous_block() {
         let mut h = ItemHistory::new();
         h.feed_task_start("A".into(), "shell".into(), "echo a".into());
         h.feed_pty(b"\x1b]7700;open;call=B\x07inline");
@@ -2543,15 +2228,15 @@ mod tests {
         h.feed_tool_result("B", true, "b".into());
         h.feed_pty(b"\x1b]7700;close;call=B\x07");
 
-        assert_eq!(h.items.len(), 1);
-        match &h.items[0] {
-            Item::ToolGroup(g) => {
-                assert_eq!(g.tool, "shell");
-                assert_eq!(tool_block_ids(&h.items[0]), vec!["A", "B"]);
-                assert_eq!(g.blocks[1].args_summary.as_deref(), Some("echo b"));
-                assert_eq!(g.blocks[1].output.as_deref(), Some("b"));
+        assert_eq!(h.items.len(), 2);
+        match &h.items[1] {
+            Item::ToolBlock(block) => {
+                assert_eq!(block.call_id, "B");
+                assert_eq!(block.tool.as_deref(), Some("shell"));
+                assert_eq!(block.args_summary.as_deref(), Some("echo b"));
+                assert_eq!(block.output.as_deref(), Some("b"));
             }
-            other => panic!("expected tool group, got {other:?}"),
+            other => panic!("expected tool block, got {other:?}"),
         }
     }
 
@@ -3750,7 +3435,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_tool_group_update_stays_bounded() {
+    fn ungrouped_tool_update_stays_bounded() {
         use std::time::Instant;
         let mut h = ItemHistory::new();
         let cols = 100u16;
@@ -3770,8 +3455,8 @@ mod tests {
         let started = h.replay(cols, rows, 0);
         let start_us = start_t.elapsed().as_micros();
         assert!(
-            started.blocks.iter().any(|hit| hit.call_id == "group:g0"),
-            "collapsed group hit rect should survive append"
+            started.blocks.iter().any(|hit| hit.call_id == call),
+            "new tool hit rect should render after append"
         );
 
         h.feed_tool_result(call, true, "ok".into());
@@ -3779,19 +3464,19 @@ mod tests {
         let finished = h.replay(cols, rows, 0);
         let result_us = result_t.elapsed().as_micros();
         assert!(
-            finished.blocks.iter().any(|hit| hit.call_id == "group:g0"),
-            "collapsed group hit rect should survive result"
+            finished.blocks.iter().any(|hit| hit.call_id == call),
+            "new tool hit rect should survive result"
         );
         eprintln!(
-            "collapsed group update after 2000 calls: start {start_us} µs, result {result_us} µs"
+            "ungrouped tool update after 2000 calls: start {start_us} µs, result {result_us} µs"
         );
         assert!(
             start_us < 80_000,
-            "collapsed group start replay too slow: {start_us} µs"
+            "ungrouped tool start replay too slow: {start_us} µs"
         );
         assert!(
             result_us < 80_000,
-            "collapsed group result replay too slow: {result_us} µs"
+            "ungrouped tool result replay too slow: {result_us} µs"
         );
     }
 
