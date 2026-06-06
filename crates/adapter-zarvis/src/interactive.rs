@@ -57,9 +57,7 @@ impl<'a> Terminal<'a> {
             None => String::new(),
         };
         let banner = format!(
-            "\r\n\x1b[1;35mzarvis\x1b[0m  \x1b[2m{provider}:{model}\x1b[0m{mode_badge}\r\n\
-             \x1b[2mtype your prompt and press Enter. type `/` for commands, \
-             Tab to complete. C-c interrupts a turn. C-d to end.\x1b[0m\r\n",
+            "\r\n\x1b[1;35mzarvis\x1b[0m  \x1b[2m{provider}:{model}\x1b[0m{mode_badge}\r\n",
         );
         self.write(banner.as_bytes());
     }
