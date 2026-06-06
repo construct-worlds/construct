@@ -1630,8 +1630,10 @@ fn render_matrix_widget_viewport(f: &mut Frame, rain_area: Rect, app: &mut App, 
         &mut app.layout.dynamic_ui_url_hits,
         suppress_first_heading,
     );
-    lines.extend(std::iter::repeat(Line::raw("")));
-    let visible_lines: Vec<_> = lines.into_iter().take(inner.height as usize).collect();
+    let viewport_rows = inner.height as usize;
+    let padding_rows = viewport_rows.saturating_sub(lines.len());
+    lines.extend(std::iter::repeat(Line::raw("")).take(padding_rows));
+    let visible_lines: Vec<_> = lines.into_iter().take(viewport_rows).collect();
     f.render_widget(
         Paragraph::new(visible_lines).wrap(Wrap { trim: false }),
         inner,

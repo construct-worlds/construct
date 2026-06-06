@@ -8714,6 +8714,68 @@ mod tests {
     // behind the matrix rain (half-block `▀` cells), and vanishes when
     // the preview is gone — in lock-step with the terminal-view overlay.
     #[tokio::test]
+    async fn operator_matrix_widgets_render_without_unbounded_padding() {
+        use agentd_protocol::{UiPanel, UiPlacement};
+
+        let (mut app, _dir, server) = captured_app().await;
+        let mut orch = summary_with_kind(agentd_protocol::SessionKind::Orchestrator);
+        orch.id = "orch".into();
+        app.sessions.push(orch);
+        app.refresh_orchestrator_id();
+        app.matrix_rain_hidden = false;
+        app.matrix_widget_visibility = MatrixWidgetVisibility::Browsing;
+        app.matrix_widget_selected = Some("fleet-pulse".into());
+        app.ui_panels.insert(
+            "orch".into(),
+            HashMap::from([
+                (
+                    "ambient-note".into(),
+                    UiPanel {
+                        id: "ambient-note".into(),
+                        source: Some("ambient-note.md".into()),
+                        title: Some("Ambient note".into()),
+                        placement: UiPlacement::Sticky,
+                        markdown: "# Ambient note\n\nOperator widgets are sticky.".into(),
+                    },
+                ),
+                (
+                    "fleet-pulse".into(),
+                    UiPanel {
+                        id: "fleet-pulse".into(),
+                        source: Some("fleet-pulse.md".into()),
+                        title: Some("Fleet pulse".into()),
+                        placement: UiPlacement::Sticky,
+                        markdown: "# Fleet pulse\n\n:::timeline\n- [x] Demo widget visible\n- [~] Operator can surface fleet status here\n- [ ] Hover/click square indicators\n:::".into(),
+                    },
+                ),
+                (
+                    "merge-queue".into(),
+                    UiPanel {
+                        id: "merge-queue".into(),
+                        source: Some("merge-queue.md".into()),
+                        title: Some("Merge queue".into()),
+                        placement: UiPlacement::Sticky,
+                        markdown: "# Merge queue\n\n| PR | State |\n| --- | --- |\n| demo | ready |".into(),
+                    },
+                ),
+            ]),
+        );
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("operator widget render should not panic");
+        assert_eq!(app.layout.matrix_widget_hits.len(), 3);
+        let text = rendered_text(term.backend().buffer());
+        assert!(text.contains("operator"));
+        assert!(
+            text.contains("■"),
+            "selected widget indicator should be filled"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn matrix_rain_paints_browser_preview_wallpaper() {
         use agentd_client::Client;
         use tokio::net::UnixListener;
