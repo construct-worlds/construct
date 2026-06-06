@@ -470,6 +470,11 @@ pub struct App {
     pub chord_state: ChordState,
     pub chord_label: String,
     pub status: Option<(String, Instant)>,
+    /// Persistent "update available" advisory, sourced from the upgrade cache.
+    /// Unlike `status`, it is never auto-cleared on tick — it stays in the
+    /// modeline until you upgrade (after which `cached_update_notice` returns
+    /// None). A transient `status` message takes precedence while it is active.
+    pub update_notice: Option<String>,
     pub last_diff: Option<String>,
     pub should_quit: bool,
     pub connected: bool,
@@ -1535,6 +1540,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         chord_state: ChordState::default(),
         chord_label: String::new(),
         status: None,
+        update_notice: None,
         last_diff: None,
         should_quit: false,
         connected: true,
@@ -1631,10 +1637,10 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
 
     // One-line "update available" notice, sourced from an on-disk cache so it
     // never blocks startup (a stale cache refreshes in the background for the
-    // next launch). Opt out with AGENTD_NO_UPDATE_CHECK=1.
-    if let Some(notice) = crate::upgrade::cached_update_notice() {
-        app.set_status(notice);
-    }
+    // next launch). Held in a dedicated field so it persists in the modeline
+    // until the user upgrades, rather than expiring after a few seconds like a
+    // transient status. Opt out with AGENTD_NO_UPDATE_CHECK=1.
+    app.update_notice = crate::upgrade::cached_update_notice();
 
     if app.selected_needs_hydration() {
         if let Some(id) = app.selection.session_id() {
@@ -7512,6 +7518,7 @@ mod tests {
             chord_state: ChordState::default(),
             chord_label: String::new(),
             status: None,
+            update_notice: None,
             last_diff: None,
             should_quit: false,
             connected: true,

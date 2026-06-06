@@ -5179,7 +5179,14 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &App) {
     } else {
         String::new()
     };
-    let status = app.status.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+    // Prefer a transient status message; when none is active, fall back to the
+    // persistent "update available" notice so it stays visible until upgrade.
+    let status = app
+        .status
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .or(app.update_notice.as_deref())
+        .unwrap_or("");
     let empty_hint = if s.is_none() && app.list_items().is_empty() && status.is_empty() {
         "new: C-x C-f  help: ?  palette: C-x x"
     } else {
