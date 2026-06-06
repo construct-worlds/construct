@@ -273,6 +273,12 @@ pub struct UiPanel {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Filesystem creation time for file-backed widgets, in Unix milliseconds.
+    /// Renderers use this to keep widget positions stable across restart while
+    /// appending newly-created widgets after existing ones. Ephemeral panels may
+    /// leave it unset.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub created_at_ms: u64,
     #[serde(default)]
     pub placement: UiPlacement,
     /// Safe agentd-markdown: normal markdown plus semantic links such as
@@ -280,6 +286,10 @@ pub struct UiPanel {
     /// they understand and degrade the rest as text.
     #[serde(default)]
     pub markdown: String,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

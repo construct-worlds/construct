@@ -5486,7 +5486,11 @@ impl App {
             .filter(|panel| panel.placement == agentd_protocol::UiPlacement::Sticky)
             .cloned()
             .collect();
-        panels.sort_by(|a, b| a.id.cmp(&b.id));
+        panels.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         panels
     }
 
@@ -8751,6 +8755,7 @@ mod tests {
                     id: "fleet-pulse".into(),
                     source: Some("fleet-pulse.md".into()),
                     title: Some("Fleet pulse".into()),
+                    created_at_ms: 1,
                     placement: UiPlacement::Sticky,
                     markdown: "# Fleet pulse".into(),
                 },
@@ -8789,6 +8794,7 @@ mod tests {
                         id: "ambient-note".into(),
                         source: Some("ambient-note.md".into()),
                         title: Some("Ambient note".into()),
+                        created_at_ms: 1,
                         placement: UiPlacement::Sticky,
                         markdown: "# Ambient note\n\nOperator widgets are sticky.".into(),
                     },
@@ -8799,6 +8805,7 @@ mod tests {
                         id: "fleet-pulse".into(),
                         source: Some("fleet-pulse.md".into()),
                         title: Some("Fleet pulse".into()),
+                        created_at_ms: 2,
                         placement: UiPlacement::Sticky,
                         markdown: "# Fleet pulse\n\n:::timeline\n- [x] Demo widget visible\n- [~] Operator can surface fleet status here\n- [ ] Hover/click square indicators\n:::".into(),
                     },
@@ -8809,6 +8816,7 @@ mod tests {
                         id: "merge-queue".into(),
                         source: Some("merge-queue.md".into()),
                         title: Some("Merge queue".into()),
+                        created_at_ms: 3,
                         placement: UiPlacement::Sticky,
                         markdown: "# Merge queue\n\n| PR | State |\n| --- | --- |\n| demo | ready |".into(),
                     },
@@ -8826,6 +8834,10 @@ mod tests {
         assert!(
             text.contains("■"),
             "selected widget indicator should be filled"
+        );
+        assert!(
+            !text.contains("2/3"),
+            "widget viewport title should not include widget count"
         );
         server.abort();
     }
@@ -9915,6 +9927,7 @@ mod tests {
                     id: "task".into(),
                     source: None,
                     title: Some("Task".into()),
+                    created_at_ms: 0,
                     placement: UiPlacement::Sticky,
                     markdown: "old".into(),
                 }),
@@ -9925,6 +9938,7 @@ mod tests {
                     id: "task".into(),
                     source: None,
                     title: Some("Task".into()),
+                    created_at_ms: 0,
                     placement: UiPlacement::Sticky,
                     markdown: "new".into(),
                 }),
@@ -9935,6 +9949,7 @@ mod tests {
                     id: "other".into(),
                     source: None,
                     title: None,
+                    created_at_ms: 0,
                     placement: UiPlacement::Sticky,
                     markdown: "keep".into(),
                 }),

@@ -20,6 +20,7 @@ use agentd_protocol::{
 use anyhow::{Context, Result};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 const GLOBAL_MEMORY_TEMPLATE: &str =
     "# Global Memory\n\n## Preferences\n\n## Workflows\n\n## Pitfalls\n";
@@ -218,6 +219,7 @@ impl Storage {
                 continue;
             };
             let (frontmatter, markdown) = parse_widget_frontmatter(&raw_markdown);
+            let created_at_ms = widget_created_at_ms(&path);
             panels.push(UiPanel {
                 id: stem.to_string(),
                 source: path
@@ -227,11 +229,16 @@ impl Storage {
                 title: frontmatter
                     .title
                     .or_else(|| Some(stem.replace(['-', '_'], " "))),
+                created_at_ms,
                 placement: frontmatter.placement.unwrap_or(UiPlacement::Sticky),
                 markdown,
             });
         }
-        panels.sort_by(|a, b| a.id.cmp(&b.id));
+        panels.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         Ok(panels)
     }
 
@@ -552,6 +559,19 @@ impl Storage {
     }
 }
 
+fn widget_created_at_ms(path: &Path) -> u64 {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return 0;
+    };
+    metadata
+        .created()
+        .or_else(|_| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn is_safe_widget_id(id: &str) -> bool {
     !id.is_empty()
         && id
@@ -664,6 +684,27 @@ mod widget_tests {
         assert_eq!(widgets[0].placement, UiPlacement::Inline);
         assert!(widgets[0].markdown.starts_with("# Confirm"));
         assert!(!widgets[0].markdown.contains("placement:"));
+        assert!(widgets[0].created_at_ms > 0);
+    }
+
+    #[test]
+    fn read_widgets_sorts_by_creation_time_then_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        let dir = storage.ensure_widgets_dir("s1").unwrap();
+        let old = dir.join("z-old.md");
+        let new = dir.join("a-new.md");
+        std::fs::write(&old, "old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&new, "new").unwrap();
+
+        let widgets = storage.read_widgets("s1").unwrap();
+
+        assert_eq!(
+            widgets.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
+            vec!["z-old", "a-new"]
+        );
+        assert!(widgets[0].created_at_ms <= widgets[1].created_at_ms);
     }
 }
 
