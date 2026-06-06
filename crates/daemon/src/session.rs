@@ -454,6 +454,7 @@ fn ui_panel_changed(
     };
     previous.source != next.source
         || previous.title != next.title
+        || previous.created_at_ms != next.created_at_ms
         || previous.placement != next.placement
         || previous.markdown != next.markdown
 }
