@@ -1115,7 +1115,7 @@ impl LineEditor {
                 }
                 out.extend_from_slice(&self.redraw());
             }
-            // Ctrl-L — clear screen + redraw.
+            // Ctrl-L — redraw bottom prompt/completions only (no full-screen clear)
             0x0c => {
                 out.extend_from_slice(b"\x1b[2J\x1b[H");
                 out.extend_from_slice(&self.redraw());
