@@ -7,7 +7,7 @@ Scope: Defines the Operator's autonomous ambient loop behavior.
 
 ## Decision
 
-The daemon-owned Operator session may run an ambient loop while idle. The loop injects a synthetic observation into the Operator at a bounded interval, causing the same normal zarvis turn machinery to decide whether to inspect context, update widgets, notify the user, or do nothing.
+The daemon-owned Operator session may run an ambient loop while idle. The loop injects a synthetic observation into the Operator at a bounded interval, causing the same normal smith turn machinery to decide whether to inspect context, update widgets, notify the user, or do nothing.
 
 Ambient loop turns are advisory and non-critical. The Operator should prefer silence or widget updates, and if nothing is worth surfacing it should answer exactly `noted`. Normal tool policy and approval rules still apply; the ambient loop does not grant extra authority or bypass risky-action approvals.
 

@@ -103,11 +103,11 @@ impl Paths {
         self.state_dir.join("tui-state.json")
     }
 
-    /// Path to the learned per-model token-limit table — zarvis
+    /// Path to the learned per-model token-limit table — smith
     /// adapts this at runtime when providers reject requests as
     /// over-budget and bumps it on successful probe calls.
-    pub fn zarvis_model_limits_file(&self) -> PathBuf {
-        self.state_dir.join("zarvis-model-limits.json")
+    pub fn smith_model_limits_file(&self) -> PathBuf {
+        self.state_dir.join("smith-model-limits.json")
     }
 }
 

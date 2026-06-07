@@ -493,7 +493,7 @@ pub struct App {
     /// events feed an [`ItemHistory`] that the render path replays
     /// onto a fresh parser. This enables expand/collapse of tool
     /// blocks via height mutation rather than vt100 cursor-edit
-    /// gymnastics. Non-zarvis sessions degrade to a single
+    /// gymnastics. Non-smith sessions degrade to a single
     /// `PtyChunk` and render identically to the old pipeline.
     pub histories: HashMap<String, crate::pty_render::ItemHistory>,
     /// Per-session cached block hit-test ranges (call_id, row range
@@ -592,7 +592,7 @@ pub struct App {
     /// native drag selection/copy.
     pub mouse_capture_enabled: bool,
     /// ID of the daemon-owned orchestrator session, if one is present
-    /// in the sessions list. The orchestrator runs as a zarvis
+    /// in the sessions list. The orchestrator runs as a smith
     /// interactive (PTY) session; the TUI renders its PTY in the
     /// minibuffer panel and routes keystrokes there when the panel is
     /// focused. `None` falls back to the static palette UX.
@@ -649,7 +649,7 @@ pub struct App {
     pub remote_control_task:
         Option<tokio::task::JoinHandle<(bool, Result<agentd_protocol::RemoteStartResult>)>>,
     /// Per-session input editor state, fed by `SessionEvent::EditorState`
-    /// from the adapter (currently zarvis interactive). Drives the
+    /// from the adapter (currently smith interactive). Drives the
     /// fixed bottom input pane.
     pub editor_states: HashMap<String, EditorState>,
     /// Per-session live agent status, fed by `SessionEvent::AgentStatus`
@@ -941,7 +941,7 @@ async fn load_session_hydration(req: SessionHydrationRequest) -> Result<SessionH
             {
                 // New daemons persist PTY events in the transcript as ordering
                 // markers. Prefer rebuilding from those markers so transcript-only
-                // items (zarvis tool blocks) are interleaved with the raw bytes in
+                // items (smith tool blocks) are interleaved with the raw bytes in
                 // chronological order. The pty_replay path above remains the
                 // fallback for older sessions whose transcripts do not contain PTY.
                 h.clear_items();
@@ -2835,7 +2835,7 @@ impl App {
                 {
                     // New daemons persist PTY events in the transcript as ordering
                     // markers. Prefer rebuilding from those markers so transcript-only
-                    // items (zarvis tool blocks) are interleaved with the raw bytes in
+                    // items (smith tool blocks) are interleaved with the raw bytes in
                     // chronological order. The pty_replay path above remains the
                     // fallback for older sessions whose transcripts do not contain PTY.
                     history.clear_items();
@@ -2965,7 +2965,7 @@ impl App {
     ///
     /// Prefers a *live* (non-terminal) orchestrator. If only terminal
     /// orchestrators exist (e.g. a previous run failed to start
-    /// zarvis), we behave as if there's no orchestrator so the user
+    /// smith), we behave as if there's no orchestrator so the user
     /// gets the palette fallback.
     fn refresh_orchestrator_id(&mut self) {
         self.orchestrator_id = self
@@ -3308,7 +3308,7 @@ impl App {
                             );
                             // Also fall through so the transcript records it.
                         }
-                        // Approval resolved (answered here, in the zarvis
+                        // Approval resolved (answered here, in the smith
                         // PTY, or by another client): close our minibuffer
                         // prompt for it if it's still up, so it doesn't
                         // linger after the decision was already made.
@@ -3406,7 +3406,7 @@ impl App {
                         // ToolUse events to those fences by FIFO
                         // arrival order, and matches ToolResults by
                         // call_id (carried in the `tool` field by
-                        // zarvis convention). Tool events from the
+                        // smith convention). Tool events from the
                         // orchestrator session also land here.
                         if let SessionEvent::ToolUse { tool, args } = &payload.event {
                             // The TUI-dispatch tool (`tui`) is a
@@ -3777,7 +3777,7 @@ impl App {
         risk: agentd_protocol::ToolRisk,
         allow_auto_review: bool,
     ) {
-        // Zarvis approvals are rendered inline in the session PTY
+        // Smith approvals are rendered inline in the session PTY
         // (the `? approve [risk] tool(args) — y/n/a` row). The user
         // responds with a single key inside the session terminal,
         // not via a separate minibuffer prompt — so skip ours.
@@ -7151,17 +7151,17 @@ pub fn apply_transcript_to_local_state(
     for ev in events {
         match &ev.event {
             // TaskStart is the PRIMARY block-creation event for
-            // current zarvis sessions — it carries the explicit
+            // current smith sessions — it carries the explicit
             // `call_id` and the live `on_notification` handler
             // forwards it to `feed_task_start`. Without forwarding
             // it here too, a fresh TUI re-attaching to an existing
             // session sees no `ToolBlock` items in the replayed
             // history (the OSC 7700 backstop only fires for legacy
-            // `pty.log` files; current zarvis doesn't write the
+            // `pty.log` files; current smith doesn't write the
             // fences), `has_blocks` is false, and the user can no
             // longer see synthesized tool blocks at all — including
             // when scrolling. See
-            // `zarvis_tool_block_visible_after_bootstrap_via_task_start`.
+            // ` smith_tool_block_visible_after_bootstrap_via_task_start`.
             SessionEvent::TaskStart {
                 call_id,
                 tool,
@@ -7597,9 +7597,9 @@ mod tests {
         assert_eq!(operator_monolog_text("noted"), None);
         assert_eq!(operator_monolog_text("  Noted.  "), None);
         assert_eq!(
-            operator_monolog_text("  'run using zarvis' is waiting at the trust prompt.  ")
+            operator_monolog_text("  'run using smith' is waiting at the trust prompt.  ")
                 .as_deref(),
-            Some("'run using zarvis' is waiting at the trust prompt.")
+            Some("'run using smith' is waiting at the trust prompt.")
         );
     }
 
@@ -9889,12 +9889,12 @@ mod tests {
         server.abort();
     }
 
-    // Typing into a zarvis prompt grows the editor pane, shrinking the
+    // Typing into a smith prompt grows the editor pane, shrinking the
     // chat area. The chat parser must stay at the full pane height so
     // editor growth never resizes (and O(history)-rebuilds) it — that
     // rebuild-per-keystroke was the typing lag. Structural, timing-free.
     #[tokio::test]
-    async fn zarvis_editor_growth_does_not_resize_chat_parser() {
+    async fn smith_editor_growth_does_not_resize_chat_parser() {
         use agentd_client::Client;
         use tokio::net::UnixListener;
 
@@ -10277,8 +10277,8 @@ mod tests {
         server.abort();
     }
 
-    /// REGRESSION: a TUI re-attaching to an existing zarvis session
-    /// shows the tool blocks again. Current zarvis interactive
+    /// REGRESSION: a TUI re-attaching to an existing smith session
+    /// shows the tool blocks again. Current smith interactive
     /// adapters never write OSC 7700 fences to the PTY (the helpers
     /// `tool_block_open` / `tool_block_close` exist but no call
     /// site remains); tool blocks are communicated entirely via
@@ -10351,7 +10351,7 @@ mod tests {
         assert!(
             text.contains("→ shell"),
             "TaskStart must be forwarded to ItemHistory::feed_task_start. \
-             Without it, fresh-TUI bootstrap of an existing zarvis session \
+             Without it, fresh-TUI bootstrap of an existing smith session \
              rebuilds history with no tool blocks. Got render:\n{text}",
         );
     }
@@ -10676,9 +10676,9 @@ mod tests {
         );
     }
 
-    /// Symptom-level repro for the zarvis-prompt-overlap bug.
+    /// Symptom-level repro for the smith-prompt-overlap bug.
     ///
-    /// User report (against `tui reconnect`, harness=zarvis): after
+    /// User report (against `tui reconnect`, harness=smith): after
     /// the TUI reconnects or otherwise rebootstraps a session, the
     /// last turn's output extends all the way to the bottom row,
     /// overwriting the position where the `❯ ` prompt should sit.

@@ -1,4 +1,4 @@
-//! Chrome DevTools browser tools for Zarvis.
+//! Chrome DevTools browser tools for Smith.
 //!
 //! These tools talk to a Chrome/Chromium instance running with
 //! `--remote-debugging-port`. They intentionally use the HTTP JSON
@@ -338,7 +338,7 @@ async fn start_chrome(endpoint: &Endpoint) -> Result<()> {
         ));
     }
     let chrome = chrome_path().ok_or_else(|| anyhow!("Chrome/Chromium binary not found"))?;
-    let profile = format!("/tmp/zarvis-chrome-debug-{}", endpoint.port);
+    let profile = format!("/tmp/smith-chrome-debug-{}", endpoint.port);
     let mut cmd = Command::new(chrome);
     cmd.arg(format!("--remote-debugging-port={}", endpoint.port))
         .arg(format!("--user-data-dir={profile}"))

@@ -1,4 +1,4 @@
-//! Optional zarvis hook runner.
+//! Optional smith hook runner.
 //!
 //! Hooks are intentionally opt-in through env/config, not auto-loaded from
 //! the project tree, because they execute local commands with the user's
@@ -41,7 +41,7 @@ impl Hooks {
         match Self::try_load(cwd) {
             Ok(hooks) => hooks,
             Err(e) => {
-                emit.log(format!("zarvis hooks disabled: {e}"));
+                emit.log(format!("smith hooks disabled: {e}"));
                 Self::default()
             }
         }
@@ -75,7 +75,7 @@ impl Hooks {
         };
         for hook in commands {
             if let Err(e) = hook.run(event, cwd, payload.clone()).await {
-                emit.log(format!("zarvis hook `{event}` failed: {e}"));
+                emit.log(format!("smith hook `{event}` failed: {e}"));
             }
         }
     }
@@ -107,14 +107,14 @@ impl Hooks {
                             }
                         }
                         Ok(_) => emit.log(format!(
-                            "zarvis hook `{event}` ignored: mutating hooks must return a JSON object"
+                            "smith hook `{event}` ignored: mutating hooks must return a JSON object"
                         )),
                         Err(e) => emit.log(format!(
-                            "zarvis hook `{event}` ignored invalid JSON stdout: {e}"
+                            "smith hook `{event}` ignored invalid JSON stdout: {e}"
                         )),
                     }
                 }
-                Err(e) => emit.log(format!("zarvis hook `{event}` failed: {e}")),
+                Err(e) => emit.log(format!("smith hook `{event}` failed: {e}")),
             }
         }
         current

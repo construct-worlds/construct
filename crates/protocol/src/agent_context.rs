@@ -2,7 +2,7 @@
 //!
 //! The daemon passes memory file paths in env vars. This module reads those
 //! files and formats one stable JSON shape used by both `construct-mcp` and
-//! zarvis's native tool layer.
+//! smith's native tool layer.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

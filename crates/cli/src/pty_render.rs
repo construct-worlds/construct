@@ -21,7 +21,7 @@
 //! viewport.
 //!
 //! Sessions whose adapter never emits OSC `7700` markers (shell,
-//! claude, codex, headless zarvis) just produce a single
+//! claude, codex, headless smith) just produce a single
 //! [`Item::PtyChunk`] for the entire stream and render identically
 //! to the old direct-parser pipeline.
 
@@ -205,7 +205,7 @@ pub struct ItemHistory {
     pending_block_hydrations: VecDeque<usize>,
     /// `ToolResult` events that arrived before their matching OSC
     /// open. Keyed by call_id (the `tool` field on `ToolResult`
-    /// carries call_id by zarvis convention).
+    /// carries call_id by smith convention).
     pending_tool_results: HashMap<String, (bool, String)>,
     /// Whether the next [`replay`] should account for a mutation.
     /// Set by every mutation; cleared by `replay`.
@@ -215,7 +215,7 @@ pub struct ItemHistory {
     /// have items mutate underfoot, so we can process only the
     /// items appended since the last replay and just `set_size` on
     /// resize instead of replaying the full history.
-    /// Sessions with synthesized items (zarvis tool blocks and
+    /// Sessions with synthesized items (smith tool blocks and
     /// headless messages) keep signatures so unchanged frames reuse
     /// the parser and only mutations rebuild.
     cached: Option<CachedParser>,
@@ -360,7 +360,7 @@ fn block_sig(b: &ToolBlock) -> ItemSig {
 }
 
 /// How many output lines a collapsed tool block shows (must match
-/// the zarvis-side cap so the synthesized version mirrors the
+/// the smith-side cap so the synthesized version mirrors the
 /// inline-stream version's information density).
 /// Minimum geometry we'll feed into `vt100::Parser`. The crate
 /// (0.16.2) underflows in `grid.rs::col_wrap` when rows or cols is
@@ -376,7 +376,7 @@ pub const VT100_MIN_DIM: u16 = 2;
 
 pub const TOOL_BLOCK_COLLAPSED_LINES: usize = 5;
 pub const TOOL_BLOCK_EXPANDED_LINES: usize = 240;
-/// Per-line truncation in collapsed mode (mirrors zarvis).
+/// Per-line truncation in collapsed mode (mirrors smith).
 pub const TOOL_BLOCK_MAX_COLS: usize = 200;
 const TOOL_BLOCK_HISTORY_LINE_CHARS: usize = TOOL_BLOCK_MAX_COLS * 2;
 
@@ -774,7 +774,7 @@ impl ItemHistory {
     /// Apply a `TaskStart` event. Unlike `ToolUse`, this carries an
     /// explicit `call_id` — so the block is created and hydrated
     /// in a single step. This is the primary block-creation path
-    /// for new zarvis sessions; the OSC-fence path remains as a
+    /// for new smith sessions; the OSC-fence path remains as a
     /// backstop for byte streams loaded from older `pty.log`
     /// files that still contain inline fenced tool blocks.
     pub fn feed_task_start(&mut self, call_id: String, tool: String, args_summary: String) {
@@ -812,7 +812,7 @@ impl ItemHistory {
     }
 
     /// Apply a `ToolResult` event. The protocol's `tool` field
-    /// carries the *call_id* (zarvis convention), so we can match
+    /// carries the *call_id* (smith convention), so we can match
     /// directly. If the OSC open hasn't arrived yet, stash for later.
     pub fn feed_tool_result(&mut self, call_id: &str, ok: bool, output: String) {
         let output = tool_output_preview_for_history(&output);
@@ -874,7 +874,7 @@ impl ItemHistory {
     /// Render the session's accumulated content into a `vt100::Screen`
     /// at the requested size. Two strategies:
     ///
-    /// 1. **Tool-block sessions (zarvis):** use per-item signatures to
+    /// 1. **Tool-block sessions (smith):** use per-item signatures to
     ///    reuse the parser across unchanged frames and rebuild only when
     ///    synthesized state changes (control hints, expand/collapse,
     ///    output arrival).
@@ -912,9 +912,9 @@ impl ItemHistory {
         // main parser so block hit-test geometry, animated tool
         // block counters, etc. stay correct.
         //
-        // Tool-block sessions (zarvis) take the main parser path
+        // Tool-block sessions (smith) take the main parser path
         // even when scrolled. Two reasons:
-        //   1. zarvis is `\r\n`-shaped chat; its main parser
+        //   1. smith is `\r\n`-shaped chat; its main parser
         //      naturally populates scrollback, so the shadow
         //      isn't needed.
         //   2. The shadow only sees the truncated PTY-side
@@ -926,7 +926,7 @@ impl ItemHistory {
         //      row and the surrounding chat would shift — the
         //      user perceives that as "the tool block
         //      disappeared". See
-        //      `zarvis_tool_block_survives_one_row_of_scroll`
+        //      `smith_tool_block_survives_one_row_of_scroll`
         //      for the regression repro.
         if scrollback > 0 && !needs_synth {
             let max_scrollback = self.render_shadow(cols, rows, scrollback);
@@ -977,7 +977,7 @@ impl ItemHistory {
         //
         //   - Rows change but cols don't: `set_size` is enough.
         //     vt100 keeps the grid without replay and, importantly,
-        //     avoids cursor-relocating reset escapes. The zarvis
+        //     avoids cursor-relocating reset escapes. The smith
         //     editor pane grows as the user types, shrinking
         //     `chat_area.height` and tripping this path on nearly
         //     every keystroke; closing the minibuffer grows the main
@@ -1217,7 +1217,7 @@ impl ItemHistory {
         // scrollback window and avoids replaying ancient history.
         // We no longer re-scan the whole history with
         // `count_visible_lines` / `synth_block` every frame. That
-        // O(history)-per-frame re-scan was the zarvis typing lag.
+        // O(history)-per-frame re-scan was the smith typing lag.
         let start_processing_at = flushed_pending_layout
             .map(|(idx, _, _, _)| idx + 1)
             .unwrap_or_else(|| rebuild_from.unwrap_or(cache.processed_count));
@@ -1624,7 +1624,7 @@ fn count_visible_lines(bytes: &[u8], cols: u16) -> usize {
 }
 
 /// Build the byte sequence representing a tool block at its current
-/// state. Matches the visual idiom zarvis writes inline so
+/// state. Matches the visual idiom smith writes inline so
 /// non-ratatui consumers and the items-model render stay coherent.
 ///
 /// States rendered:
@@ -1688,16 +1688,16 @@ fn synth_message(kind: MessageKind, text: &str, break_before: bool) -> Vec<u8> {
 }
 
 fn synth_block(block: &ToolBlock, cols: u16) -> SynthOutput {
-    /// Placeholder string the zarvis adapter writes into a tool's
+    /// Placeholder string the smith adapter writes into a tool's
     /// `output` when it auto-backgrounds. Kept in sync via the
-    /// `agentd_adapter_zarvis::tasks::BG_PLACEHOLDER_OUTPUT`
+    /// `agentd_adapter_smith::tasks::BG_PLACEHOLDER_OUTPUT`
     /// constant — duplicated here only to avoid a cross-crate
     /// dep just for one string.
     const BG_PLACEHOLDER_OUTPUT: &str = "(running in background; will report when complete)";
 
     let mut out: Vec<u8> = Vec::with_capacity(128);
     // Leading blank — separates the block from prior chat content
-    // (mirrors zarvis's `\r\n→ ...` line layout). This blank takes
+    // (mirrors smith's `\r\n→ ...` line layout). This blank takes
     // one visible row, then the header.
     out.extend_from_slice(b"\r\n");
 
@@ -2093,7 +2093,7 @@ mod tests {
     #[test]
     fn tool_events_before_marker_are_buffered() {
         let mut h = ItemHistory::new();
-        // Events arrive first (in zarvis's emit order).
+        // Events arrive first (in smith's emit order).
         h.feed_tool_use("shell".into(), "ls /tmp".into());
         h.feed_tool_result("c1", true, "file_a\nfile_b\nfile_c".into());
         // Then the PTY marker.
@@ -2682,7 +2682,7 @@ mod tests {
     // Per-harness regression suite
     //
     // Each agentd-supported harness writes to the PTY in a different
-    // shape (shell = plain stdout, claude = alt-screen TUI, zarvis =
+    // shape (shell = plain stdout, claude = alt-screen TUI, smith =
     // chat + tool blocks, orchestrator = chat + EditorState, codex =
     // normal-screen TUI with accumulated history). Bugs that show up
     // in one frequently don't show up in another — these tests pin
@@ -2701,7 +2701,7 @@ mod tests {
     //     populated history; per-event cost stays bounded.
     //   * "resize perf" — cost of resizing an already-populated
     //     session. Currently passes for sessions whose accumulated
-    //     `pending_chunk` is small (shell / zarvis / orchestrator /
+    //     `pending_chunk` is small (shell / smith / orchestrator /
     //     claude-via-alt-screen) and FAILS for codex (which
     //     accumulates a lot of normal-screen content).
     // ============================================================
@@ -2829,10 +2829,10 @@ mod tests {
         );
     }
 
-    // ----- zarvis (chat text + occasional tool blocks) -----
+    // ----- smith (chat text + occasional tool blocks) -----
 
-    fn zarvis_feed_chat(h: &mut ItemHistory) {
-        // A few chat exchanges. zarvis bytes look much like a plain
+    fn smith_feed_chat(h: &mut ItemHistory) {
+        // A few chat exchanges. smith bytes look much like a plain
         // CLI for the chat portion — the special bits are
         // tool-block events (TaskStart/feed_tool_use), not OSC
         // markers anymore. Use OSC here to exercise the tool-block
@@ -2845,7 +2845,7 @@ mod tests {
         h.feed_pty(b"\xe2\x97\x8f done.\r\n");
     }
 
-    /// Daemon-restart restore path for a zarvis session.
+    /// Daemon-restart restore path for a smith session.
     ///
     /// `bootstrap_terminal` reads pty.log via `pty_replay` and
     /// feeds the bytes to a fresh `ItemHistory`. The OSC fences
@@ -2872,7 +2872,7 @@ mod tests {
     /// `args_summary` / `output` it would have had if it'd been
     /// built live.
     #[test]
-    fn zarvis_restart_restore_rehydrates_tool_block_details() {
+    fn smith_restart_restore_rehydrates_tool_block_details() {
         // Pre-restart: build the full live byte stream the adapter
         // would have produced, mirroring `interactive.rs`'s actual
         // sequence: tool_block_open → tool_use header → tool_result_body
@@ -2946,28 +2946,28 @@ mod tests {
     }
 
     #[test]
-    fn zarvis_renders_after_bootstrap() {
+    fn smith_renders_after_bootstrap() {
         let mut h = ItemHistory::new();
-        zarvis_feed_chat(&mut h);
+        smith_feed_chat(&mut h);
         let out = h.replay(80, 24, 0);
         // Don't assert exact cells (tool-block synth shifts rows);
         // just confirm we have a block recorded.
         assert!(
             !out.blocks.is_empty(),
-            "zarvis tool block should be hit-testable"
+            "smith tool block should be hit-testable"
         );
     }
 
     #[test]
-    fn zarvis_renders_after_resize() {
+    fn smith_renders_after_resize() {
         let mut h = ItemHistory::new();
-        zarvis_feed_chat(&mut h);
+        smith_feed_chat(&mut h);
         let _ = h.replay(80, 24, 0);
         let out = h.replay(120, 30, 0);
-        assert!(!out.blocks.is_empty(), "zarvis blocks survive resize");
+        assert!(!out.blocks.is_empty(), "smith blocks survive resize");
     }
 
-    /// Regression: when the zarvis editor pane grows (user types
+    /// Regression: when the smith editor pane grows (user types
     /// → multi-line input), `chat_area.height` shrinks, so the
     /// next `replay` call passes a smaller `rows`. The cached
     /// parser must absorb that via `set_size` without sending any
@@ -3108,16 +3108,16 @@ mod tests {
         );
     }
 
-    /// User-reported regression: after loading a zarvis session
+    /// User-reported regression: after loading a smith session
     /// with history, the *next* PTY bytes (user input / agent
     /// output) land at the top of the viewport instead of after
     /// the existing history. This test reproduces the scenario.
     #[test]
-    fn zarvis_new_content_after_bootstrap_does_not_overwrite_first_row() {
+    fn smith_new_content_after_bootstrap_does_not_overwrite_first_row() {
         let mut h = ItemHistory::new();
         // Bootstrap: load history (mirrors what bootstrap_terminal
         // does after `pty_replay` returns the snapshot bytes).
-        zarvis_feed_chat(&mut h);
+        smith_feed_chat(&mut h);
         // Add several screens of additional chat so the viewport
         // is "full" — exercises the scrollback path where the
         // cursor should be parked at the bottom row after history.
@@ -3129,10 +3129,10 @@ mod tests {
         // the session.
         let _ = h.replay(80, 24, 0);
 
-        // Now new bytes arrive — user typed something OR zarvis
+        // Now new bytes arrive — user typed something OR smith
         // emitted a follow-up message. These are exactly the bytes
         // the user reported as "overwriting the first row".
-        const MARKER: &str = "ZARVIS_NEW_LINE_MARKER";
+        const MARKER: &str = "SMITH_NEW_LINE_MARKER";
         h.feed_pty(format!("\x1b[36muser\x1b[0m: {MARKER}\r\n").as_bytes());
         let out = h.replay(80, 24, 0);
 
@@ -3166,9 +3166,9 @@ mod tests {
     }
 
     #[test]
-    fn zarvis_resize_steady_state_is_cheap() {
+    fn smith_resize_steady_state_is_cheap() {
         let mut h = ItemHistory::new();
-        zarvis_feed_chat(&mut h);
+        smith_feed_chat(&mut h);
         // Warm the cache at the post-bootstrap state.
         let _ = h.replay(80, 24, 0);
         let _ = h.replay(80, 24, 0);
@@ -3180,11 +3180,11 @@ mod tests {
         let t = Instant::now();
         let _ = h.replay(120, 30, 0);
         let us = t.elapsed().as_micros();
-        assert!(us < 5_000, "zarvis resize too slow: {us} µs");
+        assert!(us < 5_000, "smith resize too slow: {us} µs");
     }
 
-    /// PERF / regression: typing into a long zarvis session was
-    /// "super laggy". zarvis history has tool blocks, so it takes the
+    /// PERF / regression: typing into a long smith session was
+    /// "super laggy". smith history has tool blocks, so it takes the
     /// `replay_full` path. Unlike the streaming-bootstrap case (where
     /// the bulk sits in `pending_chunk` and is handled incrementally),
     /// a real session FLUSHES chat into many `Item::PtyChunk` entries
@@ -3198,7 +3198,7 @@ mod tests {
     /// Steady-state re-render (same size, nothing changed) must be
     /// cheap regardless of history size.
     #[test]
-    fn zarvis_steady_state_render_is_cheap_with_many_items() {
+    fn smith_steady_state_render_is_cheap_with_many_items() {
         use std::time::Instant;
         let mut h = ItemHistory::new();
         let cols = 100u16;
@@ -3242,19 +3242,19 @@ mod tests {
         }
         let total_us = t.elapsed().as_micros();
         let per_frame = total_us / frames as u128;
-        eprintln!("zarvis steady-state: {per_frame} µs/frame ({total_us} µs / {frames})");
+        eprintln!("smith steady-state: {per_frame} µs/frame ({total_us} µs / {frames})");
 
         // A no-op re-render must not re-scan the whole history. Loose
         // bound to avoid CI flakiness; the pre-fix cost was ~10-50×
         // this on the same hardware.
         assert!(
             per_frame < 300,
-            "zarvis steady-state render too slow: {per_frame} µs/frame — replay_full is re-scanning history every frame"
+            "smith steady-state render too slow: {per_frame} µs/frame — replay_full is re-scanning history every frame"
         );
     }
 
     #[test]
-    fn zarvis_tool_expand_collapse_rebuilds_only_retained_suffix() {
+    fn smith_tool_expand_collapse_rebuilds_only_retained_suffix() {
         use std::time::Instant;
         let mut h = ItemHistory::new();
         let cols = 100u16;
@@ -3314,7 +3314,7 @@ mod tests {
         );
 
         eprintln!(
-            "zarvis expand/collapse after long history: expand {expand_us} µs, collapse {collapse_us} µs"
+            "smith expand/collapse after long history: expand {expand_us} µs, collapse {collapse_us} µs"
         );
         assert!(
             expand_us < 80_000,
@@ -3327,7 +3327,7 @@ mod tests {
     }
 
     #[test]
-    fn zarvis_tool_start_reuses_already_rendered_pending_text() {
+    fn smith_tool_start_reuses_already_rendered_pending_text() {
         use std::time::Instant;
         let mut h = ItemHistory::new();
         let cols = 100u16;
@@ -3367,7 +3367,7 @@ mod tests {
             rendered.blocks.iter().any(|hit| hit.call_id == target),
             "new tool block hit rect should render after pending flush"
         );
-        eprintln!("zarvis tool start after live pending: {tool_start_us} µs");
+        eprintln!("smith tool start after live pending: {tool_start_us} µs");
         assert!(
             tool_start_us < 80_000,
             "tool start replay too slow after pending flush: {tool_start_us} µs"
@@ -3375,7 +3375,7 @@ mod tests {
     }
 
     #[test]
-    fn zarvis_tool_start_reuses_partially_rendered_pending_text() {
+    fn smith_tool_start_reuses_partially_rendered_pending_text() {
         use std::time::Instant;
         let mut h = ItemHistory::new();
         let cols = 100u16;
@@ -3416,7 +3416,7 @@ mod tests {
             rendered.blocks.iter().any(|hit| hit.call_id == target),
             "new tool block hit rect should render after partial pending flush"
         );
-        eprintln!("zarvis tool start after partial pending: {tool_start_us} µs");
+        eprintln!("smith tool start after partial pending: {tool_start_us} µs");
         assert!(
             tool_start_us < 80_000,
             "tool start replay too slow after partial pending flush: {tool_start_us} µs"
@@ -3507,7 +3507,7 @@ mod tests {
         assert!(matches!(h.items[1], Item::ToolBlock(_)), "{:?}", h.items);
     }
 
-    // ----- orchestrator / minibuffer (zarvis-like content, no
+    // ----- orchestrator / minibuffer (smith-like content, no
     // tool blocks in the common case) -----
 
     fn orchestrator_feed(h: &mut ItemHistory) {
@@ -4031,9 +4031,9 @@ mod tests {
     /// previous frame's buffer, since dims changed).
     ///
     /// Expected pattern (working hypothesis): codex's count is
-    /// significantly higher than claude's or zarvis's, because
+    /// significantly higher than claude's or smith's, because
     /// codex's normal-screen scroll fills the viewport with content
-    /// while claude's alt-screen + zarvis's chat-bubble layout leave
+    /// while claude's alt-screen + smith's chat-bubble layout leave
     /// more rows sparse.
     #[test]
     fn buffer_paint_cost_per_harness_after_resize() {
@@ -4058,17 +4058,17 @@ mod tests {
         let claude_buf = render_main_view_buffer(&mut claude, w_post, h_post);
         let (claude_p, claude_s) = populated_or_styled_cells(&claude_buf);
 
-        // --- zarvis (chat + tool block) ---
-        let mut zarvis = ItemHistory::new();
-        zarvis_feed_chat(&mut zarvis);
+        // --- smith (chat + tool block) ---
+        let mut smith = ItemHistory::new();
+        smith_feed_chat(&mut smith);
         // Add more chat to make it comparable.
         for i in 0..50 {
-            zarvis.feed_pty(format!("\x1b[1;36m> hi {i}\x1b[0m\r\n").as_bytes());
-            zarvis.feed_pty(format!("\x1b[1;35m* response {i}\x1b[0m\r\n").as_bytes());
+            smith.feed_pty(format!("\x1b[1;36m> hi {i}\x1b[0m\r\n").as_bytes());
+            smith.feed_pty(format!("\x1b[1;35m* response {i}\x1b[0m\r\n").as_bytes());
         }
-        let _ = render_main_view_buffer(&mut zarvis, w_pre, h_pre);
-        let zarvis_buf = render_main_view_buffer(&mut zarvis, w_post, h_post);
-        let (zarvis_p, zarvis_s) = populated_or_styled_cells(&zarvis_buf);
+        let _ = render_main_view_buffer(&mut smith, w_pre, h_pre);
+        let smith_buf = render_main_view_buffer(&mut smith, w_post, h_post);
+        let (smith_p, smith_s) = populated_or_styled_cells(&smith_buf);
 
         // --- codex (normal-screen, dense scroll) ---
         let mut codex = ItemHistory::new();
@@ -4088,8 +4088,8 @@ mod tests {
             100.0 * claude_p as f64 / total_cells as f64
         );
         eprintln!(
-            "  zarvis:  populated={zarvis_p:>5}  styled={zarvis_s:>5}  ({:.1}% populated)",
-            100.0 * zarvis_p as f64 / total_cells as f64
+            "  smith:  populated={smith_p:>5}  styled={smith_s:>5}  ({:.1}% populated)",
+            100.0 * smith_p as f64 / total_cells as f64
         );
         eprintln!(
             "  codex:   populated={codex_p:>5}  styled={codex_s:>5}  ({:.1}% populated)",
@@ -4099,7 +4099,7 @@ mod tests {
         // Sanity: every harness should produce non-empty buffers.
         assert!(shell_p > 0);
         assert!(claude_p > 0);
-        assert!(zarvis_p > 0);
+        assert!(smith_p > 0);
         assert!(codex_p > 0);
     }
 
@@ -4154,15 +4154,15 @@ mod tests {
         let claude_bytes =
             approximate_paint_bytes(&render_main_view_buffer(&mut claude, w_post, h_post));
 
-        let mut zarvis = ItemHistory::new();
-        zarvis_feed_chat(&mut zarvis);
+        let mut smith = ItemHistory::new();
+        smith_feed_chat(&mut smith);
         for i in 0..50 {
-            zarvis.feed_pty(format!("\x1b[1;36m> hi {i}\x1b[0m\r\n").as_bytes());
-            zarvis.feed_pty(format!("\x1b[1;35m* resp {i}\x1b[0m\r\n").as_bytes());
+            smith.feed_pty(format!("\x1b[1;36m> hi {i}\x1b[0m\r\n").as_bytes());
+            smith.feed_pty(format!("\x1b[1;35m* resp {i}\x1b[0m\r\n").as_bytes());
         }
-        let _ = render_main_view_buffer(&mut zarvis, w_pre, h_pre);
-        let zarvis_bytes =
-            approximate_paint_bytes(&render_main_view_buffer(&mut zarvis, w_post, h_post));
+        let _ = render_main_view_buffer(&mut smith, w_pre, h_pre);
+        let smith_bytes =
+            approximate_paint_bytes(&render_main_view_buffer(&mut smith, w_post, h_post));
 
         let mut codex = ItemHistory::new();
         codex_feed_long_session(&mut codex);
@@ -4173,7 +4173,7 @@ mod tests {
         eprintln!("approximate paint bytes after {w_post}x{h_post} resize:");
         eprintln!("  shell:   {shell_bytes:>8} bytes");
         eprintln!("  claude:  {claude_bytes:>8} bytes");
-        eprintln!("  zarvis:  {zarvis_bytes:>8} bytes");
+        eprintln!("  smith:  {smith_bytes:>8} bytes");
         eprintln!("  codex:   {codex_bytes:>8} bytes");
     }
 
@@ -4671,7 +4671,7 @@ mod tests {
         );
     }
 
-    /// REGRESSION: zarvis tool-call rendering "disappears" the
+    /// REGRESSION: smith tool-call rendering "disappears" the
     /// moment the user scrolls.
     ///
     /// Mechanism: the live view (`scrollback = 0`) renders a
@@ -4689,9 +4689,9 @@ mod tests {
     /// tool block visible in the live render survives into a render
     /// where the user has scrolled only a single row.
     #[test]
-    fn zarvis_tool_block_survives_one_row_of_scroll() {
+    fn smith_tool_block_survives_one_row_of_scroll() {
         let mut h = ItemHistory::new();
-        // Tool block: OSC open + truncated zarvis preview + close,
+        // Tool block: OSC open + truncated smith preview + close,
         // followed by structured ToolUse/ToolResult so the live path
         // can synthesize the rich block.
         h.feed_pty(b"\x1b]7700;open;call=t1\x07");
@@ -4726,7 +4726,7 @@ mod tests {
             scrolled.contains("→ shell"),
             "REGRESSION: scrolling a single row replaces the synthesized \
              tool block (`→ tool(args)` + status row + body) with the \
-             one-line zarvis preview from the shadow parser. The user \
+             one-line smith preview from the shadow parser. The user \
              perceives the tool block as 'disappearing' since several \
              rows of UI vanish and every row below shifts up. \
              Got:\n{scrolled}",
@@ -4835,7 +4835,7 @@ mod tests {
         );
     }
 
-    /// REGRESSION: a fresh TUI re-attaching to an existing zarvis
+    /// REGRESSION: a fresh TUI re-attaching to an existing smith
     /// session must show tool blocks just like the session that
     /// originally rendered them — including in scrollback.
     ///
@@ -4847,10 +4847,10 @@ mod tests {
     ///      `apply_transcript_to_local_state`, which forwards events
     ///      to the history.
     ///
-    /// Current zarvis interactive sessions do NOT write OSC 7700
+    /// Current smith interactive sessions do NOT write OSC 7700
     /// fences to the PTY (they're defined in `interactive.rs` but
     /// never called); the OSC backstop only fires for `pty.log`
-    /// files left over from older zarvis builds. New sessions
+    /// files left over from older smith builds. New sessions
     /// communicate tool blocks exclusively through
     /// `SessionEvent::TaskStart` (which carries the `call_id`) +
     /// `ToolUse` + `ToolResult`. If `apply_transcript_to_local_state`
@@ -4860,20 +4860,20 @@ mod tests {
     /// runs and the user sees raw chat with no synthesized blocks
     /// at any scroll position.
     ///
-    /// This test simulates a current zarvis session: PTY bytes
+    /// This test simulates a current smith session: PTY bytes
     /// without OSC fences, plus a TaskStart + ToolResult on the
     /// transcript side. After both replays the synthesized block
     /// must appear in both live and scrolled renders.
     #[test]
-    fn zarvis_tool_block_visible_after_bootstrap_via_task_start() {
+    fn smith_tool_block_visible_after_bootstrap_via_task_start() {
         let mut h = ItemHistory::new();
         // Step 1: pty_replay bytes — pure chat, no OSC fences (that's
-        // what current zarvis adapters actually write).
+        // what current smith adapters actually write).
         for i in 0..10u32 {
             h.feed_pty(format!("chat line {i:02}\r\n").as_bytes());
         }
         // Step 2: transcript replay — TaskStart carries the call_id
-        // and is the canonical block-creation event for new zarvis
+        // and is the canonical block-creation event for new smith
         // sessions. apply_transcript_to_local_state must forward it.
         h.feed_task_start("t1".to_string(), "shell".to_string(), "ls".to_string());
         h.feed_tool_result("t1", true, "OUTPUT-LINE".to_string());
@@ -4889,7 +4889,7 @@ mod tests {
         assert!(
             scrolled.contains("→ shell"),
             "scrolled render after bootstrap should keep the synthesized \
-             header (companion to zarvis_tool_block_survives_one_row_of_scroll \
+             header (companion to smith_tool_block_survives_one_row_of_scroll \
              — same fix, different bootstrap source). got:\n{scrolled}",
         );
     }

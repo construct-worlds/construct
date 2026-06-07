@@ -18,7 +18,7 @@ The TUI consolidates the orchestrator's streaming assistant `Message` deltas acr
 
 ## Reason
 
-The operator's text replies landed only in the daemon-owned orchestrator panel, which is collapsed by default (`orchestrator_panel_h: None`) — so a genuinely useful line ("'run using zarvis' is waiting at the folder trust prompt — press Enter") was invisible unless the user opened the panel. The matrix area is the operator's always-visible visual home, so surfacing its monolog there (without stealing focus or a panel) closes the gap. A typewriter over the rain is ambient: visible but not modal, and self-dismissing.
+The operator's text replies landed only in the daemon-owned orchestrator panel, which is collapsed by default (`orchestrator_panel_h: None`) — so a genuinely useful line ("'run using smith' is waiting at the folder trust prompt — press Enter") was invisible unless the user opened the panel. The matrix area is the operator's always-visible visual home, so surfacing its monolog there (without stealing focus or a panel) closes the gap. A typewriter over the rain is ambient: visible but not modal, and self-dismissing.
 
 ## Consequences
 

@@ -1,6 +1,6 @@
 //! Orchestrator-only event observer.
 //!
-//! When the zarvis adapter is running as the daemon's orchestrator
+//! When the smith adapter is running as the daemon's orchestrator
 //! session (`CONSTRUCT_SESSION_KIND=orchestrator`), it opens a second
 //! IPC connection to the daemon and subscribes to events from every
 //! other session. Filtered, those events flow back to the interactive

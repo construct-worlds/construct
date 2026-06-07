@@ -1,6 +1,6 @@
-//! Interactive (PTY) mode for zarvis.
+//! Interactive (PTY) mode for smith.
 //!
-//! Zarvis doesn't spawn a child — there's no CLI to attach a real PTY
+//! Smith doesn't spawn a child — there's no CLI to attach a real PTY
 //! to. Instead we synthesize a terminal session: we emit
 //! `SessionEvent::Pty` bytes that look like a chat-style REPL (banner
 //! + colored prompt + streaming assistant text + inline tool blocks +
@@ -57,7 +57,7 @@ impl<'a> Terminal<'a> {
             None => String::new(),
         };
         let banner = format!(
-            "\r\n\x1b[1;35mzarvis\x1b[0m  \x1b[2m{provider}:{model}\x1b[0m{mode_badge}\r\n",
+            "\r\n\x1b[1;35msmith\x1b[0m  \x1b[2m{provider}:{model}\x1b[0m{mode_badge}\r\n",
         );
         self.write(banner.as_bytes());
     }
@@ -85,7 +85,7 @@ impl<'a> Terminal<'a> {
     }
     /// Open a tool-block region in the PTY stream with a custom OSC
     /// marker. Ratatui clients use this as a fence: the bytes between
-    /// the open and matching close are zarvis's truncated rendering,
+    /// the open and matching close are smith's truncated rendering,
     /// which the items-model renderer skips in favor of synthesizing
     /// its own representation from the structured `ToolUse` /
     /// `ToolResult` events (and which can therefore expand/collapse
@@ -1978,7 +1978,7 @@ pub async fn run(
         ApprovalMode::Manual
     };
     // Per-model learned input-token limits. Shared with `agent.rs`
-    // via `state_dir/zarvis-model-limits.json`, so a context-overflow
+    // via `state_dir/smith-model-limits.json`, so a context-overflow
     // learned in one session benefits every later session on the same
     // machine. We hold one instance for the lifetime of this run and
     // mutate through `record_overflow` / `record_call`.
@@ -2294,7 +2294,7 @@ pub async fn run(
         // Slash commands never reach the model. Resolve the verb once via the
         // shared registry (crates/protocol/src/slash.rs), then branch on the
         // typed CommandId / routing — never on the raw string:
-        //   * Adapter  → mutate zarvis state here (model / reset / compact)
+        //   * Adapter  → mutate smith state here (model / reset / compact)
         //   * ToolCall → synthesize a real tool call (/loop → loop_create)
         //   * Client   → hand off to the attached client as a ClientCommand
         let trimmed = user_text.trim();

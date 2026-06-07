@@ -1,8 +1,8 @@
-//! Zarvis subagent tools.
+//! Smith subagent tools.
 //!
 //! A subagent is backed by an agentd session so every harness can run
 //! unchanged, but it is marked `SessionKind::Subagent` and tracked in
-//! the parent Zarvis session's data dir. The parent sees task-like
+//! the parent Smith session's data dir. The parent sees task-like
 //! create/list/peek/enqueue/cancel/delete operations; the main TUI list
 //! does not show the backing sessions.
 
@@ -53,7 +53,7 @@ fn now_ms() -> i64 {
 fn registry_path() -> Result<PathBuf> {
     let dir = std::env::var("CONSTRUCT_SESSION_DATA_DIR")
         .context("CONSTRUCT_SESSION_DATA_DIR is not set; subagents require an agentd session")?;
-    Ok(PathBuf::from(dir).join("zarvis-subagents.json"))
+    Ok(PathBuf::from(dir).join("smith-subagents.json"))
 }
 
 fn load_registry() -> Result<SubagentRegistry> {
@@ -229,7 +229,7 @@ impl Tool for List {
         "agentd_subagent_list"
     }
     fn description(&self) -> &str {
-        "List subagents created by this Zarvis session, including current backing \
+        "List subagents created by this Smith session, including current backing \
          session summaries when still present."
     }
     fn schema(&self) -> Value {
@@ -412,7 +412,7 @@ impl Tool for Delete {
         "agentd_subagent_delete"
     }
     fn description(&self) -> &str {
-        "Delete a subagent and remove it from this Zarvis session's registry."
+        "Delete a subagent and remove it from this Smith session's registry."
     }
     fn schema(&self) -> Value {
         schema_id_only()

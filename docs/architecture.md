@@ -32,7 +32,7 @@ Five layers, each replaceable:
 | `crates/adapter-shell` | `construct-adapter-shell` | Generic shell command runner |
 | `crates/adapter-claude` | `construct-adapter-claude` | Wraps the `claude` CLI |
 | `crates/adapter-codex` | `construct-adapter-codex` | Wraps the `codex` CLI |
-| `crates/adapter-zarvis` | `construct-adapter-smith` | Built-in multi-provider agent (OpenAI / Anthropic / Gemini / Ollama) |
+| `crates/adapter-smith` | `construct-adapter-smith` | Built-in multi-provider agent (OpenAI / Anthropic / Gemini / Ollama) |
 
 ## Adapter protocol (AHP)
 
