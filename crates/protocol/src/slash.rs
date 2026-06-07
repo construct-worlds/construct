@@ -4,7 +4,7 @@
 //! ## Why this exists
 //!
 //! Slash commands used to be described in *three* hand-synchronized places:
-//! the zarvis adapter's popup array (`SLASH_COMMANDS`), the adapter's
+//! the smith adapter's popup array (`SLASH_COMMANDS`), the adapter's
 //! after-submit `match trimmed { "/reset" => … }` ladder, and the TUI
 //! client's `run_slash_command` table. Each consumer re-derived a command's
 //! behavior from its *name string*, which is both fragile ("keep these in

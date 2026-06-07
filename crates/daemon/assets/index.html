@@ -1519,10 +1519,10 @@
     <section class="view">
       <!--
         DOM order inside `.view` (`flex-direction: column`):
-          1. transcript    — chat-mode content (zarvis / shell)
+          1. transcript    — chat-mode content (smith / shell)
           2. terminal-wrap — PTY-mode content (codex / claude /
-             zarvis interactive)
-          3. editor-state — Zarvis live editor mirror in terminal mode
+             smith interactive)
+          3. editor-state — Smith live editor mirror in terminal mode
           4. composer      — always visible; sends `session.input`
              in both modes
           5. vkbd          — terminal-mode virtual keyboard
@@ -1552,7 +1552,7 @@
         </div>
       </div>
       <!--
-        Zarvis interactive emits structured editor_state events instead
+        Smith interactive emits structured editor_state events instead
         of echoing its live input buffer into PTY scrollback. Mirror that
         state here so remote-control users can see virtual-keyboard and
         composer-insert typing while terminal mode keeps transcript hidden.
@@ -1812,10 +1812,10 @@ const state = {
   // reconciles these rows so chat mode feels instant without duplicates.
   optimisticMessagesById: new Map(),
   renderingTranscriptHistory: false,
-  // Latest Zarvis editor_state by session id. Claude/Codex/shell do not
+  // Latest Smith editor_state by session id. Claude/Codex/shell do not
   // emit this and continue to rely on their PTY UI echoing input.
   editorById: new Map(),
-  // Latest active Zarvis agent_status by session id, rendered in the
+  // Latest active Smith agent_status by session id, rendered in the
   // same fixed editor strip as the TUI's "* Working.." line.
   agentStatusById: new Map(),
   // Recent live PTY activity by session id. Used by the web mini
@@ -3018,7 +3018,7 @@ async function enterTerminalMode(id, options = {}) {
     try {
       const s = state.sessions.find((x) => x.id === id);
       if (isStructuredToolSession(s)) {
-        // Zarvis: hydrate from the transcript so historical tool calls
+        // Smith: hydrate from the transcript so historical tool calls
         // (which are never written to the PTY) appear, interleaved with
         // prose. pty_replay alone would omit them.
         const t = await rpc("session.transcript", { session_id: id, from: 0 });
@@ -4387,7 +4387,7 @@ function renderEvent(event, at) {
     if (event.type === "error" && state.term) {
       state.term.write(`\r\n\x1b[31m[error] ${event.message || ""}\x1b[0m\r\n`);
     }
-    // Tool calls (Zarvis): unlike codex/claude, Zarvis does NOT paint
+    // Tool calls (Smith): unlike codex/claude, Smith does NOT paint
     // tool blocks into its PTY stream — it emits structured tool_use /
     // tool_result events and the desktop TUI synthesizes the block. So
     // the xterm view would show nothing for tool calls. Synthesize an
@@ -4621,7 +4621,7 @@ function shouldRenderChatMessage(role, text) {
 }
 
 // --- terminal-mode tool-call synthesis (issue #134) ----------------------
-// Zarvis emits tool calls as structured events, not PTY bytes. Render an
+// Smith emits tool calls as structured events, not PTY bytes. Render an
 // inline xterm representation that mirrors the desktop TUI's tool block.
 
 // Strip ESC + other control bytes from agent-supplied text so a tool
@@ -4713,7 +4713,7 @@ function writeToTerm(s) {
   else writeLivePtyToTerm(s);
 }
 
-// Hydrate the terminal from a session's transcript (used for zarvis,
+// Hydrate the terminal from a session's transcript (used for smith,
 // whose tool blocks aren't in the PTY stream). Writes PTY prose and
 // synthesized tool blocks in chronological order, directly to xterm —
 // this is the historical baseline, so it bypasses the live-event
@@ -5655,7 +5655,7 @@ function hasSemanticChatView(s) {
   );
 }
 
-// Zarvis renders tool calls as structured events, not PTY bytes (codex /
+// Smith renders tool calls as structured events, not PTY bytes (codex /
 // claude / shell paint their own tool UI into the PTY). For those
 // sessions the xterm view is hydrated from the transcript — which
 // interleaves PTY prose with the tool events — instead of the

@@ -28,7 +28,7 @@ pub enum Role {
 /// formats — each provider impl translates it to its own JSON.
 ///
 /// Serializable so the agent loop can append each message to
-/// `zarvis.jsonl` and replay on daemon-restart resume.
+/// `smith.jsonl` and replay on daemon-restart resume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,

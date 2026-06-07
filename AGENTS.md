@@ -24,7 +24,7 @@ Use [vhs](https://github.com/charmbracelet/vhs) to capture deterministic mp4 / g
 - **Build the worktree's binaries.** vhs records whatever `agent` you point it at, so make sure the worktree has been built (`cargo build` per the workflow above) before recording. For a before/after pair, prepare two worktrees so each side has its own binaries — never re-record `before` from a tree that already has the change applied.
 - **Isolated daemon.** Run vhs against a fresh `AGENTD_RUNTIME_DIR` / `AGENTD_STATE_DIR` / `AGENTD_DATA_DIR` / `AGENTD_CONFIG_DIR` under `/tmp/` so it doesn't collide with the user's running daemon. Each recording gets its own dir and its own daemon process; tear them down at the end.
 - **Put the TUI in a state that actually shows your change.** This part varies most by change — pick whichever shape fits:
-  - **Specific harness features** (a zarvis tool, codex output rendering, claude resume, …): spawn that harness with a representative prompt, e.g. `agent new zarvis "<task>"`. Use a prompt whose output exercises the diff (tool calls if you changed tool rendering, long messages if you changed wrapping, etc.).
+  - **Specific harness features** (a smith tool, codex output rendering, claude resume, …): spawn that harness with a representative prompt, e.g. `agent new smith "<task>"`. Use a prompt whose output exercises the diff (tool calls if you changed tool rendering, long messages if you changed wrapping, etc.).
   - **Minibuffer / keymap / popup / palette**: send the keystrokes from inside the vhs tape with `Type`, `Ctrl+X`, `Enter`, `Sleep`, etc. — no extra sessions needed if the feature is reachable from a stock TUI.
   - **Session-list / modeline / matrix rain / anything driven by fleet activity**: spawn 2–4 sessions producing ambient activity. The most robust pattern is `agent new shell ""` (interactive shell) followed by `agent send <id> "<command>"` pushing a noise loop into each. *Don't* pass the loop as the `new shell` prompt — both bash and zsh observed to fall back to interactive mode under PTY and never actually run `-lc <cmd>`, leaving the daemon silent.
   - **Single-session views** (transcript, scrollback, diff): spawn one session, then trigger the view via tape keystrokes (`C-x z` for zoom, mouse-wheel events, etc.).
@@ -142,16 +142,16 @@ Optional. Concrete behavior examples without relying on current file names or fu
 
 ## The minibuffer is just another session
 
-Most TUIs make the bottom command bar a special UI primitive. We don't — it's a regular zarvis session, persisted on disk like any other. Differences:
+Most TUIs make the bottom command bar a special UI primitive. We don't — it's a regular smith session, persisted on disk like any other. Differences:
 
 - **Hidden from the list.** `kind: SessionKind::Orchestrator` filters it out of `list_items`.
 - **Auto-created.** `SessionManager::ensure_orchestrator()` runs at daemon start.
 - **Rendered in the bottom strip.** Same `ItemHistory::replay` pipeline as the main view, just a different Rect.
-- **Specialized system prompt.** Zarvis branches on `AGENTD_SESSION_KIND` to act as the fleet dispatcher instead of a worker.
+- **Specialized system prompt.** Smith branches on `AGENTD_SESSION_KIND` to act as the fleet dispatcher instead of a worker.
 - **Subscribes to fleet events.** A second IPC connection turns other sessions' `Status{AwaitingInput|Errored|Done}` and `ToolApprovalRequest` into `OBSERVATION:` messages the orchestrator can react to.
 - **Approvals render inline in the PTY.** No global minibuffer preempt — the panel *is* the PTY.
 
-Everything else — slash commands, tool-block expand/collapse, input queue during turns, persistence across daemon restart, automode, resume — works identically to any zarvis session, *because the minibuffer is one*. Add minibuffer features as session features.
+Everything else — slash commands, tool-block expand/collapse, input queue during turns, persistence across daemon restart, automode, resume — works identically to any smith session, *because the minibuffer is one*. Add minibuffer features as session features.
 
 ## Rendering across resize and restart
 

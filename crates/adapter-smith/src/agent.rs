@@ -1,4 +1,4 @@
-//! The zarvis agent loop. Pulls user input from the inbox, calls the
+//! The smith agent loop. Pulls user input from the inbox, calls the
 //! provider, runs any tool calls (gating Risky ones behind an approval
 //! prompt unless unsafe-auto is on), feeds results back, and loops until
 //! the model signals end-of-turn.
@@ -184,7 +184,7 @@ impl<'a> TextSink for MessageSink<'a> {
     }
 }
 
-pub(crate) const SYSTEM_PROMPT_USER: &str = r#"You are zarvis, an AI agent embedded in agentd (a multi-session terminal agent fleet).
+pub(crate) const SYSTEM_PROMPT_USER: &str = r#"You are smith, an AI agent embedded in agentd (a multi-session terminal agent fleet).
 
 You have access to:
 - Local tools: shell (run any command — read files with `cat`/`sed -n`, search with `rg`/`grep`, list with `ls`, run tests, git), edit_file (apply one or many find/replace hunks across files; also creates files), write_stdin (drive an interactive process started by `shell interactive:true`).
@@ -203,7 +203,7 @@ Dynamic session UI: when a task is long-running, multi-step, decision-heavy, or 
 
 Be concise. When you finish a turn, emit a short summary of what you did; the user will see your messages and tool calls in the transcript."#;
 
-pub(crate) const SYSTEM_PROMPT_ORCHESTRATOR: &str = r#"You are the agentd orchestrator — a default zarvis session created by agentd itself, surfaced in the user's TUI minibuffer. You are the always-available control surface for the user's session fleet.
+pub(crate) const SYSTEM_PROMPT_ORCHESTRATOR: &str = r#"You are the agentd orchestrator — a default smith session created by agentd itself, surfaced in the user's TUI minibuffer. You are the always-available control surface for the user's session fleet.
 
 Your job is to help the user run, inspect, and reason about *other* sessions in agentd. Prefer agentd-control tools (prefix `agentd_`) over editing files or running ad-hoc shell commands yourself:
 - `agentd_list_sessions` / `agentd_get_session` / `agentd_get_transcript` to inspect state.
@@ -375,7 +375,7 @@ pub(crate) async fn run_safe_call(
 }
 
 /// Push a `Message` to the in-memory vec and persist the same message
-/// (best-effort) to `zarvis.jsonl` so a daemon restart can hydrate it.
+/// (best-effort) to `smith.jsonl` so a daemon restart can hydrate it.
 macro_rules! push_msg {
     ($messages:expr, $persist:expr, $msg:expr) => {{
         let m = $msg;
@@ -461,7 +461,7 @@ pub async fn run(
         procs: Arc::new(crate::tools::proc::ProcRegistry::default()),
     };
 
-    // Per-session message persistence (`zarvis.jsonl`). On resume,
+    // Per-session message persistence (`smith.jsonl`). On resume,
     // hydrate `messages` from the file before the loop starts.
     let data_dir = persist::session_data_dir_from_env();
     let mut persist = Persist::open(data_dir.as_deref());

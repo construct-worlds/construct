@@ -525,8 +525,8 @@ mod tests {
             "edits": [
                 {"find": "old app one", "replace": "new app one"},
                 {"find": "old app two", "replace": "new app two"},
-                {"path": "crates/adapter-zarvis/src/interactive.rs", "find": "old prompt", "replace": "new prompt"},
-                {"path": "crates/adapter-zarvis/src/tools/fs.rs", "find": "old summary", "replace": "new summary"}
+                {"path": "crates/adapter-smith/src/interactive.rs", "find": "old prompt", "replace": "new prompt"},
+                {"path": "crates/adapter-smith/src/tools/fs.rs", "find": "old summary", "replace": "new summary"}
             ]
         }));
 
@@ -535,10 +535,10 @@ mod tests {
             "crates/cli/src/app.rs (2 edits: `old app one` -> `new app one`; `old app two` -> `new app two`)"
         ));
         assert!(summary.contains(
-            "crates/adapter-zarvis/src/interactive.rs (1 edit: `old prompt` -> `new prompt`)"
+            "crates/adapter-smith/src/interactive.rs (1 edit: `old prompt` -> `new prompt`)"
         ));
         assert!(summary.contains(
-            "crates/adapter-zarvis/src/tools/fs.rs (1 edit: `old summary` -> `new summary`)"
+            "crates/adapter-smith/src/tools/fs.rs (1 edit: `old summary` -> `new summary`)"
         ));
         assert!(!summary.contains("file(s)"));
     }
@@ -556,7 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_edit_replaces_unique_match() {
-        let dir = std::env::temp_dir().join(format!("zarvis-edit-single-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("smith-edit-single-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join("a.txt");
         std::fs::write(&f, "alpha\nbeta\ngamma\n").unwrap();
@@ -575,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn multi_hunk_is_atomic_on_failure() {
-        let dir = std::env::temp_dir().join(format!("zarvis-edit-atomic-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("smith-edit-atomic-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join("b.txt");
         std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
@@ -602,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn multi_hunk_applies_in_order() {
-        let dir = std::env::temp_dir().join(format!("zarvis-edit-order-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("smith-edit-order-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join("c.txt");
         std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
@@ -624,7 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_find_creates_new_file() {
-        let dir = std::env::temp_dir().join(format!("zarvis-edit-create-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("smith-edit-create-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join("nested/new.txt");
         let ctx = ctx_with_cwd(dir.clone());

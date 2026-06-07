@@ -17,7 +17,7 @@ The terminal TUI renderer keeps tool calls as independent top-level blocks. Expa
 
 ## Reason
 
-Zarvis often performs bursts of repeated calls, such as reading several files or querying several sessions. Rendering each call as a full top-level block can create noisy transcripts in clients that present semantic event rows. Grouping adjacent same-tool calls can keep dense work readable while preserving auditability.
+Smith often performs bursts of repeated calls, such as reading several files or querying several sessions. Rendering each call as a full top-level block can create noisy transcripts in clients that present semantic event rows. Grouping adjacent same-tool calls can keep dense work readable while preserving auditability.
 
 Terminal rendering has a stricter frame-time constraint. A grouped terminal item can turn a one-block expand/collapse into a replay of hundreds of sibling blocks, which causes visible frame drops in long sessions. The terminal TUI therefore favors stable frame pacing over grouped chrome.
 

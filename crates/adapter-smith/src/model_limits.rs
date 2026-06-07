@@ -1,6 +1,6 @@
 //! Persisted per-model input-token limit table.
 //!
-//! Zarvis treats provider-reported limits as the ground truth: when
+//! Smith treats provider-reported limits as the ground truth: when
 //! a request fails with a context-overflow error we (a) extract the
 //! limit out of the error body if the provider includes it, (b) save
 //! the new value here, and (c) reduce-then-retry. To detect a model
@@ -9,7 +9,7 @@
 //! we bump the saved limit by however many tokens the provider
 //! actually accepted.
 //!
-//! The table lives in `state_dir/zarvis-model-limits.json` so every
+//! The table lives in `state_dir/smith-model-limits.json` so every
 //! agentd session on the same machine shares the learning. The file
 //! is JSON to stay forgiving: extra keys are ignored, a corrupt file
 //! falls back to defaults instead of failing the launch.
@@ -71,7 +71,7 @@ fn key(provider: &str, model: &str) -> String {
 }
 
 fn store_path() -> PathBuf {
-    Paths::discover().zarvis_model_limits_file()
+    Paths::discover().smith_model_limits_file()
 }
 
 impl ModelLimits {
@@ -294,7 +294,7 @@ mod tests {
 
     /// Corrupt / empty file path: `load()` must NOT panic. Used by
     /// agent.rs and interactive.rs at session start; failure there
-    /// would block every zarvis session from running.
+    /// would block every smith session from running.
     #[test]
     fn from_garbage_falls_back_to_default() {
         let s: ModelLimits = serde_json::from_str("not json").unwrap_or_default();

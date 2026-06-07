@@ -252,7 +252,7 @@ fn emacs() -> Keymap {
         (Chord(vec![shift('G')]), ScrollBottom),
         (Chord(vec![key(KeyCode::PageDown)]), ScrollPageDown),
         (Chord(vec![key(KeyCode::PageUp)]), ScrollPageUp),
-        // Cycle approval mode on the selected session (zarvis / future agents).
+        // Cycle approval mode on the selected session (smith / future agents).
         (Chord(vec![ctrl('x'), shift('A')]), ToggleAutomode),
         // Give the terminal mouse back for native text selection/copy.
         (Chord(vec![ctrl('x'), ch('m')]), ToggleMouseCapture),

@@ -8,7 +8,7 @@
 //! Adapters consume this policy differently depending on how their harness
 //! gates tool calls:
 //!
-//! - **Native (zarvis)** — the adapter implements its own approval gate; it
+//! - **Native (smith)** — the adapter implements its own approval gate; it
 //!   calls [`AutoApprovePolicy::allows_path_write`] before prompting and
 //!   skips the prompt for matches.
 //! - **Wrapper (claude)** — agentd doesn't sit in the harness's tool-call

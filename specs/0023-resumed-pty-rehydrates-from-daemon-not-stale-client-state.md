@@ -23,7 +23,7 @@ The force-redraw remains as defense in depth (and for single-session restarts, w
 
 Reconnect is treated as a fresh start for terminal rendering: histories are cleared and the selected/pinned PTY sessions re-hydrate from the daemon's authoritative log. A brief re-hydration flash on reconnect is acceptable.
 
-Silent-resume harnesses (zarvis) keep their `pty.log` across respawn, so re-hydration simply reloads the full log — no special-casing needed. They are still skipped by the force-redraw.
+Silent-resume harnesses (smith) keep their `pty.log` across respawn, so re-hydration simply reloads the full log — no special-casing needed. They are still skipped by the force-redraw.
 
 ## Non-Goals
 

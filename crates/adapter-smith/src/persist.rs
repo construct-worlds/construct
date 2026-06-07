@@ -1,4 +1,4 @@
-//! Per-session message persistence — `zarvis.jsonl`.
+//! Per-session message persistence — `smith.jsonl`.
 //!
 //! One JSON-serialized [`Message`] per line, append-only. The agent
 //! loop writes to it as it pushes messages into the in-memory vec; on
@@ -20,22 +20,22 @@ pub struct Persist {
 }
 
 impl Persist {
-    /// Create a persister rooted at `<session_data_dir>/zarvis.jsonl`,
+    /// Create a persister rooted at `<session_data_dir>/smith.jsonl`,
     /// or `None` when no data dir was provided (the daemon should always
     /// set one, but in standalone invocations it may be missing).
     pub fn open(session_data_dir: Option<&Path>) -> Option<Self> {
         let dir = session_data_dir?;
         if let Err(e) = std::fs::create_dir_all(dir) {
-            tracing::warn!(dir = %dir.display(), error = ?e, "zarvis persist: mkdir failed");
+            tracing::warn!(dir = %dir.display(), error = ?e, "smith persist: mkdir failed");
             return None;
         }
-        let path = dir.join("zarvis.jsonl");
+        let path = dir.join("smith.jsonl");
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .map_err(|e| {
-                tracing::warn!(path = %path.display(), error = ?e, "zarvis persist: open failed");
+                tracing::warn!(path = %path.display(), error = ?e, "smith persist: open failed");
                 e
             })
             .ok()?;
@@ -53,12 +53,12 @@ impl Persist {
         let line = match serde_json::to_string(msg) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = ?e, "zarvis persist: serialize failed");
+                tracing::warn!(error = ?e, "smith persist: serialize failed");
                 return;
             }
         };
         if let Err(e) = writeln!(file, "{line}") {
-            tracing::warn!(error = ?e, "zarvis persist: write failed");
+            tracing::warn!(error = ?e, "smith persist: write failed");
         }
         let _ = file.flush();
     }
@@ -76,7 +76,7 @@ impl Persist {
             Err(e) => tracing::warn!(
                 path = %self.path.display(),
                 error = ?e,
-                "zarvis persist: reset failed"
+                "smith persist: reset failed"
             ),
         }
     }
@@ -84,9 +84,9 @@ impl Persist {
     /// Atomically replace the persisted conversation with `messages`.
     ///
     /// Writes a sibling tempfile, fsyncs, then `rename`s it over
-    /// `zarvis.jsonl`. A crash mid-write leaves the original file
+    /// `smith.jsonl`. A crash mid-write leaves the original file
     /// untouched (the tempfile is orphaned but not loaded on resume,
-    /// since `load` reads `zarvis.jsonl`). After a successful swap the
+    /// since `load` reads `smith.jsonl`). After a successful swap the
     /// append handle is reopened so the next [`append`](Self::append)
     /// continues at the end of the new file.
     ///
@@ -126,7 +126,7 @@ impl Persist {
             Err(e) => tracing::warn!(
                 path = %self.path.display(),
                 error = ?e,
-                "zarvis persist: reopen after rewrite failed"
+                "smith persist: reopen after rewrite failed"
             ),
         }
         Ok(())
@@ -146,7 +146,7 @@ impl Persist {
             match serde_json::from_str::<Message>(&line) {
                 Ok(m) => out.push(m),
                 Err(e) => {
-                    tracing::warn!(line = i + 1, error = ?e, "zarvis persist: skipping malformed line");
+                    tracing::warn!(line = i + 1, error = ?e, "smith persist: skipping malformed line");
                 }
             }
         }
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn reset_truncates_persisted_messages_and_keeps_appending() {
         let dir =
-            std::env::temp_dir().join(format!("agentd-zarvis-persist-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("agentd-smith-persist-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn rewrite_swaps_atomically_and_appends_continue() {
         let dir = std::env::temp_dir().join(format!(
-            "agentd-zarvis-rewrite-test-{}-{}",
+            "agentd-smith-rewrite-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -1880,7 +1880,7 @@ fn render_matrix_reveal_tooltip(f: &mut Frame, rain_area: Rect, app: &App) {
             let harness = harness_label(s);
             // Title if the session has a distinct one, else just the
             // harness; append harness too when a title exists so the
-            // tooltip says both (e.g. "fix auth · zarvis").
+            // tooltip says both (e.g. "fix auth · smith").
             let title = s.title.as_deref().filter(|t| !t.is_empty());
             match title {
                 Some(t) => format!(" {t} · {harness} "),
@@ -2951,7 +2951,7 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
     }
     let scroll = app.scrollback_for_window(window_id);
     // Only adapters that publish `SessionEvent::EditorState` (currently
-    // zarvis interactive) get the fixed editor pane at the bottom.
+    // smith interactive) get the fixed editor pane at the bottom.
     // claude / codex / shell render their own input prompt inside the
     // PTY, so a second editor pane would just look like a duplicate.
     let editor_state = app.editor_states.get(&id).cloned();
@@ -3022,7 +3022,7 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
         }
     };
     // Render the chat at the FULL pane height, not `chat_area.height`.
-    // The zarvis editor pane below grows/shrinks on nearly every
+    // The smith editor pane below grows/shrinks on nearly every
     // keystroke; sizing the parser to the shrinking chat area forced an
     // O(history) vt100 rebuild each time (the typing lag). Keeping the
     // parser at the stable `area.height` means editor growth never
@@ -4934,7 +4934,7 @@ fn blit_image_quadrants(f: &mut Frame, area: Rect, img: &image::RgbaImage, cover
 /// - the active editor — one row per `\n`-separated buf line, cyan `❯`
 ///   on the first row, two-space indent on continuation rows.
 /// Cursor is placed on the active line/col that corresponds to `state.cursor`.
-const ZARVIS_READY_HINT: &str = "type your prompt and press Enter";
+const SMITH_READY_HINT: &str = "type your prompt and press Enter";
 
 fn editor_ready_hint(
     state: Option<&crate::app::EditorState>,
@@ -4948,9 +4948,9 @@ fn editor_ready_hint(
 
     match state {
         Some(s) if s.buf.is_empty() && s.queued.is_empty() && s.completions.is_empty() => {
-            Some(ZARVIS_READY_HINT)
+            Some(SMITH_READY_HINT)
         }
-        None => Some(ZARVIS_READY_HINT),
+        None => Some(SMITH_READY_HINT),
         _ => None,
     }
 }
@@ -5209,7 +5209,7 @@ fn editor_pane_rows(
         .unwrap_or(0);
     let completion_lines = state.map(|s| s.completions.len()).unwrap_or(0);
     let buf_lines = if ready_hint.is_some() {
-        wrapped_text_rows(ZARVIS_READY_HINT, text_width)
+        wrapped_text_rows(SMITH_READY_HINT, text_width)
     } else {
         state
             .map(|s| wrapped_text_rows(&s.buf, text_width))
@@ -5495,7 +5495,7 @@ fn render_modeline_approval_mode_tooltip(f: &mut Frame, app: &App) {
 /// Compute how many rows the minibuffer footer occupies this frame.
 /// The default footer is 1 row (palette / hints / intent prompts).
 /// When the orchestrator panel is focused (its `MinibufferIntent`
-/// active) it expands to a fixed cap so the embedded zarvis REPL has
+/// active) it expands to a fixed cap so the embedded smith REPL has
 /// room to render its banner + chat bubbles, leaving the main view
 /// most of the screen.
 pub fn compute_minibuffer_height(app: &App, total_h: u16) -> u16 {
@@ -6221,7 +6221,7 @@ pub fn pin_tile_layout(area: Rect, n: usize) -> Vec<Rect> {
 
 /// Render a slice of a vt100 screen into `area`, preserving colors and
 /// attributes. The window is anchored at the bottom of the source screen so
-/// harness status/input bars (zarvis, codex, claude all park them in the
+/// harness status/input bars (smith, codex, claude all park them in the
 /// last few rows) stay visible on pinned tiles. Used by the pin strip.
 /// Translate tool-block hit-rects from full-parser-screen rows into
 /// `chat_area`-relative rows when the chat is rendered as the bottom
@@ -6269,7 +6269,7 @@ fn translate_block_hits(
 /// Paint `screen` into `area`, showing the rows starting at `row_offset`.
 ///
 /// `row_offset` is non-zero only when the parser is taller than the chat
-/// area — i.e. a zarvis editor pane is carved out below. We keep the
+/// area — i.e. a smith editor pane is carved out below. We keep the
 /// parser at the full pane height (so the editor growing/shrinking on
 /// every keystroke never resizes — and rebuilds — it) and render only
 /// its bottom `area.height` rows here. `row_offset = full_height -
@@ -6373,7 +6373,7 @@ fn vt100_cell_style(cell: &vt100::Cell, theme: &Theme) -> Style {
         mods.insert(Modifier::BOLD);
     }
     // `\x1b[2m` (dim/faint) — without this the pin tile renders
-    // styled-dim text (e.g. zarvis's `[+N lines — click to expand]`
+    // styled-dim text (e.g. smith's `[+N lines — click to expand]`
     // markers and tool args) at full intensity, while the main view
     // shows them correctly because `tui_term::PseudoTerminal`
     // translates the attribute itself.
@@ -6433,7 +6433,7 @@ fn vt100_color(c: vt100::Color) -> Option<Color> {
 fn session_status_glyph(app: &App, s: &SessionSummary) -> &'static str {
     // `agent_statuses` only holds entries while a turn is active (the live
     // handler removes them on the `active=false` turn-end event), so a
-    // present, active entry means zarvis is working right now.
+    // present, active entry means smith is working right now.
     let agent_active = app
         .agent_statuses
         .get(&s.id)
@@ -6450,8 +6450,8 @@ fn session_should_animate_status(s: &SessionSummary, pty_active: bool, agent_act
     if !matches!(s.state, SessionState::Running) {
         return false;
     }
-    // Zarvis reports an explicit agent-turn signal (`AgentStatus`):
-    // active=true at turn start, active=false at every turn end. A zarvis
+    // Smith reports an explicit agent-turn signal (`AgentStatus`):
+    // active=true at turn start, active=false at every turn end. A smith
     // session can linger in `Running` while idle (e.g. an interrupted turn
     // that returned without flipping back to AwaitingInput), so animate
     // strictly while that turn is active — not merely because the
@@ -6646,7 +6646,7 @@ fn primary_label(s: &agentd_protocol::SessionSummary) -> String {
 }
 
 /// Render the orchestrator's PTY in the bottom strip. The orchestrator
-/// is a zarvis interactive session; the same items-model history that
+/// is a smith interactive session; the same items-model history that
 /// renders any other PTY-backed session is replayed onto a fresh
 /// parser sized to the panel's inner area each frame. Tool-block
 /// hit ranges land in `app.block_hits` for click-toggle dispatch.
@@ -6677,7 +6677,7 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
     // is publishing `EditorState`, carve out a fixed editor pane at
     // the bottom of the panel so the `❯` and live typing are always
     // visible — otherwise this panel rendered only the PTY scrollback
-    // and the editor was invisible (zarvis stopped painting it).
+    // and the editor was invisible (smith stopped painting it).
     //
     // On a fresh TUI attach, the user can open the orchestrator panel
     // before the adapter's initial `EditorState` notification has
@@ -7479,7 +7479,7 @@ mod tests {
         }
     }
 
-    /// User-reported regression: zarvis emits `\x1b[2m` (DIM/faint)
+    /// User-reported regression: smith emits `\x1b[2m` (DIM/faint)
     /// for markers like `[+N lines — click to expand]` and tool
     /// args. The main session view renders that as dim/gray because
     /// `tui_term::PseudoTerminal` translates the attribute itself,
@@ -7514,7 +7514,7 @@ mod tests {
         assert!(
             dimmed_style.add_modifier.contains(Modifier::DIM),
             "dim cell must carry DIM modifier — without it the pin \
-             tile renders zarvis's gray markers at full intensity"
+             tile renders smith's gray markers at full intensity"
         );
     }
 
@@ -7976,7 +7976,7 @@ mod tests {
         assert!(session_should_animate_status(&s, false, true));
         // Running but the turn has ended (agent inactive) → stay static,
         // even though the lifecycle state still reads Running. This is the
-        // idle-zarvis regression: PR #179 spun the glyph here.
+        // idle-smith regression: PR #179 spun the glyph here.
         assert!(!session_should_animate_status(&s, false, false));
         assert!(!session_should_animate_status(&s, true, false));
     }
@@ -7986,7 +7986,7 @@ mod tests {
         let mut s = summary_with_mode("shell", None);
         s.state = SessionState::Running;
         // Shell has no agent-status signal; gate on recent PTY bytes
-        // (agent_active is irrelevant for non-zarvis harnesses).
+        // (agent_active is irrelevant for non-smith harnesses).
         assert!(!session_should_animate_status(&s, false, false));
         assert!(session_should_animate_status(&s, true, false));
     }
