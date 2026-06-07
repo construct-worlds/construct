@@ -3,7 +3,7 @@
 //! `AGENTS.md` (also commonly `CLAUDE.md`) is the convention for
 //! per-project guidance the user wants every AI-assistant action to
 //! honor — coding style, file layout, prohibited patterns, etc.
-//! Zarvis reads it once at session start (and on resume) and
+//! Smith reads it once at session start (and on resume) and
 //! appends the contents to the system prompt under a dedicated
 //! `## Project guide` section. The file is the user's voice; the
 //! model is told to honor it unless explicitly overridden.
@@ -162,7 +162,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
-            "zarvis-guide-test-{}-{}",
+            "smith-guide-test-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));

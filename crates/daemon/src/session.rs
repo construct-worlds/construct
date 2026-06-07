@@ -1505,7 +1505,7 @@ impl SessionManager {
         // started agentd. Interactive mode gives the orchestrator a
         // PTY-backed REPL — the TUI renders it in the minibuffer panel
         // and gets the line-editor / queue / slash popup polish from
-        // zarvis interactive for free. The initial 80×10 pty_size is
+        // smith interactive for free. The initial 80×10 pty_size is
         // a placeholder; the TUI sends a pty_resize as soon as it
         // attaches the panel.
         let cwd = std::env::current_dir()
@@ -1733,7 +1733,7 @@ impl SessionManager {
         // just a cursor) until a SIGWINCH forces a redraw.
         //
         // Adapters that advertise `supports_silent_resume` promise to
-        // emit nothing on resume (zarvis does this), so we keep the
+        // emit nothing on resume (smith does this), so we keep the
         // prior PTY history visible after a daemon restart instead of
         // wiping it.
         if !info.capabilities.supports_silent_resume {
@@ -1790,7 +1790,7 @@ impl SessionManager {
         // background task. The 250 ms delay gives the child time to
         // settle into its initial draw; the two ioctls then force
         // two SIGWINCH'es, the second of which leaves the PTY at the
-        // correct cached size. zarvis (silent_resume) is skipped —
+        // correct cached size. smith (silent_resume) is skipped —
         // it explicitly emits nothing on resume.
         if let Some(size) = force_redraw_size_on_resume(&info.capabilities, start_params.pty_size) {
             let manager_for_redraw = self.clone();
@@ -1832,7 +1832,7 @@ impl SessionManager {
     ///
     /// Internally just calls [`Manager::respawn`], which sets
     /// `CONSTRUCT_RESUME=1` in the adapter env so harnesses that
-    /// persist conversation state (zarvis) reload it on the new
+    /// persist conversation state (smith) reload it on the new
     /// process.
     pub async fn restart(self: Arc<Self>, id: &str) -> Result<()> {
         let entry = self
@@ -1980,7 +1980,7 @@ impl SessionManager {
                 }));
             return;
         }
-        // Persist zarvis/chat PTY bytes in the transcript as lightweight
+        // Persist smith/chat PTY bytes in the transcript as lightweight
         // ordering markers. PTY replay still comes from pty.log, but these
         // markers let a fresh TUI interleave transcript-only items (tool
         // blocks) with the raw byte stream at the right point after restart.
@@ -2207,7 +2207,7 @@ impl SessionManager {
         // Auto-title hook: trigger on the FIRST User message we record
         // regardless of where it came from (the daemon's create()
         // prompt-as-event, send_input, or an adapter that re-emits the
-        // user's typed prompt — zarvis interactive does this). The
+        // user's typed prompt — smith interactive does this). The
         // `title_gen_attempted` AtomicBool inside maybe_spawn_auto_title
         // ensures only the first one wins.
         if let SessionEvent::Message {
@@ -3356,7 +3356,7 @@ impl SessionManager {
 
 /// Shell out to `construct-adapter-smith --title-mode "<prompt>"`, capture
 /// stdout, and apply the title to the session summary. Best-effort:
-/// any failure (zarvis missing keys, network error, non-zero exit,
+/// any failure (smith missing keys, network error, non-zero exit,
 /// empty output) leaves the session's title unset.
 async fn generate_auto_title(
     binary: PathBuf,
@@ -3443,7 +3443,7 @@ fn builtin_harness_capabilities(name: &str) -> agentd_protocol::Capabilities {
 /// (we always restore to the cached size, then bump by one column for
 /// the first leg of the cycle). Returns `None` when no force-redraw
 /// is warranted:
-///   * the adapter advertises `supports_silent_resume` (zarvis paints
+///   * the adapter advertises `supports_silent_resume` (smith paints
 ///     nothing on resume — any forced SIGWINCH would corrupt its
 ///     custom render);
 ///   * no cached pty_size to restore to (fresh creates skip this);
@@ -3561,7 +3561,7 @@ mod tests {
         );
     }
 
-    /// Zarvis advertises `supports_silent_resume = true` because its
+    /// Smith advertises `supports_silent_resume = true` because its
     /// `interactive.rs` deliberately paints nothing on resume — the
     /// PTY ring carries the prior screen forward and the next
     /// keystroke triggers a redraw. A forced SIGWINCH here would
@@ -3620,7 +3620,7 @@ mod tests {
         assert!(resume_redraw_ready(None, now, RESPAWN_REDRAW_MAX_WAIT));
     }
 
-    /// Headless / non-PTY adapters (anything zarvis-headless-only or
+    /// Headless / non-PTY adapters (anything smith-headless-only or
     /// future structured-only harnesses) shouldn't get a SIGWINCH.
     #[test]
     fn force_redraw_skipped_for_non_pty_adapters() {
@@ -4151,7 +4151,7 @@ mod tests {
                 .expect("session manager");
         let manager = Arc::new(mgr);
 
-        // Synthetic session in `Running` (what a live shell / zarvis
+        // Synthetic session in `Running` (what a live shell / smith
         // session looks like just before the user hits Ctrl-C on the
         // daemon).
         let id = "stest_shutdown".to_string();

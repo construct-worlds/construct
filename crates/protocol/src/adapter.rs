@@ -762,7 +762,7 @@ where
     while !should_exit {
         // Race the AHP stdin loop against the running session
         // handle. If the session handler completes on its own
-        // (e.g. zarvis hits EOF after a Ctrl-D), we MUST exit the
+        // (e.g. smith hits EOF after a Ctrl-D), we MUST exit the
         // loop and let the process die — otherwise the inbox
         // receiver is gone but `inbox_tx` is still held by this
         // loop, every subsequent `pty_input` request silently
@@ -1087,8 +1087,8 @@ mod tests {
         assert!(got.contains("CONSTRUCT_PROJECT_ID = \"g123\""));
     }
 
-    /// Symptom-level repro for the stuck-zarvis-prompt bug. The user
-    /// hit Ctrl-D in a zarvis session; `interactive::run` returned;
+    /// Symptom-level repro for the stuck-smith-prompt bug. The user
+    /// hit Ctrl-D in a smith session; `interactive::run` returned;
     /// but the AHP loop in `run_with_io` kept polling stdin and
     /// silently dropped every subsequent `pty_input` (the inbox
     /// receiver had been dropped with the handler future, so
@@ -1111,7 +1111,7 @@ mod tests {
 
         let handler = |_params: SessionStartParams, ctx: AdapterContext| async move {
             // Emit a couple of events and return — mirrors what a
-            // zarvis interactive loop does after Ctrl-D once it
+            // smith interactive loop does after Ctrl-D once it
             // learns to emit Done. The library-level fix doesn't
             // depend on the Done emission; it MUST exit when the
             // handler returns regardless.

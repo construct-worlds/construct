@@ -18,7 +18,7 @@ const PTY_REVEAL_GAP: Duration = Duration::from_millis(3500);
 
 /// Fallback activity words used only when the PTY byte stream
 /// hasn't yielded any extractable word for a session yet (or the
-/// pool was already drained by the last reveal). Zarvis already
+/// pool was already drained by the last reveal). Smith already
 /// emits structured tool events that map to richer words via
 /// `word_for_event`; this list is just so the rain isn't silent
 /// during the very first PTY chunk of a session.

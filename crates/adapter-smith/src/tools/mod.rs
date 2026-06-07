@@ -51,7 +51,7 @@ pub trait Tool: Send + Sync {
 ///   - its target path is covered by
 ///     [`agentd_protocol::adapter::policy::AutoApprovePolicy`] — that's how the
 ///     "agentd defines the policy once, harnesses honor it" abstraction lands
-///     on zarvis; or
+///     on smith; or
 ///   - it is a `shell` call the model explicitly flagged `read_only: true`
 ///     (see [`shell_read_only_optin`]).
 ///
@@ -193,7 +193,7 @@ impl ToolRegistry {
             Box::new(agentd::LoopList),
             Box::new(agentd::LoopUpdate),
             Box::new(agentd::LoopRemove),
-            // Zarvis-owned subagents: hidden backing sessions exposed as
+            // Smith-owned subagents: hidden backing sessions exposed as
             // task-like child agents to this parent session.
             Box::new(subagent::Create),
             Box::new(subagent::List),

@@ -197,7 +197,7 @@ pub fn save_auth_json_atomic(path: &std::path::Path, auth: &AuthDotJson) -> Resu
     Ok(())
 }
 
-/// In-process refresh coordination. Multiple zarvis sessions in the
+/// In-process refresh coordination. Multiple smith sessions in the
 /// same adapter process share one of these so only one of them at a
 /// time performs the rotation-prone refresh. Cross-process (multiple
 /// adapter instances) races remain possible; documented as a known
@@ -232,7 +232,7 @@ impl CodexOauth {
             // Use the same identity codex CLI uses so we look like a
             // CLI client, not an anonymous Rust HTTP library.
             .user_agent(format!(
-                "codex_cli_rs/{} (agentd zarvis)",
+                "codex_cli_rs/{} (agentd smith)",
                 env!("CARGO_PKG_VERSION")
             ))
             // NOTE: a cookie jar would let cf_clearance challenge
@@ -674,7 +674,7 @@ fn resolve_instructions(system: &str) -> Result<String> {
     }
     Err(anyhow!(
         "codex-oauth: no `instructions` available. Either set \
-         {INSTRUCTIONS_ENV} to a non-empty value, or run zarvis with \
+         {INSTRUCTIONS_ENV} to a non-empty value, or run smith with \
          a non-empty `system` prompt (the agent loop populates this \
          from its system-prompt builder). Empty / unset → Codex \
          backend will reject the request with a 400."
@@ -880,7 +880,7 @@ impl LlmProvider for CodexOauth {
         let body = build_responses_body(model, &instructions, messages, tools);
 
         // Take the auth lock for the duration of the request so
-        // concurrent zarvis turns don't race on token rotation.
+        // concurrent smith turns don't race on token rotation.
         let mut state = self.state.lock().await;
         if Self::needs_refresh(&state.auth) {
             self.refresh_locked(&mut state).await?;
@@ -1224,7 +1224,7 @@ async fn connect_codex_ws(access_token: &str, account_id: &str) -> Result<WsStre
     set(
         h,
         "User-Agent",
-        format!("codex_cli_rs/{} (agentd zarvis)", env!("CARGO_PKG_VERSION")),
+        format!("codex_cli_rs/{} (agentd smith)", env!("CARGO_PKG_VERSION")),
     )?;
     if !account_id.is_empty() {
         set(h, "ChatGPT-Account-ID", account_id.to_string())?;

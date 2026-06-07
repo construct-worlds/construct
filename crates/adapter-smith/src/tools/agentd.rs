@@ -1,5 +1,5 @@
 //! Agentd-control tools: thin wrappers over `agentd_client::Client`.
-//! Lets a zarvis session drive the daemon (list/spawn/send-input to
+//! Lets a smith session drive the daemon (list/spawn/send-input to
 //! other sessions) using natural-language tool calls — the same surface
 //! the MCP server exposes.
 
@@ -238,7 +238,7 @@ impl Tool for ListHarnesses {
         "agentd_list_harnesses"
     }
     fn description(&self) -> &str {
-        "List available adapter harnesses (shell, claude, codex, zarvis, …)."
+        "List available adapter harnesses (shell, claude, codex, smith, …)."
     }
     fn schema(&self) -> Value {
         json!({ "type": "object", "properties": {} })

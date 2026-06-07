@@ -33,7 +33,7 @@ calls serialize through the approval gate one at a time. That made batched
 read-only inspections (reading several files at once) impossible to run
 concurrently even in `unsafe_auto`, despite costing nothing to parallelize.
 Benchmarking against the Codex CLI on the same model and backend showed Codex
-parallelizing a meaningful share of its turns while zarvis stayed effectively
+parallelizing a meaningful share of its turns while smith stayed effectively
 one tool per turn. Trusting an explicit model-set flag is the simplest enabler
 that unblocks concurrency without parsing-based heuristics that command
 substitution and redirects can defeat.

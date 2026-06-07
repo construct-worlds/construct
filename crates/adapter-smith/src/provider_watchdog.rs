@@ -1,7 +1,7 @@
 //! Idle-timeout wrapper for provider turns.
 //!
 //! A provider stream that never reaches its terminal event leaves the
-//! zarvis turn active forever. In interactive mode that also freezes
+//! smith turn active forever. In interactive mode that also freezes
 //! the adapter-owned prompt, because the TUI only paints editor updates
 //! after the adapter emits `EditorState`. Bound every provider turn so
 //! a hung upstream becomes a visible error and the outer loop can return

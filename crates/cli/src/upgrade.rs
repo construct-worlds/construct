@@ -15,7 +15,7 @@ use agentd_client::Client;
 use agentd_protocol::paths::Paths;
 
 /// GitHub `owner/repo` the release assets and installer come from.
-const REPO: &str = "zarvis-ai/agentd";
+const REPO: &str = "smith-ai/agentd";
 /// The installer, baked in at build time so `construct upgrade` and `install.sh`
 /// can never drift apart.
 const INSTALL_SH: &str = include_str!("../../../install.sh");

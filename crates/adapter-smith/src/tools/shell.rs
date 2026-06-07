@@ -293,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_descriptive_error_when_cwd_missing() {
-        let missing = std::env::temp_dir().join("agentd-zarvis-shell-test-missing-cwd-xyz123");
+        let missing = std::env::temp_dir().join("agentd-smith-shell-test-missing-cwd-xyz123");
         assert!(!missing.exists(), "test precondition: path must not exist");
 
         let ctx = ctx_with_cwd(missing.clone());

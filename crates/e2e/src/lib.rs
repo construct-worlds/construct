@@ -113,7 +113,7 @@ impl Daemon {
             std::fs::create_dir_all(d)?;
         }
         // Disable the orchestrator session in e2e. Without this,
-        // CI runners (which have the zarvis adapter binary built
+        // CI runners (which have the smith adapter binary built
         // and discoverable) auto-spawn an "operator" session whose
         // panel grabs initial keyboard focus — keys then route
         // to the orchestrator's editor instead of the global

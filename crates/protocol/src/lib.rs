@@ -475,7 +475,7 @@ pub enum SessionEvent {
     /// Adapter compacted older conversation turns into an
     /// LLM-generated summary so the rolling context stays under the
     /// model's input-token budget without silently dropping history.
-    /// Emitted by interactive adapters (currently zarvis) when either
+    /// Emitted by interactive adapters (currently smith) when either
     /// the user runs `/compact` or auto-compact fires near the budget
     /// ceiling. Carries enough info for the TUI to render a banner
     /// card; full summary text is also in the transcript as the new
@@ -503,7 +503,7 @@ pub enum SessionEvent {
     },
     /// State of an adapter's input editor, rendered by the TUI in a
     /// fixed pane below the chat scrollback. Emitted by the adapter
-    /// (currently zarvis interactive) whenever the editor buffer,
+    /// (currently smith interactive) whenever the editor buffer,
     /// cursor, or pending-input queue changes. Lets the client paint
     /// a true bottom-anchored prompt that doesn't compete with the
     /// agent's stream for PTY rows.
@@ -601,7 +601,7 @@ pub struct ListTasksResult {
 /// recognizes this tool name, and dispatches its own slash table.
 /// Defining it as a protocol constant (instead of a separate event
 /// variant) keeps the wire format small and lets the LLM-initiated
-/// path use the same tool when we later register it in zarvis's
+/// path use the same tool when we later register it in smith's
 /// catalog for natural-language UI actions.
 pub const TUI_DISPATCH_TOOL: &str = "tui";
 
@@ -730,7 +730,7 @@ pub mod ipc_method {
     /// Respawn a session's adapter — typically used to bring a `Done`
     /// session back to life so the user can continue typing. The
     /// adapter is launched with `CONSTRUCT_RESUME=1` so harnesses that
-    /// persist conversation state (e.g. zarvis) can pick up where
+    /// persist conversation state (e.g. smith) can pick up where
     /// they left off.
     pub const SESSION_RESTART: &str = "session.restart";
     pub const SESSION_SET_PINNED: &str = "session.set_pinned";
@@ -898,7 +898,7 @@ pub struct SessionSummary {
     /// the group's header, below the ungrouped region).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
-    /// Parent session for internal child sessions such as Zarvis subagents.
+    /// Parent session for internal child sessions such as Smith subagents.
     /// Clients can render these under the owning user session instead of as
     /// ordinary top-level sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1060,7 +1060,7 @@ pub struct LoopCreateParams {
 pub struct LoopListParams {
     /// `None` = list every session's loops; `Some` = scope to one
     /// session. The MCP / CLI surface uses the unscoped form; the
-    /// zarvis tool defaults to the calling session.
+    /// smith tool defaults to the calling session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 }
@@ -1163,7 +1163,7 @@ pub struct CreateSessionParams {
     /// passes `Orchestrator`.
     #[serde(default)]
     pub kind: SessionKind,
-    /// Parent session for internal child sessions such as Zarvis subagents.
+    /// Parent session for internal child sessions such as Smith subagents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     /// Group to file the new session under. `None` (default) creates

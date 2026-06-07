@@ -569,7 +569,7 @@ async fn web_client_loads_and_websocket_connects() {
                   {
                     id: 's-operator',
                     title: 'orchestrator',
-                    harness: 'zarvis',
+                    harness: 'smith',
                     state: 'running',
                     kind: 'orchestrator',
                     position: 99,
@@ -639,7 +639,7 @@ async fn web_client_loads_and_websocket_connects() {
                 {
                   id: 's2',
                   title: 'Beta',
-                  harness: 'zarvis',
+                  harness: 'smith',
                   state: 'awaiting_input',
                   kind: 'user',
                   pinned: true,
@@ -1479,19 +1479,19 @@ async fn web_client_loads_and_websocket_connects() {
         "terminal reconnect should replace stale widget cache: {reconnect_terminal:?}"
     );
 
-    // The remote client mirrors zarvis EditorState events in a
-    // terminal-mode strip so PTY-backed zarvis input is visible even
-    // though zarvis deliberately does not echo its live editor into
+    // The remote client mirrors smith EditorState events in a
+    // terminal-mode strip so PTY-backed smith input is visible even
+    // though smith deliberately does not echo its live editor into
     // PTY scrollback. Exercise the renderer directly in the browser so
     // the smoke catches JS/schema regressions without needing a live
-    // zarvis adapter in CI.
+    // smith adapter in CI.
     page.evaluate(
         r#"
         state.mode = 'terminal';
         renderEditorState({
           type: 'editor_state',
           queued: ['queued prompt'],
-          buf: 'hello zarvis',
+          buf: 'hello smith',
           cursor: 5,
           completions: ['/help', '/hello']
         }, {
@@ -1511,14 +1511,14 @@ async fn web_client_loads_and_websocket_connects() {
         .into_value::<String>()
         .expect("string");
     assert!(
-        editor_text.contains("hello zarvis")
+        editor_text.contains("hello smith")
             && editor_text.contains("queued prompt")
             && editor_text.contains("/help")
             && editor_text.contains("Working.."),
         "expected editor_state mirror content, got:\n{editor_text}"
     );
 
-    // Headless zarvis streams assistant prose as many Message deltas.
+    // Headless smith streams assistant prose as many Message deltas.
     // Chat-mode rendering should aggregate adjacent assistant deltas
     // into one bubble, while a structured event boundary starts a new
     // assistant bubble for later prose.
@@ -1569,7 +1569,7 @@ async fn web_client_loads_and_websocket_connects() {
         "second assistant bubble should aggregate after boundary: {chat_deltas:?}"
     );
 
-    // Tool-call rendering in terminal mode (issue #134): zarvis emits
+    // Tool-call rendering in terminal mode (issue #134): smith emits
     // tool calls as structured events, not PTY bytes, so the xterm view
     // showed nothing for them. `renderEvent` now synthesizes an inline
     // representation. Mock `state.term.write` to capture what reaches the
@@ -1615,7 +1615,7 @@ async fn web_client_loads_and_websocket_connects() {
         "agent-supplied tool text leaked a raw ESC into the terminal (ANSI injection)"
     );
 
-    // Historical hydration (issue #134): switching to a zarvis session
+    // Historical hydration (issue #134): switching to a smith session
     // replays its transcript into xterm so PAST tool calls show, not just
     // live ones. Drive `replayTranscriptToTerm` with a synthetic
     // transcript and confirm prose + tool blocks render in order, while
