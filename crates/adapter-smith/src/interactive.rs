@@ -2020,6 +2020,7 @@ pub async fn run(
         prompt
     };
 
+    let pty_prompt = std::env::var("CONSTRUCT_SMITH_PTY_PROMPT").map(|v| v != "off" && v != "0").unwrap_or(true);
     let term = Terminal::new(&emit);
     let resuming = persist::is_resume();
     // On resume we emit nothing — banner, note, and prompt all stay off
@@ -2029,6 +2030,7 @@ pub async fn run(
     // prompt, so the user has an explicit "wake me up" escape hatch.)
     if !resuming {
         term.banner(provider_name, &model, approval_mode);
+        if pty_prompt { term.prompt(); }
     }
     emit.emit(SessionEvent::Status {
         state: SessionState::Running,
@@ -2108,7 +2110,7 @@ pub async fn run(
     let mut queued_rows: usize = 0;
     // Initial editor state so the TUI's bottom pane has something to
     // paint before the first drive call (idle waiting for user input).
-    emit_editor_state(&emit, &editor, &queue);
+    if !pty_prompt { if !pty_prompt { emit_editor_state(&emit, &editor, &queue); } }
 
     // Orchestrator-only: subscribe to other sessions' events so the
     // agent can react to fleet activity (sessions finishing, errors,
@@ -2173,7 +2175,7 @@ pub async fn run(
         let mut user_text = if let Some(t) = pending.pop_front() {
             // Echo the pre-supplied prompt as if the user just sent it.
             term.echo_consumed_line(&t);
-            emit_editor_state(&emit, &editor, &queue);
+            if !pty_prompt { emit_editor_state(&emit, &editor, &queue); }
             t
         } else if let Some(t) = queue.pop_front() {
             // Echo the combined consumed text into the chat as a gray
@@ -2183,7 +2185,7 @@ pub async fn run(
             editor.set_queued_recall(None);
             term.echo_consumed_line(&t);
             queued_rows = 0;
-            emit_editor_state(&emit, &editor, &queue);
+            if !pty_prompt { emit_editor_state(&emit, &editor, &queue); }
             t
         } else {
             emit.emit(SessionEvent::Status {
@@ -2472,11 +2474,11 @@ pub async fn run(
                     });
                 }
             }
-            emit_editor_state(&emit, &editor, &queue);
+            if !pty_prompt { emit_editor_state(&emit, &editor, &queue); }
             continue;
         }
         if trimmed.is_empty() {
-            emit_editor_state(&emit, &editor, &queue);
+            if !pty_prompt { emit_editor_state(&emit, &editor, &queue); }
             continue;
         }
 
@@ -2495,7 +2497,7 @@ pub async fn run(
             user_text = prompt.to_string();
         }
         if user_text.trim().is_empty() {
-            emit_editor_state(&emit, &editor, &queue);
+            if !pty_prompt { emit_editor_state(&emit, &editor, &queue); }
             continue;
         }
 
@@ -3049,7 +3051,7 @@ pub async fn run(
                 editor.set_queued_recall(None);
                 term.echo_consumed_line(&steer);
                 queued_rows = 0;
-                emit_editor_state(&emit, &editor, &queue);
+                if !pty_prompt { emit_editor_state(&emit, &editor, &queue); }
                 push_msg!(
                     messages,
                     persist,
@@ -3069,7 +3071,7 @@ pub async fn run(
 
         finish_agent_status(&emit, turn_started_at_ms, final_status);
         // Reset the editor pane to empty after the turn ends.
-        emit_editor_state(&emit, &editor, &queue);
+        if !pty_prompt { emit_editor_state(&emit, &editor, &queue); }
     }
     Ok(())
 }
@@ -4915,3 +4917,4 @@ where
         }
     }
 }
+    let pty_prompt = std::env::var("CONSTRUCT_SMITH_PTY_PROMPT").map(|v| v != "off" && v != "0").unwrap_or(true);
