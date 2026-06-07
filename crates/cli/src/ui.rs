@@ -1780,10 +1780,8 @@ pub(crate) fn render_operator_monolog(
         },
     );
 
-    // Bright + bold, matching the matrix horizontal keyword reveals (theme.text).
-    let text_style = Style::default()
-        .fg(app.theme.text)
-        .add_modifier(Modifier::BOLD);
+    // Bright, matching the matrix horizontal keyword reveals (theme.text).
+    let text_style = Style::default().fg(app.theme.text);
     let tx = box_x + MONOLOG_HPAD;
     let ty = box_y + MONOLOG_VPAD;
     for (i, line) in lines.iter().take(text_h as usize).enumerate() {
