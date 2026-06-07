@@ -1,9 +1,9 @@
 # Unified tool layer
 
 This page is the detailed reference for the **Unified tools** capability in
-[Harnesses](harnesses.md#what-agentd-gives-every-harness).
+[Harnesses](harnesses.md#what-construct-gives-every-harness).
 
-Unified tools let agents inspect, control, and coordinate the agentd fleet. For
+Unified tools let agents inspect, control, and coordinate the construct fleet. For
 example:
 
 - A review agent can read the implementer's diff before commenting.
@@ -12,29 +12,29 @@ example:
 - A session can publish a status widget without knowing whether the user is in
   the TUI or Web UI.
 
-Zarvis uses these tools natively. MCP-capable harnesses receive the same tools
-through `agentd-mcp`, so they can coordinate the fleet without shelling out to
-ad-hoc `agent` CLI commands.
+Smith uses these tools natively. MCP-capable harnesses receive the same tools
+through `construct-mcp`, so they can coordinate the fleet without shelling out to
+ad-hoc `construct` CLI commands.
 
 ## Using unified tools
 
-There is usually nothing to configure. Zarvis sees these tools natively. Claude
-Code and Codex receive them automatically when agentd can find `agentd-mcp`; set
-`AGENTD_INJECT_MCP=0` in the daemon environment to opt out.
+There is usually nothing to configure. smith sees these tools natively. Claude
+Code and Codex receive them automatically when construct can find `construct-mcp`; set
+`CONSTRUCT_INJECT_MCP=0` in the daemon environment to opt out.
 
 Agents invoke these tools during tasks, just like their other tools. A quick way
-to verify injection is to ask a Claude or Codex session to list available agentd
+to verify injection is to ask a Claude or Codex session to list available construct
 sessions; it should be able to use `agentd_list_sessions` without running the
-`agent` CLI in a shell.
+`construct` CLI in a shell.
 
 ## Harness support
 
 | Harness | User-facing status | Implementation notes |
 |---|---|---|
-| Zarvis | Built in. | Uses the same tool set without an external MCP process. |
-| Claude Code | Enabled by default when `agentd-mcp` is available. | Adapter writes a config under `AGENTD_STATE_DIR` and passes `--mcp-config <path>`. |
-| Codex | Enabled by default when `agentd-mcp` is available. | Adapter passes Codex a `-c mcp_servers.agentd=...` TOML override. |
-| Antigravity | Not injected yet. | Receives `AGENTD_SESSION_ID`; browser/tools can be injected once `agy` exposes an MCP config flag. |
+| Smith | Built in. | Uses the same tool set without an external MCP process. |
+| Claude Code | Enabled by default when `construct-mcp` is available. | Adapter writes a config under `CONSTRUCT_STATE_DIR` and passes `--mcp-config <path>`. |
+| Codex | Enabled by default when `construct-mcp` is available. | Adapter passes Codex a `-c mcp_servers.construct=...` TOML override. |
+| Antigravity | Not injected yet. | Receives `CONSTRUCT_SESSION_ID`; browser/tools can be injected once `agy` exposes an MCP config flag. |
 
 ## Fleet-control tools
 
@@ -72,7 +72,7 @@ sessions; it should be able to use `agentd_list_sessions` without running the
 
 Browser tools emit a `BrowserPreview` event back to the calling session, so the
 TUI thumbnail updates for MCP-capable harnesses the same way it does for
-Zarvis-native browser calls.
+smith-native browser calls.
 
 ## Memory and session context
 
@@ -86,16 +86,16 @@ belong to.
 
 | Variable | Purpose |
 |---|---|
-| `AGENTD_SESSION_ID` | Identifies the calling session, so tools can avoid acting on themselves. |
-| `AGENTD_RUNTIME_DIR` / `AGENTD_STATE_DIR` / `AGENTD_DATA_DIR` / `AGENTD_CONFIG_DIR` | Point tools at the same daemon and storage layout as the parent session. |
-| `AGENTD_GLOBAL_MEMORY_FILE` / `AGENTD_PROJECT_MEMORY_FILE` / `AGENTD_PROJECT_ID` | Point `agentd_context` at the Markdown memory files for the session. |
-| `AGENTD_SESSION_WIDGETS_DIR` | Points agents at the current session's file-backed widget directory. Prefer reading it from `agentd_context` so the agent also sees widget policy and supported Markdown extensions. |
+| `CONSTRUCT_SESSION_ID` | Identifies the calling session, so tools can avoid acting on themselves. |
+| `CONSTRUCT_RUNTIME_DIR` / `CONSTRUCT_STATE_DIR` / `CONSTRUCT_DATA_DIR` / `CONSTRUCT_CONFIG_DIR` | Point tools at the same daemon and storage layout as the parent session. |
+| `CONSTRUCT_GLOBAL_MEMORY_FILE` / `CONSTRUCT_PROJECT_MEMORY_FILE` / `CONSTRUCT_PROJECT_ID` | Point `agentd_context` at the Markdown memory files for the session. |
+| `CONSTRUCT_SESSION_WIDGETS_DIR` | Points agents at the current session's file-backed widget directory. Prefer reading it from `agentd_context` so the agent also sees widget policy and supported Markdown extensions. |
 
 ## Generative widgets
 
 Agents can create session-scoped UI widgets by writing Markdown files into the
 `session_widgets.dir` returned by `agentd_context`. The same directory is also
-available as `AGENTD_SESSION_WIDGETS_DIR`, but `agentd_context` is preferred
+available as `CONSTRUCT_SESSION_WIDGETS_DIR`, but `agentd_context` is preferred
 because it includes widget policy and supported Markdown extensions. See
 [Generative widgets](generative-widgets.md) for the file format, lifecycle,
 rendering behavior, and action-link semantics.

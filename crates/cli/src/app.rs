@@ -14,11 +14,11 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures::{FutureExt, StreamExt};
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{Stdout, Write};
@@ -337,7 +337,7 @@ pub enum MinibufferIntent {
     },
     /// Confirmation prompt for restarting a terminated (`Done` /
     /// `Errored`) session. Single-key dispatch: `y`/Enter respawns
-    /// the adapter (with `AGENTD_RESUME=1` so persistent harnesses
+    /// the adapter (with `CONSTRUCT_RESUME=1` so persistent harnesses
     /// reload state); anything else cancels.
     RestartConfirm {
         session_id: String,
@@ -1693,7 +1693,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
     // never blocks startup (a stale cache refreshes in the background for the
     // next launch). Held in a dedicated field so it persists in the modeline
     // until the user upgrades, rather than expiring after a few seconds like a
-    // transient status. Opt out with AGENTD_NO_UPDATE_CHECK=1.
+    // transient status. Opt out with CONSTRUCT_NO_UPDATE_CHECK=1.
     app.update_notice = crate::upgrade::cached_update_notice();
 
     if app.selected_needs_hydration() {
@@ -1812,7 +1812,9 @@ async fn run_loop(
         if app.connected && app.client.is_disconnected() {
             app.connected = false;
             reconnect = Some(ReconnectState::new(Instant::now()));
-            app.set_status("daemon disconnected — reconnecting… (press q to quit)".to_string());
+            app.set_status(
+                "daemon disconnected — reconnecting… (press C-x C-c to quit TUI)".to_string(),
+            );
         }
         app.prune_finished_transitions();
         app.poll_remote_control_task().await;
@@ -1838,7 +1840,7 @@ async fn run_loop(
                     Err(e) => {
                         state.schedule_next(now);
                         app.set_status(format!(
-                            "daemon disconnected — reconnecting… (press q to quit; last error: {e})"
+                            "daemon disconnected — reconnecting… (press C-x C-c to quit TUI; last error: {e})"
                         ));
                     }
                 }
@@ -2111,7 +2113,8 @@ async fn run_loop(
                             app.connected = false;
                             reconnect = Some(ReconnectState::new(Instant::now()));
                             app.set_status(
-                                "daemon disconnected — reconnecting… (press q to quit)".to_string(),
+                                "daemon disconnected — reconnecting… (press C-x C-c to quit TUI)"
+                                    .to_string(),
                             );
                         }
                     }
@@ -3828,7 +3831,7 @@ impl App {
             || self
                 .sessions
                 .iter()
-                .any(|s| s.id == session_id && s.harness == "zarvis")
+                .any(|s| s.id == session_id && s.harness == "smith")
     }
 
     /// Cycle the selected session's approval mode.
@@ -3854,9 +3857,10 @@ impl App {
             agentd_protocol::ApprovalMode::UnsafeAuto => agentd_protocol::ApprovalMode::Manual,
         };
         match self.client.set_approval_mode(&id, next).await {
-            Ok(()) if show_status => {
-                self.set_status(format!("approval mode {}", next.badge().unwrap_or("manual")))
-            }
+            Ok(()) if show_status => self.set_status(format!(
+                "approval mode {}",
+                next.badge().unwrap_or("manual")
+            )),
             Ok(()) => {}
             Err(e) => self.set_status(format!("set_approval_mode failed: {e}")),
         }
@@ -5395,8 +5399,24 @@ impl App {
         // /tasks modal: Esc closes it; everything else falls through
         // (the popup itself is read-only at the keyboard layer in
         // v1 — mouse-only row interactions).
-        if !self.connected && matches!(key.code, KeyCode::Char('q')) {
-            self.should_quit = true;
+        // In disconnected state, still allow standard keymap chords for
+        // quitting and quick palette access. `/` commands are not
+        // accepted here, but `C-x C-c` remains available.
+        if !self.connected {
+            let res = self.chord_state.handle(key, &self.keymap);
+            self.chord_label = self.chord_state.label();
+            match res {
+                KeymapResult::Action(KeyAction::Quit) => {
+                    self.should_quit = true;
+                }
+                KeymapResult::Action(action) => {
+                    self.run_action(action).await;
+                }
+                KeymapResult::Pending(label) => {
+                    self.chord_label = label;
+                }
+                KeymapResult::Unhandled => {}
+            }
             return;
         }
         if self.tasks_popup.is_some() {
@@ -6764,6 +6784,7 @@ impl App {
             .split_once(char::is_whitespace)
             .map(|(v, a)| (v, a.trim()))
             .unwrap_or((cmd, ""));
+        let verb = verb.trim_start_matches('/');
         match verb {
             "" => {}
             "quit" | "exit" => self.should_quit = true,
@@ -6853,20 +6874,20 @@ impl App {
                     .collect();
                 self.set_status(format!("harnesses: {}", names.join(", ")));
             }
-            "agentd" => {
+            "construct" => {
                 // Subcommand dispatch:
                 //
-                //   /agentd restart [binary path]
+                //   /construct restart [binary path]
                 //       → daemon.restart; exec the daemon's own binary,
                 //         or the given one (e.g. a freshly-built worktree
                 //         binary). The path is validated daemon-side.
                 //
                 // Other subcommands are reserved for future use
-                // (e.g. `/agentd info` to print build version). The
+                // (e.g. `/construct info` to print build version). The
                 // daemon.restart RPC will close the IPC connection
                 // as the new process replaces the old; the TUI
                 // observes that as a "daemon disconnected" status
-                // and the user must re-run `agent` to reconnect
+                // and the user must re-run `construct` to reconnect
                 // (auto-reconnect is follow-up work, see issue #90).
                 let mut parts = arg.trim().splitn(2, char::is_whitespace);
                 let sub = parts.next().unwrap_or("");
@@ -6875,8 +6896,8 @@ impl App {
                     "restart" => {
                         let exe = (!rest.is_empty()).then(|| rest.to_string());
                         match self.client.daemon_restart(exe).await {
-                            Ok(r) => self.set_status(format!(
-                                "agentd: restart requested (exe={}, pid={}) — reconnect when ready",
+                    Ok(r) => self.set_status(format!(
+                                "construct: restart requested (exe={}, pid={}) — reconnect when ready",
                                 r.exe, r.pid
                             )),
                             // BrokenPipe / connection closed is the
@@ -6891,17 +6912,17 @@ impl App {
                                     || msg.contains("closed")
                                 {
                                     self.set_status(
-                                        "agentd: restart in flight (socket closed) — reconnect when ready".to_string(),
+                                        "construct: restart in flight (socket closed) — reconnect when ready".to_string(),
                                     );
                                 } else {
-                                    self.set_status(format!("agentd restart failed: {e}"));
+                                    self.set_status(format!("construct restart failed: {e}"));
                                 }
                             }
                         }
                     }
-                    "" => self.set_status("agentd: subcommand required (e.g. `restart`)".into()),
+                    "" => self.set_status("construct: subcommand required (e.g. `restart`)".into()),
                     other => self.set_status(format!(
-                        "agentd: unknown subcommand '{other}'; try `restart`"
+                        "construct: unknown subcommand '{other}'; try `restart`"
                     )),
                 }
             }
@@ -8302,9 +8323,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_prompt_does_not_open_for_zarvis_session() {
+    async fn approval_prompt_does_not_open_for_smith_session() {
         let (mut app, _dir, server) = captured_app().await;
-        app.sessions[0].harness = "zarvis".into();
+        app.sessions[0].harness = "smith".into();
 
         app.maybe_open_approval_prompt(
             "s1".into(),
@@ -8317,7 +8338,7 @@ mod tests {
 
         assert!(
             app.minibuffer.is_none(),
-            "zarvis renders approval inline in the session PTY"
+            "smith renders approval inline in the session PTY"
         );
         server.abort();
     }
@@ -8449,7 +8470,7 @@ mod tests {
     async fn captured_app() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
         use tokio::net::UnixListener;
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             loop {
@@ -8468,7 +8489,7 @@ mod tests {
     async fn empty_app() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
         use tokio::net::UnixListener;
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             loop {
@@ -8538,7 +8559,9 @@ mod tests {
         });
         let mut showing = false;
         terminal
-            .draw(|f| showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now()))
+            .draw(|f| {
+                showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now())
+            })
             .expect("draw");
         assert!(showing, "monolog should be showing mid-cycle");
         let screen = rendered_text(terminal.backend().buffer());
@@ -8552,10 +8575,15 @@ mod tests {
             started_at: Instant::now() - std::time::Duration::from_secs(30),
         });
         terminal
-            .draw(|f| showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now()))
+            .draw(|f| {
+                showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now())
+            })
             .expect("draw");
         assert!(!showing, "monolog should have expired");
-        assert!(app.operator_monolog.is_none(), "expired monolog not cleared");
+        assert!(
+            app.operator_monolog.is_none(),
+            "expired monolog not cleared"
+        );
 
         server.abort();
     }
@@ -8584,7 +8612,10 @@ mod tests {
             .expect("draw");
         assert!(!drew, "monolog should be skipped while the panel is open");
         let screen = rendered_text(terminal.backend().buffer());
-        assert!(!screen.contains("session"), "should not draw over rain:\n{screen}");
+        assert!(
+            !screen.contains("session"),
+            "should not draw over rain:\n{screen}"
+        );
         server.abort();
     }
 
@@ -8672,7 +8703,7 @@ mod tests {
 
         let screen = rendered_text(terminal.backend().buffer());
         assert!(
-            screen.contains("Welcome to agentd"),
+            screen.contains("Welcome to construct"),
             "missing welcome:\n{screen}"
         );
         assert!(
@@ -8688,7 +8719,7 @@ mod tests {
             "missing quit shortcut:\n{screen}"
         );
         assert!(
-            !screen.contains("q        exit agentd"),
+            !screen.contains("q        exit construct"),
             "empty state should not show q as the quit shortcut:\n{screen}"
         );
         assert!(
@@ -8704,37 +8735,33 @@ mod tests {
             "expected clickable shortcuts, got {:?}",
             app.layout.shortcut_hints
         );
-        assert!(
-            app.layout
-                .shortcut_hints
-                .iter()
-                .any(|h| h.action == KeyAction::OpenNewSession)
-        );
-        assert!(
-            app.layout
-                .shortcut_hints
-                .iter()
-                .any(|h| h.action == KeyAction::OpenCommandPalette)
-        );
-        assert!(
-            app.layout
-                .shortcut_hints
-                .iter()
-                .any(|h| h.action == KeyAction::ToggleHelp)
-        );
-        assert!(
-            app.layout
-                .shortcut_hints
-                .iter()
-                .any(|h| h.action == KeyAction::Quit)
-        );
+        assert!(app
+            .layout
+            .shortcut_hints
+            .iter()
+            .any(|h| h.action == KeyAction::OpenNewSession));
+        assert!(app
+            .layout
+            .shortcut_hints
+            .iter()
+            .any(|h| h.action == KeyAction::OpenCommandPalette));
+        assert!(app
+            .layout
+            .shortcut_hints
+            .iter()
+            .any(|h| h.action == KeyAction::ToggleHelp));
+        assert!(app
+            .layout
+            .shortcut_hints
+            .iter()
+            .any(|h| h.action == KeyAction::Quit));
         server.abort();
     }
 
     #[tokio::test]
     async fn update_notice_renders_right_aligned_in_modeline() {
         let (mut app, _dir, server) = empty_app().await;
-        app.update_notice = Some("↑ agentd 9.9.9 · agent upgrade".to_string());
+        app.update_notice = Some("↑ construct 9.9.9 · construct upgrade".to_string());
         let backend = ratatui::backend::TestBackend::new(120, 36);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
 
@@ -8745,12 +8772,12 @@ mod tests {
         let screen = rendered_text(terminal.backend().buffer());
         let modeline = screen
             .lines()
-            .find(|l| l.contains("↑ agentd 9.9.9 · agent upgrade"))
+            .find(|l| l.contains("↑ construct 9.9.9 · construct upgrade"))
             .expect("update notice should be on screen");
 
         // Right-aligned: only padding follows it to the right edge.
         assert!(
-            modeline.trim_end().ends_with("agent upgrade"),
+            modeline.trim_end().ends_with("construct upgrade"),
             "notice should sit at the right edge:\n{modeline}"
         );
         // ...and it lives in the right half, not inline on the left.
@@ -8991,11 +9018,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnected_q_quits_even_when_pty_would_capture_keys() {
+    async fn disconnected_c_x_c_quits_even_when_pty_would_capture_keys() {
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -9008,7 +9035,9 @@ mod tests {
         let mut app = test_app(client, vec![summary]);
         app.connected = false;
 
-        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
             .await;
 
         assert!(app.should_quit);
@@ -9023,7 +9052,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -9086,7 +9115,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -9158,7 +9187,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             loop {
@@ -9372,10 +9401,8 @@ mod tests {
         app.sessions.push(orch);
         app.refresh_orchestrator_id();
         app.matrix_rain_hidden = false;
-        app.pending_tool_approvals.insert(
-            "orch".into(),
-            HashSet::from(["call-1".to_string()]),
-        );
+        app.pending_tool_approvals
+            .insert("orch".into(), HashSet::from(["call-1".to_string()]));
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -9481,7 +9508,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -9611,7 +9638,7 @@ mod tests {
     async fn subagents_render_under_parent_and_default_expanded() {
         use tokio::net::UnixListener;
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let _server = tokio::spawn(async move {
             loop {
@@ -9709,10 +9736,10 @@ mod tests {
         use tempfile::tempdir;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
-        use tokio::sync::{Notify, mpsc};
+        use tokio::sync::{mpsc, Notify};
 
         let dir = tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let release_input = Arc::new(Notify::new());
         let (input_seen_tx, mut input_seen_rx) = mpsc::unbounded_channel();
@@ -9791,7 +9818,7 @@ mod tests {
         use tokio::sync::oneshot;
 
         let dir = tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let (seen_tx, seen_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
@@ -9872,7 +9899,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -9881,7 +9908,7 @@ mod tests {
         let client = Client::connect(&sock).await.expect("client connects");
 
         let mut summary = summary_with_kind(agentd_protocol::SessionKind::User);
-        summary.harness = "zarvis".into();
+        summary.harness = "smith".into();
         summary.has_pty = true;
         let mut app = test_app(client, vec![summary]);
         app.view = ViewMode::Terminal;
@@ -9975,10 +10002,10 @@ mod tests {
         use tempfile::tempdir;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
-        use tokio::sync::{Notify, mpsc};
+        use tokio::sync::{mpsc, Notify};
 
         let dir = tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let release_transcript = Arc::new(Notify::new());
         let (transcript_seen_tx, mut transcript_seen_rx) = mpsc::unbounded_channel();
@@ -10108,7 +10135,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             loop {
@@ -11104,8 +11131,8 @@ fn drainable_mouse_burst_kind(kind: &MouseEventKind) -> bool {
 #[cfg(test)]
 mod drain_gate_tests {
     use super::{
-        PaneFocus, ZoomMode, should_autofocus_view_from_list, should_drain_after, url_range_at_col,
-        url_ranges,
+        should_autofocus_view_from_list, should_drain_after, url_range_at_col, url_ranges,
+        PaneFocus, ZoomMode,
     };
     use crossterm::event::{
         Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
@@ -11353,7 +11380,7 @@ pub fn parse_group_delete_choice(input: &str) -> GroupDeleteChoice {
 
 #[cfg(test)]
 mod group_delete_prompt_tests {
-    use super::{GroupDeleteChoice, parse_group_delete_choice};
+    use super::{parse_group_delete_choice, GroupDeleteChoice};
 
     /// `y` / `yes` (any case, with whitespace) → orphan members
     /// (original pre-cascade behavior).

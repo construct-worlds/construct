@@ -124,8 +124,7 @@ impl ModelLimits {
         if estimated_tokens < threshold {
             return false;
         }
-        now_ms - entry.last_probed_at_ms
-            >= PROBE_INTERVAL_SECS * 1_000
+        now_ms - entry.last_probed_at_ms >= PROBE_INTERVAL_SECS * 1_000
     }
 
     /// Called after a provider returns a context-overflow error.
@@ -145,8 +144,9 @@ impl ModelLimits {
         now_ms: i64,
     ) -> u64 {
         let k = key(provider, model);
-        let entry = self.entries.entry(k.clone()).or_insert_with(|| {
-            ModelEntry { key: k.clone(), ..Default::default() }
+        let entry = self.entries.entry(k.clone()).or_insert_with(|| ModelEntry {
+            key: k.clone(),
+            ..Default::default()
         });
         let new_limit = match extracted {
             Some(n) if n > 0 => n,
@@ -182,8 +182,9 @@ impl ModelLimits {
         now_ms: i64,
     ) {
         let k = key(provider, model);
-        let entry = self.entries.entry(k.clone()).or_insert_with(|| {
-            ModelEntry { key: k.clone(), ..Default::default() }
+        let entry = self.entries.entry(k.clone()).or_insert_with(|| ModelEntry {
+            key: k.clone(),
+            ..Default::default()
         });
         if entry.learned_input_tokens == 0 {
             entry.learned_input_tokens = fallback;
@@ -194,8 +195,7 @@ impl ModelLimits {
             // Bump only if the probe actually pushed past the prior
             // limit — otherwise the probe didn't test anything.
             if actual_input_tokens > entry.learned_input_tokens {
-                entry.learned_input_tokens =
-                    ((actual_input_tokens as f64) * 1.05) as u64;
+                entry.learned_input_tokens = ((actual_input_tokens as f64) * 1.05) as u64;
             }
         } else {
             entry.calls_since_probe = entry.calls_since_probe.saturating_add(1);
@@ -255,10 +255,15 @@ mod tests {
     #[test]
     fn serde_round_trip_preserves_learned_limit() {
         let mut s = ModelLimits::default();
-        s.record_overflow("openai", "gpt-5.5", Some(272_000), 400_000, 1_700_000_000_000);
+        s.record_overflow(
+            "openai",
+            "gpt-5.5",
+            Some(272_000),
+            400_000,
+            1_700_000_000_000,
+        );
         let json = serde_json::to_string(&s).expect("serialize");
-        let restored: ModelLimits =
-            serde_json::from_str(&json).expect("deserialize");
+        let restored: ModelLimits = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.get("openai", "gpt-5.5"), Some(272_000));
         let e = restored
             .entries

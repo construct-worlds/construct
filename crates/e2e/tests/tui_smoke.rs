@@ -1,4 +1,4 @@
-//! End-to-end: drive the `agent` TUI inside a pseudo-terminal
+//! End-to-end: drive the `construct` TUI inside a pseudo-terminal
 //! against a real `agentd`, type a slash command, observe the
 //! resulting popup, and quit cleanly.
 //!
@@ -25,12 +25,11 @@ use agentd_e2e::{Daemon, Tui};
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tui_starts_and_quits() {
     let d = Daemon::spawn().await.expect("spawn daemon");
-    let mut tui = Tui::spawn_with_recording(&d.socket, "tui_starts_and_quits")
-        .expect("spawn TUI");
+    let mut tui = Tui::spawn_with_recording(&d.socket, "tui_starts_and_quits").expect("spawn TUI");
 
-    // Modeline. The format starts with " agentd  focus:" — see
+    // Modeline. The format starts with " construct  focus:" — see
     // `render_modeline` in crates/cli/src/ui.rs.
-    tui.wait_for("agentd  focus:", Duration::from_secs(15))
+    tui.wait_for("construct  focus:", Duration::from_secs(15))
         .await
         .expect("modeline never rendered");
 
@@ -62,7 +61,7 @@ async fn tui_remote_control_popup_via_palette() {
     let mut tui = Tui::spawn_with_recording(&d.socket, "tui_remote_control_popup_via_palette")
         .expect("spawn TUI");
 
-    tui.wait_for("agentd  focus:", Duration::from_secs(15))
+    tui.wait_for("construct  focus:", Duration::from_secs(15))
         .await
         .expect("modeline never rendered");
 
@@ -110,5 +109,9 @@ async fn tui_remote_control_popup_via_palette() {
         .wait_exit(Duration::from_secs(5))
         .await
         .expect("TUI did not exit after q");
-    assert!(status.success(), "TUI exited with non-success status: {:?}", status);
+    assert!(
+        status.success(),
+        "TUI exited with non-success status: {:?}",
+        status
+    );
 }

@@ -11,8 +11,8 @@ shows a `remote` badge while remote clients are attached.
 | `/remote-control <password>` | Start remote control with a user-chosen password. |
 | `/remote-control stop` | Stop the remote listener/tunnel and rotate credentials for the next start. |
 | `/remote-control debug` | Start a local-only URL without a public tunnel; mostly retained for troubleshooting remote-control credentials/tokens. For normal local browser use, open the always-on local web UI instead. |
-| `AGENTD_REMOTE_WS_PORT=<port>` | Start the remote WebSocket listener on daemon boot for scripted/headless use. |
-| `AGENTD_WEBUI_PORT=<port>` | Override the always-on localhost web UI port. Defaults to `5746`. |
+| `CONSTRUCT_REMOTE_WS_PORT=<port>` | Start the remote WebSocket listener on daemon boot for scripted/headless use. |
+| `CONSTRUCT_WEBUI_PORT=<port>` | Override the always-on localhost web UI port. Defaults to `5746`. |
 
 The daemon also starts a localhost-only browser UI at `http://127.0.0.1:5746/`
 by default. This local UI is bound to loopback and does **not** require the

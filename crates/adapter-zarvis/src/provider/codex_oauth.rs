@@ -25,14 +25,14 @@ use anyhow::{anyhow, Context as _, Result};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::{
     Content, LlmProvider, Message, ProviderTurn, ReasoningItem, Role, StopReason, TextSink,
@@ -75,7 +75,7 @@ const CODEX_WS_BETA: &str = "responses_websockets=2026-02-06";
 /// `system` arg the agent loop already builds (same shape every
 /// other provider uses). The Codex backend rejects empty
 /// `instructions`, so the final value must be non-empty either way.
-const INSTRUCTIONS_ENV: &str = "AGENTD_ZARVIS_CODEX_INSTRUCTIONS";
+const INSTRUCTIONS_ENV: &str = "CONSTRUCT_SMITH_CODEX_INSTRUCTIONS";
 
 /// Refresh tokens are good for ~30 days but the server-side window can
 /// be tighter under load. We refresh when the access_token is within
@@ -128,7 +128,7 @@ pub struct Tokens {
 
 /// Returns the path to `auth.json`. Honors `$CODEX_HOME` first, then
 /// falls back to `$HOME/.codex/auth.json`. Mirrors what
-/// `agentd-adapter-codex` already does to find rollouts so the two
+/// `construct-adapter-codex` already does to find rollouts so the two
 /// crates agree on where codex stores its credential file.
 pub fn auth_json_path() -> Result<PathBuf> {
     if let Ok(home) = std::env::var("CODEX_HOME") {
@@ -146,8 +146,7 @@ pub fn auth_json_path() -> Result<PathBuf> {
 /// (i.e. the user is in API-key mode, not the subscription mode this
 /// provider serves).
 pub fn load_auth_json(path: &std::path::Path) -> Result<AuthDotJson> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let auth: AuthDotJson = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse {} as JSON", path.display()))?;
     let tokens = auth.tokens.as_ref().ok_or_else(|| {
@@ -173,10 +172,7 @@ pub fn load_auth_json(path: &std::path::Path) -> Result<AuthDotJson> {
 /// truncate and write leaves the file empty and the user is logged
 /// out. The same dance Codex CLI does in
 /// `codex-rs/login/src/auth/manager.rs`.
-pub fn save_auth_json_atomic(
-    path: &std::path::Path,
-    auth: &AuthDotJson,
-) -> Result<()> {
+pub fn save_auth_json_atomic(path: &std::path::Path, auth: &AuthDotJson) -> Result<()> {
     use std::io::Write as _;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -196,9 +192,8 @@ pub fn save_auth_json_atomic(
         f.sync_all()
             .with_context(|| format!("fsync {}", tmp_path.display()))?;
     }
-    std::fs::rename(&tmp_path, path).with_context(|| {
-        format!("rename {} -> {}", tmp_path.display(), path.display())
-    })?;
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename {} -> {}", tmp_path.display(), path.display()))?;
     Ok(())
 }
 
@@ -217,7 +212,7 @@ pub struct CodexOauth {
     state: Arc<Mutex<AuthState>>,
     http: reqwest::Client,
     /// [P0 spike] Reused Responses WebSocket connection (opt-in via
-    /// AGENTD_ZARVIS_CODEX_WS=1) to test whether a warm connection lifts
+    /// CONSTRUCT_SMITH_CODEX_WS=1) to test whether a warm connection lifts
     /// the prompt-cache hit-rate vs a stateless HTTP POST per request.
     ws: Arc<Mutex<Option<WsStream>>>,
     /// Set after a WS connect/transport failure so the session stops retrying
@@ -276,7 +271,8 @@ impl CodexOauth {
             map.insert("type".into(), json!("response.create"));
             map.insert("stream".into(), json!(true));
             map.entry("tool_choice").or_insert_with(|| json!("auto"));
-            map.entry("parallel_tool_calls").or_insert_with(|| json!(true));
+            map.entry("parallel_tool_calls")
+                .or_insert_with(|| json!(true));
         }
         let frame = body.to_string();
 
@@ -424,7 +420,10 @@ impl CodexOauth {
                     }
                 }
                 "response.function_call_arguments.delta" => {
-                    let item_id = chunk.get("item_id").and_then(|v| v.as_str()).unwrap_or_default();
+                    let item_id = chunk
+                        .get("item_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
                     if let Some(acc) = fn_calls.get_mut(item_id) {
                         if let Some(d) = chunk.get("delta").and_then(|v| v.as_str()) {
                             acc.args.push_str(d);
@@ -432,7 +431,10 @@ impl CodexOauth {
                     }
                 }
                 "response.function_call_arguments.done" => {
-                    let item_id = chunk.get("item_id").and_then(|v| v.as_str()).unwrap_or_default();
+                    let item_id = chunk
+                        .get("item_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
                     if let Some(acc) = fn_calls.get_mut(item_id) {
                         if let Some(a) = chunk.get("arguments").and_then(|v| v.as_str()) {
                             if !a.is_empty() {
@@ -505,7 +507,9 @@ impl CodexOauth {
             }
         }
         if !completed {
-            return Err(anyhow!("codex-oauth ws stream ended before response.completed"));
+            return Err(anyhow!(
+                "codex-oauth ws stream ended before response.completed"
+            ));
         }
         let calls: Vec<ToolCall> = fn_call_order
             .iter()
@@ -641,14 +645,13 @@ impl CodexOauth {
             return true;
         };
         let elapsed = chrono::Utc::now().signed_duration_since(last);
-        elapsed.num_seconds() + ACCESS_TOKEN_REFRESH_LEEWAY_SECS
-            >= 24 * 60 * 60
+        elapsed.num_seconds() + ACCESS_TOKEN_REFRESH_LEEWAY_SECS >= 24 * 60 * 60
     }
 }
 
 /// Resolve the `instructions` field for the Codex backend. Order:
 ///
-///   1. `AGENTD_ZARVIS_CODEX_INSTRUCTIONS` env var, if set and
+///   1. `CONSTRUCT_SMITH_CODEX_INSTRUCTIONS` env var, if set and
 ///      non-empty — explicit operator override (e.g. to mirror Codex
 ///      CLI exactly with the upstream `gpt_5_codex_prompt.md`).
 ///   2. The `system` argument the agent loop passes — same prompt
@@ -798,10 +801,10 @@ pub fn build_responses_body(
     let input: Vec<Value> = messages.iter().flat_map(message_to_input_items).collect();
     // Asks the server to emit reasoning summary deltas (surfaced via
     // `sink.reasoning_delta`). Optionally pin an explicit reasoning effort
-    // (low|medium|high) via `AGENTD_ZARVIS_REASONING_EFFORT`, mirroring Codex
+    // (low|medium|high) via `CONSTRUCT_SMITH_REASONING_EFFORT`, mirroring Codex
     // CLI's `model_reasoning_effort`; unset = the backend default.
     let mut reasoning = json!({ "summary": "auto" });
-    if let Ok(effort) = std::env::var("AGENTD_ZARVIS_REASONING_EFFORT") {
+    if let Ok(effort) = std::env::var("CONSTRUCT_SMITH_REASONING_EFFORT") {
         let effort = effort.trim();
         if !effort.is_empty() {
             reasoning["effort"] = json!(effort);
@@ -834,7 +837,7 @@ pub fn build_responses_body(
     // requests to the same prompt-cache node so the prefix actually hits.
     // Without it, automatic prefix caching still works but routing is unstable
     // under load — measured as a low/erratic hit-rate (~31% vs Codex's ~97%).
-    if let Ok(key) = std::env::var("AGENTD_SESSION_ID") {
+    if let Ok(key) = std::env::var("CONSTRUCT_SESSION_ID") {
         if !key.is_empty() {
             body["prompt_cache_key"] = json!(key);
         }
@@ -870,7 +873,7 @@ impl LlmProvider for CodexOauth {
         // Codex's Responses API uses `instructions` instead of an
         // inline system message. We pass the agent's `system` arg
         // through as-is, matching what every other provider does
-        // for the equivalent slot. `AGENTD_ZARVIS_CODEX_INSTRUCTIONS`
+        // for the equivalent slot. `CONSTRUCT_SMITH_CODEX_INSTRUCTIONS`
         // is an optional operator override (handy for mirroring
         // Codex CLI exactly with the upstream prompt).
         let instructions = resolve_instructions(system)?;
@@ -900,10 +903,13 @@ impl LlmProvider for CodexOauth {
         // far better (~97%) than a stateless HTTP POST per request. On a connect
         // / pre-stream failure it falls back to HTTP and disables WS for the
         // rest of the session; a mid-stream failure propagates (no double-emit).
-        let ws_enabled = std::env::var("AGENTD_ZARVIS_CODEX_WS").as_deref() == Ok("1")
+        let ws_enabled = std::env::var("CONSTRUCT_SMITH_CODEX_WS").as_deref() == Ok("1")
             && !self.ws_disabled.load(Ordering::Relaxed);
         if ws_enabled {
-            match self.try_ws(body.clone(), &access_token, &account_id, sink).await {
+            match self
+                .try_ws(body.clone(), &access_token, &account_id, sink)
+                .await
+            {
                 WsResult::Done(turn) => return Ok(turn),
                 WsResult::Error(e) => return Err(e),
                 WsResult::Fallback(e) => {
@@ -1008,7 +1014,9 @@ impl LlmProvider for CodexOauth {
                 // items — record the id/name so subsequent
                 // arguments-delta events can find the accumulator.
                 "response.output_item.added" => {
-                    let Some(item) = chunk.get("item") else { continue };
+                    let Some(item) = chunk.get("item") else {
+                        continue;
+                    };
                     if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
                         continue;
                     }
@@ -1061,9 +1069,7 @@ impl LlmProvider for CodexOauth {
                                     .and_then(|v| v.as_array())
                                     .map(|a| {
                                         a.iter()
-                                            .filter_map(|s| {
-                                                s.get("text").and_then(|t| t.as_str())
-                                            })
+                                            .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
                                             .map(|t| t.to_string())
                                             .collect()
                                     })
@@ -1084,9 +1090,7 @@ impl LlmProvider for CodexOauth {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     if let Some(acc) = fn_calls.get_mut(item_id) {
-                        if let Some(delta) =
-                            chunk.get("delta").and_then(|v| v.as_str())
-                        {
+                        if let Some(delta) = chunk.get("delta").and_then(|v| v.as_str()) {
                             acc.args.push_str(delta);
                         }
                     }
@@ -1101,9 +1105,7 @@ impl LlmProvider for CodexOauth {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     if let Some(acc) = fn_calls.get_mut(item_id) {
-                        if let Some(args) =
-                            chunk.get("arguments").and_then(|v| v.as_str())
-                        {
+                        if let Some(args) = chunk.get("arguments").and_then(|v| v.as_str()) {
                             if !args.is_empty() {
                                 acc.args = args.to_string();
                             }
@@ -1209,7 +1211,10 @@ async fn connect_codex_ws(access_token: &str, account_id: &str) -> Result<WsStre
         .into_client_request()
         .context("codex-oauth ws: build request")?;
     fn set(h: &mut HeaderMap, k: &'static str, v: String) -> Result<()> {
-        h.insert(k, HeaderValue::from_str(&v).with_context(|| format!("ws header {k}"))?);
+        h.insert(
+            k,
+            HeaderValue::from_str(&v).with_context(|| format!("ws header {k}"))?,
+        );
         Ok(())
     }
     let h = req.headers_mut();
@@ -1248,7 +1253,10 @@ where
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let purl = reqwest::Url::parse(proxy).with_context(|| format!("parse proxy url {proxy}"))?;
-    let phost = purl.host_str().context("proxy url has no host")?.to_string();
+    let phost = purl
+        .host_str()
+        .context("proxy url has no host")?
+        .to_string();
     let pport = purl.port_or_known_default().unwrap_or(80);
 
     let turl = reqwest::Url::parse(CODEX_RESPONSES_WS_URL).context("ws url")?;
@@ -1294,7 +1302,9 @@ where
     let head = String::from_utf8_lossy(&head);
     let status_line = head.lines().next().unwrap_or_default();
     if !status_line.contains(" 200") {
-        return Err(anyhow!("codex-oauth ws: proxy CONNECT failed: {status_line}"));
+        return Err(anyhow!(
+            "codex-oauth ws: proxy CONNECT failed: {status_line}"
+        ));
     }
 
     let (ws, _resp) = tokio_tungstenite::client_async_tls(req, tcp)
@@ -1327,7 +1337,10 @@ fn response_error_message(chunk: &Value) -> String {
 fn failed_response_error(chunk: &Value) -> anyhow::Error {
     let msg = response_error_message(chunk);
     if let Some(extracted) = super::parse_overflow(&msg) {
-        return anyhow::Error::new(super::ContextOverflow { extracted, raw: msg });
+        return anyhow::Error::new(super::ContextOverflow {
+            extracted,
+            raw: msg,
+        });
     }
     anyhow!("codex-oauth response failed: {msg}")
 }
@@ -1383,10 +1396,8 @@ mod tests {
     /// Missing file → clear actionable error mentioning the path.
     #[test]
     fn load_auth_json_missing_file_errors_with_path() {
-        let bogus = std::env::temp_dir().join(format!(
-            "agentd-codex-oauth-missing-{}",
-            std::process::id()
-        ));
+        let bogus =
+            std::env::temp_dir().join(format!("agentd-codex-oauth-missing-{}", std::process::id()));
         let _ = std::fs::remove_file(&bogus);
         let err = load_auth_json(&bogus).unwrap_err();
         let msg = format!("{err:#}");
@@ -1401,8 +1412,7 @@ mod tests {
             "agentd-codex-oauth-noauth-{}.json",
             std::process::id()
         ));
-        std::fs::write(&tmp, r#"{ "OPENAI_API_KEY": "sk-platform-only" }"#)
-            .unwrap();
+        std::fs::write(&tmp, r#"{ "OPENAI_API_KEY": "sk-platform-only" }"#).unwrap();
         let err = load_auth_json(&tmp).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("codex login"), "{msg}");
@@ -1434,10 +1444,8 @@ mod tests {
     /// that's an integration concern with a fault-injecting FS.
     #[test]
     fn save_auth_json_atomic_round_trips() {
-        let dir = std::env::temp_dir().join(format!(
-            "agentd-codex-oauth-save-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("agentd-codex-oauth-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("auth.json");
@@ -1461,10 +1469,7 @@ mod tests {
         let t = loaded.tokens.unwrap();
         assert_eq!(t.access_token, "A1");
         assert_eq!(t.refresh_token, "R1");
-        assert_eq!(
-            loaded.last_refresh.as_deref(),
-            Some("2026-05-18T01:02:03Z")
-        );
+        assert_eq!(loaded.last_refresh.as_deref(), Some("2026-05-18T01:02:03Z"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1472,18 +1477,14 @@ mod tests {
     fn user(text: &str) -> Message {
         Message {
             role: Role::User,
-            content: Content::Text {
-                text: text.into(),
-            },
+            content: Content::Text { text: text.into() },
         }
     }
 
     fn assistant(text: &str) -> Message {
         Message {
             role: Role::Assistant,
-            content: Content::Text {
-                text: text.into(),
-            },
+            content: Content::Text { text: text.into() },
         }
     }
 
@@ -1578,7 +1579,11 @@ mod tests {
         ];
         let body = build_responses_body("gpt-5-codex", "sys", &msgs, &[]);
         let input = body["input"].as_array().unwrap();
-        assert_eq!(input.len(), 4, "user + assistant-prose + fn_call + fn_output");
+        assert_eq!(
+            input.len(),
+            4,
+            "user + assistant-prose + fn_call + fn_output"
+        );
         assert_eq!(input[0]["role"], "user");
         // Assistant prose item.
         assert_eq!(input[1]["type"], "message");
@@ -1669,8 +1674,7 @@ mod tests {
         auth.last_refresh = Some(chrono::Utc::now().to_rfc3339());
         assert!(!CodexOauth::needs_refresh(&auth));
         // Old timestamp → refresh.
-        auth.last_refresh =
-            Some((chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339());
+        auth.last_refresh = Some((chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339());
         assert!(CodexOauth::needs_refresh(&auth));
         // Malformed timestamp → conservatively refresh.
         auth.last_refresh = Some("not-a-date".to_string());
@@ -1714,7 +1718,8 @@ mod tests {
         });
         let err = failed_response_error(&chunk);
         assert!(
-            err.downcast_ref::<crate::provider::ContextOverflow>().is_some(),
+            err.downcast_ref::<crate::provider::ContextOverflow>()
+                .is_some(),
             "context-window overflow via response.failed must be a ContextOverflow; got: {err:#}"
         );
     }
@@ -1726,7 +1731,8 @@ mod tests {
         });
         let err = failed_response_error(&chunk);
         assert!(
-            err.downcast_ref::<crate::provider::ContextOverflow>().is_none(),
+            err.downcast_ref::<crate::provider::ContextOverflow>()
+                .is_none(),
             "a non-overflow failure must not be misclassified as ContextOverflow"
         );
         assert_eq!(

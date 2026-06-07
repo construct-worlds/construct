@@ -261,7 +261,7 @@ impl Adapter {
         }
         let _ = std::fs::remove_file(&socket_path);
         env.insert(
-            "AGENTD_ADAPTER_SOCKET".to_string(),
+            "CONSTRUCT_ADAPTER_SOCKET".to_string(),
             socket_path.to_string_lossy().to_string(),
         );
 

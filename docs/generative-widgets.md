@@ -54,7 +54,7 @@ widgets after reconnect without replaying the model conversation.
 
 ## Markdown subset
 
-Widgets use "agentd Markdown": normal Markdown plus a small set of semantic
+Widgets use "construct Markdown": normal Markdown plus a small set of semantic
 extensions. Renderers parse the pieces they understand and degrade the rest to
 plain text.
 
@@ -146,7 +146,7 @@ A typical task status widget:
 Write it to the current session's widget directory:
 
 ```bash
-cat >"$AGENTD_SESSION_WIDGETS_DIR/pr-cleanup.md" <<'EOF'
+cat >"$CONSTRUCT_SESSION_WIDGETS_DIR/pr-cleanup.md" <<'EOF'
 # PR cleanup
 
 :::timeline

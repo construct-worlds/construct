@@ -1,5 +1,5 @@
 [package]
-name = "agentd-adapter-shell"
+name = "construct-adapter-shell"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Generic shell command adapter for agentd"
 
 [[bin]]
-name = "agentd-adapter-shell"
+name = "construct-adapter-shell"
 path = "src/main.rs"
 
 [dependencies]

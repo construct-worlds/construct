@@ -51,8 +51,8 @@ fn now_ms() -> i64 {
 }
 
 fn registry_path() -> Result<PathBuf> {
-    let dir = std::env::var("AGENTD_SESSION_DATA_DIR")
-        .context("AGENTD_SESSION_DATA_DIR is not set; subagents require an agentd session")?;
+    let dir = std::env::var("CONSTRUCT_SESSION_DATA_DIR")
+        .context("CONSTRUCT_SESSION_DATA_DIR is not set; subagents require an agentd session")?;
     Ok(PathBuf::from(dir).join("zarvis-subagents.json"))
 }
 
@@ -181,7 +181,7 @@ impl Tool for Create {
             .or_else(|| Some(format!("subagent:{}", harness)));
         let mut env = std::collections::HashMap::new();
         env.insert(
-            "AGENTD_PARENT_SESSION_ID".to_string(),
+            "CONSTRUCT_PARENT_SESSION_ID".to_string(),
             ctx.session_id.clone(),
         );
         let params = CreateSessionParams {

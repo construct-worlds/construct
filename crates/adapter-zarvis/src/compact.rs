@@ -41,7 +41,7 @@ use anyhow::{anyhow, Result};
 /// available). Auto is on by default — set this to `0`, `false`, or
 /// `off` to fall back to pure rolling-prune behavior. Mainly an escape
 /// hatch for users hitting unexpected summarizer-call costs.
-const ENV_AUTO_COMPACT: &str = "AGENTD_ZARVIS_AUTO_COMPACT";
+const ENV_AUTO_COMPACT: &str = "CONSTRUCT_SMITH_AUTO_COMPACT";
 
 /// Whether auto-compact should run this session. Default on.
 pub fn auto_compact_enabled() -> bool {

@@ -1,4 +1,4 @@
-//! Chrome DevTools browser tools exposed through agentd-mcp so every harness
+//! Chrome DevTools browser tools exposed through construct-mcp so every harness
 //! with injected MCP can browse and refresh the TUI browser preview overlay.
 
 use agentd_client::Client;
@@ -365,7 +365,7 @@ async fn start_chrome(endpoint: &Endpoint) -> Result<()> {
         ));
     }
     let chrome = chrome_path().ok_or_else(|| anyhow!("Chrome/Chromium binary not found"))?;
-    let profile = format!("/tmp/agentd-chrome-debug-{}", endpoint.port);
+    let profile = format!("/tmp/construct-chrome-debug-{}", endpoint.port);
     let mut cmd = Command::new(chrome);
     cmd.arg(format!("--remote-debugging-port={}", endpoint.port))
         .arg(format!("--user-data-dir={profile}"))

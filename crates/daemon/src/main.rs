@@ -17,7 +17,7 @@ mod worktree;
 use agentd_protocol::paths::Paths;
 
 #[derive(Debug, Parser)]
-#[command(name = "agentd", about = "agentd daemon", version)]
+#[command(name = "constructd", about = "construct daemon", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
 
 async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     // Capture the executable path now, before anything can replace
-    // the binary on disk. `/agentd restart` re-`exec()`s this path;
+    // the binary on disk. `/construct restart` re-`exec()`s this path;
     // resolving it lazily at restart time is unreliable once an
     // upgrade has rename-replaced the file (Linux's
     // `current_exe()` then reads as "… (deleted)"). See
@@ -78,6 +78,7 @@ async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     session::capture_startup_exe();
 
     let paths = Paths::discover();
+    warn_legacy_paths(&paths);
     std::fs::create_dir_all(&paths.state_dir).ok();
     std::fs::create_dir_all(&paths.data_dir).ok();
     std::fs::create_dir_all(&paths.runtime_dir).ok();
@@ -154,13 +155,13 @@ async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     }
 
     // Auto-start the remote WS listener at boot when
-    // `AGENTD_REMOTE_WS_PORT` is set — the headless / scripted
+    // `CONSTRUCT_REMOTE_WS_PORT` is set — the headless / scripted
     // entry point. Interactive users get the same machinery via
     // the TUI's `/remote-control` slash (which calls
     // `remote.start` over IPC and shows a QR), so the env var is
     // only needed when nobody is at the terminal to type the
     // command.
-    if let Ok(port_raw) = std::env::var("AGENTD_REMOTE_WS_PORT") {
+    if let Ok(port_raw) = std::env::var("CONSTRUCT_REMOTE_WS_PORT") {
         match port_raw.parse::<u16>() {
             Ok(port) => {
                 let mgr = manager.clone();
@@ -187,11 +188,11 @@ async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             }
             Err(_) => tracing::warn!(
                 value = %port_raw,
-                "AGENTD_REMOTE_WS_PORT is not a valid u16; skipping ws listener"
+                "CONSTRUCT_REMOTE_WS_PORT is not a valid u16; skipping ws listener"
             ),
         }
     } else if paths.runtime_dir.join("remote.json").exists() {
-        // `/agentd restart` path: the prior daemon had the remote
+        // `/construct restart` path: the prior daemon had the remote
         // listener up and persisted a snapshot. Resume ONLY if that
         // snapshot is still adoptable (fresh, and its cloudflared
         // tunnel PID — if any — still alive), picking the port +
@@ -271,6 +272,179 @@ async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             let err = std::process::Command::new(&cmd.exe).args(&cmd.args).exec();
             Err(anyhow::anyhow!("exec({}) failed: {err}", cmd.exe.display()))
         }
+    }
+}
+
+fn warn_legacy_paths(current: &Paths) {
+    if let Some(msg) = legacy_migration_notice(current) {
+        eprint!("{}", msg);
+    }
+}
+
+fn shell_quote(path: &std::path::Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+fn legacy_migration_notice(current: &Paths) -> Option<String> {
+    legacy_migration_notice_with_paths(current, &Paths::discover_legacy())
+}
+
+fn legacy_migration_notice_with_paths(current: &Paths, legacy: &Paths) -> Option<String> {
+    let mut found = Vec::<(&str, &std::path::Path)>::new();
+    let legacy_items = [
+        ("config directory", legacy.config_dir.as_path()),
+        ("state directory", legacy.state_dir.as_path()),
+        ("data directory", legacy.data_dir.as_path()),
+        ("runtime directory", legacy.runtime_dir.as_path()),
+    ];
+
+    for (label, p) in legacy_items {
+        if p.exists() {
+            found.push((label, p));
+        }
+    }
+
+    let legacy_config = legacy.config_file();
+    if legacy_config.exists() {
+        found.push(("legacy config file", legacy_config.as_path()));
+    }
+    if found.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    out.push_str("\n[construct] Detected existing legacy `agentd` layout;\nthis daemon no longer reads those locations.\n");
+    for (label, path) in found {
+        out.push_str(&format!("  - legacy {label}: {}\n", path.display()));
+    }
+
+    out.push_str("\nSuggested migration:\n");
+    out.push_str(&format!(
+        "  config: {old} -> {new}\n",
+        old = legacy.config_dir.display(),
+        new = current.config_dir.display()
+    ));
+    out.push_str(&format!(
+        "   state: {old} -> {new}\n",
+        old = legacy.state_dir.display(),
+        new = current.state_dir.display()
+    ));
+    out.push_str(&format!(
+        "    data: {old} -> {new}\n",
+        old = legacy.data_dir.display(),
+        new = current.data_dir.display()
+    ));
+    out.push_str(&format!(
+        " runtime: {old} -> {new}\n",
+        old = legacy.runtime_dir.display(),
+        new = current.runtime_dir.display()
+    ));
+
+    out.push_str("\nCopy/paste migration command:\n");
+    out.push_str(&format!(
+        "  mkdir -p {} {} {} {}\n",
+        shell_quote(&current.config_dir),
+        shell_quote(&current.state_dir),
+        shell_quote(&current.data_dir),
+        shell_quote(&current.runtime_dir)
+    ));
+
+    let migration_dirs = [
+        (legacy.config_dir.as_path(), current.config_dir.as_path()),
+        (legacy.state_dir.as_path(), current.state_dir.as_path()),
+        (legacy.data_dir.as_path(), current.data_dir.as_path()),
+        (legacy.runtime_dir.as_path(), current.runtime_dir.as_path()),
+    ];
+    for (old_dir, new_dir) in migration_dirs {
+        if old_dir.exists() {
+            out.push_str(&format!(
+                "  cp -a {old}/. {new}/\n",
+                old = shell_quote(old_dir),
+                new = shell_quote(new_dir)
+            ));
+        }
+    }
+    if legacy_config.exists() {
+        out.push_str(&format!(
+            "  cp -a {old_config} {new_config}\n",
+            old_config = shell_quote(&legacy_config),
+            new_config = shell_quote(&current.config_file())
+        ));
+    }
+
+    out.push_str("\nMove or copy what you need; restart after migration.\n");
+
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn path(base: &std::path::Path, tail: &str) -> std::path::PathBuf {
+        base.join(tail)
+    }
+
+    #[test]
+    fn legacy_migration_notice_omits_output_when_no_legacy_layout() {
+        let root = tempdir().unwrap();
+        let current = Paths {
+            config_dir: path(root.path(), "construct-config"),
+            state_dir: path(root.path(), "construct-state"),
+            data_dir: path(root.path(), "construct-data"),
+            runtime_dir: path(root.path(), "construct-runtime"),
+        };
+        let legacy = Paths {
+            config_dir: path(root.path(), "agentd-config"),
+            state_dir: path(root.path(), "agentd-state"),
+            data_dir: path(root.path(), "agentd-data"),
+            runtime_dir: path(root.path(), "agentd-runtime"),
+        };
+        assert!(super::legacy_migration_notice_with_paths(&current, &legacy).is_none());
+    }
+
+    #[test]
+    fn legacy_migration_notice_includes_detected_items() {
+        let root = tempdir().unwrap();
+        let legacy = Paths {
+            config_dir: path(root.path(), "agentd-config"),
+            state_dir: path(root.path(), "agentd-state"),
+            data_dir: path(root.path(), "agentd-data"),
+            runtime_dir: path(root.path(), "agentd-runtime"),
+        };
+        let current = Paths {
+            config_dir: path(root.path(), "construct-config"),
+            state_dir: path(root.path(), "construct-state"),
+            data_dir: path(root.path(), "construct-data"),
+            runtime_dir: path(root.path(), "construct-runtime"),
+        };
+        std::fs::create_dir_all(&legacy.config_dir).unwrap();
+        std::fs::create_dir_all(&legacy.state_dir).unwrap();
+        std::fs::write(legacy.config_file(), "configured = true").unwrap();
+
+        let msg = super::legacy_migration_notice_with_paths(&current, &legacy).expect("notice");
+        assert!(msg.contains("Detected existing legacy `agentd` layout"));
+        assert!(msg.contains(&format!(
+            "legacy config file: {}",
+            legacy.config_file().display()
+        )));
+        assert!(msg.contains("state directory"));
+        assert!(msg.contains("legacy config file"));
+        assert!(msg.contains(&format!("config: {}", legacy.config_dir.display())));
+        assert!(msg.contains(&format!(
+            "  config: {} -> {}",
+            legacy.config_dir.display(),
+            current.config_dir.display()
+        )));
+        assert!(msg.contains(&format!(
+            " state: {} -> {}",
+            legacy.state_dir.display(),
+            current.state_dir.display()
+        )));
+        assert!(msg.contains("Copy/paste migration command:"));
+        assert!(msg.contains("mkdir -p"));
+        assert!(msg.contains("cp -a"));
     }
 }
 

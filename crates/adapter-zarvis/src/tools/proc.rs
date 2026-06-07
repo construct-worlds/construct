@@ -198,7 +198,10 @@ mod tests {
             .write("proc-999", "x", false, Duration::from_millis(10))
             .await
             .is_none());
-        assert!(reg.drain("proc-999", Duration::from_millis(10)).await.is_none());
+        assert!(reg
+            .drain("proc-999", Duration::from_millis(10))
+            .await
+            .is_none());
     }
 
     #[tokio::test]

@@ -10,11 +10,11 @@
 //! The TUI's `vt100`-backed terminal pane parses these bytes the same
 //! way it parses any other PTY-backed adapter's output.
 
-use crate::agent::{ResolvedModel, push_msg, system_prompt_for_env};
+use crate::agent::{push_msg, system_prompt_for_env, ResolvedModel};
 use crate::context;
 use crate::persist::{self, Persist};
 use crate::provider::{self, Content, Message, Role, StopReason, TextSink, ToolCall};
-use crate::tools::{ToolCtx, ToolOutcome, ToolRegistry, truncate_for_model};
+use crate::tools::{truncate_for_model, ToolCtx, ToolOutcome, ToolRegistry};
 use agentd_protocol::adapter::{AdapterContext, AdapterInboxMsg, EventEmitter};
 use agentd_protocol::{ApprovalMode, SessionEvent, SessionStartParams, SessionState, ToolRisk};
 use anyhow::Result;
@@ -1368,7 +1368,10 @@ mod tests {
         let s = String::from_utf8(observation_panel_echo(obs).unwrap()).unwrap();
         assert!(s.contains("ambient monitor flagged:"), "{s}");
         assert!(s.contains("s277 \"x\": blocked at prompt"), "{s}");
-        assert!(!s.contains("Decide whether to surface"), "boilerplate kept:\n{s}");
+        assert!(
+            !s.contains("Decide whether to surface"),
+            "boilerplate kept:\n{s}"
+        );
     }
 
     #[test]
@@ -1396,7 +1399,11 @@ mod tests {
         let now = chrono::Utc::now();
         let stale = now.timestamp_millis() - 15 * 60_000; // quiet 15m → idle
         let fresh = now.timestamp_millis();
-        fn summary(id: &str, state: &str, last_pty_ms: Option<i64>) -> agentd_protocol::SessionSummary {
+        fn summary(
+            id: &str,
+            state: &str,
+            last_pty_ms: Option<i64>,
+        ) -> agentd_protocol::SessionSummary {
             let mut v = serde_json::json!({
                 "id": id, "harness": "claude", "cwd": "/x",
                 "state": state, "created_at": "2026-06-06T00:00:00Z"
@@ -1965,7 +1972,7 @@ pub async fn run(
     let base_hook_payload = crate::hooks::base_payload(&session_id, &cwd, "interactive");
     let registry = std::sync::Arc::new(ToolRegistry::with_defaults());
     let specs = registry.specs();
-    let mut approval_mode = if std::env::var("AGENTD_ZARVIS_AUTOMODE").as_deref() == Ok("1") {
+    let mut approval_mode = if std::env::var("CONSTRUCT_SMITH_AUTOMODE").as_deref() == Ok("1") {
         ApprovalMode::UnsafeAuto
     } else {
         ApprovalMode::Manual
@@ -2099,7 +2106,7 @@ pub async fn run(
     // sessions get `None` here and skip the obs branch in the inner
     // select. Rate-limited so a burst of events can't fire a turn
     // per event.
-    let is_orchestrator = std::env::var("AGENTD_SESSION_KIND").as_deref() == Ok("orchestrator");
+    let is_orchestrator = std::env::var("CONSTRUCT_SESSION_KIND").as_deref() == Ok("orchestrator");
     let mut obs_rx = if is_orchestrator {
         Some(crate::observe::spawn(self_id_for_obs))
     } else {
@@ -2117,7 +2124,7 @@ pub async fn run(
     // Ambient monitor model: the fleet scan + triage runs as a one-shot
     // completion off the operator's own conversation, so the bulky snapshot /
     // previews never accumulate in the operator's context and only escalations
-    // reach it. Configure a cheaper model via AGENTD_OPERATOR_MONITOR_MODEL;
+    // reach it. Configure a cheaper model via CONSTRUCT_OPERATOR_MONITOR_MODEL;
     // otherwise it falls back to the operator's own model.
     // Resolve the monitor model (orchestrator-only — that's the only session
     // that ambient-ticks). The explicit override wins; otherwise default to a
@@ -2126,7 +2133,7 @@ pub async fn run(
     // falls back to the operator's own model when the chosen model can't be
     // resolved or doesn't actually answer.
     let monitor_model = if is_orchestrator {
-        let candidate = std::env::var("AGENTD_OPERATOR_MONITOR_MODEL")
+        let candidate = std::env::var("CONSTRUCT_OPERATOR_MONITOR_MODEL")
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| default_monitor_spec(provider_name, &model))
@@ -3081,7 +3088,7 @@ struct OperatorAmbientLoop {
 }
 
 fn operator_ambient_loop_interval() -> Duration {
-    let secs = std::env::var("AGENTD_OPERATOR_AMBIENT_LOOP_SECS")
+    let secs = std::env::var("CONSTRUCT_OPERATOR_AMBIENT_LOOP_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(60)
@@ -3124,7 +3131,7 @@ fn observation_panel_echo(user_text: &str) -> Option<Vec<u8>> {
 const IDLE_RUNNING_MINS: i64 = 10;
 
 fn ambient_active_window() -> Duration {
-    let secs = std::env::var("AGENTD_OPERATOR_ACTIVE_WINDOW_SECS")
+    let secs = std::env::var("CONSTRUCT_OPERATOR_ACTIVE_WINDOW_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(IDLE_RUNNING_MINS as u64 * 60)
@@ -3132,18 +3139,18 @@ fn ambient_active_window() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Max sessions previewed per tick. Override with `AGENTD_OPERATOR_PREVIEW_SESSIONS`.
+/// Max sessions previewed per tick. Override with `CONSTRUCT_OPERATOR_PREVIEW_SESSIONS`.
 fn preview_session_cap() -> usize {
-    std::env::var("AGENTD_OPERATOR_PREVIEW_SESSIONS")
+    std::env::var("CONSTRUCT_OPERATOR_PREVIEW_SESSIONS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(10)
         .min(50)
 }
-/// Per-session preview byte budget. Override with `AGENTD_OPERATOR_PREVIEW_BYTES`.
+/// Per-session preview byte budget. Override with `CONSTRUCT_OPERATOR_PREVIEW_BYTES`.
 /// When the recent messages exceed it, the older part is truncated.
 fn preview_byte_cap() -> usize {
-    std::env::var("AGENTD_OPERATOR_PREVIEW_BYTES")
+    std::env::var("CONSTRUCT_OPERATOR_PREVIEW_BYTES")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(800)
@@ -3202,9 +3209,11 @@ fn ambient_session_is_active(
     let recent_event = session
         .last_event_at
         .is_some_and(|last| (now - last).num_milliseconds().max(0) <= window_ms);
-    recent_pty || recent_event || session.state == agentd_protocol::SessionState::Running
-        && session.last_pty_at_ms.is_none()
-        && session.last_event_at.is_none()
+    recent_pty
+        || recent_event
+        || session.state == agentd_protocol::SessionState::Running
+            && session.last_pty_at_ms.is_none()
+            && session.last_event_at.is_none()
 }
 
 /// Build the ambient-tick observation text. Pulls a live fleet snapshot from
@@ -3250,7 +3259,7 @@ If anything qualifies, reply with at most 3 one-line findings, each: '<session i
 <what + why, with a short evidence snippet>'. If nothing qualifies, reply with exactly the single \
 word: nothing";
 
-/// Default monitor model when `AGENTD_OPERATOR_MONITOR_MODEL` is unset: a
+/// Default monitor model when `CONSTRUCT_OPERATOR_MONITOR_MODEL` is unset: a
 /// cheaper tier on the **same provider** as the operator (so auth/keys are
 /// already present), using model names the codebase/provider is known to
 /// accept. Returns `None` — keep the operator's own model — when the operator
@@ -3377,7 +3386,10 @@ async fn fetch_session_preview(
         return None;
     }
     msgs.reverse();
-    Some(truncate_keep_tail(&format!("  {}", msgs.join("\n  ")), max_bytes))
+    Some(truncate_keep_tail(
+        &format!("  {}", msgs.join("\n  ")),
+        max_bytes,
+    ))
 }
 
 /// Render the recent PTY-log tail through a `vt100` parser and return the
@@ -3411,7 +3423,10 @@ async fn pty_screen_preview(
     if lines.is_empty() {
         return None;
     }
-    Some(truncate_keep_tail(&format!("  {}", lines.join("\n  ")), max_bytes))
+    Some(truncate_keep_tail(
+        &format!("  {}", lines.join("\n  ")),
+        max_bytes,
+    ))
 }
 
 /// Pure snapshot builder: counts active sessions by state (including idle
@@ -3484,7 +3499,11 @@ fn compute_ambient_snapshot(
                         format!("{} running but quiet {pm}m (idle/waiting?)", label(s)),
                     ));
                 } else {
-                    let ago = if pm < 0 { "?".to_string() } else { format!("{pm}m") };
+                    let ago = if pm < 0 {
+                        "?".to_string()
+                    } else {
+                        format!("{pm}m")
+                    };
                     active_list.push((
                         pm.max(0),
                         s.id.clone(),
@@ -3501,8 +3520,10 @@ fn compute_ambient_snapshot(
             }
             SessionState::Errored => {
                 errored += 1;
-                errored_list
-                    .push((s.id.clone(), format!("{} errored {}m ago", label(s), event_idle_min(s))));
+                errored_list.push((
+                    s.id.clone(),
+                    format!("{} errored {}m ago", label(s), event_idle_min(s)),
+                ));
             }
             _ => {}
         }
@@ -4644,11 +4665,11 @@ async fn handle_slash_loop(
 /// adapter doesn't share that module — but the env-var keys
 /// match so a deployment-time override applies to both sides.
 fn clamp_interval_for_slash(secs: u64) -> (u64, bool) {
-    let min = std::env::var("AGENTD_LOOP_MIN_SECS")
+    let min = std::env::var("CONSTRUCT_LOOP_MIN_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30u64);
-    let max = std::env::var("AGENTD_LOOP_MAX_SECS")
+    let max = std::env::var("CONSTRUCT_LOOP_MAX_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(24 * 3600u64);

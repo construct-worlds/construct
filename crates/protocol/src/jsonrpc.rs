@@ -20,7 +20,11 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn new(id: impl Into<serde_json::Value>, method: impl Into<String>, params: Option<serde_json::Value>) -> Self {
+    pub fn new(
+        id: impl Into<serde_json::Value>,
+        method: impl Into<String>,
+        params: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id: id.into(),
@@ -101,7 +105,10 @@ impl ErrorObject {
     }
 
     pub fn method_not_found(method: &str) -> Self {
-        Self::new(error_codes::METHOD_NOT_FOUND, format!("method not found: {method}"))
+        Self::new(
+            error_codes::METHOD_NOT_FOUND,
+            format!("method not found: {method}"),
+        )
     }
 
     pub fn invalid_params(msg: impl Into<String>) -> Self {

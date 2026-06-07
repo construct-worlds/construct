@@ -18,8 +18,8 @@ Five layers, each replaceable:
 └──────────────────────────────────────────────┘
 ```
 
-- **Daemon** (`agentd`) owns sessions, spawns adapters, persists transcripts. Speaks JSON-RPC over a Unix socket to clients.
-- **Client** (`agent`) is the TUI plus a set of one-shot subcommands. Multiple clients can attach concurrently.
+- **Daemon** (`constructd`) owns sessions, spawns adapters, persists transcripts. Speaks JSON-RPC over a Unix socket to clients.
+- **Client** (`construct`) is the TUI plus a set of one-shot subcommands. Multiple clients can attach concurrently.
 - **Adapter** binaries are independent processes. They implement the AHP over stdio. Anyone can ship one in any language.
 
 ## Crates
@@ -27,12 +27,12 @@ Five layers, each replaceable:
 | Crate | Binary | Purpose |
 |---|---|---|
 | `crates/protocol` | — (lib) | AHP + IPC types, transport, adapter SDK |
-| `crates/daemon` | `agentd` | Session supervisor, IPC server |
-| `crates/cli` | `agent` | TUI client + control subcommands |
-| `crates/adapter-shell` | `agentd-adapter-shell` | Generic shell command runner |
-| `crates/adapter-claude` | `agentd-adapter-claude` | Wraps the `claude` CLI |
-| `crates/adapter-codex` | `agentd-adapter-codex` | Wraps the `codex` CLI |
-| `crates/adapter-zarvis` | `agentd-adapter-zarvis` | Built-in multi-provider agent (OpenAI / Anthropic / Gemini / Ollama) |
+| `crates/daemon` | `constructd` | Session supervisor, IPC server |
+| `crates/cli` | `construct` | TUI client + control subcommands |
+| `crates/adapter-shell` | `construct-adapter-shell` | Generic shell command runner |
+| `crates/adapter-claude` | `construct-adapter-claude` | Wraps the `claude` CLI |
+| `crates/adapter-codex` | `construct-adapter-codex` | Wraps the `codex` CLI |
+| `crates/adapter-zarvis` | `construct-adapter-smith` | Built-in multi-provider agent (OpenAI / Anthropic / Gemini / Ollama) |
 
 ## Adapter protocol (AHP)
 

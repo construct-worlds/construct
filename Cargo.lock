@@ -36,78 +36,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentd-adapter-antigravity"
-version = "0.8.3"
-dependencies = [
- "agentd-protocol",
- "anyhow",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agentd-adapter-claude"
-version = "0.8.3"
-dependencies = [
- "agentd-protocol",
- "anyhow",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agentd-adapter-codex"
-version = "0.8.3"
-dependencies = [
- "agentd-protocol",
- "anyhow",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "agentd-adapter-shell"
-version = "0.8.3"
-dependencies = [
- "agentd-protocol",
- "anyhow",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "agentd-adapter-zarvis"
-version = "0.8.3"
-dependencies = [
- "agentd-client",
- "agentd-protocol",
- "anyhow",
- "async-trait",
- "base64",
- "bytes",
- "chrono",
- "eventsource-stream",
- "futures",
- "image",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "unicode-width",
- "uuid",
- "vt100",
-]
-
-[[package]]
 name = "agentd-cli"
 version = "0.8.3"
 dependencies = [
@@ -164,26 +92,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "vt100",
-]
-
-[[package]]
-name = "agentd-mcp"
-version = "0.8.3"
-dependencies = [
- "agentd-client",
- "agentd-protocol",
- "anyhow",
- "base64",
- "futures",
- "image",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -583,6 +491,98 @@ dependencies = [
  "rustversion",
  "ryu",
  "static_assertions",
+]
+
+[[package]]
+name = "construct-adapter-antigravity"
+version = "0.8.3"
+dependencies = [
+ "agentd-protocol",
+ "anyhow",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "construct-adapter-claude"
+version = "0.8.3"
+dependencies = [
+ "agentd-protocol",
+ "anyhow",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "construct-adapter-codex"
+version = "0.8.3"
+dependencies = [
+ "agentd-protocol",
+ "anyhow",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "construct-adapter-shell"
+version = "0.8.3"
+dependencies = [
+ "agentd-protocol",
+ "anyhow",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "construct-adapter-smith"
+version = "0.8.3"
+dependencies = [
+ "agentd-client",
+ "agentd-protocol",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "image",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "unicode-width",
+ "uuid",
+ "vt100",
+]
+
+[[package]]
+name = "construct-mcp"
+version = "0.8.3"
+dependencies = [
+ "agentd-client",
+ "agentd-protocol",
+ "anyhow",
+ "base64",
+ "futures",
+ "image",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Quick end-to-end smoke test against a freshly built workspace.
 #
-# Spins up the daemon under an isolated $AGENTD_*_DIR sandbox, exercises the
+# Spins up the daemon under an isolated $CONSTRUCT_*_DIR sandbox, exercises the
 # IPC surface (ping / harnesses / create / list / show / send / stop), and
 # tears down. Run from the workspace root:
 #
@@ -10,43 +10,43 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-SANDBOX=${AGENTD_SMOKE_DIR:-/tmp/agentd-smoke}
+SANDBOX=${CONSTRUCT_SMOKE_DIR:-/tmp/construct-smoke}
 rm -rf "$SANDBOX"
 mkdir -p "$SANDBOX"/{state,data,config,runtime}
 
-export AGENTD_STATE_DIR="$SANDBOX/state"
-export AGENTD_DATA_DIR="$SANDBOX/data"
-export AGENTD_CONFIG_DIR="$SANDBOX/config"
-export AGENTD_RUNTIME_DIR="$SANDBOX/runtime"
+export CONSTRUCT_STATE_DIR="$SANDBOX/state"
+export CONSTRUCT_DATA_DIR="$SANDBOX/data"
+export CONSTRUCT_CONFIG_DIR="$SANDBOX/config"
+export CONSTRUCT_RUNTIME_DIR="$SANDBOX/runtime"
 
-AGENTD="$ROOT/target/debug/agentd"
-AGENT="$ROOT/target/debug/agent"
-[ -x "$AGENTD" ] || { echo "build first: cargo build --workspace" >&2; exit 1; }
-[ -x "$AGENT" ]  || { echo "build first: cargo build --workspace" >&2; exit 1; }
+CONSTRUCTD="$ROOT/target/debug/constructd"
+CONSTRUCT_CLI="$ROOT/target/debug/construct"
+[ -x "$CONSTRUCTD" ] || { echo "build first: cargo build --workspace" >&2; exit 1; }
+[ -x "$CONSTRUCT_CLI" ]  || { echo "build first: cargo build --workspace" >&2; exit 1; }
 
-"$AGENTD" run >"$SANDBOX/daemon.log" 2>&1 &
+"$CONSTRUCTD" run >"$SANDBOX/daemon.log" 2>&1 &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
 sleep 0.4
 
 echo "==> ping"
-"$AGENT" ping
+"$CONSTRUCT_CLI" ping
 
 echo "==> harnesses"
-"$AGENT" harnesses
+"$CONSTRUCT_CLI" harnesses
 
 echo "==> shell session"
-SID=$("$AGENT" new shell "echo hello-from-shell; echo and-another-line" --cwd "$SANDBOX")
+SID=$("$CONSTRUCT_CLI" new shell "echo hello-from-shell; echo and-another-line" --cwd "$SANDBOX")
 echo "  session: $SID"
 sleep 0.6
 
 echo "==> list"
-"$AGENT" list
+"$CONSTRUCT_CLI" list
 
 echo "==> show"
-"$AGENT" show "$SID"
+"$CONSTRUCT_CLI" show "$SID"
 
 echo "==> stop (idempotent on done sessions)"
-"$AGENT" stop "$SID" 2>/dev/null || true
+"$CONSTRUCT_CLI" stop "$SID" 2>/dev/null || true
 
 echo "OK"

@@ -6,7 +6,7 @@
 //! selected skill file on demand, instead of eagerly stuffing every
 //! skill body into context.
 //!
-//! Disable with `AGENTD_ZARVIS_SKILLS=off`.
+//! Disable with `CONSTRUCT_SMITH_SKILLS=off`.
 
 use std::path::{Path, PathBuf};
 
@@ -25,7 +25,7 @@ pub(crate) struct Skill {
 }
 
 pub(crate) fn discover(cwd: &Path) -> Vec<Skill> {
-    if std::env::var("AGENTD_ZARVIS_SKILLS").as_deref() == Ok("off") {
+    if std::env::var("CONSTRUCT_SMITH_SKILLS").as_deref() == Ok("off") {
         return Vec::new();
     }
 
@@ -248,7 +248,7 @@ metadata:
         std::fs::create_dir_all(&cwd).unwrap();
         std::env::set_var("CODEX_HOME", &tmp);
         std::env::set_var("CLAUDE_HOME", tmp.join("claude-home"));
-        std::env::remove_var("AGENTD_ZARVIS_SKILLS");
+        std::env::remove_var("CONSTRUCT_SMITH_SKILLS");
 
         write_skill(
             &tmp.join("skills/.system/imagegen/SKILL.md"),
@@ -287,7 +287,7 @@ metadata:
         let tmp = tempdir();
         std::env::set_var("CODEX_HOME", &tmp);
         std::env::remove_var("CLAUDE_HOME");
-        std::env::remove_var("AGENTD_ZARVIS_SKILLS");
+        std::env::remove_var("CONSTRUCT_SMITH_SKILLS");
         let path = tmp.join("skills/.system/openai-docs/SKILL.md");
         write_skill(&path, "openai-docs", "Use official OpenAI docs.");
 
@@ -305,7 +305,7 @@ metadata:
         let tmp = tempdir();
         std::env::set_var("CODEX_HOME", &tmp);
         std::env::set_var("CLAUDE_HOME", tmp.join("claude-home"));
-        std::env::set_var("AGENTD_ZARVIS_SKILLS", "off");
+        std::env::set_var("CONSTRUCT_SMITH_SKILLS", "off");
         write_skill(
             &tmp.join("skills/.system/imagegen/SKILL.md"),
             "imagegen",
@@ -315,7 +315,7 @@ metadata:
         assert!(discover(&tmp).is_empty());
         std::env::remove_var("CODEX_HOME");
         std::env::remove_var("CLAUDE_HOME");
-        std::env::remove_var("AGENTD_ZARVIS_SKILLS");
+        std::env::remove_var("CONSTRUCT_SMITH_SKILLS");
     }
 
     fn write_skill(path: &Path, name: &str, description: &str) {

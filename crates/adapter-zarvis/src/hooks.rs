@@ -48,12 +48,12 @@ impl Hooks {
     }
 
     fn try_load(cwd: &Path) -> Result<Self> {
-        let raw = if let Ok(s) = std::env::var("AGENTD_ZARVIS_HOOKS_JSON") {
+        let raw = if let Ok(s) = std::env::var("CONSTRUCT_SMITH_HOOKS_JSON") {
             if s.trim().is_empty() {
                 return Ok(Self::default());
             }
             s
-        } else if let Ok(path) = std::env::var("AGENTD_ZARVIS_HOOKS_CONFIG") {
+        } else if let Ok(path) = std::env::var("CONSTRUCT_SMITH_HOOKS_CONFIG") {
             if path.trim().is_empty() {
                 return Ok(Self::default());
             }
@@ -128,7 +128,7 @@ impl HookCommand {
 
     async fn run_capture(&self, event: &str, cwd: &Path, payload: Value) -> Result<String> {
         let timeout = Duration::from_millis(self.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-        let shell = std::env::var("AGENTD_SHELL_BIN")
+        let shell = std::env::var("CONSTRUCT_SHELL_BIN")
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "/bin/sh".to_string());
@@ -136,7 +136,7 @@ impl HookCommand {
             .arg("-lc")
             .arg(&self.command)
             .current_dir(cwd)
-            .env("AGENTD_ZARVIS_HOOK_EVENT", event)
+            .env("CONSTRUCT_SMITH_HOOK_EVENT", event)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -219,12 +219,12 @@ mod tests {
     fn parses_inline_hook_config() {
         let _guard = env_lock().lock().unwrap();
         std::env::set_var(
-            "AGENTD_ZARVIS_HOOKS_JSON",
+            "CONSTRUCT_SMITH_HOOKS_JSON",
             r#"{"hooks":{"pre_tool_use":[{"command":"echo ok","timeout_ms":123}]}}"#,
         );
-        std::env::remove_var("AGENTD_ZARVIS_HOOKS_CONFIG");
+        std::env::remove_var("CONSTRUCT_SMITH_HOOKS_CONFIG");
         let hooks = Hooks::try_load(Path::new("/tmp")).expect("load hooks");
-        std::env::remove_var("AGENTD_ZARVIS_HOOKS_JSON");
+        std::env::remove_var("CONSTRUCT_SMITH_HOOKS_JSON");
         assert_eq!(hooks.hooks["pre_tool_use"][0].command, "echo ok");
         assert_eq!(hooks.hooks["pre_tool_use"][0].timeout_ms, Some(123));
     }
@@ -238,10 +238,10 @@ mod tests {
             r#"{"hooks":{"session_stop":[{"command":"printf stop"}]}}"#,
         )
         .expect("write hooks config");
-        std::env::remove_var("AGENTD_ZARVIS_HOOKS_JSON");
-        std::env::set_var("AGENTD_ZARVIS_HOOKS_CONFIG", "hooks.json");
+        std::env::remove_var("CONSTRUCT_SMITH_HOOKS_JSON");
+        std::env::set_var("CONSTRUCT_SMITH_HOOKS_CONFIG", "hooks.json");
         let hooks = Hooks::try_load(dir.path()).expect("load hooks");
-        std::env::remove_var("AGENTD_ZARVIS_HOOKS_CONFIG");
+        std::env::remove_var("CONSTRUCT_SMITH_HOOKS_CONFIG");
         assert_eq!(hooks.hooks["session_stop"][0].command, "printf stop");
     }
 
