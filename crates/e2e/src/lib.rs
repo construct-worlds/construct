@@ -1,13 +1,13 @@
-//! End-to-end test harness for `agentd`.
+//! End-to-end test harness for `constructd`.
 //!
-//! Spawns the **real** `agentd` binary out of the workspace's
+//! Spawns the **real** `constructd` binary out of the workspace's
 //! `target/debug/` against a fresh tempdir for every test (so
-//! the test never touches the developer's actual `$AGENTD_*_DIR`
+//! the test never touches the developer's actual `$CONSTRUCT_*_DIR`
 //! state), waits for the IPC socket to come up, and returns a
 //! connected `agentd_client::Client` plus the path to the
 //! socket. Drop kills the daemon and cleans the tempdir.
 //!
-//! There's a sibling [`Tui`] helper that spawns the `agent` TUI
+//! There's a sibling [`Tui`] helper that spawns the `construct` TUI
 //! inside a pseudo-terminal so tests can scrape rendered output
 //! (via `vt100`) and send keystrokes back. Together they let a
 //! single test exercise the full stack: TUI → IPC → daemon →
@@ -32,7 +32,7 @@ use tokio::process::{Child, Command};
 
 use agentd_client::Client;
 
-/// One isolated `agentd` instance + a connected IPC client.
+/// One isolated `constructd` instance + a connected IPC client.
 /// `Drop` kills the daemon (via tokio's `kill_on_drop`) and
 /// cleans up the tempdir (via `TempDir`).
 pub struct Daemon {
@@ -45,7 +45,7 @@ pub struct Daemon {
     /// passing to the TUI helper.
     pub socket: PathBuf,
     /// Path the daemon binary was launched from. For `spawn()`
-    /// this is the workspace `target/debug/agentd`. For
+    /// this is the workspace `target/debug/constructd`. For
     /// `spawn_relocatable()` it's a private copy under the
     /// tempdir that the test can swap to exercise the
     /// "exec picks up an upgraded binary" path.
@@ -57,9 +57,9 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Spawn a fresh `agentd` against a tempdir and wait for its
+    /// Spawn a fresh `constructd` against a tempdir and wait for its
     /// IPC socket to come up. Always sets
-    /// `AGENTD_REMOTE_NO_TUNNEL=1` because the e2e tests should
+    /// `CONSTRUCT_REMOTE_NO_TUNNEL=1` because the e2e tests should
     /// never spawn a real cloudflared subprocess (would publish a
     /// real tunnel URL and the CI runner can't reach a `*.try
     /// cloudflare.com` host anyway).
@@ -71,7 +71,7 @@ impl Daemon {
         Self::spawn_inner(false).await
     }
 
-    /// Like `spawn`, but copies the `agentd` binary into the
+    /// Like `spawn`, but copies the `constructd` binary into the
     /// tempdir and launches that copy instead of the workspace
     /// binary. The copy lives at `Daemon::binary_path`, so a
     /// test can atomically swap it (write-then-rename) and then
@@ -119,14 +119,14 @@ impl Daemon {
         // to the orchestrator's editor instead of the global
         // keymap, and chords like `Ctrl-x x` (palette) silently
         // type into the editor. Local dev environments where
-        // the zarvis adapter isn't on PATH skip this naturally,
+        // the smith adapter isn't on PATH skip this naturally,
         // which is why the test passed locally but failed on CI.
         std::fs::write(
             config_dir.join("config.toml"),
             "[orchestrator]\nenabled = false\n",
         )
         .context("write e2e config.toml")?;
-        let socket = runtime_dir.join("agentd.sock");
+        let socket = runtime_dir.join("construct.sock");
 
         // For the relocatable case, copy the workspace binary into
         // the tempdir's `bin/`. Adapter binaries are resolved by
@@ -137,19 +137,19 @@ impl Daemon {
         let binary_path = if relocatable {
             let bin_dir = dir.path().join("bin");
             std::fs::create_dir_all(&bin_dir)?;
-            let src = agentd_bin_path()?;
-            let dst = bin_dir.join("agentd");
+            let src = constructd_bin_path()?;
+            let dst = bin_dir.join("constructd");
             std::fs::copy(&src, &dst)
                 .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
             copy_executable_perms(&dst)?;
             // Best-effort copy of sibling adapter binaries.
             if let Some(src_dir) = src.parent() {
                 for name in [
-                    "agentd-adapter-shell",
-                    "agentd-adapter-claude",
-                    "agentd-adapter-codex",
-                    "agentd-adapter-zarvis",
-                    "agentd-mcp",
+                    "construct-adapter-shell",
+                    "construct-adapter-claude",
+                    "construct-adapter-codex",
+                    "construct-adapter-smith",
+                    "construct-mcp",
                 ] {
                     let from = src_dir.join(name);
                     if from.exists() {
@@ -162,17 +162,17 @@ impl Daemon {
             }
             dst
         } else {
-            agentd_bin_path()?
+            constructd_bin_path()?
         };
 
         let mut cmd = Command::new(&binary_path);
-        cmd.env("AGENTD_RUNTIME_DIR", &runtime_dir)
-            .env("AGENTD_STATE_DIR", &state_dir)
-            .env("AGENTD_DATA_DIR", &data_dir)
-            .env("AGENTD_CONFIG_DIR", &config_dir)
+        cmd.env("CONSTRUCT_RUNTIME_DIR", &runtime_dir)
+            .env("CONSTRUCT_STATE_DIR", &state_dir)
+            .env("CONSTRUCT_DATA_DIR", &data_dir)
+            .env("CONSTRUCT_CONFIG_DIR", &config_dir)
             // Skip cloudflared in every e2e test — its absence
             // from CI runners is not a test failure.
-            .env("AGENTD_REMOTE_NO_TUNNEL", "1")
+            .env("CONSTRUCT_REMOTE_NO_TUNNEL", "1")
             .args(["run", "--socket"])
             .arg(&socket)
             // Silence the daemon's stderr / stdout in tests by
@@ -239,7 +239,7 @@ impl Daemon {
     }
 }
 
-/// A live `agent` TUI bound to a particular daemon socket, with
+/// A live `construct` TUI bound to a particular daemon socket, with
 /// the underlying PTY parsed by `vt100` so tests can scrape the
 /// rendered screen contents.
 ///
@@ -268,7 +268,7 @@ impl Drop for Tui {
         // Best-effort kill. `portable_pty::Child::kill` is
         // synchronous + idempotent — if the child has already
         // exited this is a no-op. Without this, a panicking
-        // `wait_for` from a test leaves the agent process alive
+        // `wait_for` from a test leaves the construct process alive
         // and the tokio runtime hangs waiting on the PTY reader.
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
@@ -277,7 +277,7 @@ impl Drop for Tui {
 }
 
 impl Tui {
-    /// Spawn `agent tui --socket <socket>` in a 30x100 PTY. The
+    /// Spawn `construct tui --socket <socket>` in a 30x100 PTY. The
     /// dimensions are arbitrary but match what the TUI tests
     /// expect for layout assertions.
     ///
@@ -299,7 +299,7 @@ impl Tui {
     }
 
     fn spawn_inner(socket: &Path, cast_path: Option<PathBuf>) -> Result<Self> {
-        let agent = agent_bin_path()?;
+        let client = construct_bin_path()?;
         let pty_system = portable_pty::native_pty_system();
         let size = portable_pty::PtySize {
             rows: 30,
@@ -311,7 +311,7 @@ impl Tui {
             .openpty(size)
             .map_err(|e| anyhow!("openpty: {e}"))?;
 
-        let mut cmd = portable_pty::CommandBuilder::new(&agent);
+        let mut cmd = portable_pty::CommandBuilder::new(&client);
         cmd.args(["tui", "--socket"]);
         cmd.arg(socket);
         // The TUI looks at TERM for color handling. xterm-256color
@@ -326,7 +326,7 @@ impl Tui {
         let child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| anyhow!("spawn agent tui: {e}"))?;
+            .map_err(|e| anyhow!("spawn construct tui: {e}"))?;
         // Slave handle is no longer needed after spawn; dropping
         // it ensures EOF propagates to the child if the parent
         // closes.
@@ -516,16 +516,16 @@ fn copy_executable_perms(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Locate the `agentd` binary in the workspace `target/`
+/// Locate the `constructd` binary in the workspace `target/`
 /// directory. Honors `CARGO_TARGET_DIR` first, then falls back
 /// to walking up two levels from `CARGO_MANIFEST_DIR`
 /// (`crates/e2e` → workspace root).
-fn agentd_bin_path() -> Result<PathBuf> {
-    bin_path("agentd")
+fn constructd_bin_path() -> Result<PathBuf> {
+    bin_path("constructd")
 }
 
-fn agent_bin_path() -> Result<PathBuf> {
-    bin_path("agent")
+fn construct_bin_path() -> Result<PathBuf> {
+    bin_path("construct")
 }
 
 fn bin_path(name: &str) -> Result<PathBuf> {

@@ -1,5 +1,5 @@
 [package]
-name = "agentd-adapter-zarvis"
+name = "construct-adapter-smith"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Built-in multi-provider agent harness for agentd (talks to OpenAI, Anthropic, Ollama directly)"
 
 [[bin]]
-name = "agentd-adapter-zarvis"
+name = "construct-adapter-smith"
 path = "src/main.rs"
 
 [dependencies]

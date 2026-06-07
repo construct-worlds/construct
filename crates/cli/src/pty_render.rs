@@ -128,13 +128,13 @@ struct SynthOutput {
 }
 
 /// How long a block must be running before the keyboard-control hint
-/// appears. Overridable via `AGENTD_TOOL_BUTTONS_AFTER_MS`.
+/// appears. Overridable via `CONSTRUCT_TOOL_BUTTONS_AFTER_MS`.
 /// Default lowered from 15s to 7s so the affordance is visible
 /// before the typical user gives up on the tool. Auto-promote
 /// still defaults to 60s — the hint just announces itself
 /// earlier.
 fn buttons_after_ms() -> u64 {
-    std::env::var("AGENTD_TOOL_BUTTONS_AFTER_MS")
+    std::env::var("CONSTRUCT_TOOL_BUTTONS_AFTER_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(7_000)

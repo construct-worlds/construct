@@ -18,7 +18,7 @@ async fn test_reconnect_flow() {
     let global_timeout = tokio::time::Duration::from_secs(10);
     let res = tokio::time::timeout(global_timeout, async {
         let dir = tempdir().unwrap();
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let _ = std::fs::remove_file(&sock);
 
         // helper to run a one-shot mock server that accepts a single

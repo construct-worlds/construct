@@ -7,13 +7,13 @@
 //!
 //! - **headless (opt-in)** — multi-turn structured mode that spawns
 //!   `codex exec <prompt>` per turn. Best-effort: if your codex build
-//!   supports session resumption, set `AGENTD_CODEX_RESUME_FLAG` to the flag
+//!   supports session resumption, set `CONSTRUCT_CODEX_RESUME_FLAG` to the flag
 //!   name (e.g. `--session-id`) and the adapter will pass any captured
 //!   `session_id` back in for subsequent turns.
 //!
-//! Pick mode via `--mode interactive|headless` on `agent new`, or via
-//! `AGENTD_CODEX_MODE=interactive|headless`. Honors `AGENTD_CODEX_CMD` for a
-//! full command prefix, falling back to `AGENTD_CODEX_BIN` for a binary path.
+//! Pick mode via `--mode interactive|headless` on `construct new`, or via
+//! `CONSTRUCT_CODEX_MODE=interactive|headless`. Honors `CONSTRUCT_CODEX_CMD` for a
+//! full command prefix, falling back to `CONSTRUCT_CODEX_BIN` for a binary path.
 
 use agentd_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use agentd_protocol::adapter::{run, AdapterContext, AdapterInboxMsg, EventEmitter};
@@ -59,7 +59,7 @@ enum Mode {
 }
 
 fn resolve_mode(params: &SessionStartParams) -> Mode {
-    if let Ok(m) = std::env::var("AGENTD_CODEX_MODE") {
+    if let Ok(m) = std::env::var("CONSTRUCT_CODEX_MODE") {
         match m.as_str() {
             "interactive" => return Mode::Interactive,
             "headless" => return Mode::Headless,
@@ -76,13 +76,13 @@ fn resolve_mode(params: &SessionStartParams) -> Mode {
 
 async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     let command = agentd_protocol::adapter::resolve_command_override(
-        "AGENTD_CODEX_CMD",
-        "AGENTD_CODEX_BIN",
+        "CONSTRUCT_CODEX_CMD",
+        "CONSTRUCT_CODEX_BIN",
         "codex",
     );
     let mut args = command.args.clone();
     args.extend(params.args.clone());
-    // The daemon's auto-approval policy (`AGENTD_AUTO_APPROVE_PATHS`, see
+    // The daemon's auto-approval policy (`CONSTRUCT_AUTO_APPROVE_PATHS`, see
     // `agentd_protocol::adapter::policy`) is set, but the upstream codex CLI
     // does not currently expose a path-scoped allow-list flag, so there's no
     // native translation to apply here. Either upstream gains the knob or we
@@ -93,7 +93,7 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     // When we see it, we persist codex's UUID to
     // `<session-dir>/codex_session_id.txt`; on daemon-restart respawn we
     // pass it back as `codex resume <uuid>`. The explicit override
-    // `AGENTD_CODEX_RESUME_ID` still wins if set.
+    // `CONSTRUCT_CODEX_RESUME_ID` still wins if set.
     //
     // We deliberately do NOT fall back to `codex resume --last` when no id
     // was captured: `--last` resolves globally across every codex session
@@ -101,13 +101,13 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     // would attach to the same upstream codex and from that moment paint
     // identical PTY content. Starting a fresh codex loses one session's
     // conversation but never conflates two of them.
-    let resuming = std::env::var("AGENTD_RESUME").as_deref() == Ok("1");
-    let sid_file = std::env::var("AGENTD_SESSION_DATA_DIR")
+    let resuming = std::env::var("CONSTRUCT_RESUME").as_deref() == Ok("1");
+    let sid_file = std::env::var("CONSTRUCT_SESSION_DATA_DIR")
         .ok()
         .map(|d| std::path::PathBuf::from(d).join("codex_session_id.txt"));
     let mut captured_id: Option<String> = None;
     if resuming {
-        let explicit = std::env::var("AGENTD_CODEX_RESUME_ID").ok();
+        let explicit = std::env::var("CONSTRUCT_CODEX_RESUME_ID").ok();
         let from_file = sid_file.as_ref().and_then(|p| {
             std::fs::read_to_string(p)
                 .ok()
@@ -131,7 +131,7 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     }
     // Auto-inject agentd MCP server via codex's `-c` override (codex has no
     // `--mcp-config` flag — MCP servers live in `[mcp_servers.<name>]`).
-    // Opt out with AGENTD_INJECT_MCP=0.
+    // Opt out with CONSTRUCT_INJECT_MCP=0.
     for a in agentd_protocol::adapter::maybe_inject_codex_mcp_args(&ctx.session_id) {
         args.push(a);
     }
@@ -149,7 +149,7 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    env.push(("AGENTD_SESSION_ID".into(), ctx.session_id.clone()));
+    env.push(("CONSTRUCT_SESSION_ID".into(), ctx.session_id.clone()));
     // Tag this codex's rollout with a unique originator we can grep for.
     // Codex stamps `payload.originator` in the rollout's session_meta line
     // from this internal env var (found by string-grep on the binary; not
@@ -484,11 +484,11 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
     } = ctx;
 
     let command_override = agentd_protocol::adapter::resolve_command_override(
-        "AGENTD_CODEX_CMD",
-        "AGENTD_CODEX_BIN",
+        "CONSTRUCT_CODEX_CMD",
+        "CONSTRUCT_CODEX_BIN",
         "codex",
     );
-    let resume_flag = std::env::var("AGENTD_CODEX_RESUME_FLAG").ok();
+    let resume_flag = std::env::var("CONSTRUCT_CODEX_RESUME_FLAG").ok();
     let cwd = PathBuf::from(&params.cwd);
     let model = params.model.clone();
     let extra_args = params.args.clone();
@@ -562,7 +562,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         for (k, v) in &env {
             command.env(k, v);
         }
-        command.env("AGENTD_SESSION_ID", &agentd_session_id);
+        command.env("CONSTRUCT_SESSION_ID", &agentd_session_id);
 
         let mut child = match command.spawn() {
             Ok(c) => c,

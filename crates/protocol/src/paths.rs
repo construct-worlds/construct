@@ -1,7 +1,7 @@
 //! XDG-style path conventions shared between daemon and client.
 //!
-//! Each layer respects `AGENTD_*_DIR` env overrides, then `XDG_*_HOME`,
-//! falling back to standard `$HOME/.config|.local/state|.local/share/agentd`.
+//! Each layer respects `CONSTRUCT_*_DIR` env overrides, then `XDG_*_HOME`,
+//! falling back to standard `$HOME/.config|.local/state|.local/share/construct`.
 
 use std::path::PathBuf;
 
@@ -17,23 +17,50 @@ impl Paths {
     pub fn discover() -> Self {
         let home = home_dir();
 
-        let config_dir = env_dir("AGENTD_CONFIG_DIR").unwrap_or_else(|| {
+        let config_dir = env_dir("CONSTRUCT_CONFIG_DIR").unwrap_or_else(|| {
             env_dir("XDG_CONFIG_HOME")
                 .unwrap_or_else(|| home.join(".config"))
-                .join("agentd")
+                .join("construct")
         });
-        let state_dir = env_dir("AGENTD_STATE_DIR").unwrap_or_else(|| {
+        let state_dir = env_dir("CONSTRUCT_STATE_DIR").unwrap_or_else(|| {
             env_dir("XDG_STATE_HOME")
                 .unwrap_or_else(|| home.join(".local").join("state"))
-                .join("agentd")
+                .join("construct")
         });
-        let data_dir = env_dir("AGENTD_DATA_DIR").unwrap_or_else(|| {
+        let data_dir = env_dir("CONSTRUCT_DATA_DIR").unwrap_or_else(|| {
             env_dir("XDG_DATA_HOME")
                 .unwrap_or_else(|| home.join(".local").join("share"))
-                .join("agentd")
+                .join("construct")
         });
-        let runtime_dir = env_dir("AGENTD_RUNTIME_DIR")
-            .or_else(|| env_dir("XDG_RUNTIME_DIR").map(|p| p.join("agentd")))
+        let runtime_dir = env_dir("CONSTRUCT_RUNTIME_DIR")
+            .or_else(|| env_dir("XDG_RUNTIME_DIR").map(|p| p.join("construct")))
+            .unwrap_or_else(|| state_dir.clone());
+
+        Self {
+            config_dir,
+            state_dir,
+            data_dir,
+            runtime_dir,
+        }
+    }
+
+    /// Resolve the legacy `agentd` layout so startup can offer a migration
+    /// message when existing `~/.config|.local|XDG_*` directories are still
+    /// using pre-rename names.
+    pub fn discover_legacy() -> Self {
+        let home = home_dir();
+
+        let config_dir = env_dir("XDG_CONFIG_HOME")
+            .unwrap_or_else(|| home.join(".config"))
+            .join("agentd");
+        let state_dir = env_dir("XDG_STATE_HOME")
+            .unwrap_or_else(|| home.join(".local").join("state"))
+            .join("agentd");
+        let data_dir = env_dir("XDG_DATA_HOME")
+            .unwrap_or_else(|| home.join(".local").join("share"))
+            .join("agentd");
+        let runtime_dir = env_dir("XDG_RUNTIME_DIR")
+            .map(|p| p.join("agentd"))
             .unwrap_or_else(|| state_dir.clone());
 
         Self {
@@ -45,7 +72,7 @@ impl Paths {
     }
 
     pub fn socket(&self) -> PathBuf {
-        self.runtime_dir.join("agentd.sock")
+        self.runtime_dir.join("construct.sock")
     }
 
     pub fn pid_file(&self) -> PathBuf {
@@ -91,14 +118,14 @@ fn home_dir() -> PathBuf {
 }
 
 /// Default port for the localhost-only browser UI. Override with the
-/// `AGENTD_WEBUI_PORT` env var. The daemon binds `127.0.0.1:<port>`; the
-/// CLI's `agent paths` prints the resolved URL.
+/// `CONSTRUCT_WEBUI_PORT` env var. The daemon binds `127.0.0.1:<port>`; the
+/// CLI's `construct paths` prints the resolved URL.
 pub const DEFAULT_WEBUI_PORT: u16 = 5746;
 
-/// Resolve the localhost web-UI port from `AGENTD_WEBUI_PORT`, falling back
+/// Resolve the localhost web-UI port from `CONSTRUCT_WEBUI_PORT`, falling back
 /// to [`DEFAULT_WEBUI_PORT`] when the var is unset or unparseable.
 pub fn local_webui_port() -> u16 {
-    std::env::var("AGENTD_WEBUI_PORT")
+    std::env::var("CONSTRUCT_WEBUI_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(DEFAULT_WEBUI_PORT)
@@ -109,10 +136,10 @@ pub fn local_webui_url() -> String {
     format!("http://127.0.0.1:{}/", local_webui_port())
 }
 
-/// Resolve a sibling binary (an adapter, `agentd-mcp`, etc.) by name.
+/// Resolve a sibling binary (an adapter, `construct-mcp`, etc.) by name.
 /// Search order: absolute path → next to the current executable → `$PATH`.
 /// Returns `None` if not found. Used by the daemon to find adapter
-/// binaries and by adapters to find auxiliary tools like `agentd-mcp`.
+/// binaries and by adapters to find auxiliary tools like `construct-mcp`.
 pub fn locate_sibling_binary(name: &str) -> Option<PathBuf> {
     let p = PathBuf::from(name);
     if p.is_absolute() {

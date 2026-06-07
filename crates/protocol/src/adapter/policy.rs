@@ -1,7 +1,7 @@
 //! Adapter-side auto-approval policy.
 //!
 //! The daemon defines a single auto-approval policy per session and exposes it
-//! to adapters via the `AGENTD_AUTO_APPROVE_PATHS` env var (colon-separated
+//! to adapters via the `CONSTRUCT_AUTO_APPROVE_PATHS` env var (colon-separated
 //! absolute directories). A file-mutating tool whose target path is under any
 //! of those directories may run without prompting the user.
 //!
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 /// Env var holding the list of directories whose contents are auto-approved
 /// for harness writes. Colon-separated (Unix path separator) absolute paths.
-pub const ENV_AUTO_APPROVE_PATHS: &str = "AGENTD_AUTO_APPROVE_PATHS";
+pub const ENV_AUTO_APPROVE_PATHS: &str = "CONSTRUCT_AUTO_APPROVE_PATHS";
 
 /// Centralized auto-approval policy. Built from the
 /// [`ENV_AUTO_APPROVE_PATHS`] env var by [`Self::from_env`], or directly with

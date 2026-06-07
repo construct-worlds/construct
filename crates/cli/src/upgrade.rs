@@ -1,8 +1,8 @@
-//! Self-update for the `agent` CLI.
+//! Self-update for the `construct` CLI.
 //!
-//! `agent upgrade` re-runs the project installer (embedded at build time, so
+//! `construct upgrade` re-runs the project installer (embedded at build time, so
 //! the download + checksum + atomic-replace logic lives in exactly one place)
-//! against the directory the running `agent` binary lives in — which, per the
+//! against the directory the running `construct` binary lives in — which, per the
 //! install layout, is where all the agentd binaries sit together. A separate,
 //! cached, fail-silent check powers the "update available" notice the TUI
 //! shows on startup.
@@ -16,7 +16,7 @@ use agentd_protocol::paths::Paths;
 
 /// GitHub `owner/repo` the release assets and installer come from.
 const REPO: &str = "zarvis-ai/agentd";
-/// The installer, baked in at build time so `agent upgrade` and `install.sh`
+/// The installer, baked in at build time so `construct upgrade` and `install.sh`
 /// can never drift apart.
 const INSTALL_SH: &str = include_str!("../../../install.sh");
 /// How long a cached update check stays fresh before a background refresh.
@@ -128,11 +128,11 @@ async fn refresh_cache() {
 /// A one-line "newer version available" notice for the TUI to surface, or
 /// `None`. Reads only the on-disk cache (instant, never blocks startup); if
 /// the cache is stale it kicks off a background refresh for the next launch.
-/// Opt out entirely with `AGENTD_NO_UPDATE_CHECK=1`.
+/// Opt out entirely with `CONSTRUCT_NO_UPDATE_CHECK=1`.
 ///
 /// Must be called from within a Tokio runtime (it may spawn the refresh).
 pub fn cached_update_notice() -> Option<String> {
-    if std::env::var_os("AGENTD_NO_UPDATE_CHECK").is_some() {
+    if std::env::var_os("CONSTRUCT_NO_UPDATE_CHECK").is_some() {
         return None;
     }
     let cache = read_cache().unwrap_or_default();
@@ -145,12 +145,12 @@ pub fn cached_update_notice() -> Option<String> {
 /// The notice string for `latest` vs `current`, or `None` when `latest` is
 /// not strictly newer (or unparseable).
 fn notice_for(latest: &str, current: &str) -> Option<String> {
-    is_newer(latest, current).then(|| format!("↑ construct {latest} · agent upgrade"))
+    is_newer(latest, current).then(|| format!("↑ construct {latest} · construct upgrade"))
 }
 
-// --- `agent upgrade` -------------------------------------------------------
+// --- `construct upgrade` -------------------------------------------------------
 
-/// Run the `agent upgrade` subcommand.
+/// Run the `construct upgrade` subcommand.
 pub async fn run(
     version: Option<String>,
     bin_dir: Option<PathBuf>,
@@ -163,7 +163,9 @@ pub async fn run(
     if check {
         match fetch_latest().await {
             Some(latest) if is_newer(&latest, current) => {
-                println!("construct {latest} available (you have {current}). Run `agent upgrade`.");
+                println!(
+                    "construct {latest} available (you have {current}). Run `construct upgrade`."
+                );
             }
             Some(latest) => {
                 println!("up to date (construct {current}; latest {latest}).")
@@ -177,7 +179,7 @@ pub async fn run(
         return Ok(());
     }
 
-    // Install into the directory the running `agent` lives in — that's where
+    // Install into the directory the running `construct` lives in — that's where
     // the whole binary set sits, and the daemon resolves adapters as siblings
     // of its own path.
     let dir = match bin_dir {
@@ -207,9 +209,9 @@ pub async fn run(
     println!("Upgrading construct to {target} in {}", dir.display());
 
     let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg(script.path()).env("AGENTD_BIN_DIR", &dir);
+    cmd.arg(script.path()).env("CONSTRUCT_BIN_DIR", &dir);
     if let Some(v) = &version {
-        cmd.env("AGENTD_VERSION", v);
+        cmd.env("CONSTRUCT_VERSION", v);
     }
     let status = cmd.status().await.context("run installer")?;
     if !status.success() {
@@ -263,7 +265,7 @@ mod tests {
     fn notice_only_when_a_newer_version_exists() {
         assert_eq!(
             notice_for("0.2.0", "0.1.0").as_deref(),
-            Some("↑ construct 0.2.0 · agent upgrade")
+            Some("↑ construct 0.2.0 · construct upgrade")
         );
         assert_eq!(notice_for("0.1.0", "0.1.0"), None);
         assert_eq!(notice_for("0.1.0", "0.2.0"), None);

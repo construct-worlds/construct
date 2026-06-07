@@ -75,7 +75,7 @@ const CODEX_WS_BETA: &str = "responses_websockets=2026-02-06";
 /// `system` arg the agent loop already builds (same shape every
 /// other provider uses). The Codex backend rejects empty
 /// `instructions`, so the final value must be non-empty either way.
-const INSTRUCTIONS_ENV: &str = "AGENTD_ZARVIS_CODEX_INSTRUCTIONS";
+const INSTRUCTIONS_ENV: &str = "CONSTRUCT_SMITH_CODEX_INSTRUCTIONS";
 
 /// Refresh tokens are good for ~30 days but the server-side window can
 /// be tighter under load. We refresh when the access_token is within
@@ -128,7 +128,7 @@ pub struct Tokens {
 
 /// Returns the path to `auth.json`. Honors `$CODEX_HOME` first, then
 /// falls back to `$HOME/.codex/auth.json`. Mirrors what
-/// `agentd-adapter-codex` already does to find rollouts so the two
+/// `construct-adapter-codex` already does to find rollouts so the two
 /// crates agree on where codex stores its credential file.
 pub fn auth_json_path() -> Result<PathBuf> {
     if let Ok(home) = std::env::var("CODEX_HOME") {
@@ -212,7 +212,7 @@ pub struct CodexOauth {
     state: Arc<Mutex<AuthState>>,
     http: reqwest::Client,
     /// [P0 spike] Reused Responses WebSocket connection (opt-in via
-    /// AGENTD_ZARVIS_CODEX_WS=1) to test whether a warm connection lifts
+    /// CONSTRUCT_SMITH_CODEX_WS=1) to test whether a warm connection lifts
     /// the prompt-cache hit-rate vs a stateless HTTP POST per request.
     ws: Arc<Mutex<Option<WsStream>>>,
     /// Set after a WS connect/transport failure so the session stops retrying
@@ -651,7 +651,7 @@ impl CodexOauth {
 
 /// Resolve the `instructions` field for the Codex backend. Order:
 ///
-///   1. `AGENTD_ZARVIS_CODEX_INSTRUCTIONS` env var, if set and
+///   1. `CONSTRUCT_SMITH_CODEX_INSTRUCTIONS` env var, if set and
 ///      non-empty — explicit operator override (e.g. to mirror Codex
 ///      CLI exactly with the upstream `gpt_5_codex_prompt.md`).
 ///   2. The `system` argument the agent loop passes — same prompt
@@ -801,10 +801,10 @@ pub fn build_responses_body(
     let input: Vec<Value> = messages.iter().flat_map(message_to_input_items).collect();
     // Asks the server to emit reasoning summary deltas (surfaced via
     // `sink.reasoning_delta`). Optionally pin an explicit reasoning effort
-    // (low|medium|high) via `AGENTD_ZARVIS_REASONING_EFFORT`, mirroring Codex
+    // (low|medium|high) via `CONSTRUCT_SMITH_REASONING_EFFORT`, mirroring Codex
     // CLI's `model_reasoning_effort`; unset = the backend default.
     let mut reasoning = json!({ "summary": "auto" });
-    if let Ok(effort) = std::env::var("AGENTD_ZARVIS_REASONING_EFFORT") {
+    if let Ok(effort) = std::env::var("CONSTRUCT_SMITH_REASONING_EFFORT") {
         let effort = effort.trim();
         if !effort.is_empty() {
             reasoning["effort"] = json!(effort);
@@ -837,7 +837,7 @@ pub fn build_responses_body(
     // requests to the same prompt-cache node so the prefix actually hits.
     // Without it, automatic prefix caching still works but routing is unstable
     // under load — measured as a low/erratic hit-rate (~31% vs Codex's ~97%).
-    if let Ok(key) = std::env::var("AGENTD_SESSION_ID") {
+    if let Ok(key) = std::env::var("CONSTRUCT_SESSION_ID") {
         if !key.is_empty() {
             body["prompt_cache_key"] = json!(key);
         }
@@ -873,7 +873,7 @@ impl LlmProvider for CodexOauth {
         // Codex's Responses API uses `instructions` instead of an
         // inline system message. We pass the agent's `system` arg
         // through as-is, matching what every other provider does
-        // for the equivalent slot. `AGENTD_ZARVIS_CODEX_INSTRUCTIONS`
+        // for the equivalent slot. `CONSTRUCT_SMITH_CODEX_INSTRUCTIONS`
         // is an optional operator override (handy for mirroring
         // Codex CLI exactly with the upstream prompt).
         let instructions = resolve_instructions(system)?;
@@ -903,7 +903,7 @@ impl LlmProvider for CodexOauth {
         // far better (~97%) than a stateless HTTP POST per request. On a connect
         // / pre-stream failure it falls back to HTTP and disables WS for the
         // rest of the session; a mid-stream failure propagates (no double-emit).
-        let ws_enabled = std::env::var("AGENTD_ZARVIS_CODEX_WS").as_deref() == Ok("1")
+        let ws_enabled = std::env::var("CONSTRUCT_SMITH_CODEX_WS").as_deref() == Ok("1")
             && !self.ws_disabled.load(Ordering::Relaxed);
         if ws_enabled {
             match self

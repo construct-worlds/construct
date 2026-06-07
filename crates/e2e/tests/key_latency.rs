@@ -9,7 +9,7 @@
 //!
 //!   cargo test -p agentd-e2e --test key_latency -- --ignored --nocapture
 //!
-//! It drives the real `agent` TUI in a PTY against a real daemon
+//! It drives the real `construct` TUI in a PTY against a real daemon
 //! running an interactive shell session (`$SHELL -il` via the
 //! shell adapter), so it exercises the entire pipeline:
 //!

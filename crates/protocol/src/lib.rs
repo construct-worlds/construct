@@ -453,7 +453,7 @@ pub enum SessionEvent {
         args_summary: String,
     },
     /// The tool's foreground budget elapsed (auto-bg at
-    /// `AGENTD_TOOL_BG_AFTER_MS`) or the user clicked `[bg]` /
+    /// `CONSTRUCT_TOOL_BG_AFTER_MS`) or the user clicked `[bg]` /
     /// invoked `session.tool_action { action: "background" }`. The
     /// adapter detached the join handle into its background pool;
     /// the agent's conversation got a placeholder result and moved
@@ -729,7 +729,7 @@ pub mod ipc_method {
     pub const SESSION_WIDGET_DELETE: &str = "session.widget.delete";
     /// Respawn a session's adapter — typically used to bring a `Done`
     /// session back to life so the user can continue typing. The
-    /// adapter is launched with `AGENTD_RESUME=1` so harnesses that
+    /// adapter is launched with `CONSTRUCT_RESUME=1` so harnesses that
     /// persist conversation state (e.g. zarvis) can pick up where
     /// they left off.
     pub const SESSION_RESTART: &str = "session.restart";
@@ -740,7 +740,7 @@ pub mod ipc_method {
     pub const SESSION_TOOL_ACTION: &str = "session.tool_action";
     pub const SESSION_LIST_TASKS: &str = "session.list_tasks";
     /// Append/broadcast a structured event for a session. Intended for trusted
-    /// local helpers such as agentd-mcp that run outside an adapter but need to
+    /// local helpers such as construct-mcp that run outside an adapter but need to
     /// surface UI-only state (for example browser previews) in the caller's
     /// session.
     pub const SESSION_EMIT_EVENT: &str = "session.emit_event";
@@ -770,7 +770,7 @@ pub mod ipc_method {
     /// can answer `session.chat_viewer_active`.
     pub const SESSION_SET_VIEW: &str = "session.set_view";
     /// Query whether any connected client is watching the session in the chat
-    /// view. Used by the `agent ask-gate` hook to decide whether to degrade
+    /// view. Used by the `construct ask-gate` hook to decide whether to degrade
     /// `AskUserQuestion` to a plain-text question.
     pub const SESSION_CHAT_VIEWER_ACTIVE: &str = "session.chat_viewer_active";
     pub const SUBSCRIBE_EVENTS: &str = "subscribe.events";

@@ -12,12 +12,12 @@
 //!   plus `--resume <session_id>` for follow-up turns. Emits structured
 //!   `Message` / `ToolUse` / `Cost` events.
 //!
-//! Pick mode via `--mode interactive|headless` on `agent new`, or via
-//! `AGENTD_CLAUDE_MODE=interactive|headless`. Default is interactive when the
+//! Pick mode via `--mode interactive|headless` on `construct new`, or via
+//! `CONSTRUCT_CLAUDE_MODE=interactive|headless`. Default is interactive when the
 //! client supplies a PTY size (the TUI always does); otherwise headless.
 //!
-//! Honors `AGENTD_CLAUDE_CMD` for a full command prefix, falling back to
-//! `AGENTD_CLAUDE_BIN` for a binary path.
+//! Honors `CONSTRUCT_CLAUDE_CMD` for a full command prefix, falling back to
+//! `CONSTRUCT_CLAUDE_BIN` for a binary path.
 
 use agentd_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use agentd_protocol::adapter::{run, AdapterContext, AdapterInboxMsg, EventEmitter};
@@ -64,7 +64,7 @@ enum Mode {
 }
 
 fn resolve_mode(params: &SessionStartParams) -> Mode {
-    if let Ok(m) = std::env::var("AGENTD_CLAUDE_MODE") {
+    if let Ok(m) = std::env::var("CONSTRUCT_CLAUDE_MODE") {
         match m.as_str() {
             "interactive" => return Mode::Interactive,
             "headless" => return Mode::Headless,
@@ -81,20 +81,20 @@ fn resolve_mode(params: &SessionStartParams) -> Mode {
 
 /// Generate a minimal Claude `--settings` file registering the AskUserQuestion
 /// chat-gate `PreToolUse` hook, and return its path. The hook shells out to
-/// `agent ask-gate`, which degrades the picker to a plain-text question only
+/// `construct ask-gate`, which degrades the picker to a plain-text question only
 /// when a chat viewer is active for this session (otherwise it allows, so the
 /// native picker behaves normally for terminal viewers).
 ///
 /// Returns `None` — no injection — when the `agent` binary or session data dir
-/// can't be located, or when disabled via `AGENTD_CLAUDE_ASKGATE=0`. Verified
+/// can't be located, or when disabled via `CONSTRUCT_CLAUDE_ASKGATE=0`. Verified
 /// that `--settings` *merges* with the user's existing settings/hooks, so this
 /// never clobbers their setup.
 fn askgate_settings_path() -> Option<PathBuf> {
-    if std::env::var("AGENTD_CLAUDE_ASKGATE").as_deref() == Ok("0") {
+    if std::env::var("CONSTRUCT_CLAUDE_ASKGATE").as_deref() == Ok("0") {
         return None;
     }
-    let agent = agentd_protocol::paths::locate_sibling_binary("agent")?;
-    let dir = std::env::var("AGENTD_SESSION_DATA_DIR")
+    let client = agentd_protocol::paths::locate_sibling_binary("construct")?;
+    let dir = std::env::var("CONSTRUCT_SESSION_DATA_DIR")
         .ok()
         .filter(|s| !s.is_empty())?;
     let path = PathBuf::from(dir).join("agentd-askgate-settings.json");
@@ -104,7 +104,7 @@ fn askgate_settings_path() -> Option<PathBuf> {
                 "matcher": "AskUserQuestion",
                 "hooks": [{
                     "type": "command",
-                    "command": format!("\"{}\" ask-gate", agent.display()),
+                    "command": format!("\"{}\" ask-gate", client.display()),
                 }],
             }],
         }
@@ -115,8 +115,8 @@ fn askgate_settings_path() -> Option<PathBuf> {
 
 async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     let command = agentd_protocol::adapter::resolve_command_override(
-        "AGENTD_CLAUDE_CMD",
-        "AGENTD_CLAUDE_BIN",
+        "CONSTRUCT_CLAUDE_CMD",
+        "CONSTRUCT_CLAUDE_BIN",
         "claude",
     );
     let mut args = command.args.clone();
@@ -127,7 +127,7 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     }
     // Auto-inject the agentd MCP server so the agent inside this session
     // can drive the daemon (list other sessions, send input, spawn helpers,
-    // etc.). Opt out with AGENTD_INJECT_MCP=0.
+    // etc.). Opt out with CONSTRUCT_INJECT_MCP=0.
     if let Some(cfg) = agentd_protocol::adapter::maybe_inject_mcp_config(&ctx.session_id) {
         args.push("--mcp-config".into());
         args.push(cfg.to_string_lossy().to_string());
@@ -145,12 +145,12 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
         agentd_protocol::adapter::policy::AutoApprovePolicy::from_env().claude_allowed_tools_args(),
     );
     // Resume support: stash our own UUID under
-    // $AGENTD_SESSION_DATA_DIR/claude_session_id.txt at first spawn (passed
+    // $CONSTRUCT_SESSION_DATA_DIR/claude_session_id.txt at first spawn (passed
     // to claude as --session-id), then pass it back as --resume when the
     // daemon respawns us after a restart. claude's own session-persistence
     // makes the conversation pick up where it left off.
-    let resuming = std::env::var("AGENTD_RESUME").as_deref() == Ok("1");
-    let sid_file = std::env::var("AGENTD_SESSION_DATA_DIR")
+    let resuming = std::env::var("CONSTRUCT_RESUME").as_deref() == Ok("1");
+    let sid_file = std::env::var("CONSTRUCT_SESSION_DATA_DIR")
         .ok()
         .map(|d| std::path::PathBuf::from(d).join("claude_session_id.txt"));
     let claude_session_id = match (resuming, sid_file.as_ref()) {
@@ -182,13 +182,13 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
         }
     }
     // Surface the session id to the child's env so agents that aren't using
-    // MCP (or the user, via `echo $AGENTD_SESSION_ID`) can still tell.
+    // MCP (or the user, via `echo $CONSTRUCT_SESSION_ID`) can still tell.
     let mut env: Vec<(String, String)> = params
         .env
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    env.push(("AGENTD_SESSION_ID".into(), ctx.session_id.clone()));
+    env.push(("CONSTRUCT_SESSION_ID".into(), ctx.session_id.clone()));
     if let Some(session_id) = watch_session_id {
         spawn_interactive_transcript_watcher(
             session_id,
@@ -239,7 +239,7 @@ fn spawn_interactive_transcript_watcher(
 }
 
 fn claude_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    let home = std::env::var("AGENTD_CLAUDE_HOME")
+    let home = std::env::var("CONSTRUCT_CLAUDE_HOME")
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| std::env::var("CLAUDE_HOME").ok().filter(|s| !s.is_empty()))
@@ -298,8 +298,8 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
     } = ctx;
 
     let command_override = agentd_protocol::adapter::resolve_command_override(
-        "AGENTD_CLAUDE_CMD",
-        "AGENTD_CLAUDE_BIN",
+        "CONSTRUCT_CLAUDE_CMD",
+        "CONSTRUCT_CLAUDE_BIN",
         "claude",
     );
     let cwd = PathBuf::from(&params.cwd);
@@ -390,7 +390,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         for (k, v) in &env {
             command.env(k, v);
         }
-        command.env("AGENTD_SESSION_ID", &agentd_session_id);
+        command.env("CONSTRUCT_SESSION_ID", &agentd_session_id);
 
         let mut child = match command.spawn() {
             Ok(c) => c,

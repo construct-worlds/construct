@@ -1,11 +1,11 @@
 # Memory
 
-agentd gives agents a small, durable memory surface for facts that should carry
+construct gives agents a small, durable memory surface for facts that should carry
 across turns, sessions, or future work in the same project. Memory is plain
 Markdown so it stays readable, editable, and easy to audit.
 
-Memory is shared across all agentd harness types in the same scope, so Codex,
-Claude Code, Zarvis, and other agents can build on the same durable context.
+Memory is shared across all construct harness types in the same scope, so Codex,
+Claude Code, smith, and other agents can build on the same durable context.
 
 Memory is intentionally separate from transcripts:
 

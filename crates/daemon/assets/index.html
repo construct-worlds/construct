@@ -5648,7 +5648,7 @@ function isTerminalSession(s) {
 function hasSemanticChatView(s) {
   const harness = (s && s.harness) || "";
   return (
-    harness === "zarvis" ||
+    harness === "smith" ||
     harness === "codex" ||
     harness === "claude" ||
     harness === "antigravity"
@@ -5662,7 +5662,7 @@ function hasSemanticChatView(s) {
 // `pty_replay` screen snapshot, so past tool calls show on switch.
 // Mirrors the desktop TUI's transcript-preferred hydration. (issue #134)
 function isStructuredToolSession(s) {
-  return !!(s && s.harness === "zarvis");
+  return !!(s && s.harness === "smith");
 }
 
 function sessionHarnessLabel(s) {

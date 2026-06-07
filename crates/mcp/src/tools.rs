@@ -22,7 +22,7 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "agentd_whoami",
-            "Returns the AGENTD_SESSION_ID env var visible to this MCP server, which is the agentd session id that the calling agent is running inside. Returns null if unset (the MCP server is running outside an agentd-managed session).",
+            "Returns the CONSTRUCT_SESSION_ID env var visible to this MCP server, which is the agentd session id that the calling agent is running inside. Returns null if unset (the MCP server is running outside an agentd-managed session).",
             schema_empty(),
         ),
         tool(
@@ -484,7 +484,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                     .unwrap_or_else(|_| ".".to_string())
             });
             let mut env = HashMap::new();
-            env.insert("AGENTD_PARENT_SESSION_ID".to_string(), parent_id.clone());
+            env.insert("CONSTRUCT_PARENT_SESSION_ID".to_string(), parent_id.clone());
             let params = CreateSessionParams {
                 title: arg_str(&args, "title")
                     .ok()
@@ -602,7 +602,7 @@ fn arg_usize(args: &Value, name: &str) -> Option<usize> {
 fn require_session_id(session_id: Option<&str>) -> Result<String> {
     session_id
         .map(ToOwned::to_owned)
-        .ok_or_else(|| anyhow!("subagent tools require AGENTD_SESSION_ID"))
+        .ok_or_else(|| anyhow!("subagent tools require CONSTRUCT_SESSION_ID"))
 }
 
 async fn owned_subagent_detail(
@@ -700,11 +700,13 @@ mod tests {
 
     #[tokio::test]
     async fn subagent_tools_flow_through_mcp_with_parent_scope() {
-        let dir =
-            std::env::temp_dir().join(format!("agentd-mcp-subagent-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "construct-mcp-subagent-test-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("test dir");
-        let sock = dir.join("agentd.sock");
+        let sock = dir.join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept client");
@@ -726,7 +728,7 @@ mod tests {
                         assert_eq!(p.kind, SessionKind::Subagent);
                         assert_eq!(p.parent_session_id.as_deref(), Some("sparent"));
                         assert_eq!(
-                            p.env.get("AGENTD_PARENT_SESSION_ID").map(String::as_str),
+                            p.env.get("CONSTRUCT_PARENT_SESSION_ID").map(String::as_str),
                             Some("sparent")
                         );
                         assert_eq!(p.mode.as_deref(), Some("headless"));

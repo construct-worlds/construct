@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "agentd daemon: supervises agent sessions across harnesses"
 
 [[bin]]
-name = "agentd"
+name = "constructd"
 path = "src/main.rs"
 
 [dependencies]

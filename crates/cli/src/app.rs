@@ -337,7 +337,7 @@ pub enum MinibufferIntent {
     },
     /// Confirmation prompt for restarting a terminated (`Done` /
     /// `Errored`) session. Single-key dispatch: `y`/Enter respawns
-    /// the adapter (with `AGENTD_RESUME=1` so persistent harnesses
+    /// the adapter (with `CONSTRUCT_RESUME=1` so persistent harnesses
     /// reload state); anything else cancels.
     RestartConfirm {
         session_id: String,
@@ -1693,7 +1693,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
     // never blocks startup (a stale cache refreshes in the background for the
     // next launch). Held in a dedicated field so it persists in the modeline
     // until the user upgrades, rather than expiring after a few seconds like a
-    // transient status. Opt out with AGENTD_NO_UPDATE_CHECK=1.
+    // transient status. Opt out with CONSTRUCT_NO_UPDATE_CHECK=1.
     app.update_notice = crate::upgrade::cached_update_notice();
 
     if app.selected_needs_hydration() {
@@ -1812,7 +1812,9 @@ async fn run_loop(
         if app.connected && app.client.is_disconnected() {
             app.connected = false;
             reconnect = Some(ReconnectState::new(Instant::now()));
-            app.set_status("daemon disconnected — reconnecting… (press q to quit)".to_string());
+            app.set_status(
+                "daemon disconnected — reconnecting… (press C-x C-c to quit TUI)".to_string(),
+            );
         }
         app.prune_finished_transitions();
         app.poll_remote_control_task().await;
@@ -1838,7 +1840,7 @@ async fn run_loop(
                     Err(e) => {
                         state.schedule_next(now);
                         app.set_status(format!(
-                            "daemon disconnected — reconnecting… (press q to quit; last error: {e})"
+                            "daemon disconnected — reconnecting… (press C-x C-c to quit TUI; last error: {e})"
                         ));
                     }
                 }
@@ -2111,7 +2113,8 @@ async fn run_loop(
                             app.connected = false;
                             reconnect = Some(ReconnectState::new(Instant::now()));
                             app.set_status(
-                                "daemon disconnected — reconnecting… (press q to quit)".to_string(),
+                                "daemon disconnected — reconnecting… (press C-x C-c to quit TUI)"
+                                    .to_string(),
                             );
                         }
                     }
@@ -3828,7 +3831,7 @@ impl App {
             || self
                 .sessions
                 .iter()
-                .any(|s| s.id == session_id && s.harness == "zarvis")
+                .any(|s| s.id == session_id && s.harness == "smith")
     }
 
     /// Cycle the selected session's approval mode.
@@ -5396,8 +5399,24 @@ impl App {
         // /tasks modal: Esc closes it; everything else falls through
         // (the popup itself is read-only at the keyboard layer in
         // v1 — mouse-only row interactions).
-        if !self.connected && matches!(key.code, KeyCode::Char('q')) {
-            self.should_quit = true;
+        // In disconnected state, still allow standard keymap chords for
+        // quitting and quick palette access. `/` commands are not
+        // accepted here, but `C-x C-c` remains available.
+        if !self.connected {
+            let res = self.chord_state.handle(key, &self.keymap);
+            self.chord_label = self.chord_state.label();
+            match res {
+                KeymapResult::Action(KeyAction::Quit) => {
+                    self.should_quit = true;
+                }
+                KeymapResult::Action(action) => {
+                    self.run_action(action).await;
+                }
+                KeymapResult::Pending(label) => {
+                    self.chord_label = label;
+                }
+                KeymapResult::Unhandled => {}
+            }
             return;
         }
         if self.tasks_popup.is_some() {
@@ -6868,7 +6887,7 @@ impl App {
                 // daemon.restart RPC will close the IPC connection
                 // as the new process replaces the old; the TUI
                 // observes that as a "daemon disconnected" status
-                // and the user must re-run `agent` to reconnect
+                // and the user must re-run `construct` to reconnect
                 // (auto-reconnect is follow-up work, see issue #90).
                 let mut parts = arg.trim().splitn(2, char::is_whitespace);
                 let sub = parts.next().unwrap_or("");
@@ -8304,9 +8323,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_prompt_does_not_open_for_zarvis_session() {
+    async fn approval_prompt_does_not_open_for_smith_session() {
         let (mut app, _dir, server) = captured_app().await;
-        app.sessions[0].harness = "zarvis".into();
+        app.sessions[0].harness = "smith".into();
 
         app.maybe_open_approval_prompt(
             "s1".into(),
@@ -8319,7 +8338,7 @@ mod tests {
 
         assert!(
             app.minibuffer.is_none(),
-            "zarvis renders approval inline in the session PTY"
+            "smith renders approval inline in the session PTY"
         );
         server.abort();
     }
@@ -8451,7 +8470,7 @@ mod tests {
     async fn captured_app() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
         use tokio::net::UnixListener;
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             loop {
@@ -8470,7 +8489,7 @@ mod tests {
     async fn empty_app() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
         use tokio::net::UnixListener;
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             loop {
@@ -8742,7 +8761,7 @@ mod tests {
     #[tokio::test]
     async fn update_notice_renders_right_aligned_in_modeline() {
         let (mut app, _dir, server) = empty_app().await;
-        app.update_notice = Some("↑ construct 9.9.9 · agent upgrade".to_string());
+        app.update_notice = Some("↑ construct 9.9.9 · construct upgrade".to_string());
         let backend = ratatui::backend::TestBackend::new(120, 36);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
 
@@ -8753,12 +8772,12 @@ mod tests {
         let screen = rendered_text(terminal.backend().buffer());
         let modeline = screen
             .lines()
-            .find(|l| l.contains("↑ construct 9.9.9 · agent upgrade"))
+            .find(|l| l.contains("↑ construct 9.9.9 · construct upgrade"))
             .expect("update notice should be on screen");
 
         // Right-aligned: only padding follows it to the right edge.
         assert!(
-            modeline.trim_end().ends_with("agent upgrade"),
+            modeline.trim_end().ends_with("construct upgrade"),
             "notice should sit at the right edge:\n{modeline}"
         );
         // ...and it lives in the right half, not inline on the left.
@@ -8999,11 +9018,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnected_q_quits_even_when_pty_would_capture_keys() {
+    async fn disconnected_c_x_c_quits_even_when_pty_would_capture_keys() {
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -9016,7 +9035,9 @@ mod tests {
         let mut app = test_app(client, vec![summary]);
         app.connected = false;
 
-        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
             .await;
 
         assert!(app.should_quit);
@@ -9031,7 +9052,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -9094,7 +9115,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -9166,7 +9187,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             loop {
@@ -9487,7 +9508,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -9617,7 +9638,7 @@ mod tests {
     async fn subagents_render_under_parent_and_default_expanded() {
         use tokio::net::UnixListener;
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let _server = tokio::spawn(async move {
             loop {
@@ -9718,7 +9739,7 @@ mod tests {
         use tokio::sync::{mpsc, Notify};
 
         let dir = tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let release_input = Arc::new(Notify::new());
         let (input_seen_tx, mut input_seen_rx) = mpsc::unbounded_channel();
@@ -9797,7 +9818,7 @@ mod tests {
         use tokio::sync::oneshot;
 
         let dir = tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let (seen_tx, seen_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
@@ -9878,7 +9899,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             let _ = listener.accept().await;
@@ -9887,7 +9908,7 @@ mod tests {
         let client = Client::connect(&sock).await.expect("client connects");
 
         let mut summary = summary_with_kind(agentd_protocol::SessionKind::User);
-        summary.harness = "zarvis".into();
+        summary.harness = "smith".into();
         summary.has_pty = true;
         let mut app = test_app(client, vec![summary]);
         app.view = ViewMode::Terminal;
@@ -9984,7 +10005,7 @@ mod tests {
         use tokio::sync::{mpsc, Notify};
 
         let dir = tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let release_transcript = Arc::new(Notify::new());
         let (transcript_seen_tx, mut transcript_seen_rx) = mpsc::unbounded_channel();
@@ -10114,7 +10135,7 @@ mod tests {
         use tokio::net::UnixListener;
 
         let dir = tempdir().expect("tempdir");
-        let sock = dir.path().join("agentd.sock");
+        let sock = dir.path().join("construct.sock");
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let server = tokio::spawn(async move {
             loop {

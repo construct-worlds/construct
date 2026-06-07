@@ -54,7 +54,7 @@ pub mod policy;
 
 use crate::paths;
 
-/// A command prefix supplied through an adapter's `AGENTD_*_CMD` override.
+/// A command prefix supplied through an adapter's `CONSTRUCT_*_CMD` override.
 ///
 /// The first token is the executable to spawn; remaining tokens are prepended
 /// before the adapter's generated CLI arguments. This lets users configure
@@ -76,8 +76,8 @@ impl CommandOverride {
 }
 
 /// Resolve a child CLI command from either a full command override env var
-/// (for example `AGENTD_CODEX_CMD=exec codex`) or a binary-only fallback env
-/// var (for example `AGENTD_CODEX_BIN=/opt/bin/codex`).
+/// (for example `CONSTRUCT_CODEX_CMD=exec codex`) or a binary-only fallback env
+/// var (for example `CONSTRUCT_CODEX_BIN=/opt/bin/codex`).
 ///
 /// The parser intentionally implements simple shell-like quoting for spaces,
 /// single quotes, double quotes, and backslash escapes without evaluating a
@@ -93,7 +93,7 @@ pub fn resolve_command_override(
             return cmd;
         }
         eprintln!(
-            "agentd adapter: ignoring invalid {command_env}; falling back to {binary_env}/{default_bin}"
+            "construct adapter: ignoring invalid {command_env}; falling back to {binary_env}/{default_bin}"
         );
     }
     CommandOverride {
@@ -179,32 +179,32 @@ fn parse_command_words(raw: &str) -> Option<CommandOverride> {
 pub fn missing_bin_hint(bin: &str, source: &std::io::Error) -> String {
     format!(
         "Failed to start `{bin}`: {source}.\n\
-         Make sure `{bin}` is on PATH in the shell you started agentd from \
+         Make sure `{bin}` is on PATH in the shell you started constructd from \
          (try `which {bin}` there). If you use a version manager (nvm, asdf, \
          pyenv, …), activate it in your shell's startup file so PATH is set \
-         before launching agentd."
+         before launching constructd."
     )
 }
 
-/// Returns codex `-c key=value` flag pairs that register `agentd-mcp` as a
+/// Returns codex `-c key=value` flag pairs that register `construct-mcp` as a
 /// session-scoped MCP server. Codex has no `--mcp-config` flag; MCP servers
 /// live in `[mcp_servers.<name>]` in `config.toml`, and the per-invocation
 /// override surface is `-c <dotted.key>=<toml-value>`.
 ///
 /// The returned `Vec<String>` is appended to codex's argv (`-c`, `<value>`,
-/// `-c`, `<value>`, ...). Empty when `AGENTD_INJECT_MCP=0` or the
-/// `agentd-mcp` binary cannot be located.
+/// `-c`, `<value>`, ...). Empty when `CONSTRUCT_INJECT_MCP=0` or the
+/// `construct-mcp` binary cannot be located.
 pub fn maybe_inject_codex_mcp_args(session_id: &str) -> Vec<String> {
-    if std::env::var("AGENTD_INJECT_MCP").as_deref() == Ok("0") {
+    if std::env::var("CONSTRUCT_INJECT_MCP").as_deref() == Ok("0") {
         return Vec::new();
     }
-    let Some(bin) = paths::locate_sibling_binary("agentd-mcp") else {
+    let Some(bin) = paths::locate_sibling_binary("construct-mcp") else {
         return Vec::new();
     };
     let bin_lit = toml_quote(&bin.to_string_lossy());
     let env_lit = mcp_env_toml(session_id);
     let inline = format!("{{ command = {bin_lit}, args = [], env = {env_lit} }}");
-    vec!["-c".into(), format!("mcp_servers.agentd={inline}")]
+    vec!["-c".into(), format!("mcp_servers.construct={inline}")]
 }
 
 fn toml_quote(s: &str) -> String {
@@ -239,22 +239,22 @@ fn mcp_env_toml_from(session_id: &str, lookup: impl Fn(&str) -> Option<String>) 
     format!("{{ {} }}", pairs.join(", "))
 }
 
-/// If `AGENTD_INJECT_MCP` is not set to `"0"`, attempt to write a per-session
+/// If `CONSTRUCT_INJECT_MCP` is not set to `"0"`, attempt to write a per-session
 /// MCP config (under `state_dir/mcp/<session_id>.json`) that registers
-/// `agentd-mcp` as an MCP server. Returns the config path on success; pass
+/// `construct-mcp` as an MCP server. Returns the config path on success; pass
 /// it to the child CLI via `--mcp-config <path>` (claude-style).
 ///
 /// Used by the claude adapter. Codex uses
 /// [`maybe_inject_codex_mcp_args`] instead.
 pub fn maybe_inject_mcp_config(session_id: &str) -> Option<PathBuf> {
-    if std::env::var("AGENTD_INJECT_MCP").as_deref() == Ok("0") {
+    if std::env::var("CONSTRUCT_INJECT_MCP").as_deref() == Ok("0") {
         return None;
     }
-    let mcp_bin = paths::locate_sibling_binary("agentd-mcp")?;
+    let mcp_bin = paths::locate_sibling_binary("construct-mcp")?;
     let paths = paths::Paths::discover();
     let dir = paths.state_dir.join("mcp");
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("agentd MCP inject: mkdir {} failed: {e}", dir.display());
+        eprintln!("construct MCP inject: mkdir {} failed: {e}", dir.display());
         return None;
     }
     let cfg_path = dir.join(format!("{session_id}.json"));
@@ -270,7 +270,7 @@ pub fn maybe_inject_mcp_config(session_id: &str) -> Option<PathBuf> {
     }
     let config = serde_json::json!({
         "mcpServers": {
-            "agentd": {
+            "construct": {
                 "command": mcp_bin.to_string_lossy(),
                 "args": [],
                 "env": env,
@@ -280,7 +280,7 @@ pub fn maybe_inject_mcp_config(session_id: &str) -> Option<PathBuf> {
     let text = serde_json::to_string_pretty(&config).ok()?;
     if let Err(e) = std::fs::write(&cfg_path, text) {
         eprintln!(
-            "agentd MCP inject: write {} failed: {e}",
+            "construct MCP inject: write {} failed: {e}",
             cfg_path.display()
         );
         return None;
@@ -379,7 +379,7 @@ where
     F: FnOnce(SessionStartParams, AdapterContext) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    if let Some(socket) = std::env::var_os("AGENTD_ADAPTER_SOCKET") {
+    if let Some(socket) = std::env::var_os("CONSTRUCT_ADAPTER_SOCKET") {
         return run_reconnectable(metadata, handler, PathBuf::from(socket)).await;
     }
     let reader = BufReader::new(tokio::io::stdin());
@@ -387,7 +387,7 @@ where
     run_with_io(metadata, handler, reader, writer).await
 }
 
-/// Socket-backed adapter runner used when `AGENTD_ADAPTER_SOCKET` is set.
+/// Socket-backed adapter runner used when `CONSTRUCT_ADAPTER_SOCKET` is set.
 ///
 /// Unlike stdio mode, daemon disconnect is not adapter shutdown: the session
 /// task keeps running, outgoing events are retained in memory, and a restarted
@@ -1081,10 +1081,10 @@ mod tests {
             _ => None,
         });
 
-        assert!(got.contains("AGENTD_SESSION_ID = \"s123\""));
-        assert!(got.contains("AGENTD_GLOBAL_MEMORY_FILE = \"/tmp/global.md\""));
-        assert!(got.contains("AGENTD_PROJECT_MEMORY_FILE = \"/tmp/project.md\""));
-        assert!(got.contains("AGENTD_PROJECT_ID = \"g123\""));
+        assert!(got.contains("CONSTRUCT_SESSION_ID = \"s123\""));
+        assert!(got.contains("CONSTRUCT_GLOBAL_MEMORY_FILE = \"/tmp/global.md\""));
+        assert!(got.contains("CONSTRUCT_PROJECT_MEMORY_FILE = \"/tmp/project.md\""));
+        assert!(got.contains("CONSTRUCT_PROJECT_ID = \"g123\""));
     }
 
     /// Symptom-level repro for the stuck-zarvis-prompt bug. The user

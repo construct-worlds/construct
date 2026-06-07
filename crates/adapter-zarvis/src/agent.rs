@@ -232,10 +232,10 @@ SURFACING: a short text reply is shown to the user as a brief typewriter "monolo
 Be concise. The minibuffer panel is small; aim for one to three short lines per turn, longer only when the user explicitly asks for detail. Risky tool calls (delete / kill / send) still gate through approval unless the session is in unsafe-auto."#;
 
 /// Pick the right system prompt for this session's kind. The daemon
-/// sets `AGENTD_SESSION_KIND` at spawn time; default is `user` so old
+/// sets `CONSTRUCT_SESSION_KIND` at spawn time; default is `user` so old
 /// callers keep working.
 pub(crate) fn system_prompt_for_env() -> &'static str {
-    match std::env::var("AGENTD_SESSION_KIND").as_deref() {
+    match std::env::var("CONSTRUCT_SESSION_KIND").as_deref() {
         Ok("orchestrator") => SYSTEM_PROMPT_ORCHESTRATOR,
         _ => SYSTEM_PROMPT_USER,
     }
@@ -447,7 +447,7 @@ pub async fn run(
         .await;
 
     // Per-session approval mode. Defaults to unsafe-auto when the legacy env override is set.
-    let mut approval_mode = if std::env::var("AGENTD_ZARVIS_AUTOMODE").as_deref() == Ok("1") {
+    let mut approval_mode = if std::env::var("CONSTRUCT_SMITH_AUTOMODE").as_deref() == Ok("1") {
         agentd_protocol::ApprovalMode::UnsafeAuto
     } else {
         agentd_protocol::ApprovalMode::Manual
@@ -563,14 +563,14 @@ pub async fn run(
         // Loop/thrash guard (model-agnostic): bound a runaway turn and nudge
         // the model when it stops making progress. The caps are opt-in via env
         // (0 = unlimited) so default behavior is unchanged; the non-progress
-        // nudge is always on. `AGENTD_ZARVIS_MAX_STEPS` caps model calls per
-        // turn; `AGENTD_ZARVIS_MAX_TURN_SECS` caps wall-clock per turn (lets a
+        // nudge is always on. `CONSTRUCT_SMITH_MAX_STEPS` caps model calls per
+        // turn; `CONSTRUCT_SMITH_MAX_TURN_SECS` caps wall-clock per turn (lets a
         // session stop itself gracefully before an external timeout SIGKILL).
-        let max_steps: usize = std::env::var("AGENTD_ZARVIS_MAX_STEPS")
+        let max_steps: usize = std::env::var("CONSTRUCT_SMITH_MAX_STEPS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let max_turn_secs: i64 = std::env::var("AGENTD_ZARVIS_MAX_TURN_SECS")
+        let max_turn_secs: i64 = std::env::var("CONSTRUCT_SMITH_MAX_TURN_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
@@ -1374,7 +1374,7 @@ impl ResolvedModel {
 /// Resolve `--model` (or its absence) to a provider instance and a
 /// model name. Order of precedence:
 ///   1. `params.model` if provided.
-///   2. `AGENTD_ZARVIS_MODEL`.
+///   2. `CONSTRUCT_SMITH_MODEL`.
 ///   3. ANTHROPIC_API_KEY set → `claude-opus-4-8`.
 ///   4. OPENAI_API_KEY set → `gpt-5`.
 ///   5. GEMINI_API_KEY (or GOOGLE_API_KEY) set → `gemini-2.5-pro`.
@@ -1384,7 +1384,7 @@ pub fn resolve_model(params: &SessionStartParams) -> Result<ResolvedModel> {
         .model
         .clone()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("AGENTD_ZARVIS_MODEL").ok())
+        .or_else(|| std::env::var("CONSTRUCT_SMITH_MODEL").ok())
         .unwrap_or_else(|| {
             if std::env::var("ANTHROPIC_API_KEY").is_ok() {
                 "anthropic:claude-opus-4-8".to_string()

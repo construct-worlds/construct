@@ -206,7 +206,7 @@ async fn handle_start(
     // clears `tunnel_task`, so a subsequent start re-spawns
     // cloudflared with the (new) token.
     if spawn_tunnel && tunnel_task.is_none() {
-        if std::env::var("AGENTD_REMOTE_NO_TUNNEL").is_err() {
+        if std::env::var("CONSTRUCT_REMOTE_NO_TUNNEL").is_err() {
             // `adopt_pid` is non-zero only after a `/agentd
             // restart`: the snapshot captured a still-running
             // cloudflared PID and `bind_and_install` rehydrated
@@ -219,7 +219,7 @@ async fn handle_start(
             });
             *tunnel_task = Some(handle);
         } else {
-            tracing::info!("AGENTD_REMOTE_NO_TUNNEL is set; skipping cloudflared spawn");
+            tracing::info!("CONSTRUCT_REMOTE_NO_TUNNEL is set; skipping cloudflared spawn");
         }
     }
 

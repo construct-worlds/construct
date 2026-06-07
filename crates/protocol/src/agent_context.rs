@@ -1,18 +1,18 @@
 //! Shared agentd context surfaced to agents through `agentd_context`.
 //!
 //! The daemon passes memory file paths in env vars. This module reads those
-//! files and formats one stable JSON shape used by both `agentd-mcp` and
+//! files and formats one stable JSON shape used by both `construct-mcp` and
 //! zarvis's native tool layer.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const TOOL_NAME: &str = "agentd_context";
-pub const ENV_GLOBAL_MEMORY_FILE: &str = "AGENTD_GLOBAL_MEMORY_FILE";
-pub const ENV_PROJECT_MEMORY_FILE: &str = "AGENTD_PROJECT_MEMORY_FILE";
-pub const ENV_PROJECT_ID: &str = "AGENTD_PROJECT_ID";
-pub const ENV_SESSION_ID: &str = "AGENTD_SESSION_ID";
-pub const ENV_SESSION_WIDGETS_DIR: &str = "AGENTD_SESSION_WIDGETS_DIR";
+pub const ENV_GLOBAL_MEMORY_FILE: &str = "CONSTRUCT_GLOBAL_MEMORY_FILE";
+pub const ENV_PROJECT_MEMORY_FILE: &str = "CONSTRUCT_PROJECT_MEMORY_FILE";
+pub const ENV_PROJECT_ID: &str = "CONSTRUCT_PROJECT_ID";
+pub const ENV_SESSION_ID: &str = "CONSTRUCT_SESSION_ID";
+pub const ENV_SESSION_WIDGETS_DIR: &str = "CONSTRUCT_SESSION_WIDGETS_DIR";
 pub const MAX_MEMORY_BYTES: usize = 24 * 1024;
 
 pub const MCP_CONTEXT_ENV_VARS: &[&str] = &[
@@ -20,10 +20,10 @@ pub const MCP_CONTEXT_ENV_VARS: &[&str] = &[
     ENV_PROJECT_MEMORY_FILE,
     ENV_PROJECT_ID,
     ENV_SESSION_WIDGETS_DIR,
-    "AGENTD_RUNTIME_DIR",
-    "AGENTD_STATE_DIR",
-    "AGENTD_DATA_DIR",
-    "AGENTD_CONFIG_DIR",
+    "CONSTRUCT_RUNTIME_DIR",
+    "CONSTRUCT_STATE_DIR",
+    "CONSTRUCT_DATA_DIR",
+    "CONSTRUCT_CONFIG_DIR",
 ];
 
 pub const TOOL_DESCRIPTION: &str =

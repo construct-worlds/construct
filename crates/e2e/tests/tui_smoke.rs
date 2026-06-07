@@ -1,4 +1,4 @@
-//! End-to-end: drive the `agent` TUI inside a pseudo-terminal
+//! End-to-end: drive the `construct` TUI inside a pseudo-terminal
 //! against a real `agentd`, type a slash command, observe the
 //! resulting popup, and quit cleanly.
 //!

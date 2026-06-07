@@ -8,7 +8,7 @@
 //! `## Project guide` section. The file is the user's voice; the
 //! model is told to honor it unless explicitly overridden.
 //!
-//! Disable with `AGENTD_ZARVIS_PROJECT_GUIDE=off`.
+//! Disable with `CONSTRUCT_SMITH_PROJECT_GUIDE=off`.
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,7 @@ const MAX_BYTES: usize = 32 * 1024;
 /// above the user's home directory, to avoid pulling in system-wide
 /// files the user didn't intend).
 pub fn find(cwd: &Path) -> Option<PathBuf> {
-    if std::env::var("AGENTD_ZARVIS_PROJECT_GUIDE").as_deref() == Ok("off") {
+    if std::env::var("CONSTRUCT_SMITH_PROJECT_GUIDE").as_deref() == Ok("off") {
         return None;
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -97,7 +97,7 @@ mod tests {
 
     /// Serialize env-touching tests within this crate's test
     /// binary. Tests run in parallel by default; one test
-    /// setting `AGENTD_ZARVIS_PROJECT_GUIDE=off` was racing with
+    /// setting `CONSTRUCT_SMITH_PROJECT_GUIDE=off` was racing with
     /// another that expected it unset. The mutex makes
     /// `set_var` + `find` + `remove_var` atomic w.r.t. peers.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -142,9 +142,9 @@ mod tests {
         let tmp = tempdir();
         let path = tmp.join("AGENTS.md");
         std::fs::write(&path, b"hello").unwrap();
-        std::env::set_var("AGENTD_ZARVIS_PROJECT_GUIDE", "off");
+        std::env::set_var("CONSTRUCT_SMITH_PROJECT_GUIDE", "off");
         let result = find(&tmp);
-        std::env::remove_var("AGENTD_ZARVIS_PROJECT_GUIDE");
+        std::env::remove_var("CONSTRUCT_SMITH_PROJECT_GUIDE");
         assert!(result.is_none());
     }
 

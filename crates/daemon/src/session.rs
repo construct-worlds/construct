@@ -62,9 +62,9 @@ fn resume_redraw_ready(last_pty_at_ms: Option<i64>, now_ms: i64, elapsed: Durati
     }
 }
 const MAX_CLIPBOARD_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
-const ENV_GLOBAL_MEMORY_FILE: &str = "AGENTD_GLOBAL_MEMORY_FILE";
-const ENV_PROJECT_MEMORY_FILE: &str = "AGENTD_PROJECT_MEMORY_FILE";
-const ENV_PROJECT_ID: &str = "AGENTD_PROJECT_ID";
+const ENV_GLOBAL_MEMORY_FILE: &str = "CONSTRUCT_GLOBAL_MEMORY_FILE";
+const ENV_PROJECT_MEMORY_FILE: &str = "CONSTRUCT_PROJECT_MEMORY_FILE";
+const ENV_PROJECT_ID: &str = "CONSTRUCT_PROJECT_ID";
 const WIDGET_WATCH_INTERVAL: Duration = Duration::from_millis(700);
 
 fn should_resume_on_startup(state: SessionState) -> bool {
@@ -424,14 +424,6 @@ fn should_record_pty_user_message(harness: &str) -> bool {
     matches!(harness, "claude" | "antigravity")
 }
 
-fn smith_adapter_name(name: &str) -> &str {
-    if name == "zarvis" {
-        "smith"
-    } else {
-        name
-    }
-}
-
 impl SessionEntry {
     pub fn is_deleted(&self) -> bool {
         self.deleted.load(Ordering::SeqCst)
@@ -557,7 +549,7 @@ pub struct SessionManager {
     /// `index.html` + `static/*` from this directory (with a live-reload
     /// poller injected) instead of the binary's embedded assets. Set via
     /// the `dev.set_assets` IPC method (debug builds only) or the
-    /// `AGENTD_ASSETS_DIR` env var at boot. Lets you iterate on the web
+    /// `CONSTRUCT_ASSETS_DIR` env var at boot. Lets you iterate on the web
     /// UI in a worktree against a running daemon without rebuilding.
     dev_assets: std::sync::Mutex<Option<PathBuf>>,
     widget_snapshots: tokio::sync::Mutex<HashMap<String, WidgetSnapshot>>,
@@ -752,10 +744,10 @@ impl SessionManager {
         let (remote_tx, remote_rx) = tokio::sync::mpsc::unbounded_channel();
         let (restart_tx, restart_rx) = tokio::sync::mpsc::unbounded_channel();
         let remote_snapshot_path = runtime_dir.join("remote.json");
-        // Honor AGENTD_ASSETS_DIR at boot in debug builds only — release
+        // Honor CONSTRUCT_ASSETS_DIR at boot in debug builds only — release
         // always serves the embedded, tamper-proof assets.
         let dev_assets = if cfg!(debug_assertions) {
-            std::env::var_os("AGENTD_ASSETS_DIR").map(PathBuf::from)
+            std::env::var_os("CONSTRUCT_ASSETS_DIR").map(PathBuf::from)
         } else {
             None
         };
@@ -985,7 +977,7 @@ impl SessionManager {
     /// `port_hint` is honored when set (env-var-at-boot path);
     /// otherwise an ephemeral localhost port is bound. The cloudflared
     /// supervisor is also launched on first call (skipped when
-    /// `AGENTD_REMOTE_NO_TUNNEL` is set, same as the boot path).
+    /// `CONSTRUCT_REMOTE_NO_TUNNEL` is set, same as the boot path).
     ///
     /// `wait_for_tunnel` caps how long we wait for cloudflared to
     /// publish its `*.trycloudflare.com` URL before returning the
@@ -1132,9 +1124,9 @@ impl SessionManager {
         // we can muster. The CLI surfaces this verbatim in the
         // popup so the user knows why the tunnel didn't come up.
         let cloudflared_available = which::which("cloudflared").is_ok();
-        let no_tunnel_env = std::env::var("AGENTD_REMOTE_NO_TUNNEL").is_ok();
+        let no_tunnel_env = std::env::var("CONSTRUCT_REMOTE_NO_TUNNEL").is_ok();
         let msg = if no_tunnel_env {
-            "AGENTD_REMOTE_NO_TUNNEL is set; unset it and rerun \
+            "CONSTRUCT_REMOTE_NO_TUNNEL is set; unset it and rerun \
              `/remote-control`. Use `/remote-control debug` for the \
              local-only URL."
         } else if !cloudflared_available {
@@ -1251,7 +1243,7 @@ impl SessionManager {
     }
 
     pub async fn create(self: &Arc<Self>, params: CreateSessionParams) -> Result<String> {
-        let harness = smith_adapter_name(&params.harness);
+        let harness = params.harness.as_str();
         let adapter_cfg = self
             .config
             .adapters
@@ -1311,7 +1303,7 @@ impl SessionManager {
             parent_session_id: params
                 .parent_session_id
                 .clone()
-                .or_else(|| params.env.get("AGENTD_PARENT_SESSION_ID").cloned()),
+                .or_else(|| params.env.get("CONSTRUCT_PARENT_SESSION_ID").cloned()),
             last_pty_at_ms: None,
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind: params.kind,
@@ -1327,7 +1319,7 @@ impl SessionManager {
 
         // Build the full env (adapter-config + user-provided + daemon
         // meta) BEFORE spawn so the adapter process inherits
-        // AGENTD_SESSION_DATA_DIR / AGENTD_SESSION_KIND — not just
+        // CONSTRUCT_SESSION_DATA_DIR / CONSTRUCT_SESSION_KIND — not just
         // the session.start params.env. The codex adapter (and
         // claude) reads these via std::env::var, so leaving them
         // only in session.start meant their first-spawn bookkeeping
@@ -1337,7 +1329,7 @@ impl SessionManager {
         //
         // Precedence: `[adapters.<name>].env` is the per-harness
         // baseline (operator-set default model, etc.), overridden
-        // by the per-session `params.env` (explicit `agent new
+        // by the per-session `params.env` (explicit `construct new
         // --env KEY=VAL`), overridden in turn by daemon-meta. So a
         // CLI flag always wins over config.toml, and daemon meta
         // always wins over both.
@@ -1351,11 +1343,11 @@ impl SessionManager {
             self.storage.widgets_dir(&id)
         });
         env_with_meta.insert(
-            "AGENTD_SESSION_DATA_DIR".to_string(),
+            "CONSTRUCT_SESSION_DATA_DIR".to_string(),
             session_dir.to_string_lossy().to_string(),
         );
         env_with_meta.insert(
-            "AGENTD_SESSION_WIDGETS_DIR".to_string(),
+            "CONSTRUCT_SESSION_WIDGETS_DIR".to_string(),
             widgets_dir.to_string_lossy().to_string(),
         );
         // Single auto-approval policy the daemon defines once; each adapter
@@ -1366,7 +1358,7 @@ impl SessionManager {
             widgets_dir.to_string_lossy().to_string(),
         );
         env_with_meta.insert(
-            "AGENTD_SESSION_KIND".to_string(),
+            "CONSTRUCT_SESSION_KIND".to_string(),
             match params.kind {
                 agentd_protocol::SessionKind::User => "user",
                 agentd_protocol::SessionKind::Orchestrator => "orchestrator",
@@ -1553,7 +1545,7 @@ impl SessionManager {
     /// sessions are retried because an error can mean the previous adapter or
     /// machine died rather than the underlying agent conversation ending.
     /// Each adapter
-    /// receives `AGENTD_RESUME=1` in its env plus the same start params it
+    /// receives `CONSTRUCT_RESUME=1` in its env plus the same start params it
     /// was originally launched with (cwd, model, prompt, etc.) — the
     /// adapter decides what "resume" means for its harness. Sessions that
     /// can't be re-spawned (missing start.json, missing adapter binary,
@@ -1592,8 +1584,8 @@ impl SessionManager {
 
     /// Spawn an adapter for an already-existing session entry (i.e. on
     /// daemon restart). Reuses the start params persisted at create time
-    /// and signals `AGENTD_RESUME=1` so the adapter can pull its own
-    /// prior state from `AGENTD_SESSION_DATA_DIR`.
+    /// and signals `CONSTRUCT_RESUME=1` so the adapter can pull its own
+    /// prior state from `CONSTRUCT_SESSION_DATA_DIR`.
     async fn respawn(self: Arc<Self>, id: &str) -> Result<()> {
         let entry = self
             .get_entry(id)
@@ -1602,11 +1594,11 @@ impl SessionManager {
         let mut start_params = self.storage.load_start_params(id)?;
         start_params
             .env
-            .insert("AGENTD_RESUME".to_string(), "1".to_string());
+            .insert("CONSTRUCT_RESUME".to_string(), "1".to_string());
         // Make sure the data-dir env is present even if start.json predates
         // the meta env injection.
         start_params.env.insert(
-            "AGENTD_SESSION_DATA_DIR".to_string(),
+            "CONSTRUCT_SESSION_DATA_DIR".to_string(),
             self.storage.session_dir(id).to_string_lossy().to_string(),
         );
         let project_id = {
@@ -1619,7 +1611,7 @@ impl SessionManager {
             self.storage.widgets_dir(id)
         });
         start_params.env.insert(
-            "AGENTD_SESSION_WIDGETS_DIR".to_string(),
+            "CONSTRUCT_SESSION_WIDGETS_DIR".to_string(),
             widgets_dir.to_string_lossy().to_string(),
         );
         start_params.env.insert(
@@ -1707,7 +1699,7 @@ impl SessionManager {
 
         // Merge `[adapters.<name>].env` underneath the persisted
         // start-params env so config.toml-driven defaults apply on
-        // respawn too. Per-session env (from `agent new --env`)
+        // respawn too. Per-session env (from `construct new --env`)
         // still wins because start_params.env was constructed with
         // it on top of adapter_cfg.env at create time and gets the
         // same treatment again here.
@@ -1839,7 +1831,7 @@ impl SessionManager {
     /// — those are running, not done.
     ///
     /// Internally just calls [`Manager::respawn`], which sets
-    /// `AGENTD_RESUME=1` in the adapter env so harnesses that
+    /// `CONSTRUCT_RESUME=1` in the adapter env so harnesses that
     /// persist conversation state (zarvis) reload it on the new
     /// process.
     pub async fn restart(self: Arc<Self>, id: &str) -> Result<()> {
@@ -2351,7 +2343,7 @@ impl SessionManager {
     /// has not set a title yet (i.e. the `title` field is `None` — the
     /// hash shown in the UI is just `primary_label`'s display fallback),
     /// (b) we haven't already attempted this incarnation, (c) the
-    /// prompt is non-empty, and (d) the zarvis adapter binary is
+    /// prompt is non-empty, and (d) the smith adapter binary is
     /// configured + locatable. Silently no-ops on any miss.
     fn maybe_spawn_auto_title(&self, entry: Arc<SessionEntry>, prompt: String) {
         // Cheap checks first so we don't burn the per-session attempt
@@ -2361,19 +2353,13 @@ impl SessionManager {
         if prompt.trim().is_empty() {
             return;
         }
-        let Some(zi) = self
-            .config
-            .adapters
-            .get("smith")
-            .or_else(|| self.config.adapters.get("zarvis"))
-            .cloned()
-        else {
+        let Some(smith_adapter) = self.config.adapters.get("smith").cloned() else {
             return;
         };
-        let binary_spec = zi
+        let binary_spec = smith_adapter
             .binary
             .clone()
-            .unwrap_or_else(|| "agentd-adapter-zarvis".to_string());
+            .unwrap_or_else(|| "construct-adapter-smith".to_string());
         let Some(binary) = locate_binary(&binary_spec) else {
             return;
         };
@@ -2723,7 +2709,7 @@ impl SessionManager {
         }
 
         // Best-effort: remove the per-session MCP config the adapter may
-        // have written for an injected `agentd-mcp` server.
+        // have written for an injected `construct-mcp` server.
         let mcp_path = agentd_protocol::paths::Paths::discover()
             .state_dir
             .join("mcp")
@@ -3368,7 +3354,7 @@ impl SessionManager {
     }
 }
 
-/// Shell out to `agentd-adapter-zarvis --title-mode "<prompt>"`, capture
+/// Shell out to `construct-adapter-smith --title-mode "<prompt>"`, capture
 /// stdout, and apply the title to the session summary. Best-effort:
 /// any failure (zarvis missing keys, network error, non-zero exit,
 /// empty output) leaves the session's title unset.
@@ -3444,7 +3430,7 @@ fn effective_mode(params: &CreateSessionParams) -> String {
 
 fn builtin_harness_capabilities(name: &str) -> agentd_protocol::Capabilities {
     match name {
-        "shell" | "claude" | "codex" | "smith" | "zarvis" => agentd_protocol::Capabilities {
+        "shell" | "claude" | "codex" | "smith" => agentd_protocol::Capabilities {
             supports_pty: true,
             ..Default::default()
         },

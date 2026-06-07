@@ -42,11 +42,11 @@
 //!
 //! `<antigravity_home>` defaults to `$HOME/.gemini/antigravity-cli`
 //! (antigravity currently nests under the gemini dir); override with
-//! `AGENTD_ANTIGRAVITY_HOME`.
+//! `CONSTRUCT_ANTIGRAVITY_HOME`.
 //!
-//! Env overrides: `AGENTD_ANTIGRAVITY_CMD` (full command prefix),
-//! `AGENTD_ANTIGRAVITY_BIN` (binary, default `agy`),
-//! `AGENTD_ANTIGRAVITY_MODE` (`interactive`|`headless`).
+//! Env overrides: `CONSTRUCT_ANTIGRAVITY_CMD` (full command prefix),
+//! `CONSTRUCT_ANTIGRAVITY_BIN` (binary, default `agy`),
+//! `CONSTRUCT_ANTIGRAVITY_MODE` (`interactive`|`headless`).
 
 use agentd_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use agentd_protocol::adapter::{run, AdapterContext, AdapterInboxMsg, EventEmitter};
@@ -92,7 +92,7 @@ enum Mode {
 }
 
 fn resolve_mode(params: &SessionStartParams) -> Mode {
-    if let Ok(m) = std::env::var("AGENTD_ANTIGRAVITY_MODE") {
+    if let Ok(m) = std::env::var("CONSTRUCT_ANTIGRAVITY_MODE") {
         match m.as_str() {
             "interactive" => return Mode::Interactive,
             "headless" => return Mode::Headless,
@@ -109,13 +109,13 @@ fn resolve_mode(params: &SessionStartParams) -> Mode {
 
 fn command_override() -> agentd_protocol::adapter::CommandOverride {
     agentd_protocol::adapter::resolve_command_override(
-        "AGENTD_ANTIGRAVITY_CMD",
-        "AGENTD_ANTIGRAVITY_BIN",
+        "CONSTRUCT_ANTIGRAVITY_CMD",
+        "CONSTRUCT_ANTIGRAVITY_BIN",
         "agy",
     )
 }
 
-// The daemon's auto-approval policy (`AGENTD_AUTO_APPROVE_PATHS`, see
+// The daemon's auto-approval policy (`CONSTRUCT_AUTO_APPROVE_PATHS`, see
 // `agentd_protocol::adapter::policy`) is set, but `agy` only exposes a
 // global `--dangerously-skip-permissions` and no path-scoped allow-list, so
 // there's no native translation to apply in interactive mode. Headless mode
@@ -124,7 +124,7 @@ fn command_override() -> agentd_protocol::adapter::CommandOverride {
 // agy feature or for agentd to intercept its tool calls.
 
 fn session_data_dir() -> Option<PathBuf> {
-    std::env::var("AGENTD_SESSION_DATA_DIR")
+    std::env::var("CONSTRUCT_SESSION_DATA_DIR")
         .ok()
         .map(PathBuf::from)
 }
@@ -132,9 +132,9 @@ fn session_data_dir() -> Option<PathBuf> {
 /// Antigravity's home dir, where per-conversation `brain/<id>` trees
 /// (and their `.system_generated/logs/transcript.jsonl`) live. Defaults
 /// to `$HOME/.gemini/antigravity-cli`; override with
-/// `AGENTD_ANTIGRAVITY_HOME`.
+/// `CONSTRUCT_ANTIGRAVITY_HOME`.
 fn antigravity_home() -> Option<PathBuf> {
-    if let Ok(h) = std::env::var("AGENTD_ANTIGRAVITY_HOME") {
+    if let Ok(h) = std::env::var("CONSTRUCT_ANTIGRAVITY_HOME") {
         return Some(PathBuf::from(h));
     }
     let home = std::env::var_os("HOME")?;
@@ -198,7 +198,7 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     let mut args = command.args.clone();
     args.extend(params.args.clone());
 
-    let resuming = std::env::var("AGENTD_RESUME").as_deref() == Ok("1");
+    let resuming = std::env::var("CONSTRUCT_RESUME").as_deref() == Ok("1");
     let log_path = session_data_dir().map(|d| d.join("agy.log"));
     if let Some(lp) = &log_path {
         args.push("--log-file".into());
@@ -235,7 +235,7 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    env.push(("AGENTD_SESSION_ID".into(), ctx.session_id.clone()));
+    env.push(("CONSTRUCT_SESSION_ID".into(), ctx.session_id.clone()));
 
     let label = command.argv_preview();
     let bin = command.bin;
@@ -311,7 +311,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    env.push(("AGENTD_SESSION_ID".into(), session_id.clone()));
+    env.push(("CONSTRUCT_SESSION_ID".into(), session_id.clone()));
 
     // Resume bookkeeping: known conversation id + how many transcript
     // steps we've already emitted (so we only forward NEW steps each

@@ -146,7 +146,7 @@ async fn web_client_loads_and_websocket_connects() {
               try {
                 state.sessions = [{
                   id: 's-parent',
-                  cwd: '/tmp/agentd-project',
+                  cwd: '/tmp/construct-project',
                   group_id: 'project-123',
                   kind: 'user',
                 }];
@@ -158,7 +158,7 @@ async fn web_client_loads_and_websocket_connects() {
                 }];
                 newSessionHarnessEl.innerHTML = '<option value="shell">shell</option>';
                 newSessionHarnessEl.value = 'shell';
-                newSessionCwdEl.value = '/tmp/agentd-project';
+                newSessionCwdEl.value = '/tmp/construct-project';
                 newSessionPromptEl.value = '';
                 state.ws = {
                   readyState: 1,

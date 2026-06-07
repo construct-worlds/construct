@@ -4,7 +4,7 @@
 //!   1. **Binary reload** — `daemon.restart` `exec()`s the
 //!      current on-disk binary, so a replaced/upgraded binary is
 //!      picked up. PID is preserved (exec, not respawn).
-//!   2. **TUI auto-reconnect** — the `agent` TUI notices the
+//!   2. **TUI auto-reconnect** — the `construct` TUI notices the
 //!      socket drop and reconnects on its own, no manual re-run.
 //!   3. **Web reconnect to the same URL** — the bundled web
 //!      client's WebSocket drops and reconnects to the *same*
@@ -100,7 +100,7 @@ async fn restart_reloads_updated_binary() {
 // ---------------------------------------------------------------------------
 
 /// After a daemon restart, the TUI should reconnect on its own —
-/// the user shouldn't have to quit and re-launch `agent`.
+/// the user shouldn't have to quit and re-launch `construct`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tui_auto_reconnects_after_restart() {
     let d = Daemon::spawn().await.expect("spawn daemon");

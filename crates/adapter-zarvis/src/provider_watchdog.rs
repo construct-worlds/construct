@@ -15,8 +15,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
-const ENV_PROVIDER_IDLE_TIMEOUT_SECS: &str = "AGENTD_ZARVIS_PROVIDER_IDLE_TIMEOUT_SECS";
-const ENV_PROVIDER_RETRY_ATTEMPTS: &str = "AGENTD_ZARVIS_PROVIDER_RETRY_ATTEMPTS";
+const ENV_PROVIDER_IDLE_TIMEOUT_SECS: &str = "CONSTRUCT_SMITH_PROVIDER_IDLE_TIMEOUT_SECS";
+const ENV_PROVIDER_RETRY_ATTEMPTS: &str = "CONSTRUCT_SMITH_PROVIDER_RETRY_ATTEMPTS";
 /// Idle = no stream activity from upstream (see `WatchdogSink`: any
 /// `delta` / `reasoning_delta` / `progress` ping resets it). 90s leaves
 /// headroom for the gap between the first event and the first content on

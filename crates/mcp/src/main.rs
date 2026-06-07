@@ -1,4 +1,4 @@
-//! `agentd-mcp` — MCP stdio server that lets an agent (running inside an
+//! `construct-mcp` — MCP stdio server that lets an agent (running inside an
 //! agentd session) control the agentd daemon: list sessions, read their
 //! output, send input, spawn new sessions, etc.
 //!
@@ -7,8 +7,8 @@
 //! `agentd_protocol::jsonrpc` for envelope types.
 //!
 //! Environment:
-//! - `AGENTD_SOCKET` — override the daemon's Unix socket path
-//! - `AGENTD_SESSION_ID` — the calling agent's session id (returned by the
+//! - `CONSTRUCT_SOCKET` — override the daemon's Unix socket path
+//! - `CONSTRUCT_SESSION_ID` — the calling agent's session id (returned by the
 //!   `agentd_whoami` tool). Set by the agentd adapter when it spawns the
 //!   child CLI.
 
@@ -27,16 +27,19 @@ const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let socket = std::env::var("AGENTD_SOCKET")
+    let socket = std::env::var("CONSTRUCT_SOCKET")
         .ok()
         .map(PathBuf::from)
         .unwrap_or_else(|| Paths::discover().socket());
-    let session_id = std::env::var("AGENTD_SESSION_ID").ok();
+    let session_id = std::env::var("CONSTRUCT_SESSION_ID").ok();
 
     let client = match Client::connect(&socket).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("agentd-mcp: failed to connect to {}: {e}", socket.display());
+            eprintln!(
+                "construct-mcp: failed to connect to {}: {e}",
+                socket.display()
+            );
             std::process::exit(1);
         }
     };
@@ -53,7 +56,7 @@ async fn run(client: Arc<Client>, session_id: Option<String>) -> Result<()> {
             Ok(Some(v)) => v,
             Ok(None) => return Ok(()), // EOF
             Err(e) => {
-                eprintln!("agentd-mcp: invalid JSON on stdin: {e}");
+                eprintln!("construct-mcp: invalid JSON on stdin: {e}");
                 continue;
             }
         };
@@ -90,7 +93,7 @@ async fn handle_request(client: &Arc<Client>, session_id: Option<&str>, req: Req
             serde_json::json!({
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "serverInfo": {
-                    "name": "agentd-mcp",
+                    "name": "construct-mcp",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
                 "capabilities": {

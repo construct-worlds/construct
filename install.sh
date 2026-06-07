@@ -1,5 +1,5 @@
 #!/bin/sh
-# agentd installer.
+# construct installer.
 #
 #   curl -fsSL https://raw.githubusercontent.com/zarvis-ai/agentd/main/install.sh | sh
 #
@@ -9,17 +9,17 @@
 # everything must live together — this script keeps them together.
 #
 # Environment overrides:
-#   AGENTD_VERSION   release tag to install (e.g. v0.2.0). Default: latest.
-#   AGENTD_BIN_DIR   install directory.       Default: $HOME/.local/bin.
-#   AGENTD_BASE_URL  download base URL (mirror / testing). Default: the
-#                    GitHub release for AGENTD_VERSION. The script fetches
-#                    <base>/agentd-<target>.tar.gz and <base>/SHA256SUMS.
+#   CONSTRUCT_VERSION   release tag to install (e.g. v0.2.0). Default: latest.
+#   CONSTRUCT_BIN_DIR   install directory.       Default: $HOME/.local/bin.
+#   CONSTRUCT_BASE_URL  download base URL (mirror / testing). Default: the
+#                       GitHub release for CONSTRUCT_VERSION. The script fetches
+#                       <base>/constructd-<target>.tar.gz and <base>/SHA256SUMS.
 set -eu
 
 REPO="zarvis-ai/agentd"
-VERSION="${AGENTD_VERSION:-latest}"
-BIN_DIR="${AGENTD_BIN_DIR:-$HOME/.local/bin}"
-BINS="agent agentd agentd-mcp agentd-adapter-shell agentd-adapter-claude agentd-adapter-codex agentd-adapter-antigravity agentd-adapter-zarvis"
+VERSION="${CONSTRUCT_VERSION:-latest}"
+BIN_DIR="${CONSTRUCT_BIN_DIR:-$HOME/.local/bin}"
+BINS="construct constructd construct-mcp construct-adapter-shell construct-adapter-claude construct-adapter-codex construct-adapter-antigravity construct-adapter-smith"
 
 say() { printf '%s\n' "$*"; }
 err() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -61,9 +61,9 @@ else
 fi
 
 # --- resolve URLs ---------------------------------------------------------
-asset="agentd-${target}.tar.gz"
-if [ -n "${AGENTD_BASE_URL:-}" ]; then
-  base="${AGENTD_BASE_URL%/}"
+asset="constructd-${target}.tar.gz"
+if [ -n "${CONSTRUCT_BASE_URL:-}" ]; then
+  base="${CONSTRUCT_BASE_URL%/}"
 elif [ "$VERSION" = "latest" ]; then
   base="https://github.com/${REPO}/releases/latest/download"
 else
@@ -73,7 +73,7 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-say "Installing agentd ($VERSION) for $target"
+say "Installing constructd ($VERSION) for $target"
 
 if ! fetch "${base}/${asset}" "${tmp}/${asset}"; then
   err "could not download ${base}/${asset}
@@ -83,7 +83,7 @@ fi
 fetch "${base}/SHA256SUMS" "${tmp}/SHA256SUMS" || err "could not download SHA256SUMS"
 
 # --- verify checksum ------------------------------------------------------
-want="$(grep " ${asset}\$" "${tmp}/SHA256SUMS" | awk '{print $1}')"
+want="$(grep " ${asset}$" "${tmp}/SHA256SUMS" | awk '{print $1}')"
 [ -n "$want" ] || err "no checksum for ${asset} in SHA256SUMS"
 got="$(sha256 "${tmp}/${asset}")"
 [ "$want" = "$got" ] || err "checksum mismatch for ${asset}
@@ -93,8 +93,8 @@ say "Checksum OK"
 
 # --- install --------------------------------------------------------------
 tar -xzf "${tmp}/${asset}" -C "$tmp"
-src="${tmp}/agentd-${target}"
-[ -d "$src" ] || err "unexpected archive layout (no agentd-${target}/ inside ${asset})"
+src="${tmp}/constructd-${target}"
+[ -d "$src" ] || err "unexpected archive layout (no constructd-${target}/ inside ${asset})"
 
 mkdir -p "$BIN_DIR"
 # Validate the whole set before touching anything (all-or-nothing-ish).
@@ -128,4 +128,4 @@ case ":${PATH}:" in
 esac
 
 say ""
-say "Done. Try:  agentd run    (in another terminal)  agent"
+say "Done. Try:  constructd run    (in another terminal)  construct"

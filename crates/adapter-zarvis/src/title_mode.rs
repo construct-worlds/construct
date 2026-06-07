@@ -2,9 +2,9 @@
 //!
 //! When the daemon detects a session's first user message and no
 //! user-set title exists, it shells out to
-//! `agentd-adapter-zarvis --title-mode "<prompt>"`. This module powers
+//! `construct-adapter-smith --title-mode "<prompt>"`. This module powers
 //! that invocation: it picks a model the same way the regular adapter
-//! does (AGENTD_ZARVIS_MODEL → API-key fallback), runs a single
+//! does (CONSTRUCT_SMITH_MODEL → API-key fallback), runs a single
 //! tools-disabled completion with a short system prompt, and prints
 //! the cleaned-up title to stdout.
 
@@ -31,7 +31,7 @@ impl TextSink for CaptureSink {
 }
 
 fn pick_default_spec_str() -> String {
-    if let Ok(s) = std::env::var("AGENTD_ZARVIS_MODEL") {
+    if let Ok(s) = std::env::var("CONSTRUCT_SMITH_MODEL") {
         if !s.trim().is_empty() {
             return s;
         }

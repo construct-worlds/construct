@@ -15,7 +15,11 @@ use agentd_client::Client;
 use agentd_protocol::paths::Paths;
 
 #[derive(Debug, Parser)]
-#[command(name = "agent", about = "agent: TUI client for agentd", version)]
+#[command(
+    name = "construct",
+    about = "construct: TUI client for constructd",
+    version
+)]
 struct Cli {
     /// Override the daemon socket path.
     #[arg(long, global = true)]
@@ -60,7 +64,7 @@ enum Command {
     Send { session_id: String, text: String },
     /// Internal: `PreToolUse` hook body for the AskUserQuestion chat-gate.
     /// Reads the hook payload on stdin; if a chat viewer is active for
-    /// `$AGENTD_SESSION_ID`, prints a `deny` decision that degrades Claude's
+    /// `$CONSTRUCT_SESSION_ID`, prints a `deny` decision that degrades Claude's
     /// picker to a plain-text question. Fails open (allow) on any error.
     #[command(hide = true)]
     AskGate,
@@ -96,7 +100,7 @@ enum Command {
         /// Install a specific release tag (e.g. v0.2.0). Default: latest.
         #[arg(long)]
         version: Option<String>,
-        /// Install directory. Default: the directory of the running `agent`.
+        /// Install directory. Default: the directory of the running `construct`.
         #[arg(long)]
         bin_dir: Option<PathBuf>,
         /// After upgrading, ask the running daemon to restart so the new
@@ -231,7 +235,7 @@ async fn main() -> Result<()> {
             use std::io::Read as _;
             let mut buf = String::new();
             let _ = std::io::stdin().read_to_string(&mut buf);
-            let session_id = std::env::var("AGENTD_SESSION_ID")
+            let session_id = std::env::var("CONSTRUCT_SESSION_ID")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .or_else(|| {

@@ -1,39 +1,40 @@
-# Example agentd config.
+# Example construct config.
 #
-# Drop this at $AGENTD_CONFIG_DIR/config.toml (default
-# ~/.config/agentd/config.toml). All adapter entries here are optional —
+# Drop this at $CONSTRUCT_CONFIG_DIR/config.toml (default
+# ~/.config/construct/config.toml). All adapter entries here are optional —
 # `shell`, `claude`, and `codex` are registered automatically. Override the
 # binary path when the adapter binary is not on $PATH and not next to the
-# `agentd` binary.
+# `constructd` binary.
 
 # [adapters.shell]
-# binary = "agentd-adapter-shell"
+# binary = "construct-adapter-shell"
 # description = "Generic shell command runner"
 
 # [adapters.claude]
-# binary = "/opt/agentd/agentd-adapter-claude"
+# binary = "/opt/construct/construct-adapter-claude"
 # description = "Claude Code"
 
 # Override the child command a built-in adapter launches without writing a
-# wrapper script. `AGENTD_*_CMD` is split shell-style (quotes/backslashes only;
-# no shell expansion) and prepended before the adapter's generated arguments.
-# This wins over the older binary-only `AGENTD_*_BIN` env var.
+# wrapper script. `CONSTRUCT_*_CMD` is split shell-style (quotes/backslashes
+# only; no shell expansion) and prepended before the adapter's generated
+# arguments.
+# This wins over the binary-only `CONSTRUCT_*_BIN` env var.
 #
 # [adapters.codex]
-# env = { AGENTD_CODEX_CMD = "exec codex" }
+# env = { CONSTRUCT_CODEX_CMD = "exec codex" }
 #
-# Other built-ins use AGENTD_CLAUDE_CMD, AGENTD_ANTIGRAVITY_CMD, and
-# AGENTD_SHELL_CMD.
+# Other built-ins use CONSTRUCT_CLAUDE_CMD, CONSTRUCT_ANTIGRAVITY_CMD, and
+# CONSTRUCT_SHELL_CMD.
 
 # Add a custom adapter — just point to any binary that speaks the AHP
 # protocol. See `crates/protocol/src/adapter.rs` for the SDK helper.
 #
 # [adapters.aider]
-# binary = "agentd-adapter-aider"
+# binary = "construct-adapter-aider"
 # description = "Aider (community adapter)"
 
 [defaults]
 # When true, every new session whose cwd is a git repo gets its own
 # `git worktree add`-style isolated copy. Override per-session with
-# `agent new ... --worktree`.
+# `construct new ... --worktree`.
 worktree = false

@@ -40,17 +40,17 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 /// Minimum interval; below this is just spam. Configurable for
-/// tests via `AGENTD_LOOP_MIN_SECS`.
+/// tests via `CONSTRUCT_LOOP_MIN_SECS`.
 pub fn min_interval_secs() -> u64 {
-    std::env::var("AGENTD_LOOP_MIN_SECS")
+    std::env::var("CONSTRUCT_LOOP_MIN_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30)
 }
 
-/// Maximum interval. Configurable via `AGENTD_LOOP_MAX_SECS`.
+/// Maximum interval. Configurable via `CONSTRUCT_LOOP_MAX_SECS`.
 pub fn max_interval_secs() -> u64 {
-    std::env::var("AGENTD_LOOP_MAX_SECS")
+    std::env::var("CONSTRUCT_LOOP_MAX_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(24 * 3600)
@@ -429,10 +429,10 @@ mod tests {
 
     #[test]
     fn clamp_respects_min() {
-        std::env::set_var("AGENTD_LOOP_MIN_SECS", "30");
+        std::env::set_var("CONSTRUCT_LOOP_MIN_SECS", "30");
         let (v, clamped) = clamp_interval(5);
         assert_eq!(v, 30);
         assert!(clamped);
-        std::env::remove_var("AGENTD_LOOP_MIN_SECS");
+        std::env::remove_var("CONSTRUCT_LOOP_MIN_SECS");
     }
 }

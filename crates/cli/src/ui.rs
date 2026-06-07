@@ -5464,7 +5464,7 @@ fn approval_mode_modeline_label(s: &SessionSummary) -> Option<&'static str> {
 }
 
 fn is_smith_like_harness(name: &str) -> bool {
-    matches!(name, "smith" | "zarvis")
+    matches!(name, "smith")
 }
 
 fn render_modeline_approval_mode_tooltip(f: &mut Frame, app: &App) {
@@ -5688,7 +5688,7 @@ fn render_help(f: &mut Frame, area: Rect, theme: &Theme) -> Rect {
 }
 
 const HELP_TEXT: &str = "
-emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
+emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
 
   getting started
     A session is one live task or terminal that construct keeps in the list.
@@ -7923,9 +7923,9 @@ mod tests {
 
     #[test]
     fn is_headless_only_for_headless_mode() {
-        assert!(is_headless(&summary_with_mode("zarvis", Some("headless"))));
+        assert!(is_headless(&summary_with_mode("smith", Some("headless"))));
         assert!(!is_headless(&summary_with_mode(
-            "zarvis",
+            "smith",
             Some("interactive")
         )));
         // Missing mode is treated as not-headless (older sessions
@@ -7938,20 +7938,20 @@ mod tests {
         // Headless sessions get a "(headless) " prefix so the list /
         // title bar visibly distinguish them from interactive ones.
         assert_eq!(
-            harness_label(&summary_with_mode("zarvis", Some("headless"))),
-            "(headless) zarvis"
+            harness_label(&summary_with_mode("smith", Some("headless"))),
+            "(headless) smith"
         );
         // Interactive and mode-less sessions render the bare harness.
         assert_eq!(
-            harness_label(&summary_with_mode("zarvis", Some("interactive"))),
-            "zarvis"
+            harness_label(&summary_with_mode("smith", Some("interactive"))),
+            "smith"
         );
         assert_eq!(harness_label(&summary_with_mode("shell", None)), "shell");
     }
 
     #[test]
-    fn approval_mode_modeline_label_shows_manual_for_zarvis() {
-        let s = summary_with_mode("zarvis", Some("interactive"));
+    fn approval_mode_modeline_label_shows_manual_for_smith() {
+        let s = summary_with_mode("smith", Some("interactive"));
         assert_eq!(approval_mode_modeline_label(&s), Some("manual"));
     }
 
@@ -7963,14 +7963,14 @@ mod tests {
 
     #[test]
     fn approval_mode_modeline_label_uses_non_manual_badge() {
-        let mut s = summary_with_mode("zarvis", Some("interactive"));
+        let mut s = summary_with_mode("smith", Some("interactive"));
         s.approval_mode = agentd_protocol::ApprovalMode::UnsafeAuto;
         assert_eq!(approval_mode_modeline_label(&s), Some("unsafe-auto"));
     }
 
     #[test]
-    fn zarvis_running_animates_only_while_agent_active() {
-        let mut s = summary_with_mode("zarvis", Some("interactive"));
+    fn smith_running_animates_only_while_agent_active() {
+        let mut s = summary_with_mode("smith", Some("interactive"));
         s.state = SessionState::Running;
         // Mid-turn: agent active → animate, even with no recent PTY bytes.
         assert!(session_should_animate_status(&s, false, true));
@@ -7993,7 +7993,7 @@ mod tests {
 
     #[test]
     fn awaiting_input_status_stays_static() {
-        let mut s = summary_with_mode("zarvis", Some("interactive"));
+        let mut s = summary_with_mode("smith", Some("interactive"));
         s.state = SessionState::AwaitingInput;
         // Not Running → never animates, regardless of activity signals.
         assert!(!session_should_animate_status(&s, true, true));
