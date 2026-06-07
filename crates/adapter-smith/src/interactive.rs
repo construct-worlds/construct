@@ -822,12 +822,22 @@ impl LineEditor {
     }
 
     fn submit(&mut self) -> LineEvent {
-        let line = std::mem::take(&mut self.buf);
+        let mut line = std::mem::take(&mut self.buf);
+        // Normalize CRs so multi-line prompts round-trip.
+        if line.contains(r) {
+            line = line.replace("\r\n", "\n").replace(, "\n");
+        }
         self.cursor = 0;
         self.hist_pos = None;
         self.saved.clear();
         if !line.is_empty() && self.history.last().map(|s| s.as_str()) != Some(line.as_str()) {
             self.history.push(line.clone());
+            // Cap history at 10,000 entries (drop oldest first).
+            const HISTORY_MAX: usize = 10_000;
+            if self.history.len() > HISTORY_MAX {
+                let drop = self.history.len() - HISTORY_MAX;
+                self.history.drain(0..drop);
+            }
         }
         LineEvent::Submit(line)
     }
