@@ -587,7 +587,7 @@ simple_write_tool!(
 /// the daemon. The agentd-control tools default to "this" session
 /// when the LLM doesn't supply a session_id explicitly.
 fn calling_session_id() -> Option<String> {
-    std::env::var("AGENTD_SESSION_ID").ok()
+    std::env::var("CONSTRUCT_SESSION_ID").ok()
 }
 
 pub struct LoopCreate;
@@ -633,7 +633,7 @@ impl Tool for LoopCreate {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .or_else(calling_session_id)
-            .ok_or_else(|| anyhow!("session_id required (and AGENTD_SESSION_ID unset)"))?;
+            .ok_or_else(|| anyhow!("session_id required (and CONSTRUCT_SESSION_ID unset)"))?;
         let secs = input
             .get("interval_seconds")
             .and_then(|v| v.as_u64())

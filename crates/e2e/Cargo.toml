@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "End-to-end test harness for agentd — spawns the real daemon binary against a temp $AGENTD_*_DIR and drives it via the IPC client (and optionally the TUI in a pseudo-terminal)."
+description = "End-to-end test harness for agentd — spawns the real daemon binary against a temp $CONSTRUCT_*_DIR and drives it via the IPC client (and optionally the TUI in a pseudo-terminal)."
 publish = false
 
 [lib]

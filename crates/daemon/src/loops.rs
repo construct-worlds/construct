@@ -40,17 +40,17 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 /// Minimum interval; below this is just spam. Configurable for
-/// tests via `AGENTD_LOOP_MIN_SECS`.
+/// tests via `CONSTRUCT_LOOP_MIN_SECS`.
 pub fn min_interval_secs() -> u64 {
-    std::env::var("AGENTD_LOOP_MIN_SECS")
+    std::env::var("CONSTRUCT_LOOP_MIN_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30)
 }
 
-/// Maximum interval. Configurable via `AGENTD_LOOP_MAX_SECS`.
+/// Maximum interval. Configurable via `CONSTRUCT_LOOP_MAX_SECS`.
 pub fn max_interval_secs() -> u64 {
-    std::env::var("AGENTD_LOOP_MAX_SECS")
+    std::env::var("CONSTRUCT_LOOP_MAX_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(24 * 3600)
@@ -131,18 +131,14 @@ impl LoopRegistry {
     /// state. Called after every mutation.
     async fn persist_session(&self, session_id: &str) -> Result<()> {
         let g = self.inner.read().await;
-        let session_loops: Vec<&Loop> =
-            g.values().filter(|l| l.session_id == session_id).collect();
+        let session_loops: Vec<&Loop> = g.values().filter(|l| l.session_id == session_id).collect();
         let path = self.path_for(session_id);
         let parent = path.parent().context("loops.json parent")?;
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(&session_loops)?;
-        std::fs::write(&tmp, json)
-            .with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
-            .with_context(|| format!("rename {}", path.display()))?;
+        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
         Ok(())
     }
 
@@ -162,7 +158,11 @@ impl LoopRegistry {
     pub async fn list(&self, session_id: Option<&str>) -> Vec<Loop> {
         let g = self.inner.read().await;
         match session_id {
-            Some(sid) => g.values().filter(|l| l.session_id == sid).cloned().collect(),
+            Some(sid) => g
+                .values()
+                .filter(|l| l.session_id == sid)
+                .cloned()
+                .collect(),
             None => g.values().cloned().collect(),
         }
     }
@@ -273,9 +273,7 @@ pub async fn run_scheduler(
     registry: Arc<LoopRegistry>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(SCHEDULER_TICK_MS));
-    interval.set_missed_tick_behavior(
-        tokio::time::MissedTickBehavior::Delay,
-    );
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
         let now_ms = Utc::now().timestamp_millis();
@@ -306,10 +304,7 @@ pub async fn run_scheduler(
             }
             // Fire: synthesize a user input. The adapter's inbox
             // queues it for the next turn boundary.
-            match manager
-                .send_input(&l.session_id, l.prompt.clone())
-                .await
-            {
+            match manager.send_input(&l.session_id, l.prompt.clone()).await {
                 Ok(()) => {
                     if let Err(e) = registry.mark_fired(&l.id, now_ms).await {
                         tracing::warn!(
@@ -347,10 +342,7 @@ pub async fn run_scheduler(
 /// - `every 10s hi`           → 10s interval, no expiry
 /// - `30s for 5min check`     → 30s interval, expires in 5min, prompt="check"
 /// - `hello`                  → None (no interval token recognized)
-pub fn parse_slash_spec(
-    input: &str,
-    now_ms: i64,
-) -> Option<(LoopSpec, Option<i64>, String)> {
+pub fn parse_slash_spec(input: &str, now_ms: i64) -> Option<(LoopSpec, Option<i64>, String)> {
     let mut tokens = input.split_whitespace().peekable();
     // Strip optional "every"
     if matches!(tokens.peek().copied(), Some("every")) {
@@ -417,8 +409,7 @@ mod tests {
 
     #[test]
     fn parses_for_expiry() {
-        let (spec, exp, prompt) =
-            parse_slash_spec("30s for 5min check", 1000).unwrap();
+        let (spec, exp, prompt) = parse_slash_spec("30s for 5min check", 1000).unwrap();
         assert!(matches!(spec, LoopSpec::Interval { seconds: 30 }));
         assert_eq!(exp, Some(1000 + 5 * 60 * 1000));
         assert_eq!(prompt, "check");
@@ -431,18 +422,17 @@ mod tests {
 
     #[test]
     fn parses_hour_unit() {
-        let (spec, _, prompt) =
-            parse_slash_spec("2hours summarize the day", 0).unwrap();
+        let (spec, _, prompt) = parse_slash_spec("2hours summarize the day", 0).unwrap();
         assert!(matches!(spec, LoopSpec::Interval { seconds: 7200 }));
         assert_eq!(prompt, "summarize the day");
     }
 
     #[test]
     fn clamp_respects_min() {
-        std::env::set_var("AGENTD_LOOP_MIN_SECS", "30");
+        std::env::set_var("CONSTRUCT_LOOP_MIN_SECS", "30");
         let (v, clamped) = clamp_interval(5);
         assert_eq!(v, 30);
         assert!(clamped);
-        std::env::remove_var("AGENTD_LOOP_MIN_SECS");
+        std::env::remove_var("CONSTRUCT_LOOP_MIN_SECS");
     }
 }

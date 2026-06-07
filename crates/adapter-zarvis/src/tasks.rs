@@ -3,7 +3,7 @@
 //! Every tool invocation goes through a [`Supervisor`] that races the
 //! tool's `tokio::spawn` handle against three signals:
 //!
-//!   - **Auto-bg timer** (60 s by default; `AGENTD_TOOL_BG_AFTER_MS`):
+//!   - **Auto-bg timer** (60 s by default; `CONSTRUCT_TOOL_BG_AFTER_MS`):
 //!     the agent decides the tool's been running long enough that the
 //!     conversation shouldn't keep blocking on it. The handle is
 //!     detached, a placeholder `ToolResult` is synthesized, and the
@@ -34,14 +34,13 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 /// auto-backgrounds. The real result lands later as an
 /// `OBSERVATION:` injection. Keep stable — the system prompt
 /// references this exact phrasing so the model knows what to expect.
-pub const BG_PLACEHOLDER_OUTPUT: &str =
-    "(running in background; will report when complete)";
+pub const BG_PLACEHOLDER_OUTPUT: &str = "(running in background; will report when complete)";
 
 /// Default auto-background threshold. Overridable via
-/// `AGENTD_TOOL_BG_AFTER_MS`.
+/// `CONSTRUCT_TOOL_BG_AFTER_MS`.
 pub const DEFAULT_BG_AFTER_MS: u64 = 60_000;
 /// Default time before the `[bg]` / `[kill]` buttons appear on a
-/// running tool block. Overridable via `AGENTD_TOOL_BUTTONS_AFTER_MS`.
+/// running tool block. Overridable via `CONSTRUCT_TOOL_BUTTONS_AFTER_MS`.
 /// Read by the TUI's `synth_block` — the adapter doesn't act on
 /// this directly, it's exported here for a single source of truth.
 pub const DEFAULT_BUTTONS_AFTER_MS: u64 = 15_000;
@@ -126,7 +125,7 @@ pub type BgCompletionRx = mpsc::UnboundedReceiver<BackgroundCompletion>;
 
 /// Read the auto-bg threshold from env or fall back to the default.
 pub fn bg_after_duration() -> Duration {
-    let ms = std::env::var("AGENTD_TOOL_BG_AFTER_MS")
+    let ms = std::env::var("CONSTRUCT_TOOL_BG_AFTER_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(DEFAULT_BG_AFTER_MS);
@@ -283,11 +282,7 @@ fn spawn_background_watcher(
 /// `call_id` in the running map and forwards the control message
 /// via its `control_tx`. Returns `true` if a matching supervisor
 /// was found.
-pub async fn forward_control(
-    tasks: &Tasks,
-    call_id: &str,
-    control: ToolControl,
-) -> bool {
+pub async fn forward_control(tasks: &Tasks, call_id: &str, control: ToolControl) -> bool {
     let g = tasks.running.lock().await;
     match g.get(call_id) {
         Some(entry) => entry.control_tx.send(control).is_ok(),
@@ -351,7 +346,10 @@ mod tests {
             Duration::from_secs(60),
             async {
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                Ok(ToolOutcome { ok: true, output: "never".into() })
+                Ok(ToolOutcome {
+                    ok: true,
+                    output: "never".into(),
+                })
             },
         )
         .await;
@@ -371,18 +369,18 @@ mod tests {
             Duration::from_millis(50),
             async {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok(ToolOutcome { ok: true, output: "delayed".into() })
+                Ok(ToolOutcome {
+                    ok: true,
+                    output: "delayed".into(),
+                })
             },
         )
         .await;
         assert!(matches!(outcome, SupervisorOutcome::Backgrounded));
-        let completion = tokio::time::timeout(
-            Duration::from_millis(500),
-            rx.recv(),
-        )
-        .await
-        .expect("watcher should report")
-        .expect("channel should not close");
+        let completion = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("watcher should report")
+            .expect("channel should not close");
         assert_eq!(completion.call_id, "c1");
         match completion.outcome {
             Ok(o) => assert_eq!(o.output, "delayed"),
@@ -408,18 +406,18 @@ mod tests {
             Duration::from_secs(60), // wouldn't auto-bg in this window
             async {
                 tokio::time::sleep(Duration::from_millis(80)).await;
-                Ok(ToolOutcome { ok: true, output: "delayed".into() })
+                Ok(ToolOutcome {
+                    ok: true,
+                    output: "delayed".into(),
+                })
             },
         )
         .await;
         assert!(matches!(outcome, SupervisorOutcome::Backgrounded));
-        let completion = tokio::time::timeout(
-            Duration::from_millis(500),
-            rx.recv(),
-        )
-        .await
-        .expect("watcher reports")
-        .unwrap();
+        let completion = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("watcher reports")
+            .unwrap();
         match completion.outcome {
             Ok(o) => assert_eq!(o.output, "delayed"),
             Err(e) => panic!("expected ok, got {e}"),

@@ -6,17 +6,15 @@ use crate::session::{BroadcastMsg, SessionManager};
 use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
     ipc_method, ipc_notif, transport, ChatViewerActiveResult, CreateSessionParams, ErrorObject,
-    GroupCreateParams,
-    GroupCreateResult, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
+    GroupCreateParams, GroupCreateResult, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
     GroupSetCollapsedParams, Notification, PingResult, ProjectCreateParams, ProjectCreateResult,
     ProjectDeleteParams, ProjectDeletedNotificationPayload, ProjectMoveParams, ProjectRenameParams,
     ProjectSetCollapsedParams, ProjectStateNotificationPayload, PtyReplayParams, Request, Response,
     SessionAttachClipboardParams, SessionIdParams, SessionInputParams, SessionMoveParams,
     SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
     SessionSetGroupParams, SessionSetPinnedParams, SessionSetProjectParams, SessionSetTitleParams,
-    SessionSetViewParams,
-    SessionToolActionParams, SessionToolDecisionParams, SubscribeParams, TranscriptParams,
-    IPC_VERSION,
+    SessionSetViewParams, SessionToolActionParams, SessionToolDecisionParams, SubscribeParams,
+    TranscriptParams, IPC_VERSION,
 };
 use anyhow::{Context, Result};
 use futures::{SinkExt as _, StreamExt as _};

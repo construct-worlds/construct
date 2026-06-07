@@ -8,12 +8,12 @@ use crate::app::{
 use crate::keymap::KeyAction;
 use crate::theme::Theme;
 use agentd_protocol::{MessageRole, SessionEvent, SessionState, SessionSummary, TimestampedEvent};
-use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::Frame;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthStr;
@@ -678,7 +678,13 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
         if let Some(rain) = app.layout.matrix_rain_area {
             if let Some((xs, xe, y)) = matrix_rain_close_button_range(rain) {
                 if my == y && mx >= xs && mx < xe {
-                    render_button_tooltip(f, &app.theme, " Hide Operator ", xs, y.saturating_add(2));
+                    render_button_tooltip(
+                        f,
+                        &app.theme,
+                        " Hide Operator ",
+                        xs,
+                        y.saturating_add(2),
+                    );
                 }
             }
         }
@@ -2010,9 +2016,9 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
     let label_x = area.x.saturating_add(1);
     let operator_start = label_x.saturating_add(1);
     let operator_end = operator_start.saturating_add(UnicodeWidthStr::width(operator_text) as u16);
-    let operator_hovered = app.mouse_pos.is_some_and(|(mx, my)| {
-        my == area.y && mx >= operator_start && mx < operator_end
-    });
+    let operator_hovered = app
+        .mouse_pos
+        .is_some_and(|(mx, my)| my == area.y && mx >= operator_start && mx < operator_end);
     let operator_style = if approval_pending {
         Style::default()
             .fg(app.theme.warning)
@@ -2031,7 +2037,8 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
     let selected_id = app.matrix_widget_selected.clone();
     let separator_x = operator_end.saturating_add(1);
     if !panels.is_empty() {
-        f.buffer_mut().set_string(separator_x, area.y, "─", line_style);
+        f.buffer_mut()
+            .set_string(separator_x, area.y, "─", line_style);
     }
     let mut icon_x = separator_x.saturating_add(2);
     let icon_limit = area.x + area.width.saturating_sub(5);
@@ -2398,7 +2405,11 @@ fn render_pinned_letters_at(
         } else {
             let since_pin_ms = elapsed_ms.saturating_sub(pinned_at);
             let brightness = if elapsed_ms < fade_start {
-                if since_pin_ms < 220 { 1.0 } else { 0.76 }
+                if since_pin_ms < 220 {
+                    1.0
+                } else {
+                    0.76
+                }
             } else {
                 (0.12 + fade_level * 0.64).clamp(0.0, 1.0)
             };
@@ -2813,14 +2824,14 @@ fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
 
     let lines = vec![
         Line::from(Span::styled(
-            "Welcome to agentd",
+            "Welcome to construct",
             Style::default()
                 .fg(app.theme.text)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
         Line::from(Span::styled(
-            "Start with a session. Sessions are the live terminals agentd tracks.",
+            "Start with a session. Sessions are the live terminals construct tracks.",
             Style::default().fg(app.theme.dim),
         )),
         Line::raw(""),
@@ -3996,7 +4007,13 @@ fn render_markdown_table(
         total -= 1;
     }
     let mut out = Vec::with_capacity(table.rows.len() + 2);
-    out.push(table_row_line(&table.header, &widths, &table.aligns, theme, true));
+    out.push(table_row_line(
+        &table.header,
+        &widths,
+        &table.aligns,
+        theme,
+        true,
+    ));
     out.push(table_rule_line(&widths, theme));
     for row in &table.rows {
         out.push(table_row_line(row, &widths, &table.aligns, theme, false));
@@ -4012,7 +4029,9 @@ fn table_row_line(
     header: bool,
 ) -> Line<'static> {
     let cell_style = if header {
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.text)
     };
@@ -5340,7 +5359,7 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         ""
     };
     let modeline_before_approval_mode = format!(
-        " agentd  focus:{focus}  {sel}  {model}  {remote}",
+        " construct  focus:{focus}  {sel}  {model}  {remote}",
         focus = focus_label,
         remote = remote_badge,
         sel = match s {
@@ -5365,12 +5384,11 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
                 .saturating_add(width)
                 .min(area.x.saturating_add(area.width));
             if end_col > start_col {
-                app.layout.modeline_approval_mode_hit =
-                    Some(crate::app::ModelineApprovalModeHit {
-                        row: area.y,
-                        start_col,
-                        end_col,
-                    });
+                app.layout.modeline_approval_mode_hit = Some(crate::app::ModelineApprovalModeHit {
+                    row: area.y,
+                    start_col,
+                    end_col,
+                });
             }
         }
     }
@@ -5442,7 +5460,11 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
 fn approval_mode_modeline_label(s: &SessionSummary) -> Option<&'static str> {
     s.approval_mode
         .badge()
-        .or_else(|| (s.harness == "zarvis").then_some("manual"))
+        .or_else(|| is_smith_like_harness(&s.harness).then_some("manual"))
+}
+
+fn is_smith_like_harness(name: &str) -> bool {
+    matches!(name, "smith")
 }
 
 fn render_modeline_approval_mode_tooltip(f: &mut Frame, app: &App) {
@@ -5666,11 +5688,11 @@ fn render_help(f: &mut Frame, area: Rect, theme: &Theme) -> Rect {
 }
 
 const HELP_TEXT: &str = "
-emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
+emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
 
   getting started
-    A session is one live task or terminal that agentd keeps in the list.
-    A harness is the runtime for a session: zarvis, codex, claude, or shell.
+    A session is one live task or terminal that construct keeps in the list.
+    A harness is the runtime for a session: smith, codex, claude, or shell.
     The left pane selects sessions; the right pane shows the selected session.
     Use C-x C-f to create a session, then choose a harness.
     Use C-x x for the command palette when you forget a shortcut.
@@ -5719,12 +5741,12 @@ emacs keymap (default; AGENTD_KEYMAP=vim for vim profile)
                     palette commands: new send delete rename diff border
                                       zoom interrupt refresh harnesses help
     ?               toggle this help
-    C-x C-c / q     quit
+    C-x C-c          quit
 
 When the right pane is showing a PTY-backed session (shell / interactive
 claude / interactive codex) and focus is on the view, keystrokes go to the
 child. `C-x` is the escape prefix — start any `C-x …` chord above to run
-an agentd command without changing focus.
+an construct command without changing focus.
 ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6438,7 +6460,7 @@ fn session_should_animate_status(s: &SessionSummary, pty_active: bool, agent_act
     //
     // Shell / PTY-only harnesses have no agent-status signal and also sit
     // in `Running` while idle, so they keep the short PTY-activity gate.
-    if s.harness == "zarvis" {
+    if is_smith_like_harness(&s.harness) {
         agent_active
     } else {
         pty_active
@@ -7149,31 +7171,21 @@ mod tests {
             true,
         );
         let rendered: Vec<_> = lines.iter().map(line_text).collect();
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line.contains("◉ [d] Start demo"))
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line.contains("│  ✓ Prepare demo workspace"))
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line.contains("│    ○ Record demo"))
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line.contains("○ [r] Run checks"))
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line.contains("• Plain milestone"))
-        );
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("◉ [d] Start demo")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("│  ✓ Prepare demo workspace")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("│    ○ Record demo")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("○ [r] Run checks")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("• Plain milestone")));
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].action.id, "start-demo");
         assert_eq!(hits[0].action.key.as_deref(), Some("d"));
@@ -7911,9 +7923,9 @@ mod tests {
 
     #[test]
     fn is_headless_only_for_headless_mode() {
-        assert!(is_headless(&summary_with_mode("zarvis", Some("headless"))));
+        assert!(is_headless(&summary_with_mode("smith", Some("headless"))));
         assert!(!is_headless(&summary_with_mode(
-            "zarvis",
+            "smith",
             Some("interactive")
         )));
         // Missing mode is treated as not-headless (older sessions
@@ -7926,20 +7938,20 @@ mod tests {
         // Headless sessions get a "(headless) " prefix so the list /
         // title bar visibly distinguish them from interactive ones.
         assert_eq!(
-            harness_label(&summary_with_mode("zarvis", Some("headless"))),
-            "(headless) zarvis"
+            harness_label(&summary_with_mode("smith", Some("headless"))),
+            "(headless) smith"
         );
         // Interactive and mode-less sessions render the bare harness.
         assert_eq!(
-            harness_label(&summary_with_mode("zarvis", Some("interactive"))),
-            "zarvis"
+            harness_label(&summary_with_mode("smith", Some("interactive"))),
+            "smith"
         );
         assert_eq!(harness_label(&summary_with_mode("shell", None)), "shell");
     }
 
     #[test]
-    fn approval_mode_modeline_label_shows_manual_for_zarvis() {
-        let s = summary_with_mode("zarvis", Some("interactive"));
+    fn approval_mode_modeline_label_shows_manual_for_smith() {
+        let s = summary_with_mode("smith", Some("interactive"));
         assert_eq!(approval_mode_modeline_label(&s), Some("manual"));
     }
 
@@ -7951,14 +7963,14 @@ mod tests {
 
     #[test]
     fn approval_mode_modeline_label_uses_non_manual_badge() {
-        let mut s = summary_with_mode("zarvis", Some("interactive"));
+        let mut s = summary_with_mode("smith", Some("interactive"));
         s.approval_mode = agentd_protocol::ApprovalMode::UnsafeAuto;
         assert_eq!(approval_mode_modeline_label(&s), Some("unsafe-auto"));
     }
 
     #[test]
-    fn zarvis_running_animates_only_while_agent_active() {
-        let mut s = summary_with_mode("zarvis", Some("interactive"));
+    fn smith_running_animates_only_while_agent_active() {
+        let mut s = summary_with_mode("smith", Some("interactive"));
         s.state = SessionState::Running;
         // Mid-turn: agent active → animate, even with no recent PTY bytes.
         assert!(session_should_animate_status(&s, false, true));
@@ -7981,7 +7993,7 @@ mod tests {
 
     #[test]
     fn awaiting_input_status_stays_static() {
-        let mut s = summary_with_mode("zarvis", Some("interactive"));
+        let mut s = summary_with_mode("smith", Some("interactive"));
         s.state = SessionState::AwaitingInput;
         // Not Running → never animates, regardless of activity signals.
         assert!(!session_should_animate_status(&s, true, true));

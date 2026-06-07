@@ -160,14 +160,14 @@ impl Persist {
 
 /// Resolve the session data dir from env, if any.
 pub fn session_data_dir_from_env() -> Option<PathBuf> {
-    std::env::var("AGENTD_SESSION_DATA_DIR")
+    std::env::var("CONSTRUCT_SESSION_DATA_DIR")
         .ok()
         .map(PathBuf::from)
 }
 
 /// True if the daemon signaled this is a resumed session.
 pub fn is_resume() -> bool {
-    std::env::var("AGENTD_RESUME").as_deref() == Ok("1")
+    std::env::var("CONSTRUCT_RESUME").as_deref() == Ok("1")
 }
 
 #[cfg(test)]

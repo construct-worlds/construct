@@ -68,9 +68,8 @@ async fn typing_latency_under_background_floods() {
         );
     }
 
-    let mut tui = Tui::spawn_with_recording(&d.socket, "multi_session_latency")
-        .expect("spawn TUI");
-    tui.wait_for("agentd  focus:", Duration::from_secs(15))
+    let mut tui = Tui::spawn_with_recording(&d.socket, "multi_session_latency").expect("spawn TUI");
+    tui.wait_for("construct  focus:", Duration::from_secs(15))
         .await
         .expect("modeline");
 
@@ -79,7 +78,11 @@ async fn typing_latency_under_background_floods() {
     tokio::time::sleep(Duration::from_millis(400)).await;
     tui.send(b"\r").ok();
     tokio::time::sleep(Duration::from_millis(800)).await;
-    assert!(probe(&mut tui).await, "PTY capture not active:\n{}", tui.screen());
+    assert!(
+        probe(&mut tui).await,
+        "PTY capture not active:\n{}",
+        tui.screen()
+    );
     tui.send(b"\x15").ok(); // clear line
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -104,7 +107,10 @@ async fn typing_latency_under_background_floods() {
     let under_load = measure_backspace_burst(&mut tui).await;
 
     eprintln!("\n=== focused typing: backspace x{MARKER_LEN} settle ===");
-    eprintln!("baseline (idle bg):        {:.1} ms", baseline.as_secs_f64() * 1000.0);
+    eprintln!(
+        "baseline (idle bg):        {:.1} ms",
+        baseline.as_secs_f64() * 1000.0
+    );
     match under_load {
         Some(d) => eprintln!(
             "under {BG_SESSIONS} flooding bg sessions: {:.1} ms  ({:.1}x)",
@@ -164,7 +170,11 @@ async fn measure_backspace_burst(tui: &mut Tui) -> Option<Duration> {
     Some(t0.elapsed())
 }
 
-async fn wait_until(tui: &Tui, pred: impl Fn(&str) -> bool, timeout: Duration) -> anyhow::Result<()> {
+async fn wait_until(
+    tui: &Tui,
+    pred: impl Fn(&str) -> bool,
+    timeout: Duration,
+) -> anyhow::Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
         if pred(&tui.screen()) {

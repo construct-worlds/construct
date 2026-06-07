@@ -6,10 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "agent: TUI client for agentd"
+description = "construct: TUI client for constructd"
 
 [[bin]]
-name = "agent"
+name = "construct"
 path = "src/main.rs"
 
 [dependencies]

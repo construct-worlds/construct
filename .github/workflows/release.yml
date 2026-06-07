@@ -21,7 +21,7 @@ env:
   # The binaries that make up a release. The daemon resolves adapters as
   # siblings of its own path (see `locate_binary`), so all of these must
   # ship together and land in the same directory.
-  BINS: "agent agentd agentd-mcp agentd-adapter-shell agentd-adapter-claude agentd-adapter-codex agentd-adapter-antigravity agentd-adapter-zarvis"
+  BINS: "construct constructd construct-mcp construct-adapter-shell construct-adapter-claude construct-adapter-codex construct-adapter-antigravity construct-adapter-smith"
 
 jobs:
   verify:
@@ -85,15 +85,15 @@ jobs:
           CC_aarch64_unknown_linux_gnu: ${{ matrix.cc }}
         run: |
           cargo build --release --locked --target "${{ matrix.target }}" \
-            -p agentd -p agentd-cli -p agentd-mcp \
-            -p agentd-adapter-shell -p agentd-adapter-claude \
-            -p agentd-adapter-codex -p agentd-adapter-antigravity \
-            -p agentd-adapter-zarvis
+            -p agentd -p agentd-cli -p construct-mcp \
+            -p construct-adapter-shell -p construct-adapter-claude \
+            -p construct-adapter-codex -p construct-adapter-antigravity \
+            -p construct-adapter-smith
 
       - name: Package tarball + checksum
         run: |
           set -eu
-          stage="agentd-${{ matrix.target }}"
+          stage="constructd-${{ matrix.target }}"
           mkdir -p "$stage"
           for b in $BINS; do
             cp "target/${{ matrix.target }}/release/$b" "$stage/"
@@ -109,10 +109,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: agentd-${{ matrix.target }}
+          name: constructd-${{ matrix.target }}
           path: |
-            agentd-${{ matrix.target }}.tar.gz
-            agentd-${{ matrix.target }}.tar.gz.sha256
+            constructd-${{ matrix.target }}.tar.gz
+            constructd-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
 
   release:

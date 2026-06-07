@@ -3,17 +3,15 @@
 use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
     ipc_method, transport, ChatViewerActiveResult, ClientView, CreateSessionParams, DiffResult,
-    ErrorObject, GroupCreateParams,
-    GroupDeleteParams, GroupMoveParams, GroupRenameParams, GroupSetCollapsedParams, GroupSummary,
-    HarnessInfo, MoveDirection, Notification, PingResult, ProjectCreateParams, ProjectCreateResult,
-    ProjectDeleteParams, ProjectMoveParams, ProjectRenameParams, ProjectSetCollapsedParams,
-    ProjectSummary, PtyReplayResult, Request, Response, SessionAttachClipboardParams,
-    SessionAttachClipboardResult, SessionDetail, SessionEmitEventParams, SessionIdParams,
-    SessionInputParams, SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams,
-    SessionSetApprovalModeParams, SessionSetPinnedParams, SessionSetProjectParams,
-    SessionSetTitleParams, SessionSetViewParams, SessionSummary, SessionToolDecisionParams,
-    SubscribeParams,
-    TranscriptParams, TranscriptResult,
+    ErrorObject, GroupCreateParams, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
+    GroupSetCollapsedParams, GroupSummary, HarnessInfo, MoveDirection, Notification, PingResult,
+    ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams, ProjectMoveParams,
+    ProjectRenameParams, ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, Request,
+    Response, SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
+    SessionEmitEventParams, SessionIdParams, SessionInputParams, SessionMoveParams,
+    SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
+    SessionSetPinnedParams, SessionSetProjectParams, SessionSetTitleParams, SessionSetViewParams,
+    SessionSummary, SessionToolDecisionParams, SubscribeParams, TranscriptParams, TranscriptResult,
 };
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
@@ -457,7 +455,7 @@ impl Client {
     /// Respawn a session's adapter (TUI restart-confirm flow). Used
     /// on a `Done` session to bring it back to life so the user can
     /// keep typing. The daemon launches the new adapter with
-    /// `AGENTD_RESUME=1`.
+    /// `CONSTRUCT_RESUME=1`.
     pub async fn restart(&self, id: &str) -> Result<()> {
         let _: serde_json::Value = self
             .request(

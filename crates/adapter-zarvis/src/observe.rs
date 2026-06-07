@@ -1,7 +1,7 @@
 //! Orchestrator-only event observer.
 //!
 //! When the zarvis adapter is running as the daemon's orchestrator
-//! session (`AGENTD_SESSION_KIND=orchestrator`), it opens a second
+//! session (`CONSTRUCT_SESSION_KIND=orchestrator`), it opens a second
 //! IPC connection to the daemon and subscribes to events from every
 //! other session. Filtered, those events flow back to the interactive
 //! agent loop as [`Observation`]s — the orchestrator surfaces them as
@@ -90,25 +90,20 @@ pub fn spawn(self_id: String) -> mpsc::UnboundedReceiver<Observation> {
                 continue;
             }
             let Some(params) = n.params else { continue };
-            let payload: EventNotificationPayload =
-                match serde_json::from_value(params) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "orchestrator observe: bad payload");
-                        continue;
-                    }
-                };
+            let payload: EventNotificationPayload = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "orchestrator observe: bad payload");
+                    continue;
+                }
+            };
             if payload.session_id == self_id {
                 continue;
             }
             let Some(msg) = format_observation(&payload.event) else {
                 continue;
             };
-            let short = payload
-                .session_id
-                .chars()
-                .take(10)
-                .collect::<String>();
+            let short = payload.session_id.chars().take(10).collect::<String>();
             if tx
                 .send(Observation {
                     session_id: payload.session_id,
@@ -143,9 +138,7 @@ fn format_observation(ev: &SessionEvent) -> Option<String> {
                 .unwrap_or_default();
             Some(format!("{label}{suffix}"))
         }
-        SessionEvent::Done { exit_code } => {
-            Some(format!("ended (exit={exit_code})"))
-        }
+        SessionEvent::Done { exit_code } => Some(format!("ended (exit={exit_code})")),
         _ => None,
     }
 }

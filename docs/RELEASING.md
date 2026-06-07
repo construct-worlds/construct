@@ -8,8 +8,8 @@ checksums, and publishes a GitHub Release with auto-generated release notes.
 ## Versioning
 
 The single source of truth is `version` under `[workspace.package]` in the
-root `Cargo.toml`. Every binary inherits it, so `agentd --version` and
-`agent --version` always report the workspace version. Use [semver](https://semver.org/)
+root `Cargo.toml`. `constructd --version` and
+`construct --version` always report the workspace version. Use [semver](https://semver.org/)
 (`MAJOR.MINOR.PATCH`).
 
 The release workflow's `verify` job refuses to build unless the pushed tag
@@ -39,14 +39,14 @@ never publish a mislabelled binary.
 3. The workflow runs. When it finishes, a GitHub Release for `v0.2.0` exists
    with these assets:
 
-   - `agentd-aarch64-apple-darwin.tar.gz`     (macOS, Apple Silicon)
-   - `agentd-x86_64-apple-darwin.tar.gz`      (macOS, Intel)
-   - `agentd-x86_64-unknown-linux-musl.tar.gz` (Linux x86_64, static)
-   - `agentd-aarch64-unknown-linux-gnu.tar.gz` (Linux arm64)
+   - `constructd-aarch64-apple-darwin.tar.gz`     (macOS, Apple Silicon)
+   - `constructd-x86_64-apple-darwin.tar.gz`      (macOS, Intel)
+   - `constructd-x86_64-unknown-linux-musl.tar.gz` (Linux x86_64, static)
+   - `constructd-aarch64-unknown-linux-gnu.tar.gz` (Linux arm64)
    - `SHA256SUMS`
 
-   Each tarball contains all release binaries (`agent`, `agentd`,
-   `agentd-mcp`, `agentd-adapter-*`) plus `README.md` and `LICENSE`.
+   Each tarball contains all release binaries (`construct`, `constructd`,
+   `construct-mcp`, `construct-adapter-*`) plus `README.md` and `LICENSE`.
 
 4. Review the release notes. The workflow passes `generate_release_notes: true`
    to the release step, so GitHub fills the release body automatically from the

@@ -3,7 +3,7 @@
 //! Defaults to a Matrix-inspired palette. Users can override any slot in:
 //!
 //! ```toml
-//! # $AGENTD_CONFIG_DIR/theme.toml, default ~/.config/agentd/theme.toml
+//! # $CONSTRUCT_CONFIG_DIR/theme.toml, default ~/.config/construct/theme.toml
 //! [colors]
 //! text = "#b8ffcc"
 //! accent = "#39ff88"

@@ -28,11 +28,11 @@ Default to 300s (5 minutes) if you genuinely can't tell. Stay within [30, 86400]
 /// bounds, but clamping at the adapter level gives a cleaner
 /// error path + lets us mention the clamp in the tool result.
 fn bounds() -> (u64, u64) {
-    let min = std::env::var("AGENTD_LOOP_MIN_SECS")
+    let min = std::env::var("CONSTRUCT_LOOP_MIN_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30u64);
-    let max = std::env::var("AGENTD_LOOP_MAX_SECS")
+    let max = std::env::var("CONSTRUCT_LOOP_MAX_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(24 * 3600u64);
@@ -57,11 +57,7 @@ impl TextSink for CaptureSink {
 
 /// Ask the model for an interval in seconds for this loop's prompt.
 /// Returns a clamped value; failures fall back to the lower bound.
-pub async fn suggest(
-    provider: &dyn LlmProvider,
-    model: &str,
-    user_prompt: &str,
-) -> Result<u64> {
+pub async fn suggest(provider: &dyn LlmProvider, model: &str, user_prompt: &str) -> Result<u64> {
     let messages = vec![Message {
         role: Role::User,
         content: Content::Text {
@@ -73,7 +69,9 @@ pub async fn suggest(
     let _turn = provider
         .complete(model, SYSTEM_PROMPT, &messages, &tools, &mut sink)
         .await?;
-    Ok(parse_secs(&sink.text).map(clamp).unwrap_or_else(|| bounds().0))
+    Ok(parse_secs(&sink.text)
+        .map(clamp)
+        .unwrap_or_else(|| bounds().0))
 }
 
 /// Extract the first run of digits in the response, parse it,
@@ -114,12 +112,12 @@ mod tests {
 
     #[test]
     fn clamp_respects_bounds() {
-        std::env::set_var("AGENTD_LOOP_MIN_SECS", "30");
-        std::env::set_var("AGENTD_LOOP_MAX_SECS", "3600");
+        std::env::set_var("CONSTRUCT_LOOP_MIN_SECS", "30");
+        std::env::set_var("CONSTRUCT_LOOP_MAX_SECS", "3600");
         assert_eq!(clamp(5), 30);
         assert_eq!(clamp(5000), 3600);
         assert_eq!(clamp(60), 60);
-        std::env::remove_var("AGENTD_LOOP_MIN_SECS");
-        std::env::remove_var("AGENTD_LOOP_MAX_SECS");
+        std::env::remove_var("CONSTRUCT_LOOP_MIN_SECS");
+        std::env::remove_var("CONSTRUCT_LOOP_MAX_SECS");
     }
 }

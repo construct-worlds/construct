@@ -1,4 +1,4 @@
-//! Zarvis — agentd's built-in multi-provider agent harness.
+//! Smith — construct's built-in multi-provider agent harness.
 //!
 //! Talks to OpenAI / Anthropic / Gemini / Ollama directly (no vendor CLI required),
 //! runs its own agent loop, and executes shell + filesystem +
@@ -32,7 +32,7 @@ enum Mode {
 }
 
 fn resolve_mode(params: &SessionStartParams) -> Mode {
-    if let Ok(m) = std::env::var("AGENTD_ZARVIS_MODE") {
+    if let Ok(m) = std::env::var("CONSTRUCT_SMITH_MODE") {
         match m.as_str() {
             "interactive" => return Mode::Interactive,
             "headless" => return Mode::Headless,
@@ -43,7 +43,7 @@ fn resolve_mode(params: &SessionStartParams) -> Mode {
         Some("interactive") => Mode::Interactive,
         Some("headless") => Mode::Headless,
         // Default: interactive when the client supplied a PTY size (the
-        // TUI always does), else headless (so `agent new zarvis "..."`
+        // TUI always does), else headless (so `construct new smith "..."`
         // from a non-TUI client gets the structured stream).
         _ if params.pty_size.is_some() => Mode::Interactive,
         _ => Mode::Headless,
@@ -52,7 +52,7 @@ fn resolve_mode(params: &SessionStartParams) -> Mode {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // CLI sub-mode: `agentd-adapter-zarvis --title-mode "<prompt>"` runs
+    // CLI sub-mode: `construct-adapter-smith --title-mode "<prompt>"` runs
     // one LLM completion that returns a short conversation title on
     // stdout. Used by the daemon to auto-name sessions on first input.
     let args: Vec<String> = std::env::args().collect();
@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let metadata = InitializeResult {
-        name: "zarvis".into(),
+        name: "smith".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         capabilities: Capabilities {
             supports_input: true,
@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => {
                 ctx.emit.emit(SessionEvent::Error {
                     message: format!(
-                        "{e}\n\nzarvis needs one of: AGENTD_ZARVIS_MODEL set, \
+                        "{e}\n\nsmith needs one of: CONSTRUCT_SMITH_MODEL set, \
                          ANTHROPIC_API_KEY set, OPENAI_API_KEY set, \
                          GEMINI_API_KEY set, or a local Ollama (set OLLAMA_HOST \
                          if not at localhost:11434)."
@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
             Mode::Headless => agent::run(params, ctx, resolved).await,
         };
         if let Err(e) = result {
-            tracing::warn!(error = ?e, "zarvis agent loop returned with error");
+            tracing::warn!(error = ?e, "smith agent loop returned with error");
         }
     })
     .await

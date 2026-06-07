@@ -81,7 +81,7 @@ impl Profile {
     }
 
     pub fn from_env() -> Self {
-        match std::env::var("AGENTD_KEYMAP").as_deref() {
+        match std::env::var("CONSTRUCT_KEYMAP").as_deref() {
             Ok("vim") => Profile::Vim,
             _ => Profile::Emacs,
         }
@@ -188,7 +188,6 @@ fn emacs() -> Keymap {
     let bindings = vec![
         // Quit
         (Chord(vec![ctrl('x'), ctrl('c')]), Quit),
-        (Chord(vec![ch('q')]), Quit),
         // Session navigation
         (Chord(vec![ctrl('n')]), NextSession),
         (Chord(vec![ctrl('p')]), PrevSession),
@@ -266,7 +265,6 @@ fn emacs() -> Keymap {
 fn vim() -> Keymap {
     use KeyAction::*;
     let bindings = vec![
-        (Chord(vec![ch('q')]), Quit),
         (Chord(vec![ch('j')]), NextSession),
         (Chord(vec![ch('k')]), PrevSession),
         (Chord(vec![key(KeyCode::Down)]), NextSession),

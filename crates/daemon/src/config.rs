@@ -1,4 +1,4 @@
-//! Config loading. Looks at `~/.config/agentd/config.toml`, merging built-in
+//! Config loading. Looks at `~/.config/construct/config.toml`, merging built-in
 //! adapter defaults underneath.
 
 use agentd_protocol::paths::Paths;
@@ -6,29 +6,31 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
-pub const DEFAULT_CONFIG_TOML: &str = r#"# agentd configuration
+pub const DEFAULT_CONFIG_TOML: &str = r#"# construct configuration
 # Each [adapters.<name>] entry registers a harness. The daemon looks up the
 # binary in PATH or alongside the daemon binary. Use `binary = "/abs/path"`
 # to override.
 
 # [adapters.shell]
-# binary = "agentd-adapter-shell"
+# binary = "construct-adapter-shell"
 # description = "Generic shell command runner"
 
 # [adapters.claude]
-# binary = "agentd-adapter-claude"
+# binary = "construct-adapter-claude"
 # description = "Claude Code"
 
 # [adapters.codex]
-# binary = "agentd-adapter-codex"
+# binary = "construct-adapter-codex"
 # description = "OpenAI Codex"
 
-# [adapters.zarvis.env]
+# [adapters.smith.env]
 # # Per-harness env vars merged into every spawned session. Lets
 # # operators set defaults like the model from config.toml instead
 # # of needing to export them in the shell that launches the daemon.
-# # Per-session env (`agent new --env KEY=VAL`) takes precedence.
-# # AGENTD_ZARVIS_MODEL = "codex-oauth:gpt-5.5"
+# # Per-session env (`construct new --env KEY=VAL`) takes precedence.
+# # CONSTRUCT_SMITH_MODEL = "codex-oauth:gpt-5.5"
+# #
+# smith is the native built-in harness.
 
 # [defaults]
 # worktree = false   # default value of session.worktree if not specified
@@ -49,7 +51,7 @@ pub struct OrchestratorConfig {
     /// Which harness backs the daemon-created orchestrator session.
     /// `None` (TOML: `harness = ""` or `enabled = false`) disables
     /// the orchestrator entirely — clients then fall back to the
-    /// static command palette. Default: `"zarvis"`.
+    /// static command palette. Default: `"smith"`.
     #[serde(default)]
     pub harness: Option<String>,
     /// Hard kill switch; set to `false` to disable the orchestrator
@@ -65,7 +67,7 @@ fn default_orchestrator_enabled() -> bool {
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
-            harness: Some("zarvis".to_string()),
+            harness: Some("smith".to_string()),
             enabled: true,
         }
     }
@@ -95,14 +97,16 @@ pub struct AdapterConfig {
     /// shell where the daemon launches. Merged INTO the per-session
     /// `env_with_meta` (see `daemon/src/session.rs`); existing
     /// per-session env takes precedence so an explicit
-    /// `agent new --env KEY=VAL` still overrides.
+    /// `construct new --env KEY=VAL` still overrides.
     ///
-    /// Example: pin every new zarvis session to use the Codex OAuth
+    /// Example: pin every new smith session to use the
+    /// Codex OAuth path (subscription-billed) instead of the heuristic
+    /// fallback:
     /// path (subscription-billed) instead of the heuristic fallback:
     ///
     /// ```toml
-    /// [adapters.zarvis]
-    /// env = { AGENTD_ZARVIS_MODEL = "codex-oauth:gpt-5.5" }
+    /// [adapters.smith]
+    /// env = { CONSTRUCT_SMITH_MODEL = "codex-oauth:gpt-5.5" }
     /// ```
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -123,27 +127,27 @@ pub struct BuiltinAdapter {
 pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
     BuiltinAdapter {
         name: "shell",
-        binary: "agentd-adapter-shell",
+        binary: "construct-adapter-shell",
         description: "Generic shell command runner",
     },
     BuiltinAdapter {
         name: "claude",
-        binary: "agentd-adapter-claude",
+        binary: "construct-adapter-claude",
         description: "Claude Code (wraps the `claude` CLI)",
     },
     BuiltinAdapter {
         name: "codex",
-        binary: "agentd-adapter-codex",
+        binary: "construct-adapter-codex",
         description: "OpenAI Codex (wraps the `codex` CLI)",
     },
     BuiltinAdapter {
         name: "antigravity",
-        binary: "agentd-adapter-antigravity",
+        binary: "construct-adapter-antigravity",
         description: "Google Antigravity (wraps the `agy` CLI)",
     },
     BuiltinAdapter {
-        name: "zarvis",
-        binary: "agentd-adapter-zarvis",
+        name: "smith",
+        binary: "construct-adapter-smith",
         description: "Built-in multi-provider agent (OpenAI / Anthropic / Ollama)",
     },
 ];
@@ -154,14 +158,13 @@ impl Config {
         let mut cfg = if path.exists() {
             let s = std::fs::read_to_string(&path)
                 .with_context(|| format!("read {}", path.display()))?;
-            toml::from_str::<Config>(&s)
-                .with_context(|| format!("parse {}", path.display()))?
+            toml::from_str::<Config>(&s).with_context(|| format!("parse {}", path.display()))?
         } else {
             Self::default()
         };
         // Layer in built-ins so users don't have to declare them.
         // Important: we layer at the FIELD level, not the entry level
-        // — a user who declared `[adapters.zarvis] env = {...}` (only
+        // — a user who declared `[adapters.smith] env = {...}` (only
         // to set per-harness env defaults) still needs the builtin
         // `binary` + `description` to fill in. Without this,
         // declaring an `[adapters.<name>]` block to set ONE field
@@ -190,17 +193,17 @@ mod tests {
     #[test]
     fn adapter_env_table_parses() {
         let toml = r#"
-            [adapters.zarvis]
-            binary = "agentd-adapter-zarvis"
-            env = { AGENTD_ZARVIS_MODEL = "codex-oauth:gpt-5.5", DEBUG = "1" }
+            [adapters.smith]
+            binary = "construct-adapter-smith"
+            env = { CONSTRUCT_SMITH_MODEL = "codex-oauth:gpt-5.5", DEBUG = "1" }
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        let zarvis = cfg.adapters.get("zarvis").expect("zarvis adapter");
+        let smith = cfg.adapters.get("smith").expect("smith adapter");
         assert_eq!(
-            zarvis.env.get("AGENTD_ZARVIS_MODEL").map(String::as_str),
+            smith.env.get("CONSTRUCT_SMITH_MODEL").map(String::as_str),
             Some("codex-oauth:gpt-5.5"),
         );
-        assert_eq!(zarvis.env.get("DEBUG").map(String::as_str), Some("1"));
+        assert_eq!(smith.env.get("DEBUG").map(String::as_str), Some("1"));
     }
 
     /// Omitting `env` is fine — it defaults to empty rather than
@@ -208,15 +211,15 @@ mod tests {
     #[test]
     fn adapter_env_defaults_to_empty() {
         let toml = r#"
-            [adapters.zarvis]
-            binary = "agentd-adapter-zarvis"
+            [adapters.smith]
+            binary = "construct-adapter-smith"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        let zarvis = cfg.adapters.get("zarvis").expect("zarvis adapter");
-        assert!(zarvis.env.is_empty());
+        let smith = cfg.adapters.get("smith").expect("smith adapter");
+        assert!(smith.env.is_empty());
     }
 
-    /// REGRESSION: declaring `[adapters.zarvis] env = {…}` (to set
+    /// REGRESSION: declaring `[adapters.smith] env = {…}` (to set
     /// per-harness env defaults — the motivating use case for that
     /// field) must NOT drop the built-in `binary` / `description`
     /// values that the daemon needs to actually spawn the adapter.
@@ -225,13 +228,13 @@ mod tests {
     /// `or_insert_with`, which only fired when the entry was
     /// missing entirely. A user-supplied entry that lacked `binary`
     /// got NO `binary` field, the daemon fell back to looking up a
-    /// binary named bare `zarvis` (not `agentd-adapter-zarvis`),
+    /// binary named bare `smith` (not `construct-adapter-smith`),
     /// and session create failed with "adapter binary not found".
     #[test]
     fn user_partial_adapter_config_keeps_builtin_binary() {
         let toml = r#"
-            [adapters.zarvis]
-            env = { AGENTD_ZARVIS_MODEL = "codex-oauth:gpt-5.5" }
+            [adapters.smith]
+            env = { CONSTRUCT_SMITH_MODEL = "codex-oauth:gpt-5.5" }
         "#;
         let mut cfg: Config = toml::from_str(toml).expect("parse");
         // Mimic Config::load's builtin-layering step (the actual
@@ -246,16 +249,15 @@ mod tests {
                 entry.description = Some(b.description.to_string());
             }
         }
-        let zarvis = cfg.adapters.get("zarvis").expect("zarvis adapter");
+        let smith = cfg.adapters.get("smith").expect("smith adapter");
         assert_eq!(
-            zarvis.binary.as_deref(),
-            Some("agentd-adapter-zarvis"),
-            "user-supplied [adapters.zarvis] with only `env` set must \
-             still pick up the built-in binary path",
+            smith.binary.as_deref(),
+            Some("construct-adapter-smith"),
+            "user-supplied [adapters.smith] with only `env` set must still pick up the built-in binary path",
         );
         // And the user's env stays in place.
         assert_eq!(
-            zarvis.env.get("AGENTD_ZARVIS_MODEL").map(String::as_str),
+            smith.env.get("CONSTRUCT_SMITH_MODEL").map(String::as_str),
             Some("codex-oauth:gpt-5.5"),
         );
     }
