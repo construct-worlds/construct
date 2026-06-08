@@ -22,7 +22,7 @@ All code changes go through a branch, worktree, and PR — no exceptions.
 Use [vhs](https://github.com/charmbracelet/vhs) to capture deterministic mp4 / gif clips of the TUI without needing a desktop session or screen-recording permissions. The notes below are the ones we wish we'd had on the first attempt.
 
 - **Build the worktree's binaries.** vhs records whatever `agent` you point it at, so make sure the worktree has been built (`cargo build` per the workflow above) before recording. For a before/after pair, prepare two worktrees so each side has its own binaries — never re-record `before` from a tree that already has the change applied.
-- **Isolated daemon.** Run vhs against a fresh `AGENTD_RUNTIME_DIR` / `AGENTD_STATE_DIR` / `AGENTD_DATA_DIR` / `AGENTD_CONFIG_DIR` under `/tmp/` so it doesn't collide with the user's running daemon. Each recording gets its own dir and its own daemon process; tear them down at the end.
+- **Isolated daemon.** Run vhs against a fresh `CONSTRUCT_RUNTIME_DIR` / `CONSTRUCT_STATE_DIR` / `CONSTRUCT_DATA_DIR` / `CONSTRUCT_CONFIG_DIR` under `/tmp/` so it doesn't collide with the user's running daemon. Each recording gets its own dir and its own daemon process; tear them down at the end.
 - **Put the TUI in a state that actually shows your change.** This part varies most by change — pick whichever shape fits:
   - **Specific harness features** (a smith tool, codex output rendering, claude resume, …): spawn that harness with a representative prompt, e.g. `agent new smith "<task>"`. Use a prompt whose output exercises the diff (tool calls if you changed tool rendering, long messages if you changed wrapping, etc.).
   - **Minibuffer / keymap / popup / palette**: send the keystrokes from inside the vhs tape with `Type`, `Ctrl+X`, `Enter`, `Sleep`, etc. — no extra sessions needed if the feature is reachable from a stock TUI.
@@ -45,11 +45,11 @@ Use [vhs](https://github.com/charmbracelet/vhs) to capture deterministic mp4 / g
   rm -rf "$DEMO_DIR"
   mkdir -p "$DEMO_DIR/run" "$DEMO_DIR/state" "$DEMO_DIR/data" "$DEMO_DIR/config"
 
-  export AGENTD_RUNTIME_DIR="$DEMO_DIR/run"
-  export AGENTD_STATE_DIR="$DEMO_DIR/state"
-  export AGENTD_DATA_DIR="$DEMO_DIR/data"
-  export AGENTD_CONFIG_DIR="$DEMO_DIR/config"
-  export AGENTD_SHELL_BIN="/bin/bash"        # adapter discovery
+  export CONSTRUCT_RUNTIME_DIR="$DEMO_DIR/run"
+  export CONSTRUCT_STATE_DIR="$DEMO_DIR/state"
+  export CONSTRUCT_DATA_DIR="$DEMO_DIR/data"
+  export CONSTRUCT_CONFIG_DIR="$DEMO_DIR/config"
+  export CONSTRUCT_SHELL_BIN="/bin/bash"        # adapter discovery
   export PATH="$BIN_DIR:$PATH"
 
   "$BIN_DIR/agentd" run >"/tmp/rain-${VARIANT}-daemon.log" 2>&1 &
@@ -94,7 +94,7 @@ Use [vhs](https://github.com/charmbracelet/vhs) to capture deterministic mp4 / g
 `crates/daemon/assets/index.html` + `static/*` are `include_str!`/`include_bytes!`'d into the daemon, so a naive edit needs a recompile + restart + browser reconnect. To skip all that, point a **running** debug daemon at a worktree's assets directory and it serves them from disk, with a live-reload poller injected (browser auto-refreshes on save):
 
 - **From a dev session (any worktree):** call the `webui_hot_reload` MCP tool with `dir: "<worktree>/crates/daemon/assets"` (debug builds only). `dir: null` reverts to the embedded assets.
-- **At boot:** `AGENTD_ASSETS_DIR=<dir>` (honored in debug builds only).
+- **At boot:** `CONSTRUCT_ASSETS_DIR=<dir>` (honored in debug builds only).
 - **Programmatically:** the `dev.set_assets` IPC method / `client.dev_set_assets()`.
 
 Edit `index.html` → save → the browser reloads itself (the injected poller watches `/dev/version`, a combined mtime of the served files). No rebuild, no daemon restart. Release builds ignore all of this and always serve the embedded, tamper-proof assets.
@@ -147,7 +147,7 @@ Most TUIs make the bottom command bar a special UI primitive. We don't — it's 
 - **Hidden from the list.** `kind: SessionKind::Orchestrator` filters it out of `list_items`.
 - **Auto-created.** `SessionManager::ensure_orchestrator()` runs at daemon start.
 - **Rendered in the bottom strip.** Same `ItemHistory::replay` pipeline as the main view, just a different Rect.
-- **Specialized system prompt.** Smith branches on `AGENTD_SESSION_KIND` to act as the fleet dispatcher instead of a worker.
+- **Specialized system prompt.** Smith branches on `CONSTRUCT_SESSION_KIND` to act as the fleet dispatcher instead of a worker.
 - **Subscribes to fleet events.** A second IPC connection turns other sessions' `Status{AwaitingInput|Errored|Done}` and `ToolApprovalRequest` into `OBSERVATION:` messages the orchestrator can react to.
 - **Approvals render inline in the PTY.** No global minibuffer preempt — the panel *is* the PTY.
 
