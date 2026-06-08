@@ -10,7 +10,7 @@
 //! The TUI's `vt100`-backed terminal pane parses these bytes the same
 //! way it parses any other PTY-backed adapter's output.
 
-use crate::agent::{push_msg, ResolvedModel};
+use crate::agent::{push_msg, system_prompt_for_env, ResolvedModel};
 use crate::context;
 use crate::persist::{self, Persist};
 use crate::provider::{self, Content, Message, Role, StopReason, TextSink, ToolCall};
@@ -276,48 +276,6 @@ fn emit_editor_state(emit: &EventEmitter, editor: &LineEditor, queue: &VecDeque<
             .map(str::to_string)
             .collect(),
     });
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PromptMode {
-    EditorState,
-    PtyPrompt,
-}
-
-impl PromptMode {
-    fn use_editor_state(self) -> bool {
-        matches!(self, Self::EditorState)
-    }
-}
-
-const ENV_SMITH_PTY_PROMPT: &str = "CONSTRUCT_SMITH_PTY_PROMPT";
-
-fn smith_prompt_mode() -> PromptMode {
-    smith_prompt_mode_from_env(std::env::var(ENV_SMITH_PTY_PROMPT).ok().as_deref())
-}
-
-fn smith_prompt_mode_from_env(raw: Option<&str>) -> PromptMode {
-    let raw = match raw {
-        Some(v) => v.trim().to_ascii_lowercase(),
-        None => return PromptMode::EditorState,
-    };
-    match raw.as_str() {
-        "1" | "true" | "on" | "yes" | "prompt" => PromptMode::PtyPrompt,
-        "0" | "false" | "off" | "no" | "disabled" => PromptMode::EditorState,
-        "" => PromptMode::EditorState,
-        _ => PromptMode::EditorState,
-    }
-}
-
-fn emit_editor_state_if_enabled(
-    emit: &EventEmitter,
-    editor: &LineEditor,
-    queue: &VecDeque<String>,
-    enabled: bool,
-) {
-    if enabled {
-        emit_editor_state(emit, editor, queue);
-    }
 }
 
 /// Lines whose start matches one of these labels are dimmed in the PTY
@@ -864,22 +822,12 @@ impl LineEditor {
     }
 
     fn submit(&mut self) -> LineEvent {
-        let mut line = std::mem::take(&mut self.buf);
-        // Normalize CRs so multi-line prompts round-trip.
-        if line.contains('\r') {
-            line = line.replace("\r\n", "\n").replace('\r', "\n");
-        }
+        let line = std::mem::take(&mut self.buf);
         self.cursor = 0;
         self.hist_pos = None;
         self.saved.clear();
         if !line.is_empty() && self.history.last().map(|s| s.as_str()) != Some(line.as_str()) {
             self.history.push(line.clone());
-            // Cap history at 10,000 entries (drop oldest first).
-            const HISTORY_MAX: usize = 10_000;
-            if self.history.len() > HISTORY_MAX {
-                let drop = self.history.len() - HISTORY_MAX;
-                self.history.drain(0..drop);
-            }
         }
         LineEvent::Submit(line)
     }
@@ -889,6 +837,10 @@ impl LineEditor {
         self.hist_pos = None;
         self.saved.clear();
         self.queued_recall = None;
+    }
+
+    fn ascii_at(&self, n: usize) -> Option<char> {
+        self.buf.chars().nth(n)
     }
 
     fn move_left(&mut self) {
@@ -1163,7 +1115,7 @@ impl LineEditor {
                 }
                 out.extend_from_slice(&self.redraw());
             }
-            // Ctrl-L — redraw bottom prompt/completions only (no full-screen clear)
+            // Ctrl-L — clear screen + redraw.
             0x0c => {
                 out.extend_from_slice(b"\x1b[2J\x1b[H");
                 out.extend_from_slice(&self.redraw());
@@ -1396,47 +1348,6 @@ mod tests {
         // No confident cheap default → keep the operator's model.
         assert_eq!(default_monitor_spec("ollama", "llama3"), None);
         assert_eq!(default_monitor_spec("gemini", "gemini-pro"), None);
-    }
-
-    #[test]
-    fn smith_prompt_mode_defaults_to_editor_state() {
-        assert_eq!(smith_prompt_mode_from_env(None), PromptMode::EditorState);
-    }
-
-    #[test]
-    fn smith_prompt_mode_accepts_prompt_values() {
-        assert_eq!(
-            smith_prompt_mode_from_env(Some("on")),
-            PromptMode::PtyPrompt
-        );
-        assert_eq!(
-            smith_prompt_mode_from_env(Some("1")),
-            PromptMode::PtyPrompt
-        );
-        assert_eq!(
-            smith_prompt_mode_from_env(Some("true")),
-            PromptMode::PtyPrompt
-        );
-    }
-
-    #[test]
-    fn smith_prompt_mode_defaults_to_editor_state_on_off_values() {
-        assert_eq!(
-            smith_prompt_mode_from_env(Some("off")),
-            PromptMode::EditorState
-        );
-        assert_eq!(
-            smith_prompt_mode_from_env(Some("0")),
-            PromptMode::EditorState
-        );
-    }
-
-    #[test]
-    fn smith_prompt_mode_defaults_to_editor_state_for_unknown_values() {
-        assert_eq!(
-            smith_prompt_mode_from_env(Some("maybe")),
-            PromptMode::EditorState
-        );
     }
 
     #[test]
@@ -2099,8 +2010,6 @@ pub async fn run(
         prompt
     };
 
-    let prompt_mode = smith_prompt_mode();
-    let emit_editor_state = prompt_mode.use_editor_state();
     let term = Terminal::new(&emit);
     let resuming = persist::is_resume();
     // On resume we emit nothing — banner, note, and prompt all stay off
@@ -2110,9 +2019,6 @@ pub async fn run(
     // prompt, so the user has an explicit "wake me up" escape hatch.)
     if !resuming {
         term.banner(provider_name, &model, approval_mode);
-        if !emit_editor_state {
-            term.prompt();
-        }
     }
     emit.emit(SessionEvent::Status {
         state: SessionState::Running,
@@ -2192,7 +2098,7 @@ pub async fn run(
     let mut queued_rows: usize = 0;
     // Initial editor state so the TUI's bottom pane has something to
     // paint before the first drive call (idle waiting for user input).
-    emit_editor_state_if_enabled(&emit, &editor, &queue, emit_editor_state);
+    emit_editor_state(&emit, &editor, &queue);
 
     // Orchestrator-only: subscribe to other sessions' events so the
     // agent can react to fleet activity (sessions finishing, errors,
@@ -2257,9 +2163,7 @@ pub async fn run(
         let mut user_text = if let Some(t) = pending.pop_front() {
             // Echo the pre-supplied prompt as if the user just sent it.
             term.echo_consumed_line(&t);
-            if emit_editor_state {
-                emit_editor_state_if_enabled(&emit, &editor, &queue, emit_editor_state);
-            }
+            emit_editor_state(&emit, &editor, &queue);
             t
         } else if let Some(t) = queue.pop_front() {
             // Echo the combined consumed text into the chat as a gray
@@ -2269,9 +2173,7 @@ pub async fn run(
             editor.set_queued_recall(None);
             term.echo_consumed_line(&t);
             queued_rows = 0;
-            if emit_editor_state {
-                emit_editor_state_if_enabled(&emit, &editor, &queue, emit_editor_state);
-            }
+            emit_editor_state(&emit, &editor, &queue);
             t
         } else {
             emit.emit(SessionEvent::Status {
@@ -2287,7 +2189,6 @@ pub async fn run(
                 obs_rx.as_mut(),
                 &mut bg_completion_rx,
                 &tasks,
-                emit_editor_state,
                 ambient_loop.clone(),
             )
             .await
@@ -2561,15 +2462,11 @@ pub async fn run(
                     });
                 }
             }
-            if emit_editor_state {
-                emit_editor_state_if_enabled(&emit, &editor, &queue, emit_editor_state);
-            }
+            emit_editor_state(&emit, &editor, &queue);
             continue;
         }
         if trimmed.is_empty() {
-            if emit_editor_state {
-                emit_editor_state_if_enabled(&emit, &editor, &queue, emit_editor_state);
-            }
+            emit_editor_state(&emit, &editor, &queue);
             continue;
         }
 
@@ -2588,9 +2485,7 @@ pub async fn run(
             user_text = prompt.to_string();
         }
         if user_text.trim().is_empty() {
-            if emit_editor_state {
-                emit_editor_state_if_enabled(&emit, &editor, &queue, emit_editor_state);
-            }
+            emit_editor_state(&emit, &editor, &queue);
             continue;
         }
 
@@ -2712,7 +2607,6 @@ pub async fn run(
                 &mut queue,
                 &mut approval_mode,
                 &emit,
-                emit_editor_state,
                 tasks.clone(),
                 async {
                     crate::provider_watchdog::complete(
@@ -2767,7 +2661,6 @@ pub async fn run(
                             &mut queue,
                             &mut approval_mode,
                             &emit,
-                            emit_editor_state,
                             tasks.clone(),
                             async {
                                 crate::provider_watchdog::complete(
@@ -3012,7 +2905,6 @@ pub async fn run(
                     &mut queue,
                     &mut queued_rows,
                     &mut approval_mode,
-                    emit_editor_state,
                     tasks.clone(),
                     render_fut,
                 )
@@ -3068,7 +2960,6 @@ pub async fn run(
                             }),
                             recent_approvals: Vec::new(),
                         },
-                        emit_editor_state,
                         tasks.clone(),
                         bg_completion_tx.clone(),
                         bg_after,
@@ -3148,9 +3039,7 @@ pub async fn run(
                 editor.set_queued_recall(None);
                 term.echo_consumed_line(&steer);
                 queued_rows = 0;
-                if emit_editor_state {
-                    emit_editor_state_if_enabled(&emit, &editor, &queue, emit_editor_state);
-                }
+                emit_editor_state(&emit, &editor, &queue);
                 push_msg!(
                     messages,
                     persist,
@@ -3170,9 +3059,7 @@ pub async fn run(
 
         finish_agent_status(&emit, turn_started_at_ms, final_status);
         // Reset the editor pane to empty after the turn ends.
-        if emit_editor_state {
-            emit_editor_state_if_enabled(&emit, &editor, &queue, emit_editor_state);
-        }
+        emit_editor_state(&emit, &editor, &queue);
     }
     Ok(())
 }
@@ -3730,8 +3617,7 @@ async fn read_one_line(
     pty_width: &mut usize,
     mut obs_rx: Option<&mut tokio::sync::mpsc::UnboundedReceiver<crate::observe::Observation>>,
     bg_completion_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::tasks::BackgroundCompletion>,
-    _tasks: &std::sync::Arc<crate::tasks::Tasks>,
-    emit_editor_state: bool,
+    tasks: &std::sync::Arc<crate::tasks::Tasks>,
     ambient_loop: Option<OperatorAmbientLoop>,
 ) -> ReadOutcome {
     loop {
@@ -3778,12 +3664,7 @@ async fn read_one_line(
                 editor.buf.clear();
                 editor.cursor = 0;
                 term.note("(C-c)");
-                emit_editor_state_if_enabled(
-                    term.emit,
-                    editor,
-                    &VecDeque::new(),
-                    emit_editor_state,
-                );
+                emit_editor_state(term.emit, editor, &VecDeque::new());
             }
             Some(AdapterInboxMsg::Input(t)) => {
                 term.echo_consumed_line(&t);
@@ -3801,12 +3682,7 @@ async fn read_one_line(
                     match ev {
                         LineEvent::Submit(line) => {
                             term.echo_consumed_line(&line);
-                            emit_editor_state_if_enabled(
-                                term.emit,
-                                editor,
-                                &VecDeque::new(),
-                                emit_editor_state,
-                            );
+                            emit_editor_state(term.emit, editor, &VecDeque::new());
                             return ReadOutcome::Line(line);
                         }
                         LineEvent::Interrupt => {
@@ -3822,12 +3698,7 @@ async fn read_one_line(
                         }
                     }
                 }
-                emit_editor_state_if_enabled(
-                    term.emit,
-                    editor,
-                    &VecDeque::new(),
-                    emit_editor_state,
-                );
+                emit_editor_state(term.emit, editor, &VecDeque::new());
             }
             Some(AdapterInboxMsg::PtyResize { cols, .. }) => {
                 apply_pty_resize(cols, pty_width);
@@ -3861,7 +3732,6 @@ async fn run_one_tool(
     provider: &dyn crate::provider::LlmProvider,
     model: &str,
     review_ctx: &crate::agent::AutoReviewContext,
-    emit_editor_state: bool,
     tasks: std::sync::Arc<crate::tasks::Tasks>,
     bg_completion_tx: crate::tasks::BgCompletionTx,
     bg_after: std::time::Duration,
@@ -4092,7 +3962,6 @@ async fn run_one_tool(
         queue,
         queued_rows,
         approval_mode,
-        emit_editor_state,
         tasks,
         bg_completion_tx,
         bg_after,
@@ -4405,7 +4274,6 @@ async fn run_with_supervisor(
     queue: &mut VecDeque<String>,
     queued_rows: &mut usize,
     approval_mode: &mut ApprovalMode,
-    emit_editor_state: bool,
     tasks: std::sync::Arc<crate::tasks::Tasks>,
     bg_completion_tx: crate::tasks::BgCompletionTx,
     bg_after: std::time::Duration,
@@ -4460,7 +4328,6 @@ async fn run_with_supervisor(
         queue,
         queued_rows,
         approval_mode,
-        emit_editor_state,
         tasks_for_drive,
         &call_id,
         async { (&mut supervisor).await },
@@ -4538,7 +4405,6 @@ async fn drive_with_input_relaying<F>(
     queue: &mut VecDeque<String>,
     queued_rows: &mut usize,
     approval_mode: &mut ApprovalMode,
-    emit_editor_state: bool,
     tasks: std::sync::Arc<crate::tasks::Tasks>,
     this_call_id: &str,
     fut: F,
@@ -4550,7 +4416,7 @@ where
     // `EditorState` events. No PTY-side prompt painting here — the
     // PTY scrollback is reserved for chat + tool blocks.
     let _ = queued_rows; // retained for source-compat with callers
-    emit_editor_state_if_enabled(term.emit, editor, queue, emit_editor_state);
+    emit_editor_state(term.emit, editor, queue);
     tokio::pin!(fut);
     loop {
         tokio::select! {
@@ -4564,7 +4430,7 @@ where
                     Some(AdapterInboxMsg::SetApprovalMode(mode)) => *approval_mode = mode,
                     Some(AdapterInboxMsg::Input(t)) => {
                         enqueue_line(queue, editor, t);
-                        emit_editor_state_if_enabled(term.emit, editor, queue, emit_editor_state);
+                        emit_editor_state(term.emit, editor, queue);
                     }
                     Some(AdapterInboxMsg::PtyInput(bytes)) => {
                         if pty_input_requests_interrupt(&bytes) {
@@ -4595,7 +4461,7 @@ where
                                 }
                             }
                         }
-                        emit_editor_state_if_enabled(term.emit, editor, queue, emit_editor_state);
+                        emit_editor_state(term.emit, editor, queue);
                     }
                     Some(AdapterInboxMsg::PtyResize { .. }) => {}
                     Some(AdapterInboxMsg::ToolDecision { .. }) => {}
@@ -4901,7 +4767,6 @@ async fn drive_with_input<F>(
     queue: &mut VecDeque<String>,
     queued_rows: &mut usize,
     approval_mode: &mut ApprovalMode,
-    emit_editor_state: bool,
     tasks: std::sync::Arc<crate::tasks::Tasks>,
     fut: F,
 ) -> DriveExit<F::Output>
@@ -4911,7 +4776,7 @@ where
     // Editor lives in the TUI's fixed bottom pane; emit state changes
     // as `EditorState` events instead of painting the PTY scrollback.
     let _ = queued_rows; // retained for source-compat with callers
-    emit_editor_state_if_enabled(term.emit, editor, queue, emit_editor_state);
+    emit_editor_state(term.emit, editor, queue);
     tokio::pin!(fut);
     loop {
         tokio::select! {
@@ -4925,7 +4790,7 @@ where
                     Some(AdapterInboxMsg::SetApprovalMode(mode)) => *approval_mode = mode,
                     Some(AdapterInboxMsg::Input(t)) => {
                         enqueue_line(queue, editor, t);
-                        emit_editor_state_if_enabled(term.emit, editor, queue, emit_editor_state);
+                        emit_editor_state(term.emit, editor, queue);
                     }
                     Some(AdapterInboxMsg::PtyInput(bytes)) => {
                         if pty_input_requests_interrupt(&bytes) {
@@ -4946,7 +4811,7 @@ where
                                 }
                             }
                         }
-                        emit_editor_state_if_enabled(term.emit, editor, queue, emit_editor_state);
+                        emit_editor_state(term.emit, editor, queue);
                     }
                     Some(AdapterInboxMsg::PtyResize { .. }) => {}
                     Some(AdapterInboxMsg::ToolDecision { .. }) => {}
@@ -4984,7 +4849,6 @@ async fn drive_with_input_silent<F>(
     queue: &mut VecDeque<String>,
     approval_mode: &mut ApprovalMode,
     emit: &EventEmitter,
-    emit_editor_state: bool,
     _tasks: std::sync::Arc<crate::tasks::Tasks>,
     fut: F,
 ) -> DriveExit<F::Output>
@@ -4994,7 +4858,7 @@ where
     // The agent owns the PTY for the duration of this future; the
     // TUI's fixed editor pane is what users see, fed by
     // `EditorState` events.
-    emit_editor_state_if_enabled(emit, editor, queue, emit_editor_state);
+    emit_editor_state(emit, editor, queue);
     tokio::pin!(fut);
     loop {
         tokio::select! {
@@ -5008,7 +4872,7 @@ where
                     Some(AdapterInboxMsg::SetApprovalMode(mode)) => *approval_mode = mode,
                     Some(AdapterInboxMsg::Input(t)) => {
                         enqueue_line(queue, editor, t);
-                        emit_editor_state_if_enabled(emit, editor, queue, emit_editor_state);
+                        emit_editor_state(emit, editor, queue);
                     }
                     Some(AdapterInboxMsg::PtyInput(bytes)) => {
                         if pty_input_requests_interrupt(&bytes) {
@@ -5029,7 +4893,7 @@ where
                                 }
                             }
                         }
-                        emit_editor_state_if_enabled(emit, editor, queue, emit_editor_state);
+                        emit_editor_state(emit, editor, queue);
                     }
                     Some(AdapterInboxMsg::PtyResize { .. }) => {}
                     Some(AdapterInboxMsg::ToolDecision { .. }) => {}
