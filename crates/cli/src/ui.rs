@@ -3114,17 +3114,39 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
         };
         f.render_widget(Paragraph::new(Line::from(vec![Span::raw(blank)])), r);
     }
+
+    // Gapless bottom-align for short smith chats: when the history content
+    // is shorter than the chat viewport, paint it hugging the editor pane
+    // instead of anchored at the top (which leaves a gap above the prompt).
+    let mut paint_area = chat_area;
+    let mut paint_row_offset = row_offset;
+    let is_smith_like = app
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| is_smith_like_harness(&s.harness))
+        .unwrap_or(false);
+    if editor_area.is_some() && scroll == 0 && is_smith_like {
+        let content_rows = non_empty_row_span(out.screen);
+        if content_rows > 0 && content_rows < chat_area.height {
+            let top_pad = chat_area.height - content_rows;
+            paint_area.y = paint_area.y.saturating_add(top_pad);
+            paint_area.height = content_rows;
+            paint_row_offset = 0;
+        }
+    }
+
     render_pty_screen(
         f,
-        chat_area,
+        paint_area,
         out.screen,
         &app.theme,
         editor_area.is_none(),
-        row_offset,
+        paint_row_offset,
     );
     app.block_hits.insert(
         id.clone(),
-        translate_block_hits(out.blocks, row_offset, chat_area.height),
+        translate_block_hits(out.blocks, paint_row_offset, paint_area.height),
     );
     let terminal_scrollbar = render_terminal_scrollbar(
         f,
@@ -6348,10 +6370,11 @@ fn render_pty_screen(
     show_cursor: bool,
     row_offset: u16,
 ) {
+    // Paint a slice of the vt100 screen into `area`, starting at `row_offset`.
+    // Caller is responsible for clearing the target area if needed.
     if area.width == 0 || area.height == 0 {
         return;
     }
-    f.render_widget(Clear, area);
     let visible_h = area.height;
     let visible_w = area.width;
     let buf = f.buffer_mut();
@@ -6389,6 +6412,26 @@ fn render_pty_screen(
             }
         }
     }
+}
+
+/// Count the number of content-bearing rows on the screen (exclusive end row).
+/// Scans from the bottom up and returns the index of the last row that has
+/// any cell with visible contents, plus one. Returns 0 when the screen is empty.
+fn non_empty_row_span(screen: &vt100::Screen) -> u16 {
+    let (rows, cols) = screen.size();
+    if rows == 0 || cols == 0 {
+        return 0;
+    }
+    for r in (0..rows).rev() {
+        for c in 0..cols {
+            if let Some(cell) = screen.cell(r, c) {
+                if cell.has_contents() {
+                    return r.saturating_add(1);
+                }
+            }
+        }
+    }
+    0
 }
 
 fn render_pty_tail(f: &mut Frame, area: Rect, screen: &vt100::Screen, theme: &Theme) {
@@ -6784,17 +6827,43 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
     // slice. See the matching note in `render_terminal`.
     let row_offset = inner.height.saturating_sub(chat_area.height);
     let out = history.replay(inner.width, inner.height, app.orchestrator_scrollback);
+
+    // Clear and bottom-align short content so the last message hugs the input.
+    f.render_widget(Clear, chat_area);
+    for row in 0..chat_area.height {
+        let blank = " ".repeat(chat_area.width as usize);
+        let r = Rect {
+            x: chat_area.x,
+            y: chat_area.y + row,
+            width: chat_area.width,
+            height: 1,
+        };
+        f.render_widget(Paragraph::new(Line::from(vec![Span::raw(blank)])), r);
+    }
+
+    let mut paint_area = chat_area;
+    let mut paint_row_offset = row_offset;
+    if editor_area.is_some() && app.orchestrator_scrollback == 0 {
+        let content_rows = non_empty_row_span(out.screen);
+        if content_rows > 0 && content_rows < chat_area.height {
+            let top_pad = chat_area.height - content_rows;
+            paint_area.y = paint_area.y.saturating_add(top_pad);
+            paint_area.height = content_rows;
+            paint_row_offset = 0;
+        }
+    }
+
     render_pty_screen(
         f,
-        chat_area,
+        paint_area,
         out.screen,
         &app.theme,
         editor_area.is_none(),
-        row_offset,
+        paint_row_offset,
     );
     app.block_hits.insert(
         id,
-        translate_block_hits(out.blocks, row_offset, chat_area.height),
+        translate_block_hits(out.blocks, paint_row_offset, paint_area.height),
     );
     if let Some(area) = editor_area {
         render_editor_pane(
