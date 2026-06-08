@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 mod app;
 mod keymap;
+mod loadout;
 mod matrix_rain;
 mod pty_render;
 mod theme;

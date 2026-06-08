@@ -328,9 +328,8 @@ pub enum MinibufferIntent {
     SendInput {
         session_id: String,
     },
-    NewSessionHarness,
-    /// Second stage of the new-session wizard when the user typed `group`:
-    /// asks for the group's name.
+    /// Second stage of the new-session flow when the user picks the
+    /// synthetic `project` card in the loadout: asks for the group's name.
     NewGroupName,
     DeleteConfirm {
         session_id: String,
@@ -463,6 +462,11 @@ pub struct App {
     pub transcript_session: Option<String>,
     pub transcript_scroll: u16,
     pub minibuffer: Option<Minibuffer>,
+    /// The Construct loadout screen — the cinematic new-session composer
+    /// opened by `OpenNewSession` (`C-x C-f`). `None` when closed. A full
+    /// takeover: while present it captures all input and `ui::render` short-
+    /// circuits to it.
+    pub loadout: Option<crate::loadout::LoadoutState>,
     pub harnesses: Vec<HarnessInfo>,
     pub theme: crate::theme::Theme,
     pub help_visible: bool,
@@ -1352,10 +1356,6 @@ pub struct LayoutSnapshot {
     /// (palette / send-input / etc.) is open for minibuffer hints, but may
     /// still contain main-view shortcut affordances.
     pub shortcut_hints: Vec<HintZone>,
-    /// Clickable harness names in the new-session picker prompt
-    /// (`MinibufferIntent::NewSessionHarness`). Click → submit the
-    /// matching name as if the user typed it and hit Enter.
-    pub minibuffer_harness_hits: Vec<HarnessHit>,
     /// Bounds of the topmost modal/dialog rendered in the last frame.
     /// Mouse clicks outside this rect dismiss the modal instead of
     /// falling through to panes underneath it.
@@ -1388,19 +1388,6 @@ pub struct LayoutSnapshot {
     pub dynamic_ui_dropdown_area: Option<ratatui::layout::Rect>,
     /// Last rendered dynamic UI stack dimensions: `(session_id, content_rows, viewport_rows)`.
     pub dynamic_ui_scroll_metrics: Option<(String, usize, usize)>,
-}
-
-#[derive(Debug, Clone)]
-pub struct HarnessHit {
-    pub name: String,
-    pub x_start: u16,
-    /// Exclusive end column.
-    pub x_end: u16,
-    pub y: u16,
-    /// `false` for harnesses whose adapter binary isn't on PATH —
-    /// rendered dimmed + struck-through, click is a no-op + status
-    /// line note, hover shows a "not installed" tooltip.
-    pub available: bool,
 }
 
 fn selection_bounds_for_layout(
@@ -1583,6 +1570,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         transcript_session: None,
         transcript_scroll: 0,
         minibuffer: None,
+        loadout: None,
         harnesses,
         theme,
         help_visible: false,
@@ -4904,26 +4892,6 @@ impl App {
             if matches!(mb.intent, MinibufferIntent::ApproveTool { .. }) {
                 return;
             }
-            // Harness picker: clicking an available name submits it
-            // as if the user typed and pressed Enter. Unavailable
-            // names are visually disabled (strikethrough); clicks
-            // on them drop a status note rather than submitting —
-            // the hover tooltip explains why.
-            if matches!(mb.intent, MinibufferIntent::NewSessionHarness) {
-                let hits = self.layout.minibuffer_harness_hits.clone();
-                for hit in hits {
-                    if hit.y == mb_area.y && col >= hit.x_start && col < hit.x_end {
-                        if !hit.available {
-                            self.set_status(format!("{}: adapter binary not installed", hit.name));
-                            return;
-                        }
-                        let intent = mb.intent.clone();
-                        self.minibuffer = None;
-                        self.run_minibuffer_submit(intent, hit.name).await;
-                        return;
-                    }
-                }
-            }
             let prompt_w = unicode_width::UnicodeWidthStr::width(mb.prompt.as_str()) as u16;
             let input_start = mb_area.x + prompt_w;
             if col < input_start {
@@ -5449,6 +5417,12 @@ impl App {
             }
             return;
         }
+        // The loadout screen is a full takeover: while it's open every key
+        // drives the composer (slot nav, text edit, LOAD / abort).
+        if self.loadout.is_some() {
+            self.handle_loadout_key(key).await;
+            return;
+        }
         // Minibuffer captures all input when open — with one exception:
         // the orchestrator intent is just a focus marker for a
         // PTY-backed panel, so keys go to the orchestrator session's
@@ -5879,27 +5853,7 @@ impl App {
                 }
             }
             OpenNewSession => {
-                if self.harnesses.is_empty() {
-                    self.harnesses = self.client.harnesses().await.unwrap_or_default();
-                }
-                let mut names: Vec<&str> = self
-                    .harnesses
-                    .iter()
-                    .filter(|h| h.available)
-                    .map(|h| h.name.as_str())
-                    .collect();
-                // `project` is a synthetic option that creates a project
-                // instead of a session — surfaced in the same wizard for
-                // discovery.
-                names.push("project");
-                let hint = names.join("|");
-                self.minibuffer = Some(Minibuffer {
-                    prompt: format!("New [{hint}] (Tab completes): "),
-                    input: String::new(),
-                    cursor: 0,
-                    intent: MinibufferIntent::NewSessionHarness,
-                    error: None,
-                });
+                self.open_loadout().await;
             }
             OpenRename => match self.selection.clone() {
                 Selection::Session(id) => {
@@ -6293,10 +6247,6 @@ impl App {
     async fn handle_minibuffer_key(&mut self, key: KeyEvent) {
         // Snapshot the data we'll need without holding a borrow on
         // self.minibuffer across the (possibly &self) lookups.
-        let is_new_harness = matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::NewSessionHarness)
-        );
         let is_switch_session = matches!(
             self.minibuffer.as_ref().map(|m| &m.intent),
             Some(MinibufferIntent::SwitchSession)
@@ -6306,20 +6256,6 @@ impl App {
         } else {
             Vec::new()
         };
-        let available_harnesses: Vec<String> = if is_new_harness {
-            let mut v: Vec<String> = self
-                .harnesses
-                .iter()
-                .filter(|h| h.available)
-                .map(|h| h.name.clone())
-                .collect();
-            v.push("project".to_string());
-            v.push("group".to_string());
-            v
-        } else {
-            Vec::new()
-        };
-
         // Restart confirmation: single-key dispatch (`y` confirms,
         // anything else cancels) so the user can press one key and
         // move on, matching the way they invoked the prompt with a
@@ -6427,9 +6363,7 @@ impl App {
                 return;
             }
             KeyCode::Tab => {
-                if is_new_harness {
-                    apply_harness_completion(mb, &available_harnesses);
-                } else if matches!(mb.intent, MinibufferIntent::SwitchSession) {
+                if matches!(mb.intent, MinibufferIntent::SwitchSession) {
                     let input = mb.input.clone();
                     let matches = match_switch_sessions_from(&switch_sessions, &input);
                     if let Some(s) = matches.first() {
@@ -6443,17 +6377,6 @@ impl App {
                 return;
             }
             KeyCode::Enter => {
-                if is_new_harness {
-                    let trimmed = mb.input.trim().to_string();
-                    if trimmed.is_empty() {
-                        mb.error = Some("pick a harness".to_string());
-                        return;
-                    }
-                    if !available_harnesses.iter().any(|h| h == &trimmed) {
-                        mb.error = Some(format!("unknown: {trimmed} (Tab to complete)"));
-                        return;
-                    }
-                }
                 let intent = mb.intent.clone();
                 let input = std::mem::take(&mut mb.input);
                 self.minibuffer = None;
@@ -6519,6 +6442,254 @@ impl App {
         }
     }
 
+    /// Open the Construct loadout screen (the cinematic new-session
+    /// composer). Replaces the old one-line harness minibuffer: the user
+    /// kits out a harness + working dir + initial prompt, then "loads in".
+    async fn open_loadout(&mut self) {
+        if self.harnesses.is_empty() {
+            self.harnesses = self.client.harnesses().await.unwrap_or_default();
+        }
+        let mut cards: Vec<crate::loadout::LoadoutHarness> = self
+            .harnesses
+            .iter()
+            .map(|h| crate::loadout::LoadoutHarness {
+                name: h.name.clone(),
+                description: h.description.clone(),
+                available: h.available,
+                is_project: false,
+            })
+            .collect();
+        // The synthetic `project` card keeps project creation discoverable
+        // from the same place sessions are made (mirrors the old picker's
+        // `project` option), but LOAD on it opens the project-name prompt.
+        cards.push(crate::loadout::LoadoutHarness {
+            name: "project".to_string(),
+            description: Some("create a project to group sessions".to_string()),
+            available: true,
+            is_project: true,
+        });
+        // Inherit the group context from the current selection, exactly like
+        // the old flow, so a session made "inside" a group joins it.
+        let group_id = match &self.selection {
+            Selection::Group(gid) => Some(gid.clone()),
+            Selection::Session(sid) => self
+                .sessions
+                .iter()
+                .find(|s| s.id == *sid)
+                .and_then(|s| s.group_id.clone()),
+            Selection::None => None,
+        };
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        self.loadout = Some(crate::loadout::LoadoutState::new(
+            cards,
+            group_id,
+            cwd,
+            Instant::now(),
+        ));
+    }
+
+    /// Confirm the loadout — "jack in". Routes the synthetic `project` card to
+    /// project creation; otherwise spawns a session from the assembled
+    /// loadout (harness + cwd + worktree + initial prompt).
+    async fn loadout_submit(&mut self) {
+        let Some(lo) = self.loadout.as_ref() else {
+            return;
+        };
+        let Some(card) = lo.selected_harness() else {
+            return;
+        };
+        if card.is_project {
+            self.loadout = None;
+            self.minibuffer = Some(Minibuffer {
+                prompt: "Project name: ".to_string(),
+                input: String::new(),
+                cursor: 0,
+                intent: MinibufferIntent::NewGroupName,
+                error: None,
+            });
+            return;
+        }
+        if !card.available {
+            let name = card.name.clone();
+            if let Some(lo) = self.loadout.as_mut() {
+                lo.note = Some(format!("{name} unavailable — binary not found"));
+            }
+            return;
+        }
+        let harness = card.name.clone();
+        let cwd = lo.expanded_cwd();
+        let prompt = {
+            let trimmed = lo.prompt.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(lo.prompt.clone())
+            }
+        };
+        let worktree = lo.worktree;
+        let group_id = lo.group_id.clone();
+        self.loadout = None;
+        self.spawn_loadout_session(harness, cwd, prompt, worktree, group_id)
+            .await;
+    }
+
+    /// Create a session from a fully-assembled loadout and select it. Shares
+    /// the post-create bookkeeping with the old new-session path.
+    async fn spawn_loadout_session(
+        &mut self,
+        harness: String,
+        cwd: String,
+        prompt: Option<String>,
+        worktree: bool,
+        group_id: Option<String>,
+    ) {
+        let params = agentd_protocol::CreateSessionParams {
+            harness,
+            cwd,
+            prompt,
+            model: None,
+            title: None,
+            mode: None,
+            pty_size: Some(agentd_protocol::PtySize {
+                cols: self.active_pane_size().0.max(20),
+                rows: self.active_pane_size().1.max(5),
+            }),
+            worktree,
+            env: HashMap::new(),
+            args: Vec::new(),
+            kind: agentd_protocol::SessionKind::User,
+            parent_session_id: None,
+            group_id,
+        };
+        match self.client.create(params).await {
+            Ok(id) => {
+                self.set_status(format!("created {}", short_id(&id)));
+                self.refresh_sessions().await;
+                // Pre-insert an empty PTY parser so the subsequent
+                // refresh short-circuits and the banner isn't drawn twice
+                // (see the old new-session path for the full rationale).
+                if !self.histories.contains_key(&id) {
+                    self.histories
+                        .insert(id.clone(), crate::pty_render::ItemHistory::new());
+                }
+                self.select_session(id);
+                self.sync_active_window_selection();
+                self.focus = PaneFocus::View;
+            }
+            Err(e) => self.set_status(format!("create failed: {e}")),
+        }
+    }
+
+    /// Keyboard handling for the loadout screen. See the footer hint in
+    /// `ui::render_loadout` for the user-facing summary.
+    async fn handle_loadout_key(&mut self, key: KeyEvent) {
+        use crate::loadout::LoadoutField;
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Esc / C-c / C-g always abort, even mid-entrance.
+        let abort = matches!(key.code, KeyCode::Esc)
+            || (ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('g')));
+        if abort {
+            self.loadout = None;
+            self.set_status("loadout aborted".to_string());
+            return;
+        }
+
+        // Any other key during the rack-slide entrance just skips it.
+        let now = Instant::now();
+        if let Some(lo) = self.loadout.as_ref() {
+            if lo.entrance_active(now) {
+                if let Some(lo) = self.loadout.as_mut() {
+                    lo.entrance_skipped = true;
+                }
+                return;
+            }
+        }
+
+        let field = match self.loadout.as_ref() {
+            Some(lo) => lo.field,
+            None => return,
+        };
+
+        // LOAD: Alt/Ctrl+Enter from anywhere; plain Enter everywhere except
+        // the briefing (where Enter inserts a newline).
+        if matches!(key.code, KeyCode::Enter) {
+            if alt || ctrl || field != LoadoutField::Briefing {
+                self.loadout_submit().await;
+            } else if let Some(lo) = self.loadout.as_mut() {
+                lo.newline();
+            }
+            return;
+        }
+
+        let Some(lo) = self.loadout.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Tab => {
+                if field == LoadoutField::Gear {
+                    // Tab completes the path; if there's nothing left to
+                    // complete, it advances to the next slot.
+                    if !lo.complete_cwd() {
+                        lo.focus_next();
+                    }
+                } else {
+                    lo.focus_next();
+                }
+            }
+            KeyCode::BackTab => lo.focus_prev(),
+            KeyCode::Up => {
+                if field == LoadoutField::Briefing {
+                    lo.cursor_up();
+                } else {
+                    lo.focus_prev();
+                }
+            }
+            KeyCode::Down => {
+                if field == LoadoutField::Briefing {
+                    lo.cursor_down();
+                } else {
+                    lo.focus_next();
+                }
+            }
+            KeyCode::Left => match field {
+                LoadoutField::Weapon => lo.select_harness_prev(),
+                LoadoutField::Worktree => lo.toggle_worktree(),
+                _ => lo.cursor_left(),
+            },
+            KeyCode::Right => match field {
+                LoadoutField::Weapon => lo.select_harness_next(),
+                LoadoutField::Worktree => lo.toggle_worktree(),
+                _ => lo.cursor_right(),
+            },
+            KeyCode::Home => lo.cursor_home(),
+            KeyCode::End => lo.cursor_end(),
+            KeyCode::Backspace => lo.backspace(),
+            KeyCode::Delete => lo.delete_forward(),
+            KeyCode::Char(' ') if field == LoadoutField::Worktree => lo.toggle_worktree(),
+            KeyCode::Char(c) if !ctrl => match field {
+                // Type-to-jump: pick the first harness whose name starts with
+                // the typed letter.
+                LoadoutField::Weapon => {
+                    let lower = c.to_ascii_lowercase();
+                    if let Some(i) = lo
+                        .harnesses
+                        .iter()
+                        .position(|h| h.name.to_ascii_lowercase().starts_with(lower))
+                    {
+                        lo.harness_idx = i;
+                    }
+                }
+                LoadoutField::Worktree => {}
+                LoadoutField::Gear | LoadoutField::Briefing => lo.insert_char(c),
+            },
+            _ => {}
+        }
+    }
+
     async fn run_minibuffer_submit(&mut self, intent: MinibufferIntent, input: String) {
         match intent {
             MinibufferIntent::SendInput { session_id } => {
@@ -6542,80 +6713,6 @@ impl App {
                 self.sync_active_window_selection();
                 self.focus = PaneFocus::View;
                 self.set_status(format!("window → {label}"));
-            }
-            MinibufferIntent::NewSessionHarness => {
-                let harness = input.trim().to_string();
-                if harness.is_empty() {
-                    return;
-                }
-                // `project` is a synthetic option in the harness picker that
-                // redirects to the project-create flow. Keep `group` as a
-                // compatibility alias for muscle memory.
-                if harness == "project" || harness == "group" {
-                    self.minibuffer = Some(Minibuffer {
-                        prompt: "Project name: ".to_string(),
-                        input: String::new(),
-                        cursor: 0,
-                        intent: MinibufferIntent::NewGroupName,
-                        error: None,
-                    });
-                    return;
-                }
-                let cwd = std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| ".".to_string());
-                // Inherit the group context from the current selection
-                // so creating a session "while inside" a group keeps
-                // the new session in that same group.
-                let group_id = match &self.selection {
-                    Selection::Group(gid) => Some(gid.clone()),
-                    Selection::Session(sid) => self
-                        .sessions
-                        .iter()
-                        .find(|s| s.id == *sid)
-                        .and_then(|s| s.group_id.clone()),
-                    Selection::None => None,
-                };
-                let params = agentd_protocol::CreateSessionParams {
-                    harness: harness.clone(),
-                    cwd,
-                    prompt: None,
-                    model: None,
-                    title: None,
-                    mode: None,
-                    pty_size: Some(agentd_protocol::PtySize {
-                        cols: self.active_pane_size().0.max(20),
-                        rows: self.active_pane_size().1.max(5),
-                    }),
-                    worktree: false,
-                    env: HashMap::new(),
-                    args: Vec::new(),
-                    kind: agentd_protocol::SessionKind::User,
-                    parent_session_id: None,
-                    group_id,
-                };
-                match self.client.create(params).await {
-                    Ok(id) => {
-                        self.set_status(format!("created {}", short_id(&id)));
-                        self.refresh_sessions().await;
-                        // Pre-insert an empty PTY parser so the subsequent
-                        // `refresh_selected_transcript → bootstrap_terminal`
-                        // short-circuits (parser already present). Our live
-                        // subscription will deliver every byte the adapter
-                        // emits; without this short-circuit, pty_replay
-                        // would race the subscription and the banner ends
-                        // up rendered twice (once from the ring, once from
-                        // the live broadcast that was already in flight).
-                        if !self.histories.contains_key(&id) {
-                            self.histories
-                                .insert(id.clone(), crate::pty_render::ItemHistory::new());
-                        }
-                        self.select_session(id);
-                        self.sync_active_window_selection();
-                        self.focus = PaneFocus::View;
-                    }
-                    Err(e) => self.set_status(format!("create failed: {e}")),
-                }
             }
             MinibufferIntent::GroupDeleteConfirm { group_id } => {
                 let choice = parse_group_delete_choice(&input);
@@ -7708,7 +7805,6 @@ mod tests {
             list_items_area: None,
             list_scroll_offset: 0,
             shortcut_hints: Vec::new(),
-            minibuffer_harness_hits: Vec::new(),
             modal_area: None,
             browser_preview_area: None,
             browser_preview_close: None,
@@ -7746,6 +7842,7 @@ mod tests {
             transcript_session: None,
             transcript_scroll: 0,
             minibuffer: None,
+            loadout: None,
             harnesses: Vec::new(),
             theme: crate::theme::Theme::default(),
             help_visible: false,
@@ -8832,11 +8929,8 @@ mod tests {
 
         let (x, y) = click(&app, KeyAction::OpenNewSession);
         app.handle_left_click(x, y).await;
-        assert!(matches!(
-            app.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::NewSessionHarness)
-        ));
-        app.minibuffer = None;
+        assert!(app.loadout.is_some(), "C-x C-f should open the loadout");
+        app.loadout = None;
 
         let (x, y) = click(&app, KeyAction::Quit);
         app.handle_left_click(x, y).await;
@@ -8868,6 +8962,43 @@ mod tests {
             screen.contains("A harness is the runtime"),
             "missing harness concept:\n{screen}"
         );
+        server.abort();
+    }
+
+    /// The loadout screen (C-x C-f) renders its core slots without panicking.
+    /// Guards the full-screen takeover render path (slide math, per-line
+    /// Paragraph rects, cursor spans) against out-of-bounds / regressions.
+    #[tokio::test]
+    async fn loadout_screen_renders_core_slots() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.open_loadout().await;
+        // Settle the entrance so every slot is at rest and visible.
+        if let Some(lo) = app.loadout.as_mut() {
+            lo.entrance_skipped = true;
+        }
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let screen = rendered_text(terminal.backend().buffer());
+        for needle in ["THE CONSTRUCT", "WEAPON", "GEAR", "BRIEFING", "+worktree"] {
+            assert!(screen.contains(needle), "missing {needle}:\n{screen}");
+        }
+        server.abort();
+    }
+
+    /// A tiny terminal must not panic the loadout render — it degrades to the
+    /// program title only.
+    #[tokio::test]
+    async fn loadout_screen_survives_tiny_terminal() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.open_loadout().await;
+        let backend = ratatui::backend::TestBackend::new(20, 6);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
         server.abort();
     }
 
@@ -10963,51 +11094,6 @@ fn kill_word_forward(mb: &mut Minibuffer) {
     let end_b = byte_pos(&mb.input, end);
     mb.input.drain(start_b..end_b);
     mb.error = None;
-}
-
-/// Bash-style Tab completion for the harness-picker minibuffer. Completes
-/// to the longest common prefix of all matches; sets an inline hint listing
-/// the candidates when the result is ambiguous.
-fn apply_harness_completion(mb: &mut Minibuffer, options: &[String]) {
-    let current = mb.input.clone();
-    let matches: Vec<&String> = options.iter().filter(|o| o.starts_with(&current)).collect();
-    if matches.is_empty() {
-        mb.error = if options.is_empty() {
-            Some("(no harnesses available)".to_string())
-        } else {
-            Some(format!("no match for {current}"))
-        };
-        return;
-    }
-    if matches.len() == 1 {
-        mb.input = matches[0].clone();
-        mb.cursor = mb.input.chars().count();
-        mb.error = None;
-        return;
-    }
-    let prefix = longest_common_prefix(&matches);
-    if prefix.len() > mb.input.len() {
-        mb.input = prefix;
-        mb.cursor = mb.input.chars().count();
-    }
-    let listed: Vec<&str> = matches.iter().map(|s| s.as_str()).collect();
-    mb.error = Some(format!("matches: {}", listed.join(", ")));
-}
-
-fn longest_common_prefix(strs: &[&String]) -> String {
-    let mut out = String::new();
-    let Some(first) = strs.first() else {
-        return out;
-    };
-    'outer: for (i, c) in first.chars().enumerate() {
-        for s in &strs[1..] {
-            if s.chars().nth(i) != Some(c) {
-                break 'outer;
-            }
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// Translate a crossterm `KeyEvent` into the raw byte sequence a PTY would

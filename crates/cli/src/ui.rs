@@ -1,11 +1,12 @@
 //! Ratatui rendering for the TUI.
 
 use crate::app::{
-    App, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
+    App, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
     MinibufferIntent, PaneFocus, ScreenPoint, Selection, TextSelectionRange, ViewMode,
     WindowDividerHit, WindowPaneHit, WindowSplitDirection, ZoomMode,
 };
 use crate::keymap::KeyAction;
+use crate::loadout::LoadoutField;
 use crate::theme::Theme;
 use agentd_protocol::{MessageRole, SessionEvent, SessionState, SessionSummary, TimestampedEvent};
 use ratatui::buffer::Buffer;
@@ -114,6 +115,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_popover_area = None;
     app.layout.dynamic_ui_scroll_metrics = None;
     let area = f.area();
+    // The loadout screen is a full takeover (the cinematic new-session
+    // composer). Render it over everything and bail before the normal layout.
+    if app.loadout.is_some() {
+        render_loadout(f, area, app);
+        finish_frame(f, app);
+        return;
+    }
     match app.zoom {
         ZoomMode::View => {
             render_zoomed_view(f, area, app);
@@ -253,7 +261,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_dynamic_ui_widget_title_tooltip(f, app);
     render_list_title_button_tooltips(f, app);
     render_view_uncollapse_tooltip(f, app);
-    render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
     render_tasks_popup(f, app);
     render_remote_control_popup(f, app);
@@ -938,134 +945,6 @@ fn render_browser_preview_close_tooltip(f: &mut Frame, app: &App) {
     if my == y && mx >= x_start && mx < x_end {
         render_button_tooltip(f, &app.theme, " Close preview ", x_start, y);
     }
-}
-
-/// Tooltip that appears when the cursor is hovering an
-/// **unavailable** harness name in the picker — explains why the
-/// click did nothing. Available harnesses don't get one; the
-/// underline + click-submit affordance is self-explanatory.
-fn render_harness_unavailable_tooltip(f: &mut Frame, app: &App) {
-    let Some((mx, my)) = app.mouse_pos else {
-        return;
-    };
-    let hits = &app.layout.minibuffer_harness_hits;
-    let hit = hits
-        .iter()
-        .find(|h| h.y == my && mx >= h.x_start && mx < h.x_end && !h.available);
-    let Some(hit) = hit else { return };
-    let label = format!(" {} — not installed ", hit.name);
-    let total = f.area();
-    let inner_w = UnicodeWidthStr::width(label.as_str()) as u16;
-    let w = inner_w + 2;
-    let h: u16 = 3;
-    // Place above the picker row (room there since the minibuffer
-    // is at the bottom of the screen).
-    let mut tx = hit.x_start;
-    if tx + w > total.x + total.width {
-        tx = total.x + total.width.saturating_sub(w);
-    }
-    let ty = hit.y.saturating_sub(h);
-    let rect = Rect {
-        x: tx,
-        y: ty,
-        width: w,
-        height: h,
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border));
-    let p = Paragraph::new(label)
-        .block(block)
-        .style(Style::default().fg(app.theme.text));
-    f.render_widget(Clear, rect);
-    f.render_widget(p, rect);
-}
-
-/// Render the new-session harness picker with each name as a
-/// clickable span. Records per-name column ranges in
-/// `app.layout.minibuffer_harness_hits` so the click handler can
-/// submit the picked name without the user having to type it.
-fn render_harness_picker(f: &mut Frame, area: Rect, app: &mut App, mb: &Minibuffer) {
-    // Show every registered harness plus the synthetic `project` op.
-    // Unavailable harnesses (binary not on PATH) render dimmed and
-    // strike-through; clicking them no-ops + drops a status note;
-    // hover surfaces a "not installed" tooltip.
-    let mut entries: Vec<(String, bool)> = app
-        .harnesses
-        .iter()
-        .map(|h| (h.name.clone(), h.available))
-        .collect();
-    entries.push(("project".to_string(), true));
-
-    let (hovered_x, hovered_y) = app.mouse_pos.unwrap_or((u16::MAX, u16::MAX));
-    let base_available = Style::default()
-        .fg(app.theme.info)
-        .add_modifier(Modifier::UNDERLINED);
-    let hover_available = Style::default()
-        .fg(app.theme.text)
-        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-    let base_disabled = Style::default()
-        .fg(app.theme.dim)
-        .add_modifier(Modifier::CROSSED_OUT);
-    let hover_disabled = Style::default()
-        .fg(app.theme.danger)
-        .add_modifier(Modifier::CROSSED_OUT | Modifier::BOLD);
-
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(entries.len() * 2 + 8);
-    let mut col: u16 = area.x;
-
-    let push_raw = |spans: &mut Vec<Span<'static>>, col: &mut u16, s: &str| {
-        *col += UnicodeWidthStr::width(s) as u16;
-        spans.push(Span::raw(s.to_string()));
-    };
-
-    push_raw(&mut spans, &mut col, "New [");
-    for (i, (name, available)) in entries.iter().enumerate() {
-        if i > 0 {
-            push_raw(&mut spans, &mut col, "|");
-        }
-        let w = UnicodeWidthStr::width(name.as_str()) as u16;
-        let x_start = col;
-        let x_end = col + w;
-        let hovered = hovered_y == area.y && hovered_x >= x_start && hovered_x < x_end;
-        let style = match (*available, hovered) {
-            (true, true) => hover_available,
-            (true, false) => base_available,
-            (false, true) => hover_disabled,
-            (false, false) => base_disabled,
-        };
-        spans.push(Span::styled(name.clone(), style));
-        app.layout.minibuffer_harness_hits.push(HarnessHit {
-            name: name.clone(),
-            x_start,
-            x_end,
-            y: area.y,
-            available: *available,
-        });
-        col = x_end;
-    }
-    push_raw(&mut spans, &mut col, "] ");
-    // Hint suffix — kept short so the prompt fits in a typical
-    // terminal width even with several adapters available.
-    push_raw(&mut spans, &mut col, "(Tab completes, click to pick): ");
-    let input_x = col;
-    spans.push(Span::raw(mb.input.clone()));
-    if let Some(err) = &mb.error {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            err.clone(),
-            Style::default().fg(app.theme.danger),
-        ));
-    }
-    let para = Paragraph::new(Line::from(spans));
-    f.render_widget(para, area);
-    // Cursor on the input — same shape as the default minibuffer
-    // render uses.
-    let cursor_x = input_x + mb.cursor as u16;
-    f.set_cursor_position(Position {
-        x: cursor_x,
-        y: area.y,
-    });
 }
 
 fn render_diamond_tooltip(f: &mut Frame, app: &App) {
@@ -2852,6 +2731,334 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         ViewMode::Chat => render_chat(f, inner, app),
     }
     render_main_transition(f, inner, app, window_id);
+}
+
+/// Horizontal slide offset (cells from the right) for a loadout row group at
+/// the given entrance `progress`. Each group has a staggered `delay` so the
+/// racks "load in" one after another. Settles to 0 when fully revealed.
+fn loadout_slide_off(progress: f32, delay: f32) -> u16 {
+    const START: f32 = 24.0;
+    const WIN: f32 = 0.45;
+    let local = ((progress - delay) / WIN).clamp(0.0, 1.0);
+    let eased = 1.0 - (1.0 - local).powi(3); // easeOutCubic
+    ((1.0 - eased) * START).round() as u16
+}
+
+/// Render one slid line of the loadout panel, clipping to the panel interior.
+fn loadout_put(f: &mut Frame, x: u16, w: u16, y: u16, bottom: u16, off: u16, line: Line) {
+    if y >= bottom {
+        return;
+    }
+    let avail = w.saturating_sub(off);
+    if avail == 0 {
+        return;
+    }
+    let rect = Rect {
+        x: x + off,
+        y,
+        width: avail,
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(line), rect);
+}
+
+/// A slot label like `WEAPON` / `GEAR` / `BRIEFING`, brightened when focused.
+fn loadout_label(name: &str, focused: bool, theme: &Theme) -> Span<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::BOLD)
+    };
+    Span::styled(format!("{name:<9}"), style)
+}
+
+/// Render text with an optional block cursor (reverse-video cell) at the given
+/// char position — used for the cwd field and briefing lines.
+fn loadout_text_cursor(s: &str, cursor: usize, base: Style, show: bool) -> Vec<Span<'static>> {
+    if !show {
+        return vec![Span::styled(s.to_string(), base)];
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let col = cursor.min(chars.len());
+    let before: String = chars[..col].iter().collect();
+    let (cur_ch, after) = if col < chars.len() {
+        (
+            chars[col].to_string(),
+            chars[col + 1..].iter().collect::<String>(),
+        )
+    } else {
+        (" ".to_string(), String::new())
+    };
+    vec![
+        Span::styled(before, base),
+        Span::styled(cur_ch, base.add_modifier(Modifier::REVERSED)),
+        Span::styled(after, base),
+    ]
+}
+
+/// The Construct loadout screen — a cinematic full-screen new-session
+/// composer. Matrix backdrop + scrolling rack rail behind a centered panel
+/// whose rows slide in like racks being loaded.
+fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
+    let now = Instant::now();
+    let theme = app.theme.clone();
+    let elapsed = app.start_instant.elapsed().as_millis() as u64;
+    let spinner = app.spinner_frame();
+
+    // Snapshot loadout state, then drop the borrow before touching `f`.
+    let Some(lo) = app.loadout.as_ref() else {
+        return;
+    };
+    let progress = lo.entrance_progress(now);
+    let field = lo.field;
+    let harness_idx = lo.harness_idx;
+    let cards: Vec<(String, bool, bool)> = lo
+        .harnesses
+        .iter()
+        .map(|h| (h.name.clone(), h.available, h.is_project))
+        .collect();
+    let card_desc = lo.selected_harness().and_then(|h| h.description.clone());
+    let cwd = lo.cwd.clone();
+    let cwd_cursor = lo.cwd_cursor;
+    let worktree = lo.worktree;
+    let prompt = lo.prompt.clone();
+    let prompt_cursor = lo.prompt_cursor;
+    let note = lo.note.clone();
+
+    // --- backdrop: faint matrix sparkle over the whole screen ---
+    f.render_widget(Clear, area);
+    let charset = b"01:|/\\{}[]<>+$#@*=-zrvshcodxgit";
+    {
+        let dim = Style::default().fg(theme.matrix_dim);
+        let buf = f.buffer_mut();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let seed = hash64((x as u64) ^ ((y as u64) << 16) ^ (elapsed / 220));
+                if seed % 100 < 3 {
+                    let g = charset[(hash64(seed ^ 0x55) as usize) % charset.len()] as char;
+                    buf.set_string(x, y, g.to_string(), dim);
+                }
+            }
+        }
+        // --- rack rail: a row of weapon-rack ticks scrolling sideways near
+        // the bottom, conveying the "racks rushing past" motion. ---
+        if area.height >= 3 {
+            let pattern: Vec<char> = "╪══╪  ".chars().collect();
+            let offset = ((elapsed / 45) as usize) % pattern.len();
+            let rail: String = (0..area.width as usize)
+                .map(|i| pattern[(i + offset) % pattern.len()])
+                .collect();
+            buf.set_string(
+                area.x,
+                area.bottom() - 1,
+                rail,
+                Style::default().fg(theme.matrix_glow),
+            );
+        }
+    }
+
+    // Too small for the panel — just announce the program and bail.
+    if area.width < 34 || area.height < 12 {
+        let msg = Line::from(Span::styled(
+            "THE CONSTRUCT",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let rect = centered_rect(area, 13, 1);
+        f.render_widget(Paragraph::new(msg), rect);
+        return;
+    }
+
+    // --- centered panel ---
+    let pw = area.width.saturating_sub(6).min(82).max(34);
+    let ph = area.height.saturating_sub(2).min(26).max(12);
+    let panel = centered_rect(area, pw, ph);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .style(Style::default().bg(Color::Reset));
+    let inner = block.inner(panel);
+    f.render_widget(Clear, panel);
+    f.render_widget(block, panel);
+
+    let cx = inner.x + 1;
+    let cw = inner.width.saturating_sub(2);
+    let bottom = inner.y + inner.height;
+    let mut y = inner.y;
+
+    let dim = Style::default().fg(theme.dim);
+    let muted = Style::default().fg(theme.muted);
+    let text = Style::default().fg(theme.text);
+
+    // Group offsets (staggered rack-slide).
+    let off_title = loadout_slide_off(progress, 0.00);
+    let off_weapon = loadout_slide_off(progress, 0.10);
+    let off_gear = loadout_slide_off(progress, 0.18);
+    let off_brief = loadout_slide_off(progress, 0.26);
+    let off_footer = loadout_slide_off(progress, 0.34);
+
+    // TITLE
+    let title = Line::from(vec![
+        Span::styled(
+            "THE CONSTRUCT",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   load your loadout  ", dim),
+        Span::styled(spinner, Style::default().fg(theme.accent)),
+        Span::styled(" jacking in", dim),
+    ]);
+    loadout_put(f, cx, cw, y, bottom, off_title, title);
+    y += 1;
+    let sep: String = "─".repeat(cw as usize);
+    loadout_put(f, cx, cw, y, bottom, off_title, Line::from(Span::styled(sep, dim)));
+    y += 2;
+
+    // WEAPON
+    let mut weapon: Vec<Span> = vec![loadout_label("WEAPON", field == LoadoutField::Weapon, &theme)];
+    for (i, (name, available, is_project)) in cards.iter().enumerate() {
+        let selected = i == harness_idx;
+        let label = if *is_project {
+            format!("+ {name}")
+        } else {
+            name.clone()
+        };
+        if selected {
+            let style = if field == LoadoutField::Weapon {
+                Style::default()
+                    .fg(theme.highlight_fg)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                text.add_modifier(Modifier::BOLD)
+            };
+            weapon.push(Span::styled(format!(" ‹{label}› "), style));
+        } else if *available {
+            weapon.push(Span::styled(format!(" {label} "), muted));
+        } else {
+            weapon.push(Span::styled(
+                format!(" {label} "),
+                dim.add_modifier(Modifier::CROSSED_OUT),
+            ));
+        }
+    }
+    loadout_put(f, cx, cw, y, bottom, off_weapon, Line::from(weapon));
+    y += 1;
+    let desc = card_desc.unwrap_or_default();
+    loadout_put(
+        f,
+        cx,
+        cw,
+        y,
+        bottom,
+        off_weapon,
+        Line::from(Span::styled(format!("         {desc}"), dim)),
+    );
+    y += 2;
+
+    // GEAR (cwd + worktree)
+    let mut gear: Vec<Span> = vec![
+        loadout_label("GEAR", field == LoadoutField::Gear, &theme),
+        Span::styled("cwd ▸ ", dim),
+    ];
+    gear.extend(loadout_text_cursor(
+        &cwd,
+        cwd_cursor,
+        text,
+        field == LoadoutField::Gear,
+    ));
+    loadout_put(f, cx, cw, y, bottom, off_gear, Line::from(gear));
+    y += 1;
+    let wt_focused = field == LoadoutField::Worktree;
+    let wt_box = if worktree { "[x]" } else { "[ ]" };
+    let wt_style = if wt_focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        muted
+    };
+    let worktree_line = Line::from(vec![
+        Span::raw("         "),
+        Span::styled(format!("{wt_box} +worktree"), wt_style),
+        Span::styled("   run in an isolated git worktree", dim),
+    ]);
+    loadout_put(f, cx, cw, y, bottom, off_gear, worktree_line);
+    y += 2;
+
+    // BRIEFING
+    loadout_put(
+        f,
+        cx,
+        cw,
+        y,
+        bottom,
+        off_brief,
+        Line::from(loadout_label("BRIEFING", field == LoadoutField::Briefing, &theme)),
+    );
+    y += 1;
+    // Reserve two rows at the bottom for the note line + footer.
+    let avail_box = bottom.saturating_sub(y).saturating_sub(2);
+    let bh = avail_box.clamp(1, 6);
+    // Cursor (line, col) within the prompt.
+    let (mut cline, mut ccol) = (0usize, 0usize);
+    for (i, ch) in prompt.chars().enumerate() {
+        if i == prompt_cursor {
+            break;
+        }
+        if ch == '\n' {
+            cline += 1;
+            ccol = 0;
+        } else {
+            ccol += 1;
+        }
+    }
+    let lines: Vec<&str> = prompt.split('\n').collect();
+    let first = if cline >= bh as usize {
+        cline - bh as usize + 1
+    } else {
+        0
+    };
+    let brief_focused = field == LoadoutField::Briefing;
+    for row in 0..bh {
+        let li = first + row as usize;
+        let mut spans: Vec<Span> = vec![Span::styled("│ ", dim)];
+        if li == 0 && prompt.is_empty() {
+            spans.push(Span::styled(
+                "describe the task…  (Enter newline · ⌥Enter load)",
+                dim.add_modifier(Modifier::ITALIC),
+            ));
+        } else if let Some(line) = lines.get(li) {
+            let show_cursor = brief_focused && li == cline;
+            spans.extend(loadout_text_cursor(line, ccol, text, show_cursor));
+        }
+        loadout_put(f, cx, cw, y, bottom, off_brief, Line::from(spans));
+        y += 1;
+    }
+
+    // NOTE (completion / errors), else blank.
+    let note_line = match note {
+        Some(n) => Line::from(Span::styled(
+            n,
+            Style::default().fg(theme.warning),
+        )),
+        None => Line::from(""),
+    };
+    loadout_put(f, cx, cw, y, bottom, off_footer, note_line);
+    y += 1;
+
+    // FOOTER
+    let footer = Line::from(Span::styled(
+        "↑↓ move · ←→ choose · type to edit · Enter load (⌥Enter in briefing) · Esc abort",
+        dim,
+    ));
+    loadout_put(f, cx, cw, y, bottom, off_footer, footer);
 }
 
 fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
@@ -5608,8 +5815,6 @@ fn minibuffer_panel_height(preferred: Option<u16>, total_h: u16) -> u16 {
 }
 
 fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
-    app.layout.minibuffer_harness_hits.clear();
-
     // Orchestrator panel: events above, input row at the bottom.
     if matches!(
         app.minibuffer.as_ref().map(|m| &m.intent),
@@ -5620,14 +5825,6 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     if let Some(mb) = &app.minibuffer {
-        // Harness picker: render `[name1|name2|...|group]` with each
-        // name as its own clickable span, recording column ranges
-        // for the click handler. Hover bolds + underlines.
-        if matches!(mb.intent, MinibufferIntent::NewSessionHarness) {
-            let mb_clone = mb.clone();
-            render_harness_picker(f, area, app, &mb_clone);
-            return;
-        }
         let mut spans = vec![Span::raw(mb.prompt.clone()), Span::raw(mb.input.clone())];
         if let Some(err) = &mb.error {
             spans.push(Span::raw("  "));
