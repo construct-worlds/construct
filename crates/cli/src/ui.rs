@@ -2912,7 +2912,7 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
         ),
         Span::styled("   load your loadout  ", dim),
         Span::styled(spinner, Style::default().fg(theme.accent)),
-        Span::styled(" jacking in", dim),
+        Span::styled(" new session", dim),
     ]);
     loadout_put(f, cx, cw, y, bottom, off_title, title);
     y += 1;
