@@ -6642,14 +6642,17 @@ impl App {
             }
             KeyCode::BackTab => lo.focus_prev(),
             KeyCode::Up => {
-                if field == LoadoutField::Briefing {
+                // In the prompt, Up moves the text cursor up a line — but at
+                // the first line it leaves the slot, so Up always feels like
+                // "go to the field above".
+                if field == LoadoutField::Briefing && !lo.cursor_on_first_line() {
                     lo.cursor_up();
                 } else {
                     lo.focus_prev();
                 }
             }
             KeyCode::Down => {
-                if field == LoadoutField::Briefing {
+                if field == LoadoutField::Briefing && !lo.cursor_on_last_line() {
                     lo.cursor_down();
                 } else {
                     lo.focus_next();
@@ -8982,9 +8985,36 @@ mod tests {
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw");
         let screen = rendered_text(terminal.backend().buffer());
-        for needle in ["THE CONSTRUCT", "WEAPON", "GEAR", "BRIEFING", "+worktree"] {
+        for needle in [
+            "THE CONSTRUCT",
+            "HARNESS",
+            "WORKING DIR",
+            "INITIAL PROMPT",
+            "+worktree",
+        ] {
             assert!(screen.contains(needle), "missing {needle}:\n{screen}");
         }
+        server.abort();
+    }
+
+    /// `Up` on the prompt's first line leaves the slot (moves to the field
+    /// above) instead of being trapped as a dead cursor move. Regression
+    /// guard for "up arrow does nothing in the loadout".
+    #[tokio::test]
+    async fn loadout_up_on_first_line_moves_to_previous_slot() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.open_loadout().await;
+        if let Some(lo) = app.loadout.as_mut() {
+            lo.entrance_skipped = true;
+            lo.field = crate::loadout::LoadoutField::Briefing;
+        }
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.loadout.as_ref().map(|l| l.field),
+            Some(crate::loadout::LoadoutField::Worktree),
+            "Up on the prompt's first line should focus the previous slot"
+        );
         server.abort();
     }
 

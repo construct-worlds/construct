@@ -262,6 +262,20 @@ impl LoadoutState {
         }
     }
 
+    /// Whether the prompt cursor is on the first line (so an `Up` should
+    /// leave the prompt and move to the previous slot instead of moving the
+    /// text cursor).
+    pub fn cursor_on_first_line(&self) -> bool {
+        line_col(&self.prompt, self.prompt_cursor).0 == 0
+    }
+
+    /// Whether the prompt cursor is on the last line (so a `Down` should
+    /// leave the prompt and move to the next slot).
+    pub fn cursor_on_last_line(&self) -> bool {
+        let last = self.prompt.split('\n').count().saturating_sub(1);
+        line_col(&self.prompt, self.prompt_cursor).0 >= last
+    }
+
     /// Briefing-only: move the cursor up one line, keeping the column.
     pub fn cursor_up(&mut self) {
         if self.field != LoadoutField::Briefing {
@@ -496,6 +510,23 @@ mod tests {
         // Cursor up keeps column, lands on line 0.
         s.cursor_up();
         assert_eq!(line_col(&s.prompt, s.prompt_cursor).0, 0);
+    }
+
+    #[test]
+    fn prompt_line_boundaries_drive_slot_exit() {
+        let mut s = state();
+        s.field = LoadoutField::Briefing;
+        // Empty prompt: cursor is on both the first and last line.
+        assert!(s.cursor_on_first_line());
+        assert!(s.cursor_on_last_line());
+        s.insert_char('a');
+        s.newline();
+        s.insert_char('b'); // "a\nb", cursor on line 1
+        assert!(!s.cursor_on_first_line());
+        assert!(s.cursor_on_last_line());
+        s.cursor_up(); // back to line 0
+        assert!(s.cursor_on_first_line());
+        assert!(!s.cursor_on_last_line());
     }
 
     #[test]

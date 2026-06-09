@@ -9,9 +9,11 @@ Scope: Creating a session in the TUI happens through a full-screen cinematic "lo
 
 The new-session action (`OpenNewSession`, bound to `C-x C-f`) opens **the Construct loadout** — a full-screen takeover that composes the resources an agent task needs before it is spawned:
 
-- **WEAPON** — the harness that drives the session.
-- **GEAR** — the working directory, plus an optional isolated git worktree.
-- **BRIEFING** — the initial prompt handed to the harness.
+- **Harness** — the harness that drives the session.
+- **Working dir** — the working directory, plus an optional isolated git worktree.
+- **Initial prompt** — the first prompt handed to the harness.
+
+The slots are labeled with plain terms (`HARNESS` / `WORKING DIR` / `INITIAL PROMPT`), not themed names — the screen's identity comes from its framing, not from renaming the inputs.
 
 Confirming the loadout ("LOAD" / "jack in") creates the session from the assembled values in one shot. The screen replaces the previous one-line harness-picker minibuffer entirely; there is no separate quick path.
 

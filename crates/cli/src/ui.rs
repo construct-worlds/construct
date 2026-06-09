@@ -2773,7 +2773,7 @@ fn loadout_label(name: &str, focused: bool, theme: &Theme) -> Span<'static> {
             .fg(theme.muted)
             .add_modifier(Modifier::BOLD)
     };
-    Span::styled(format!("{name:<9}"), style)
+    Span::styled(format!("{name:<13}"), style)
 }
 
 /// Render text with an optional block cursor (reverse-video cell) at the given
@@ -2921,7 +2921,7 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
     y += 2;
 
     // WEAPON
-    let mut weapon: Vec<Span> = vec![loadout_label("WEAPON", field == LoadoutField::Weapon, &theme)];
+    let mut weapon: Vec<Span> = vec![loadout_label("HARNESS", field == LoadoutField::Weapon, &theme)];
     for (i, (name, available, is_project)) in cards.iter().enumerate() {
         let selected = i == harness_idx;
         let label = if *is_project {
@@ -2958,14 +2958,14 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
         y,
         bottom,
         off_weapon,
-        Line::from(Span::styled(format!("         {desc}"), dim)),
+        Line::from(Span::styled(format!("             {desc}"), dim)),
     );
     y += 2;
 
     // GEAR (cwd + worktree)
     let mut gear: Vec<Span> = vec![
-        loadout_label("GEAR", field == LoadoutField::Gear, &theme),
-        Span::styled("cwd ▸ ", dim),
+        loadout_label("WORKING DIR", field == LoadoutField::Gear, &theme),
+        Span::styled("▸ ", dim),
     ];
     gear.extend(loadout_text_cursor(
         &cwd,
@@ -2985,7 +2985,7 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
         muted
     };
     let worktree_line = Line::from(vec![
-        Span::raw("         "),
+        Span::raw("             "),
         Span::styled(format!("{wt_box} +worktree"), wt_style),
         Span::styled("   run in an isolated git worktree", dim),
     ]);
@@ -3000,7 +3000,7 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
         y,
         bottom,
         off_brief,
-        Line::from(loadout_label("BRIEFING", field == LoadoutField::Briefing, &theme)),
+        Line::from(loadout_label("INITIAL PROMPT", field == LoadoutField::Briefing, &theme)),
     );
     y += 1;
     // Reserve two rows at the bottom for the note line + footer.
