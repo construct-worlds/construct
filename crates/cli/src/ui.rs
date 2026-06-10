@@ -108,6 +108,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_trigger = None;
     app.layout.dynamic_ui_triggers.clear();
     app.layout.shortcut_hints.clear();
+    app.layout.loadout_hits.clear();
     app.layout.modeline_approval_mode_hit = None;
     app.layout.main_window_areas.clear();
     app.layout.main_window_dividers.clear();
@@ -2763,6 +2764,9 @@ fn loadout_put(f: &mut Frame, x: u16, w: u16, y: u16, bottom: u16, off: u16, lin
 }
 
 /// A slot label like `WEAPON` / `GEAR` / `BRIEFING`, brightened when focused.
+/// Column width of the slot-label gutter; inline values start here.
+const LOADOUT_LABEL_W: u16 = 16;
+
 fn loadout_label(name: &str, focused: bool, theme: &Theme) -> Span<'static> {
     let style = if focused {
         Style::default()
@@ -2773,7 +2777,10 @@ fn loadout_label(name: &str, focused: bool, theme: &Theme) -> Span<'static> {
             .fg(theme.muted)
             .add_modifier(Modifier::BOLD)
     };
-    Span::styled(format!("{name:<13}"), style)
+    Span::styled(
+        format!("{name:<width$}", width = LOADOUT_LABEL_W as usize),
+        style,
+    )
 }
 
 /// Render text with an optional block cursor (reverse-video cell) at the given
@@ -2824,6 +2831,7 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
     let card_desc = lo.selected_harness().and_then(|h| h.description.clone());
     let cwd = lo.cwd.clone();
     let cwd_cursor = lo.cwd_cursor;
+    let cwd_valid = lo.cwd_valid;
     let worktree = lo.worktree;
     let prompt = lo.prompt.clone();
     let prompt_cursor = lo.prompt_cursor;
@@ -2880,12 +2888,28 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
     let muted = Style::default().fg(theme.muted);
     let text = Style::default().fg(theme.text);
 
-    // Group offsets (staggered rack-slide).
+    // Group offsets (staggered rack-slide). Row order: prompt first (it's
+    // the task), then the pre-filled details.
     let off_title = loadout_slide_off(progress, 0.00);
-    let off_weapon = loadout_slide_off(progress, 0.10);
-    let off_gear = loadout_slide_off(progress, 0.18);
-    let off_brief = loadout_slide_off(progress, 0.26);
+    let off_brief = loadout_slide_off(progress, 0.10);
+    let off_weapon = loadout_slide_off(progress, 0.18);
+    let off_gear = loadout_slide_off(progress, 0.26);
     let off_footer = loadout_slide_off(progress, 0.34);
+    // Click targets are only registered once the entrance settles —
+    // positions shift during the slide.
+    let register_hits = progress >= 1.0;
+    let mut hits: Vec<crate::app::LoadoutHit> = Vec::new();
+    let mut hit = |on: bool, area: Rect, action: crate::app::LoadoutHitAction| {
+        if on {
+            hits.push(crate::app::LoadoutHit { area, action });
+        }
+    };
+    let row_rect = |x: u16, y: u16, w: u16| Rect {
+        x,
+        y,
+        width: w,
+        height: 1,
+    };
 
     // TITLE
     let title = Line::from(vec![
@@ -2905,79 +2929,7 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
     loadout_put(f, cx, cw, y, bottom, off_title, Line::from(Span::styled(sep, dim)));
     y += 2;
 
-    // WEAPON
-    let mut weapon: Vec<Span> = vec![loadout_label("HARNESS", field == LoadoutField::Weapon, &theme)];
-    for (i, (name, available, is_project)) in cards.iter().enumerate() {
-        let selected = i == harness_idx;
-        let label = if *is_project {
-            format!("+ {name}")
-        } else {
-            name.clone()
-        };
-        if selected {
-            let style = if field == LoadoutField::Weapon {
-                Style::default()
-                    .fg(theme.highlight_fg)
-                    .bg(theme.highlight_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                text.add_modifier(Modifier::BOLD)
-            };
-            weapon.push(Span::styled(format!(" ‹{label}› "), style));
-        } else if *available {
-            weapon.push(Span::styled(format!(" {label} "), muted));
-        } else {
-            weapon.push(Span::styled(
-                format!(" {label} "),
-                dim.add_modifier(Modifier::CROSSED_OUT),
-            ));
-        }
-    }
-    loadout_put(f, cx, cw, y, bottom, off_weapon, Line::from(weapon));
-    y += 1;
-    let desc = card_desc.unwrap_or_default();
-    loadout_put(
-        f,
-        cx,
-        cw,
-        y,
-        bottom,
-        off_weapon,
-        Line::from(Span::styled(format!("             {desc}"), dim)),
-    );
-    y += 2;
-
-    // GEAR (cwd + worktree)
-    let mut gear: Vec<Span> = vec![
-        loadout_label("WORKING DIR", field == LoadoutField::Gear, &theme),
-        Span::styled("▸ ", dim),
-    ];
-    gear.extend(loadout_text_cursor(
-        &cwd,
-        cwd_cursor,
-        text,
-        field == LoadoutField::Gear,
-    ));
-    loadout_put(f, cx, cw, y, bottom, off_gear, Line::from(gear));
-    y += 1;
-    let wt_focused = field == LoadoutField::Worktree;
-    let wt_box = if worktree { "[x]" } else { "[ ]" };
-    let wt_style = if wt_focused {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        muted
-    };
-    let worktree_line = Line::from(vec![
-        Span::raw("             "),
-        Span::styled(format!("{wt_box} +worktree"), wt_style),
-        Span::styled("   run in an isolated git worktree", dim),
-    ]);
-    loadout_put(f, cx, cw, y, bottom, off_gear, worktree_line);
-    y += 2;
-
-    // BRIEFING
+    // INITIAL PROMPT — first and focused on open.
     loadout_put(
         f,
         cx,
@@ -2985,11 +2937,21 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
         y,
         bottom,
         off_brief,
-        Line::from(loadout_label("INITIAL PROMPT", field == LoadoutField::Briefing, &theme)),
+        Line::from(loadout_label(
+            "INITIAL PROMPT",
+            field == LoadoutField::Briefing,
+            &theme,
+        )),
+    );
+    hit(
+        register_hits,
+        row_rect(cx, y, cw),
+        crate::app::LoadoutHitAction::Focus(LoadoutField::Briefing),
     );
     y += 1;
-    // Reserve two rows at the bottom for the note line + footer.
-    let avail_box = bottom.saturating_sub(y).saturating_sub(2);
+    // Rows still needed below the box: blank + harness(2) + blank +
+    // gear(2) + note + footer = 8.
+    let avail_box = bottom.saturating_sub(y).saturating_sub(8);
     let bh = avail_box.clamp(1, 6);
     // Cursor (line, col) within the prompt.
     let (mut cline, mut ccol) = (0usize, 0usize);
@@ -3016,7 +2978,7 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
         let mut spans: Vec<Span> = vec![Span::styled("│ ", dim)];
         if li == 0 && prompt.is_empty() {
             spans.push(Span::styled(
-                "describe the task…  (Enter newline · ⌥Enter load)",
+                "describe the task…  (Enter loads · once typing, Enter = newline)",
                 dim.add_modifier(Modifier::ITALIC),
             ));
         } else if let Some(line) = lines.get(li) {
@@ -3024,26 +2986,153 @@ fn render_loadout(f: &mut Frame, area: Rect, app: &mut App) {
             spans.extend(loadout_text_cursor(line, ccol, text, show_cursor));
         }
         loadout_put(f, cx, cw, y, bottom, off_brief, Line::from(spans));
+        hit(
+            register_hits,
+            row_rect(cx, y, cw),
+            crate::app::LoadoutHitAction::Focus(LoadoutField::Briefing),
+        );
         y += 1;
     }
+    y += 1;
 
-    // NOTE (completion / errors), else blank.
-    let note_line = match note {
-        Some(n) => Line::from(Span::styled(
-            n,
-            Style::default().fg(theme.warning),
+    // HARNESS rack.
+    let mut weapon: Vec<Span> =
+        vec![loadout_label("HARNESS", field == LoadoutField::Weapon, &theme)];
+    let mut card_col = cx + LOADOUT_LABEL_W;
+    for (i, (name, available, is_project)) in cards.iter().enumerate() {
+        let selected = i == harness_idx;
+        let label = if *is_project {
+            format!("+ {name}")
+        } else {
+            name.clone()
+        };
+        let rendered = if selected {
+            format!(" ‹{label}› ")
+        } else {
+            format!(" {label} ")
+        };
+        let style = if selected {
+            if field == LoadoutField::Weapon {
+                Style::default()
+                    .fg(theme.highlight_fg)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                text.add_modifier(Modifier::BOLD)
+            }
+        } else if *available {
+            muted
+        } else {
+            dim.add_modifier(Modifier::CROSSED_OUT)
+        };
+        let w = UnicodeWidthStr::width(rendered.as_str()) as u16;
+        hit(
+            register_hits,
+            row_rect(card_col, y, w),
+            crate::app::LoadoutHitAction::Card(i),
+        );
+        card_col += w;
+        weapon.push(Span::styled(rendered, style));
+    }
+    loadout_put(f, cx, cw, y, bottom, off_weapon, Line::from(weapon));
+    y += 1;
+    let desc = card_desc.unwrap_or_default();
+    loadout_put(
+        f,
+        cx,
+        cw,
+        y,
+        bottom,
+        off_weapon,
+        Line::from(Span::styled(
+            format!("{:width$}{desc}", "", width = LOADOUT_LABEL_W as usize),
+            dim,
         )),
+    );
+    y += 2;
+
+    // WORKING DIR (cwd + worktree). Invalid paths render in the danger
+    // color so the user sees the problem before LOAD refuses it.
+    let cwd_style = if cwd_valid {
+        text
+    } else {
+        Style::default().fg(theme.danger)
+    };
+    let mut gear: Vec<Span> = vec![
+        loadout_label("WORKING DIR", field == LoadoutField::Gear, &theme),
+        Span::styled("▸ ", dim),
+    ];
+    gear.extend(loadout_text_cursor(
+        &cwd,
+        cwd_cursor,
+        cwd_style,
+        field == LoadoutField::Gear,
+    ));
+    loadout_put(f, cx, cw, y, bottom, off_gear, Line::from(gear));
+    hit(
+        register_hits,
+        row_rect(cx, y, cw),
+        crate::app::LoadoutHitAction::Focus(LoadoutField::Gear),
+    );
+    y += 1;
+    let wt_focused = field == LoadoutField::Worktree;
+    let wt_box = if worktree { "[x]" } else { "[ ]" };
+    let wt_style = if wt_focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        muted
+    };
+    let wt_label = format!("{wt_box} +worktree");
+    let wt_w = UnicodeWidthStr::width(wt_label.as_str()) as u16;
+    hit(
+        register_hits,
+        row_rect(cx + LOADOUT_LABEL_W, y, wt_w),
+        crate::app::LoadoutHitAction::Worktree,
+    );
+    let worktree_line = Line::from(vec![
+        Span::raw(" ".repeat(LOADOUT_LABEL_W as usize)),
+        Span::styled(wt_label, wt_style),
+        Span::styled("   run in an isolated git worktree", dim),
+    ]);
+    loadout_put(f, cx, cw, y, bottom, off_gear, worktree_line);
+    y += 2;
+
+    // NOTE (completion / validation / Esc-guard), else blank.
+    let note_line = match note {
+        Some(n) => Line::from(Span::styled(n, Style::default().fg(theme.warning))),
         None => Line::from(""),
     };
     loadout_put(f, cx, cw, y, bottom, off_footer, note_line);
     y += 1;
 
-    // FOOTER
+    // FOOTER hints + [ LOAD ] button (right-aligned).
+    const LOAD_BTN: &str = "[ LOAD ]";
+    let btn_w = LOAD_BTN.len() as u16;
     let footer = Line::from(Span::styled(
-        "↑↓ move · ←→ choose · type to edit · Enter load (⌥Enter in briefing) · Esc abort",
+        "↑↓ move · ←→ choose · Enter/⌥Enter load · Esc cancel",
         dim,
     ));
-    loadout_put(f, cx, cw, y, bottom, off_footer, footer);
+    loadout_put(f, cx, cw.saturating_sub(btn_w + 1), y, bottom, off_footer, footer);
+    if y < bottom && cw > btn_w {
+        let btn_x = cx + cw - btn_w;
+        let btn_style = Style::default()
+            .fg(theme.highlight_fg)
+            .bg(theme.highlight_bg)
+            .add_modifier(Modifier::BOLD);
+        f.render_widget(
+            Paragraph::new(Span::styled(LOAD_BTN, btn_style)),
+            row_rect(btn_x, y, btn_w),
+        );
+        hit(
+            register_hits,
+            row_rect(btn_x, y, btn_w),
+            crate::app::LoadoutHitAction::Load,
+        );
+    }
+
+    app.layout.loadout_hits = hits;
 }
 
 fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {

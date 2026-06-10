@@ -49,6 +49,14 @@ pub struct TuiState {
     pub active_window_id: Option<u64>,
     #[serde(default)]
     pub widgets: HashMap<String, WidgetState>,
+    /// Loadout screen defaults, learned from the last successful LOAD so
+    /// repeat session creation starts pre-filled with the user's habits.
+    #[serde(default)]
+    pub loadout_last_harness: Option<String>,
+    #[serde(default)]
+    pub loadout_last_cwd: Option<String>,
+    #[serde(default)]
+    pub loadout_last_worktree: bool,
 }
 
 impl Default for TuiState {
@@ -66,6 +74,9 @@ impl Default for TuiState {
             main_windows: None,
             active_window_id: None,
             widgets: HashMap::new(),
+            loadout_last_harness: None,
+            loadout_last_cwd: None,
+            loadout_last_worktree: false,
         }
     }
 }

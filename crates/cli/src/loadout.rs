@@ -34,22 +34,24 @@ pub enum LoadoutField {
 }
 
 impl LoadoutField {
-    /// Cycle order: Weapon → Gear → Worktree → Briefing → (wrap).
+    /// Cycle order mirrors the on-screen row order: the prompt comes first
+    /// (it's the task — the part the user actually composes), then the
+    /// pre-filled details below it: Briefing → Weapon → Gear → Worktree.
     pub fn next(self) -> Self {
         match self {
+            LoadoutField::Briefing => LoadoutField::Weapon,
             LoadoutField::Weapon => LoadoutField::Gear,
             LoadoutField::Gear => LoadoutField::Worktree,
             LoadoutField::Worktree => LoadoutField::Briefing,
-            LoadoutField::Briefing => LoadoutField::Weapon,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
+            LoadoutField::Briefing => LoadoutField::Worktree,
             LoadoutField::Weapon => LoadoutField::Briefing,
             LoadoutField::Gear => LoadoutField::Weapon,
             LoadoutField::Worktree => LoadoutField::Gear,
-            LoadoutField::Briefing => LoadoutField::Worktree,
         }
     }
 }
@@ -96,6 +98,16 @@ pub struct LoadoutState {
     /// Transient inline note (completion result, "unavailable", …). Cleared
     /// by the next text edit.
     pub note: Option<String>,
+
+    /// Whether `cwd` currently names an existing directory. Recomputed on
+    /// every cwd edit; renders the path in the danger color and blocks LOAD
+    /// when false.
+    pub cwd_valid: bool,
+
+    /// Set by a first Esc while the prompt has text: the next Esc discards;
+    /// any other key disarms. Prevents one stray Esc from eating a long
+    /// typed prompt.
+    pub esc_armed: bool,
 }
 
 impl LoadoutState {
@@ -117,10 +129,16 @@ impl LoadoutState {
             })
             .unwrap_or(0);
         let cwd_cursor = cwd.chars().count();
+        let cwd_valid = std::path::Path::new(&expand_tilde(&cwd)).is_dir();
         Self {
             opened_at: now,
-            entrance_skipped: false,
-            field: LoadoutField::Weapon,
+            // Honor an opt-out for the entrance animation (repetition /
+            // reduced-motion): CONSTRUCT_LOADOUT_INTRO=0|off|false.
+            entrance_skipped: intro_disabled(
+                std::env::var("CONSTRUCT_LOADOUT_INTRO").ok().as_deref(),
+            ),
+            // The prompt is the task — start composing immediately.
+            field: LoadoutField::Briefing,
             harnesses,
             harness_idx,
             cwd,
@@ -130,6 +148,8 @@ impl LoadoutState {
             prompt_cursor: 0,
             group_id,
             note: None,
+            cwd_valid,
+            esc_armed: false,
         }
     }
 
@@ -183,6 +203,12 @@ impl LoadoutState {
         expand_tilde(&self.cwd)
     }
 
+    /// Recompute `cwd_valid`. Called after every edit that can change the
+    /// path (and cheap enough to call defensively).
+    pub fn revalidate_cwd(&mut self) {
+        self.cwd_valid = std::path::Path::new(&self.expanded_cwd()).is_dir();
+    }
+
     // ---- text editing for the active text field (Gear cwd / Briefing prompt) ----
 
     fn active_text(&mut self) -> Option<(&mut String, &mut usize)> {
@@ -206,6 +232,9 @@ impl LoadoutState {
             *s = chars.into_iter().collect();
             *cur = idx + 1;
         }
+        if self.field == LoadoutField::Gear {
+            self.revalidate_cwd();
+        }
     }
 
     pub fn backspace(&mut self) {
@@ -222,6 +251,9 @@ impl LoadoutState {
             *s = chars.into_iter().collect();
             *cur = idx;
         }
+        if self.field == LoadoutField::Gear {
+            self.revalidate_cwd();
+        }
     }
 
     pub fn delete_forward(&mut self) {
@@ -232,6 +264,37 @@ impl LoadoutState {
                 chars.remove(*cur);
                 *s = chars.into_iter().collect();
             }
+        }
+        if self.field == LoadoutField::Gear {
+            self.revalidate_cwd();
+        }
+    }
+
+    /// Delete the word before the cursor (`C-w`), shell-style: skip trailing
+    /// separators, then delete to the start of the word. Separators are
+    /// whitespace and `/` so path components delete one at a time.
+    pub fn delete_word_back(&mut self) {
+        self.note = None;
+        if let Some((s, cur)) = self.active_text() {
+            if *cur == 0 {
+                return;
+            }
+            let chars: Vec<char> = s.chars().collect();
+            let is_sep = |c: char| c.is_whitespace() || c == '/';
+            let mut start = (*cur).min(chars.len());
+            while start > 0 && is_sep(chars[start - 1]) {
+                start -= 1;
+            }
+            while start > 0 && !is_sep(chars[start - 1]) {
+                start -= 1;
+            }
+            let mut out: Vec<char> = chars[..start].to_vec();
+            out.extend_from_slice(&chars[(*cur).min(chars.len())..]);
+            *s = out.into_iter().collect();
+            *cur = start;
+        }
+        if self.field == LoadoutField::Gear {
+            self.revalidate_cwd();
         }
     }
 
@@ -342,6 +405,7 @@ impl LoadoutState {
             self.cwd = full;
             self.cwd_cursor = self.cwd.chars().count();
             self.note = None;
+            self.revalidate_cwd();
             return changed;
         }
         let common = longest_common_prefix(&names);
@@ -350,6 +414,7 @@ impl LoadoutState {
         if changed {
             self.cwd = completed;
             self.cwd_cursor = self.cwd.chars().count();
+            self.revalidate_cwd();
         }
         // Show a few candidates as a hint either way.
         let mut shown: Vec<String> = names.iter().take(6).cloned().collect();
@@ -359,6 +424,15 @@ impl LoadoutState {
         self.note = Some(format!("matches: {}", shown.join("  ")));
         changed
     }
+}
+
+/// Whether `CONSTRUCT_LOADOUT_INTRO` disables the entrance animation.
+/// Anything except `0` / `off` / `false` (or unset) keeps it on.
+fn intro_disabled(val: Option<&str>) -> bool {
+    matches!(
+        val.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("0") | Some("off") | Some("false")
+    )
 }
 
 /// Expand a leading `~` / `~/` to `$HOME`.
@@ -478,13 +552,54 @@ mod tests {
     #[test]
     fn field_cycles_forward_and_back() {
         let mut s = state();
+        // The prompt is first and focused on open.
+        assert_eq!(s.field, LoadoutField::Briefing);
+        s.focus_next();
         assert_eq!(s.field, LoadoutField::Weapon);
         s.focus_next();
         assert_eq!(s.field, LoadoutField::Gear);
-        s.focus_prev();
-        assert_eq!(s.field, LoadoutField::Weapon);
-        s.focus_prev();
+        s.focus_next();
+        assert_eq!(s.field, LoadoutField::Worktree);
+        s.focus_next();
         assert_eq!(s.field, LoadoutField::Briefing);
+        s.focus_prev();
+        assert_eq!(s.field, LoadoutField::Worktree);
+    }
+
+    #[test]
+    fn cwd_validation_tracks_edits() {
+        let mut s = state();
+        assert!(s.cwd_valid, "/tmp should validate");
+        s.field = LoadoutField::Gear;
+        for c in "/definitely-missing".chars() {
+            s.insert_char(c);
+        }
+        assert!(!s.cwd_valid);
+        for _ in 0.."/definitely-missing".len() {
+            s.backspace();
+        }
+        assert!(s.cwd_valid);
+    }
+
+    #[test]
+    fn delete_word_back_eats_path_components() {
+        let mut s = state();
+        s.field = LoadoutField::Gear;
+        s.cwd = "/a/bb/ccc".to_string();
+        s.cwd_cursor = s.cwd.chars().count();
+        s.delete_word_back();
+        assert_eq!(s.cwd, "/a/bb/");
+        s.delete_word_back();
+        assert_eq!(s.cwd, "/a/");
+    }
+
+    #[test]
+    fn intro_env_opt_out() {
+        assert!(intro_disabled(Some("0")));
+        assert!(intro_disabled(Some("off")));
+        assert!(intro_disabled(Some("FALSE")));
+        assert!(!intro_disabled(Some("1")));
+        assert!(!intro_disabled(None));
     }
 
     #[test]

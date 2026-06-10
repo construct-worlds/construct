@@ -467,6 +467,12 @@ pub struct App {
     /// takeover: while present it captures all input and `ui::render` short-
     /// circuits to it.
     pub loadout: Option<crate::loadout::LoadoutState>,
+    /// Loadout defaults learned from the last successful LOAD (persisted in
+    /// tui_state). Pre-fill the next open so habitual session shapes are one
+    /// Enter away.
+    pub loadout_last_harness: Option<String>,
+    pub loadout_last_cwd: Option<String>,
+    pub loadout_last_worktree: bool,
     pub harnesses: Vec<HarnessInfo>,
     pub theme: crate::theme::Theme,
     pub help_visible: bool,
@@ -1356,6 +1362,10 @@ pub struct LayoutSnapshot {
     /// (palette / send-input / etc.) is open for minibuffer hints, but may
     /// still contain main-view shortcut affordances.
     pub shortcut_hints: Vec<HintZone>,
+    /// Clickable regions of the loadout screen from the last frame
+    /// (harness cards, worktree toggle, field focus, LOAD button).
+    /// Only populated once the entrance animation has settled.
+    pub loadout_hits: Vec<LoadoutHit>,
     /// Bounds of the topmost modal/dialog rendered in the last frame.
     /// Mouse clicks outside this rect dismiss the modal instead of
     /// falling through to panes underneath it.
@@ -1388,6 +1398,25 @@ pub struct LayoutSnapshot {
     pub dynamic_ui_dropdown_area: Option<ratatui::layout::Rect>,
     /// Last rendered dynamic UI stack dimensions: `(session_id, content_rows, viewport_rows)`.
     pub dynamic_ui_scroll_metrics: Option<(String, usize, usize)>,
+}
+
+/// A clickable region of the loadout screen and what clicking it does.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadoutHit {
+    pub area: ratatui::layout::Rect,
+    pub action: LoadoutHitAction,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LoadoutHitAction {
+    /// Select harness card `i` (and focus the harness slot).
+    Card(usize),
+    /// Toggle the worktree checkbox (and focus it).
+    Worktree,
+    /// Focus a slot without changing its value.
+    Focus(crate::loadout::LoadoutField),
+    /// The [ LOAD ] button.
+    Load,
 }
 
 fn selection_bounds_for_layout(
@@ -1571,6 +1600,9 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         transcript_scroll: 0,
         minibuffer: None,
         loadout: None,
+        loadout_last_harness: persisted.loadout_last_harness.clone(),
+        loadout_last_cwd: persisted.loadout_last_cwd.clone(),
+        loadout_last_worktree: persisted.loadout_last_worktree,
         harnesses,
         theme,
         help_visible: false,
@@ -1748,6 +1780,9 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         main_windows: Some(app.main_windows.clone()),
         active_window_id: Some(app.active_window_id),
         widgets,
+        loadout_last_harness: app.loadout_last_harness.clone(),
+        loadout_last_cwd: app.loadout_last_cwd.clone(),
+        loadout_last_worktree: app.loadout_last_worktree,
     });
 
     result
@@ -4558,6 +4593,12 @@ impl App {
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
         }
+        // Loadout: full takeover — while open, clicks only interact with the
+        // loadout's own controls and never fall through to the panes below.
+        if self.loadout.is_some() {
+            self.handle_loadout_click(col, row).await;
+            return;
+        }
         if self.handle_dynamic_ui_overlay_click(col, row).await {
             return;
         }
@@ -6479,15 +6520,33 @@ impl App {
                 .and_then(|s| s.group_id.clone()),
             Selection::None => None,
         };
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string());
-        self.loadout = Some(crate::loadout::LoadoutState::new(
-            cards,
-            group_id,
-            cwd,
-            Instant::now(),
-        ));
+        // Working dir: prefer the last-used one (the TUI is long-running, so
+        // the process cwd goes stale fast) when it still exists; else the
+        // process cwd.
+        let cwd = self
+            .loadout_last_cwd
+            .clone()
+            .filter(|p| std::path::Path::new(p).is_dir())
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| ".".to_string());
+        let mut state =
+            crate::loadout::LoadoutState::new(cards, group_id, cwd, Instant::now());
+        // Pre-select the last-used harness when it's still available.
+        if let Some(last) = &self.loadout_last_harness {
+            if let Some(i) = state
+                .harnesses
+                .iter()
+                .position(|h| h.available && !h.is_project && h.name == *last)
+            {
+                state.harness_idx = i;
+            }
+        }
+        state.worktree = self.loadout_last_worktree;
+        self.loadout = Some(state);
     }
 
     /// Confirm the loadout — "jack in". Routes the synthetic `project` card to
@@ -6515,6 +6574,14 @@ impl App {
             let name = card.name.clone();
             if let Some(lo) = self.loadout.as_mut() {
                 lo.note = Some(format!("{name} unavailable — binary not found"));
+            }
+            return;
+        }
+        if !std::path::Path::new(&lo.expanded_cwd()).is_dir() {
+            if let Some(lo) = self.loadout.as_mut() {
+                lo.revalidate_cwd();
+                lo.note = Some("working dir does not exist".to_string());
+                lo.field = crate::loadout::LoadoutField::Gear;
             }
             return;
         }
@@ -6563,8 +6630,13 @@ impl App {
             parent_session_id: None,
             group_id,
         };
+        let remembered = (params.harness.clone(), params.cwd.clone(), params.worktree);
         match self.client.create(params).await {
             Ok(id) => {
+                // Learn the defaults for the next open.
+                self.loadout_last_harness = Some(remembered.0);
+                self.loadout_last_cwd = Some(remembered.1);
+                self.loadout_last_worktree = remembered.2;
                 self.set_status(format!("created {}", short_id(&id)));
                 self.refresh_sessions().await;
                 // Pre-insert an empty PTY parser so the subsequent
@@ -6582,6 +6654,55 @@ impl App {
         }
     }
 
+    /// Mouse handling for the loadout screen: clicks hit-test the regions
+    /// recorded by `ui::render_loadout` (cards, worktree box, slot focus,
+    /// LOAD). A click during the entrance just skips the animation.
+    async fn handle_loadout_click(&mut self, col: u16, row: u16) {
+        let now = Instant::now();
+        if let Some(lo) = self.loadout.as_mut() {
+            if lo.entrance_active(now) {
+                lo.entrance_skipped = true;
+                return;
+            }
+            // Any interaction disarms a pending Esc-discard.
+            lo.esc_armed = false;
+        }
+        let hit = self
+            .layout
+            .loadout_hits
+            .iter()
+            .find(|h| {
+                col >= h.area.x
+                    && col < h.area.x + h.area.width
+                    && row >= h.area.y
+                    && row < h.area.y + h.area.height
+            })
+            .copied();
+        let Some(hit) = hit else { return };
+        match hit.action {
+            LoadoutHitAction::Card(i) => {
+                if let Some(lo) = self.loadout.as_mut() {
+                    if i < lo.harnesses.len() {
+                        lo.harness_idx = i;
+                        lo.field = crate::loadout::LoadoutField::Weapon;
+                    }
+                }
+            }
+            LoadoutHitAction::Worktree => {
+                if let Some(lo) = self.loadout.as_mut() {
+                    lo.field = crate::loadout::LoadoutField::Worktree;
+                    lo.toggle_worktree();
+                }
+            }
+            LoadoutHitAction::Focus(field) => {
+                if let Some(lo) = self.loadout.as_mut() {
+                    lo.field = field;
+                }
+            }
+            LoadoutHitAction::Load => self.loadout_submit().await,
+        }
+    }
+
     /// Keyboard handling for the loadout screen. See the footer hint in
     /// `ui::render_loadout` for the user-facing summary.
     async fn handle_loadout_key(&mut self, key: KeyEvent) {
@@ -6589,13 +6710,32 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // Esc / C-c / C-g always abort, even mid-entrance.
-        let abort = matches!(key.code, KeyCode::Esc)
-            || (ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('g')));
-        if abort {
+        // C-c / C-g abort immediately, even mid-entrance. Esc aborts too,
+        // but when the prompt has text it arms first ("press Esc again") so
+        // one stray Esc can't eat a long typed prompt.
+        if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('g')) {
             self.loadout = None;
-            self.set_status("loadout aborted".to_string());
+            self.set_status("loadout cancelled".to_string());
             return;
+        }
+        if matches!(key.code, KeyCode::Esc) {
+            if let Some(lo) = self.loadout.as_mut() {
+                if !lo.prompt.trim().is_empty() && !lo.esc_armed {
+                    lo.esc_armed = true;
+                    lo.note = Some("unsaved prompt — Esc again to discard".to_string());
+                    return;
+                }
+            }
+            self.loadout = None;
+            self.set_status("loadout cancelled".to_string());
+            return;
+        }
+        // Any non-Esc key disarms the pending discard.
+        if let Some(lo) = self.loadout.as_mut() {
+            if lo.esc_armed {
+                lo.esc_armed = false;
+                lo.note = None;
+            }
         }
 
         // Any other key during the rack-slide entrance just skips it.
@@ -6614,10 +6754,16 @@ impl App {
             None => return,
         };
 
-        // LOAD: Alt/Ctrl+Enter from anywhere; plain Enter everywhere except
-        // the briefing (where Enter inserts a newline).
+        // LOAD: Alt/Ctrl+Enter from anywhere; plain Enter from any non-prompt
+        // field. In the prompt, Enter loads while it's still empty (so
+        // open → Enter spawns with defaults), and inserts a newline once
+        // there's text.
         if matches!(key.code, KeyCode::Enter) {
-            if alt || ctrl || field != LoadoutField::Briefing {
+            let prompt_empty = self
+                .loadout
+                .as_ref()
+                .is_some_and(|lo| lo.prompt.is_empty());
+            if alt || ctrl || field != LoadoutField::Briefing || prompt_empty {
                 self.loadout_submit().await;
             } else if let Some(lo) = self.loadout.as_mut() {
                 lo.newline();
@@ -6672,18 +6818,29 @@ impl App {
             KeyCode::End => lo.cursor_end(),
             KeyCode::Backspace => lo.backspace(),
             KeyCode::Delete => lo.delete_forward(),
+            // Emacs-style editing in the text fields, matching the minibuffer.
+            KeyCode::Char('a') if ctrl => lo.cursor_home(),
+            KeyCode::Char('e') if ctrl => lo.cursor_end(),
+            KeyCode::Char('w') if ctrl => lo.delete_word_back(),
             KeyCode::Char(' ') if field == LoadoutField::Worktree => lo.toggle_worktree(),
             KeyCode::Char(c) if !ctrl => match field {
-                // Type-to-jump: pick the first harness whose name starts with
-                // the typed letter.
                 LoadoutField::Weapon => {
-                    let lower = c.to_ascii_lowercase();
-                    if let Some(i) = lo
-                        .harnesses
-                        .iter()
-                        .position(|h| h.name.to_ascii_lowercase().starts_with(lower))
-                    {
-                        lo.harness_idx = i;
+                    // 1-9 picks a card directly; letters jump to the first
+                    // harness whose name starts with the typed letter.
+                    if let Some(d) = c.to_digit(10) {
+                        let idx = (d as usize).wrapping_sub(1);
+                        if idx < lo.harnesses.len() {
+                            lo.harness_idx = idx;
+                        }
+                    } else {
+                        let lower = c.to_ascii_lowercase();
+                        if let Some(i) = lo
+                            .harnesses
+                            .iter()
+                            .position(|h| h.name.to_ascii_lowercase().starts_with(lower))
+                        {
+                            lo.harness_idx = i;
+                        }
                     }
                 }
                 LoadoutField::Worktree => {}
@@ -7808,6 +7965,7 @@ mod tests {
             list_items_area: None,
             list_scroll_offset: 0,
             shortcut_hints: Vec::new(),
+            loadout_hits: Vec::new(),
             modal_area: None,
             browser_preview_area: None,
             browser_preview_close: None,
@@ -7846,6 +8004,9 @@ mod tests {
             transcript_scroll: 0,
             minibuffer: None,
             loadout: None,
+            loadout_last_harness: None,
+            loadout_last_cwd: None,
+            loadout_last_worktree: false,
             harnesses: Vec::new(),
             theme: crate::theme::Theme::default(),
             help_visible: false,
@@ -9015,6 +9176,80 @@ mod tests {
             Some(crate::loadout::LoadoutField::Worktree),
             "Up on the prompt's first line should focus the previous slot"
         );
+        server.abort();
+    }
+
+    /// Open → Enter must keep the 2-keystroke fast path: with the prompt
+    /// empty (and focused, as it is on open), Enter submits instead of
+    /// inserting a newline.
+    #[tokio::test]
+    async fn loadout_enter_on_empty_prompt_loads_immediately() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.open_loadout().await;
+        if let Some(lo) = app.loadout.as_mut() {
+            lo.entrance_skipped = true;
+        }
+        assert_eq!(
+            app.loadout.as_ref().map(|l| l.field),
+            Some(crate::loadout::LoadoutField::Briefing),
+            "prompt should be focused on open"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert!(
+            app.loadout.is_none(),
+            "Enter with an empty prompt should submit the loadout"
+        );
+        server.abort();
+    }
+
+    /// Esc with typed prompt text arms instead of discarding; the second
+    /// Esc closes. Regression guard for losing a long prompt to one
+    /// reflexive Esc.
+    #[tokio::test]
+    async fn loadout_esc_guards_nonempty_prompt() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.open_loadout().await;
+        if let Some(lo) = app.loadout.as_mut() {
+            lo.entrance_skipped = true;
+            lo.prompt = "important draft".to_string();
+        }
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(app.loadout.is_some(), "first Esc must not discard the prompt");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(app.loadout.is_none(), "second Esc closes");
+        server.abort();
+    }
+
+    /// Clicking a harness card selects it; the loadout eats the click
+    /// (no fall-through to panes underneath).
+    #[tokio::test]
+    async fn loadout_click_selects_harness_card() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.open_loadout().await;
+        if let Some(lo) = app.loadout.as_mut() {
+            lo.entrance_skipped = true;
+        }
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let card = app
+            .layout
+            .loadout_hits
+            .iter()
+            .find_map(|h| match h.action {
+                LoadoutHitAction::Card(i) => Some((i, h.area)),
+                _ => None,
+            })
+            .expect("at least one card hit registered");
+        app.handle_left_click(card.1.x, card.1.y).await;
+        let lo = app.loadout.as_ref().expect("loadout still open");
+        assert_eq!(lo.harness_idx, card.0);
+        assert_eq!(lo.field, crate::loadout::LoadoutField::Weapon);
         server.abort();
     }
 
