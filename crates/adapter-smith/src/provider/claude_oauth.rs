@@ -270,7 +270,16 @@ fn parse_protocol_turn(raw: &str) -> Result<ProviderTurn> {
         Err(first_err) => {
             let trimmed = raw.trim();
             let Some(start) = trimmed.find('{') else {
-                return Err(anyhow!("parse claude-oauth structured turn: {first_err}"));
+                if trimmed.is_empty() {
+                    return Err(anyhow!("parse claude-oauth structured turn: {first_err}"));
+                }
+                return Ok(ProviderTurn {
+                    text: Some(trimmed.to_string()),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    reasoning_items: Vec::new(),
+                });
             };
             let Some(end) = trimmed.rfind('}').map(|i| i + 1) else {
                 return Err(anyhow!("parse claude-oauth structured turn: {first_err}"));
@@ -464,6 +473,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(turn.text.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn plain_text_result_is_final_text_turn() {
+        let turn = parse_protocol_turn("Hello from Claude.").unwrap();
+        assert_eq!(turn.text.as_deref(), Some("Hello from Claude."));
+        assert!(turn.tool_calls.is_empty());
+        assert_eq!(turn.stop_reason, StopReason::EndTurn);
     }
 
     #[test]
