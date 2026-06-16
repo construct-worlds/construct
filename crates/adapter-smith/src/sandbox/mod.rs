@@ -9,16 +9,15 @@
 //! `CONSTRUCT_SMITH_SANDBOX=auto|seatbelt|none` (default `none` → `Noop`), so
 //! default behavior is unchanged while the first cut is validated.
 
-// The module is the proven primitive; the consumers (shell/proc wrap, the
-// edit_file writer, the gate escalation) land in the wiring follow-up, so much
-// of this is "unused" until then.
-#![allow(dead_code)]
-
 mod policy;
 #[cfg(target_os = "macos")]
 pub mod seatbelt;
 
-pub use policy::{canon, NetworkPolicy, ReadScope, SandboxMode, SandboxPolicy};
+pub use policy::{NetworkPolicy, SandboxMode, SandboxPolicy};
+// `canon` (a path util) and `ReadScope` are referenced from the backends' unit
+// tests and are part of the module's surface; not yet from non-test consumers.
+#[allow(unused_imports)]
+pub use policy::{canon, ReadScope};
 
 use std::io;
 use std::path::Path;

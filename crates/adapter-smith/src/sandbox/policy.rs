@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxMode {
-    /// No writes, no spawning of mutating processes.
+    /// No writes, no spawning of mutating processes. Part of the model (the
+    /// SBPL/bwrap backends honor it); no consumer derives it yet — a session
+    /// `read-only` mode is a later config layer.
+    #[allow(dead_code)]
     ReadOnly,
     /// Write within `writable_roots`, network per `network`. The default.
     WorkspaceWrite,
@@ -37,21 +40,28 @@ pub struct SandboxPolicy {
     pub mode: SandboxMode,
     /// Absolute, canonicalized roots an action may write within.
     pub writable_roots: Vec<PathBuf>,
+    /// Read scope. Always `All` today (reads are unconfined — exfiltration is
+    /// gated by the network + write boundaries); the field carries the model
+    /// for a future read-restricting backend.
+    #[allow(dead_code)]
     pub readable: ReadScope,
     pub network: NetworkPolicy,
 }
 
 impl SandboxPolicy {
     /// Runtime default for a session — no config file. The worktree (`cwd`),
-    /// the widgets dir, and tmp are writable; network is denied.
-    pub fn workspace_default(cwd: &Path, widgets_dir: Option<&Path>) -> Self {
+    /// the auto-approve paths (widgets dir, …), and tmp are writable; network
+    /// is denied.
+    pub fn workspace_default(cwd: &Path) -> Self {
         let mut roots = vec![canon(cwd), canon(&std::env::temp_dir())];
-        if let Some(w) = widgets_dir {
-            roots.push(canon(w));
-        }
         // On macOS `/tmp` is a symlink into `/private`; Seatbelt matches the
         // resolved path, so canonicalize it (→ `/private/tmp`).
         roots.push(canon(Path::new("/tmp")));
+        // Paths the gate already auto-approves writes to (widgets dir, …) must
+        // be writable, or those Safe writes would be blocked once confined.
+        for p in agentd_protocol::adapter::policy::AutoApprovePolicy::from_env().allow_paths() {
+            roots.push(canon(p));
+        }
         roots.sort();
         roots.dedup();
         Self {
@@ -72,8 +82,11 @@ impl SandboxPolicy {
         }
     }
 
-    /// Would a write to `path` be permitted under this policy? Used by the
-    /// in-process `edit_file` guard before routing to the sandboxed writer.
+    /// Would a write to `path` be permitted under this policy? The kernel is
+    /// the real enforcer (the writer subprocess returns `EPERM`); this is the
+    /// in-process predicate a future pre-flight planner uses to classify a
+    /// write as in-sandbox vs a boundary crossing without spawning anything.
+    #[allow(dead_code)]
     pub fn allows_write(&self, path: &Path) -> bool {
         match self.mode {
             SandboxMode::FullAccess => true,
@@ -123,7 +136,7 @@ mod tests {
     fn workspace_default_writes_inside_worktree_only() {
         let dir = std::env::temp_dir().join("smith-sb-policy");
         let _ = std::fs::create_dir_all(&dir);
-        let p = SandboxPolicy::workspace_default(&dir, None);
+        let p = SandboxPolicy::workspace_default(&dir);
         assert_eq!(p.mode, SandboxMode::WorkspaceWrite);
         assert_eq!(p.network, NetworkPolicy::Denied);
         assert!(p.allows_write(&dir.join("src/main.rs")));
@@ -134,7 +147,7 @@ mod tests {
 
     #[test]
     fn escalated_allows_everything() {
-        let p = SandboxPolicy::workspace_default(Path::new("/tmp"), None).escalated();
+        let p = SandboxPolicy::workspace_default(Path::new("/tmp")).escalated();
         assert_eq!(p.mode, SandboxMode::FullAccess);
         assert_eq!(p.network, NetworkPolicy::Allowed);
         assert!(p.allows_write(Path::new("/etc/hosts")));

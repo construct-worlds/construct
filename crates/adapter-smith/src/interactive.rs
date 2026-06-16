@@ -2052,7 +2052,14 @@ pub async fn run(
         client: tokio::sync::OnceCell::new(),
         emit: Some(emit.clone()),
         procs: std::sync::Arc::new(crate::tools::proc::ProcRegistry::default()),
+        sandbox: crate::sandbox::select().into(),
+        sandbox_policy: crate::sandbox::SandboxPolicy::workspace_default(&cwd),
     };
+    tracing::debug!(
+        backend = tool_ctx.sandbox.name(),
+        enforces = tool_ctx.sandbox.enforces(),
+        "smith sandbox backend selected"
+    );
 
     // Prompt bytes the line editor will re-emit on every redraw. Must
     // match Terminal::prompt's payload sans the leading `\r\n` (we keep
@@ -3949,13 +3956,24 @@ async fn run_one_tool(
         }
     }
 
+    // Sandbox escalation (spec 0029): a Risky (effective) call that reaches
+    // this point has been *permitted* — user-approved, auto-review-approved,
+    // or an auto mode — so it may legitimately cross the confined boundary;
+    // run it with the policy relaxed. Safe calls keep the confined floor.
+    let escalated_ctx;
+    let run_ctx = if is_risky {
+        escalated_ctx = tool_ctx.escalated();
+        &escalated_ctx
+    } else {
+        tool_ctx
+    };
     let supervisor_outcome = run_with_supervisor(
         call.id.clone(),
         call.name.clone(),
         args_summary.clone(),
         registry.clone(),
         call.input.clone(),
-        tool_ctx,
+        run_ctx,
         inbox,
         editor,
         term,
@@ -4282,6 +4300,8 @@ async fn run_with_supervisor(
     let session_id = ctx.session_id.clone();
     let emit = ctx.emit.clone();
     let procs = ctx.procs.clone();
+    let sandbox = ctx.sandbox.clone();
+    let sandbox_policy = ctx.sandbox_policy.clone();
     let client_seed = ctx.client.get().cloned();
     let tool_name_for_runner = tool_name.clone();
     let tool_runner = async move {
@@ -4291,6 +4311,8 @@ async fn run_with_supervisor(
             client: tokio::sync::OnceCell::new(),
             emit,
             procs,
+            sandbox,
+            sandbox_policy,
         };
         if let Some(c) = client_seed {
             let _ = local_ctx.client.set(c);
