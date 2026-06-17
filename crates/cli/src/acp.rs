@@ -224,6 +224,7 @@ async fn handle_request(
                     kind: SessionKind::User,
                     parent_session_id: None,
                     group_id: None,
+                    position_after_session_id: None,
                 })
                 .await
                 .context("create construct session")?;

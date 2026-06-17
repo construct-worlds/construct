@@ -338,6 +338,7 @@ impl Tool for CreateSession {
                 .get("group_id")
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string()),
+            position_after_session_id: None,
         };
         let c = client(ctx).await?;
         let sid = c.create(params).await?;

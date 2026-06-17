@@ -50,6 +50,7 @@ async fn repeated_key_latency() {
             kind: Default::default(),
             parent_session_id: None,
             group_id: None,
+            position_after_session_id: None,
         })
         .await
         .expect("create shell session");

@@ -157,6 +157,57 @@ enum RegionEdge {
     Bottom,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PositionAfterPlacement {
+    position: i64,
+    updates: Vec<(String, i64)>,
+}
+
+fn position_after_visible_session(
+    after_id: &str,
+    group_id: &Option<String>,
+    sessions: &[SessionSummary],
+) -> Option<PositionAfterPlacement> {
+    let mut region: Vec<&SessionSummary> = sessions
+        .iter()
+        .filter(|s| &s.group_id == group_id && is_user_session_kind(s))
+        .collect();
+    region.sort_by(|a, b| {
+        a.position
+            .cmp(&b.position)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
+    let idx = region.iter().position(|s| s.id == after_id)?;
+    let source = region[idx];
+    if let Some(next) = region.get(idx + 1) {
+        let gap = next.position.saturating_sub(source.position);
+        if gap > 1 {
+            return Some(PositionAfterPlacement {
+                position: source.position + gap / 2,
+                updates: Vec::new(),
+            });
+        }
+
+        let base = region.first().map(|s| s.position).unwrap_or(0);
+        let mut updates = Vec::new();
+        for (i, s) in region.iter().enumerate() {
+            let next_pos = base.saturating_add((i as i64).saturating_mul(1024));
+            if s.position != next_pos {
+                updates.push((s.id.clone(), next_pos));
+            }
+        }
+        return Some(PositionAfterPlacement {
+            position: base.saturating_add((idx as i64).saturating_mul(1024) + 512),
+            updates,
+        });
+    }
+
+    Some(PositionAfterPlacement {
+        position: source.position.saturating_add(1),
+        updates: Vec::new(),
+    })
+}
+
 /// Returns the `group_id` of the region immediately above the given region
 /// in display order. `Some(None)` = ungrouped; `Some(Some(id))` = group N-1.
 /// `None` = there is nothing above (ungrouped is already at the top).
@@ -1277,6 +1328,30 @@ impl SessionManager {
             None
         };
         let effective_cwd = worktree_path.clone().unwrap_or_else(|| cwd_path.clone());
+        let mut position = -now.timestamp_millis();
+        if let Some(after_id) = params.position_after_session_id.as_deref() {
+            let all_sessions = self.list().await;
+            if let Some(placement) =
+                position_after_visible_session(after_id, &params.group_id, &all_sessions)
+            {
+                for (session_id, next_position) in placement.updates {
+                    if let Some(entry) = self.get_entry(&session_id).await {
+                        let snapshot = {
+                            let mut s = entry.summary.write().await;
+                            s.position = next_position;
+                            s.clone()
+                        };
+                        self.storage.save_summary(&snapshot)?;
+                        let _ =
+                            self.broadcast
+                                .send(BroadcastMsg::State(StateNotificationPayload {
+                                    session: snapshot,
+                                }));
+                    }
+                }
+                position = placement.position;
+            }
+        }
 
         let mut summary = SessionSummary {
             id: id.clone(),
@@ -1297,8 +1372,7 @@ impl SessionManager {
             has_pty: false,
             mode: Some(effective_mode(&params)),
             pinned: false,
-            // Negative timestamp so newer sessions sort to the top by default.
-            position: -now.timestamp_millis(),
+            position,
             group_id: params.group_id.clone(),
             parent_session_id: params
                 .parent_session_id
@@ -1526,6 +1600,7 @@ impl SessionManager {
             kind: agentd_protocol::SessionKind::Orchestrator,
             parent_session_id: None,
             group_id: None,
+            position_after_session_id: None,
         };
         match self.create(params).await {
             Ok(id) => tracing::info!(
@@ -3635,6 +3710,76 @@ mod tests {
         }
     }
 
+    fn placement_summary(
+        id: &str,
+        position: i64,
+        group_id: Option<&str>,
+        kind: agentd_protocol::SessionKind,
+    ) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            harness: "smith".to_string(),
+            cwd: "/tmp".to_string(),
+            title: None,
+            state: SessionState::Running,
+            created_at: "2026-06-17T00:00:00Z".parse().expect("timestamp"),
+            last_event_at: None,
+            cost_usd: None,
+            model: None,
+            worktree: None,
+            pending_input: false,
+            last_prompt: None,
+            event_count: 0,
+            has_pty: true,
+            mode: Some("interactive".to_string()),
+            pinned: false,
+            position,
+            group_id: group_id.map(str::to_string),
+            parent_session_id: None,
+            last_pty_at_ms: None,
+            approval_mode: agentd_protocol::ApprovalMode::Manual,
+            kind,
+            archived: false,
+        }
+    }
+
+    #[test]
+    fn position_after_visible_session_uses_gap_below_source() {
+        let sessions = vec![
+            placement_summary("a", 10, None, agentd_protocol::SessionKind::User),
+            placement_summary("b", 30, None, agentd_protocol::SessionKind::User),
+        ];
+
+        let placement = position_after_visible_session("a", &None, &sessions).expect("placement");
+
+        assert_eq!(placement.position, 20);
+        assert!(placement.updates.is_empty());
+    }
+
+    #[test]
+    fn position_after_visible_session_renumbers_dense_region() {
+        let sessions = vec![
+            placement_summary("a", 10, Some("g1"), agentd_protocol::SessionKind::User),
+            placement_summary("b", 11, Some("g1"), agentd_protocol::SessionKind::User),
+            placement_summary("c", 12, Some("g1"), agentd_protocol::SessionKind::User),
+            placement_summary(
+                "hidden",
+                13,
+                Some("g1"),
+                agentd_protocol::SessionKind::Subagent,
+            ),
+        ];
+        let group = Some("g1".to_string());
+
+        let placement = position_after_visible_session("a", &group, &sessions).expect("placement");
+
+        assert_eq!(placement.position, 522);
+        assert_eq!(
+            placement.updates,
+            vec![("b".to_string(), 1034), ("c".to_string(), 2058)]
+        );
+    }
+
     /// Regression: codex / claude / shell sessions painted only their
     /// startup banner after a daemon restart because the PTY was
     /// spawned at the cached size and no SIGWINCH ever fired (kernel
@@ -4436,6 +4581,7 @@ mod tests {
             kind: agentd_protocol::SessionKind::User,
             parent_session_id: None,
             group_id: None,
+            position_after_session_id: None,
         }
     }
 

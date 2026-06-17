@@ -6854,6 +6854,7 @@ impl App {
                     kind: agentd_protocol::SessionKind::User,
                     parent_session_id: None,
                     group_id,
+                    position_after_session_id: None,
                 };
                 match self.client.create(params).await {
                     Ok(id) => {
@@ -6885,13 +6886,15 @@ impl App {
                 }
                 // Default options: seed the fork with the full source
                 // transcript (skipped for `shell` inside the client).
+                let mut opts = agentd_client::ForkOptions::default();
+                let (cols, rows) = self.active_pane_size();
+                opts.pty_size = Some(agentd_protocol::PtySize {
+                    cols: cols.max(20),
+                    rows: rows.max(5),
+                });
                 match self
                     .client
-                    .fork_session(
-                        &source_session_id,
-                        &harness,
-                        agentd_client::ForkOptions::default(),
-                    )
+                    .fork_session(&source_session_id, &harness, opts)
                     .await
                 {
                     Ok(id) => {

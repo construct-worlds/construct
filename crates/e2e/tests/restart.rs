@@ -168,6 +168,7 @@ async fn tui_reconnects_after_orchestrator_typed_construct_restart() {
         kind: agentd_protocol::SessionKind::Orchestrator,
         parent_session_id: None,
         group_id: None,
+        position_after_session_id: None,
     };
     let orch_id = match d.client.create(orch).await {
         Ok(id) => id,

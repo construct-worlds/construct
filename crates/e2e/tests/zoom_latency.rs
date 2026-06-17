@@ -46,6 +46,7 @@ async fn zoom_toggle_latency() {
             kind: Default::default(),
             group_id: None,
             parent_session_id: None,
+            position_after_session_id: None,
         })
         .await
         .expect("create shell session");

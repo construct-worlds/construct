@@ -41,6 +41,7 @@ fn shell_params(cwd: &str, title: &str) -> CreateSessionParams {
         kind: Default::default(),
         group_id: None,
         parent_session_id: None,
+        position_after_session_id: None,
     }
 }
 
