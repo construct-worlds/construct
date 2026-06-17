@@ -403,6 +403,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 kind: agentd_protocol::SessionKind::User,
                 parent_session_id: None,
                 group_id: arg_str(&args, "group_id").ok(),
+                position_after_session_id: None,
             };
             let sid = client.create(params).await?;
             json!({ "session_id": sid })
@@ -414,6 +415,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 model: arg_str(&args, "model").ok(),
                 prompt: arg_str(&args, "prompt").ok(),
                 seed: args.get("seed").and_then(|v| v.as_bool()).unwrap_or(true),
+                pty_size: None,
                 ..Default::default()
             };
             let sid = client.fork_session(&source, &harness, opts).await?;
@@ -534,6 +536,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 kind: agentd_protocol::SessionKind::Subagent,
                 parent_session_id: Some(parent_id),
                 group_id: None,
+                position_after_session_id: None,
             };
             let sid = client.create(params).await?;
             json!({ "subagent_id": sid })

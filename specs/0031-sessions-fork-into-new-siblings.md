@@ -11,9 +11,12 @@ A session's harness is fixed for the life of that session. To "switch the
 harness" of running work, agentd **forks**: it creates a new sibling session
 backed by the chosen harness and leaves the original untouched. The fork
 inherits the source's working directory and group, runs as an independent
-top-level session (not a child/subagent), and — unless seeding is disabled or
-the target harness takes commands rather than conversation (`shell`) — its
-initial prompt is seeded with a rendered summary of the source transcript.
+top-level session (not a child/subagent), and is placed immediately after the
+source in the session list. If the source is a terminal session, the fork starts
+as a terminal session too; headless sources fork as headless sessions. Unless
+seeding is disabled or the target harness takes commands rather than
+conversation (`shell`), the fork's initial prompt is seeded with a rendered
+summary of the source transcript.
 
 Context transfer across harnesses is **best-effort and limited to the
 harness-agnostic transcript**. The fork does not adopt the source harness's
@@ -43,6 +46,9 @@ can and cannot cross the boundary.
   create) and needs no new daemon mutation or adapter-lifecycle path. It can
   live in the shared client so every surface (CLI, MCP, future UI) forks
   identically.
+- Forks are displayed next to the source session, rather than at the top of the
+  project, so related work stays visually grouped without making the fork a
+  child session.
 - A model spec is harness-specific, so the source's model is only inherited
   when the harness is unchanged; otherwise the target harness picks its default
   unless the caller overrides it.

@@ -1214,6 +1214,11 @@ pub struct CreateSessionParams {
     /// group keeps the user's mental grouping intact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// Optional placement hint for clients that are creating a related
+    /// session and want it to render immediately after an existing
+    /// visible session in the same group/project region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_after_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

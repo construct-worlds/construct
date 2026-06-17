@@ -302,6 +302,7 @@ async fn main() -> Result<()> {
                     kind: agentd_protocol::SessionKind::User,
                     parent_session_id: None,
                     group_id: None,
+                    position_after_session_id: None,
                 })
                 .await?;
             println!("{id}");
@@ -325,6 +326,7 @@ async fn main() -> Result<()> {
                         prompt,
                         seed: !no_seed,
                         max_seed_bytes,
+                        pty_size: None,
                     },
                 )
                 .await?;

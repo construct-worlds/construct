@@ -6,8 +6,8 @@ use agentd_protocol::{
     ErrorObject, GroupCreateParams, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
     GroupSetCollapsedParams, GroupSummary, HarnessInfo, MoveDirection, Notification, PingResult,
     ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams, ProjectMoveParams,
-    ProjectRenameParams, ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, Request,
-    Response, SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
+    ProjectRenameParams, ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, PtySize,
+    Request, Response, SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
     SessionEmitEventParams, SessionIdParams, SessionInputParams, SessionMoveParams,
     SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
     SessionSetPinnedParams, SessionSetProjectParams, SessionSetTitleParams, SessionSetViewParams,
@@ -302,11 +302,13 @@ impl Client {
     /// top-level session — not a child/subagent — so the source is left
     /// untouched (a session's own harness is immutable, per spec 0001).
     ///
-    /// Unless [`ForkOptions::seed`] is false or the target is the `shell`
-    /// harness (which takes a command, not conversation context), the fork's
-    /// initial prompt is seeded with a rendered summary of the source
-    /// transcript so an agent harness can pick up where the original left
-    /// off. Returns the new session id.
+    /// The fork preserves the source's terminal/headless shape: forking a
+    /// visible terminal session starts the target harness in interactive PTY
+    /// mode. Unless [`ForkOptions::seed`] is false or the target is the
+    /// `shell` harness (which takes a command, not conversation context), the
+    /// fork's initial prompt is seeded with a rendered summary of the source
+    /// transcript so an agent harness can pick up where the original left off.
+    /// Returns the new session id.
     pub async fn fork_session(
         &self,
         source_id: &str,
@@ -339,15 +341,28 @@ impl Client {
         // A model spec is harness-specific (`openai:gpt-5` means nothing to
         // the claude harness), so only carry the source's model when the
         // harness is unchanged — unless the caller passed an explicit one.
-        let model = opts
-            .model
-            .clone()
-            .or_else(|| (harness == src.harness).then(|| src.model.clone()).flatten());
+        let model = opts.model.clone().or_else(|| {
+            (harness == src.harness)
+                .then(|| src.model.clone())
+                .flatten()
+        });
 
         let title = Some(match &src.title {
             Some(t) => format!("⑂ {t}"),
             None => format!("⑂ fork of {}", short_id(&src.id)),
         });
+        let source_is_terminal = src.has_pty && src.mode.as_deref() != Some("headless");
+        let pty_size = source_is_terminal.then(|| {
+            opts.pty_size.unwrap_or(PtySize {
+                cols: 100,
+                rows: 30,
+            })
+        });
+        let mode = if source_is_terminal {
+            Some("interactive".to_string())
+        } else {
+            src.mode.clone()
+        };
 
         self.create(CreateSessionParams {
             harness: harness.to_string(),
@@ -355,14 +370,15 @@ impl Client {
             prompt,
             model,
             title,
-            mode: None,
-            pty_size: None,
+            mode,
+            pty_size,
             worktree: false,
             env: HashMap::new(),
             args: Vec::new(),
             kind: agentd_protocol::SessionKind::User,
-            parent_session_id: None, // sibling, not a subagent
+            parent_session_id: None,        // sibling, not a subagent
             group_id: src.group_id.clone(), // same group → rendered alongside the source
+            position_after_session_id: Some(src.id.clone()),
         })
         .await
     }
@@ -957,6 +973,9 @@ pub struct ForkOptions {
     /// the most-recent activity are kept while the middle is elided, so the
     /// goal is never dropped.
     pub max_seed_bytes: usize,
+    /// Initial PTY size for forks of terminal sessions. When omitted, the
+    /// client uses a standard terminal default.
+    pub pty_size: Option<PtySize>,
 }
 
 impl Default for ForkOptions {
@@ -966,6 +985,7 @@ impl Default for ForkOptions {
             prompt: None,
             seed: true,
             max_seed_bytes: 0,
+            pty_size: None,
         }
     }
 }
@@ -1166,7 +1186,10 @@ mod fork_tests {
             }),
         ];
         let seed = render_fork_seed(&events, 1000).unwrap();
-        assert!(seed.contains("OBJECTIVE_MARKER"), "opening/objective preserved");
+        assert!(
+            seed.contains("OBJECTIVE_MARKER"),
+            "opening/objective preserved"
+        );
         assert!(seed.contains("RECENT_MARKER"), "recent tail preserved");
         assert!(seed.contains("elided"), "middle elided with a marker");
     }
