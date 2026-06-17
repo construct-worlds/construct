@@ -3779,6 +3779,7 @@ mod tests {
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind,
             archived: false,
+            operator_loop_disabled: false,
         }
     }
 
@@ -3974,6 +3975,7 @@ mod tests {
                 approval_mode: agentd_protocol::ApprovalMode::Manual,
                 kind,
                 archived: false,
+                operator_loop_disabled: false,
             }),
             transcript_count: AtomicU64::new(0),
             adapter: tokio::sync::Mutex::new(None),
@@ -4542,6 +4544,7 @@ mod tests {
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind: agentd_protocol::SessionKind::User,
             archived: false,
+            operator_loop_disabled: false,
         };
         let entry = Arc::new(SessionEntry {
             id: id.clone(),

@@ -8212,6 +8212,7 @@ mod tests {
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind,
             archived: false,
+            operator_loop_disabled: false,
         }
     }
 
