@@ -207,6 +207,7 @@ impl Tool for Create {
             kind: agentd_protocol::SessionKind::Subagent,
             parent_session_id: Some(ctx.session_id.clone()),
             group_id: None,
+            position_after_session_id: None,
         };
         let c = client(ctx).await?;
         let id = c.create(params).await?;
