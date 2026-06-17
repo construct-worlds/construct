@@ -2652,6 +2652,7 @@ fn render_main_transition(f: &mut Frame, area: Rect, app: &App, window_id: Optio
     let seed = match &app.selection {
         Selection::Session(id) => hash_str(id),
         Selection::Group(id) => hash_str(id) ^ 0x67726f7570,
+        Selection::ArchivedRow(_) => 0x617263,
         Selection::None => 0x5e5510,
     };
     render_glitch_overlay(f, area, &app.theme, seed, amount);
