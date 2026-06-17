@@ -13,10 +13,14 @@ view `x` button), alongside delete and cancel:
 - **Archive terminates the session's adapter but keeps everything on disk** —
   transcript, worktree, start params, widgets. It is the non-destructive
   counterpart to delete (which drops all of that).
-- **Archived sessions are hidden from the session list by default.** A persisted
-  per-client "show archived" toggle reveals them; while shown, their names render
-  dimmed. The toggle is reachable from a slash command and a control on the list
-  title bar.
+- **Archived sessions are hidden from the session list by default**, revealed
+  per section. The list has independent sections — the ungrouped top-level run
+  and each project — and any section that contains archived sessions ends with an
+  expandable "N archived" row. Activating that row reveals/hides only that
+  section's archived sessions; while shown, their names render dimmed. The reveal
+  state is per-section and not persisted (archived sessions default to hidden on
+  each launch). A slash command toggles the section the current selection lives
+  in, for keyboard use.
 - **An archived session behaves like any other when selected** — its history
   renders normally and it can be restarted.
 - **Restarting an archived session un-archives it.** Restart brings the session
@@ -68,9 +72,9 @@ single reflexive keystroke once a non-destructive option shares the prompt.
 
 - A user finishes a task, presses the view's `x`, and types `a`: the adapter
   stops, the row disappears from the list, and the session's transcript remains
-  available.
-- The user enables "show archived"; the archived session reappears with a dimmed
-  name, selecting it shows its full history, and restarting it removes the dim and
-  returns it to the normal list.
+  available. The section it was in now shows a "1 archived" row.
+- The user clicks that section's "N archived" row; the archived sessions appear
+  with dimmed names, selecting one shows its full history, and restarting it
+  removes the dim and returns it to the section's normal (active) run.
 - The daemon restarts: active sessions auto-resume, the archived one stays down
   until the user restarts it.

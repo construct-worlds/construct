@@ -62,6 +62,24 @@ pub enum ListItem {
         group: GroupSummary,
         member_count: usize,
     },
+    /// Expandable "▸ N archived" / "▾ N archived" row that ends a section
+    /// (the ungrouped top-level run or a project) when that section has
+    /// archived sessions. Clicking it reveals/hides that section's archived
+    /// sessions; it is not itself a selectable target.
+    ArchivedRow {
+        section: ArchiveSection,
+        count: usize,
+        expanded: bool,
+        indented: bool,
+    },
+}
+
+/// A region of the session list whose archived sessions can be revealed
+/// independently: the ungrouped top-level run, or a specific project.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ArchiveSection {
+    Ungrouped,
+    Group(String),
 }
 
 fn is_user_list_session(s: &SessionSummary) -> bool {
@@ -730,9 +748,14 @@ pub struct App {
     /// User-hidden Matrix-rain panel. Toggle with `/rain`; close with the
     /// panel's `x` button.
     pub matrix_rain_hidden: bool,
-    /// Show archived sessions in the list. Off by default; toggle with
-    /// `/archived` or the list-title archive button. Persisted across runs.
-    pub show_archived: bool,
+    /// Whether the ungrouped top-level section's archived sessions are
+    /// revealed. Toggled by its "N archived" row. Ephemeral — archived
+    /// sessions default to hidden on each launch.
+    pub show_archived_ungrouped: bool,
+    /// Project ids whose archived sessions are currently revealed, toggled by
+    /// each project's "N archived" row. Ephemeral, like
+    /// [`Self::show_archived_ungrouped`].
+    pub show_archived_groups: HashSet<String>,
     /// Hide left, right, and bottom border lines for list/view/pin panes.
     pub hide_pane_side_borders: bool,
     /// Last rendered frame, one string per terminal row. Mouse drag
@@ -1700,7 +1723,8 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         matrix_widget_pinned: None,
         matrix_widget_hover: None,
         matrix_rain_hidden: persisted.matrix_rain_hidden,
-        show_archived: persisted.show_archived,
+        show_archived_ungrouped: false,
+        show_archived_groups: HashSet::new(),
         hide_pane_side_borders: persisted.hide_pane_side_borders,
         frame_text: Vec::new(),
         text_selection: None,
@@ -1805,7 +1829,6 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         matrix_rain_h: app.matrix_rain_h,
         list_collapsed: app.list_collapsed,
         matrix_rain_hidden: app.matrix_rain_hidden,
-        show_archived: app.show_archived,
         hide_pane_side_borders: app.hide_pane_side_borders,
         main_windows: Some(app.main_windows.clone()),
         active_window_id: Some(app.active_window_id),
@@ -2633,8 +2656,6 @@ impl App {
         let mut out: Vec<ListItem> = Vec::new();
 
         let orch_id = self.orchestrator_id.as_deref();
-        // Archived sessions are hidden unless the user toggled them on.
-        let show_archived = self.show_archived;
         let mut subagents_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
         for s in self.sessions.iter().filter(|s| is_subagent_session(s)) {
             if let Some(parent) = s.parent_session_id.as_deref() {
@@ -2682,15 +2703,32 @@ impl App {
             // of their parent session.
             .filter(|s| Some(s.id.as_str()) != orch_id)
             .filter(|s| is_user_list_session(s))
-            .filter(|s| show_archived || !s.archived)
             .collect();
         ungrouped.sort_by(|a, b| {
             a.position
                 .cmp(&b.position)
                 .then_with(|| b.created_at.cmp(&a.created_at))
         });
-        for s in ungrouped {
+        // Active sessions render directly; archived ones sit behind an
+        // expandable "N archived" row that ends the section.
+        let (ungrouped_active, ungrouped_archived): (Vec<&SessionSummary>, Vec<&SessionSummary>) =
+            ungrouped.into_iter().partition(|s| !s.archived);
+        for s in ungrouped_active {
             push_session(&mut out, s, false);
+        }
+        if !ungrouped_archived.is_empty() {
+            let expanded = self.show_archived_ungrouped;
+            out.push(ListItem::ArchivedRow {
+                section: ArchiveSection::Ungrouped,
+                count: ungrouped_archived.len(),
+                expanded,
+                indented: false,
+            });
+            if expanded {
+                for s in ungrouped_archived {
+                    push_session(&mut out, s, false);
+                }
+            }
         }
 
         let mut groups: Vec<&GroupSummary> = self.groups.iter().collect();
@@ -2701,34 +2739,80 @@ impl App {
                 .iter()
                 .filter(|s| s.group_id.as_deref() == Some(g.id.as_str()))
                 .filter(|s| is_user_list_session(s))
-                .filter(|s| show_archived || !s.archived)
                 .collect();
             members.sort_by_key(|s| s.position);
+            let (active, archived): (Vec<&SessionSummary>, Vec<&SessionSummary>) =
+                members.into_iter().partition(|s| !s.archived);
             out.push(ListItem::GroupHeader {
                 group: g.clone(),
-                member_count: members.len(),
+                member_count: active.len(),
             });
             if !g.collapsed {
-                for s in members {
+                for s in active {
                     push_session(&mut out, s, true);
+                }
+                if !archived.is_empty() {
+                    let expanded = self.show_archived_groups.contains(&g.id);
+                    out.push(ListItem::ArchivedRow {
+                        section: ArchiveSection::Group(g.id.clone()),
+                        count: archived.len(),
+                        expanded,
+                        indented: true,
+                    });
+                    if expanded {
+                        for s in archived {
+                            push_session(&mut out, s, true);
+                        }
+                    }
                 }
             }
         }
         out
     }
 
-    /// Toggle whether archived sessions appear in the list. Shared by the
-    /// `/archived` command and the list-title archive button.
-    pub fn toggle_show_archived(&mut self) {
-        self.show_archived = !self.show_archived;
+    /// Toggle whether a section's archived sessions are revealed — the click
+    /// target of an "N archived" row.
+    pub fn toggle_archive_section(&mut self, section: &ArchiveSection) {
+        let revealed = match section {
+            ArchiveSection::Ungrouped => {
+                self.show_archived_ungrouped = !self.show_archived_ungrouped;
+                self.show_archived_ungrouped
+            }
+            ArchiveSection::Group(id) => {
+                if self.show_archived_groups.remove(id) {
+                    false
+                } else {
+                    self.show_archived_groups.insert(id.clone());
+                    true
+                }
+            }
+        };
         self.set_status(
-            if self.show_archived {
+            if revealed {
                 "showing archived sessions"
             } else {
                 "hiding archived sessions"
             }
             .to_string(),
         );
+    }
+
+    /// `/archived` keyboard entry point: reveal/hide archived sessions for the
+    /// section the current selection lives in — the selected project, the
+    /// selected session's project, or the ungrouped section.
+    pub fn toggle_archived_for_selection(&mut self) {
+        let section = match &self.selection {
+            Selection::Group(id) => ArchiveSection::Group(id.clone()),
+            Selection::Session(id) => self
+                .sessions
+                .iter()
+                .find(|s| s.id == *id)
+                .and_then(|s| s.group_id.clone())
+                .map(ArchiveSection::Group)
+                .unwrap_or(ArchiveSection::Ungrouped),
+            Selection::None => ArchiveSection::Ungrouped,
+        };
+        self.toggle_archive_section(&section);
     }
 
     /// Find the index of the currently-selected item in the materialized
@@ -3310,18 +3394,25 @@ impl App {
     /// wrapping at the ends. No-op if the list is empty.
     async fn step_selection(&mut self, delta: i32) {
         let items = self.list_items();
-        if items.is_empty() {
+        // Only Session / GroupHeader rows are selectable; "N archived" rows are
+        // click-only and skipped by keyboard navigation.
+        let selectable: Vec<&ListItem> = items
+            .iter()
+            .filter(|it| matches!(it, ListItem::Session { .. } | ListItem::GroupHeader { .. }))
+            .collect();
+        if selectable.is_empty() {
             return;
         }
-        let cur = items
+        let cur = selectable
             .iter()
             .position(|it| it.matches(&self.selection))
             .unwrap_or(0);
-        let n = items.len() as i32;
+        let n = selectable.len() as i32;
         let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
-        match &items[next] {
+        match selectable[next] {
             ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
             ListItem::GroupHeader { group, .. } => self.select_group(group.id.clone()),
+            ListItem::ArchivedRow { .. } => {}
         }
         self.sync_active_window_selection();
     }
@@ -3333,11 +3424,14 @@ impl App {
         if items.iter().any(|it| it.matches(&self.selection)) {
             return;
         }
-        self.selection = match items.first() {
-            Some(ListItem::Session { summary, .. }) => Selection::Session(summary.id.clone()),
-            Some(ListItem::GroupHeader { group, .. }) => Selection::Group(group.id.clone()),
-            None => Selection::None,
-        };
+        self.selection = items
+            .iter()
+            .find_map(|it| match it {
+                ListItem::Session { summary, .. } => Some(Selection::Session(summary.id.clone())),
+                ListItem::GroupHeader { group, .. } => Some(Selection::Group(group.id.clone())),
+                ListItem::ArchivedRow { .. } => None,
+            })
+            .unwrap_or(Selection::None);
     }
 
     async fn on_notification(&mut self, n: agentd_protocol::Notification) {
@@ -5092,12 +5186,6 @@ impl App {
                     return;
                 }
             }
-            if let Some((xs, xe, y)) = crate::ui::list_archive_button_range(list) {
-                if row == y && col >= xs && col < xe {
-                    self.toggle_show_archived();
-                    return;
-                }
-            }
             if let Some((xs, xe, y)) = crate::ui::list_collapse_button_range(list) {
                 if row == y && col >= xs && col < xe {
                     self.list_collapsed = true;
@@ -5186,6 +5274,10 @@ impl App {
                 if let Err(e) = self.client.set_project_collapsed(&id, next).await {
                     self.set_status(format!("collapse failed: {e}"));
                 }
+            }
+            ListItem::ArchivedRow { section, .. } => {
+                let section = section.clone();
+                self.toggle_archive_section(&section);
             }
         }
     }
@@ -6909,7 +7001,7 @@ impl App {
                 ));
             }
             "archived" | "archive" | "archives" => {
-                self.toggle_show_archived();
+                self.toggle_archived_for_selection();
             }
             "border" => {
                 self.hide_pane_side_borders = !self.hide_pane_side_borders;
@@ -7921,7 +8013,8 @@ mod tests {
             matrix_widget_pinned: None,
             matrix_widget_hover: None,
             matrix_rain_hidden: false,
-            show_archived: false,
+            show_archived_ungrouped: false,
+            show_archived_groups: HashSet::new(),
             hide_pane_side_borders: true,
             frame_text: Vec::new(),
             text_selection: None,
@@ -9961,7 +10054,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_items_hides_archived_until_toggled() {
+    async fn list_items_hides_archived_behind_expandable_row() {
         use agentd_client::Client;
         use tokio::net::UnixListener;
 
@@ -9987,31 +10080,43 @@ mod tests {
 
         let mut app = test_app(client, vec![active, archived]);
 
-        // Hidden by default: only the active session shows.
+        // Collapsed by default: the active session plus a "1 archived" row.
         let items = app.list_items();
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert!(
             matches!(&items[0], ListItem::Session { summary, .. } if summary.id == "active"),
-            "default list should show only the active session",
+            "active session should render directly",
+        );
+        match &items[1] {
+            ListItem::ArchivedRow {
+                section,
+                count,
+                expanded,
+                ..
+            } => {
+                assert_eq!(*section, ArchiveSection::Ungrouped);
+                assert_eq!(*count, 1);
+                assert!(!*expanded, "archived row starts collapsed");
+            }
+            other => panic!("expected an archived row, got {other:?}"),
+        }
+
+        // Reveal: active session, the open row, then the archived session.
+        app.toggle_archive_section(&ArchiveSection::Ungrouped);
+        let items = app.list_items();
+        assert_eq!(items.len(), 3);
+        assert!(matches!(
+            &items[1],
+            ListItem::ArchivedRow { expanded: true, .. }
+        ));
+        assert!(
+            matches!(&items[2], ListItem::Session { summary, .. } if summary.id == "archived"),
+            "revealed archived session should follow its row",
         );
 
-        // Toggled on: both appear.
-        app.toggle_show_archived();
-        assert!(app.show_archived);
-        let ids: Vec<String> = app
-            .list_items()
-            .iter()
-            .filter_map(|it| match it {
-                ListItem::Session { summary, .. } => Some(summary.id.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(ids.len(), 2, "toggle on should reveal the archived session");
-        assert!(ids.iter().any(|id| id == "archived"));
-
-        // Toggled back off: hidden again.
-        app.toggle_show_archived();
-        assert_eq!(app.list_items().len(), 1);
+        // Toggle back off: collapsed again.
+        app.toggle_archive_section(&ArchiveSection::Ungrouped);
+        assert_eq!(app.list_items().len(), 2);
     }
 
     #[test]
