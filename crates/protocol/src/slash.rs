@@ -359,8 +359,7 @@ pub fn popup_names() -> impl Iterator<Item = &'static str> {
 pub const MODEL_COMPLETIONS: &[&str] = &[
     // ChatGPT subscription / Codex CLI OAuth path.
     "codex-oauth:gpt-5.5",
-    "codex-oauth:gpt-5-codex",
-    "codex-oauth:gpt-5",
+    "codex-oauth:gpt-5.4-mini",
     // OpenAI platform API path.
     "openai:gpt-5.5",
     "openai:gpt-5",
