@@ -5891,16 +5891,21 @@ impl App {
         }
     }
 
-    pub fn dynamic_ui_panel_visible(&self, session_id: &str, panel_id: &str) -> bool {
+    /// Returns true if the widget is persistently pinned/selected or temporarily shown.
+    /// Does NOT include hover preview state — use this for icon glyph decisions.
+    pub fn dynamic_ui_panel_pinned(&self, session_id: &str, panel_id: &str) -> bool {
         let key = (session_id.to_string(), panel_id.to_string());
         if self.dynamic_ui_selected.contains(&key) {
             return true;
         }
-        if self
-            .dynamic_ui_temporary_until
+        self.dynamic_ui_temporary_until
             .get(&key)
             .is_some_and(|until| *until > Instant::now())
-        {
+    }
+
+    /// Returns true if the widget body should be rendered (pinned OR hover preview).
+    pub fn dynamic_ui_panel_visible(&self, session_id: &str, panel_id: &str) -> bool {
+        if self.dynamic_ui_panel_pinned(session_id, panel_id) {
             return true;
         }
         self.dynamic_ui_hover.as_ref().is_some_and(|h| {
