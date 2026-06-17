@@ -113,7 +113,7 @@ The TUI also surfaces a one-line notice when a newer release is available
 ## ACP clients
 
 `construct acp` runs an Agent Client Protocol stdio server. Configure ACP
-clients to launch this command instead of a separate `construct-acp` binary:
+clients to launch this command:
 
 ```sh
 construct acp
