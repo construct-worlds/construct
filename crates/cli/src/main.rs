@@ -70,6 +70,27 @@ enum Command {
         #[arg(long, default_value_t = false)]
         worktree: bool,
     },
+    /// Fork a session into a new sibling session backed by a (possibly
+    /// different) harness. The fork inherits the source's cwd and group and,
+    /// unless `--no-seed`, is seeded with a summary of the source transcript
+    /// so an agent harness can continue the prior context. The original
+    /// session is left untouched.
+    Fork {
+        /// Source session id to fork from.
+        session_id: String,
+        /// Harness for the new session (shell, claude, codex, smith, …).
+        #[arg(long)]
+        harness: String,
+        /// Model spec for the new session (defaults to the harness default).
+        #[arg(long)]
+        model: Option<String>,
+        /// Extra instruction appended after the seeded context.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Don't seed the fork with the source transcript.
+        #[arg(long, default_value_t = false)]
+        no_seed: bool,
+    },
     /// Run `construct` as an Agent Client Protocol stdio server.
     Acp {
         /// Default harness when `session/new` omits `harness`.
@@ -277,6 +298,29 @@ async fn main() -> Result<()> {
                     parent_session_id: None,
                     group_id: None,
                 })
+                .await?;
+            println!("{id}");
+            Ok(())
+        }
+        Command::Fork {
+            session_id,
+            harness,
+            model,
+            prompt,
+            no_seed,
+        } => {
+            let c = connect(&socket).await?;
+            let id = c
+                .fork_session(
+                    &session_id,
+                    &harness,
+                    agentd_client::ForkOptions {
+                        model,
+                        prompt,
+                        seed: !no_seed,
+                        ..Default::default()
+                    },
+                )
                 .await?;
             println!("{id}");
             Ok(())

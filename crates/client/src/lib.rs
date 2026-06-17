@@ -296,6 +296,78 @@ impl Client {
         let r: R = self.request(ipc_method::SESSION_CREATE, &p).await?;
         Ok(r.session_id)
     }
+    /// Fork an existing session into a new **sibling** session backed by
+    /// `harness` (which may differ from the source's). The new session
+    /// inherits the source's cwd and group and runs as an independent
+    /// top-level session — not a child/subagent — so the source is left
+    /// untouched (a session's own harness is immutable, per spec 0001).
+    ///
+    /// Unless [`ForkOptions::seed`] is false or the target is the `shell`
+    /// harness (which takes a command, not conversation context), the fork's
+    /// initial prompt is seeded with a rendered summary of the source
+    /// transcript so an agent harness can pick up where the original left
+    /// off. Returns the new session id.
+    pub async fn fork_session(
+        &self,
+        source_id: &str,
+        harness: &str,
+        opts: ForkOptions,
+    ) -> Result<String> {
+        let src = self.get(source_id).await?.summary;
+
+        let mut prompt_parts: Vec<String> = Vec::new();
+        if opts.seed && harness != "shell" {
+            let n = if opts.seed_events == 0 {
+                20
+            } else {
+                opts.seed_events
+            };
+            if let Ok(tr) = self.transcript_tail(source_id, n).await {
+                if let Some(seed) = render_fork_seed(&tr.events) {
+                    prompt_parts.push(seed);
+                }
+            }
+        }
+        if let Some(p) = opts
+            .prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            prompt_parts.push(p.to_string());
+        }
+        let prompt = (!prompt_parts.is_empty()).then(|| prompt_parts.join("\n\n"));
+
+        // A model spec is harness-specific (`openai:gpt-5` means nothing to
+        // the claude harness), so only carry the source's model when the
+        // harness is unchanged — unless the caller passed an explicit one.
+        let model = opts
+            .model
+            .clone()
+            .or_else(|| (harness == src.harness).then(|| src.model.clone()).flatten());
+
+        let title = Some(match &src.title {
+            Some(t) => format!("⑂ {t}"),
+            None => format!("⑂ fork of {}", short_id(&src.id)),
+        });
+
+        self.create(CreateSessionParams {
+            harness: harness.to_string(),
+            cwd: src.cwd.clone(),
+            prompt,
+            model,
+            title,
+            mode: None,
+            pty_size: None,
+            worktree: false,
+            env: HashMap::new(),
+            args: Vec::new(),
+            kind: agentd_protocol::SessionKind::User,
+            parent_session_id: None, // sibling, not a subagent
+            group_id: src.group_id.clone(), // same group → rendered alongside the source
+        })
+        .await
+    }
     pub async fn send_input(&self, id: &str, text: String) -> Result<()> {
         let _: serde_json::Value = self
             .request(
@@ -864,5 +936,187 @@ impl Client {
             .request(ipc_method::UNSUBSCRIBE_EVENTS, &serde_json::Value::Null)
             .await?;
         Ok(())
+    }
+}
+
+/// Options for [`Client::fork_session`].
+#[derive(Debug, Clone)]
+pub struct ForkOptions {
+    /// Model spec for the new session. `None` lets the target harness pick
+    /// its default; the source's model is only inherited when the harness is
+    /// unchanged.
+    pub model: Option<String>,
+    /// Extra user instruction appended after the seeded context (e.g.
+    /// "continue from here"). `None` leaves the fork at just the seed (or
+    /// interactive when nothing is seeded).
+    pub prompt: Option<String>,
+    /// Seed the fork's initial prompt with a rendered summary of the source
+    /// transcript. Ignored for the `shell` harness.
+    pub seed: bool,
+    /// How many recent transcript events to render into the seed (0 → 20).
+    pub seed_events: usize,
+}
+
+impl Default for ForkOptions {
+    fn default() -> Self {
+        Self {
+            model: None,
+            prompt: None,
+            seed: true,
+            seed_events: 20,
+        }
+    }
+}
+
+/// Render recent transcript events into a plain-text context block for a
+/// forked session. Returns `None` when there's nothing worth seeding. When
+/// over budget, keeps the most-recent content (the tail).
+fn render_fork_seed(events: &[agentd_protocol::TimestampedEvent]) -> Option<String> {
+    use agentd_protocol::{MessageRole, SessionEvent};
+    const MAX: usize = 6000;
+    let mut lines: Vec<String> = Vec::new();
+    for ev in events {
+        match &ev.event {
+            SessionEvent::Message { role, text } => {
+                let t = text.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                let who = match role {
+                    MessageRole::User => "User",
+                    MessageRole::Assistant => "Assistant",
+                    MessageRole::System => "System",
+                    MessageRole::Tool => "Tool",
+                };
+                lines.push(format!("{who}: {t}"));
+            }
+            SessionEvent::ToolUse { tool, .. } => lines.push(format!("[tool: {tool}]")),
+            SessionEvent::ToolResult { tool, ok, output } => {
+                let status = if *ok { "ok" } else { "error" };
+                lines.push(format!(
+                    "[tool result: {tool} ({status})] {}",
+                    truncate_str(output.trim(), 200)
+                ));
+            }
+            // PTY/status/cost/etc. carry no portable conversation content.
+            _ => {}
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let mut body = lines.join("\n");
+    if body.len() > MAX {
+        // Keep the tail (most recent); advance to a char boundary.
+        let mut cut = body.len() - MAX;
+        while cut < body.len() && !body.is_char_boundary(cut) {
+            cut += 1;
+        }
+        body = format!("…(earlier context truncated)…\n{}", &body[cut..]);
+    }
+    Some(format!(
+        "[Forked session context. The following summarizes the prior \
+         conversation you are continuing from — treat it as background; do \
+         not re-run past tool calls.]\n\n{body}\n\n[End of forked context.]"
+    ))
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}…")
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+    use agentd_protocol::{MessageRole, SessionEvent, TimestampedEvent};
+
+    // Build via serde so the test doesn't need a direct `chrono` dep just to
+    // stamp `at` (render_fork_seed only reads `.event`).
+    fn ev(event: SessionEvent) -> TimestampedEvent {
+        serde_json::from_value(serde_json::json!({
+            "seq": 0,
+            "at": "1970-01-01T00:00:00Z",
+            "event": serde_json::to_value(&event).unwrap(),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn seed_renders_messages_and_tools() {
+        let events = vec![
+            ev(SessionEvent::Message {
+                role: MessageRole::User,
+                text: "fix the bug".into(),
+            }),
+            ev(SessionEvent::ToolUse {
+                tool: "edit_file".into(),
+                args: serde_json::json!({}),
+            }),
+            ev(SessionEvent::ToolResult {
+                tool: "edit_file".into(),
+                ok: true,
+                output: "patched".into(),
+            }),
+            ev(SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: "done".into(),
+            }),
+        ];
+        let seed = render_fork_seed(&events).expect("seed");
+        assert!(seed.contains("User: fix the bug"));
+        assert!(seed.contains("[tool: edit_file]"));
+        assert!(seed.contains("[tool result: edit_file (ok)] patched"));
+        assert!(seed.contains("Assistant: done"));
+        assert!(seed.contains("Forked session context"));
+    }
+
+    #[test]
+    fn seed_none_when_nothing_renderable() {
+        let events = vec![
+            ev(SessionEvent::Pty { data: "x".into() }),
+            ev(SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: "   ".into(),
+            }),
+        ];
+        assert!(render_fork_seed(&events).is_none());
+    }
+
+    #[test]
+    fn seed_truncates_to_budget_keeping_tail() {
+        let big = "x".repeat(5000);
+        let events = vec![
+            ev(SessionEvent::Message {
+                role: MessageRole::User,
+                text: big.clone(),
+            }),
+            ev(SessionEvent::Message {
+                role: MessageRole::User,
+                text: big,
+            }),
+            ev(SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: "RECENT_MARKER".into(),
+            }),
+        ];
+        let seed = render_fork_seed(&events).unwrap();
+        assert!(seed.contains("RECENT_MARKER"), "tail must be kept");
+        assert!(seed.contains("earlier context truncated"));
+        assert!(seed.len() < 6500, "seed stays near budget");
+    }
+
+    #[test]
+    fn default_options_seed_on() {
+        let o = ForkOptions::default();
+        assert!(o.seed);
+        assert_eq!(o.seed_events, 20);
     }
 }
