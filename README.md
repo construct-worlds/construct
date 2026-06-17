@@ -110,7 +110,7 @@ running daemon keeps the old code until it restarts — pass `--restart`, or run
 The TUI also surfaces a one-line notice when a newer release is available
 (disable with `CONSTRUCT_NO_UPDATE_CHECK=1`).
 
-## ACP clients
+## Agent Client Protocol server
 
 `construct acp` runs an Agent Client Protocol stdio server. Configure ACP
 clients to launch this command:
