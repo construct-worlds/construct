@@ -19,6 +19,9 @@ you. Remote control from your phone when you're in motion.
   observe all your sessions across different harnesses.
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
   output, spawn helpers, send input, inspect diffs, and drive Chrome.
+- **ACP client support** — point Agent Client Protocol clients at
+  `construct acp` to create, load, resume, prompt, cancel, and close construct
+  daemon sessions through the same installed binary.
 - **Generative widgets** — construct generates and updates widgets for your task,
   so you can track progress, review outputs, and take action without leaving
   the TUI or web client.
@@ -86,7 +89,20 @@ construct daemon run
 It owns sessions, persists state, and exposes the local IPC socket used by
 clients.
 
-### 4. Start crack the matrix
+### 4. Use construct from ACP clients
+
+`construct acp` runs an Agent Client Protocol stdio server. Configure ACP
+clients to launch this command instead of a separate `construct-acp` binary:
+
+```sh
+construct acp
+```
+
+It auto-starts the daemon if needed, then maps ACP session lifecycle calls onto
+construct daemon sessions. Use `--harness`, `--model`, or `--cwd` to set
+defaults for `session/new` requests that omit those fields.
+
+### 5. Start crack the matrix
 
 Happy hacking. Chase the dream idea from your terminal: ask Codex, Claude Code,
 Antigravity, and [smith](docs/smith.md) to dive into the hard parts, then keep
@@ -117,7 +133,8 @@ cargo build --workspace
 
 Debug binaries land in `target/debug/`:
 
-- `target/debug/construct` — TUI, control CLI, **and the daemon** (`construct daemon run`)
+- `target/debug/construct` — TUI, control CLI, **the daemon**
+  (`construct daemon run`), and ACP stdio server (`construct acp`)
 - `target/debug/construct-mcp` — MCP bridge for agents
 - `target/debug/construct-adapter-*` — harness adapters
 
