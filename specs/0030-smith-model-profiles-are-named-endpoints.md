@@ -38,7 +38,7 @@ endpoint's URL and credential declared in one place.
 - OAuth-backed providers (`codex-oauth`, `claude-oauth`, `grok-oauth`) are not
   expressible as profiles: they have no base-URL/credential surface and keep
   their explicit prefixes.
-  prefixes. Declaring one in a profile is a configuration error.
+  Declaring one in a profile is a configuration error.
 - Credentials should be referenced indirectly (an env var name) rather than
   written inline, though inline is accepted. When neither is given, the wire
   protocol's standard env var(s) are the fallback.
