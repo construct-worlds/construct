@@ -5432,6 +5432,13 @@ composerEl.addEventListener("submit", (ev) => {
   ev.preventDefault();
   submitComposer({ enter: true });
 });
+enterBtn.addEventListener("click", (ev) => {
+  // Handle the visible Send button explicitly instead of relying only on the
+  // form submit path. This keeps mobile browsers from preserving the textarea
+  // value after the button activation/focus cycle.
+  ev.preventDefault();
+  submitComposer({ enter: true });
+});
 insertBtn.addEventListener("click", (ev) => {
   ev.preventDefault();
   submitComposer({ enter: false });
@@ -5574,6 +5581,17 @@ function resetInputHeightPreservingTerminalScroll() {
   if (wasAtBottom) requestAnimationFrame(() => restoreTerminalBottom(true));
 }
 
+function clearComposerTextPreservingTerminalScroll() {
+  inputEl.value = "";
+  // Some mobile browsers keep a stale rendered value around when a submit
+  // button takes focus. Clear the underlying default/text content too and
+  // collapse the selection so the textarea visually empties immediately.
+  inputEl.defaultValue = "";
+  inputEl.textContent = "";
+  try { inputEl.setSelectionRange(0, 0); } catch (_) {}
+  resetInputHeightPreservingTerminalScroll();
+}
+
 async function handleComposerPaste(ev) {
   if (!state.currentId || !state.ws || state.ws.readyState !== 1) return;
   const items = Array.from((ev.clipboardData && ev.clipboardData.items) || []);
@@ -5672,6 +5690,7 @@ function restoreComposerText(text, sessionId) {
   // session A's message into session B's composer).
   if (!text || inputEl.value || state.currentId !== sessionId) return;
   inputEl.value = text;
+  inputEl.defaultValue = text;
   resetInputHeightPreservingTerminalScroll();
 }
 
@@ -5683,8 +5702,7 @@ async function submitComposer({ enter }) {
   // meaningful (sends a bare `\r`), so allow it there.
   if (!text && !(enter && currentSessionHasPty())) return;
   const sid = state.currentId;
-  inputEl.value = "";
-  resetInputHeightPreservingTerminalScroll();
+  clearComposerTextPreservingTerminalScroll();
   const pty = currentSessionHasPty();
   const harness = currentSessionHarness();
   if (pty) {
