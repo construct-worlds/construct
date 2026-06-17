@@ -65,7 +65,7 @@ curl -fsSL https://raw.githubusercontent.com/zarvis-ai/agentd/main/install.sh | 
 Pin a version or change the directory with `CONSTRUCT_VERSION=v0.2.0` /
 `CONSTRUCT_BIN_DIR=/usr/local/bin`.
 
-### 3. Open the fleet TUI
+### 3. Open the construct Terminal UI
 
 ```sh
 construct
@@ -89,20 +89,7 @@ construct daemon run
 It owns sessions, persists state, and exposes the local IPC socket used by
 clients.
 
-### 4. Use construct from ACP clients
-
-`construct acp` runs an Agent Client Protocol stdio server. Configure ACP
-clients to launch this command instead of a separate `construct-acp` binary:
-
-```sh
-construct acp
-```
-
-It auto-starts the daemon if needed, then maps ACP session lifecycle calls onto
-construct daemon sessions. Use `--harness`, `--model`, or `--cwd` to set
-defaults for `session/new` requests that omit those fields.
-
-### 5. Start crack the matrix
+### 4. Start crack the matrix
 
 Happy hacking. Chase the dream idea from your terminal: ask Codex, Claude Code,
 Antigravity, and [smith](docs/smith.md) to dive into the hard parts, then keep
@@ -122,6 +109,19 @@ running daemon keeps the old code until it restarts — pass `--restart`, or run
 `/construct restart` in the TUI, to pick up the upgrade without losing sessions.
 The TUI also surfaces a one-line notice when a newer release is available
 (disable with `CONSTRUCT_NO_UPDATE_CHECK=1`).
+
+## ACP clients
+
+`construct acp` runs an Agent Client Protocol stdio server. Configure ACP
+clients to launch this command instead of a separate `construct-acp` binary:
+
+```sh
+construct acp
+```
+
+It auto-starts the daemon if needed, then maps ACP session lifecycle calls onto
+construct daemon sessions. Use `--harness`, `--model`, or `--cwd` to set
+defaults for `session/new` requests that omit those fields.
 
 ## Building from source
 
