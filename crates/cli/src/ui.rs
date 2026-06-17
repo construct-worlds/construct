@@ -6018,14 +6018,16 @@ fn format_chat_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>
                 Span::styled(text.clone(), style),
             ]
         }
-        SessionEvent::ToolUse { tool, args } => {
+        SessionEvent::ToolUse { tool, args, .. } => {
             let args_s = serde_json::to_string(args).unwrap_or_default();
             vec![
                 Span::styled("   tool: ", Style::default().fg(theme.tool)),
                 Span::raw(format!("{tool}({})", shorten(&args_s, 120))),
             ]
         }
-        SessionEvent::ToolResult { tool, ok, output } => {
+        SessionEvent::ToolResult {
+            tool, ok, output, ..
+        } => {
             let (mark, color) = if *ok {
                 (" ✓ ", theme.success)
             } else {

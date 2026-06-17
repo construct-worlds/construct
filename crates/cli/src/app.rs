@@ -3384,7 +3384,7 @@ impl App {
                         // name to fire a slash-command-style action in
                         // the client. Args shape:
                         //   {"command": "<verb>", "args": "<rest>"}
-                        if let SessionEvent::ToolUse { tool, args } = &payload.event {
+                        if let SessionEvent::ToolUse { tool, args, .. } = &payload.event {
                             if tool == agentd_protocol::TUI_DISPATCH_TOOL {
                                 let cmd =
                                     args.get("command").and_then(|v| v.as_str()).unwrap_or("");
@@ -3450,10 +3450,11 @@ impl App {
                         // block in the PTY stream; the history pairs
                         // ToolUse events to those fences by FIFO
                         // arrival order, and matches ToolResults by
-                        // call_id (carried in the `tool` field by
-                        // smith convention). Tool events from the
+                        // the explicit `call_id` field (with a legacy
+                        // fallback to the `tool` field for old
+                        // transcripts). Tool events from the
                         // orchestrator session also land here.
-                        if let SessionEvent::ToolUse { tool, args } = &payload.event {
+                        if let SessionEvent::ToolUse { tool, args, .. } = &payload.event {
                             // The TUI-dispatch tool (`tui`) is a
                             // slash-command short-circuit, not a real
                             // tool — skip the items-history feed
@@ -3488,13 +3489,22 @@ impl App {
                                 args_summary.clone(),
                             );
                         }
-                        if let SessionEvent::ToolResult { tool, ok, output } = &payload.event {
+                        if let SessionEvent::ToolResult {
+                            tool,
+                            ok,
+                            output,
+                            call_id,
+                        } = &payload.event
+                        {
                             let history = self
                                 .histories
                                 .entry(payload.session_id.clone())
                                 .or_default();
+                            // Correlate by the explicit `call_id` when present;
+                            // legacy transcripts (call_id == None) still carry
+                            // the id in the `tool` field, so fall back to it.
                             history.feed_tool_result(
-                                tool,
+                                call_id.as_deref().unwrap_or(tool),
                                 *ok,
                                 crate::pty_render::tool_output_preview_for_history(output),
                             );
@@ -7242,7 +7252,7 @@ pub fn apply_transcript_to_local_state(
                     history.feed_pty(&bytes);
                 }
             }
-            SessionEvent::ToolUse { tool, args } => {
+            SessionEvent::ToolUse { tool, args, .. } => {
                 // The TUI-dispatch tool (`tui`) is a slash-command
                 // short-circuit, not a real tool block — skip it
                 // just like the live notification handler does.
@@ -7250,9 +7260,17 @@ pub fn apply_transcript_to_local_state(
                     history.feed_tool_use(tool.clone(), summarize_tool_args(args));
                 }
             }
-            SessionEvent::ToolResult { tool, ok, output } => {
+            SessionEvent::ToolResult {
+                tool,
+                ok,
+                output,
+                call_id,
+            } => {
+                // Correlate by the explicit `call_id` when present; legacy
+                // transcripts (call_id == None) still carry the id in the
+                // `tool` field, so fall back to it.
                 history.feed_tool_result(
-                    tool,
+                    call_id.as_deref().unwrap_or(tool),
                     *ok,
                     crate::pty_render::tool_output_preview_for_history(output),
                 );
@@ -10519,6 +10537,7 @@ mod tests {
                     tool: "t1".into(),
                     ok: true,
                     output: "out".into(),
+                    call_id: None,
                 },
             ),
         ];
@@ -10666,6 +10685,7 @@ mod tests {
                     tool: "t1".into(),
                     ok: true,
                     output: "hi".into(),
+                    call_id: None,
                 },
             ),
             ev(4, SessionEvent::pty(b"after tool answer\r\n")),
@@ -10926,6 +10946,7 @@ mod tests {
                 SessionEvent::ToolUse {
                     tool: "shell".into(),
                     args: serde_json::json!({"command": "ls"}),
+                    call_id: None,
                 },
             ),
             // The most recent EditorState — this is what the TUI
