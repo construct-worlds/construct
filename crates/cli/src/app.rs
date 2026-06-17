@@ -268,6 +268,7 @@ fn chat_scroll_kind(ev: &SessionEvent) -> ChatScrollKind {
         | SessionEvent::ClientCommand { .. }
         | SessionEvent::ToolApprovalResolved { .. }
         | SessionEvent::ApprovalModeChanged { .. }
+        | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
         | SessionEvent::AgentStatus(_) => ChatScrollKind::Hidden,
         SessionEvent::Message { role, text }
@@ -1437,6 +1438,8 @@ pub struct LayoutSnapshot {
     pub dynamic_ui_widget_hits: Vec<DynamicUiWidgetHit>,
     pub dynamic_ui_panel_close_hits: Vec<DynamicUiPanelCloseHit>,
     pub dynamic_ui_inline_hit: Option<DynamicUiInlineHit>,
+    /// Matrix-rain title-bar play/pause loop-toggle button: `(x_start, x_end, y)`.
+    pub matrix_operator_loop_hit: Option<(u16, u16, u16)>,
     /// Matrix-rain title-bar Operator label bounds: `(x_start, x_end, y)`.
     pub matrix_operator_title_hit: Option<(u16, u16, u16)>,
     /// Matrix-rain title-bar widget viewport affordances for the operator session.
@@ -3965,6 +3968,16 @@ impl App {
             .is_some_and(|pending| !pending.is_empty())
     }
 
+    pub fn operator_loop_disabled(&self) -> bool {
+        let Some(id) = self.orchestrator_id.as_deref() else {
+            return false;
+        };
+        self.sessions
+            .iter()
+            .find(|s| s.id == id)
+            .is_some_and(|s| s.operator_loop_disabled)
+    }
+
     fn toggle_orchestrator_panel(&mut self) {
         if self.is_orchestrator_panel_open() {
             self.minibuffer = None;
@@ -5186,6 +5199,19 @@ impl App {
                     }
                 }
                 return;
+            }
+            if let Some((xs, xe, y)) = self.layout.matrix_operator_loop_hit {
+                if row == y && col >= xs && col < xe {
+                    if let Some(id) = self.orchestrator_id.clone() {
+                        let cmd = if self.operator_loop_disabled() {
+                            "/operator enable"
+                        } else {
+                            "/operator disable"
+                        };
+                        let _ = self.client.send_input(&id, cmd.to_string()).await;
+                    }
+                    return;
+                }
             }
             if let Some((xs, xe, y)) = self.layout.matrix_operator_title_hit {
                 if row == y && col >= xs && col < xe {
@@ -8036,6 +8062,7 @@ mod tests {
             dynamic_ui_widget_hits: Vec::new(),
             dynamic_ui_panel_close_hits: Vec::new(),
             dynamic_ui_inline_hit: None,
+            matrix_operator_loop_hit: None,
             matrix_operator_title_hit: None,
             matrix_widget_hits: Vec::new(),
             dynamic_ui_trigger: None,
