@@ -76,7 +76,7 @@ pub enum ListItem {
 
 /// A region of the session list whose archived sessions can be revealed
 /// independently: the ungrouped top-level run, or a specific project.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ArchiveSection {
     Ungrouped,
     Group(String),
@@ -101,6 +101,14 @@ fn selection_is_valid_for_sessions(
             .iter()
             .any(|s| s.id == *id && is_user_list_session(s)),
         Selection::Group(id) => groups.iter().any(|g| g.id == *id),
+        Selection::ArchivedRow(section) => sessions.iter().any(|s| {
+            is_user_list_session(s)
+                && s.archived
+                && match section {
+                    ArchiveSection::Ungrouped => s.group_id.is_none(),
+                    ArchiveSection::Group(id) => s.group_id.as_deref() == Some(id.as_str()),
+                }
+        }),
     }
 }
 
@@ -154,6 +162,7 @@ impl ListItem {
         match (self, sel) {
             (ListItem::Session { summary, .. }, Selection::Session(id)) => summary.id == *id,
             (ListItem::GroupHeader { group, .. }, Selection::Group(id)) => group.id == *id,
+            (ListItem::ArchivedRow { section, .. }, Selection::ArchivedRow(sel)) => section == sel,
             _ => false,
         }
     }
@@ -166,6 +175,9 @@ pub enum Selection {
     None,
     Session(String),
     Group(String),
+    /// A section's "N archived" disclosure row. Selectable like a group header
+    /// so keyboard nav can land on it and left/right expand/collapse it.
+    ArchivedRow(ArchiveSection),
 }
 
 impl Selection {
@@ -179,6 +191,13 @@ impl Selection {
     pub fn group_id(&self) -> Option<&str> {
         if let Self::Group(id) = self {
             Some(id)
+        } else {
+            None
+        }
+    }
+    pub fn archive_section(&self) -> Option<&ArchiveSection> {
+        if let Self::ArchivedRow(section) = self {
+            Some(section)
         } else {
             None
         }
@@ -2489,6 +2508,20 @@ impl App {
         self.set_scrollback_for_window(active_window, 0);
     }
 
+    /// Select a section's "N archived" disclosure row. Like [`Self::select_group`]
+    /// it isn't a session, so the main view shows nothing for it.
+    pub fn select_archive_row(&mut self, section: ArchiveSection) {
+        if self.selection.archive_section() != Some(&section) {
+            self.start_session_transition();
+        }
+        self.selection = Selection::ArchivedRow(section);
+        self.transcript.clear();
+        self.transcript_session = None;
+        self.transcript_scroll = u16::MAX;
+        let active_window = Some(self.active_window_id);
+        self.set_scrollback_for_window(active_window, 0);
+    }
+
     pub fn prune_finished_transitions(&mut self) {
         let done = |started: Instant| started.elapsed().as_millis() >= SESSION_TRANSITION_MS;
         self.session_transitions
@@ -2790,21 +2823,35 @@ impl App {
 
     /// Toggle whether a section's archived sessions are revealed — the click
     /// target of an "N archived" row.
-    pub fn toggle_archive_section(&mut self, section: &ArchiveSection) {
-        let revealed = match section {
+    pub fn archive_section_revealed(&self, section: &ArchiveSection) -> bool {
+        match section {
+            ArchiveSection::Ungrouped => self.show_archived_ungrouped,
+            ArchiveSection::Group(id) => self.show_archived_groups.contains(id),
+        }
+    }
+
+    /// Set whether a section's archived sessions are revealed. Returns whether
+    /// the state actually changed.
+    pub fn set_archive_section_revealed(&mut self, section: &ArchiveSection, revealed: bool) -> bool {
+        match section {
             ArchiveSection::Ungrouped => {
-                self.show_archived_ungrouped = !self.show_archived_ungrouped;
-                self.show_archived_ungrouped
+                let changed = self.show_archived_ungrouped != revealed;
+                self.show_archived_ungrouped = revealed;
+                changed
             }
             ArchiveSection::Group(id) => {
-                if self.show_archived_groups.remove(id) {
-                    false
+                if revealed {
+                    self.show_archived_groups.insert(id.clone())
                 } else {
-                    self.show_archived_groups.insert(id.clone());
-                    true
+                    self.show_archived_groups.remove(id)
                 }
             }
-        };
+        }
+    }
+
+    pub fn toggle_archive_section(&mut self, section: &ArchiveSection) {
+        let revealed = !self.archive_section_revealed(section);
+        self.set_archive_section_revealed(section, revealed);
         self.set_status(
             if revealed {
                 "showing archived sessions"
@@ -2816,10 +2863,11 @@ impl App {
     }
 
     /// `/archived` keyboard entry point: reveal/hide archived sessions for the
-    /// section the current selection lives in — the selected project, the
-    /// selected session's project, or the ungrouped section.
+    /// section the current selection lives in — the archived row itself, the
+    /// selected project, the selected session's project, or the ungrouped run.
     pub fn toggle_archived_for_selection(&mut self) {
         let section = match &self.selection {
+            Selection::ArchivedRow(section) => section.clone(),
             Selection::Group(id) => ArchiveSection::Group(id.clone()),
             Selection::Session(id) => self
                 .sessions
@@ -3089,6 +3137,8 @@ impl App {
             Selection::None => {
                 self.set_status("nothing selected".into());
             }
+            // The "N archived" disclosure row isn't a pin target.
+            Selection::ArchivedRow(_) => {}
         }
     }
 
@@ -3111,6 +3161,8 @@ impl App {
                 }
             }
             Selection::None => self.set_status("nothing selected".into()),
+            // The "N archived" disclosure row isn't reorderable.
+            Selection::ArchivedRow(_) => {}
         }
     }
 
@@ -3412,25 +3464,21 @@ impl App {
     /// wrapping at the ends. No-op if the list is empty.
     async fn step_selection(&mut self, delta: i32) {
         let items = self.list_items();
-        // Only Session / GroupHeader rows are selectable; "N archived" rows are
-        // click-only and skipped by keyboard navigation.
-        let selectable: Vec<&ListItem> = items
-            .iter()
-            .filter(|it| matches!(it, ListItem::Session { .. } | ListItem::GroupHeader { .. }))
-            .collect();
-        if selectable.is_empty() {
+        if items.is_empty() {
             return;
         }
-        let cur = selectable
+        // Every materialized row is a navigation stop, including "N archived"
+        // disclosure rows (so left/right can expand/collapse them).
+        let cur = items
             .iter()
             .position(|it| it.matches(&self.selection))
             .unwrap_or(0);
-        let n = selectable.len() as i32;
+        let n = items.len() as i32;
         let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
-        match selectable[next] {
+        match &items[next] {
             ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
             ListItem::GroupHeader { group, .. } => self.select_group(group.id.clone()),
-            ListItem::ArchivedRow { .. } => {}
+            ListItem::ArchivedRow { section, .. } => self.select_archive_row(section.clone()),
         }
         self.sync_active_window_selection();
     }
@@ -3442,12 +3490,22 @@ impl App {
         if items.iter().any(|it| it.matches(&self.selection)) {
             return;
         }
+        // Prefer a real session/group; fall back to an archived row only if
+        // that's the only thing left in the list.
         self.selection = items
             .iter()
             .find_map(|it| match it {
                 ListItem::Session { summary, .. } => Some(Selection::Session(summary.id.clone())),
                 ListItem::GroupHeader { group, .. } => Some(Selection::Group(group.id.clone())),
                 ListItem::ArchivedRow { .. } => None,
+            })
+            .or_else(|| {
+                items.iter().find_map(|it| match it {
+                    ListItem::ArchivedRow { section, .. } => {
+                        Some(Selection::ArchivedRow(section.clone()))
+                    }
+                    _ => None,
+                })
             })
             .unwrap_or(Selection::None);
     }
@@ -5308,6 +5366,8 @@ impl App {
             }
             ListItem::ArchivedRow { section, .. } => {
                 let section = section.clone();
+                self.select_archive_row(section.clone());
+                self.sync_active_window_selection();
                 self.toggle_archive_section(&section);
             }
         }
@@ -6179,6 +6239,8 @@ impl App {
                     });
                 }
                 Selection::None => self.set_status("nothing selected".into()),
+                // The "N archived" disclosure row has no name to rename.
+                Selection::ArchivedRow(_) => {}
             },
             OpenDeleteConfirm => match self.selection.clone() {
                 Selection::Session(id) => {
@@ -6212,6 +6274,8 @@ impl App {
                     });
                 }
                 Selection::None => {}
+                // The "N archived" disclosure row isn't a delete target.
+                Selection::ArchivedRow(_) => {}
             },
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
@@ -6243,6 +6307,12 @@ impl App {
                 self.open_minibuffer_for_switch_session();
             }
             FocusView => {
+                // Enter on an "N archived" disclosure row expands/collapses it
+                // (it has no view to drill into).
+                if let Some(section) = self.selection.archive_section().cloned() {
+                    self.toggle_archive_section(&section);
+                    return;
+                }
                 // Enter on a *terminated* session opens a restart
                 // confirmation instead of drilling in. Typing into
                 // the prompt of a Done/Errored session is a no-op
@@ -6381,7 +6451,9 @@ impl App {
                 self.toggle_pin_on_selection().await;
             }
             ExpandGroup => {
-                if let Some(g) = self.selected_group() {
+                if let Some(section) = self.selection.archive_section().cloned() {
+                    self.set_archive_section_revealed(&section, true);
+                } else if let Some(g) = self.selected_group() {
                     let id = g.id.clone();
                     if let Err(e) = self.client.set_project_collapsed(&id, false).await {
                         self.set_status(format!("expand failed: {e}"));
@@ -6393,7 +6465,9 @@ impl App {
                 }
             }
             CollapseGroup => {
-                if let Some(g) = self.selected_group() {
+                if let Some(section) = self.selection.archive_section().cloned() {
+                    self.set_archive_section_revealed(&section, false);
+                } else if let Some(g) = self.selected_group() {
                     let id = g.id.clone();
                     if let Err(e) = self.client.set_project_collapsed(&id, true).await {
                         self.set_status(format!("collapse failed: {e}"));
@@ -6835,7 +6909,10 @@ impl App {
                         .iter()
                         .find(|s| s.id == *sid)
                         .and_then(|s| s.group_id.clone()),
-                    Selection::None => None,
+                    // Inherit the archived row's section so a new session
+                    // created "inside" a project stays in it.
+                    Selection::ArchivedRow(ArchiveSection::Group(gid)) => Some(gid.clone()),
+                    Selection::ArchivedRow(ArchiveSection::Ungrouped) | Selection::None => None,
                 };
                 let params = agentd_protocol::CreateSessionParams {
                     harness: harness.clone(),
@@ -10308,6 +10385,61 @@ mod tests {
         // Toggle back off: collapsed again.
         app.toggle_archive_section(&ArchiveSection::Ungrouped);
         assert_eq!(app.list_items().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn archived_row_is_navigable_and_arrows_expand_collapse_it() {
+        use agentd_client::Client;
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let _server = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+
+        let mut active = summary_with_kind(agentd_protocol::SessionKind::User);
+        active.id = "active".into();
+        active.position = 0;
+        let mut archived = summary_with_kind(agentd_protocol::SessionKind::User);
+        archived.id = "arch".into();
+        archived.position = 1;
+        archived.archived = true;
+
+        let mut app = test_app(client, vec![active, archived]);
+        app.focus = PaneFocus::List;
+        app.select_session("active".into());
+
+        // Down lands on the archived row — it's a navigation stop now, not skipped.
+        app.run_action(KeyAction::NextSession).await;
+        assert_eq!(
+            app.selection,
+            Selection::ArchivedRow(ArchiveSection::Ungrouped)
+        );
+
+        // Right (ExpandGroup) reveals the section's archived sessions.
+        app.run_action(KeyAction::ExpandGroup).await;
+        assert!(app.show_archived_ungrouped);
+        assert!(
+            app.list_items()
+                .iter()
+                .any(|it| matches!(it, ListItem::Session { summary, .. } if summary.id == "arch")),
+            "expand should reveal the archived session",
+        );
+
+        // Left (CollapseGroup) hides them again; the row stays selected.
+        app.run_action(KeyAction::CollapseGroup).await;
+        assert!(!app.show_archived_ungrouped);
+        assert_eq!(
+            app.selection,
+            Selection::ArchivedRow(ArchiveSection::Ungrouped)
+        );
     }
 
     #[test]

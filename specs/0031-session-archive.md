@@ -19,8 +19,10 @@ view `x` button), alongside delete and cancel:
   expandable "N archived" row. Activating that row reveals/hides only that
   section's archived sessions; while shown, their names render dimmed. The reveal
   state is per-section and not persisted (archived sessions default to hidden on
-  each launch). A slash command toggles the section the current selection lives
-  in, for keyboard use.
+  each launch). The row is a first-class list entry: keyboard navigation lands on
+  it (it is not skipped), the list expand/collapse keys reveal/hide it like a
+  project header, and a slash command toggles the section the current selection
+  lives in.
 - **An archived session behaves like any other when selected** — its history
   renders normally and it can be restarted.
 - **Restarting an archived session un-archives it.** Restart brings the session
