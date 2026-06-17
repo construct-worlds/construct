@@ -19,7 +19,7 @@ you. Remote control from your phone when you're in motion.
   observe all your sessions across different harnesses.
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
   output, spawn helpers, send input, inspect diffs, and drive Chrome.
-- **ACP client support** — point Agent Client Protocol clients at
+- **ACP (Agent Client Protocol) server** — point Agent Client Protocol clients at
   `construct acp` to create, load, resume, prompt, cancel, and close construct
   daemon sessions through the same installed binary.
 - **Generative widgets** — construct generates and updates widgets for your task,
@@ -110,7 +110,7 @@ running daemon keeps the old code until it restarts — pass `--restart`, or run
 The TUI also surfaces a one-line notice when a newer release is available
 (disable with `CONSTRUCT_NO_UPDATE_CHECK=1`).
 
-## Agent Client Protocol server
+## ACP (Agent Client Protocol) server
 
 `construct acp` runs an Agent Client Protocol stdio server. Configure ACP
 clients to launch this command:
