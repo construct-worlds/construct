@@ -362,7 +362,15 @@ fn codex_rollout_events(v: &Value) -> Vec<SessionEvent> {
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
                 .or_else(|| payload.get("arguments").cloned())
                 .unwrap_or(Value::Null);
-            vec![SessionEvent::ToolUse { tool, args }]
+            let call_id = payload
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            vec![SessionEvent::ToolUse {
+                tool,
+                args,
+                call_id,
+            }]
         }
         "function_call_output" => {
             let tool = payload
@@ -375,10 +383,14 @@ fn codex_rollout_events(v: &Value) -> Vec<SessionEvent> {
                 Some(v) => serde_json::to_string(v).unwrap_or_default(),
                 None => String::new(),
             };
+            // No tool name is available here; `tool` keeps the call_id and
+            // `call_id` carries the explicit correlation key.
+            let call_id = Some(tool.clone());
             vec![SessionEvent::ToolResult {
                 tool,
                 ok: true,
                 output,
+                call_id,
             }]
         }
         _ => Vec::new(),
@@ -778,7 +790,12 @@ fn try_emit_structured(emit: &EventEmitter, v: &Value) -> bool {
                 .unwrap_or("?")
                 .to_string();
             let args = v.get("input").cloned().unwrap_or(Value::Null);
-            emit.emit(SessionEvent::ToolUse { tool: name, args });
+            let call_id = v.get("id").and_then(|n| n.as_str()).map(str::to_string);
+            emit.emit(SessionEvent::ToolUse {
+                tool: name,
+                args,
+                call_id,
+            });
             true
         }
         "tool_result" => {
@@ -794,7 +811,15 @@ fn try_emit_structured(emit: &EventEmitter, v: &Value) -> bool {
                 Some(other) => serde_json::to_string(other).unwrap_or_default(),
                 None => String::new(),
             };
-            emit.emit(SessionEvent::ToolResult { tool, ok, output });
+            // No tool name is available here; `tool` keeps the id and `call_id`
+            // carries the explicit correlation key.
+            let call_id = Some(tool.clone());
+            emit.emit(SessionEvent::ToolResult {
+                tool,
+                ok,
+                output,
+                call_id,
+            });
             true
         }
         _ => false,
@@ -986,17 +1011,28 @@ mod tests {
         });
 
         match codex_rollout_events(&call).as_slice() {
-            [SessionEvent::ToolUse { tool, args }] => {
+            [SessionEvent::ToolUse {
+                tool,
+                args,
+                call_id,
+            }] => {
                 assert_eq!(tool, "exec_command");
                 assert_eq!(args["cmd"], "cargo test");
+                assert_eq!(call_id.as_deref(), Some("call_1"));
             }
             other => panic!("unexpected tool-use events: {other:?}"),
         }
         match codex_rollout_events(&output).as_slice() {
-            [SessionEvent::ToolResult { tool, ok, output }] => {
+            [SessionEvent::ToolResult {
+                tool,
+                ok,
+                output,
+                call_id,
+            }] => {
                 assert_eq!(tool, "call_1");
                 assert!(*ok);
                 assert_eq!(output, "ok");
+                assert_eq!(call_id.as_deref(), Some("call_1"));
             }
             other => panic!("unexpected tool-result events: {other:?}"),
         }

@@ -597,7 +597,18 @@ fn antigravity_events_from_step(v: &Value) -> Vec<SessionEvent> {
                         .unwrap_or("?")
                         .to_string();
                     let args = c.get("args").cloned().unwrap_or(Value::Null);
-                    out.push(SessionEvent::ToolUse { tool: name, args });
+                    // Antigravity tool_call objects may carry an `id`; if not,
+                    // there is no stable correlation key in this transcript
+                    // format, so leave it None.
+                    let call_id = c
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    out.push(SessionEvent::ToolUse {
+                        tool: name,
+                        args,
+                        call_id,
+                    });
                 }
                 out
             } else if let Some(content) = v.get("content").and_then(|s| s.as_str()) {
@@ -624,10 +635,14 @@ fn antigravity_events_from_step(v: &Value) -> Vec<SessionEvent> {
                 .and_then(|s| s.as_str())
                 .unwrap_or("")
                 .to_string();
+            // The result step is named after the tool action (`ty`), which is
+            // the real tool name, not an id; this transcript format has no
+            // stable correlation key, so leave `call_id` None.
             vec![SessionEvent::ToolResult {
                 tool: ty.to_string(),
                 ok,
                 output,
+                call_id: None,
             }]
         }
     }
@@ -709,9 +724,14 @@ mod tests {
         )
         .unwrap();
         match antigravity_events_from_step(&v).as_slice() {
-            [SessionEvent::ToolUse { tool, args }] => {
+            [SessionEvent::ToolUse {
+                tool,
+                args,
+                call_id,
+            }] => {
                 assert_eq!(tool, "run_command");
                 assert_eq!(args["cmd"], "ls");
+                assert_eq!(*call_id, None);
             }
             other => panic!("unexpected tool-use events: {other:?}"),
         }
@@ -723,10 +743,16 @@ mod tests {
             serde_json::from_str(r#"{"type":"RUN_COMMAND","status":"DONE","content":"out"}"#)
                 .unwrap();
         match antigravity_events_from_step(&v).as_slice() {
-            [SessionEvent::ToolResult { tool, ok, output }] => {
+            [SessionEvent::ToolResult {
+                tool,
+                ok,
+                output,
+                call_id,
+            }] => {
                 assert_eq!(tool, "RUN_COMMAND");
                 assert!(*ok);
                 assert_eq!(output, "out");
+                assert_eq!(*call_id, None);
             }
             other => panic!("unexpected tool-result events: {other:?}"),
         }

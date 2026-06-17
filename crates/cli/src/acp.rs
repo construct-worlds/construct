@@ -431,11 +431,19 @@ fn session_update_from_event(event: &SessionEvent, seq: u64) -> Option<Value> {
         SessionEvent::Reasoning { text } => {
             Some(build_chunk_update("thought_chunk", &message_id, text))
         }
-        SessionEvent::ToolUse { tool, args } => {
+        SessionEvent::ToolUse {
+            tool,
+            args,
+            call_id,
+        } => {
             let output = serde_json::to_string(args).ok();
+            // Prefer the explicit `call_id` as the ACP toolCallId so a
+            // ToolUse and its ToolResult correlate; legacy events without
+            // one fall back to a per-event id.
+            let tool_call_id = call_id.clone().unwrap_or_else(|| format!("tool_{seq}"));
             Some(build_tool_call_update(
                 "tool_call",
-                &format!("tool_{seq}"),
+                &tool_call_id,
                 tool,
                 "in_progress",
                 output,
@@ -445,13 +453,17 @@ fn session_update_from_event(event: &SessionEvent, seq: u64) -> Option<Value> {
             tool,
             ok,
             output,
-        } => Some(build_tool_call_update(
-            "tool_call_update",
-            &format!("tool_{seq}"),
-            tool,
-            if *ok { "completed" } else { "failed" },
-            Some(output.clone()),
-        )),
+            call_id,
+        } => {
+            let tool_call_id = call_id.clone().unwrap_or_else(|| format!("tool_{seq}"));
+            Some(build_tool_call_update(
+                "tool_call_update",
+                &tool_call_id,
+                tool,
+                if *ok { "completed" } else { "failed" },
+                Some(output.clone()),
+            ))
+        }
         SessionEvent::TaskStart {
             call_id,
             tool,

@@ -642,6 +642,7 @@ mod tests {
         let ev = SessionEvent::ToolUse {
             tool: "edit_file".to_string(),
             args: serde_json::json!({}),
+            call_id: None,
         };
         assert_eq!(word_for_event(&ev).map(|w| w.0), Some("editing"));
     }

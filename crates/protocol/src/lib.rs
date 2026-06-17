@@ -335,16 +335,36 @@ pub enum SessionEvent {
     Reasoning {
         text: String,
     },
+    /// A tool invocation by the model.
+    ///
+    /// `call_id` is the canonical key correlating a [`SessionEvent::ToolResult`]
+    /// (or a `TaskStart`) back to this `ToolUse`. Historically the `tool` field
+    /// on `ToolResult` carried the call id by "smith convention"; that is now
+    /// superseded by `call_id`, and `tool` should hold the actual tool name.
+    /// When `call_id` is `None` (legacy transcripts), consumers fall back to the
+    /// `tool` field for correlation.
     ToolUse {
         tool: String,
         #[serde(default)]
         args: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
     },
+    /// The result of a tool invocation.
+    ///
+    /// `call_id` is the canonical key correlating this result back to its
+    /// [`SessionEvent::ToolUse`] (or `TaskStart`). Historically the `tool` field
+    /// carried the call id by "smith convention"; that is now superseded by
+    /// `call_id`, and `tool` should hold the actual tool name. When `call_id` is
+    /// `None` (legacy transcripts), consumers fall back to the `tool` field for
+    /// correlation.
     ToolResult {
         tool: String,
         ok: bool,
         #[serde(default)]
         output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
     },
     AwaitingInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -205,8 +205,9 @@ pub struct ItemHistory {
     /// hydrate from incoming ToolUse events.
     pending_block_hydrations: VecDeque<usize>,
     /// `ToolResult` events that arrived before their matching OSC
-    /// open. Keyed by call_id (the `tool` field on `ToolResult`
-    /// carries call_id by smith convention).
+    /// open. Keyed by call_id — the caller passes the explicit
+    /// `call_id` field from the event (falling back to the legacy
+    /// `tool` field for old transcripts).
     pending_tool_results: HashMap<String, (bool, String)>,
     /// Whether the next [`replay`] should account for a mutation.
     /// Set by every mutation; cleared by `replay`.
@@ -828,9 +829,11 @@ impl ItemHistory {
         self.dirty = true;
     }
 
-    /// Apply a `ToolResult` event. The protocol's `tool` field
-    /// carries the *call_id* (smith convention), so we can match
-    /// directly. If the OSC open hasn't arrived yet, stash for later.
+    /// Apply a `ToolResult` event. The caller passes the call's
+    /// correlation key — the event's explicit `call_id` field when
+    /// present, falling back to the legacy `tool` field for old
+    /// transcripts — so we can match directly. If the OSC open hasn't
+    /// arrived yet, stash for later.
     pub fn feed_tool_result(&mut self, call_id: &str, ok: bool, output: String) {
         let output = tool_output_preview_for_history(&output);
         if let Some(block) = self.find_block_mut(call_id) {

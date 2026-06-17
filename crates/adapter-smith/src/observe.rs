@@ -219,6 +219,7 @@ mod tests {
             SessionEvent::ToolUse {
                 tool: "x".into(),
                 args: serde_json::Value::Null,
+                call_id: None,
             },
             SessionEvent::Cost {
                 usd: 0.0,
