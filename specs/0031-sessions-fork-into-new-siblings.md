@@ -28,6 +28,11 @@ reconnect contract, and there is no faithful way to hand a harness another
 harness's private conversation state (smith's own message log, or the external
 CLIs that claude/codex/antigravity wrap, each manage their own resume).
 
+The seed is rendered from the **full** transcript by default, in chronological
+order, because the user's objective is normally stated at the very beginning —
+dropping the opening to keep only recent activity would discard the goal the
+fork exists to continue.
+
 Forking sidesteps all of that: it reuses the ordinary session-creation path,
 keeps both the before and after available to the user, and is honest about what
 can and cannot cross the boundary.
@@ -41,10 +46,11 @@ can and cannot cross the boundary.
 - A model spec is harness-specific, so the source's model is only inherited
   when the harness is unchanged; otherwise the target harness picks its default
   unless the caller overrides it.
-- The seed is a plain-text rendering of recent transcript events, size-bounded
-  and keeping the most recent content. It is background context, not a
-  re-execution of past tool calls, and is omitted for harnesses that consume
-  commands rather than conversation.
+- The seed is a plain-text rendering of the full transcript by default. It is
+  background context, not a re-execution of past tool calls, and is omitted for
+  harnesses that consume commands rather than conversation. A caller may set a
+  byte ceiling; when hit, the opening (objective) and the most-recent activity
+  are preserved and the middle is elided, so the goal is never dropped.
 - Because the harness-private state does not transfer, a fork is a fresh agent
   run primed with context — not a perfect continuation. Surfaces should present
   it that way.

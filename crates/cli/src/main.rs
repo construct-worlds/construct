@@ -90,6 +90,11 @@ enum Command {
         /// Don't seed the fork with the source transcript.
         #[arg(long, default_value_t = false)]
         no_seed: bool,
+        /// Cap the seeded transcript at N bytes (0 = unlimited / full
+        /// transcript, the default). When exceeded, the opening (objective)
+        /// and most-recent activity are kept and the middle is elided.
+        #[arg(long, default_value_t = 0)]
+        max_seed_bytes: usize,
     },
     /// Run `construct` as an Agent Client Protocol stdio server.
     Acp {
@@ -308,6 +313,7 @@ async fn main() -> Result<()> {
             model,
             prompt,
             no_seed,
+            max_seed_bytes,
         } => {
             let c = connect(&socket).await?;
             let id = c
@@ -318,7 +324,7 @@ async fn main() -> Result<()> {
                         model,
                         prompt,
                         seed: !no_seed,
-                        ..Default::default()
+                        max_seed_bytes,
                     },
                 )
                 .await?;

@@ -317,13 +317,11 @@ impl Client {
 
         let mut prompt_parts: Vec<String> = Vec::new();
         if opts.seed && harness != "shell" {
-            let n = if opts.seed_events == 0 {
-                20
-            } else {
-                opts.seed_events
-            };
-            if let Ok(tr) = self.transcript_tail(source_id, n).await {
-                if let Some(seed) = render_fork_seed(&tr.events) {
+            // Full transcript from the start (seq 0) so the original objective
+            // — usually stated in the opening message — is carried, not just
+            // the recent tail.
+            if let Ok(tr) = self.transcript(source_id, 0, None).await {
+                if let Some(seed) = render_fork_seed(&tr.events, opts.max_seed_bytes) {
                     prompt_parts.push(seed);
                 }
             }
@@ -950,11 +948,15 @@ pub struct ForkOptions {
     /// "continue from here"). `None` leaves the fork at just the seed (or
     /// interactive when nothing is seeded).
     pub prompt: Option<String>,
-    /// Seed the fork's initial prompt with a rendered summary of the source
+    /// Seed the fork's initial prompt with a rendering of the source
     /// transcript. Ignored for the `shell` harness.
     pub seed: bool,
-    /// How many recent transcript events to render into the seed (0 → 20).
-    pub seed_events: usize,
+    /// Safety ceiling on the rendered seed, in bytes. `0` (the default) means
+    /// unlimited — the **full** transcript is seeded. When a positive cap is
+    /// exceeded, the opening (which usually states the user's objective) and
+    /// the most-recent activity are kept while the middle is elided, so the
+    /// goal is never dropped.
+    pub max_seed_bytes: usize,
 }
 
 impl Default for ForkOptions {
@@ -963,17 +965,21 @@ impl Default for ForkOptions {
             model: None,
             prompt: None,
             seed: true,
-            seed_events: 20,
+            max_seed_bytes: 0,
         }
     }
 }
 
-/// Render recent transcript events into a plain-text context block for a
-/// forked session. Returns `None` when there's nothing worth seeding. When
-/// over budget, keeps the most-recent content (the tail).
-fn render_fork_seed(events: &[agentd_protocol::TimestampedEvent]) -> Option<String> {
+/// Render transcript events into a plain-text context block for a forked
+/// session. Renders the full history in chronological order so the opening
+/// (objective) comes first. Returns `None` when there's nothing worth
+/// seeding. When `max_bytes > 0` and the body exceeds it, keeps the opening
+/// and the most-recent activity and elides the middle (see [`elide_middle`]).
+fn render_fork_seed(
+    events: &[agentd_protocol::TimestampedEvent],
+    max_bytes: usize,
+) -> Option<String> {
     use agentd_protocol::{MessageRole, SessionEvent};
-    const MAX: usize = 6000;
     let mut lines: Vec<String> = Vec::new();
     for ev in events {
         match &ev.event {
@@ -1005,20 +1011,42 @@ fn render_fork_seed(events: &[agentd_protocol::TimestampedEvent]) -> Option<Stri
     if lines.is_empty() {
         return None;
     }
-    let mut body = lines.join("\n");
-    if body.len() > MAX {
-        // Keep the tail (most recent); advance to a char boundary.
-        let mut cut = body.len() - MAX;
-        while cut < body.len() && !body.is_char_boundary(cut) {
-            cut += 1;
-        }
-        body = format!("…(earlier context truncated)…\n{}", &body[cut..]);
-    }
+    let body = lines.join("\n");
+    let body = if max_bytes > 0 && body.len() > max_bytes {
+        elide_middle(&body, max_bytes)
+    } else {
+        body
+    };
     Some(format!(
-        "[Forked session context. The following summarizes the prior \
-         conversation you are continuing from — treat it as background; do \
-         not re-run past tool calls.]\n\n{body}\n\n[End of forked context.]"
+        "[Forked session context. The following is the prior conversation you \
+         are continuing from — treat it as background; do not re-run past tool \
+         calls.]\n\n{body}\n\n[End of forked context.]"
     ))
+}
+
+/// Keep roughly the first and last halves of `s` within `budget` bytes,
+/// replacing the middle with an elision marker. The opening usually carries
+/// the user's objective, so both ends are preserved. Char-boundary safe.
+fn elide_middle(s: &str, budget: usize) -> String {
+    let head_budget = budget / 2;
+    let tail_budget = budget - head_budget;
+    let mut head_end = head_budget.min(s.len());
+    while head_end > 0 && !s.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = s.len().saturating_sub(tail_budget);
+    while tail_start < s.len() && !s.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    if tail_start <= head_end {
+        return s.to_string();
+    }
+    let middle = tail_start - head_end;
+    format!(
+        "{}\n…({middle} chars of earlier context elided)…\n{}",
+        &s[..head_end],
+        &s[tail_start..]
+    )
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -1070,7 +1098,7 @@ mod fork_tests {
                 text: "done".into(),
             }),
         ];
-        let seed = render_fork_seed(&events).expect("seed");
+        let seed = render_fork_seed(&events, 0).expect("seed");
         assert!(seed.contains("User: fix the bug"));
         assert!(seed.contains("[tool: edit_file]"));
         assert!(seed.contains("[tool result: edit_file (ok)] patched"));
@@ -1087,36 +1115,62 @@ mod fork_tests {
                 text: "   ".into(),
             }),
         ];
-        assert!(render_fork_seed(&events).is_none());
+        assert!(render_fork_seed(&events, 0).is_none());
     }
 
     #[test]
-    fn seed_truncates_to_budget_keeping_tail() {
-        let big = "x".repeat(5000);
+    fn seed_unlimited_includes_full_history() {
         let events = vec![
             ev(SessionEvent::Message {
                 role: MessageRole::User,
-                text: big.clone(),
-            }),
-            ev(SessionEvent::Message {
-                role: MessageRole::User,
-                text: big,
+                text: "OBJECTIVE".into(),
             }),
             ev(SessionEvent::Message {
                 role: MessageRole::Assistant,
-                text: "RECENT_MARKER".into(),
+                text: "MIDDLE".into(),
+            }),
+            ev(SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: "RECENT".into(),
             }),
         ];
-        let seed = render_fork_seed(&events).unwrap();
-        assert!(seed.contains("RECENT_MARKER"), "tail must be kept");
-        assert!(seed.contains("earlier context truncated"));
-        assert!(seed.len() < 6500, "seed stays near budget");
+        // max_bytes = 0 → nothing elided.
+        let seed = render_fork_seed(&events, 0).unwrap();
+        assert!(seed.contains("OBJECTIVE") && seed.contains("MIDDLE") && seed.contains("RECENT"));
+        assert!(!seed.contains("elided"));
     }
 
     #[test]
-    fn default_options_seed_on() {
+    fn seed_cap_keeps_objective_and_recent_elides_middle() {
+        let filler = "z".repeat(2000);
+        let events = vec![
+            ev(SessionEvent::Message {
+                role: MessageRole::User,
+                text: "OBJECTIVE_MARKER: build the thing".into(),
+            }),
+            ev(SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: filler.clone(),
+            }),
+            ev(SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: filler,
+            }),
+            ev(SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: "RECENT_MARKER: latest state".into(),
+            }),
+        ];
+        let seed = render_fork_seed(&events, 1000).unwrap();
+        assert!(seed.contains("OBJECTIVE_MARKER"), "opening/objective preserved");
+        assert!(seed.contains("RECENT_MARKER"), "recent tail preserved");
+        assert!(seed.contains("elided"), "middle elided with a marker");
+    }
+
+    #[test]
+    fn default_options_seed_full() {
         let o = ForkOptions::default();
         assert!(o.seed);
-        assert_eq!(o.seed_events, 20);
+        assert_eq!(o.max_seed_bytes, 0, "0 = unlimited / full transcript");
     }
 }
