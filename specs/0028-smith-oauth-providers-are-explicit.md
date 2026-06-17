@@ -8,8 +8,8 @@ Scope: Smith providers that draw from subscription-backed OAuth credentials.
 ## Decision
 
 Smith subscription-backed providers must be selected with explicit model
-prefixes such as `codex-oauth:` or `claude-oauth:`. Bare model names keep using
-their direct API provider routes.
+prefixes such as `codex-oauth:`, `claude-oauth:`, or `grok-oauth:`. Bare
+model names keep using their direct API provider routes.
 
 ## Reason
 
@@ -22,7 +22,7 @@ and operational failure modes than direct API-key usage. A model string like
 Future Smith OAuth providers need their own explicit prefixes and provider
 labels. Provider implementations may delegate credential handling to official
 local CLIs, or read those CLIs' stored credentials and call the API directly
-(see 0030 for the `claude-oauth` direct-API transport), but Smith still owns
+(see 0031 for the `claude-oauth` direct-API transport), but Smith still owns
 tool execution, approval semantics, and conversation persistence unless a user
 intentionally chooses a separate CLI harness.
 

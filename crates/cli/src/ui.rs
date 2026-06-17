@@ -246,7 +246,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_pin_diamond_tooltip(f, app, &pinned_ids);
     render_view_close_tooltip(f, app);
     render_browser_preview_close_tooltip(f, app);
-    render_dynamic_ui_widget_title_tooltip(f, app);
     render_list_title_button_tooltips(f, app);
     render_view_uncollapse_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
@@ -521,9 +520,11 @@ pub fn list_collapse_button_range(list_area: Rect) -> Option<(u16, u16, u16)> {
     Some((x_start, x_end, list_area.y))
 }
 
-/// Hit zone for the Matrix-rain panel close button.
+/// Hit zone for the Matrix-rain panel's collapse/expand toggle button (the
+/// `−` / `+` glyph at the right edge of the panel title bar). Only one row is
+/// needed because the title bar survives even when the panel is collapsed.
 pub fn matrix_rain_close_button_range(rain_area: Rect) -> Option<(u16, u16, u16)> {
-    if rain_area.width < 8 || rain_area.height < 4 {
+    if rain_area.width < 8 || rain_area.height < 1 {
         return None;
     }
     let x_start = rain_area.x + rain_area.width.saturating_sub(4);
@@ -588,35 +589,6 @@ fn render_button_tooltip(f: &mut Frame, theme: &Theme, label: &str, anchor_x: u1
     f.render_widget(p, rect);
 }
 
-fn render_dynamic_ui_widget_title_tooltip(f: &mut Frame, app: &App) {
-    let Some((mx, my)) = app.mouse_pos else {
-        return;
-    };
-    let Some(hit) = app
-        .layout
-        .dynamic_ui_widget_hits
-        .iter()
-        .find(|hit| hit.contains(mx, my))
-    else {
-        return;
-    };
-    let Some(panel) = app
-        .ui_panels
-        .get(&hit.session_id)
-        .and_then(|panels| panels.get(&hit.panel_id))
-    else {
-        return;
-    };
-    let title = dynamic_ui_panel_title(panel).unwrap_or_else(|| panel.id.clone());
-    render_button_tooltip(
-        f,
-        &app.theme,
-        &format!(" {title} "),
-        hit.start_col,
-        hit.row.saturating_add(2),
-    );
-}
-
 fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
     let Some(list) = app.layout.list_area else {
         return;
@@ -636,24 +608,9 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
             return;
         }
     }
-    if let Some(hit) = app
-        .layout
-        .matrix_widget_hits
-        .iter()
-        .find(|hit| hit.contains(mx, my))
-    {
-        let crate::app::MatrixWidgetHitKind::Select { panel_id } = &hit.kind;
-        if let Some(title) = matrix_widget_title(app, panel_id) {
-            render_button_tooltip(
-                f,
-                &app.theme,
-                &format!(" {title} "),
-                hit.start_col,
-                hit.row.saturating_add(2),
-            );
-            return;
-        }
-    }
+    // Note: widget title squares no longer show a tooltip — hovering a square
+    // reveals the widget itself (see `render_session_widget_title` /
+    // `render_matrix_rain_header`).
     // Only when expanded — collapsed list has no `+` / `−`.
     if app.list_collapsed && app.focus != PaneFocus::List {
         return;
@@ -670,18 +627,15 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
             return;
         }
     }
-    if !app.matrix_rain_hidden {
-        if let Some(rain) = app.layout.matrix_rain_area {
-            if let Some((xs, xe, y)) = matrix_rain_close_button_range(rain) {
-                if my == y && mx >= xs && mx < xe {
-                    render_button_tooltip(
-                        f,
-                        &app.theme,
-                        " Hide Operator ",
-                        xs,
-                        y.saturating_add(2),
-                    );
-                }
+    if let Some(rain) = app.layout.matrix_rain_area {
+        if let Some((xs, xe, y)) = matrix_rain_close_button_range(rain) {
+            if my == y && mx >= xs && mx < xe {
+                let (label, anchor_y) = if app.matrix_rain_hidden {
+                    (" Expand Operator ", y)
+                } else {
+                    (" Collapse Operator ", y.saturating_add(2))
+                };
+                render_button_tooltip(f, &app.theme, label, xs, anchor_y);
             }
         }
     }
@@ -768,12 +722,26 @@ fn render_session_widget_title(
     // Ratatui right-aligned block titles paint one cell left of the simple
     // `right - width` geometry used for layout reservation; mirror that for
     // hit-testing so hover/click lands on the visible square, not one cell over.
+    let now = Instant::now();
+    // Drop a lapsed hover preview so a stale square doesn't read as filled.
+    if app.dynamic_ui_hover.as_ref().is_some_and(|h| h.until <= now) {
+        app.dynamic_ui_hover = None;
+    }
     let mut icon_x = x_start.saturating_add(1);
     for panel in panels {
-        let filled = app.dynamic_ui_panel_visible(&session_id, &panel.id);
         let hovered = app
             .mouse_pos
             .is_some_and(|(mx, my)| my == y && mx >= icon_x && mx < icon_x.saturating_add(1));
+        if hovered {
+            // Hovering the square reveals the widget itself. The 1s grace lets
+            // the pointer travel down onto the widget body, where it's held open.
+            app.dynamic_ui_hover = Some(crate::app::DynamicUiHover {
+                session_id: session_id.clone(),
+                panel_id: panel.id.clone(),
+                until: now + Duration::from_millis(crate::app::DYNAMIC_UI_HOVER_GRACE_MS),
+            });
+        }
+        let filled = app.dynamic_ui_panel_visible(&session_id, &panel.id);
         let glyph = if filled { "■" } else { "□" };
         let style = if filled {
             Style::default()
@@ -1405,10 +1373,11 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
 /// The matrix panel is "sticky": it always claims its preferred
 /// height at the bottom whenever there is room. The list shrinks to
 /// the remaining rows and scrolls when items overflow. Below
-/// `SESSION_LIST_H_MIN + MATRIX_RAIN_H_MIN` of total inner height
-/// (or when the user hid the rain), the list takes the entire pane
-/// and the rain area is reported as zero-height — i.e., the rain
-/// effectively goes "out of view" when the terminal is too short.
+/// `SESSION_LIST_H_MIN + MATRIX_RAIN_H_MIN` of total inner height the
+/// list takes the entire pane and the rain area is reported as
+/// zero-height — i.e., the rain effectively goes "out of view" when
+/// the terminal is too short. When the user collapses the rain, only
+/// its 1-row title bar stays pinned at the bottom of the list pane.
 fn split_list_pane(
     inner: Rect,
     matrix_rain_hidden: bool,
@@ -1420,8 +1389,27 @@ fn split_list_pane(
         width: inner.width,
         height: 0,
     };
+    // Collapsed: the rain panel shrinks to just its 1-row title bar, pinned at
+    // the bottom of the list pane, as long as the list keeps its minimum height
+    // above it. When the pane is too short the rain goes fully out of view.
     if matrix_rain_hidden {
-        return (inner, empty_matrix);
+        if inner.height <= crate::app::SESSION_LIST_H_MIN {
+            return (inner, empty_matrix);
+        }
+        let list_h = inner.height.saturating_sub(1);
+        let list = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: list_h,
+        };
+        let matrix = Rect {
+            x: inner.x,
+            y: inner.y.saturating_add(list_h),
+            width: inner.width,
+            height: 1,
+        };
+        return (list, matrix);
     }
     let max_matrix_h = inner.height.saturating_sub(crate::app::SESSION_LIST_H_MIN);
     if max_matrix_h < crate::app::MATRIX_RAIN_H_MIN {
@@ -1453,15 +1441,21 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
     // paths below — otherwise a hidden/too-small panel would leave stale
     // hits from a prior frame clickable.
     app.matrix_reveal_hits.clear();
-    if app.matrix_rain_hidden {
-        return;
-    }
-    if rain_area.width < 8 || rain_area.height < 4 {
+    // One row is enough for the title bar; below that the panel is fully out of
+    // view. A collapsed panel keeps the title bar and skips the animated body.
+    if rain_area.width < 8 || rain_area.height < 1 {
         return;
     }
     app.layout.matrix_rain_area = Some(rain_area);
     let now = Instant::now();
     render_matrix_rain_header(f, rain_area, app, now);
+    if app.matrix_rain_hidden {
+        // Collapsed: only the title bar shows; skip the animated body.
+        return;
+    }
+    if rain_area.height < 4 {
+        return;
+    }
     let rain_area = Rect {
         x: rain_area.x,
         y: rain_area.y + 1,
@@ -1800,22 +1794,19 @@ fn render_matrix_widget_viewport(f: &mut Frame, rain_area: Rect, app: &mut App, 
     let cursor_inside = app
         .mouse_pos
         .is_some_and(|(mx, my)| contains_rect(rain_area, mx, my));
-    match app.matrix_widget_visibility {
-        crate::app::MatrixWidgetVisibility::Browsing if !cursor_inside => {
-            app.matrix_widget_visibility = crate::app::MatrixWidgetVisibility::Auto {
-                until: now + Duration::from_secs(crate::app::DYNAMIC_UI_AUTOHIDE_SECS),
-            };
+    // Hovering anywhere in the rain panel holds a hover preview open, so the
+    // pointer can slide off the title square down onto the widget body.
+    if cursor_inside {
+        if let Some(hover) = app.matrix_widget_hover.as_mut() {
+            hover.until = now + Duration::from_millis(crate::app::DYNAMIC_UI_HOVER_GRACE_MS);
         }
-        crate::app::MatrixWidgetVisibility::Auto { .. } if cursor_inside => {
-            app.matrix_widget_visibility = crate::app::MatrixWidgetVisibility::Auto {
-                until: now + Duration::from_secs(crate::app::DYNAMIC_UI_AUTOHIDE_SECS),
-            };
-        }
-        _ => {}
     }
-    let selected_idx = selected_matrix_widget_index(app, &panels).unwrap_or(0);
+    let shown = app.matrix_widget_shown(now);
+    let selected_idx = shown
+        .as_ref()
+        .and_then(|id| panels.iter().position(|panel| &panel.id == id))
+        .unwrap_or(0);
     let panel = panels[selected_idx].clone();
-    app.matrix_widget_selected = Some(panel.id.clone());
     let Some(session_id) = app.orchestrator_id.clone() else {
         return;
     };
@@ -1875,20 +1866,6 @@ fn render_matrix_widget_viewport(f: &mut Frame, rain_area: Rect, app: &mut App, 
         Paragraph::new(visible_lines).wrap(Wrap { trim: false }),
         inner,
     );
-}
-
-fn selected_matrix_widget_index(app: &App, panels: &[agentd_protocol::UiPanel]) -> Option<usize> {
-    app.matrix_widget_selected
-        .as_ref()
-        .and_then(|id| panels.iter().position(|panel| &panel.id == id))
-        .or_else(|| (!panels.is_empty()).then_some(0))
-}
-
-fn matrix_widget_title(app: &App, panel_id: &str) -> Option<String> {
-    app.orchestrator_widget_panels()
-        .into_iter()
-        .find(|panel| panel.id == panel_id)
-        .map(|panel| dynamic_ui_panel_title(&panel).unwrap_or(panel.id))
 }
 
 fn matrix_operator_status(app: &App) -> &'static str {
@@ -2061,7 +2038,9 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
     }
 
     let panels = app.orchestrator_widget_panels();
-    let viewport_visible = app.matrix_widget_visible(now);
+    // Expire any lapsed hover preview (and clear state when no panels remain)
+    // so the squares below reflect the live shown/pinned widget.
+    app.matrix_widget_visible(now);
     let approval_pending = app.operator_has_pending_approval();
     let operator_text = if approval_pending {
         "operator !"
@@ -2090,7 +2069,6 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
         .set_string(label_x, area.y, label.as_str(), operator_style);
     app.layout.matrix_operator_title_hit = Some((operator_start, operator_end, area.y));
 
-    let selected_id = app.matrix_widget_selected.clone();
     let separator_x = operator_end.saturating_add(1);
     if !panels.is_empty() {
         f.buffer_mut()
@@ -2102,10 +2080,19 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
         if icon_x >= icon_limit {
             break;
         }
-        let filled = viewport_visible && selected_id.as_deref() == Some(panel.id.as_str());
         let hovered = app
             .mouse_pos
             .is_some_and(|(mx, my)| my == area.y && mx >= icon_x && mx < icon_x.saturating_add(1));
+        // Hovering a square reveals that widget in the rain viewport. Skipped
+        // when collapsed — the viewport only renders in the expanded panel, so
+        // a preview would have nowhere to show.
+        if hovered && !app.matrix_rain_hidden {
+            app.matrix_widget_hover = Some(crate::app::MatrixWidgetHover {
+                panel_id: panel.id.clone(),
+                until: now + Duration::from_millis(crate::app::DYNAMIC_UI_HOVER_GRACE_MS),
+            });
+        }
+        let filled = app.matrix_widget_shown(now).as_deref() == Some(panel.id.as_str());
         let glyph = if filled { "■" } else { "□" };
         let style = if filled {
             Style::default()
@@ -2133,8 +2120,24 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
         icon_x = icon_x.saturating_add(w + 1);
     }
 
-    let x = area.x + area.width.saturating_sub(3);
-    f.buffer_mut().set_string(x, area.y, " x ", close_style);
+    let toggle_glyph = if app.matrix_rain_hidden {
+        " + "
+    } else {
+        " − "
+    };
+    let toggle_x = area.x + area.width.saturating_sub(3);
+    let toggle_hovered = app
+        .mouse_pos
+        .is_some_and(|(mx, my)| my == area.y && mx >= toggle_x && mx < toggle_x.saturating_add(3));
+    let toggle_style = if toggle_hovered {
+        Style::default()
+            .fg(app.theme.matrix_flash_good)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        close_style
+    };
+    f.buffer_mut()
+        .set_string(toggle_x, area.y, toggle_glyph, toggle_style);
 }
 
 fn update_matrix_rain_intensity(app: &mut App, now: Instant) -> f32 {
@@ -3441,6 +3444,9 @@ fn render_visible_dynamic_ui_panels(
     let now = std::time::Instant::now();
     app.dynamic_ui_temporary_until
         .retain(|_, until| *until > now);
+    if app.dynamic_ui_hover.as_ref().is_some_and(|h| h.until <= now) {
+        app.dynamic_ui_hover = None;
+    }
     let mut visible: Vec<_> = panels
         .iter()
         .filter(|panel| app.dynamic_ui_panel_visible(&session_id, &panel.id))
@@ -3462,6 +3468,14 @@ fn render_visible_dynamic_ui_panels(
                         key,
                         now + std::time::Duration::from_secs(crate::app::DYNAMIC_UI_AUTOHIDE_SECS),
                     );
+                }
+            }
+            // Hovering the widget body holds a hover preview open, so the
+            // pointer can rest on it after sliding off the title square.
+            if let Some(hover) = app.dynamic_ui_hover.as_mut() {
+                if hover.session_id == session_id {
+                    hover.until = now
+                        + std::time::Duration::from_millis(crate::app::DYNAMIC_UI_HOVER_GRACE_MS);
                 }
             }
         }
@@ -7721,8 +7735,23 @@ mod tests {
     }
 
     #[test]
-    fn split_list_pane_skips_matrix_when_hidden() {
+    fn split_list_pane_keeps_title_bar_when_collapsed() {
+        // Collapsed: the rain panel shrinks to just its 1-row title bar,
+        // pinned at the bottom of the list pane, while the list keeps the rest.
         let inner = Rect::new(0, 0, 20, 30);
+        let (list, matrix) = split_list_pane(inner, true, None);
+        assert_eq!(list.height, inner.height - 1);
+        assert_eq!(matrix.height, 1);
+        assert_eq!(matrix.y, list.y + list.height);
+        assert_eq!(list.x, inner.x);
+        assert_eq!(matrix.x, inner.x);
+    }
+
+    #[test]
+    fn split_list_pane_drops_collapsed_title_bar_when_pane_too_short() {
+        // When the pane can't keep the list's minimum height above the title
+        // bar, the rain goes fully out of view and the list takes everything.
+        let inner = Rect::new(0, 0, 20, crate::app::SESSION_LIST_H_MIN);
         let (list, matrix) = split_list_pane(inner, true, None);
         assert_eq!(list, inner);
         assert_eq!(matrix.height, 0);

@@ -1,7 +1,7 @@
 //! Translate a model spec string into a (provider, bare model name).
 //!
 //! Explicit prefixes (`openai:`, `anthropic:`, `gemini:`, `ollama:`,
-//! `codex-oauth:`, `claude-oauth:`, `claude-code-oauth:`) always win.
+//! `grok:`, `grok-oauth:`, `codex-oauth:`, `claude-oauth:`, `claude-code-oauth:`) always win.
 //! Otherwise we sniff the bare name:
 //!   - starts with `gpt-` or `o[1-5]` → OpenAI
 //!   - starts with `claude-` → Anthropic
@@ -18,7 +18,7 @@
 //!
 //! `claude-oauth:` uses the user's Claude Code subscription: it reads the
 //! Claude Code login credentials and calls the Anthropic API directly with the
-//! subscription OAuth token (see spec 0030). It is distinct from `anthropic:`,
+//! subscription OAuth token (see spec 0031). It is distinct from `anthropic:`,
 //! which uses `ANTHROPIC_API_KEY`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,10 +27,15 @@ pub enum Provider {
     Anthropic,
     Gemini,
     Ollama,
+    /// xAI Grok API surface.
+    Grok,
+    /// OAuth-backed Grok access path.
+    GrokOauth,
     /// OAuth-backed Codex backend; reads `~/.codex/auth.json`, bills
     /// against the user's ChatGPT subscription.
     CodexOauth,
-    /// OAuth-backed Claude Code CLI path; delegates auth to `claude`.
+    /// Claude Code subscription path; reads the Claude Code OAuth
+    /// credentials and calls the Anthropic API directly (spec 0031).
     ClaudeOauth,
 }
 
@@ -69,6 +74,18 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
             model: rest.to_string(),
         });
     }
+    if let Some(rest) = s.strip_prefix("grok:") {
+        return Ok(ModelSpec {
+            provider: Provider::Grok,
+            model: rest.to_string(),
+        });
+    }
+    if let Some(rest) = s.strip_prefix("grok-oauth:") {
+        return Ok(ModelSpec {
+            provider: Provider::GrokOauth,
+            model: rest.to_string(),
+        });
+    }
     if let Some(rest) = s.strip_prefix("codex-oauth:") {
         return Ok(ModelSpec {
             provider: Provider::CodexOauth,
@@ -93,6 +110,8 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
                     | "anthropic"
                     | "gemini"
                     | "ollama"
+                    | "grok"
+                    | "grok-oauth"
                     | "codex-oauth"
                     | "claude-oauth"
                     | "claude-code-oauth"
@@ -100,7 +119,7 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
         {
             return Err(format!(
                 "unknown provider prefix `{prefix}:` (expected one of \
-                 openai:, anthropic:, ollama:, codex-oauth:, claude-oauth:)"
+                 openai:, anthropic:, gemini:, ollama:, grok:, grok-oauth:, codex-oauth:, claude-oauth:)"
             ));
         }
     }
@@ -110,6 +129,8 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
         Provider::Anthropic
     } else if s.starts_with("gemini-") {
         Provider::Gemini
+    } else if s.starts_with("grok") {
+        Provider::Grok
     } else {
         Provider::Ollama
     };
@@ -240,6 +261,27 @@ mod tests {
         // router treats it as OpenAI based on the `gpt-` prefix; users
         // must type the `codex-oauth:` prefix explicitly.
         assert_eq!(parse("gpt-5-codex").provider, Provider::OpenAI);
+    }
+
+    #[test]
+    fn grok_prefix_is_recognized() {
+        let s = parse("grok:grok-2-1212");
+        assert_eq!(s.provider, Provider::Grok);
+        assert_eq!(s.model, "grok-2-1212");
+    }
+
+    #[test]
+    fn grok_oauth_prefix_is_recognized() {
+        let s = parse("grok-oauth:grok-2-1212");
+        assert_eq!(s.provider, Provider::GrokOauth);
+        assert_eq!(s.model, "grok-2-1212");
+    }
+
+    #[test]
+    fn bare_grok_like_model_routes_to_grok() {
+        let s = parse("grok-2-1212");
+        assert_eq!(s.provider, Provider::Grok);
+        assert_eq!(s.model, "grok-2-1212");
     }
 
     #[test]

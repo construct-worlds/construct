@@ -9,9 +9,9 @@ use crate::provider::{self, Content, LlmProvider, Message, Role, StopReason, Tex
 use crate::tools::{truncate_for_model, ToolCtx, ToolOutcome, ToolRegistry};
 use agentd_protocol::adapter::{AdapterContext, AdapterInboxMsg, EventEmitter};
 use agentd_protocol::{MessageRole, SessionEvent, SessionStartParams, SessionState, ToolRisk};
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use serde_json::json;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -68,6 +68,7 @@ const APPROVAL_HISTORY_LIMIT: usize = 20;
 /// harness nudges the model to change approach instead of thrashing.
 /// Purely a function of observed progress — model- and provider-agnostic.
 const NONPRODUCTIVE_STREAK_LIMIT: usize = 4;
+const GROK_BASE_URL: &str = "https://api.x.ai/v1";
 
 fn record_approval_history(
     history: &mut VecDeque<ApprovalHistoryEntry>,
@@ -438,6 +439,9 @@ pub async fn run(
     };
 
     let provider_name = spec.provider_name();
+    // User-facing label (`@profile` when from config, else the wire name);
+    // `provider_name` stays the wire name for limit/context keying.
+    let display_name = spec.display_name();
     let model = spec.model.clone();
     let provider = spec.provider;
     // Per-model learned token limits — adapts on overflow errors
@@ -448,7 +452,7 @@ pub async fn run(
     // actually resolved to.
     emit.emit(SessionEvent::Status {
         state: SessionState::Running,
-        detail: Some(format!("{}:{}", provider_name, model)),
+        detail: Some(format!("{}:{}", display_name, model)),
     });
     hooks
         .run(
@@ -772,7 +776,7 @@ pub async fn run(
                 emit.emit(SessionEvent::Error {
                     message: format!(
                         "{} returned an empty response for model {}",
-                        provider_name, model
+                        display_name, model
                     ),
                 });
                 break;
@@ -1395,18 +1399,36 @@ pub struct ResolvedModel {
     pub model: String,
     pub provider: Box<dyn LlmProvider>,
     pub kind: provider::routing::Provider,
+    /// `Some("@<name>")` when this came from a `[smith.models.<name>]`
+    /// config profile; `None` for a direct/prefixed spec. Only affects the
+    /// user-facing label — `kind` still carries the real wire protocol so
+    /// context-window and learned-limit lookups stay correct.
+    pub profile: Option<String>,
 }
 
 impl ResolvedModel {
+    /// The wire protocol name. Stable key for context-window heuristics and
+    /// learned token limits — NOT a display label (a profile reports its
+    /// underlying wire name here, e.g. `openai`).
     pub fn provider_name(&self) -> &'static str {
         match self.kind {
             provider::routing::Provider::OpenAI => "openai",
             provider::routing::Provider::Anthropic => "anthropic",
             provider::routing::Provider::Gemini => "gemini",
             provider::routing::Provider::Ollama => "ollama",
+            provider::routing::Provider::Grok => "grok",
+            provider::routing::Provider::GrokOauth => "grok-oauth",
             provider::routing::Provider::CodexOauth => "codex-oauth",
             provider::routing::Provider::ClaudeOauth => "claude-oauth",
         }
+    }
+
+    /// User-facing provider label for banners / status / notes: the
+    /// `@profile` name when resolved from config, else the wire name.
+    pub fn display_name(&self) -> String {
+        self.profile
+            .clone()
+            .unwrap_or_else(|| self.provider_name().to_string())
     }
 }
 
@@ -1440,10 +1462,19 @@ pub fn resolve_model(params: &SessionStartParams) -> Result<ResolvedModel> {
     resolve_model_from_spec(&spec_str)
 }
 
-/// Build a [`ResolvedModel`] from an explicit `<provider>:<name>` (or
-/// auto-detect bare-name) spec string. Used by the `/model <spec>`
-/// slash command to swap mid-session.
+/// Build a [`ResolvedModel`] from a model spec string. Used by the
+/// `/model <spec>` slash command to swap mid-session.
+///
+/// Three forms:
+///   - `@<name>` / `@<name>:<model>` — a `[smith.models.<name>]` config
+///     profile (its own endpoint + key + default model, optionally model-
+///     overridden). Lets several distinct endpoints coexist in one session.
+///   - `<provider>:<name>` — explicit provider prefix.
+///   - bare name — auto-detected provider.
 pub fn resolve_model_from_spec(spec_str: &str) -> Result<ResolvedModel> {
+    if let Some(rest) = spec_str.trim().strip_prefix('@') {
+        return resolve_profile(rest);
+    }
     let spec = provider::routing::parse_model_spec(spec_str)
         .map_err(|e| anyhow::anyhow!("invalid model spec `{spec_str}`: {e}"))?;
     let provider: Box<dyn LlmProvider> = match spec.provider {
@@ -1453,6 +1484,18 @@ pub fn resolve_model_from_spec(spec_str: &str) -> Result<ResolvedModel> {
         }
         provider::routing::Provider::Gemini => Box::new(provider::gemini::Gemini::from_env()?),
         provider::routing::Provider::Ollama => Box::new(provider::ollama::Ollama::from_env()?),
+        provider::routing::Provider::Grok => {
+            Box::new(provider::openai::OpenAi::with_config(
+                Some(GROK_BASE_URL.to_string()),
+                grok_api_key()?,
+            )?)
+        }
+        provider::routing::Provider::GrokOauth => {
+            Box::new(provider::openai::OpenAi::with_config(
+                Some(GROK_BASE_URL.to_string()),
+                grok_oauth_token()?,
+            )?)
+        }
         provider::routing::Provider::CodexOauth => {
             Box::new(provider::codex_oauth::CodexOauth::from_env()?)
         }
@@ -1464,12 +1507,305 @@ pub fn resolve_model_from_spec(spec_str: &str) -> Result<ResolvedModel> {
         model: spec.model,
         provider,
         kind: spec.provider,
+        profile: None,
     })
+}
+
+/// Resolve a `@<name>` (or `@<name>:<model-override>`) reference against
+/// the `[smith.models.<name>]` profiles in `config.toml`.
+fn resolve_profile(rest: &str) -> Result<ResolvedModel> {
+    let (name, override_model) = match rest.split_once(':') {
+        Some((n, m)) => (n.trim(), Some(m.trim().to_string())),
+        None => (rest.trim(), None),
+    };
+    if name.is_empty() {
+        anyhow::bail!("empty profile name after `@` (try `@<name>`)");
+    }
+    let profile = provider::config::load_profile(name)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no `[smith.models.{name}]` profile in config.toml — declare one \
+             with `provider`, `base_url`, `api_key_env`, and `model`"
+        )
+    })?;
+    build_profile_model(name, &profile, override_model)
+}
+
+/// Turn a loaded profile (+ optional model override) into a [`ResolvedModel`].
+/// Split from the filesystem load so the validation rules are unit-testable.
+fn build_profile_model(
+    name: &str,
+    profile: &provider::config::ModelProfile,
+    override_model: Option<String>,
+) -> Result<ResolvedModel> {
+    // Map the declared wire protocol. OAuth-backed providers are excluded:
+    // they have no base-URL/key surface and keep their explicit prefixes
+    // (spec 0028).
+    let kind = match profile.provider.as_str() {
+        "openai" => provider::routing::Provider::OpenAI,
+        "anthropic" => provider::routing::Provider::Anthropic,
+        "gemini" => provider::routing::Provider::Gemini,
+        "ollama" => provider::routing::Provider::Ollama,
+        "grok" => provider::routing::Provider::Grok,
+        "codex-oauth" | "claude-oauth" | "claude-code-oauth" | "grok-oauth" => anyhow::bail!(
+            "profile `{name}`: provider `{}` is OAuth-backed and has no \
+             configurable endpoint — use the `{}:` model prefix directly",
+            profile.provider,
+            profile.provider
+        ),
+        other => anyhow::bail!(
+            "profile `{name}`: unknown provider `{other}` \
+             (expected openai | anthropic | gemini | ollama | grok)"
+        ),
+    };
+
+    let model = override_model
+        .or_else(|| profile.model.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "profile `{name}`: no model — set `model = \"...\"` in the \
+                 profile or reference it as `@{name}:<model>`"
+            )
+        })?;
+
+    let base_url = profile.base_url.clone();
+    let provider: Box<dyn LlmProvider> = match kind {
+        provider::routing::Provider::OpenAI => Box::new(provider::openai::OpenAi::with_config(
+            base_url,
+            profile_api_key(profile, name, &["OPENAI_API_KEY"])?,
+        )?),
+        provider::routing::Provider::Anthropic => {
+            Box::new(provider::anthropic::Anthropic::with_config(
+                base_url,
+                profile_api_key(profile, name, &["ANTHROPIC_API_KEY"])?,
+            )?)
+        }
+        provider::routing::Provider::Gemini => Box::new(provider::gemini::Gemini::with_config(
+            base_url,
+            profile_api_key(profile, name, &["GEMINI_API_KEY", "GOOGLE_API_KEY"])?,
+        )?),
+        provider::routing::Provider::Ollama => {
+            Box::new(provider::ollama::Ollama::with_config(base_url)?)
+        }
+        provider::routing::Provider::Grok => Box::new(provider::openai::OpenAi::with_config(
+            base_url.or_else(|| Some(GROK_BASE_URL.to_string())),
+            profile_api_key(profile, name, &["GROK_API_KEY", "XAI_API_KEY"])?,
+        )?),
+        // codex-oauth / claude-oauth / grok-oauth rejected above.
+        _ => unreachable!("oauth providers rejected above"),
+    };
+
+    Ok(ResolvedModel {
+        model,
+        provider,
+        kind,
+        profile: Some(format!("@{name}")),
+    })
+}
+
+/// Resolve a profile's API key: explicit `api_key_env` (read that var),
+/// else inline `api_key`, else fall back to the wire protocol's standard
+/// env var(s). Errors with actionable guidance when none is available.
+fn profile_api_key(
+    profile: &provider::config::ModelProfile,
+    name: &str,
+    default_envs: &[&str],
+) -> Result<String> {
+    if let Some(var) = &profile.api_key_env {
+        return std::env::var(var).map_err(|_| {
+            anyhow::anyhow!("profile `{name}`: api_key_env `{var}` is not set in the environment")
+        });
+    }
+    if let Some(key) = &profile.api_key {
+        return Ok(key.clone());
+    }
+    for var in default_envs {
+        if let Ok(key) = std::env::var(var) {
+            return Ok(key);
+        }
+    }
+    anyhow::bail!(
+        "profile `{name}`: no API key — set `api_key_env` (preferred) or \
+         `api_key` in the profile, or export {}",
+        default_envs.join(" / ")
+    )
+}
+
+fn grok_api_key() -> Result<String> {
+    std::env::var("GROK_API_KEY")
+        .or_else(|_| std::env::var("XAI_API_KEY"))
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "grok provider requires GROK_API_KEY or XAI_API_KEY"
+            )
+        })
+}
+
+fn grok_auth_path() -> Result<PathBuf> {
+    if let Ok(home) = std::env::var("GROK_HOME") {
+        if !home.trim().is_empty() {
+            return Ok(PathBuf::from(home).join(".grok").join("auth.json"));
+        }
+    }
+    let home = std::env::var("HOME")
+        .map_err(|_| anyhow::anyhow!("$HOME is not set; cannot locate ~/.grok/auth.json"))?;
+    Ok(PathBuf::from(home).join(".grok").join("auth.json"))
+}
+
+fn parse_expires_at(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(ts).ok().map(|v| v.with_timezone(&chrono::Utc))
+}
+
+pub(crate) fn grok_oauth_token() -> Result<String> {
+    let path = grok_auth_path()?;
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read {}", path.display()))
+        .context("load grok auth token from auth.json")?;
+    let entries: BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+
+    let now = chrono::Utc::now();
+    let mut selected_token: Option<(Option<chrono::DateTime<chrono::Utc>>, String)> = None;
+    let mut seen_expired = false;
+
+    for entry in entries.values() {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let Some(token) = obj.get("key").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            continue;
+        }
+
+        let expiry = obj.get("expires_at").and_then(|v| v.as_str()).and_then(parse_expires_at);
+        if let Some(expiry) = expiry {
+            if expiry > now {
+                match selected_token {
+                    Some((Some(current_expiry), _)) if expiry <= current_expiry => {}
+                    _ => selected_token = Some((Some(expiry), token)),
+                }
+            } else {
+                seen_expired = true;
+            }
+        } else if selected_token.is_none() {
+            selected_token = Some((None, token));
+        }
+    }
+
+    if let Some((_, token)) = selected_token {
+        return Ok(token);
+    }
+    if seen_expired {
+        return Err(anyhow!(
+            "grok auth token in {} is expired; run `grok login` or set GROK_API_KEY/XAI_API_KEY.",
+            path.display()
+        ));
+    }
+    Err(anyhow!(
+        "no usable `key` field found in {}. Run `grok login` or set GROK_API_KEY/XAI_API_KEY.",
+        path.display()
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provider::config::ModelProfile;
+    use std::env;
+    use std::fs;
+
+    fn profile(provider: &str, model: Option<&str>) -> ModelProfile {
+        ModelProfile {
+            provider: provider.to_string(),
+            base_url: Some("https://example.invalid/v1".to_string()),
+            // inline key so build doesn't depend on process env in tests
+            api_key: Some("test-key".to_string()),
+            api_key_env: None,
+            model: model.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn profile_builds_with_label_and_wire_kind() {
+        let r = build_profile_model("deepseek", &profile("openai", Some("deepseek-chat")), None)
+            .expect("build");
+        assert_eq!(r.model, "deepseek-chat");
+        assert_eq!(r.kind, provider::routing::Provider::OpenAI);
+        // wire name keeps internal keying correct; label shows the profile.
+        assert_eq!(r.provider_name(), "openai");
+        assert_eq!(r.display_name(), "@deepseek");
+    }
+
+    #[test]
+    fn profile_model_override_wins() {
+        let r = build_profile_model(
+            "deepseek",
+            &profile("openai", Some("deepseek-chat")),
+            Some("deepseek-reasoner".to_string()),
+        )
+        .expect("build");
+        assert_eq!(r.model, "deepseek-reasoner");
+    }
+
+    #[test]
+    fn profile_rejects_oauth_providers() {
+        let e = build_profile_model("x", &profile("codex-oauth", Some("gpt-5")), None)
+            .err()
+            .expect("expected error")
+            .to_string();
+        assert!(e.contains("OAuth-backed"), "got: {e}");
+    }
+
+    #[test]
+    fn profile_supports_grok_provider() {
+        let r = build_profile_model("x", &profile("grok", Some("grok-2-latest")), None)
+            .expect("build");
+        assert_eq!(r.provider_name(), "grok");
+        assert_eq!(r.kind, provider::routing::Provider::Grok);
+    }
+
+    #[test]
+    fn profile_rejects_grok_oauth_provider() {
+        let e = build_profile_model("x", &profile("grok-oauth", Some("grok-2-latest")), None)
+            .err()
+            .expect("expected error")
+            .to_string();
+        assert!(e.contains("OAuth-backed"), "got: {e}");
+    }
+
+    #[test]
+    fn profile_rejects_unknown_provider() {
+        let e = build_profile_model("x", &profile("cohere", Some("command")), None)
+            .err()
+            .expect("expected error")
+            .to_string();
+        assert!(e.contains("unknown provider"), "got: {e}");
+    }
+
+    #[test]
+    fn profile_requires_a_model() {
+        let e = build_profile_model("x", &profile("openai", None), None)
+            .err()
+            .expect("expected error")
+            .to_string();
+        assert!(e.contains("no model"), "got: {e}");
+    }
+
+    #[test]
+    fn empty_profile_name_after_at_errors() {
+        assert!(resolve_profile("")
+            .err()
+            .expect("expected error")
+            .to_string()
+            .contains("empty profile name"));
+        assert!(resolve_profile(":gpt-5")
+            .err()
+            .expect("expected error")
+            .to_string()
+            .contains("empty profile name"));
+    }
 
     /// Both paths of the "no OS backstop" notice, driven through the real
     /// emit code: a requested-but-unavailable sandbox emits exactly one notice;
@@ -1583,5 +1919,111 @@ mod tests {
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("pipes read-only output"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("broad/unscoped paths"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("secrets or credentials"));
+    }
+
+    #[test]
+    fn grok_oauth_token_selects_latest_unexpired() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let grok_home = tmp.path().join("grok");
+        fs::create_dir_all(grok_home.join(".grok")).expect("mkdir");
+        let auth_path = grok_home.join(".grok").join("auth.json");
+        fs::write(
+            &auth_path,
+            serde_json::json!({
+                "expired": { "key": "old", "expires_at": "2020-01-01T00:00:00Z" },
+                "older": { "key": "first", "expires_at": "2060-01-01T00:00:00Z" },
+                "newer": { "key": "second", "expires_at": "2099-01-01T00:00:00Z" },
+            })
+            .to_string(),
+        )
+        .expect("write");
+
+        let old_home = env::var_os("HOME");
+        let old_grok_home = env::var_os("GROK_HOME");
+        env::set_var("HOME", "/does/not/matter");
+        env::set_var("GROK_HOME", grok_home);
+        let token = grok_oauth_token().expect("token");
+        if let Some(v) = old_grok_home {
+            env::set_var("GROK_HOME", v);
+        } else {
+            env::remove_var("GROK_HOME");
+        }
+        if let Some(v) = old_home {
+            env::set_var("HOME", v);
+        } else {
+            env::remove_var("HOME");
+        }
+        assert_eq!(token, "second");
+    }
+
+    #[test]
+    fn grok_oauth_token_rejects_expired_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let grok_home = tmp.path().join("grok");
+        fs::create_dir_all(grok_home.join(".grok")).expect("mkdir");
+        let auth_path = grok_home.join(".grok").join("auth.json");
+        fs::write(
+            &auth_path,
+            serde_json::json!({
+                "expired": { "key": "old", "expires_at": "2020-01-01T00:00:00Z" },
+            })
+            .to_string(),
+        )
+        .expect("write");
+
+        let old_home = env::var_os("HOME");
+        let old_grok_home = env::var_os("GROK_HOME");
+        env::set_var("HOME", "/does/not/matter");
+        env::set_var("GROK_HOME", grok_home);
+        let err = grok_oauth_token().unwrap_err().to_string();
+        if let Some(v) = old_grok_home {
+            env::set_var("GROK_HOME", v);
+        } else {
+            env::remove_var("GROK_HOME");
+        }
+        if let Some(v) = old_home {
+            env::set_var("HOME", v);
+        } else {
+            env::remove_var("HOME");
+        }
+
+        assert!(err.contains("expired"));
+    }
+
+    #[test]
+    fn resolve_model_from_spec_grok_oauth_reads_auth_json_token() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let grok_home = tmp.path().join("grok");
+        fs::create_dir_all(grok_home.join(".grok")).expect("mkdir");
+        let auth_path = grok_home.join(".grok").join("auth.json");
+        fs::write(
+            &auth_path,
+            serde_json::json!({
+                "default": { "key": "runtime-token", "expires_at": "2099-01-01T00:00:00Z" },
+            })
+            .to_string(),
+        )
+        .expect("write");
+
+        let old_home = env::var_os("HOME");
+        let old_grok_home = env::var_os("GROK_HOME");
+        env::set_var("HOME", "/does/not/matter");
+        env::set_var("GROK_HOME", grok_home);
+
+        let resolved =
+            resolve_model_from_spec("grok-oauth:grok-2-latest").expect("resolve");
+        if let Some(v) = old_grok_home {
+            env::set_var("GROK_HOME", v);
+        } else {
+            env::remove_var("GROK_HOME");
+        }
+        if let Some(v) = old_home {
+            env::set_var("HOME", v);
+        } else {
+            env::remove_var("HOME");
+        }
+
+        assert_eq!(resolved.model, "grok-2-latest");
+        assert_eq!(resolved.provider_name(), "grok-oauth");
     }
 }

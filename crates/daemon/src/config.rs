@@ -29,8 +29,22 @@ pub const DEFAULT_CONFIG_TOML: &str = r#"# construct configuration
 # # of needing to export them in the shell that launches the daemon.
 # # Per-session env (`construct new --env KEY=VAL`) takes precedence.
 # # CONSTRUCT_SMITH_MODEL = "codex-oauth:gpt-5.5"
+# # or: CONSTRUCT_SMITH_MODEL = "grok-oauth:grok-2-latest"
 # #
 # smith is the native built-in harness.
+
+# [smith.models.<name>]
+# # Named smith endpoint profiles. Reference at runtime with `/model @<name>`
+# # (or `--model @<name>`), e.g. `/model @deepseek`. Lets several endpoints of
+# # the same wire protocol coexist in one session — unlike the single
+# # OPENAI_BASE_URL/ANTHROPIC_BASE_URL/... env vars. `provider` is the wire
+# # protocol: openai | anthropic | gemini | grok | ollama.
+# #
+# # [smith.models.deepseek]
+# # provider    = "openai"
+# # base_url    = "https://api.deepseek.com/v1"
+# # api_key_env = "DEEPSEEK_API_KEY"
+# # model       = "deepseek-chat"
 
 # [defaults]
 # worktree = false   # default value of session.worktree if not specified
@@ -106,6 +120,7 @@ pub struct AdapterConfig {
     /// [adapters.smith]
     /// env = { CONSTRUCT_SMITH_MODEL = "codex-oauth:gpt-5.5" }
     /// # or: env = { CONSTRUCT_SMITH_MODEL = "claude-oauth:sonnet" }
+    /// # or: env = { CONSTRUCT_SMITH_MODEL = "grok-oauth:grok-2-latest" }
     /// ```
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -147,7 +162,7 @@ pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
     BuiltinAdapter {
         name: "smith",
         binary: "construct-adapter-smith",
-        description: "Built-in multi-provider agent (OpenAI / Anthropic / Ollama)",
+        description: "Built-in multi-provider agent (OpenAI / Anthropic / Gemini / Ollama / Grok)",
     },
 ];
 
