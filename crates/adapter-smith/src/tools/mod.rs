@@ -84,7 +84,7 @@ pub fn effective_risk(tool: &dyn Tool, input: &Value, cwd: &std::path::Path) -> 
 /// process that is not a bounded read). A mutating command the model
 /// mislabels would bypass the gate, so the flag's contract — provably
 /// side-effect-free only — lives in the tool's arg description.
-fn shell_read_only_optin(tool_name: &str, input: &Value) -> bool {
+pub fn shell_read_only_optin(tool_name: &str, input: &Value) -> bool {
     if tool_name != "shell" {
         return false;
     }
@@ -166,6 +166,16 @@ impl ToolCtx {
     pub fn escalated(&self) -> ToolCtx {
         let mut c = crate::agent::clone_tool_ctx(self);
         c.sandbox_policy = self.sandbox_policy.escalated();
+        c
+    }
+
+    /// A clone of this context with network allowed but writes still confined
+    /// to the worktree. Used for `read_only: true` shell calls that need
+    /// network access (e.g. `gh pr view`, `curl` reads) without granting full
+    /// filesystem write access.
+    pub fn with_network_read(&self) -> ToolCtx {
+        let mut c = crate::agent::clone_tool_ctx(self);
+        c.sandbox_policy = self.sandbox_policy.with_network_allowed();
         c
     }
 }
