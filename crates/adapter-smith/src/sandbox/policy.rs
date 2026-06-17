@@ -82,6 +82,17 @@ impl SandboxPolicy {
         }
     }
 
+    /// Policy for a `read_only: true` shell call: writes are still confined to
+    /// the worktree, but network is allowed. Network reads (gh, curl, etc.) are
+    /// side-effect-free and must not be blocked by the default network=Denied
+    /// floor.
+    pub fn with_network_allowed(&self) -> Self {
+        Self {
+            network: NetworkPolicy::Allowed,
+            ..self.clone()
+        }
+    }
+
     /// Would a write to `path` be permitted under this policy? The kernel is
     /// the real enforcer (the writer subprocess returns `EPERM`); this is the
     /// in-process predicate a future pre-flight planner uses to classify a
