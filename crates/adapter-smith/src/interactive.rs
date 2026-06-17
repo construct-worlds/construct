@@ -2245,9 +2245,10 @@ pub async fn run(
                         Err(e) => (false, format!("({e})")),
                     };
                     emit.emit(SessionEvent::ToolResult {
-                        tool: bc.call_id.clone(),
+                        tool: bc.tool_name.clone(),
                         ok,
                         output: output_text.clone(),
+                        call_id: Some(bc.call_id.clone()),
                     });
                     // TaskEnd for the daemon's registry — closes
                     // out the entry that's been in `Backgrounded`
@@ -2480,11 +2481,13 @@ pub async fn run(
                     emit.emit(SessionEvent::ToolUse {
                         tool: agentd_protocol::TUI_DISPATCH_TOOL.to_string(),
                         args: tool_args,
+                        call_id: Some(call_id.clone()),
                     });
                     emit.emit(SessionEvent::ToolResult {
-                        tool: call_id,
+                        tool: agentd_protocol::TUI_DISPATCH_TOOL.to_string(),
                         ok: true,
                         output: pretty,
+                        call_id: Some(call_id),
                     });
                 }
             }
@@ -3772,11 +3775,13 @@ async fn run_one_tool(
             emit.emit(SessionEvent::ToolUse {
                 tool: call.name.clone(),
                 args: call.input.clone(),
+                call_id: Some(call.id.clone()),
             });
             emit.emit(SessionEvent::ToolResult {
-                tool: call.id.clone(),
+                tool: call.name.clone(),
                 ok: false,
                 output: format!("unknown tool: {}", call.name),
+                call_id: Some(call.id.clone()),
             });
             return Ok(ToolOutcome {
                 ok: false,
@@ -3815,6 +3820,7 @@ async fn run_one_tool(
     emit.emit(SessionEvent::ToolUse {
         tool: call.name.clone(),
         args: call.input.clone(),
+        call_id: Some(call.id.clone()),
     });
     hooks
         .run(
@@ -3964,9 +3970,10 @@ async fn run_one_tool(
         if denied {
             let msg = "user denied this action".to_string();
             emit.emit(SessionEvent::ToolResult {
-                tool: call.id.clone(),
+                tool: call.name.clone(),
                 ok: false,
                 output: msg.clone(),
+                call_id: Some(call.id.clone()),
             });
             return Ok(ToolOutcome {
                 ok: false,
@@ -4024,9 +4031,10 @@ async fn run_one_tool(
     match &outcome {
         Ok(o) => {
             emit.emit(SessionEvent::ToolResult {
-                tool: call.id.clone(),
+                tool: call.name.clone(),
                 ok: o.ok,
                 output: o.output.clone(),
+                call_id: Some(call.id.clone()),
             });
             // Foreground-completed (non-bg) paths fire TaskEnd
             // here; the backgrounded path fires it later when the
@@ -4042,9 +4050,10 @@ async fn run_one_tool(
         }
         Err(reason) => {
             emit.emit(SessionEvent::ToolResult {
-                tool: call.id.clone(),
+                tool: call.name.clone(),
                 ok: false,
                 output: format!("({reason})"),
+                call_id: Some(call.id.clone()),
             });
             emit.emit(SessionEvent::TaskEnd {
                 call_id: call.id.clone(),
@@ -4168,12 +4177,14 @@ async fn run_safe_call_silent(
             emit.emit(SessionEvent::ToolUse {
                 tool: call.name.clone(),
                 args: call.input.clone(),
+                call_id: Some(call.id.clone()),
             });
             let msg = format!("unknown tool: {}", call.name);
             emit.emit(SessionEvent::ToolResult {
-                tool: call.id.clone(),
+                tool: call.name.clone(),
                 ok: false,
                 output: msg.clone(),
+                call_id: Some(call.id.clone()),
             });
             return Ok(ToolOutcome {
                 ok: false,
@@ -4222,6 +4233,7 @@ async fn run_safe_call_silent(
     emit.emit(SessionEvent::ToolUse {
         tool: call.name.clone(),
         args: call.input.clone(),
+        call_id: Some(call.id.clone()),
     });
     emit.emit(SessionEvent::TaskStart {
         call_id: call.id.clone(),
@@ -4235,9 +4247,10 @@ async fn run_safe_call_silent(
     match &outcome {
         Ok(o) => {
             emit.emit(SessionEvent::ToolResult {
-                tool: call.id.clone(),
+                tool: call.name.clone(),
                 ok: o.ok,
                 output: o.output.clone(),
+                call_id: Some(call.id.clone()),
             });
             // The supervisor may auto-bg this call later — only fire
             // TaskEnd for genuinely-foreground completions. The
@@ -4252,9 +4265,10 @@ async fn run_safe_call_silent(
         }
         Err(reason) => {
             emit.emit(SessionEvent::ToolResult {
-                tool: call.id.clone(),
+                tool: call.name.clone(),
                 ok: false,
                 output: format!("({reason})"),
+                call_id: Some(call.id.clone()),
             });
             emit.emit(SessionEvent::TaskEnd {
                 call_id: call.id.clone(),
@@ -4675,11 +4689,13 @@ async fn handle_slash_loop(
     emit.emit(SessionEvent::ToolUse {
         tool: "agentd_loop_create".to_string(),
         args,
+        call_id: Some(call_id.clone()),
     });
     emit.emit(SessionEvent::ToolResult {
-        tool: call_id,
+        tool: "agentd_loop_create".to_string(),
         ok: true,
         output: serde_json::to_string(&loop_obj).unwrap_or_default(),
+        call_id: Some(call_id),
     });
 
     let note = format!(

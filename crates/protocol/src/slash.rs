@@ -501,10 +501,12 @@ mod tests {
         assert!(is_model_hidden(&SessionEvent::ToolUse {
             tool: crate::TUI_DISPATCH_TOOL.to_string(),
             args: serde_json::json!({ "command": "foo" }),
+            call_id: None,
         }));
         assert!(!is_model_hidden(&SessionEvent::ToolUse {
             tool: "read_file".to_string(),
             args: serde_json::json!({}),
+            call_id: None,
         }));
         // EffectOnly commands carry their effect via other events, so the
         // (rare) ClientCommand-shaped ones would still be visible — none of

@@ -684,9 +684,14 @@ fn tool_uses_from_message(msg: Option<&Value>) -> Vec<SessionEvent> {
                 .unwrap_or("?")
                 .to_string();
             let input = block.get("input").cloned().unwrap_or(Value::Null);
+            let call_id = block
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             out.push(SessionEvent::ToolUse {
                 tool: name,
                 args: input,
+                call_id,
             });
         }
     }
@@ -717,7 +722,15 @@ fn tool_results_from_message(msg: Option<&Value>) -> Vec<SessionEvent> {
                 Some(v) => serde_json::to_string(v).unwrap_or_default(),
                 None => String::new(),
             };
-            out.push(SessionEvent::ToolResult { tool, ok, output });
+            // No tool name is available in a tool_result block; `tool` keeps the
+            // tool_use_id and `call_id` carries the explicit correlation key.
+            let call_id = Some(tool.clone());
+            out.push(SessionEvent::ToolResult {
+                tool,
+                ok,
+                output,
+                call_id,
+            });
         }
     }
     out
@@ -771,9 +784,14 @@ mod tests {
             other => panic!("unexpected message event: {other:?}"),
         }
         match &events[1] {
-            SessionEvent::ToolUse { tool, args } => {
+            SessionEvent::ToolUse {
+                tool,
+                args,
+                call_id,
+            } => {
                 assert_eq!(tool, "Bash");
                 assert_eq!(args["command"], "cargo test");
+                assert_eq!(call_id.as_deref(), Some("toolu_1"));
             }
             other => panic!("unexpected tool-use event: {other:?}"),
         }
@@ -797,10 +815,16 @@ mod tests {
         });
 
         match claude_events_from_json(&v).as_slice() {
-            [SessionEvent::ToolResult { tool, ok, output }] => {
+            [SessionEvent::ToolResult {
+                tool,
+                ok,
+                output,
+                call_id,
+            }] => {
                 assert_eq!(tool, "toolu_1");
                 assert!(*ok);
                 assert_eq!(output, "finished");
+                assert_eq!(call_id.as_deref(), Some("toolu_1"));
             }
             other => panic!("unexpected tool-result events: {other:?}"),
         }

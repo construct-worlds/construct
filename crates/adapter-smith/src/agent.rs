@@ -300,12 +300,14 @@ pub(crate) async fn run_safe_call(
             emit.emit(SessionEvent::ToolUse {
                 tool: call.name.clone(),
                 args: call.input.clone(),
+                call_id: Some(call.id.clone()),
             });
             let msg = format!("unknown tool: {}", call.name);
             emit.emit(SessionEvent::ToolResult {
-                tool: call.id.clone(),
+                tool: call.name.clone(),
                 ok: false,
                 output: msg.clone(),
+                call_id: Some(call.id.clone()),
             });
             return Ok(ToolOutcome {
                 ok: false,
@@ -354,6 +356,7 @@ pub(crate) async fn run_safe_call(
     emit.emit(SessionEvent::ToolUse {
         tool: call.name.clone(),
         args: call.input.clone(),
+        call_id: Some(call.id.clone()),
     });
     let outcome = tool
         .run(call.input.clone(), ctx)
@@ -361,14 +364,16 @@ pub(crate) async fn run_safe_call(
         .map_err(|e| format!("tool error: {e}"));
     match &outcome {
         Ok(o) => emit.emit(SessionEvent::ToolResult {
-            tool: call.id.clone(),
+            tool: call.name.clone(),
             ok: o.ok,
             output: o.output.clone(),
+            call_id: Some(call.id.clone()),
         }),
         Err(reason) => emit.emit(SessionEvent::ToolResult {
-            tool: call.id.clone(),
+            tool: call.name.clone(),
             ok: false,
             output: format!("({reason})"),
+            call_id: Some(call.id.clone()),
         }),
     }
     let (ok, output) = match &outcome {
@@ -1042,11 +1047,13 @@ async fn run_one_tool(
             emit.emit(SessionEvent::ToolUse {
                 tool: call.name.clone(),
                 args: call.input.clone(),
+                call_id: Some(call.id.clone()),
             });
             emit.emit(SessionEvent::ToolResult {
-                tool: call.id.clone(),
+                tool: call.name.clone(),
                 ok: false,
                 output: format!("unknown tool: {}", call.name),
+                call_id: Some(call.id.clone()),
             });
             return Ok(ToolOutcome {
                 ok: false,
@@ -1079,6 +1086,7 @@ async fn run_one_tool(
     emit.emit(SessionEvent::ToolUse {
         tool: call.name.clone(),
         args: call.input.clone(),
+        call_id: Some(call.id.clone()),
     });
     hooks
         .run(
@@ -1264,9 +1272,10 @@ async fn run_one_tool(
         if denied {
             let msg = "user denied this action".to_string();
             emit.emit(SessionEvent::ToolResult {
-                tool: call.id.clone(),
+                tool: call.name.clone(),
                 ok: false,
                 output: msg.clone(),
+                call_id: Some(call.id.clone()),
             });
             return Ok(ToolOutcome {
                 ok: false,
@@ -1292,14 +1301,16 @@ async fn run_one_tool(
     let outcome = run_with_interrupt(tool, call.input.clone(), run_ctx, inbox).await;
     match &outcome {
         Ok(o) => emit.emit(SessionEvent::ToolResult {
-            tool: call.id.clone(),
+            tool: call.name.clone(),
             ok: o.ok,
             output: o.output.clone(),
+            call_id: Some(call.id.clone()),
         }),
         Err(reason) => emit.emit(SessionEvent::ToolResult {
-            tool: call.id.clone(),
+            tool: call.name.clone(),
             ok: false,
             output: format!("({reason})"),
+            call_id: Some(call.id.clone()),
         }),
     }
     let (ok, output) = match &outcome {
