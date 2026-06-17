@@ -26,7 +26,7 @@ jobs:
         # into a GIF. Both produced as e2e artifacts so reviewers
         # can replay the test interactively from the workflow run
         # page.
-        timeout-minutes: 5
+        timeout-minutes: 15
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
