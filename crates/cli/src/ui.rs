@@ -741,9 +741,9 @@ fn render_session_widget_title(
                 until: now + Duration::from_millis(crate::app::DYNAMIC_UI_HOVER_GRACE_MS),
             });
         }
-        let filled = app.dynamic_ui_panel_visible(&session_id, &panel.id);
-        let glyph = if filled { "■" } else { "□" };
-        let style = if filled {
+        let pinned = app.dynamic_ui_panel_pinned(&session_id, &panel.id);
+        let glyph = if pinned { "■" } else { "□" };
+        let style = if pinned {
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD)
