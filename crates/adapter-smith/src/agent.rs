@@ -1289,12 +1289,17 @@ async fn run_one_tool(
     // Sandbox escalation: a Risky (effective) call that reaches this point has
     // been *permitted* (user-approved, auto-review-approved, or an auto mode),
     // so it may legitimately cross the confined boundary — run it with the
-    // policy relaxed. Safe calls keep the confined floor (no network, writes
-    // only within the worktree/widgets/tmp). See spec 0029's gate reframe.
+    // policy relaxed. Safe calls keep the confined floor (writes only within
+    // the worktree/widgets/tmp), EXCEPT read_only:true shell calls which get
+    // network access because network reads are side-effect-free. See spec 0029.
     let escalated_ctx;
+    let network_read_ctx;
     let run_ctx = if is_risky {
         escalated_ctx = tool_ctx.escalated();
         &escalated_ctx
+    } else if crate::tools::shell_read_only_optin(&call.name, &call.input) {
+        network_read_ctx = tool_ctx.with_network_read();
+        &network_read_ctx
     } else {
         tool_ctx
     };
