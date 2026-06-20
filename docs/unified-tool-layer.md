@@ -13,13 +13,13 @@ example:
   the TUI or Web UI.
 
 Smith uses these tools natively. MCP-capable harnesses receive the same tools
-through `construct-mcp`, so they can coordinate the fleet without shelling out to
-ad-hoc `construct` CLI commands.
+through the construct MCP server (`construct __mcp`), so they can coordinate the
+fleet without shelling out to ad-hoc `construct` CLI commands.
 
 ## Using unified tools
 
 There is usually nothing to configure. smith sees these tools natively. Claude
-Code and Codex receive them automatically when construct can find `construct-mcp`; set
+Code and Codex receive them automatically via `construct __mcp`; set
 `CONSTRUCT_INJECT_MCP=0` in the daemon environment to opt out.
 
 Agents invoke these tools during tasks, just like their other tools. A quick way
@@ -32,8 +32,8 @@ sessions; it should be able to use `agentd_list_sessions` without running the
 | Harness | User-facing status | Implementation notes |
 |---|---|---|
 | Smith | Built in. | Uses the same tool set without an external MCP process. |
-| Claude Code | Enabled by default when `construct-mcp` is available. | Adapter writes a config under `CONSTRUCT_STATE_DIR` and passes `--mcp-config <path>`. |
-| Codex | Enabled by default when `construct-mcp` is available. | Adapter passes Codex a `-c mcp_servers.construct=...` TOML override. |
+| Claude Code | Enabled by default. | Adapter writes a config under `CONSTRUCT_STATE_DIR` and passes `--mcp-config <path>` pointing to `construct __mcp`. |
+| Codex | Enabled by default. | Adapter passes Codex a `-c mcp_servers.construct=...` TOML override pointing to `construct __mcp`. |
 | Antigravity | Not injected yet. | Receives `CONSTRUCT_SESSION_ID`; browser/tools can be injected once `agy` exposes an MCP config flag. |
 
 ## Fleet-control tools

@@ -117,7 +117,7 @@ which endpoint is active.
 Local: `shell`, `read_file`, `write_file`, `edit_file` (search/replace
 with required uniqueness), `list_dir`, `find_files`.
 
-Agentd-control (16 tools, same surface as `construct-mcp`):
+Agentd-control (16 tools, same surface as the construct MCP server):
 `agentd_list_sessions`, `agentd_create_session`, `agentd_send_input`,
 `agentd_get_output`, `agentd_get_diff`, `agentd_pin_session`,
 `agentd_rename_session`, … — full read + write access to other
@@ -127,7 +127,7 @@ this smith is running inside (auto-injected via env).
 Browser: `browser_open`, `browser_inspect`, `browser_screenshot`, and
 `browser_eval` drive Chrome through DevTools and emit the same browser
 preview thumbnail that the TUI renders above the session. These tools
-are native to smith and are also exposed through `construct-mcp` for
+are native to smith and are also exposed through the construct MCP server for
 MCP-capable harnesses.
 
 ### Approval / automode
