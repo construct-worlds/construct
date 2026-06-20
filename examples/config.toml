@@ -1,24 +1,13 @@
 # Example construct config.
 #
 # Drop this at $CONSTRUCT_CONFIG_DIR/config.toml (default
-# ~/.config/construct/config.toml). All adapter entries here are optional —
-# `shell`, `claude`, and `codex` are registered automatically. Override the
-# binary path when the adapter binary is not on $PATH and not next to the
-# `construct` binary.
-
-# [adapters.shell]
-# binary = "construct-adapter-shell"
-# description = "Generic shell command runner"
-
-# [adapters.claude]
-# binary = "/opt/construct/construct-adapter-claude"
-# description = "Claude Code"
+# ~/.config/construct/config.toml). All built-in adapters (shell, claude,
+# codex, antigravity, smith) are registered automatically — no config needed.
 
 # Override the child command a built-in adapter launches without writing a
 # wrapper script. `CONSTRUCT_*_CMD` is split shell-style (quotes/backslashes
 # only; no shell expansion) and prepended before the adapter's generated
-# arguments.
-# This wins over the binary-only `CONSTRUCT_*_BIN` env var.
+# arguments. This wins over the binary-only `CONSTRUCT_*_BIN` env var.
 #
 # [adapters.codex]
 # env = { CONSTRUCT_CODEX_CMD = "exec codex" }

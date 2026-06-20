@@ -22,7 +22,7 @@ Five layers, each replaceable:
 - **Client** (`construct`) is the TUI plus a set of one-shot subcommands and protocol-facing entrypoints such as `construct acp`. Multiple clients can attach concurrently.
 - **Adapter** binaries are independent processes. They implement the AHP over stdio. Anyone can ship one in any language.
 
-The daemon and client ship as **one binary**: `construct` runs the TUI by default, the daemon under `construct daemon`, and the Agent Client Protocol stdio bridge under `construct acp`. The daemon's runtime lives in the `agentd` library crate; there is no standalone daemon binary. The daemon and client are not merged into one *process* — the daemon stays a separate long-lived process that many clients attach to — only into one shipped executable. See [`specs/0026-single-binary-daemon-and-client.md`](../specs/0026-single-binary-daemon-and-client.md).
+Everything ships as **one binary**: `construct` runs the TUI by default, the daemon under `construct daemon`, the ACP bridge under `construct acp`, adapters under `construct __adapter <name>`, and the MCP server under `construct __mcp`. The daemon's runtime lives in the `agentd` library crate; adapter and MCP logic live in their own library crates linked into `construct`. The daemon and client are not merged into one *process* — the daemon stays a separate long-lived process that many clients attach to — only into one shipped executable. See [`specs/0026-single-binary-daemon-and-client.md`](../specs/0026-single-binary-daemon-and-client.md).
 
 ## Crates
 
@@ -31,10 +31,12 @@ The daemon and client ship as **one binary**: `construct` runs the TUI by defaul
 | `crates/protocol` | — (lib) | AHP + IPC types, transport, adapter SDK |
 | `crates/daemon` | `agentd` (lib only) | Session supervisor + IPC server runtime. No standalone binary — driven by `construct daemon` |
 | `crates/cli` | `construct` | TUI client + control subcommands + `construct daemon` (runs the daemon via the `agentd` lib) + `construct acp` |
-| `crates/adapter-shell` | `construct-adapter-shell` | Generic shell command runner |
-| `crates/adapter-claude` | `construct-adapter-claude` | Wraps the `claude` CLI |
-| `crates/adapter-codex` | `construct-adapter-codex` | Wraps the `codex` CLI |
-| `crates/adapter-smith` | `construct-adapter-smith` | Built-in multi-provider agent (OpenAI / Anthropic / Gemini / Ollama) |
+| `crates/adapter-shell` | — (lib, via `construct __adapter shell`) | Generic shell command runner |
+| `crates/adapter-claude` | — (lib, via `construct __adapter claude`) | Wraps the `claude` CLI |
+| `crates/adapter-codex` | — (lib, via `construct __adapter codex`) | Wraps the `codex` CLI |
+| `crates/adapter-antigravity` | — (lib, via `construct __adapter antigravity`) | Wraps the `agy` CLI |
+| `crates/adapter-smith` | — (lib, via `construct __adapter smith`) | Built-in multi-provider agent (OpenAI / Anthropic / Gemini / Ollama) |
+| `crates/mcp` | — (lib, via `construct __mcp`) | MCP stdio server for agents running inside sessions |
 
 ## Adapter protocol (AHP)
 
