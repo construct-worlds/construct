@@ -48,8 +48,7 @@ never publish a mislabelled binary.
    URL `install.sh` and `construct upgrade` expect) even though there is no
    longer a `constructd` binary inside.
 
-   Each tarball contains all release binaries (`construct`, `construct-mcp`,
-   `construct-adapter-*`) plus `README.md` and `LICENSE`.
+   Each tarball contains the single `construct` binary plus `README.md` and `LICENSE`. All adapter and MCP functionality is built into `construct` (`construct __adapter <name>`, `construct __mcp`).
 
 4. Review the release notes. The workflow passes `generate_release_notes: true`
    to the release step, so GitHub fills the release body automatically from the
@@ -70,13 +69,12 @@ never publish a mislabelled binary.
    exclude certain labels, add a [`.github/release.yml`](https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes#configuring-automatically-generated-release-notes)
    with category rules; the release step picks it up with no workflow change.
 
-## What ships, and why together
+## What ships
 
-The daemon locates an adapter by looking next to its own binary first (see
-`locate_binary` in `crates/daemon/src/adapter.rs`), then falling back to
-`PATH`. So the release bundles all eight binaries, and `install.sh` installs
-them into one directory. Splitting them up makes the daemon fail with
-"adapter binary not found".
+A single `construct` binary. All adapter harnesses (`shell`, `claude`, `codex`,
+`antigravity`, `smith`) and the MCP server are compiled in and dispatched via
+hidden subcommands (`construct __adapter <name>`, `construct __mcp`). The daemon
+calls the same `construct` binary it was started from when it spawns adapters.
 
 ## Testing the build without releasing
 
