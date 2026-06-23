@@ -3360,6 +3360,10 @@ fn default_monitor_spec(provider_name: &str, operator_model: &str) -> Option<Str
 /// resolves fine but 400s at call time, which would silently blind the monitor
 /// (every triage returns "nothing"). A tiny completion at startup lets us fall
 /// back to the operator's own model — which we know works — instead.
+///
+/// Bounded to 5 seconds: the check is best-effort and must not hold up the
+/// adapter startup sequence (which blocks the TUI pty_resize path and freezes
+/// the render loop for the full 60 s adapter.request timeout when it hangs).
 async fn monitor_model_usable(m: &crate::agent::ResolvedModel) -> bool {
     let messages = vec![Message {
         role: Role::User,
@@ -3368,16 +3372,18 @@ async fn monitor_model_usable(m: &crate::agent::ResolvedModel) -> bool {
         },
     }];
     let mut sink = DiscardSink;
-    crate::provider_watchdog::complete(
+    let fut = crate::provider_watchdog::complete(
         m.provider.as_ref(),
         &m.model,
         "Health check.",
         &messages,
         &[],
         &mut sink,
-    )
-    .await
-    .is_ok()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), fut)
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false)
 }
 
 /// Null sink for one-shot completions where we only want the final text.

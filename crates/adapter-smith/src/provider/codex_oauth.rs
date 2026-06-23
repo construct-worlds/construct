@@ -235,6 +235,17 @@ impl CodexOauth {
                 "codex_cli_rs/{} (agentd smith)",
                 env!("CARGO_PKG_VERSION")
             ))
+            // Bound OAuth token refresh and API calls so a hung/slow
+            // upstream (auth.openai.com, chatgpt.com) does not stall
+            // the adapter for minutes. The provider_watchdog idle
+            // timeout guards the SSE stream but starts *after* the
+            // TCP connect + TLS + request-send phase, so without a
+            // connection timeout the refresh POST can hang until the
+            // OS-level TCP timeout (~75 s on macOS), which in turn
+            // makes the adapter unresponsive to pty_resize and freezes
+            // the TUI for the full 60 s adapter.request timeout.
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
             // NOTE: a cookie jar would let cf_clearance challenge
             // cookies stick across the auth-refresh ↔ responses-call
             // sequence (matching codex CLI). Reqwest's `cookie_store`
