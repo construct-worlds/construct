@@ -1,5 +1,5 @@
 //! MCP tool catalog and dispatchers. Each tool wraps one or more methods
-//! on `agentd_client::Client`.
+//! on the daemon IPC client.
 
 use agentd_client::Client;
 use agentd_protocol::{agent_context, CreateSessionParams, PtySize};
@@ -11,37 +11,35 @@ use std::sync::Arc;
 
 mod browser;
 
+const CONTEXT_TOOL_NAME: &str = "construct_context";
+
 /// Static tool catalog returned by `tools/list`.
 pub fn catalog() -> Vec<Value> {
     let mut tools = vec![
         // ----- Read -----
+        tool(CONTEXT_TOOL_NAME, agent_context::TOOL_DESCRIPTION, schema_empty()),
         tool(
-            agent_context::TOOL_NAME,
-            agent_context::TOOL_DESCRIPTION,
+            "construct_whoami",
+            "Returns the CONSTRUCT_SESSION_ID env var visible to this MCP server, which is the construct session id that the calling agent is running inside. Returns null if unset (the MCP server is running outside a construct-managed session).",
             schema_empty(),
         ),
         tool(
-            "agentd_whoami",
-            "Returns the CONSTRUCT_SESSION_ID env var visible to this MCP server, which is the agentd session id that the calling agent is running inside. Returns null if unset (the MCP server is running outside an agentd-managed session).",
+            "construct_list_sessions",
+            "List every construct session known to the daemon (running and finished, ungrouped and grouped). Returns an array of session summaries. Each entry includes `last_pty_at_ms` (Unix epoch ms of the latest PTY byte — use `now - last_pty_at_ms < ~600ms` to tell whether the session looks busy) and, when the session belongs to a group, `group_id` and `group_name`.",
             schema_empty(),
         ),
         tool(
-            "agentd_list_sessions",
-            "List every agentd session known to the daemon (running and finished, ungrouped and grouped). Returns an array of session summaries. Each entry includes `last_pty_at_ms` (Unix epoch ms of the latest PTY byte — use `now - last_pty_at_ms < ~600ms` to tell whether the session looks busy) and, when the session belongs to a group, `group_id` and `group_name`.",
-            schema_empty(),
-        ),
-        tool(
-            "agentd_list_harnesses",
+            "construct_list_harnesses",
             "List the available agent harnesses (shell, claude, codex, …). Each entry includes whether the binary was resolvable on this host.",
             schema_empty(),
         ),
         tool(
-            "agentd_get_session",
+            "construct_get_session",
             "Fetch the full detail (summary + structured transcript) for one session.",
             schema_obj(&[("session_id", "string", true)]),
         ),
         tool(
-            "agentd_get_transcript",
+            "construct_get_transcript",
             "Fetch a slice of the session's structured event log. `from` is a 1-based sequence number; `limit` bounds the returned events.",
             json!({
                 "type": "object",
@@ -54,24 +52,24 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "agentd_get_output",
+            "construct_get_output",
             "Fetch the session's recent PTY scrollback as text (UTF-8 lossy). Use this to read what's on the screen of a PTY-backed session.",
             schema_obj(&[("session_id", "string", true)]),
         ),
         tool(
-            "agentd_get_diff",
+            "construct_get_diff",
             "`git diff HEAD` for the session's worktree (or its cwd if it's a git repo without an isolated worktree). Empty string if not a git repo.",
             schema_obj(&[("session_id", "string", true)]),
         ),
         tool(
-            "agentd_get_tasks",
+            "construct_get_tasks",
             "List the session's tool-call task registry: running, backgrounded, and recently-completed entries. Each entry includes call_id, tool, args_summary, state, started_at_ms, optionally backgrounded_at_ms / ended_at_ms / output_preview. Use this to discover what a session is currently working on, including long-running tools that have been auto-promoted to the background.",
             schema_obj(&[("session_id", "string", true)]),
         ),
         // ----- Write -----
         tool(
-            "agentd_create_session",
-            "Spawn a new top-level/visible session in the fleet. Use this when the user asks for a new session or independent session. If the user says subagent, use agentd_subagent_create instead so the child is parented to the current session. `harness` must match an available harness name (see agentd_list_harnesses). `cwd` defaults to the caller's cwd when provided by the adapter, otherwise the daemon's process cwd. Set `worktree:true` to start the session in an isolated git worktree.",
+            "construct_create_session",
+            "Spawn a new top-level/visible session in the fleet. Use this when the user asks for a new session or independent session. If the user says subagent, use construct_subagent_create instead so the child is parented to the current session. `harness` must match an available harness name (see construct_list_harnesses). `cwd` defaults to the caller's cwd when provided by the adapter, otherwise the daemon's process cwd. Set `worktree:true` to start the session in an isolated git worktree.",
             json!({
                 "type": "object",
                 "properties": {
@@ -86,7 +84,7 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "agentd_fork_session",
+            "construct_fork_session",
             "Fork an existing session into a NEW sibling session backed by `harness` (which may differ from the source's). The fork inherits the source's working directory and group and runs independently — NOT a child/subagent, and the original session is left untouched (a session's own harness can't be changed in place). Unless `seed:false` (or the target is the `shell` harness), the fork is seeded with a summary of the source transcript so an agent harness can continue the prior context. Use this to continue a conversation under a different harness or model. Returns the new session_id.",
             json!({
                 "type": "object",
@@ -101,7 +99,7 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "agentd_send_input",
+            "construct_send_input",
             "Send a line of text to a session as user input. For PTY sessions a trailing newline is added automatically.",
             schema_obj(&[
                 ("session_id", "string", true),
@@ -109,7 +107,7 @@ pub fn catalog() -> Vec<Value> {
             ]),
         ),
         tool(
-            "agentd_send_keys",
+            "construct_send_keys",
             "Send raw bytes to a PTY-backed session (base64-encoded). Use this for control characters or arrow keys — e.g. `\\u0003` (C-c) base64 = \"Aw==\".",
             schema_obj(&[
                 ("session_id", "string", true),
@@ -117,27 +115,27 @@ pub fn catalog() -> Vec<Value> {
             ]),
         ),
         tool(
-            "agentd_interrupt_session",
+            "construct_interrupt_session",
             "Send an interrupt to the session (the adapter decides the exact semantic: usually SIGINT-equivalent to the running child).",
             schema_obj(&[("session_id", "string", true)]),
         ),
         tool(
-            "agentd_stop_session",
+            "construct_stop_session",
             "Stop the session cleanly (asks the adapter to shut down). Use kill_session for hard kill.",
             schema_obj(&[("session_id", "string", true)]),
         ),
         tool(
-            "agentd_kill_session",
+            "construct_kill_session",
             "SIGKILL the adapter (and its child). The session record stays; use delete_session to also drop the record.",
             schema_obj(&[("session_id", "string", true)]),
         ),
         tool(
-            "agentd_delete_session",
+            "construct_delete_session",
             "Delete a session entirely: kill if running, remove transcript, worktree, and metadata from disk.",
             schema_obj(&[("session_id", "string", true)]),
         ),
         tool(
-            "agentd_pin_session",
+            "construct_pin_session",
             "Pin or unpin a session so it shows as a live tile in the TUI pin strip.",
             json!({
                 "type": "object",
@@ -149,7 +147,7 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "agentd_rename_session",
+            "construct_rename_session",
             "Set a user-facing title for the session. Empty or omitted `title` clears it.",
             json!({
                 "type": "object",
@@ -161,7 +159,7 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "agentd_set_session_group",
+            "construct_set_session_group",
             "Move a session into a group, or ungroup it. Omit `group_id` (or pass null) \
              to remove the session from its current group. `position` is `top` or `bottom` \
              of the target region (default `bottom`).",
@@ -176,7 +174,7 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "agentd_move_session",
+            "construct_move_session",
             "Reorder a session within its current region — `direction` `up` swaps with the \
              session above (or moves into the previous group/ungrouped region when at the top \
              of its region); `down` is symmetric.",
@@ -190,8 +188,8 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "agentd_subagent_create",
-            "Create a subagent: a child agent owned by the current agentd session. Use this \
+            "construct_subagent_create",
+            "Create a subagent: a child agent owned by the current construct session. Use this \
              by default when the user says subagent, asks to split work, or asks to \
              parallelize bounded review/research tasks. The subagent is backed by any \
              registered harness and appears nested under the parent session in clients.",
@@ -209,13 +207,13 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "agentd_subagent_list",
-            "List subagents owned by the current agentd session, including current backing \
+            "construct_subagent_list",
+            "List subagents owned by the current construct session, including current backing \
              session summaries.",
             schema_empty(),
         ),
         tool(
-            "agentd_subagent_peek",
+            "construct_subagent_peek",
             "Peek at a subagent's current output. PTY-backed subagents return recent scrollback \
              text; headless subagents return a tail of structured events.",
             json!({
@@ -228,7 +226,7 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "agentd_subagent_enqueue",
+            "construct_subagent_enqueue",
             "Enqueue a user message/input line for a subagent owned by the current session.",
             schema_obj(&[
                 ("subagent_id", "string", true),
@@ -236,12 +234,12 @@ pub fn catalog() -> Vec<Value> {
             ]),
         ),
         tool(
-            "agentd_subagent_cancel",
+            "construct_subagent_cancel",
             "Interrupt a subagent's current turn/task without deleting the subagent.",
             schema_obj(&[("subagent_id", "string", true)]),
         ),
         tool(
-            "agentd_subagent_delete",
+            "construct_subagent_delete",
             "Delete a subagent owned by the current session.",
             schema_obj(&[("subagent_id", "string", true)]),
         ),
@@ -252,7 +250,7 @@ pub fn catalog() -> Vec<Value> {
     #[cfg(debug_assertions)]
     tools.push(tool(
         "webui_hot_reload",
-        "Dev-only. Point the running agentd daemon's web UI at a directory of assets \
+        "Dev-only. Point the running construct daemon's web UI at a directory of assets \
          (typically `<worktree>/crates/daemon/assets`) so edits to `index.html` / static files \
          show up on browser refresh — a live-reload poller is injected so the page reloads on \
          save. Pass `dir: null` (or omit) to revert to the embedded assets. Lets a dev session \
@@ -313,9 +311,9 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
 
     let result_json: Value = match name.as_str() {
         // ----- Read -----
-        agent_context::TOOL_NAME => serde_json::to_value(agent_context::build_from_env())?,
-        "agentd_whoami" => json!({ "session_id": session_id }),
-        "agentd_list_sessions" => {
+        CONTEXT_TOOL_NAME => serde_json::to_value(agent_context::build_from_env())?,
+        "construct_whoami" => json!({ "session_id": session_id }),
+        "construct_list_sessions" => {
             // Enrich each summary with its group name so callers don't need
             // a separate list_groups round-trip. `last_pty_at_ms` is already
             // part of SessionSummary.
@@ -339,12 +337,12 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 .collect();
             Value::Array(enriched)
         }
-        "agentd_list_harnesses" => serde_json::to_value(client.harnesses().await?)?,
-        "agentd_get_session" => {
+        "construct_list_harnesses" => serde_json::to_value(client.harnesses().await?)?,
+        "construct_get_session" => {
             let sid = arg_str(&args, "session_id")?;
             serde_json::to_value(client.get(&sid).await?)?
         }
-        "agentd_get_transcript" => {
+        "construct_get_transcript" => {
             let sid = arg_str(&args, "session_id")?;
             let from = arg_u64(&args, "from").unwrap_or(0);
             let limit = arg_usize(&args, "limit");
@@ -357,7 +355,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 .retain(|ev| !agentd_protocol::slash::is_model_hidden(&ev.event));
             serde_json::to_value(tr)?
         }
-        "agentd_get_output" => {
+        "construct_get_output" => {
             let sid = arg_str(&args, "session_id")?;
             let snap = client.pty_replay(&sid).await?;
             let bytes = base64::engine::general_purpose::STANDARD
@@ -366,17 +364,17 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             let text = String::from_utf8_lossy(&bytes).to_string();
             json!({ "text": text, "size": snap.size })
         }
-        "agentd_get_diff" => {
+        "construct_get_diff" => {
             let sid = arg_str(&args, "session_id")?;
             serde_json::to_value(client.diff(&sid).await?)?
         }
-        "agentd_get_tasks" => {
+        "construct_get_tasks" => {
             let sid = arg_str(&args, "session_id")?;
             let tasks = client.list_tasks(&sid).await?;
             json!({ "tasks": tasks })
         }
         // ----- Write -----
-        "agentd_create_session" => {
+        "construct_create_session" => {
             let harness = arg_str(&args, "harness")?;
             let cwd = arg_str(&args, "cwd").unwrap_or_else(|_| {
                 std::env::current_dir()
@@ -408,7 +406,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             let sid = client.create(params).await?;
             json!({ "session_id": sid })
         }
-        "agentd_fork_session" => {
+        "construct_fork_session" => {
             let source = arg_str(&args, "source_session_id")?;
             let harness = arg_str(&args, "harness")?;
             let opts = agentd_client::ForkOptions {
@@ -421,36 +419,36 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             let sid = client.fork_session(&source, &harness, opts).await?;
             json!({ "session_id": sid })
         }
-        "agentd_send_input" => {
+        "construct_send_input" => {
             let sid = arg_str(&args, "session_id")?;
             let text = arg_str(&args, "text")?;
             client.send_input(&sid, text).await?;
             json!({ "ok": true })
         }
-        "agentd_send_keys" => {
+        "construct_send_keys" => {
             let sid = arg_str(&args, "session_id")?;
             let b64 = arg_str(&args, "bytes_b64")?;
             let bytes = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())?;
             client.pty_input(&sid, bytes).await?;
             json!({ "ok": true })
         }
-        "agentd_interrupt_session" => {
+        "construct_interrupt_session" => {
             client.interrupt(&arg_str(&args, "session_id")?).await?;
             json!({ "ok": true })
         }
-        "agentd_stop_session" => {
+        "construct_stop_session" => {
             client.stop(&arg_str(&args, "session_id")?).await?;
             json!({ "ok": true })
         }
-        "agentd_kill_session" => {
+        "construct_kill_session" => {
             client.kill(&arg_str(&args, "session_id")?).await?;
             json!({ "ok": true })
         }
-        "agentd_delete_session" => {
+        "construct_delete_session" => {
             client.delete(&arg_str(&args, "session_id")?).await?;
             json!({ "ok": true })
         }
-        "agentd_pin_session" => {
+        "construct_pin_session" => {
             let sid = arg_str(&args, "session_id")?;
             let pinned = args
                 .get("pinned")
@@ -459,7 +457,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             client.set_pinned(&sid, pinned).await?;
             json!({ "ok": true })
         }
-        "agentd_rename_session" => {
+        "construct_rename_session" => {
             let sid = arg_str(&args, "session_id")?;
             let title = arg_str(&args, "title")
                 .ok()
@@ -467,7 +465,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             client.set_title(&sid, title).await?;
             json!({ "ok": true })
         }
-        "agentd_set_session_group" => {
+        "construct_set_session_group" => {
             let sid = arg_str(&args, "session_id")?;
             let group_id = match args.get("group_id") {
                 Some(serde_json::Value::Null) | None => None,
@@ -490,7 +488,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             client.set_session_group(&sid, group_id, position).await?;
             json!({ "ok": true })
         }
-        "agentd_move_session" => {
+        "construct_move_session" => {
             let sid = arg_str(&args, "session_id")?;
             let direction = match arg_str(&args, "direction")?.as_str() {
                 "up" => agentd_protocol::MoveDirection::Up,
@@ -504,7 +502,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             client.move_session(&sid, direction).await?;
             json!({ "ok": true })
         }
-        "agentd_subagent_create" => {
+        "construct_subagent_create" => {
             let parent_id = require_session_id(session_id)?;
             let harness = arg_str(&args, "harness")?;
             let cwd = arg_str(&args, "cwd").unwrap_or_else(|_| {
@@ -541,7 +539,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             let sid = client.create(params).await?;
             json!({ "subagent_id": sid })
         }
-        "agentd_subagent_list" => {
+        "construct_subagent_list" => {
             let parent_id = require_session_id(session_id)?;
             let subagents: Vec<_> = client
                 .list()
@@ -554,7 +552,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 .collect();
             json!({ "subagents": subagents })
         }
-        "agentd_subagent_peek" => {
+        "construct_subagent_peek" => {
             let sid = arg_str(&args, "subagent_id")?;
             let detail = owned_subagent_detail(client, session_id, &sid).await?;
             if detail.summary.has_pty {
@@ -577,19 +575,19 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 })
             }
         }
-        "agentd_subagent_enqueue" => {
+        "construct_subagent_enqueue" => {
             let sid = arg_str(&args, "subagent_id")?;
             owned_subagent_detail(client, session_id, &sid).await?;
             client.send_input(&sid, arg_str(&args, "text")?).await?;
             json!({ "ok": true })
         }
-        "agentd_subagent_cancel" => {
+        "construct_subagent_cancel" => {
             let sid = arg_str(&args, "subagent_id")?;
             owned_subagent_detail(client, session_id, &sid).await?;
             client.interrupt(&sid).await?;
             json!({ "ok": true })
         }
-        "agentd_subagent_delete" => {
+        "construct_subagent_delete" => {
             let sid = arg_str(&args, "subagent_id")?;
             owned_subagent_detail(client, session_id, &sid).await?;
             client.delete(&sid).await?;
@@ -680,18 +678,38 @@ mod tests {
     }
 
     #[test]
-    fn catalog_includes_agentd_context_tool() {
+    fn catalog_includes_construct_context_tool() {
         let tools = catalog();
         let context = tools
             .iter()
-            .find(|tool| tool.get("name").and_then(|name| name.as_str()) == Some("agentd_context"))
-            .expect("missing agentd_context");
+            .find(|tool| {
+                tool.get("name").and_then(|name| name.as_str()) == Some("construct_context")
+            })
+            .expect("missing construct_context");
 
         assert!(context
             .get("description")
             .and_then(|description| description.as_str())
             .unwrap_or_default()
             .contains("Call this before starting any user task"));
+    }
+
+    #[test]
+    fn catalog_does_not_advertise_agentd_prefixed_tools() {
+        let agentd_names: Vec<String> = catalog()
+            .into_iter()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(|name| name.as_str())
+                    .filter(|name| name.starts_with("agentd_"))
+                    .map(|name| name.to_string())
+            })
+            .collect();
+
+        assert!(
+            agentd_names.is_empty(),
+            "catalog advertised old agentd-prefixed tools: {agentd_names:?}"
+        );
     }
 
     #[test]
@@ -706,12 +724,12 @@ mod tests {
             .collect();
 
         for expected in [
-            "agentd_subagent_create",
-            "agentd_subagent_list",
-            "agentd_subagent_peek",
-            "agentd_subagent_enqueue",
-            "agentd_subagent_cancel",
-            "agentd_subagent_delete",
+            "construct_subagent_create",
+            "construct_subagent_list",
+            "construct_subagent_peek",
+            "construct_subagent_enqueue",
+            "construct_subagent_cancel",
+            "construct_subagent_delete",
         ] {
             assert!(names.contains(expected), "missing {expected}");
         }
@@ -832,7 +850,7 @@ mod tests {
         let created = call_tool(
             &client,
             Some("sparent"),
-            "agentd_subagent_create",
+            "construct_subagent_create",
             json!({
                 "harness": "codex",
                 "prompt": "summarize",
@@ -841,14 +859,20 @@ mod tests {
         .await;
         assert_eq!(created["subagent_id"], "ssub");
 
-        let listed = call_tool(&client, Some("sparent"), "agentd_subagent_list", json!({})).await;
+        let listed = call_tool(
+            &client,
+            Some("sparent"),
+            "construct_subagent_list",
+            json!({}),
+        )
+        .await;
         assert_eq!(listed["subagents"].as_array().expect("subagents").len(), 1);
         assert_eq!(listed["subagents"][0]["id"], "ssub");
 
         let peeked = call_tool(
             &client,
             Some("sparent"),
-            "agentd_subagent_peek",
+            "construct_subagent_peek",
             json!({ "subagent_id": "ssub" }),
         )
         .await;
@@ -857,21 +881,21 @@ mod tests {
         call_tool(
             &client,
             Some("sparent"),
-            "agentd_subagent_enqueue",
+            "construct_subagent_enqueue",
             json!({ "subagent_id": "ssub", "text": "continue" }),
         )
         .await;
         call_tool(
             &client,
             Some("sparent"),
-            "agentd_subagent_cancel",
+            "construct_subagent_cancel",
             json!({ "subagent_id": "ssub" }),
         )
         .await;
         call_tool(
             &client,
             Some("sparent"),
-            "agentd_subagent_delete",
+            "construct_subagent_delete",
             json!({ "subagent_id": "ssub" }),
         )
         .await;
@@ -880,7 +904,7 @@ mod tests {
             &client,
             Some("sparent"),
             json!({
-                "name": "agentd_subagent_peek",
+                "name": "construct_subagent_peek",
                 "arguments": { "subagent_id": "sother" }
             }),
         )
@@ -889,6 +913,23 @@ mod tests {
         assert!(
             blocked.to_string().contains("not owned by this session"),
             "unexpected error: {blocked}"
+        );
+
+        let legacy_name = call(
+            &client,
+            Some("sparent"),
+            json!({
+                "name": "agentd_subagent_peek",
+                "arguments": { "subagent_id": "ssub" }
+            }),
+        )
+        .await
+        .expect_err("legacy agentd-prefixed tool names should not be accepted");
+        assert!(
+            legacy_name
+                .to_string()
+                .contains("unknown tool: agentd_subagent_peek"),
+            "unexpected error: {legacy_name}"
         );
 
         drop(client);
