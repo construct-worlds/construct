@@ -1944,6 +1944,57 @@ mod tests {
             .collect();
         assert_eq!(submits, vec!["hello", "world"]);
     }
+
+    // --- monitor_model_usable timeout regression ----------------------------
+    //
+    // Regression: C-x x froze the TUI for ~60 s when the operator model had
+    // a broken OAuth token.  The freeze originated in monitor_model_usable,
+    // which had no upper bound on the health-check call — a hanging provider
+    // could keep the adapter unresponsive long enough for the daemon's
+    // adapter.request timeout (60 s) to fire, blocking the render loop.
+    //
+    // Fix: monitor_model_usable wraps the check in tokio::time::timeout(5 s).
+    // This test verifies that a provider that never resolves causes the check
+    // to return `false` well within the 5 s bound (we allow 8 s to avoid
+    // flakiness on slow CI, but in practice it resolves in ~5 s).
+
+    struct HangingProvider;
+
+    #[async_trait::async_trait]
+    impl crate::provider::LlmProvider for HangingProvider {
+        fn name(&self) -> &str {
+            "hanging-stub"
+        }
+
+        async fn complete(
+            &self,
+            _model: &str,
+            _system: &str,
+            _messages: &[crate::provider::Message],
+            _tools: &[crate::provider::ToolSpec],
+            _sink: &mut dyn crate::provider::TextSink,
+        ) -> anyhow::Result<crate::provider::ProviderTurn> {
+            std::future::pending::<anyhow::Result<crate::provider::ProviderTurn>>().await
+        }
+    }
+
+    #[tokio::test]
+    async fn monitor_model_usable_times_out_on_hanging_provider() {
+        let m = crate::agent::ResolvedModel {
+            model: "stub".to_string(),
+            provider: Box::new(HangingProvider),
+            kind: crate::provider::routing::Provider::OpenAI,
+            profile: None,
+        };
+        let start = std::time::Instant::now();
+        let usable = monitor_model_usable(&m).await;
+        let elapsed = start.elapsed();
+        assert!(!usable, "hanging provider should be reported as unusable");
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "monitor_model_usable took {elapsed:?}, expected < 8 s (5 s timeout + headroom)"
+        );
+    }
 }
 
 /// Tri-state interrupt signal used during in-flight turns.
@@ -3360,6 +3411,10 @@ fn default_monitor_spec(provider_name: &str, operator_model: &str) -> Option<Str
 /// resolves fine but 400s at call time, which would silently blind the monitor
 /// (every triage returns "nothing"). A tiny completion at startup lets us fall
 /// back to the operator's own model — which we know works — instead.
+///
+/// Bounded to 5 seconds: the check is best-effort and must not hold up the
+/// adapter startup sequence (which blocks the TUI pty_resize path and freezes
+/// the render loop for the full 60 s adapter.request timeout when it hangs).
 async fn monitor_model_usable(m: &crate::agent::ResolvedModel) -> bool {
     let messages = vec![Message {
         role: Role::User,
@@ -3368,16 +3423,18 @@ async fn monitor_model_usable(m: &crate::agent::ResolvedModel) -> bool {
         },
     }];
     let mut sink = DiscardSink;
-    crate::provider_watchdog::complete(
+    let fut = crate::provider_watchdog::complete(
         m.provider.as_ref(),
         &m.model,
         "Health check.",
         &messages,
         &[],
         &mut sink,
-    )
-    .await
-    .is_ok()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), fut)
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false)
 }
 
 /// Null sink for one-shot completions where we only want the final text.

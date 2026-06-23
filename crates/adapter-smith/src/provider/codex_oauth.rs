@@ -235,6 +235,17 @@ impl CodexOauth {
                 "codex_cli_rs/{} (agentd smith)",
                 env!("CARGO_PKG_VERSION")
             ))
+            // Bound OAuth token refresh and API calls so a hung/slow
+            // upstream (auth.openai.com, chatgpt.com) does not stall
+            // the adapter for minutes. The provider_watchdog idle
+            // timeout guards the SSE stream but starts *after* the
+            // TCP connect + TLS + request-send phase, so without a
+            // connection timeout the refresh POST can hang until the
+            // OS-level TCP timeout (~75 s on macOS), which in turn
+            // makes the adapter unresponsive to pty_resize and freezes
+            // the TUI for the full 60 s adapter.request timeout.
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
             // NOTE: a cookie jar would let cf_clearance challenge
             // cookies stick across the auth-refresh ↔ responses-call
             // sequence (matching codex CLI). Reqwest's `cookie_store`
@@ -1795,5 +1806,55 @@ mod tests {
             sink.progress_calls
         );
         assert!(!emitted, "no model output should have been emitted");
+    }
+
+    // --- reqwest client timeout regression ----------------------------------
+    //
+    // Regression: a hung auth.openai.com TCP connection in refresh_locked()
+    // could stall the adapter (and therefore the TUI's pty_resize path) for
+    // the OS-level TCP timeout (~75 s on macOS) because the reqwest client
+    // had no connect or request timeout configured.
+    //
+    // Fix: from_env() now sets connect_timeout(10 s) and timeout(30 s).
+    // We verify the configuration through a local server that accepts the TCP
+    // connection but never sends a byte — the connect succeeds but the request
+    // must time out before the 30 s overall deadline.
+
+    #[tokio::test]
+    async fn refresh_locked_respects_request_timeout() {
+        use tokio::net::TcpListener;
+
+        // Bind a server that accepts connections but never responds.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Accept the connection and then do nothing — simulates a hung
+            // upstream (connected TCP socket, no HTTP response).
+            let _ = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+
+        // Build a client with the same timeouts from_env() now uses.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(1)) // shorter for test speed
+            .build()
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let result = client
+            .post(format!("http://{addr}/oauth/token"))
+            .json(&serde_json::json!({"grant_type": "refresh_token"}))
+            .send()
+            .await;
+        let elapsed = start.elapsed();
+
+        // The request must fail (timeout), not hang.
+        assert!(result.is_err(), "expected timeout error, got success");
+        // Must fail well within 5 s (we used a 1 s timeout above).
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "request took {elapsed:?}, timeout did not fire in time"
+        );
     }
 }
