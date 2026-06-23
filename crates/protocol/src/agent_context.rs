@@ -1,4 +1,4 @@
-//! Shared agentd context surfaced to agents through `agentd_context`.
+//! Shared construct context surfaced to agents through agent context tools.
 //!
 //! The daemon passes memory file paths in env vars. This module reads those
 //! files and formats one stable JSON shape used by both `construct-mcp` and
@@ -27,7 +27,7 @@ pub const MCP_CONTEXT_ENV_VARS: &[&str] = &[
 ];
 
 pub const TOOL_DESCRIPTION: &str =
-    "Load agentd global/project memory, session widget paths, and operating context. Call this before starting any user task, before planning, and before using other tools. Use the returned memory as durable context, follow its maintenance policy, update listed Markdown memory files with normal file tools when you learn durable information, and create/update session widgets when compact task status or actions would help the user.";
+    "Load construct global/project memory, session widget paths, and operating context. Call this before starting any user task, before planning, and before using other tools. Use the returned memory as durable context, follow its maintenance policy, update listed Markdown memory files with normal file tools when you learn durable information, and create/update session widgets when compact task status or actions would help the user.";
 
 const WIDGET_POLICY: &[&str] = &[
     "Use session widgets for compact task status, checklists, decision prompts, and action links that help the user monitor or steer the current session.",
@@ -107,7 +107,7 @@ pub fn build_from_env() -> AgentdContext {
         session_id: std::env::var(ENV_SESSION_ID).ok(),
         project_id: std::env::var(ENV_PROJECT_ID).ok(),
         instructions: vec![
-            "Use this context before starting work in this agentd session.".to_string(),
+            "Use this context before starting work in this construct session.".to_string(),
             "Read global_memory and project_memory, if present, before planning or making changes."
                 .to_string(),
             "When you learn durable information, update the listed Markdown memory file directly with normal file tools according to memory_policy.".to_string(),

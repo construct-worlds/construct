@@ -28,7 +28,7 @@ pub fn catalog() -> Vec<Value> {
     vec![
         tool(
             "browser_open",
-            "Open a URL in Chrome via DevTools. Starts a separate debug-profile Chrome if needed. Emits a UI-only browser preview overlay for the calling agentd session.",
+            "Open a URL in Chrome via DevTools. Starts a separate debug-profile Chrome if needed. Emits a UI-only browser preview overlay for the calling construct session.",
             json!({
                 "type": "object",
                 "properties": {
