@@ -6277,7 +6277,7 @@ impl App {
                 Selection::Session(id) => {
                     self.minibuffer = Some(Minibuffer {
                         prompt: format!(
-                            "Session {}: [d] delete (drop transcript + worktree) / [y/a] archive (terminate, keep, hide) / [N] cancel: ",
+                            "Session {}: [d/y] delete (drop transcript + worktree) / [a] archive (terminate, keep, hide) / [N] cancel: ",
                             short_id(&id)
                         ),
                         input: String::new(),
@@ -12143,9 +12143,9 @@ pub fn parse_group_delete_choice(input: &str) -> GroupDeleteChoice {
 /// Outcome of the session kill prompt (`C-x k` / the view `x` button).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEndChoice {
-    /// `d` / `delete` — drop the transcript, worktree, and all on-disk state.
+    /// `d` / `y` / `delete` — drop the transcript, worktree, and all on-disk state.
     Delete,
-    /// `a` / `y` / `archive` — terminate the adapter but keep the session; it's
+    /// `a` / `archive` — terminate the adapter but keep the session; it's
     /// hidden from the list until the "show archived" toggle is on, and can be
     /// restarted later.
     Archive,
@@ -12155,8 +12155,8 @@ pub enum SessionEndChoice {
 
 pub fn parse_session_end_choice(input: &str) -> SessionEndChoice {
     match input.trim().to_lowercase().as_str() {
-        "d" | "delete" => SessionEndChoice::Delete,
-        "a" | "y" | "archive" => SessionEndChoice::Archive,
+        "d" | "y" | "delete" => SessionEndChoice::Delete,
+        "a" | "archive" => SessionEndChoice::Archive,
         _ => SessionEndChoice::Cancel,
     }
 }
@@ -12227,8 +12227,8 @@ mod session_end_prompt_tests {
     use super::{parse_session_end_choice, SessionEndChoice};
 
     #[test]
-    fn d_or_delete_deletes() {
-        for s in ["d", "D", "  d  ", "delete", "DELETE", " Delete "] {
+    fn d_or_y_or_delete_deletes() {
+        for s in ["d", "D", "  d  ", "y", "Y", "  y  ", "delete", "DELETE", " Delete "] {
             assert_eq!(
                 parse_session_end_choice(s),
                 SessionEndChoice::Delete,
@@ -12238,8 +12238,8 @@ mod session_end_prompt_tests {
     }
 
     #[test]
-    fn a_or_y_or_archive_archives() {
-        for s in ["a", "A", "  a  ", "y", "Y", "  y  ", "archive", "ARCHIVE", " Archive "] {
+    fn a_or_archive_archives() {
+        for s in ["a", "A", "  a  ", "archive", "ARCHIVE", " Archive "] {
             assert_eq!(
                 parse_session_end_choice(s),
                 SessionEndChoice::Archive,
