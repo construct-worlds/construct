@@ -258,6 +258,24 @@ impl MainWindowTree {
                 .or_else(|| second.find_selection(target)),
         }
     }
+
+    /// Session IDs of every visible leaf pane (all split halves included).
+    pub fn visible_session_ids(&self) -> Vec<&str> {
+        let mut ids = Vec::new();
+        self.collect_session_ids_into(&mut ids);
+        ids
+    }
+
+    fn collect_session_ids_into<'a>(&'a self, out: &mut Vec<&'a str>) {
+        match self {
+            Self::Leaf { selection: Selection::Session(id), .. } => out.push(id.as_str()),
+            Self::Leaf { .. } => {}
+            Self::Split { first, second, .. } => {
+                first.collect_session_ids_into(out);
+                second.collect_session_ids_into(out);
+            }
+        }
+    }
 }
 
 /// What the right pane is currently showing for the selected session.
