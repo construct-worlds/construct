@@ -1944,6 +1944,57 @@ mod tests {
             .collect();
         assert_eq!(submits, vec!["hello", "world"]);
     }
+
+    // --- monitor_model_usable timeout regression ----------------------------
+    //
+    // Regression: C-x x froze the TUI for ~60 s when the operator model had
+    // a broken OAuth token.  The freeze originated in monitor_model_usable,
+    // which had no upper bound on the health-check call — a hanging provider
+    // could keep the adapter unresponsive long enough for the daemon's
+    // adapter.request timeout (60 s) to fire, blocking the render loop.
+    //
+    // Fix: monitor_model_usable wraps the check in tokio::time::timeout(5 s).
+    // This test verifies that a provider that never resolves causes the check
+    // to return `false` well within the 5 s bound (we allow 8 s to avoid
+    // flakiness on slow CI, but in practice it resolves in ~5 s).
+
+    struct HangingProvider;
+
+    #[async_trait::async_trait]
+    impl crate::provider::LlmProvider for HangingProvider {
+        fn name(&self) -> &str {
+            "hanging-stub"
+        }
+
+        async fn complete(
+            &self,
+            _model: &str,
+            _system: &str,
+            _messages: &[crate::provider::Message],
+            _tools: &[crate::provider::ToolSpec],
+            _sink: &mut dyn crate::provider::TextSink,
+        ) -> anyhow::Result<crate::provider::ProviderTurn> {
+            std::future::pending::<anyhow::Result<crate::provider::ProviderTurn>>().await
+        }
+    }
+
+    #[tokio::test]
+    async fn monitor_model_usable_times_out_on_hanging_provider() {
+        let m = crate::agent::ResolvedModel {
+            model: "stub".to_string(),
+            provider: Box::new(HangingProvider),
+            kind: crate::provider::routing::Provider::OpenAI,
+            profile: None,
+        };
+        let start = std::time::Instant::now();
+        let usable = monitor_model_usable(&m).await;
+        let elapsed = start.elapsed();
+        assert!(!usable, "hanging provider should be reported as unusable");
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "monitor_model_usable took {elapsed:?}, expected < 8 s (5 s timeout + headroom)"
+        );
+    }
 }
 
 /// Tri-state interrupt signal used during in-flight turns.
