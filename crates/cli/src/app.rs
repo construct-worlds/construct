@@ -2074,7 +2074,16 @@ async fn run_loop(
         if let Some((size, at)) = pending_orch {
             if at.elapsed() >= resize_debounce {
                 if let Some(orch_id) = app.orchestrator_id.clone() {
-                    let _ = app.client.pty_resize(&orch_id, size.0, size.1).await;
+                    // Fire-and-forget: the adapter may still be in its startup
+                    // health-check when the panel first opens (model broken,
+                    // OAuth refresh in flight, etc.).  Awaiting it directly
+                    // here — before tokio::select! — blocks the entire render
+                    // loop (matrix rain, notifications, keystrokes) for up to
+                    // the 60 s adapter.request timeout and freezes the TUI.
+                    let client = app.client.clone();
+                    tokio::spawn(async move {
+                        let _ = client.pty_resize(&orch_id, size.0, size.1).await;
+                    });
                 }
                 last_orch_sent = size;
                 pending_orch = None;
