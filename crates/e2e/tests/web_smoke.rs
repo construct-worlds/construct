@@ -327,6 +327,10 @@ async fn web_client_loads_and_websocket_connects() {
                 }));
               const tick = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
               const renderedMessageCount = (pane) => (pane.textContent.match(/message \d+/g) || []).length;
+              const waitForOlderRequest = async () => {
+                for (let i = 0; i < 30 && pendingOlder.length === 0; i++) await tick();
+                if (pendingOlder.length === 0) throw new Error('expected pending older transcript request');
+              };
               const resolveNextOlder = () => {
                 const pending = pendingOlder.shift();
                 if (!pending) throw new Error('expected pending older transcript request');
@@ -400,12 +404,14 @@ async fn web_client_loads_and_websocket_connects() {
                 pane.scrollTop = pane.scrollHeight;
                 pane._atBottom = true;
 
+                await waitForOlderRequest();
                 await switchCurrentViewMode('terminal');
                 resolveNextOlder();
                 await tick();
                 const messagesWhileTerminal = renderedMessageCount(pane);
 
                 await switchCurrentViewMode('chat');
+                await waitForOlderRequest();
                 resolveNextOlder();
                 await tick();
                 const messagesAfterResume = renderedMessageCount(pane);
