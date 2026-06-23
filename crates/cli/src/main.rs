@@ -677,11 +677,18 @@ async fn daemon_restart_cmd(socket_override: Option<PathBuf>, sessions: bool) ->
     // it stops every adapter first (bounded but slow), so poll generously
     // until a daemon is reachable again.
     if poll_socket(&socket, true, 200).await {
-        println!(
-            "construct daemon restarted{} ({})",
-            if sessions { " (sessions bounced)" } else { "" },
-            socket.display()
-        );
+        if sessions {
+            // The new daemon respawns each adapter (and its MCP child) in
+            // the background after the in-place exec, so by the time the
+            // socket is reachable again the bounce is typically still in
+            // flight — report it as in progress, not done.
+            println!(
+                "construct daemon restarted; sessions are restarting in the background ({})",
+                socket.display()
+            );
+        } else {
+            println!("construct daemon restarted ({})", socket.display());
+        }
         Ok(())
     } else {
         anyhow::bail!("construct daemon did not come back within 20s after restart")
