@@ -21,6 +21,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::io::{Stdout, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -4556,13 +4557,13 @@ impl App {
                     if sel.dragged {
                         let text = self.selected_frame_text(&sel);
                         match copy_to_clipboard(&text) {
-                            Ok(()) => {
+                            Ok(outcome) => {
                                 let n = text.chars().count();
                                 self.selected_text = (!text.is_empty()).then_some(text);
                                 self.selected_text_bounds = sel.bounds;
                                 self.selected_text_range = self.selected_frame_range(&sel);
                                 self.text_selection = None;
-                                self.set_status(format!("copied {n} chars"));
+                                self.set_status(outcome.status(n));
                             }
                             Err(e) => self.set_status(format!("copy failed: {e}")),
                         }
@@ -8103,7 +8104,22 @@ fn open_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-fn copy_to_clipboard(text: &str) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardCopyOutcome {
+    Copied,
+    Requested,
+}
+
+impl ClipboardCopyOutcome {
+    fn status(self, chars: usize) -> String {
+        match self {
+            Self::Copied => format!("copied {chars} chars"),
+            Self::Requested => format!("sent copy request for {chars} chars"),
+        }
+    }
+}
+
+fn copy_to_clipboard(text: &str) -> Result<ClipboardCopyOutcome> {
     // `pbcopy` writes to the clipboard of the host construct runs on; OSC 52
     // travels back through the controlling terminal to the clipboard of the
     // machine the user is actually sitting at. Over SSH those differ — pbcopy
@@ -8114,14 +8130,16 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     // reliable path (e.g. Terminal.app honors no OSC 52).
     if is_remote_session() {
         if copy_with_osc52(text).is_ok() {
-            return Ok(());
+            return Ok(ClipboardCopyOutcome::Requested);
         }
-        return copy_with_pbcopy(text);
+        copy_with_pbcopy(text)?;
+        return Ok(ClipboardCopyOutcome::Copied);
     }
     if copy_with_pbcopy(text).is_ok() {
-        return Ok(());
+        return Ok(ClipboardCopyOutcome::Copied);
     }
-    copy_with_osc52(text)
+    copy_with_osc52(text)?;
+    Ok(ClipboardCopyOutcome::Requested)
 }
 
 /// True when the process appears to be running inside an SSH session, where
@@ -8152,10 +8170,60 @@ fn copy_with_pbcopy(text: &str) -> Result<()> {
 /// Build the OSC 52 clipboard-write escape sequence for `text`: the terminal
 /// that receives it copies the (base64-encoded) payload to the system
 /// clipboard of the machine the terminal runs on.
-fn osc52_sequence(text: &str) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Osc52Mode {
+    Direct,
+    Tmux,
+    Screen,
+}
+
+fn osc52_mode() -> Osc52Mode {
+    osc52_mode_from_vars(
+        std::env::var_os("TMUX").as_deref(),
+        std::env::var_os("STY").as_deref(),
+    )
+}
+
+fn osc52_mode_from_vars(tmux: Option<&OsStr>, screen: Option<&OsStr>) -> Osc52Mode {
+    if tmux.is_some_and(|v| !v.is_empty()) {
+        Osc52Mode::Tmux
+    } else if screen.is_some_and(|v| !v.is_empty()) {
+        Osc52Mode::Screen
+    } else {
+        Osc52Mode::Direct
+    }
+}
+
+fn osc52_direct_sequence(text: &str) -> String {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     format!("\x1b]52;c;{encoded}\x07")
+}
+
+fn tmux_passthrough_sequence(sequence: &str) -> String {
+    let escaped = sequence.replace('\x1b', "\x1b\x1b");
+    format!("\x1bPtmux;{escaped}\x1b\\")
+}
+
+fn screen_passthrough_sequence(sequence: &str) -> String {
+    format!("\x1bP{sequence}\x1b\\")
+}
+
+fn osc52_sequence_for_mode(text: &str, mode: Osc52Mode) -> String {
+    let direct = osc52_direct_sequence(text);
+    match mode {
+        Osc52Mode::Direct => direct,
+        // Emit both the multiplexer passthrough form and the plain OSC 52.
+        // Different tmux/screen versions and configs accept different paths:
+        // passthrough reaches the outer terminal when enabled, while the plain
+        // sequence lets multiplexers with native OSC 52 clipboard support copy.
+        Osc52Mode::Tmux => format!("{}{}", tmux_passthrough_sequence(&direct), direct),
+        Osc52Mode::Screen => format!("{}{}", screen_passthrough_sequence(&direct), direct),
+    }
+}
+
+fn osc52_sequence(text: &str) -> String {
+    osc52_sequence_for_mode(text, osc52_mode())
 }
 
 fn copy_with_osc52(text: &str) -> Result<()> {
@@ -8180,8 +8248,53 @@ mod tests {
     #[test]
     fn osc52_sequence_wraps_base64_in_clipboard_escape() {
         // ESC ] 52 ; c ; <base64> BEL — base64("hi") == "aGk=".
-        assert_eq!(osc52_sequence("hi"), "\x1b]52;c;aGk=\u{7}");
-        assert_eq!(osc52_sequence(""), "\x1b]52;c;\u{7}");
+        assert_eq!(
+            osc52_sequence_for_mode("hi", Osc52Mode::Direct),
+            "\x1b]52;c;aGk=\u{7}"
+        );
+        assert_eq!(
+            osc52_sequence_for_mode("", Osc52Mode::Direct),
+            "\x1b]52;c;\u{7}"
+        );
+    }
+
+    #[test]
+    fn osc52_sequence_wraps_for_terminal_multiplexers() {
+        let direct = "\x1b]52;c;aGk=\u{7}";
+        assert_eq!(
+            osc52_sequence_for_mode("hi", Osc52Mode::Tmux),
+            format!("\x1bPtmux;\x1b{direct}\x1b\\{direct}")
+        );
+        assert_eq!(
+            osc52_sequence_for_mode("hi", Osc52Mode::Screen),
+            format!("\x1bP{direct}\x1b\\{direct}")
+        );
+    }
+
+    #[test]
+    fn osc52_mode_prefers_tmux_then_screen() {
+        assert_eq!(osc52_mode_from_vars(None, None), Osc52Mode::Direct);
+        assert_eq!(
+            osc52_mode_from_vars(Some(OsStr::new("tmux")), None),
+            Osc52Mode::Tmux
+        );
+        assert_eq!(
+            osc52_mode_from_vars(None, Some(OsStr::new("screen"))),
+            Osc52Mode::Screen
+        );
+        assert_eq!(
+            osc52_mode_from_vars(Some(OsStr::new("tmux")), Some(OsStr::new("screen"))),
+            Osc52Mode::Tmux
+        );
+    }
+
+    #[test]
+    fn clipboard_copy_outcome_status_distinguishes_requests() {
+        assert_eq!(ClipboardCopyOutcome::Copied.status(7), "copied 7 chars");
+        assert_eq!(
+            ClipboardCopyOutcome::Requested.status(7),
+            "sent copy request for 7 chars"
+        );
     }
 
     #[test]
