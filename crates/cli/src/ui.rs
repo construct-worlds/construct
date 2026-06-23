@@ -1508,44 +1508,6 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
         return;
     }
 
-    // Wallpaper: paint the most recent browser preview from ANY session
-    // (cross-session — the matrix rain is a fleet visualization, so the
-    // backdrop reflects the whole fleet, not just the focused session,
-    // unlike the per-session terminal overlay) dimmed and cropped-to-fill
-    // as a backdrop. The rain loop below draws over it: cells with a
-    // drop/letter overwrite the image, empty cells keep it, so the
-    // animation runs uninterrupted on top of the wallpaper.
-    //
-    // Dial-up nostalgia: the image draws in top-to-bottom when the
-    // preview arrives and erases top-to-bottom when it's about to hide,
-    // like a JPEG over a slow modem. The matrix tick (~8fps) already
-    // redraws each frame, so the animation advances on its own.
-    let wallpaper = app
-        .browser_previews
-        .values()
-        .max_by_key(|state| state.revealed_at)
-        .and_then(|state| {
-            state.decoded.clone().map(|img| {
-                (
-                    img,
-                    state.revealed_at,
-                    state.hide_after,
-                    state.hover_started.is_some(),
-                )
-            })
-        });
-    if let Some((img, revealed_at, hide_after, hovered)) = &wallpaper {
-        let row_frac = preview_reveal_range(*revealed_at, *hide_after, now, *hovered);
-        if row_frac.1 > row_frac.0 {
-            // 2 sub-pixels per cell in each axis for quadrant rendering:
-            // `oh` is already 2*rows (half-cell tall), so only the width
-            // doubles here.
-            let (ow, oh) = blit_scale_dims(img.dimensions(), rain_area, true);
-            let resized = resized_image(&mut app.image_resize_cache, img, ow * 2, oh);
-            paint_resized_quadrants(f, rain_area, &resized, MATRIX_WALLPAPER_DIM, row_frac);
-        }
-    }
-
     let activity = update_matrix_rain_intensity(app, now);
     let elapsed = app.start_instant.elapsed().as_millis() as u64;
     let cycle = rain_area.height + MATRIX_RAIN_TAIL_MAX + 1;
@@ -1668,6 +1630,33 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
     }
     app.matrix_rain_active_drops
         .retain(|key, _| current_drop_keys.contains(key));
+
+    // Foreground thumbnail: show the most recent browser preview from a
+    // session that is NOT currently displayed in any main-view pane (if the
+    // user can already see the page in their session view, repeating it here
+    // is redundant). Rendered after the rain so it sits on top, fitted to
+    // preserve aspect ratio (no crop), at full brightness.
+    {
+        let visible_ids = app.main_windows.visible_session_ids();
+        let thumb = app
+            .browser_previews
+            .iter()
+            .filter(|(sid, _)| !visible_ids.contains(&sid.as_str()))
+            .max_by_key(|(_, state)| state.revealed_at)
+            .and_then(|(_, state)| {
+                state.decoded.clone().map(|img| {
+                    (img, state.revealed_at, state.hide_after, state.hover_started.is_some())
+                })
+            });
+        if let Some((img, revealed_at, hide_after, hovered)) = &thumb {
+            let row_frac = preview_reveal_range(*revealed_at, *hide_after, now, *hovered);
+            if row_frac.1 > row_frac.0 {
+                let (ow, oh) = blit_scale_dims(img.dimensions(), rain_area, false);
+                let resized = resized_image(&mut app.image_resize_cache, img, ow * 2, oh);
+                paint_resized_quadrants(f, rain_area, &resized, 1.0, row_frac);
+            }
+        }
+    }
 
     let theme = app.theme.clone();
     let mut hits: Vec<crate::app::MatrixRevealHit> = Vec::new();
