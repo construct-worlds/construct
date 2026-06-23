@@ -258,6 +258,24 @@ impl MainWindowTree {
                 .or_else(|| second.find_selection(target)),
         }
     }
+
+    /// Session IDs of every visible leaf pane (all split halves included).
+    pub fn visible_session_ids(&self) -> Vec<&str> {
+        let mut ids = Vec::new();
+        self.collect_session_ids_into(&mut ids);
+        ids
+    }
+
+    fn collect_session_ids_into<'a>(&'a self, out: &mut Vec<&'a str>) {
+        match self {
+            Self::Leaf { selection: Selection::Session(id), .. } => out.push(id.as_str()),
+            Self::Leaf { .. } => {}
+            Self::Split { first, second, .. } => {
+                first.collect_session_ids_into(out);
+                second.collect_session_ids_into(out);
+            }
+        }
+    }
 }
 
 /// What the right pane is currently showing for the selected session.
@@ -10230,11 +10248,13 @@ mod tests {
             n
         };
 
-        // No preview → no wallpaper cells in the rain (the rain only
+        // No preview → no thumbnail cells in the rain (the rain only
         // sets fg colors, never an Rgb background).
         assert_eq!(count_wallpaper_cells(&mut app), 0);
 
-        // Insert a preview for the selected session → wallpaper appears.
+        // Insert a preview for "s1", which is the session currently visible
+        // in the main window (see test_app). The thumbnail must be suppressed
+        // in the rain area — the user can already see it in their session pane.
         app.browser_previews.insert(
             "s1".into(),
             BrowserPreviewState {
@@ -10245,28 +10265,17 @@ mod tests {
                     24,
                     image::Rgba([180, 40, 40, 255]),
                 ))),
-                // In the past so the top-to-bottom reveal has completed
-                // and the full wallpaper is drawn.
                 revealed_at: Instant::now() - Duration::from_secs(10),
             },
         );
-        assert!(
-            count_wallpaper_cells(&mut app) > 0,
-            "selected session's browser preview should paint a matrix-rain wallpaper"
-        );
-
-        // Preview expires/removed → wallpaper gone again.
-        app.browser_previews.clear();
         assert_eq!(
             count_wallpaper_cells(&mut app),
             0,
-            "wallpaper must vanish when the preview is gone"
+            "preview for a session visible in the main view must be suppressed in the rain area"
         );
 
-        // Cross-session: the rain wallpaper is a fleet visualization, so a
-        // preview from a session that is NOT the selected one still paints
-        // the backdrop (the per-session overlay stays scoped, but the
-        // wallpaper tracks the latest preview from any session).
+        // A preview from a session NOT visible in the main window IS shown
+        // in the rain area as a foreground thumbnail.
         app.browser_previews.insert(
             "s-other".into(),
             BrowserPreviewState {
@@ -10282,7 +10291,15 @@ mod tests {
         );
         assert!(
             count_wallpaper_cells(&mut app) > 0,
-            "a non-selected session's preview should still paint the rain wallpaper (cross-session)"
+            "non-visible session's preview should paint as foreground thumbnail in the rain area"
+        );
+
+        // Preview removed → thumbnail gone again.
+        app.browser_previews.clear();
+        assert_eq!(
+            count_wallpaper_cells(&mut app),
+            0,
+            "thumbnail must vanish when the preview is gone"
         );
         server.abort();
     }
