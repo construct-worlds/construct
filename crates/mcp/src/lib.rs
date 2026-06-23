@@ -1,5 +1,5 @@
 //! `construct-mcp` — MCP stdio server that lets an agent (running inside an
-//! agentd session) control the agentd daemon: list sessions, read their
+//! construct session) control the construct daemon: list sessions, read their
 //! output, send input, spawn new sessions, etc.
 //!
 //! Wire protocol is MCP 2024-11-05 (JSON-RPC 2.0 over line-delimited JSON
@@ -9,7 +9,7 @@
 //! Environment:
 //! - `CONSTRUCT_SOCKET` — override the daemon's Unix socket path
 //! - `CONSTRUCT_SESSION_ID` — the calling agent's session id (returned by the
-//!   `agentd_whoami` tool). Set by the agentd adapter when it spawns the
+//!   `construct_whoami` tool). Set by the construct adapter when it spawns the
 //!   child CLI.
 
 use agentd_client::Client;
