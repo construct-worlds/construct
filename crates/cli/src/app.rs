@@ -8175,17 +8175,27 @@ enum Osc52Mode {
     Direct,
     Tmux,
     Screen,
+    Remote,
 }
 
 fn osc52_mode() -> Osc52Mode {
     osc52_mode_from_vars(
         std::env::var_os("TMUX").as_deref(),
         std::env::var_os("STY").as_deref(),
+        std::env::var_os("SSH_TTY").as_deref(),
+        std::env::var_os("SSH_CONNECTION").as_deref(),
     )
 }
 
-fn osc52_mode_from_vars(tmux: Option<&OsStr>, screen: Option<&OsStr>) -> Osc52Mode {
-    if tmux.is_some_and(|v| !v.is_empty()) {
+fn osc52_mode_from_vars(
+    tmux: Option<&OsStr>,
+    screen: Option<&OsStr>,
+    ssh_tty: Option<&OsStr>,
+    ssh_connection: Option<&OsStr>,
+) -> Osc52Mode {
+    if ssh_tty.is_some_and(|v| !v.is_empty()) || ssh_connection.is_some_and(|v| !v.is_empty()) {
+        Osc52Mode::Remote
+    } else if tmux.is_some_and(|v| !v.is_empty()) {
         Osc52Mode::Tmux
     } else if screen.is_some_and(|v| !v.is_empty()) {
         Osc52Mode::Screen
@@ -8209,6 +8219,14 @@ fn screen_passthrough_sequence(sequence: &str) -> String {
     format!("\x1bP{sequence}\x1b\\")
 }
 
+fn osc52_remote_sequence(direct: &str) -> String {
+    let tmux_once = tmux_passthrough_sequence(direct);
+    let tmux_twice = tmux_passthrough_sequence(&tmux_once);
+    let screen_once = screen_passthrough_sequence(direct);
+    let screen_twice = screen_passthrough_sequence(&screen_once);
+    format!("{direct}{tmux_once}{tmux_twice}{screen_once}{screen_twice}")
+}
+
 fn osc52_sequence_for_mode(text: &str, mode: Osc52Mode) -> String {
     let direct = osc52_direct_sequence(text);
     match mode {
@@ -8219,6 +8237,11 @@ fn osc52_sequence_for_mode(text: &str, mode: Osc52Mode) -> String {
         // sequence lets multiplexers with native OSC 52 clipboard support copy.
         Osc52Mode::Tmux => format!("{}{}", tmux_passthrough_sequence(&direct), direct),
         Osc52Mode::Screen => format!("{}{}", screen_passthrough_sequence(&direct), direct),
+        // Over SSH, the client can see only the remote process environment.
+        // A local tmux/screen on the user's laptop sits outside SSH and is
+        // invisible here, so emit a small stack of equivalent requests that
+        // covers direct terminals plus one or two outer multiplexer layers.
+        Osc52Mode::Remote => osc52_remote_sequence(&direct),
     }
 }
 
@@ -8273,18 +8296,56 @@ mod tests {
 
     #[test]
     fn osc52_mode_prefers_tmux_then_screen() {
-        assert_eq!(osc52_mode_from_vars(None, None), Osc52Mode::Direct);
         assert_eq!(
-            osc52_mode_from_vars(Some(OsStr::new("tmux")), None),
+            osc52_mode_from_vars(None, None, None, None),
+            Osc52Mode::Direct
+        );
+        assert_eq!(
+            osc52_mode_from_vars(Some(OsStr::new("tmux")), None, None, None),
             Osc52Mode::Tmux
         );
         assert_eq!(
-            osc52_mode_from_vars(None, Some(OsStr::new("screen"))),
+            osc52_mode_from_vars(None, Some(OsStr::new("screen")), None, None),
             Osc52Mode::Screen
         );
         assert_eq!(
-            osc52_mode_from_vars(Some(OsStr::new("tmux")), Some(OsStr::new("screen"))),
+            osc52_mode_from_vars(
+                Some(OsStr::new("tmux")),
+                Some(OsStr::new("screen")),
+                None,
+                None
+            ),
             Osc52Mode::Tmux
+        );
+    }
+
+    #[test]
+    fn osc52_mode_treats_ssh_as_remote_even_without_multiplexer_env() {
+        assert_eq!(
+            osc52_mode_from_vars(None, None, Some(OsStr::new("/dev/pts/1")), None),
+            Osc52Mode::Remote
+        );
+        assert_eq!(
+            osc52_mode_from_vars(
+                Some(OsStr::new("remote-tmux")),
+                None,
+                None,
+                Some(OsStr::new("client server 22"))
+            ),
+            Osc52Mode::Remote
+        );
+    }
+
+    #[test]
+    fn remote_osc52_sequence_includes_direct_and_invisible_outer_multiplexers() {
+        let direct = "\x1b]52;c;aGk=\u{7}";
+        let tmux_once = tmux_passthrough_sequence(direct);
+        let tmux_twice = tmux_passthrough_sequence(&tmux_once);
+        let screen_once = screen_passthrough_sequence(direct);
+        let screen_twice = screen_passthrough_sequence(&screen_once);
+        assert_eq!(
+            osc52_sequence_for_mode("hi", Osc52Mode::Remote),
+            format!("{direct}{tmux_once}{tmux_twice}{screen_once}{screen_twice}")
         );
     }
 
