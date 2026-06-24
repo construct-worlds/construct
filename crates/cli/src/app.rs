@@ -626,10 +626,12 @@ pub struct App {
     pub view_scrollback: usize,
     /// Per-split-window PTY scrollback offsets, keyed by main-window id.
     pub window_scrollback: HashMap<u64, usize>,
-    /// Show the terminal scrollback overlay until this instant. Refreshed by
-    /// wheel/key scrollback input and hidden automatically after a short idle
-    /// delay, similar to editor overlay scrollbars.
-    pub terminal_scrollbar_visible_until: Option<Instant>,
+    /// Show the terminal scrollback overlay until this instant, keyed by
+    /// main-window id. Refreshed by wheel/key scrollback input for the window
+    /// being scrolled and hidden automatically after a short idle delay,
+    /// similar to editor overlay scrollbars. Keyed per window so scrolling one
+    /// split does not flash the scrollbar over its (at-bottom) siblings.
+    pub terminal_scrollbar_visible_until: HashMap<u64, Instant>,
     /// Set by an event handler when the just-handled event produced
     /// no local display change that needs an immediate repaint — the
     /// canonical case being a keystroke forwarded straight to a PTY,
@@ -1731,7 +1733,7 @@ pub async fn run_with_socket(socket: std::path::PathBuf) -> Result<()> {
         list_scroll_offset: 0,
         view_scrollback: 0,
         window_scrollback: HashMap::new(),
-        terminal_scrollbar_visible_until: None,
+        terminal_scrollbar_visible_until: HashMap::new(),
         skip_redraw_after_event: false,
         hydrating_sessions: HashSet::new(),
         orchestrator_scrollback: 0,
@@ -5608,8 +5610,24 @@ impl App {
         self.show_terminal_scrollbar();
     }
 
+    /// Reveal the scrollback overlay for the window the user just scrolled (the
+    /// active window). Keyed per window so siblings in a split layout — which
+    /// are still at the bottom — don't flash a scrollbar too. Expired entries
+    /// are pruned here so the map stays bounded to recently-scrolled windows.
     fn show_terminal_scrollbar(&mut self) {
-        self.terminal_scrollbar_visible_until = Some(Instant::now() + TERMINAL_SCROLLBAR_TTL);
+        let now = Instant::now();
+        self.terminal_scrollbar_visible_until
+            .retain(|_, until| *until > now);
+        self.terminal_scrollbar_visible_until
+            .insert(self.active_window_id, now + TERMINAL_SCROLLBAR_TTL);
+    }
+
+    /// When the scrollback overlay should stay visible for `window_id`. `None`
+    /// (zoomed / single-window render) falls back to the active window, mirroring
+    /// `scrollback_for_window`.
+    pub fn terminal_scrollbar_visible_until(&self, window_id: Option<u64>) -> Option<Instant> {
+        let id = window_id.unwrap_or(self.active_window_id);
+        self.terminal_scrollbar_visible_until.get(&id).copied()
     }
 
     fn mouse_scrollback_step(&self) -> i32 {
@@ -8574,7 +8592,7 @@ mod tests {
             list_scroll_offset: 0,
             view_scrollback: 0,
             window_scrollback: HashMap::new(),
-            terminal_scrollbar_visible_until: None,
+            terminal_scrollbar_visible_until: HashMap::new(),
             skip_redraw_after_event: false,
             hydrating_sessions: HashSet::new(),
             orchestrator_scrollback: 0,
@@ -8928,6 +8946,18 @@ mod tests {
         assert_eq!(app.scrollback_for_window(Some(1)), 0);
         assert_eq!(app.scrollback_for_window(Some(2)), 10);
         assert_eq!(app.view_scrollback, 10);
+
+        // The scrollbar overlay must reveal only on the scrolled pane (2), not
+        // its at-bottom sibling (1). Keying the reveal timer per window is what
+        // keeps a sibling split from flashing a scrollbar it isn't scrolling.
+        assert!(
+            app.terminal_scrollbar_visible_until(Some(2)).is_some(),
+            "scrolled split should reveal its own scrollbar overlay"
+        );
+        assert!(
+            app.terminal_scrollbar_visible_until(Some(1)).is_none(),
+            "at-bottom sibling split must not reveal a scrollbar overlay"
+        );
         server.abort();
     }
 
@@ -9868,7 +9898,7 @@ mod tests {
             "mouse wheel outside the list should scroll codex PTY history by a partial page"
         );
         assert!(
-            app.terminal_scrollbar_visible_until.is_some(),
+            app.terminal_scrollbar_visible_until(None).is_some(),
             "mouse-wheel scroll should reveal the terminal scrollbar overlay"
         );
     }
