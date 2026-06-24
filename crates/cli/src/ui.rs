@@ -3067,6 +3067,10 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
         app.dynamic_ui_focused = Some((id.clone(), panel.id.clone()));
     }
     let scroll = app.scrollback_for_window(window_id);
+    // Resolve the per-window scrollbar-reveal timer up front: the render below
+    // holds a mutable borrow on `app.histories`, which would block this
+    // immutable `&self` method call if deferred to the scrollbar call site.
+    let scrollbar_visible_until = app.terminal_scrollbar_visible_until(window_id);
     // Only adapters that publish `SessionEvent::EditorState` (currently
     // smith interactive) get the fixed editor pane at the bottom.
     // claude / codex / shell render their own input prompt inside the
@@ -3223,7 +3227,7 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
         f,
         chat_area,
         &app.theme,
-        app.terminal_scrollbar_visible_until,
+        scrollbar_visible_until,
         clamped_scrollback,
         out.max_scrollback,
     );
