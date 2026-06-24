@@ -586,7 +586,7 @@ async fn web_client_loads_and_websocket_connects() {
         .into_value()
         .expect("json");
     assert_eq!(mini_matrix["tag"], "CANVAS");
-    assert_eq!(mini_matrix["label"], "agentd connected");
+    assert_eq!(mini_matrix["label"], "construct connected");
     assert_eq!(mini_matrix["role"], "img");
     assert_eq!(mini_matrix["connState"], "open");
     assert_eq!(mini_matrix["connLabel"], "connected");
