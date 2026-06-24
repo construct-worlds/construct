@@ -52,7 +52,7 @@ enum Command {
     /// List sessions.
     #[command(visible_alias = "ls")]
     List,
-    /// Create a new session.
+    /// Create a new interactive session and open the TUI.
     New {
         /// Harness name (shell, claude, codex, …).
         harness: String,
@@ -65,7 +65,8 @@ enum Command {
         model: Option<String>,
         #[arg(long)]
         title: Option<String>,
-        /// Session mode hint (e.g. "interactive" / "headless"); adapter-defined.
+        /// Session mode hint. Defaults to "interactive" and opens the TUI;
+        /// "headless" creates the session, prints its id, and exits.
         #[arg(long)]
         mode: Option<String>,
         #[arg(long, default_value_t = false)]
@@ -124,10 +125,6 @@ enum Command {
     /// Delete a session entirely (kill if running, remove transcript + worktree).
     #[command(visible_alias = "rm")]
     Delete { session_id: String },
-    /// Pin a session so it's always shown as a live tile in the TUI pin strip.
-    Pin { session_id: String },
-    /// Unpin a session.
-    Unpin { session_id: String },
     /// Rename a session — sets the user-facing title (shown instead of the
     /// session hash). Pass `--clear` to remove the title and fall back to
     /// the hash.
@@ -139,8 +136,6 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
-    /// Show diff of session's working tree.
-    Diff { session_id: String },
     /// Show session detail + transcript.
     Show { session_id: String },
     /// Download and install the latest release (or `--version TAG`),
@@ -341,6 +336,9 @@ async fn main() -> Result<()> {
             mode,
             worktree,
         } => {
+            let mode = mode.unwrap_or_else(|| "interactive".to_string());
+            let open_tui = mode == "interactive";
+            ensure_daemon_running(&socket).await;
             let c = connect(&socket).await?;
             let cwd = std::fs::canonicalize(&cwd)
                 .with_context(|| format!("resolve cwd {}", cwd.display()))?
@@ -357,7 +355,7 @@ async fn main() -> Result<()> {
                     },
                     model,
                     title,
-                    mode,
+                    mode: Some(mode),
                     pty_size: None,
                     worktree,
                     env: Default::default(),
@@ -368,8 +366,12 @@ async fn main() -> Result<()> {
                     position_after_session_id: None,
                 })
                 .await?;
-            println!("{id}");
-            Ok(())
+            if open_tui {
+                app::run_with_socket_selected(socket, id).await
+            } else {
+                println!("{id}");
+                Ok(())
+            }
         }
         Command::Fork {
             session_id,
@@ -454,16 +456,6 @@ async fn main() -> Result<()> {
             c.delete(&session_id).await?;
             Ok(())
         }
-        Command::Pin { session_id } => {
-            let c = connect(&socket).await?;
-            c.set_pinned(&session_id, true).await?;
-            Ok(())
-        }
-        Command::Unpin { session_id } => {
-            let c = connect(&socket).await?;
-            c.set_pinned(&session_id, false).await?;
-            Ok(())
-        }
         Command::Rename {
             session_id,
             title,
@@ -472,16 +464,6 @@ async fn main() -> Result<()> {
             let c = connect(&socket).await?;
             let new_title = if clear { None } else { title };
             c.set_title(&session_id, new_title).await?;
-            Ok(())
-        }
-        Command::Diff { session_id } => {
-            let c = connect(&socket).await?;
-            let r = c.diff(&session_id).await?;
-            if r.patch.is_empty() {
-                println!("(no diff)");
-            } else {
-                print!("{}", r.patch);
-            }
             Ok(())
         }
         Command::Show { session_id } => {
