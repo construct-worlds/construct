@@ -1803,6 +1803,7 @@
           <div class="op-canvas-actions">
             <button type="button" id="opCanvasResetBtn" title="Restore starter canvas">Reset</button>
             <button type="button" id="opCanvasInsertBtn" title="Insert selected session as context">+ Session</button>
+            <button type="button" id="opCanvasApplyBtn" title="Apply latest operator canvas update" disabled>Apply update</button>
             <button type="button" id="opCanvasActBtn" class="primary"
                     title="Ask the operator about the selected text or current block">Act</button>
           </div>
@@ -2070,6 +2071,7 @@ const opCanvasStatusEl = $("opCanvasStatus");
 const opCanvasActBtn = $("opCanvasActBtn");
 const opCanvasResetBtn = $("opCanvasResetBtn");
 const opCanvasInsertBtn = $("opCanvasInsertBtn");
+const opCanvasApplyBtn = $("opCanvasApplyBtn");
 /** Autohide timer for the browser-preview overlay (mirrors the TUI's
  *  ~7s timeout). Hover pins it (clears the timer); the × dismisses. */
 let browserPreviewHideTimer = null;
@@ -2250,7 +2252,10 @@ const PTY_REPLAY_INITIAL_BYTES = 128 * 1024;
 const PTY_REPLAY_MAX_BYTES = 1024 * 1024;
 const PTY_REPLAY_TOP_THRESHOLD_ROWS = 20;
 const OP_CANVAS_DOC_KEY = "agentd.web.operationalCanvas.doc";
+const OP_CANVAS_PENDING_UPDATE_KEY = "agentd.web.operationalCanvas.pendingUpdate";
 let widgetAutohideTimer = null;
+let pendingOperationalCanvasUpdate = null;
+let operatorCanvasUpdateBuffer = "";
 
 function loadViewModePrefs() {
   try {
@@ -2310,9 +2315,28 @@ function loadOperationalCanvasText() {
   return defaultOperationalCanvasText();
 }
 
+function loadOperationalCanvasPendingUpdate() {
+  try {
+    const raw = localStorage.getItem(OP_CANVAS_PENDING_UPDATE_KEY);
+    if (typeof raw === "string" && raw.trim()) return raw;
+  } catch (_) {}
+  return null;
+}
+
 function saveOperationalCanvasText() {
   if (!opCanvasEditorEl) return;
   localStorage.setItem(OP_CANVAS_DOC_KEY, opCanvasEditorEl.value || "");
+}
+
+function saveOperationalCanvasPendingUpdate(text) {
+  pendingOperationalCanvasUpdate = String(text || "").trim() || null;
+  try {
+    if (pendingOperationalCanvasUpdate) {
+      localStorage.setItem(OP_CANVAS_PENDING_UPDATE_KEY, pendingOperationalCanvasUpdate);
+    } else {
+      localStorage.removeItem(OP_CANVAS_PENDING_UPDATE_KEY);
+    }
+  } catch (_) {}
 }
 
 function operatorSession() {
@@ -2453,6 +2477,12 @@ function renderOperationalCanvas() {
   }
   if (opCanvasActBtn) opCanvasActBtn.disabled = !op || !(opCanvasEditorEl.value || "").trim();
   if (opCanvasInsertBtn) opCanvasInsertBtn.disabled = !state.currentId;
+  if (opCanvasApplyBtn) {
+    opCanvasApplyBtn.disabled = !pendingOperationalCanvasUpdate;
+    opCanvasApplyBtn.title = pendingOperationalCanvasUpdate
+      ? "Apply the latest operator canvas update"
+      : "No pending operator canvas update";
+  }
   renderOperationalCanvasChips();
 }
 
@@ -2515,6 +2545,38 @@ function setOperationalCanvasStatus(text, isError = false) {
   opCanvasStatusEl.style.color = isError ? "var(--err)" : "var(--fg-dim)";
 }
 
+function extractOperationalCanvasUpdate(text) {
+  const match = /```construct-canvas-update[ \t]*\n([\s\S]*?)```/i.exec(String(text || ""));
+  if (!match) return null;
+  return match[1].replace(/\n$/, "").trim();
+}
+
+function maybeCaptureOperationalCanvasUpdate(sessionId, event) {
+  const op = operatorSession();
+  if (!op || sessionId !== op.id || !event || event.type !== "message") return;
+  if (event.role !== "assistant") {
+    operatorCanvasUpdateBuffer = "";
+    return;
+  }
+  operatorCanvasUpdateBuffer = (operatorCanvasUpdateBuffer + String(event.text || "")).slice(-80000);
+  const update = extractOperationalCanvasUpdate(operatorCanvasUpdateBuffer);
+  if (!update) return;
+  saveOperationalCanvasPendingUpdate(update);
+  operatorCanvasUpdateBuffer = "";
+  renderOperationalCanvas();
+  setOperationalCanvasStatus("Operator proposed a canvas update. Review it in the operator response, then Apply update.");
+}
+
+function applyPendingOperationalCanvasUpdate() {
+  if (!opCanvasEditorEl || !pendingOperationalCanvasUpdate) return;
+  opCanvasEditorEl.value = pendingOperationalCanvasUpdate;
+  saveOperationalCanvasText();
+  saveOperationalCanvasPendingUpdate(null);
+  renderOperationalCanvas();
+  setOperationalCanvasStatus("Applied operator canvas update.");
+  opCanvasEditorEl.focus();
+}
+
 async function submitOperationalCanvasAction() {
   const op = operatorSession();
   if (!op || !opCanvasEditorEl) {
@@ -2529,6 +2591,12 @@ async function submitOperationalCanvasAction() {
     "The user clicked Act in the web operational canvas.",
     "Interpret only the visible document and selected scope below. The document is freely editable; do not assume hidden workflow rules.",
     "If the selected scope is a clear runnable request, carry it out using normal Construct tools and approval policy. If it is ambiguous, propose a concise plan or ask a clarifying question.",
+    "If you create or delegate work to other sessions/subagents, check their result before reporting completion.",
+    "When the canvas should change after your work, include exactly one fenced block containing the complete replacement canvas document:",
+    "```construct-canvas-update",
+    "<complete updated markdown canvas>",
+    "```",
+    "Only include that block after checking the results. If no canvas update is needed, do not include the block.",
     "",
     `Scope: ${scope.label}`,
     "",
@@ -2624,6 +2692,7 @@ function initOperationalCanvas() {
   opCanvasEditorEl.addEventListener("select", renderOperationalCanvas);
   opCanvasActBtn.addEventListener("click", submitOperationalCanvasAction);
   opCanvasInsertBtn.addEventListener("click", insertCurrentSessionIntoCanvas);
+  opCanvasApplyBtn.addEventListener("click", applyPendingOperationalCanvasUpdate);
   opCanvasResetBtn.addEventListener("click", () => {
     if (!confirm("Reset the operational canvas starter text?")) return;
     opCanvasEditorEl.value = defaultOperationalCanvasText();
@@ -2634,6 +2703,7 @@ function initOperationalCanvas() {
     if (state.canvasOpen) closeOperationalCanvas();
     else openOperationalCanvas();
   });
+  pendingOperationalCanvasUpdate = loadOperationalCanvasPendingUpdate();
   renderOperationalCanvas();
 }
 
@@ -5280,6 +5350,7 @@ async function backgroundLoadOlderTranscript(id, pane, minTailSeq, alreadyLoaded
 function handleNotification(method, params) {
   if (method === "session/event") {
     const { session_id, event } = params;
+    maybeCaptureOperationalCanvasUpdate(session_id, event);
     // Tool-approval requests are interactive and time-sensitive —
     // surface them in the bottom sheet regardless of which session
     // is currently being viewed. The session_id sticks with the

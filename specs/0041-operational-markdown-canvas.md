@@ -34,6 +34,12 @@ cancels sessions, or submits prompts by itself. Actions happen through a
 contextual action affordance, direct user command, accepted operator proposal,
 or ordinary approval flow.
 
+Canvas updates after execution are also explicit. When the operator creates or
+delegates work to sessions, subagents, or tools, it must check the resulting
+state before proposing document changes. The product may surface the proposed
+replacement or patch as a pending canvas update, but the editable document is
+not changed until the user accepts it or directly edits it.
+
 ## Reason
 
 Chat is a good input channel for intent, but it is a poor primary surface for
@@ -83,6 +89,13 @@ The default action is to ask the operator about the current selection or
 location. The operator may then propose concrete actions such as running a task,
 creating sessions, attaching context, summarizing a section, moving completed
 items, or updating status.
+
+The operator-to-canvas return path should be visible and reviewable. In v1 this
+can be a full-document replacement proposal; later versions may use structured
+patches, comments, or tracked changes. The important invariant is that completed
+work does not silently disappear into another transcript: the operator either
+updates the canvas through an accepted proposal or explains why no update is
+needed.
 
 When Construct writes into the document, it should prefer generated regions,
 comments, status chips, summaries, or clearly attributed edits. User prose
