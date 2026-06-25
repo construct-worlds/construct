@@ -2472,13 +2472,7 @@ function operationalCanvasTokenMeta(raw) {
 
 function operationalCanvasChipHtml(raw) {
   const meta = operationalCanvasTokenMeta(raw);
-  return `
-    <span class="op-doc-chip ${attr(meta.className)}" data-raw="${attr(raw)}" contenteditable="false">
-      <span class="chip-kind">${escape(meta.kind)}</span>
-      <span>${escape(meta.label)}</span>
-      <span class="chip-status">${escape(meta.status)}</span>
-    </span>
-  `;
+  return `<span class="op-doc-chip ${attr(meta.className)}" data-raw="${attr(raw)}" contenteditable="false"><span class="chip-kind">${escape(meta.kind)}</span><span>${escape(meta.label)}</span><span class="chip-status">${escape(meta.status)}</span></span>`;
 }
 
 function operationalCanvasTaskboxHtml(raw) {
@@ -2531,7 +2525,7 @@ function rawTextFromCanvasNode(node) {
   if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
   if (node.nodeType !== Node.ELEMENT_NODE) return "";
   const el = node;
-  if (el.dataset && el.dataset.raw != null && el.contentEditable === "false") {
+  if (el.dataset && el.dataset.raw != null && el.getAttribute("contenteditable") === "false") {
     return el.dataset.raw;
   }
   if (el.tagName === "BR") return "";
@@ -2705,6 +2699,7 @@ function renderOperationalCanvas() {
       ? "Apply the latest operator canvas update"
       : "No pending operator canvas update";
   }
+  if (state.canvasOpen) setComposerEnabled(!!(state.ws && state.ws.readyState === 1));
   renderOperationalCanvasChips();
 }
 
@@ -2795,11 +2790,7 @@ function refreshOperationalCanvasInlineChips() {
     const raw = chip.dataset.raw || "";
     const meta = operationalCanvasTokenMeta(raw);
     chip.className = `op-doc-chip ${meta.className || ""}`;
-    chip.innerHTML = `
-      <span class="chip-kind">${escape(meta.kind)}</span>
-      <span>${escape(meta.label)}</span>
-      <span class="chip-status">${escape(meta.status)}</span>
-    `;
+    chip.innerHTML = `<span class="chip-kind">${escape(meta.kind)}</span><span>${escape(meta.label)}</span><span class="chip-status">${escape(meta.status)}</span>`;
   }
 }
 
@@ -2859,6 +2850,48 @@ async function submitOperationalCanvasAction() {
   }
 }
 
+async function submitOperationalCanvasChat(text) {
+  const op = operatorSession();
+  if (!op) {
+    setOperationalCanvasStatus("No operator session is available.", true);
+    restoreComposerText(text, state.currentId);
+    return;
+  }
+  const prompt = [
+    "OBSERVATION: operational_canvas.chat",
+    "",
+    "The user sent a bottom-prompt message while focused on the operational canvas.",
+    "Treat this as chat about the visible canvas. If the user asks you to act, use normal Construct tools and approval policy.",
+    "If you create or delegate work to other sessions/subagents, check their result before reporting completion.",
+    "When the canvas should change after your work, include exactly one fenced block containing the complete replacement canvas document:",
+    "```construct-canvas-update",
+    "<complete updated markdown canvas>",
+    "```",
+    "Only include that block after checking the results. If no canvas update is needed, do not include the block.",
+    "",
+    "User message:",
+    "```text",
+    trimForOperator(text, 6000),
+    "```",
+    "",
+    "Full canvas:",
+    "```md",
+    trimForOperator(operationalCanvasText()),
+    "```",
+  ].join("\n");
+
+  setOperationalCanvasStatus("Sending canvas prompt to operator...");
+  try {
+    await rpc("session.input", { session_id: op.id, text: prompt });
+    setOperationalCanvasStatus("Sent to operator.");
+  } catch (e) {
+    setOperationalCanvasStatus(`Operator prompt failed: ${e.message}`, true);
+    restoreComposerText(text, state.currentId);
+  } finally {
+    renderOperationalCanvas();
+  }
+}
+
 function insertCurrentSessionIntoCanvas() {
   if (!opCanvasEditorEl || !state.currentId) return;
   const s = state.sessions.find((x) => x.id === state.currentId);
@@ -2887,7 +2920,7 @@ function openOperationalCanvas() {
   transcriptEl.hidden = true;
   terminalWrapEl.hidden = true;
   editorStateEl.hidden = true;
-  composerEl.hidden = true;
+  composerEl.hidden = false;
   vkbdEl.hidden = true;
   terminalScrollOverlayEl.hidden = true;
   sessionWidgetsEl.hidden = true;
@@ -2897,6 +2930,7 @@ function openOperationalCanvas() {
   sessionTitleEl.textContent = "operational canvas";
   if (!operationalCanvasText().trim()) setOperationalCanvasText(loadOperationalCanvasText());
   renderOperationalCanvas();
+  setComposerEnabled(!!(state.ws && state.ws.readyState === 1));
   setTimeout(() => opCanvasEditorEl.focus(), 0);
 }
 
@@ -3221,14 +3255,21 @@ function setConnState(s, label) {
 
 function setComposerEnabled(on) {
   if (state.canvasOpen) {
-    inputEl.disabled = true;
-    inputEl.hidden = true;
+    const op = operatorSession();
+    const canSend = !!(op && state.ws && state.ws.readyState === 1);
+    composerEl.hidden = false;
+    inputEl.disabled = !canSend;
+    inputEl.hidden = false;
+    inputEl.placeholder = op ? "Message operator about canvas..." : "Operator unavailable";
     insertBtn.hidden = true;
-    enterBtn.hidden = true;
+    insertBtn.disabled = true;
+    enterBtn.disabled = !canSend;
+    enterBtn.hidden = false;
     return;
   }
   const blocked = !!(state.currentId && state.widgetsById && currentInlineWidget(state.currentId));
   inputEl.disabled = blocked;
+  inputEl.placeholder = "Message...";
   const terminal = state.mode === "terminal" && currentSessionHasPty();
   // Mobile terminal controls are only useful on touch browsers:
   // desktop xterm users can type directly into the terminal. Chat
@@ -7106,6 +7147,12 @@ function restoreComposerText(text, sessionId) {
 /** Insert vs Enter — see the comment on the Composer section. */
 async function submitComposer({ enter }) {
   const text = inputEl.value;
+  if (state.canvasOpen) {
+    if (!text.trim()) return;
+    clearComposerTextPreservingTerminalScroll();
+    await submitOperationalCanvasChat(text);
+    return;
+  }
   if (!state.currentId || currentInlineWidget(state.currentId)) return;
   // Empty Insert is a no-op. Empty Enter on a PTY session is
   // meaningful (sends a bare `\r`), so allow it there.

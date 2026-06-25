@@ -136,9 +136,28 @@ async fn web_client_loads_and_websocket_connects() {
     let operational_canvas: serde_json::Value = page
         .evaluate(
             r#"
-            (() => {
+            (async () => {
               const previous = localStorage.getItem(OP_CANVAS_DOC_KEY);
+              const saved = {
+                sessions: state.sessions,
+                currentId: state.currentId,
+                ws: state.ws,
+                canvasOpen: state.canvasOpen,
+              };
+              const calls = [];
               try {
+                state.sessions = [{ id: 's-operator', kind: 'orchestrator', title: 'operator' }];
+                state.currentId = 's-operator';
+                state.ws = {
+                  readyState: 1,
+                  send(raw) {
+                    const msg = JSON.parse(raw);
+                    calls.push(msg);
+                    const pending = state.pending.get(msg.id);
+                    state.pending.delete(msg.id);
+                    pending.resolve({});
+                  },
+                };
                 openOperationalCanvas();
                 const doc = [
                   '# Canvas Test',
@@ -152,6 +171,13 @@ async fn web_client_loads_and_websocket_connects() {
                 const editor = document.getElementById('opCanvasEditor');
                 const chips = Array.from(editor.querySelectorAll('.op-doc-chip'));
                 const tasks = Array.from(editor.querySelectorAll('.op-doc-taskbox'));
+                editor.focus();
+                const activeAfterEditorFocus = document.activeElement && document.activeElement.id;
+                inputEl.focus();
+                const activeAfterInputFocus = document.activeElement && document.activeElement.id;
+                inputEl.value = 'summarize the canvas state';
+                await submitComposer({ enter: true });
+                const call = calls.find((msg) => msg.method === 'session.input');
                 return {
                   tag: editor.tagName,
                   editable: editor.getAttribute('contenteditable'),
@@ -162,10 +188,26 @@ async fn web_client_loads_and_websocket_connects() {
                   firstChipRaw: chips[0]?.dataset.raw || '',
                   firstChipEditable: chips[0]?.getAttribute('contenteditable') || '',
                   scope: currentOperationalCanvasScope().label,
+                  composerHidden: composerEl.hidden,
+                  inputHidden: inputEl.hidden,
+                  inputDisabled: inputEl.disabled,
+                  enterHidden: enterBtn.hidden,
+                  activeAfterEditorFocus,
+                  activeAfterInputFocus,
+                  sentSessionId: call?.params?.session_id || '',
+                  sentText: call?.params?.text || '',
                 };
               } finally {
                 if (previous == null) localStorage.removeItem(OP_CANVAS_DOC_KEY);
                 else localStorage.setItem(OP_CANVAS_DOC_KEY, previous);
+                state.sessions = saved.sessions;
+                state.currentId = saved.currentId;
+                state.ws = saved.ws;
+                if (!saved.canvasOpen) {
+                  state.canvasOpen = false;
+                  opCanvasEl.hidden = true;
+                  canvasToggleBtn.setAttribute('aria-pressed', 'false');
+                }
               }
             })()
             "#,
@@ -180,6 +222,20 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(operational_canvas["taskCount"], 1);
     assert_eq!(operational_canvas["firstChipRaw"], "@codex");
     assert_eq!(operational_canvas["firstChipEditable"], "false");
+    assert_eq!(operational_canvas["composerHidden"], false);
+    assert_eq!(operational_canvas["inputHidden"], false);
+    assert_eq!(operational_canvas["inputDisabled"], false);
+    assert_eq!(operational_canvas["enterHidden"], false);
+    assert_eq!(operational_canvas["activeAfterEditorFocus"], "opCanvasEditor");
+    assert_eq!(operational_canvas["activeAfterInputFocus"], "input");
+    assert_eq!(operational_canvas["sentSessionId"], "s-operator");
+    let sent_text = operational_canvas["sentText"].as_str().unwrap_or_default();
+    assert!(
+        sent_text.contains("operational_canvas.chat")
+            && sent_text.contains("summarize the canvas state")
+            && sent_text.contains("@codex"),
+        "canvas composer should send the prompt and canvas to operator: {operational_canvas:?}"
+    );
     let raw = operational_canvas["raw"].as_str().unwrap_or_default();
     assert!(
         raw.contains("@codex") && raw.contains("README.md") && raw.contains("@session:s123"),
