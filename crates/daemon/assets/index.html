@@ -1868,6 +1868,9 @@ const state = {
   // daemon's canonical transcript event round-trips back. The live event
   // reconciles these rows so chat mode feels instant without duplicates.
   optimisticMessagesById: new Map(),
+  // Sessions where the web composer has submitted a turn but the daemon has
+  // not yet emitted active agent_status. This fills the post-SEND status gap.
+  chatWorkingById: new Set(),
   renderingTranscriptHistory: false,
   // Latest Smith editor_state by session id. Claude/Codex/shell do not
   // emit this and continue to rely on their PTY UI echoing input.
@@ -3029,6 +3032,7 @@ function enterChatMode() {
   // after send when a turn is active. We reuse renderEditorState with the
   // current session's agent status; queued/buffer lines are empty in chat mode.
   renderEditorState(state.editorById.get(state.currentId) || null, state.agentStatusById.get(state.currentId) || null);
+  syncThinkingBanner(state.currentId);
   // Virtual keyboard only makes sense over xterm — chat sessions
   // have a text-style editor instead.
   vkbdEl.hidden = true;
@@ -4310,6 +4314,7 @@ function clearTranscriptPane(id) {
   }
   state.transcriptViewportById.delete(id);
   state.optimisticMessagesById.delete(id);
+  state.chatWorkingById.delete(id);
 }
 
 function markTranscriptStale(id) {
@@ -4635,7 +4640,10 @@ function handleNotification(method, params) {
     if (event && event.type === "pty") observeSessionPtyActivity(session_id, params.at);
     if (event && event.type === "agent_status") {
       if (event.active) state.agentStatusById.set(session_id, event);
-      else state.agentStatusById.delete(session_id);
+      else {
+        state.agentStatusById.delete(session_id);
+        state.chatWorkingById.delete(session_id);
+      }
     }
     if (eventInvalidatesCachedTranscript(event) && !(session_id === state.currentId && state.mode === "chat")) {
       markTranscriptStale(session_id);
@@ -4663,6 +4671,12 @@ function handleNotification(method, params) {
     const i = state.sessions.findIndex((s) => s.id === session.id);
     if (i >= 0) state.sessions[i] = session;
     else state.sessions.push(session);
+    const status = sessionStatusLabel(session);
+    if (status !== "running" && status !== "pending") {
+      state.chatWorkingById.delete(session.id);
+      state.agentStatusById.delete(session.id);
+    }
+    syncThinkingBanner(session.id);
     scheduleRenderSessions();
     if (archiveNeighborId) {
       selectSession(archiveNeighborId);
@@ -4686,6 +4700,7 @@ function handleNotification(method, params) {
     scheduleRenderSessions();
     state.editorById.delete(params.session_id);
     state.agentStatusById.delete(params.session_id);
+    state.chatWorkingById.delete(params.session_id);
     state.ptyActivityById.delete(params.session_id);
     state.widgetsById.delete(params.session_id);
     if (state.viewModeById.delete(params.session_id)) saveViewModePrefs();
@@ -4762,12 +4777,12 @@ function renderEvent(event, at) {
     }
     if (event.type === "agent_status") {
       if (event.active) state.agentStatusById.set(state.currentId, event);
-      else state.agentStatusById.delete(state.currentId);
-      renderEditorStateForSession(state.currentId);
-      if (state.mode === "chat") {
-        if (event.active) ensureThinkingBanner(state.currentId);
-        else removeThinkingBanner(state.currentId);
+      else {
+        state.agentStatusById.delete(state.currentId);
+        state.chatWorkingById.delete(state.currentId);
       }
+      renderEditorStateForSession(state.currentId);
+      if (state.mode === "chat") syncThinkingBanner(state.currentId);
     }
     if (event.type === "reset") {
       if (state.term) state.term.reset();
@@ -4806,11 +4821,13 @@ function renderEvent(event, at) {
       const text = event.text || "";
       if (shouldRenderChatMessage(role, text)) {
         if (role === "user" && consumeOptimisticMessage(state.currentId, role, text)) break;
+        if (role === "assistant") clearOptimisticWorkingIndicator(state.currentId);
         appendMessage(role, text);
       }
       break;
     }
     case "tool_use":
+      clearOptimisticWorkingIndicator(state.currentId);
       appendToolUse(event.tool, event.args);
       break;
     case "tool_result":
@@ -4829,6 +4846,7 @@ function renderEvent(event, at) {
       clearTranscriptPane(state.currentId);
       state.editorById.delete(state.currentId);
       state.agentStatusById.delete(state.currentId);
+      state.chatWorkingById.delete(state.currentId);
       clearBrowserPreview(state.currentId);
       renderEditorState(null);
       break;
@@ -4838,12 +4856,12 @@ function renderEvent(event, at) {
       break;
     case "agent_status":
       if (event.active) state.agentStatusById.set(state.currentId, event);
-      else state.agentStatusById.delete(state.currentId);
-      renderEditorStateForSession(state.currentId);
-      if (state.mode === "chat") {
-        if (event.active) ensureThinkingBanner(state.currentId);
-        else removeThinkingBanner(state.currentId);
+      else {
+        state.agentStatusById.delete(state.currentId);
+        state.chatWorkingById.delete(state.currentId);
       }
+      renderEditorStateForSession(state.currentId);
+      if (state.mode === "chat") syncThinkingBanner(state.currentId);
       break;
     case "tool_approval_request":
       // Render as a tool-use card; v1 doesn't yet implement
@@ -4959,17 +4977,45 @@ function appendMessage(role, text, opts = {}) {
   return row;
 }
 
+function chatSessionIsVisible(sessionId) {
+  return !!sessionId && state.mode === "chat" && sessionId === state.currentId;
+}
+
+function sessionHasWorkingIndicator(sessionId) {
+  if (!sessionId) return false;
+  if (state.chatWorkingById.has(sessionId)) return true;
+  const active = state.agentStatusById.get(sessionId);
+  if (active && active.active) return true;
+  const s = state.sessions.find((x) => x.id === sessionId);
+  return sessionStatusLabel(s) === "running";
+}
+
+function syncThinkingBanner(sessionId) {
+  if (!chatSessionIsVisible(sessionId)) return;
+  if (sessionHasWorkingIndicator(sessionId)) ensureThinkingBanner(sessionId);
+  else removeThinkingBanner(sessionId);
+}
+
+function startOptimisticWorkingIndicator(sessionId) {
+  if (!sessionId) return;
+  state.chatWorkingById.add(sessionId);
+  syncThinkingBanner(sessionId);
+}
+
+function clearOptimisticWorkingIndicator(sessionId) {
+  if (!sessionId) return;
+  state.chatWorkingById.delete(sessionId);
+  removeThinkingBanner(sessionId);
+}
+
 function ensureThinkingBanner(sessionId) {
   const s = state.sessions.find((x) => x.id === sessionId);
-  if (!s || state.mode !== "chat") return;
-  const active = state.agentStatusById.get(sessionId);
-  if (!active || !active.active) return;
+  if (!s || !chatSessionIsVisible(sessionId)) return;
   // Prepend/ensure a lightweight thinking row at the end of the active transcript.
-  const target = transcriptTarget();
+  const target = transcriptTarget(sessionId);
   if (!target) return;
   // Avoid duplicating if one is already present as the very last row.
-  const last = target.lastElementChild;
-  if (last && last.classList && last.classList.contains("thinking-row")) return;
+  if (target.querySelector(".thinking-row")) return;
   const row = document.createElement("div");
   row.className = "row role-assistant thinking-row";
   row.innerHTML = `
@@ -4979,16 +5025,14 @@ function ensureThinkingBanner(sessionId) {
       <span>Working..</span>
     </div>`;
   target.appendChild(row);
-  scrollTranscriptToBottomSmooth();
+  scrollToBottom();
 }
 
 function removeThinkingBanner(sessionId) {
-  const target = transcriptTarget();
+  if (!sessionId) return;
+  const target = state.transcriptPaneById.get(sessionId);
   if (!target) return;
-  const last = target.lastElementChild;
-  if (last && last.classList && last.classList.contains("thinking-row")) {
-    last.remove();
-  }
+  target.querySelectorAll(".thinking-row").forEach((row) => row.remove());
 }
 
 function appendOptimisticUserMessage(sessionId, text) {
@@ -4997,7 +5041,7 @@ function appendOptimisticUserMessage(sessionId, text) {
   showTranscriptPane(sessionId);
   const optimisticId = `opt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const row = appendMessage("user", text, { optimisticId });
-  const entry = { id: optimisticId, role: "user", text, row, createdAt: Date.now() };
+  const entry = { id: optimisticId, sessionId, role: "user", text, row, createdAt: Date.now() };
   const list = state.optimisticMessagesById.get(sessionId) || [];
   list.push(entry);
   state.optimisticMessagesById.set(sessionId, list);
@@ -5007,13 +5051,13 @@ function appendOptimisticUserMessage(sessionId, text) {
 
 function markOptimisticMessageSent(entry) {
   if (!entry) return;
-  ensureThinkingBanner(entry.sessionId);
+  startOptimisticWorkingIndicator(entry.sessionId);
   if (!entry.row) return;
   entry.row.classList.remove("optimistic");
 }
 
 function removeOptimisticMessage(sessionId, entry) {
-  removeThinkingBanner(sessionId);
+  clearOptimisticWorkingIndicator(sessionId);
 
   if (!sessionId || !entry) return;
   const list = state.optimisticMessagesById.get(sessionId) || [];
@@ -6054,7 +6098,7 @@ function currentSessionHarness() {
 }
 
 function restoreComposerText(text, sessionId) {
-  removeThinkingBanner(sessionId);
+  clearOptimisticWorkingIndicator(sessionId);
 
   // Put the user's text back if the send failed so it isn't lost —
   // unless they've already started typing something new, or switched
@@ -6080,6 +6124,7 @@ async function submitComposer({ enter }) {
   const harness = currentSessionHarness();
   if (pty) {
     const optimistic = enter ? appendOptimisticUserMessage(sid, text) : null;
+    if (optimistic) startOptimisticWorkingIndicator(sid);
     try {
       if (text) {
         await rpc("session.pty_input", { session_id: sid, data: encodeBase64Utf8(text) });
@@ -6106,6 +6151,7 @@ async function submitComposer({ enter }) {
     // row below so the user sees their message immediately without duplicates.
     if (!text.trim()) return;
     const optimistic = appendOptimisticUserMessage(sid, text);
+    startOptimisticWorkingIndicator(sid);
     try {
       await rpc("session.input", { session_id: sid, text });
       markOptimisticMessageSent(optimistic);
