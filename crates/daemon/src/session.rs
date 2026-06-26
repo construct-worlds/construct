@@ -48,6 +48,7 @@ const PTY_REPLAY_CAP: usize = 8 * 1024 * 1024;
 const RESPAWN_REDRAW_POLL: Duration = Duration::from_millis(100);
 const RESPAWN_REDRAW_SETTLE: Duration = Duration::from_millis(400);
 const RESPAWN_REDRAW_MAX_WAIT: Duration = Duration::from_secs(6);
+const CANVAS_EXTERNAL_PTY_SUBMIT_DELAY: Duration = Duration::from_millis(500);
 
 /// Whether the post-resume force-redraw should fire now: the child has
 /// produced PTY output and then gone quiet for [`RESPAWN_REDRAW_SETTLE`],
@@ -1424,7 +1425,7 @@ impl SessionManager {
                     canvas_execution_paste_bytes(&prompt),
                 )
                 .await?;
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(CANVAS_EXTERNAL_PTY_SUBMIT_DELAY).await;
                 self.pty_input_without_capture(&params.session_id, vec![b'\r'])
                     .await?;
             }
