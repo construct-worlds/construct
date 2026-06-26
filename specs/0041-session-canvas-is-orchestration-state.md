@@ -13,6 +13,8 @@ Smart clips are persisted as Markdown-native typed references, using inline `@{t
 
 Canvas updates use optimistic concurrency. Writers may pass the version they read as `base_version`; if the current version differs, the daemon rejects the update and the writer must re-read, merge, and retry. Agent-originated canvas updates are trusted session actions and do not require user approval.
 
+Terminal clients expose canvas through a terminal-deliverable command path rather than modifier-only key gestures. Browser or desktop clients may add richer gestures, but the TUI must keep an explicit keyboard command and palette command for canvas access.
+
 ## Reason
 
 Canvas is an alternative orchestration surface, not an output preview. Keeping Markdown as the source of truth makes the state inspectable, editable with ordinary tools, and resilient across clients. Routing execution through the owning session preserves the existing session/subagent model instead of creating a second workflow engine.
@@ -26,6 +28,8 @@ Clients must treat canvas rendering as a projection of Markdown, not as canonica
 The daemon owns canvas persistence, versioning, and execution routing. Agents should use canvas tools to update the document rather than writing session storage files directly.
 
 Template selection copies Markdown into the session canvas. Templates are not live-linked after selection.
+
+Terminal shortcuts must avoid bindings that are easy to confuse with quit or interrupt chords.
 
 ## Non-Goals
 

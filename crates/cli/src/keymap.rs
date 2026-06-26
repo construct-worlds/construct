@@ -23,6 +23,10 @@ pub enum KeyAction {
     /// default layout. Bound to `C-x z` (emacs) / `z` (vim), matching
     /// tmux's `prefix z` (zoom-pane).
     ToggleZoom,
+    /// Open the selected session's canvas in an external editor. Bound to
+    /// `C-x e` in both profiles because bare modifier double-taps are not
+    /// delivered reliably by terminal emulators.
+    OpenCanvas,
     OpenDiff,
     Interrupt,
     OpenCommandPalette,
@@ -220,6 +224,7 @@ fn emacs() -> Keymap {
         (Chord(vec![ctrl('x'), ctrl('f')]), OpenNewSession),
         (Chord(vec![ctrl('x'), ch('b')]), OpenSwitchSession),
         (Chord(vec![ctrl('x'), ch('k')]), OpenDeleteConfirm),
+        (Chord(vec![ctrl('x'), ch('e')]), OpenCanvas),
         (Chord(vec![ctrl('x'), ch('d')]), OpenDiff),
         (Chord(vec![ctrl('x'), ch('i')]), OpenSendInput),
         // `C-x r` opens the rename minibuffer (with current title pre-filled).
@@ -280,6 +285,7 @@ fn vim() -> Keymap {
         (Chord(vec![ch('n')]), OpenNewSession),
         (Chord(vec![ctrl('x'), ch('b')]), OpenSwitchSession),
         (Chord(vec![shift('K')]), OpenDeleteConfirm),
+        (Chord(vec![ctrl('x'), ch('e')]), OpenCanvas),
         (Chord(vec![ch('d')]), OpenDiff),
         (Chord(vec![ctrl('c')]), Interrupt),
         // `r` opens the rename minibuffer; refresh moved to M-x refresh.
@@ -457,6 +463,27 @@ mod tests {
                     KeymapResult::Action(KeyAction::ScrollPageDown)
                 ),
                 "PageDown should page down (like C-x ]) in {profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c_x_e_opens_canvas_without_shadowing_c_x_ctrl_c_quit() {
+        for profile in [Profile::Emacs, Profile::Vim] {
+            let km = default_for(profile);
+            assert!(
+                matches!(
+                    resolve(&km, vec![ctrl('x'), ch('e')]),
+                    KeymapResult::Action(KeyAction::OpenCanvas)
+                ),
+                "C-x e should open canvas in {profile:?}"
+            );
+            assert!(
+                matches!(
+                    resolve(&km, vec![ctrl('x'), ctrl('c')]),
+                    KeymapResult::Action(KeyAction::Quit)
+                ),
+                "C-x C-c should still quit in {profile:?}"
             );
         }
     }

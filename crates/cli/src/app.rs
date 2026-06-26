@@ -6170,6 +6170,7 @@ impl App {
                 | KeyAction::ToggleView
                 | KeyAction::ToggleZoom
                 | KeyAction::ToggleHelp
+                | KeyAction::OpenCanvas
                 | KeyAction::OpenCommandPalette
                 | KeyAction::OpenSwitchSession
                 | KeyAction::OpenNewSession
@@ -6445,6 +6446,112 @@ impl App {
             && live
     }
 
+    async fn open_canvas_editor(&mut self) {
+        let Some(session_id) = self.selected_id() else {
+            self.set_status("canvas: no session selected".to_string());
+            return;
+        };
+
+        let current = match self.client.canvas_get(&session_id).await {
+            Ok(result) => result.canvas,
+            Err(e) => {
+                self.set_status(format!("canvas get failed: {e}"));
+                return;
+            }
+        };
+
+        let dir = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.set_status(format!("canvas tempdir failed: {e}"));
+                return;
+            }
+        };
+        let path = dir.path().join("canvas.md");
+        if let Err(e) = std::fs::write(&path, &current.markdown) {
+            self.set_status(format!("canvas write failed: {e}"));
+            return;
+        }
+
+        let editor = std::env::var_os("VISUAL")
+            .or_else(|| std::env::var_os("EDITOR"))
+            .unwrap_or_else(|| OsStr::new("vi").to_os_string());
+        let editor_status = match self.run_external_editor(&editor, &path) {
+            Ok(status) => status,
+            Err(e) => {
+                self.set_status(format!("canvas editor failed: {e}"));
+                return;
+            }
+        };
+        if !editor_status.success() {
+            self.set_status(format!("canvas editor exited with {editor_status}"));
+            return;
+        }
+
+        let markdown = match std::fs::read_to_string(&path) {
+            Ok(markdown) => markdown,
+            Err(e) => {
+                self.set_status(format!("canvas read failed: {e}"));
+                return;
+            }
+        };
+        if markdown == current.markdown {
+            self.set_status(format!("canvas unchanged at version {}", current.version));
+            return;
+        }
+
+        match self
+            .client
+            .canvas_update(agentd_protocol::CanvasUpdateParams {
+                session_id,
+                markdown,
+                base_version: Some(current.version),
+                actor: agentd_protocol::CanvasUpdateActor::Human,
+                template_id: current.template_id,
+                note: None,
+            })
+            .await
+        {
+            Ok(result) => {
+                self.set_status(format!("canvas saved version {}", result.canvas.version))
+            }
+            Err(e) => self.set_status(format!("canvas save failed: {e}")),
+        }
+    }
+
+    fn run_external_editor(
+        &mut self,
+        editor: &OsStr,
+        path: &std::path::Path,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        self.suspend_terminal_for_external_editor();
+        let status = Command::new(editor).arg(path).status();
+        self.restore_terminal_after_external_editor();
+        status
+    }
+
+    fn suspend_terminal_for_external_editor(&mut self) {
+        self.mouse_pos = None;
+        let mut stdout = std::io::stdout();
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout, DisableBracketedPaste);
+        if self.mouse_capture_enabled {
+            let _ = execute!(stdout, DisableMouseCapture);
+        }
+        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = stdout.flush();
+    }
+
+    fn restore_terminal_after_external_editor(&mut self) {
+        let mut stdout = std::io::stdout();
+        let _ = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste);
+        if self.mouse_capture_enabled {
+            let _ = execute!(stdout, EnableMouseCapture);
+        }
+        let _ = enable_raw_mode();
+        let _ = stdout.flush();
+    }
+
     async fn run_action(&mut self, action: KeyAction) {
         use KeyAction::*;
         match action {
@@ -6585,6 +6692,9 @@ impl App {
                 // The "N archived" disclosure row isn't a delete target.
                 Selection::ArchivedRow(_) => {}
             },
+            OpenCanvas => {
+                self.open_canvas_editor().await;
+            }
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
                     match self.client.diff(&id).await {
@@ -7488,6 +7598,7 @@ impl App {
             "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "rename" => self.run_action(KeyAction::OpenRename).await,
             "fork" => self.run_action(KeyAction::OpenFork).await,
+            "canvas" | "edit-canvas" => self.run_action(KeyAction::OpenCanvas).await,
             "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
             "rain" | "matrix" | "matrix-rain" => {
                 self.matrix_rain_hidden = !self.matrix_rain_hidden;
