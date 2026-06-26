@@ -7241,8 +7241,23 @@ fn render_canvas_smart_clip_picker(
         return;
     }
     let candidates = app.canvas_smart_clip_candidates(popup);
-    let max_rows = canvas_area.height.saturating_sub(2).min(8);
-    let row_count = (candidates.len().max(1) as u16).min(max_rows);
+    let group_count = candidates
+        .iter()
+        .fold((None, 0usize), |(last, count), candidate| {
+            if last != Some(candidate.group) {
+                (Some(candidate.group), count + 1)
+            } else {
+                (last, count)
+            }
+        })
+        .1;
+    let desired_rows = if candidates.is_empty() {
+        1
+    } else {
+        candidates.len().saturating_add(group_count)
+    };
+    let max_rows = canvas_area.height.saturating_sub(2).min(10);
+    let row_count = (desired_rows as u16).min(max_rows);
     let width = 42u16.min(canvas_area.width.max(1));
     let x = cursor_pos
         .x
@@ -7282,7 +7297,23 @@ fn render_canvas_smart_clip_picker(
             Style::default().fg(app.theme.dim),
         )));
     } else {
-        for (idx, candidate) in candidates.iter().take(row_count as usize).enumerate() {
+        let mut last_group = None;
+        for (idx, candidate) in candidates.iter().enumerate() {
+            if lines.len() >= row_count as usize {
+                break;
+            }
+            if last_group != Some(candidate.group) {
+                lines.push(Line::from(Span::styled(
+                    candidate.group.label(),
+                    Style::default()
+                        .fg(app.theme.accent_alt)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                last_group = Some(candidate.group);
+                if lines.len() >= row_count as usize {
+                    break;
+                }
+            }
             let selected = idx == search.selected.min(candidates.len().saturating_sub(1));
             let style = if selected {
                 Style::default()

@@ -1286,9 +1286,25 @@ pub struct CanvasSmartClipSearch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanvasSmartClipCandidate {
+    pub group: CanvasSmartClipGroup,
     pub clip: String,
     pub label: String,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasSmartClipGroup {
+    Session,
+    Harness,
+}
+
+impl CanvasSmartClipGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Harness => "harness",
+        }
+    }
 }
 
 /// Live state of the `/remote-control` (or `/remote-control-debug`)
@@ -7035,6 +7051,7 @@ impl App {
             .to_ascii_lowercase();
             if query.is_empty() || haystack.contains(&query) {
                 out.push(CanvasSmartClipCandidate {
+                    group: CanvasSmartClipGroup::Session,
                     clip: format!("@{{session:{}}}", session.id),
                     label: title,
                     detail: format!("session · {} · {}", session.harness, session.state.label()),
@@ -7055,6 +7072,7 @@ impl App {
                     "harness · unavailable".to_string()
                 };
                 out.push(CanvasSmartClipCandidate {
+                    group: CanvasSmartClipGroup::Harness,
                     clip: format!("@{{harness:{}}}", harness.name),
                     label: harness.name.clone(),
                     detail,
@@ -9898,6 +9916,32 @@ mod tests {
         assert_eq!(popup.buffer, "@{harness:codex}");
         assert_eq!(popup.cursor, "@{harness:codex}".chars().count());
         assert!(popup.smart_clip.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_smart_clip_candidates_are_grouped_by_type() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.title = Some("issue 132".to_string());
+        app.sessions = vec![session];
+        app.harnesses = vec![agentd_protocol::HarnessInfo {
+            name: "codex".to_string(),
+            available: true,
+            binary: None,
+            description: Some("coding agent".to_string()),
+            capabilities: Default::default(),
+        }];
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "", 0));
+
+        app.insert_canvas_text("@");
+        let candidates = app.canvas_smart_clip_candidates(app.canvas_popup.as_ref().unwrap());
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].group, CanvasSmartClipGroup::Session);
+        assert_eq!(candidates[0].label, "issue 132");
+        assert_eq!(candidates[1].group, CanvasSmartClipGroup::Harness);
+        assert_eq!(candidates[1].label, "codex");
         server.abort();
     }
 
