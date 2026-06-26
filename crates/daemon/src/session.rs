@@ -478,6 +478,20 @@ fn should_record_pty_user_message(harness: &str) -> bool {
     matches!(harness, "claude" | "antigravity")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanvasExecutionDelivery {
+    AdapterInput,
+    PtySubmit,
+}
+
+fn canvas_execution_delivery(summary: &agentd_protocol::SessionSummary) -> CanvasExecutionDelivery {
+    if summary.has_pty {
+        CanvasExecutionDelivery::PtySubmit
+    } else {
+        CanvasExecutionDelivery::AdapterInput
+    }
+}
+
 impl SessionEntry {
     pub fn is_deleted(&self) -> bool {
         self.deleted.load(Ordering::SeqCst)
@@ -1349,7 +1363,14 @@ impl SessionManager {
     }
 
     pub async fn canvas_execute(&self, params: CanvasExecuteParams) -> Result<CanvasExecuteResult> {
-        let result = self.canvas_get(&params.session_id).await?;
+        let entry = self
+            .get_entry(&params.session_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
+        let result = CanvasGetResult {
+            canvas: self.storage.read_canvas(&params.session_id)?,
+            revisions: self.storage.read_canvas_revisions(&params.session_id)?,
+        };
         if let Some(base) = params.base_version {
             if base != result.canvas.version {
                 anyhow::bail!(
@@ -1372,7 +1393,20 @@ impl SessionManager {
             "Execute the following construct canvas instructions. Treat the Markdown as orchestration state. Resolve smart clips written as @{{type:id}} references when possible, create subagent sessions for harness clips when appropriate, and update the canvas with construct_canvas_update when task state changes.\n\n```markdown\n{}\n```",
             body
         );
-        self.send_input(&params.session_id, prompt.clone()).await?;
+        let delivery = {
+            let summary = entry.summary.read().await;
+            canvas_execution_delivery(&*summary)
+        };
+        match delivery {
+            CanvasExecutionDelivery::PtySubmit => {
+                let mut bytes = prompt.clone().into_bytes();
+                bytes.push(b'\r');
+                self.pty_input(&params.session_id, bytes).await?;
+            }
+            CanvasExecutionDelivery::AdapterInput => {
+                self.send_input(&params.session_id, prompt.clone()).await?;
+            }
+        }
         Ok(CanvasExecuteResult {
             canvas: result.canvas,
             prompt,
@@ -3889,6 +3923,27 @@ mod tests {
             archived: false,
             operator_loop_disabled: false,
         }
+    }
+
+    #[test]
+    fn canvas_execution_submits_to_pty_backed_sessions() {
+        let summary = placement_summary("s1", 0, None, agentd_protocol::SessionKind::User);
+
+        assert_eq!(
+            canvas_execution_delivery(&summary),
+            CanvasExecutionDelivery::PtySubmit
+        );
+    }
+
+    #[test]
+    fn canvas_execution_uses_adapter_input_for_headless_sessions() {
+        let mut summary = placement_summary("s1", 0, None, agentd_protocol::SessionKind::User);
+        summary.has_pty = false;
+
+        assert_eq!(
+            canvas_execution_delivery(&summary),
+            CanvasExecutionDelivery::AdapterInput
+        );
     }
 
     #[test]
