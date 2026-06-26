@@ -252,6 +252,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_view_uncollapse_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
+    app.sync_canvas_popup_with_selection();
     render_canvas_popup(f, app);
     render_tasks_popup(f, app);
     render_remote_control_popup(f, app);
@@ -7081,23 +7082,53 @@ fn render_canvas_popup(f: &mut Frame, app: &mut App) {
         .is_some_and(|popup| popup.closing && now >= popup.hide_after)
     {
         app.canvas_popup = None;
-        return;
     }
-    let Some(popup) = app.canvas_popup.as_ref() else {
-        return;
-    };
-    let base_rect = app
-        .layout
-        .main_window_areas
-        .iter()
-        .find(|hit| hit.id == app.active_window_id)
-        .map(|hit| hit.area)
-        .or(app.layout.view_area)
-        .unwrap_or_else(|| f.area());
+
+    let active_session_id = app
+        .canvas_popup
+        .as_ref()
+        .map(|popup| popup.canvas.session_id.clone());
+    let mut popups: Vec<(crate::app::CanvasPopup, Rect, bool)> = Vec::new();
+    for hit in &app.layout.main_window_areas {
+        let Some(crate::app::Selection::Session(session_id)) = app.selection_for_window(hit.id)
+        else {
+            continue;
+        };
+        if active_session_id.as_deref() == Some(session_id.as_str()) {
+            continue;
+        }
+        if let Some(popup) = app.canvas_popups.get(&session_id) {
+            popups.push((popup.clone(), hit.area, false));
+        }
+    }
+    if let Some(popup) = app.canvas_popup.as_ref() {
+        let base_rect = app
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|hit| hit.id == app.active_window_id)
+            .map(|hit| hit.area)
+            .or(app.layout.view_area)
+            .unwrap_or_else(|| f.area());
+        app.layout.modal_area = Some(base_rect);
+        popups.push((popup.clone(), base_rect, true));
+    }
+    for (popup, base_rect, active) in popups {
+        render_canvas_popup_at(f, app, &popup, base_rect, active, now);
+    }
+}
+
+fn render_canvas_popup_at(
+    f: &mut Frame,
+    app: &App,
+    popup: &crate::app::CanvasPopup,
+    base_rect: Rect,
+    active: bool,
+    now: Instant,
+) {
     if base_rect.width < 40 || base_rect.height < 8 {
         return;
     }
-    app.layout.modal_area = Some(base_rect);
 
     let progress = if popup.closing {
         popup
@@ -7158,7 +7189,8 @@ fn render_canvas_popup(f: &mut Frame, app: &mut App) {
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
 
-    let mut lines = render_canvas_markdown_lines(app, &popup.buffer);
+    let selection = canvas_selection_range(popup);
+    let mut lines = render_canvas_markdown_lines(app, &popup.buffer, selection);
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "Type Markdown here. Use @{session:id}, @{harness:codex}, or :::clip blocks.",
@@ -7168,7 +7200,7 @@ fn render_canvas_popup(f: &mut Frame, app: &mut App) {
     let visible: Vec<Line> = lines.into_iter().take(inner.height as usize).collect();
     let para = Paragraph::new(visible).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
-    if !popup.closing {
+    if active && !popup.closing {
         if let Some(pos) = canvas_cursor_position(&popup.buffer, popup.cursor, inner) {
             render_editor_cursor(f, pos, &app.theme);
         }
@@ -7226,21 +7258,50 @@ fn canvas_visual_col_for_line(raw: &str, raw_col: usize) -> usize {
     }
 }
 
-fn render_canvas_markdown_lines<'a>(app: &App, markdown: &'a str) -> Vec<Line<'a>> {
+fn canvas_selection_range(popup: &crate::app::CanvasPopup) -> Option<(usize, usize)> {
+    let selection = popup.selection.as_ref()?;
+    let start = selection.anchor.min(selection.head);
+    let end = selection.anchor.max(selection.head);
+    (start != end).then_some((start, end))
+}
+
+fn render_canvas_markdown_lines<'a>(
+    app: &App,
+    markdown: &'a str,
+    selection: Option<(usize, usize)>,
+) -> Vec<Line<'a>> {
     let mut out = Vec::new();
+    let mut line_start = 0usize;
     for raw in markdown.lines() {
         let trimmed = raw.trim();
+        let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
         if trimmed.is_empty() {
             out.push(Line::from(""));
         } else if let Some(level) = canvas_heading_level(trimmed) {
-            out.push(render_canvas_heading_line(&app.theme, level, trimmed));
+            out.push(render_canvas_heading_line(
+                &app.theme,
+                level,
+                trimmed,
+                line_start + leading,
+                selection,
+            ));
         } else if let Some(rest) = trimmed.strip_prefix("- ") {
             let mut spans = vec![Span::styled("  • ", Style::default().fg(app.theme.accent))];
-            spans.extend(render_canvas_inline_spans(app, rest));
+            spans.extend(render_canvas_inline_spans(
+                app,
+                rest,
+                line_start + leading + 2,
+                selection,
+            ));
             out.push(Line::from(spans));
         } else if let Some(rest) = trimmed.strip_prefix("* ") {
             let mut spans = vec![Span::styled("  • ", Style::default().fg(app.theme.accent))];
-            spans.extend(render_canvas_inline_spans(app, rest));
+            spans.extend(render_canvas_inline_spans(
+                app,
+                rest,
+                line_start + leading + 2,
+                selection,
+            ));
             out.push(Line::from(spans));
         } else if let Some(rest) = trimmed.strip_prefix(":::clip") {
             out.push(Line::from(vec![
@@ -7257,8 +7318,11 @@ fn render_canvas_markdown_lines<'a>(app: &App, markdown: &'a str) -> Vec<Line<'a
                 Style::default().fg(app.theme.dim),
             )));
         } else {
-            out.push(Line::from(render_canvas_inline_spans(app, raw)));
+            out.push(Line::from(render_canvas_inline_spans(
+                app, raw, line_start, selection,
+            )));
         }
+        line_start += raw.chars().count() + 1;
     }
     out
 }
@@ -7275,46 +7339,101 @@ fn canvas_heading_level(trimmed: &str) -> Option<u8> {
     }
 }
 
-fn render_canvas_heading_line(theme: &Theme, level: u8, text: &str) -> Line<'static> {
+fn render_canvas_heading_line(
+    theme: &Theme,
+    level: u8,
+    text: &str,
+    base: usize,
+    selection: Option<(usize, usize)>,
+) -> Line<'static> {
     let fg = match level {
         1 => theme.accent,
         2 => theme.accent_alt,
         _ => theme.info,
     };
-    Line::from(Span::styled(
-        text.to_string(),
-        Style::default().fg(fg).add_modifier(Modifier::BOLD),
-    ))
+    let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
+    Line::from(canvas_text_spans(theme, text, base, style, selection))
 }
 
-fn render_canvas_inline_spans<'a>(app: &App, text: &'a str) -> Vec<Span<'a>> {
+fn render_canvas_inline_spans<'a>(
+    app: &App,
+    text: &'a str,
+    base: usize,
+    selection: Option<(usize, usize)>,
+) -> Vec<Span<'a>> {
     let mut spans = Vec::new();
     let mut rest = text;
+    let mut offset = 0usize;
     while let Some(start) = rest.find("@{") {
         let (before, after_start) = rest.split_at(start);
         if !before.is_empty() {
-            spans.push(Span::styled(
-                before.to_string(),
+            spans.extend(canvas_text_spans(
+                &app.theme,
+                before,
+                base + offset,
                 Style::default().fg(app.theme.text),
+                selection,
             ));
         }
         let after_marker = &after_start[2..];
         let Some(end) = after_marker.find('}') else {
-            spans.push(Span::styled(
-                after_start.to_string(),
+            spans.extend(canvas_text_spans(
+                &app.theme,
+                after_start,
+                base + offset + before.chars().count(),
                 Style::default().fg(app.theme.text),
+                selection,
             ));
             return spans;
         };
         let raw_clip = &after_marker[..end];
         spans.push(canvas_smart_clip_span(app, raw_clip));
+        offset += before.chars().count() + 2 + raw_clip.chars().count() + 1;
         rest = &after_marker[end + 1..];
     }
     if !rest.is_empty() {
-        spans.push(Span::styled(
-            rest.to_string(),
+        spans.extend(canvas_text_spans(
+            &app.theme,
+            rest,
+            base + offset,
             Style::default().fg(app.theme.text),
+            selection,
         ));
+    }
+    spans
+}
+
+fn canvas_text_spans<'a>(
+    theme: &Theme,
+    text: &str,
+    base: usize,
+    style: Style,
+    selection: Option<(usize, usize)>,
+) -> Vec<Span<'a>> {
+    let Some((sel_start, sel_end)) = selection else {
+        return vec![Span::styled(text.to_string(), style)];
+    };
+    let mut spans = Vec::new();
+    let mut chunk = String::new();
+    let mut chunk_selected: Option<bool> = None;
+    for (idx, ch) in text.chars().enumerate() {
+        let selected = base + idx >= sel_start && base + idx < sel_end;
+        if chunk_selected.is_some_and(|current| current != selected) {
+            let mut chunk_style = style;
+            if chunk_selected == Some(true) {
+                chunk_style = chunk_style.bg(theme.inactive_highlight_bg);
+            }
+            spans.push(Span::styled(std::mem::take(&mut chunk), chunk_style));
+        }
+        chunk_selected = Some(selected);
+        chunk.push(ch);
+    }
+    if !chunk.is_empty() {
+        let mut chunk_style = style;
+        if chunk_selected == Some(true) {
+            chunk_style = chunk_style.bg(theme.inactive_highlight_bg);
+        }
+        spans.push(Span::styled(chunk, chunk_style));
     }
     spans
 }
@@ -7629,11 +7748,17 @@ mod tests {
     fn canvas_heading_rendering_keeps_markdown_marker() {
         let theme = Theme::default();
         assert_eq!(
-            line_text(&render_canvas_heading_line(&theme, 1, "# Todo")),
+            line_text(&render_canvas_heading_line(&theme, 1, "# Todo", 0, None)),
             "# Todo"
         );
         assert_eq!(
-            line_text(&render_canvas_heading_line(&theme, 2, "## Progress")),
+            line_text(&render_canvas_heading_line(
+                &theme,
+                2,
+                "## Progress",
+                0,
+                None
+            )),
             "## Progress"
         );
     }

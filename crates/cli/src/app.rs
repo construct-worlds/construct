@@ -771,6 +771,11 @@ pub struct App {
     pub tasks_popup: Option<TasksPopup>,
     /// Selected session's canvas, rendered in an in-TUI modal.
     pub canvas_popup: Option<CanvasPopup>,
+    /// Open canvas popups for sessions that are not currently selected.
+    /// Presence means the canvas should be restored when that session is
+    /// focused again, including unsaved draft text and cursor state.
+    pub canvas_popups: HashMap<String, CanvasPopup>,
+    pub canvas_clipboard: Option<String>,
     /// Live `/remote-control` modal — URL + QR for the active
     /// remote-WS deployment. `Some` while open, `None` otherwise.
     /// Dismissed with Esc the same way `tasks_popup` is.
@@ -1259,9 +1264,17 @@ pub struct CanvasPopup {
     pub saved_markdown: String,
     pub cursor: usize,
     pub preferred_col: Option<usize>,
+    pub selection: Option<CanvasSelection>,
     pub revealed_at: Instant,
     pub hide_after: Instant,
     pub closing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanvasSelection {
+    pub anchor: usize,
+    pub head: usize,
+    pub dragged: bool,
 }
 
 /// Live state of the `/remote-control` (or `/remote-control-debug`)
@@ -1805,6 +1818,8 @@ async fn run_with_socket_initial_selection(
         orchestrator_desired_size: None,
         tasks_popup: None,
         canvas_popup: None,
+        canvas_popups: HashMap::new(),
+        canvas_clipboard: None,
         remote_control_popup: None,
         remote_control_task: None,
         terminal_pane_size: (100, 30),
@@ -2498,6 +2513,11 @@ impl App {
 
     async fn on_paste(&mut self, text: String) {
         if text.is_empty() {
+            return;
+        }
+
+        if self.canvas_popup.is_some() {
+            self.insert_canvas_text(&text);
             return;
         }
 
@@ -3387,7 +3407,7 @@ impl App {
         self.main_windows.set_selection(active_id, replacement);
     }
 
-    fn selection_for_window(&self, target: u64) -> Option<Selection> {
+    pub(crate) fn selection_for_window(&self, target: u64) -> Option<Selection> {
         fn find(node: &MainWindowTree, target: u64) -> Option<Selection> {
             match node {
                 MainWindowTree::Leaf { id, selection } if *id == target => Some(selection.clone()),
@@ -4453,6 +4473,9 @@ impl App {
         // the child's own scroll/click/selection handling works. Skipped while
         // a construct-owned drag gesture (pane/list resize, scrollbar, text
         // selection) is in flight so those finish under our control.
+        if self.handle_canvas_mouse(&ev).await {
+            return;
+        }
         if self.resizing_list.is_none()
             && self.resizing_pin_strip.is_none()
             && self.resizing_orchestrator_panel.is_none()
@@ -5098,20 +5121,30 @@ impl App {
         if let Some(modal) = self.layout.modal_area {
             if !contains(modal, col, row) {
                 if self.canvas_popup.is_some() {
-                    self.close_canvas_popup().await;
+                    if self
+                        .layout
+                        .main_window_areas
+                        .iter()
+                        .any(|hit| hit.id != self.active_window_id && contains(hit.area, col, row))
+                    {
+                        self.stash_active_canvas_popup();
+                    } else {
+                        self.close_canvas_popup().await;
+                        return;
+                    }
                 } else {
                     self.dismiss_modal();
+                    return;
                 }
-                return;
-            }
-            if self.canvas_popup.is_some() {
+            } else if self.canvas_popup.is_some() {
                 self.place_canvas_cursor(modal, col, row);
                 return;
+            } else {
+                // The current modals are informational/read-only. Clicks
+                // inside them are consumed so they don't focus or activate
+                // controls in panes underneath the modal.
+                return;
             }
-            // The current modals are informational/read-only. Clicks
-            // inside them are consumed so they don't focus or activate
-            // controls in panes underneath the modal.
-            return;
         }
         if let Some(hit) = self.url_hit_at(col, row) {
             match open_url(&hit.url) {
@@ -6495,12 +6528,14 @@ impl App {
                 let version = result.canvas.version;
                 let markdown = result.canvas.markdown.clone();
                 let now = Instant::now();
+                self.canvas_popups.remove(&result.canvas.session_id);
                 self.canvas_popup = Some(CanvasPopup {
                     canvas: result.canvas,
                     buffer: markdown.clone(),
                     saved_markdown: markdown,
                     cursor: 0,
                     preferred_col: None,
+                    selection: None,
                     revealed_at: now,
                     hide_after: now + Duration::from_secs(365 * 24 * 60 * 60),
                     closing: false,
@@ -6518,6 +6553,33 @@ impl App {
             self.close_canvas_popup().await;
         } else {
             self.open_canvas_popup().await;
+        }
+    }
+
+    pub fn sync_canvas_popup_with_selection(&mut self) {
+        let selected_id = self.selection.session_id().map(str::to_string);
+        let active_id = self
+            .canvas_popup
+            .as_ref()
+            .map(|popup| popup.canvas.session_id.clone());
+        if active_id.as_deref() == selected_id.as_deref() {
+            return;
+        }
+        self.stash_active_canvas_popup();
+        if let Some(selected_id) = selected_id {
+            if let Some(mut popup) = self.canvas_popups.remove(&selected_id) {
+                popup.closing = false;
+                self.canvas_popup = Some(popup);
+            }
+        }
+    }
+
+    fn stash_active_canvas_popup(&mut self) {
+        if let Some(popup) = self.canvas_popup.take() {
+            if !popup.closing {
+                self.canvas_popups
+                    .insert(popup.canvas.session_id.clone(), popup);
+            }
         }
     }
 
@@ -6560,6 +6622,7 @@ impl App {
             return;
         }
         if let Some(popup) = self.canvas_popup.as_mut() {
+            self.canvas_popups.remove(&popup.canvas.session_id);
             let now = Instant::now();
             popup.closing = true;
             popup.hide_after = now + Duration::from_millis(CANVAS_REVEAL_MS);
@@ -6571,22 +6634,71 @@ impl App {
             return;
         };
         popup.closing = false;
-        let inner_x = modal
-            .x
-            .saturating_add(1)
-            .saturating_add(CANVAS_CONTENT_PADDING_X);
-        let inner_y = modal
-            .y
-            .saturating_add(1)
-            .saturating_add(CANVAS_CONTENT_PADDING_Y);
-        if row < inner_y {
-            popup.cursor = 0;
-            return;
-        }
-        let target_line = row.saturating_sub(inner_y) as usize;
-        let target_col = col.saturating_sub(inner_x) as usize;
-        popup.cursor = canvas_cursor_for_line_col(&popup.buffer, target_line, target_col);
+        popup.cursor = canvas_cursor_at_modal_point(&popup.buffer, modal, col, row).unwrap_or(0);
         popup.preferred_col = None;
+        popup.selection = None;
+    }
+
+    async fn handle_canvas_mouse(&mut self, ev: &MouseEvent) -> bool {
+        use crossterm::event::MouseButton;
+        let Some(modal) = self.layout.modal_area else {
+            return false;
+        };
+        if self.canvas_popup.is_none() {
+            return false;
+        }
+        let contains = ev.column >= modal.x
+            && ev.column < modal.x.saturating_add(modal.width)
+            && ev.row >= modal.y
+            && ev.row < modal.y.saturating_add(modal.height);
+        if !contains {
+            return false;
+        }
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(popup) = self.canvas_popup.as_mut() else {
+                    return true;
+                };
+                let cursor = canvas_cursor_at_modal_point(&popup.buffer, modal, ev.column, ev.row)
+                    .unwrap_or(0);
+                popup.cursor = cursor;
+                popup.preferred_col = None;
+                popup.selection = Some(CanvasSelection {
+                    anchor: cursor,
+                    head: cursor,
+                    dragged: false,
+                });
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(popup) = self.canvas_popup.as_mut() else {
+                    return true;
+                };
+                let cursor = canvas_cursor_at_modal_point(&popup.buffer, modal, ev.column, ev.row)
+                    .unwrap_or(0);
+                popup.cursor = cursor;
+                popup.preferred_col = None;
+                if let Some(selection) = popup.selection.as_mut() {
+                    selection.dragged = selection.dragged || selection.head != cursor;
+                    selection.head = cursor;
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let should_copy = self
+                    .canvas_popup
+                    .as_ref()
+                    .and_then(|popup| popup.selection.as_ref())
+                    .is_some_and(|selection| selection.dragged);
+                if should_copy {
+                    self.copy_canvas_selection();
+                } else if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.selection = None;
+                }
+                true
+            }
+            _ => true,
+        }
     }
 
     async fn handle_canvas_key(&mut self, key: KeyEvent) {
@@ -6601,25 +6713,31 @@ impl App {
                 self.save_canvas_popup().await;
             }
             KeyCode::Char('g') if ctrl => self.close_canvas_popup().await,
+            KeyCode::Char(' ') if ctrl => self.begin_canvas_selection(),
             KeyCode::Char('a') if ctrl => {
                 if let Some(popup) = self.canvas_popup.as_mut() {
                     popup.cursor = canvas_line_start(&popup.buffer, popup.cursor);
                     popup.preferred_col = None;
+                    Self::update_canvas_selection_head(popup);
                 }
             }
             KeyCode::Char('e') if ctrl => {
                 if let Some(popup) = self.canvas_popup.as_mut() {
                     popup.cursor = canvas_line_end(&popup.buffer, popup.cursor);
                     popup.preferred_col = None;
+                    Self::update_canvas_selection_head(popup);
                 }
             }
             KeyCode::Char('b') if ctrl => self.move_canvas_cursor(-1),
             KeyCode::Char('f') if ctrl => self.move_canvas_cursor(1),
             KeyCode::Char('p') if ctrl => self.move_canvas_cursor_vertical(-1),
             KeyCode::Char('n') if ctrl => self.move_canvas_cursor_vertical(1),
+            KeyCode::Char('v') if ctrl => self.paste_canvas_clipboard(),
+            KeyCode::Char('y') if ctrl => self.paste_canvas_clipboard(),
+            KeyCode::Char('w') if ctrl => self.cut_canvas_selection(),
             KeyCode::Char('d') if ctrl => self.delete_canvas_forward(),
             KeyCode::Char('h') if ctrl => self.delete_canvas_back(),
-            KeyCode::Char('k') if ctrl => self.kill_canvas_line(),
+            KeyCode::Char('k') if ctrl => self.cut_canvas_line(),
             KeyCode::Enter => self.insert_canvas_text("\n"),
             KeyCode::Backspace => self.delete_canvas_back(),
             KeyCode::Delete => self.delete_canvas_forward(),
@@ -6631,12 +6749,14 @@ impl App {
                 if let Some(popup) = self.canvas_popup.as_mut() {
                     popup.cursor = canvas_line_start(&popup.buffer, popup.cursor);
                     popup.preferred_col = None;
+                    Self::update_canvas_selection_head(popup);
                 }
             }
             KeyCode::End => {
                 if let Some(popup) = self.canvas_popup.as_mut() {
                     popup.cursor = canvas_line_end(&popup.buffer, popup.cursor);
                     popup.preferred_col = None;
+                    Self::update_canvas_selection_head(popup);
                 }
             }
             KeyCode::Char(c) if !ctrl && !alt => self.insert_canvas_text(&c.to_string()),
@@ -6668,7 +6788,123 @@ impl App {
         true
     }
 
+    fn begin_canvas_selection(&mut self) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        popup.selection = Some(CanvasSelection {
+            anchor: popup.cursor,
+            head: popup.cursor,
+            dragged: false,
+        });
+        self.set_status("canvas selection started".to_string());
+    }
+
+    fn update_canvas_selection_head(popup: &mut CanvasPopup) {
+        if let Some(selection) = popup.selection.as_mut() {
+            selection.head = popup.cursor;
+        }
+    }
+
+    fn canvas_selection_range(popup: &CanvasPopup) -> Option<(usize, usize)> {
+        let selection = popup.selection.as_ref()?;
+        let start = selection.anchor.min(selection.head);
+        let end = selection.anchor.max(selection.head);
+        (start != end).then_some((start, end))
+    }
+
+    fn selected_canvas_text(popup: &CanvasPopup) -> Option<String> {
+        let (start, end) = Self::canvas_selection_range(popup)?;
+        let start_b = byte_pos(&popup.buffer, start);
+        let end_b = byte_pos(&popup.buffer, end);
+        Some(popup.buffer[start_b..end_b].to_string())
+    }
+
+    fn delete_canvas_selection(&mut self) -> Option<String> {
+        let popup = self.canvas_popup.as_mut()?;
+        let (start, end) = Self::canvas_selection_range(popup)?;
+        let start_b = byte_pos(&popup.buffer, start);
+        let end_b = byte_pos(&popup.buffer, end);
+        let deleted = popup.buffer[start_b..end_b].to_string();
+        popup.buffer.replace_range(start_b..end_b, "");
+        popup.cursor = start;
+        popup.preferred_col = None;
+        popup.selection = None;
+        Some(deleted)
+    }
+
+    fn copy_canvas_text(&mut self, text: &str, verb: &str) {
+        self.canvas_clipboard = Some(text.to_string());
+        match copy_to_clipboard(text) {
+            Ok(outcome) => self.set_status(outcome.status(text.chars().count())),
+            Err(e) => self.set_status(format!("{verb} failed: {e}")),
+        }
+    }
+
+    fn copy_canvas_selection(&mut self) {
+        let Some(text) = self
+            .canvas_popup
+            .as_ref()
+            .and_then(Self::selected_canvas_text)
+        else {
+            return;
+        };
+        if !text.is_empty() {
+            self.copy_canvas_text(&text, "copy");
+        }
+    }
+
+    fn cut_canvas_selection(&mut self) {
+        let Some(text) = self.delete_canvas_selection() else {
+            return;
+        };
+        if !text.is_empty() {
+            self.copy_canvas_text(&text, "cut");
+        }
+    }
+
+    fn paste_canvas_clipboard(&mut self) {
+        let text = self
+            .canvas_clipboard
+            .clone()
+            .or_else(|| read_from_clipboard().ok());
+        let Some(text) = text else {
+            self.set_status("canvas paste failed: clipboard unavailable".to_string());
+            return;
+        };
+        if !text.is_empty() {
+            self.insert_canvas_text(&text);
+        }
+    }
+
+    fn cut_canvas_line(&mut self) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        let start = byte_pos(&popup.buffer, popup.cursor);
+        let line_end = canvas_line_end(&popup.buffer, popup.cursor);
+        let mut end = byte_pos(&popup.buffer, line_end);
+        if start == end && end < popup.buffer.len() {
+            end += 1;
+        }
+        let cut = popup.buffer[start..end].to_string();
+        popup.buffer.replace_range(start..end, "");
+        popup.preferred_col = None;
+        popup.selection = None;
+        if !cut.is_empty() {
+            self.copy_canvas_text(&cut, "cut");
+        }
+    }
+
     fn insert_canvas_text(&mut self, text: &str) {
+        if self
+            .canvas_popup
+            .as_ref()
+            .and_then(Self::canvas_selection_range)
+            .is_some()
+        {
+            self.delete_canvas_selection();
+        }
         let Some(popup) = self.canvas_popup.as_mut() else {
             return;
         };
@@ -6676,6 +6912,7 @@ impl App {
         popup.buffer.insert_str(pos, text);
         popup.cursor += text.chars().count();
         popup.preferred_col = None;
+        popup.selection = None;
     }
 
     fn move_canvas_cursor(&mut self, delta: isize) {
@@ -6689,6 +6926,7 @@ impl App {
             popup.cursor = (popup.cursor + delta as usize).min(len);
         }
         popup.preferred_col = None;
+        Self::update_canvas_selection_head(popup);
     }
 
     fn move_canvas_cursor_vertical(&mut self, delta: isize) {
@@ -6704,9 +6942,13 @@ impl App {
         };
         popup.cursor = canvas_cursor_for_line_col(&popup.buffer, next_line, target_col);
         popup.preferred_col = Some(target_col);
+        Self::update_canvas_selection_head(popup);
     }
 
     fn delete_canvas_back(&mut self) {
+        if self.delete_canvas_selection().is_some() {
+            return;
+        }
         let Some(popup) = self.canvas_popup.as_mut() else {
             return;
         };
@@ -6718,9 +6960,13 @@ impl App {
         popup.buffer.replace_range(start..end, "");
         popup.cursor -= 1;
         popup.preferred_col = None;
+        popup.selection = None;
     }
 
     fn delete_canvas_forward(&mut self) {
+        if self.delete_canvas_selection().is_some() {
+            return;
+        }
         let Some(popup) = self.canvas_popup.as_mut() else {
             return;
         };
@@ -6731,20 +6977,7 @@ impl App {
         let end = byte_pos(&popup.buffer, popup.cursor + 1);
         popup.buffer.replace_range(start..end, "");
         popup.preferred_col = None;
-    }
-
-    fn kill_canvas_line(&mut self) {
-        let Some(popup) = self.canvas_popup.as_mut() else {
-            return;
-        };
-        let start = byte_pos(&popup.buffer, popup.cursor);
-        let line_end = canvas_line_end(&popup.buffer, popup.cursor);
-        let mut end = byte_pos(&popup.buffer, line_end);
-        if start == end && end < popup.buffer.len() {
-            end += 1;
-        }
-        popup.buffer.replace_range(start..end, "");
-        popup.preferred_col = None;
+        popup.selection = None;
     }
 
     async fn run_action(&mut self, action: KeyAction) {
@@ -8621,6 +8854,15 @@ fn copy_with_pbcopy(text: &str) -> Result<()> {
     }
 }
 
+fn read_from_clipboard() -> Result<String> {
+    let output = Command::new("pbpaste").output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        anyhow::bail!("pbpaste exited with {}", output.status)
+    }
+}
+
 /// Build the OSC 52 clipboard-write escape sequence for `text`: the terminal
 /// that receives it copies the (base64-encoded) payload to the system
 /// clipboard of the machine the terminal runs on.
@@ -8728,6 +8970,28 @@ fn byte_pos(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or(s.len())
+}
+
+fn canvas_cursor_at_modal_point(
+    buffer: &str,
+    modal: ratatui::layout::Rect,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    let inner_x = modal
+        .x
+        .saturating_add(1)
+        .saturating_add(CANVAS_CONTENT_PADDING_X);
+    let inner_y = modal
+        .y
+        .saturating_add(1)
+        .saturating_add(CANVAS_CONTENT_PADDING_Y);
+    if row < inner_y {
+        return None;
+    }
+    let target_line = row.saturating_sub(inner_y) as usize;
+    let target_col = col.saturating_sub(inner_x) as usize;
+    Some(canvas_cursor_for_line_col(buffer, target_line, target_col))
 }
 
 fn canvas_line_col(s: &str, cursor: usize) -> (usize, usize) {
@@ -9130,6 +9394,8 @@ mod tests {
             list_collapsed: false,
             tasks_popup: None,
             canvas_popup: None,
+            canvas_popups: HashMap::new(),
+            canvas_clipboard: None,
             remote_control_popup: None,
             remote_control_task: None,
             editor_states: HashMap::new(),
@@ -9205,6 +9471,65 @@ mod tests {
             archived: false,
             operator_loop_disabled: false,
         }
+    }
+
+    fn canvas_popup_for_test(session_id: &str, markdown: &str, cursor: usize) -> CanvasPopup {
+        let now = Instant::now();
+        CanvasPopup {
+            canvas: agentd_protocol::CanvasDocument {
+                session_id: session_id.to_string(),
+                markdown: markdown.to_string(),
+                version: 1,
+                updated_at_ms: 0,
+                template_id: None,
+            },
+            buffer: markdown.to_string(),
+            saved_markdown: markdown.to_string(),
+            cursor,
+            preferred_col: None,
+            selection: None,
+            revealed_at: now,
+            hide_after: now + Duration::from_secs(60),
+            closing: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn canvas_open_state_is_preserved_per_session() {
+        let (mut app, _dir, server) = empty_app().await;
+        let s1 = summary_with_kind(agentd_protocol::SessionKind::User);
+        let mut s2 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s2.id = "s2".into();
+        app.sessions = vec![s1, s2];
+        app.selection = Selection::Session("s1".into());
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 3));
+
+        app.selection = Selection::Session("s2".into());
+        app.sync_canvas_popup_with_selection();
+        assert!(app.canvas_popup.is_none());
+        assert!(app.canvas_popups.contains_key("s1"));
+
+        app.selection = Selection::Session("s1".into());
+        app.sync_canvas_popup_with_selection();
+        let popup = app.canvas_popup.as_ref().expect("s1 canvas restored");
+        assert_eq!(popup.buffer, "draft");
+        assert_eq!(popup.cursor, 3);
+        assert!(!app.canvas_popups.contains_key("s1"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_selection_cut_and_insert_replaces_selection() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "abcdef", 2));
+        app.begin_canvas_selection();
+        app.move_canvas_cursor(3);
+        app.cut_canvas_selection();
+        assert_eq!(app.canvas_clipboard.as_deref(), Some("cde"));
+        assert_eq!(app.canvas_popup.as_ref().unwrap().buffer, "abf");
+        app.insert_canvas_text("XY");
+        assert_eq!(app.canvas_popup.as_ref().unwrap().buffer, "abXYf");
+        server.abort();
     }
 
     #[test]
@@ -9471,6 +9796,71 @@ mod tests {
         assert!(
             app.terminal_scrollbar_visible_until(Some(1)).is_none(),
             "at-bottom sibling split must not reveal a scrollbar overlay"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_open_state_survives_split_focus_changes() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut second = summary_with_kind(agentd_protocol::SessionKind::User);
+        second.id = "s2".into();
+        second.has_pty = true;
+        app.sessions.push(second);
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        app.focus = PaneFocus::View;
+        app.layout.main_window_areas = vec![
+            WindowPaneHit {
+                id: 1,
+                area: Rect::new(20, 0, 40, 20),
+                inner_area: Rect::new(21, 1, 38, 18),
+            },
+            WindowPaneHit {
+                id: 2,
+                area: Rect::new(60, 0, 40, 20),
+                inner_area: Rect::new(61, 1, 38, 18),
+            },
+        ];
+        app.layout.modal_area = Some(Rect::new(20, 0, 40, 20));
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 3));
+
+        app.handle_left_click(65, 5).await;
+
+        assert_eq!(app.active_window_id, 2);
+        assert_eq!(app.selection, Selection::Session("s2".into()));
+        assert!(app.canvas_popup.is_none());
+        assert!(
+            app.canvas_popups.contains_key("s1"),
+            "clicking another split should stash, not close, the open canvas"
+        );
+
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        app.sync_canvas_popup_with_selection();
+        assert!(app.canvas_popup.is_some());
+
+        app.run_action(KeyAction::SwitchFocus).await;
+        app.sync_canvas_popup_with_selection();
+
+        assert_eq!(app.active_window_id, 2);
+        assert_eq!(app.selection, Selection::Session("s2".into()));
+        assert!(app.canvas_popup.is_none());
+        assert!(
+            app.canvas_popups.contains_key("s1"),
+            "C-x o should keep split 1's canvas attached to split 1's session"
         );
         server.abort();
     }
