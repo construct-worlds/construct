@@ -30,6 +30,9 @@ const MATRIX_WALLPAPER_DIM: f32 = 0.22;
 /// terminal-view overlay and the matrix-rain wallpaper.
 const PREVIEW_REVEAL_SECS: f32 = 1.0;
 const CANVAS_REVEAL_SECS: f32 = CANVAS_REVEAL_MS as f32 / 1000.0;
+const CANVAS_RUN_BUTTON: &str = " ▶ ";
+const CANVAS_SELECTION_RUN_MENU_W: u16 = 9;
+const CANVAS_SELECTION_RUN_MENU_H: u16 = 3;
 
 /// Row-fraction range `[start, end)` of a preview image to paint this
 /// frame. On appear the image fills from the top over `PREVIEW_REVEAL_SECS`
@@ -7076,6 +7079,8 @@ fn render_tasks_popup(f: &mut Frame, app: &mut App) {
 
 fn render_canvas_popup(f: &mut Frame, app: &mut App) {
     let now = Instant::now();
+    app.layout.canvas_title_run_hit = None;
+    app.layout.canvas_selection_run_hit = None;
     if app
         .canvas_popup
         .as_ref()
@@ -7120,7 +7125,7 @@ fn render_canvas_popup(f: &mut Frame, app: &mut App) {
 
 fn render_canvas_popup_at(
     f: &mut Frame,
-    app: &App,
+    app: &mut App,
     popup: &crate::app::CanvasPopup,
     base_rect: Rect,
     active: bool,
@@ -7158,9 +7163,32 @@ fn render_canvas_popup_at(
     let summary = app
         .sessions
         .iter()
-        .find(|s| s.id == popup.canvas.session_id);
-    let title = canvas_title_line(app, popup, summary, rect, active);
-    let harness_right = summary.map(|s| {
+        .find(|s| s.id == popup.canvas.session_id)
+        .cloned();
+    let summary_ref = summary.as_ref();
+    let title = canvas_title_line(app, popup, summary_ref, rect, active);
+    let title_run_hit = canvas_title_run_button_range(rect, summary_ref);
+    let run_hovered = title_run_hit
+        .zip(app.mouse_pos)
+        .is_some_and(|((xs, xe, y), (mx, my))| my == y && mx >= xs && mx < xe);
+    let run_style = if run_hovered {
+        Style::default()
+            .fg(app.theme.text)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        let fg = if active {
+            app.theme.accent
+        } else {
+            app.theme.muted
+        };
+        Style::default().fg(fg).add_modifier(Modifier::BOLD)
+    };
+    let run_right = Line::from(Span::styled(CANVAS_RUN_BUTTON, run_style))
+        .alignment(ratatui::layout::Alignment::Right);
+    if active {
+        app.layout.canvas_title_run_hit = title_run_hit;
+    }
+    let harness_right = summary_ref.map(|s| {
         Line::from(Span::styled(
             format!(" {} ", harness_label(s)),
             canvas_border_style(&app.theme, active),
@@ -7170,7 +7198,8 @@ fn render_canvas_popup_at(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(canvas_border_style(&app.theme, active))
-        .title(title);
+        .title(title)
+        .title(run_right);
     let block = if let Some(h) = harness_right {
         block.title(h)
     } else {
@@ -7200,7 +7229,10 @@ fn render_canvas_popup_at(
             render_canvas_smart_clip_picker(f, app, popup, pos, inner);
         }
     }
-    render_canvas_title_tooltip(f, app, popup, summary, rect);
+    if active && !popup.closing {
+        render_canvas_selection_context_menu(f, app, popup, inner);
+    }
+    render_canvas_title_tooltip(f, app, popup, summary_ref, rect);
 }
 
 fn canvas_border_style(theme: &Theme, active: bool) -> Style {
@@ -7283,6 +7315,29 @@ fn canvas_title_marker_width(dirty: bool) -> usize {
         }
 }
 
+fn canvas_title_run_button_range(
+    rect: Rect,
+    summary: Option<&agentd_protocol::SessionSummary>,
+) -> Option<(u16, u16, u16)> {
+    if rect.width < 8 {
+        return None;
+    }
+    let run_w = UnicodeWidthStr::width(CANVAS_RUN_BUTTON) as u16;
+    let harness_w = summary
+        .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()) as u16)
+        .unwrap_or(0);
+    let x_end = rect
+        .x
+        .saturating_add(rect.width)
+        .saturating_sub(1)
+        .saturating_sub(harness_w);
+    let x_start = x_end.saturating_sub(run_w);
+    if x_start <= rect.x {
+        return None;
+    }
+    Some((x_start, x_end, rect.y))
+}
+
 fn render_canvas_title_tooltip(
     f: &mut Frame,
     app: &App,
@@ -7296,6 +7351,12 @@ fn render_canvas_title_tooltip(
     if my != rect.y {
         return;
     }
+    if let Some((xs, xe, y)) = app.layout.canvas_title_run_hit {
+        if my == y && mx >= xs && mx < xe {
+            render_button_tooltip(f, &app.theme, " Run canvas ", mx, my);
+            return;
+        }
+    }
     let dirty = popup.buffer != popup.saved_markdown;
     let marker_ranges = canvas_title_marker_ranges(app, popup, summary, rect, dirty);
     if mx >= marker_ranges.canvas.0 && mx < marker_ranges.canvas.1 {
@@ -7304,6 +7365,73 @@ fn render_canvas_title_tooltip(
         if mx >= start && mx < end {
             render_button_tooltip(f, &app.theme, " C-x C-s save ", mx, my);
         }
+    }
+}
+
+fn render_canvas_selection_context_menu(
+    f: &mut Frame,
+    app: &mut App,
+    popup: &crate::app::CanvasPopup,
+    canvas_area: Rect,
+) {
+    if canvas_selection_range(popup).is_none() {
+        app.layout.canvas_selection_run_hit = None;
+        return;
+    }
+    let Some(pos) = canvas_cursor_position(Some(app), &popup.buffer, popup.cursor, canvas_area)
+    else {
+        app.layout.canvas_selection_run_hit = None;
+        return;
+    };
+    let rect = canvas_selection_context_menu_rect(pos, canvas_area);
+    let hit = (
+        rect.x.saturating_add(1),
+        rect.x.saturating_add(rect.width.saturating_sub(1)),
+        rect.y.saturating_add(1),
+    );
+    app.layout.canvas_selection_run_hit = Some(hit);
+    let hovered = app
+        .mouse_pos
+        .is_some_and(|(mx, my)| my == hit.2 && mx >= hit.0 && mx < hit.1);
+    let style = if hovered {
+        Style::default()
+            .fg(app.theme.text)
+            .bg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.accent)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border));
+    let para = Paragraph::new(Line::from(Span::styled("▶ Run", style)));
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        para,
+        Rect {
+            x: hit.0,
+            y: hit.2,
+            width: hit.1.saturating_sub(hit.0),
+            height: 1,
+        },
+    );
+}
+
+fn canvas_selection_context_menu_rect(pos: Position, total: Rect) -> Rect {
+    let max_x = total
+        .x
+        .saturating_add(total.width)
+        .saturating_sub(CANVAS_SELECTION_RUN_MENU_W);
+    let max_y = total
+        .y
+        .saturating_add(total.height)
+        .saturating_sub(CANVAS_SELECTION_RUN_MENU_H);
+    Rect {
+        x: pos.x.saturating_add(1).min(max_x),
+        y: pos.y.saturating_add(1).min(max_y),
+        width: CANVAS_SELECTION_RUN_MENU_W.min(total.width),
+        height: CANVAS_SELECTION_RUN_MENU_H.min(total.height),
     }
 }
 

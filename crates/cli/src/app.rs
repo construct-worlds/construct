@@ -1566,6 +1566,10 @@ pub struct LayoutSnapshot {
     /// Mouse clicks outside this rect dismiss the modal instead of
     /// falling through to panes underneath it.
     pub modal_area: Option<ratatui::layout::Rect>,
+    /// Canvas title-bar Run button bounds: `(x_start, x_end, y)`.
+    pub canvas_title_run_hit: Option<(u16, u16, u16)>,
+    /// Canvas selected-text context Run button bounds: `(x_start, x_end, y)`.
+    pub canvas_selection_run_hit: Option<(u16, u16, u16)>,
     /// Bounds of the browser preview overlay rendered in the terminal view.
     pub browser_preview_area: Option<ratatui::layout::Rect>,
     /// Top-right close button bounds for the browser preview overlay: `(x_start, x_end, y)`.
@@ -6741,6 +6745,50 @@ impl App {
         }
     }
 
+    async fn execute_canvas_popup(&mut self, selection: Option<String>) -> bool {
+        let Some(session_id) = self
+            .canvas_popup
+            .as_ref()
+            .map(|popup| popup.canvas.session_id.clone())
+        else {
+            self.set_status("canvas run failed: no active canvas".to_string());
+            return false;
+        };
+
+        let dirty = self
+            .canvas_popup
+            .as_ref()
+            .is_some_and(|popup| popup.buffer != popup.saved_markdown);
+        if dirty && !self.save_canvas_popup().await {
+            return false;
+        }
+
+        let base_version = self
+            .canvas_popup
+            .as_ref()
+            .map(|popup| popup.canvas.version);
+        let is_selection = selection.is_some();
+        let params = agentd_protocol::CanvasExecuteParams {
+            session_id,
+            selection,
+            base_version,
+        };
+        match self.client.canvas_execute(params).await {
+            Ok(result) => {
+                let scope = if is_selection { "selection" } else { "canvas" };
+                self.set_status(format!(
+                    "canvas run sent ({scope}, version {})",
+                    result.canvas.version
+                ));
+                true
+            }
+            Err(e) => {
+                self.set_status(format!("canvas run failed: {e}"));
+                false
+            }
+        }
+    }
+
     async fn close_canvas_popup(&mut self) {
         if !self.save_canvas_popup().await {
             return;
@@ -6778,6 +6826,25 @@ impl App {
             && ev.row < modal.y.saturating_add(modal.height);
         if !contains {
             return false;
+        }
+        let title_run_hit = self.layout.canvas_title_run_hit;
+        let selection_run_hit = self.layout.canvas_selection_run_hit;
+        let hit_title_run = title_run_hit
+            .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
+        let hit_selection_run = selection_run_hit
+            .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
+        if hit_title_run || hit_selection_run {
+            if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let selection = hit_selection_run
+                    .then(|| {
+                        self.canvas_popup
+                            .as_ref()
+                            .and_then(Self::selected_canvas_text)
+                    })
+                    .flatten();
+                self.execute_canvas_popup(selection).await;
+            }
+            return true;
         }
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -9736,6 +9803,8 @@ mod tests {
             shortcut_hints: Vec::new(),
             minibuffer_harness_hits: Vec::new(),
             modal_area: None,
+            canvas_title_run_hit: None,
+            canvas_selection_run_hit: None,
             browser_preview_area: None,
             browser_preview_close: None,
             terminal_scrollbar: None,
@@ -9990,6 +10059,127 @@ mod tests {
         let popup = app.canvas_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "draft changed");
         assert_eq!(popup.saved_markdown, "draft");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_render_registers_run_affordance_hits() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.canvas_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(CANVAS_REVEAL_MS);
+        }
+        app.begin_canvas_selection();
+        app.move_canvas_cursor(5);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("canvas should render");
+        let text = rendered_text(term.backend().buffer());
+
+        assert!(text.contains("▶"), "title run icon should render: {text:?}");
+        assert!(text.contains("Run"), "selection run menu should render: {text:?}");
+        assert!(app.layout.canvas_title_run_hit.is_some());
+        assert!(app.layout.canvas_selection_run_hit.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_execute_selection_saves_then_runs_selected_text() {
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use tempfile::tempdir;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let params = req.get("params").cloned().unwrap_or(Value::Null);
+                let _ = seen_tx.send((method.clone(), params.clone()));
+                let canvas = serde_json::json!({
+                    "session_id": "s1",
+                    "markdown": params
+                        .get("markdown")
+                        .and_then(Value::as_str)
+                        .unwrap_or("alpha beta"),
+                    "version": 2,
+                    "updated_at_ms": 0,
+                    "template_id": null,
+                });
+                let result = match method.as_str() {
+                    ipc_method::CANVAS_UPDATE => serde_json::json!({ "canvas": canvas }),
+                    ipc_method::CANVAS_EXECUTE => {
+                        serde_json::json!({ "canvas": canvas, "prompt": "sent" })
+                    }
+                    _ => Value::Null,
+                };
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                });
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(client, Vec::new());
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "alpha beta", 0));
+        app.canvas_popup.as_mut().unwrap().buffer = "alpha beta changed".to_string();
+
+        assert!(app.execute_canvas_popup(Some("beta".to_string())).await);
+
+        let (first_method, first_params) = seen_rx.recv().await.expect("canvas update request");
+        let (second_method, second_params) = seen_rx.recv().await.expect("canvas execute request");
+        assert_eq!(first_method, ipc_method::CANVAS_UPDATE);
+        assert_eq!(
+            first_params.get("markdown").and_then(Value::as_str),
+            Some("alpha beta changed")
+        );
+        assert_eq!(second_method, ipc_method::CANVAS_EXECUTE);
+        assert_eq!(
+            second_params.get("selection").and_then(Value::as_str),
+            Some("beta")
+        );
+        assert_eq!(
+            second_params.get("base_version").and_then(Value::as_u64),
+            Some(2)
+        );
         server.abort();
     }
 
