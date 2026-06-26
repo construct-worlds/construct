@@ -6545,7 +6545,7 @@ impl App {
         if let Some(popup) = self.canvas_popup.as_mut() {
             let now = Instant::now();
             popup.closing = true;
-            popup.hide_after = now + Duration::from_secs(1);
+            popup.hide_after = now + Duration::from_millis(180);
         }
     }
 

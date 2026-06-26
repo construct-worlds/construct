@@ -28,6 +28,7 @@ const MATRIX_WALLPAPER_DIM: f32 = 0.22;
 /// appear, and the top-to-bottom erase on disappear. Applies to both the
 /// terminal-view overlay and the matrix-rain wallpaper.
 const PREVIEW_REVEAL_SECS: f32 = 1.0;
+const CANVAS_REVEAL_SECS: f32 = 0.18;
 
 /// Row-fraction range `[start, end)` of a preview image to paint this
 /// frame. On appear the image fills from the top over `PREVIEW_REVEAL_SECS`
@@ -7084,34 +7085,42 @@ fn render_canvas_popup(f: &mut Frame, app: &mut App) {
     let Some(popup) = app.canvas_popup.as_ref() else {
         return;
     };
-    let total = f.area();
-    let w = total.width.saturating_sub(6).min(110);
-    let h = total.height.saturating_sub(4).min(32).max(8);
-    if w < 40 || h < 8 {
+    let base_rect = app
+        .layout
+        .main_window_areas
+        .iter()
+        .find(|hit| hit.id == app.active_window_id)
+        .map(|hit| hit.area)
+        .or(app.layout.view_area)
+        .unwrap_or_else(|| f.area());
+    if base_rect.width < 40 || base_rect.height < 8 {
         return;
     }
-    let x = total.x + (total.width.saturating_sub(w)) / 2;
-    let y = total.y + (total.height.saturating_sub(h)) / 2;
+    app.layout.modal_area = Some(base_rect);
+
+    let progress = if popup.closing {
+        popup
+            .hide_after
+            .saturating_duration_since(now)
+            .as_secs_f32()
+            / CANVAS_REVEAL_SECS
+    } else {
+        now.saturating_duration_since(popup.revealed_at)
+            .as_secs_f32()
+            / CANVAS_REVEAL_SECS
+    }
+    .clamp(0.0, 1.0);
+    if progress <= 0.0 {
+        return;
+    }
+    let visible_h = ((base_rect.height as f32 * progress).ceil() as u16)
+        .clamp(1, base_rect.height);
+    if visible_h == 0 {
+        return;
+    }
     let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-    app.layout.modal_area = Some(rect);
-    let row_frac = preview_reveal_range(popup.revealed_at, popup.hide_after, now, false);
-    if row_frac.1 <= row_frac.0 {
-        return;
-    }
-    let start_row = ((rect.height as f32 * row_frac.0).floor() as u16).min(rect.height);
-    let end_row = ((rect.height as f32 * row_frac.1).ceil() as u16).min(rect.height);
-    if end_row <= start_row {
-        return;
-    }
-    let rect = Rect {
-        y: rect.y + start_row,
-        height: end_row - start_row,
-        ..rect
+        height: visible_h,
+        ..base_rect
     };
 
     let template = popup
