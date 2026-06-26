@@ -250,6 +250,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_view_uncollapse_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
+    render_canvas_popup(f, app);
     render_tasks_popup(f, app);
     render_remote_control_popup(f, app);
     if app.help_visible {
@@ -5888,7 +5889,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-x b           switch focused window to an existing session
     C-x i           send input to selected session
     C-x k           delete selected session (confirms; kills if running)
-    C-x e           edit selected session's canvas in $VISUAL/$EDITOR
+    C-x e           open selected session's canvas
     C-x d           show diff
     C-x r           rename selected session (clears title on empty submit)
     C-x f           fork selected session into a new harness (seeded w/ history)
@@ -7068,6 +7069,201 @@ fn render_tasks_popup(f: &mut Frame, app: &mut App) {
     }
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
+}
+
+fn render_canvas_popup(f: &mut Frame, app: &mut App) {
+    let Some(popup) = app.canvas_popup.as_ref() else {
+        return;
+    };
+    let total = f.area();
+    let w = total.width.saturating_sub(6).min(110);
+    let h = total.height.saturating_sub(4).min(32).max(8);
+    if w < 40 || h < 8 {
+        return;
+    }
+    let x = total.x + (total.width.saturating_sub(w)) / 2;
+    let y = total.y + (total.height.saturating_sub(h)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    app.layout.modal_area = Some(rect);
+
+    let template = popup
+        .canvas
+        .template_id
+        .as_deref()
+        .map(|id| format!(" · {id}"))
+        .unwrap_or_default();
+    let title = format!(
+        " canvas — {} · v{}{} — Esc to close ",
+        short_id(&popup.canvas.session_id),
+        popup.canvas.version,
+        template
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border_focused))
+        .title(Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(app.theme.accent_alt)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(rect);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+
+    let mut lines = render_canvas_markdown_lines(app, &popup.canvas.markdown);
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Select a template or add Markdown with `construct canvas set`.",
+            Style::default().fg(app.theme.dim),
+        )));
+    }
+    let visible: Vec<Line> = lines.into_iter().take(inner.height as usize).collect();
+    let para = Paragraph::new(visible).wrap(Wrap { trim: false });
+    f.render_widget(para, inner);
+}
+
+fn render_canvas_markdown_lines<'a>(app: &App, markdown: &'a str) -> Vec<Line<'a>> {
+    let mut out = Vec::new();
+    for raw in markdown.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            out.push(Line::from(""));
+        } else if let Some(rest) = trimmed.strip_prefix("### ") {
+            out.push(Line::from(Span::styled(
+                rest.to_string(),
+                Style::default()
+                    .fg(app.theme.info)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        } else if let Some(rest) = trimmed.strip_prefix("## ") {
+            out.push(Line::from(Span::styled(
+                rest.to_string(),
+                Style::default()
+                    .fg(app.theme.accent_alt)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        } else if let Some(rest) = trimmed.strip_prefix("# ") {
+            out.push(Line::from(Span::styled(
+                rest.to_string(),
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        } else if let Some(rest) = trimmed.strip_prefix("- ") {
+            let mut spans = vec![Span::styled("  • ", Style::default().fg(app.theme.accent))];
+            spans.extend(render_canvas_inline_spans(app, rest));
+            out.push(Line::from(spans));
+        } else if let Some(rest) = trimmed.strip_prefix("* ") {
+            let mut spans = vec![Span::styled("  • ", Style::default().fg(app.theme.accent))];
+            spans.extend(render_canvas_inline_spans(app, rest));
+            out.push(Line::from(spans));
+        } else if let Some(rest) = trimmed.strip_prefix(":::clip") {
+            out.push(Line::from(vec![
+                Span::raw("  "),
+                canvas_chip_span(
+                    format!("clip {}", rest.trim()).trim(),
+                    app.theme.highlight_fg,
+                    app.theme.info,
+                ),
+            ]));
+        } else if trimmed == ":::" {
+            out.push(Line::from(Span::styled(
+                "  end clip",
+                Style::default().fg(app.theme.dim),
+            )));
+        } else {
+            out.push(Line::from(render_canvas_inline_spans(app, raw)));
+        }
+    }
+    out
+}
+
+fn render_canvas_inline_spans<'a>(app: &App, text: &'a str) -> Vec<Span<'a>> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("@{") {
+        let (before, after_start) = rest.split_at(start);
+        if !before.is_empty() {
+            spans.push(Span::styled(
+                before.to_string(),
+                Style::default().fg(app.theme.text),
+            ));
+        }
+        let after_marker = &after_start[2..];
+        let Some(end) = after_marker.find('}') else {
+            spans.push(Span::styled(
+                after_start.to_string(),
+                Style::default().fg(app.theme.text),
+            ));
+            return spans;
+        };
+        let raw_clip = &after_marker[..end];
+        spans.push(canvas_smart_clip_span(app, raw_clip));
+        rest = &after_marker[end + 1..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(
+            rest.to_string(),
+            Style::default().fg(app.theme.text),
+        ));
+    }
+    spans
+}
+
+fn canvas_smart_clip_span<'a>(app: &App, raw_clip: &str) -> Span<'a> {
+    let first = raw_clip.split_whitespace().next().unwrap_or(raw_clip);
+    let (kind, id) = first.split_once(':').unwrap_or(("clip", first));
+    let label = match kind {
+        "session" => app
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| {
+                let model = s.model.as_deref().unwrap_or(s.harness.as_str());
+                format!(
+                    "session {} · {} · {}",
+                    primary_label(s),
+                    model,
+                    s.state.label()
+                )
+            })
+            .unwrap_or_else(|| format!("session {id}")),
+        "harness" => app
+            .harnesses
+            .iter()
+            .find(|h| h.name == id)
+            .map(|h| {
+                let status = if h.available { "available" } else { "missing" };
+                format!("harness {} · {status}", h.name)
+            })
+            .unwrap_or_else(|| format!("harness {id}")),
+        "session-response" => format!("response {id}"),
+        _ => format!("{kind} {id}"),
+    };
+    let bg = match kind {
+        "session" => app.theme.accent_alt,
+        "harness" => app.theme.harness,
+        "session-response" => app.theme.info,
+        _ => app.theme.inactive_highlight_bg,
+    };
+    canvas_chip_span(label, app.theme.highlight_fg, bg)
+}
+
+fn canvas_chip_span<'a>(
+    label: impl AsRef<str>,
+    fg: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) -> Span<'a> {
+    Span::styled(
+        format!(" {} ", label.as_ref()),
+        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+    )
 }
 
 /// Centered modal that paints either the URL+QR (success) or a

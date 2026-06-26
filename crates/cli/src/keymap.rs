@@ -23,7 +23,7 @@ pub enum KeyAction {
     /// default layout. Bound to `C-x z` (emacs) / `z` (vim), matching
     /// tmux's `prefix z` (zoom-pane).
     ToggleZoom,
-    /// Open the selected session's canvas in an external editor. Bound to
+    /// Open the selected session's in-TUI canvas surface. Bound to
     /// `C-x e` in both profiles because bare modifier double-taps are not
     /// delivered reliably by terminal emulators.
     OpenCanvas,

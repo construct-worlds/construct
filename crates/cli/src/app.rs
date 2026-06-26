@@ -766,6 +766,8 @@ pub struct App {
     /// /tasks popup state: `None` = closed, `Some(...)` = open with
     /// a snapshot of the session's task registry.
     pub tasks_popup: Option<TasksPopup>,
+    /// Selected session's canvas, rendered in an in-TUI modal.
+    pub canvas_popup: Option<CanvasPopup>,
     /// Live `/remote-control` modal — URL + QR for the active
     /// remote-WS deployment. `Some` while open, `None` otherwise.
     /// Dismissed with Esc the same way `tasks_popup` is.
@@ -1243,6 +1245,13 @@ fn coalesce_pty_input(
 pub struct TasksPopup {
     pub session_id: String,
     pub tasks: Vec<agentd_protocol::TaskInfo>,
+}
+
+/// In-TUI canvas surface for the selected session. The renderer treats
+/// Markdown as source and projects smart clips as chips/blocks.
+#[derive(Debug, Clone)]
+pub struct CanvasPopup {
+    pub canvas: agentd_protocol::CanvasDocument,
 }
 
 /// Live state of the `/remote-control` (or `/remote-control-debug`)
@@ -1785,6 +1794,7 @@ async fn run_with_socket_initial_selection(
         matrix_reveal_hits: Vec::new(),
         orchestrator_desired_size: None,
         tasks_popup: None,
+        canvas_popup: None,
         remote_control_popup: None,
         remote_control_task: None,
         terminal_pane_size: (100, 30),
@@ -5243,6 +5253,9 @@ impl App {
     }
 
     fn dismiss_modal(&mut self) {
+        if self.canvas_popup.take().is_some() {
+            return;
+        }
         if self.tasks_popup.take().is_some() {
             return;
         }
@@ -5986,6 +5999,12 @@ impl App {
                 return;
             }
         }
+        if self.canvas_popup.is_some() {
+            if matches!(key.code, KeyCode::Esc) {
+                self.canvas_popup = None;
+            }
+            return;
+        }
         // /remote-control modal: Esc closes the popup *and* the
         // orchestrator panel it was launched from, so a single Esc
         // returns the user to whichever session they had focused
@@ -6446,110 +6465,24 @@ impl App {
             && live
     }
 
-    async fn open_canvas_editor(&mut self) {
+    async fn open_canvas_popup(&mut self) {
         let Some(session_id) = self.selected_id() else {
             self.set_status("canvas: no session selected".to_string());
             return;
         };
 
-        let current = match self.client.canvas_get(&session_id).await {
-            Ok(result) => result.canvas,
+        match self.client.canvas_get(&session_id).await {
+            Ok(result) => {
+                let version = result.canvas.version;
+                self.canvas_popup = Some(CanvasPopup {
+                    canvas: result.canvas,
+                });
+                self.set_status(format!("canvas opened at version {version}"));
+            }
             Err(e) => {
                 self.set_status(format!("canvas get failed: {e}"));
-                return;
             }
-        };
-
-        let dir = match tempfile::tempdir() {
-            Ok(dir) => dir,
-            Err(e) => {
-                self.set_status(format!("canvas tempdir failed: {e}"));
-                return;
-            }
-        };
-        let path = dir.path().join("canvas.md");
-        if let Err(e) = std::fs::write(&path, &current.markdown) {
-            self.set_status(format!("canvas write failed: {e}"));
-            return;
         }
-
-        let editor = std::env::var_os("VISUAL")
-            .or_else(|| std::env::var_os("EDITOR"))
-            .unwrap_or_else(|| OsStr::new("vi").to_os_string());
-        let editor_status = match self.run_external_editor(&editor, &path) {
-            Ok(status) => status,
-            Err(e) => {
-                self.set_status(format!("canvas editor failed: {e}"));
-                return;
-            }
-        };
-        if !editor_status.success() {
-            self.set_status(format!("canvas editor exited with {editor_status}"));
-            return;
-        }
-
-        let markdown = match std::fs::read_to_string(&path) {
-            Ok(markdown) => markdown,
-            Err(e) => {
-                self.set_status(format!("canvas read failed: {e}"));
-                return;
-            }
-        };
-        if markdown == current.markdown {
-            self.set_status(format!("canvas unchanged at version {}", current.version));
-            return;
-        }
-
-        match self
-            .client
-            .canvas_update(agentd_protocol::CanvasUpdateParams {
-                session_id,
-                markdown,
-                base_version: Some(current.version),
-                actor: agentd_protocol::CanvasUpdateActor::Human,
-                template_id: current.template_id,
-                note: None,
-            })
-            .await
-        {
-            Ok(result) => {
-                self.set_status(format!("canvas saved version {}", result.canvas.version))
-            }
-            Err(e) => self.set_status(format!("canvas save failed: {e}")),
-        }
-    }
-
-    fn run_external_editor(
-        &mut self,
-        editor: &OsStr,
-        path: &std::path::Path,
-    ) -> std::io::Result<std::process::ExitStatus> {
-        self.suspend_terminal_for_external_editor();
-        let status = Command::new(editor).arg(path).status();
-        self.restore_terminal_after_external_editor();
-        status
-    }
-
-    fn suspend_terminal_for_external_editor(&mut self) {
-        self.mouse_pos = None;
-        let mut stdout = std::io::stdout();
-        let _ = disable_raw_mode();
-        let _ = execute!(stdout, DisableBracketedPaste);
-        if self.mouse_capture_enabled {
-            let _ = execute!(stdout, DisableMouseCapture);
-        }
-        let _ = execute!(stdout, LeaveAlternateScreen);
-        let _ = stdout.flush();
-    }
-
-    fn restore_terminal_after_external_editor(&mut self) {
-        let mut stdout = std::io::stdout();
-        let _ = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste);
-        if self.mouse_capture_enabled {
-            let _ = execute!(stdout, EnableMouseCapture);
-        }
-        let _ = enable_raw_mode();
-        let _ = stdout.flush();
     }
 
     async fn run_action(&mut self, action: KeyAction) {
@@ -6693,7 +6626,7 @@ impl App {
                 Selection::ArchivedRow(_) => {}
             },
             OpenCanvas => {
-                self.open_canvas_editor().await;
+                self.open_canvas_popup().await;
             }
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
@@ -8872,6 +8805,7 @@ mod tests {
             resizing_main_window: None,
             list_collapsed: false,
             tasks_popup: None,
+            canvas_popup: None,
             remote_control_popup: None,
             remote_control_task: None,
             editor_states: HashMap::new(),
