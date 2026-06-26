@@ -1,7 +1,7 @@
 //! Ratatui rendering for the TUI.
 
 use crate::app::{
-    App, CANVAS_CONTENT_PADDING_X, CANVAS_CONTENT_PADDING_Y, HarnessHit, HintZone,
+    App, CANVAS_CONTENT_PADDING_X, CANVAS_CONTENT_PADDING_Y, CANVAS_REVEAL_MS, HarnessHit, HintZone,
     ListItem as AppListItem, MainWindowTree, Minibuffer, MinibufferIntent, PaneFocus, ScreenPoint,
     Selection, TextSelectionRange, ViewMode, WindowDividerHit, WindowPaneHit,
     WindowSplitDirection, ZoomMode,
@@ -29,7 +29,7 @@ const MATRIX_WALLPAPER_DIM: f32 = 0.22;
 /// appear, and the top-to-bottom erase on disappear. Applies to both the
 /// terminal-view overlay and the matrix-rain wallpaper.
 const PREVIEW_REVEAL_SECS: f32 = 1.0;
-const CANVAS_REVEAL_SECS: f32 = 0.24;
+const CANVAS_REVEAL_SECS: f32 = CANVAS_REVEAL_MS as f32 / 1000.0;
 
 /// Row-fraction range `[start, end)` of a preview image to paint this
 /// frame. On appear the image fills from the top over `PREVIEW_REVEAL_SECS`

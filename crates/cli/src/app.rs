@@ -47,6 +47,7 @@ pub const SCROLLBACK_MAX: usize = 5_000;
 pub const MINIBUFFER_PANEL_H_DEFAULT: u16 = 13;
 pub const MINIBUFFER_PANEL_H_MIN: u16 = 3;
 pub const MINIBUFFER_PANEL_H_MAX: u16 = 80;
+pub(crate) const CANVAS_REVEAL_MS: u64 = 240;
 pub(crate) const CANVAS_CONTENT_PADDING_X: u16 = 1;
 pub(crate) const CANVAS_CONTENT_PADDING_Y: u16 = 1;
 const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
@@ -1257,6 +1258,7 @@ pub struct CanvasPopup {
     pub buffer: String,
     pub saved_markdown: String,
     pub cursor: usize,
+    pub preferred_col: Option<usize>,
     pub revealed_at: Instant,
     pub hide_after: Instant,
     pub closing: bool,
@@ -6498,6 +6500,7 @@ impl App {
                     buffer: markdown.clone(),
                     saved_markdown: markdown,
                     cursor: 0,
+                    preferred_col: None,
                     revealed_at: now,
                     hide_after: now + Duration::from_secs(365 * 24 * 60 * 60),
                     closing: false,
@@ -6507,6 +6510,14 @@ impl App {
             Err(e) => {
                 self.set_status(format!("canvas get failed: {e}"));
             }
+        }
+    }
+
+    async fn toggle_canvas_popup(&mut self) {
+        if self.canvas_popup.is_some() {
+            self.close_canvas_popup().await;
+        } else {
+            self.open_canvas_popup().await;
         }
     }
 
@@ -6532,6 +6543,7 @@ impl App {
                     popup.buffer = result.canvas.markdown.clone();
                     popup.saved_markdown = result.canvas.markdown;
                     popup.cursor = popup.cursor.min(popup.buffer.chars().count());
+                    popup.preferred_col = None;
                 }
                 self.set_status(format!("canvas saved version {}", result.canvas.version));
                 true
@@ -6550,7 +6562,7 @@ impl App {
         if let Some(popup) = self.canvas_popup.as_mut() {
             let now = Instant::now();
             popup.closing = true;
-            popup.hide_after = now + Duration::from_millis(180);
+            popup.hide_after = now + Duration::from_millis(CANVAS_REVEAL_MS);
         }
     }
 
@@ -6574,6 +6586,7 @@ impl App {
         let target_line = row.saturating_sub(inner_y) as usize;
         let target_col = col.saturating_sub(inner_x) as usize;
         popup.cursor = canvas_cursor_for_line_col(&popup.buffer, target_line, target_col);
+        popup.preferred_col = None;
     }
 
     async fn handle_canvas_key(&mut self, key: KeyEvent) {
@@ -6591,11 +6604,13 @@ impl App {
             KeyCode::Char('a') if ctrl => {
                 if let Some(popup) = self.canvas_popup.as_mut() {
                     popup.cursor = canvas_line_start(&popup.buffer, popup.cursor);
+                    popup.preferred_col = None;
                 }
             }
             KeyCode::Char('e') if ctrl => {
                 if let Some(popup) = self.canvas_popup.as_mut() {
                     popup.cursor = canvas_line_end(&popup.buffer, popup.cursor);
+                    popup.preferred_col = None;
                 }
             }
             KeyCode::Char('b') if ctrl => self.move_canvas_cursor(-1),
@@ -6615,11 +6630,13 @@ impl App {
             KeyCode::Home => {
                 if let Some(popup) = self.canvas_popup.as_mut() {
                     popup.cursor = canvas_line_start(&popup.buffer, popup.cursor);
+                    popup.preferred_col = None;
                 }
             }
             KeyCode::End => {
                 if let Some(popup) = self.canvas_popup.as_mut() {
                     popup.cursor = canvas_line_end(&popup.buffer, popup.cursor);
+                    popup.preferred_col = None;
                 }
             }
             KeyCode::Char(c) if !ctrl && !alt => self.insert_canvas_text(&c.to_string()),
@@ -6658,6 +6675,7 @@ impl App {
         let pos = byte_pos(&popup.buffer, popup.cursor);
         popup.buffer.insert_str(pos, text);
         popup.cursor += text.chars().count();
+        popup.preferred_col = None;
     }
 
     fn move_canvas_cursor(&mut self, delta: isize) {
@@ -6670,6 +6688,7 @@ impl App {
         } else {
             popup.cursor = (popup.cursor + delta as usize).min(len);
         }
+        popup.preferred_col = None;
     }
 
     fn move_canvas_cursor_vertical(&mut self, delta: isize) {
@@ -6677,12 +6696,14 @@ impl App {
             return;
         };
         let (line, col) = canvas_line_col(&popup.buffer, popup.cursor);
+        let target_col = popup.preferred_col.unwrap_or(col);
         let next_line = if delta < 0 {
             line.saturating_sub(delta.unsigned_abs())
         } else {
             line.saturating_add(delta as usize)
         };
-        popup.cursor = canvas_cursor_for_line_col(&popup.buffer, next_line, col);
+        popup.cursor = canvas_cursor_for_line_col(&popup.buffer, next_line, target_col);
+        popup.preferred_col = Some(target_col);
     }
 
     fn delete_canvas_back(&mut self) {
@@ -6696,6 +6717,7 @@ impl App {
         let end = byte_pos(&popup.buffer, popup.cursor);
         popup.buffer.replace_range(start..end, "");
         popup.cursor -= 1;
+        popup.preferred_col = None;
     }
 
     fn delete_canvas_forward(&mut self) {
@@ -6708,6 +6730,7 @@ impl App {
         let start = byte_pos(&popup.buffer, popup.cursor);
         let end = byte_pos(&popup.buffer, popup.cursor + 1);
         popup.buffer.replace_range(start..end, "");
+        popup.preferred_col = None;
     }
 
     fn kill_canvas_line(&mut self) {
@@ -6721,6 +6744,7 @@ impl App {
             end += 1;
         }
         popup.buffer.replace_range(start..end, "");
+        popup.preferred_col = None;
     }
 
     async fn run_action(&mut self, action: KeyAction) {
@@ -6864,7 +6888,7 @@ impl App {
                 Selection::ArchivedRow(_) => {}
             },
             OpenCanvas => {
-                self.open_canvas_popup().await;
+                self.toggle_canvas_popup().await;
             }
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
