@@ -48,7 +48,6 @@ const PTY_REPLAY_CAP: usize = 8 * 1024 * 1024;
 const RESPAWN_REDRAW_POLL: Duration = Duration::from_millis(100);
 const RESPAWN_REDRAW_SETTLE: Duration = Duration::from_millis(400);
 const RESPAWN_REDRAW_MAX_WAIT: Duration = Duration::from_secs(6);
-const CANVAS_EXTERNAL_PTY_SUBMIT_DELAY: Duration = Duration::from_millis(2000);
 
 /// Whether the post-resume force-redraw should fire now: the child has
 /// produced PTY output and then gone quiet for [`RESPAWN_REDRAW_SETTLE`],
@@ -482,30 +481,18 @@ fn should_record_pty_user_message(harness: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CanvasExecutionDelivery {
     AdapterInput,
+    SessionInput,
     PtySubmit,
-    PtyPasteThenSubmit,
 }
 
 fn canvas_execution_delivery(summary: &agentd_protocol::SessionSummary) -> CanvasExecutionDelivery {
     if !summary.has_pty {
         CanvasExecutionDelivery::AdapterInput
     } else if matches!(summary.harness.as_str(), "claude" | "codex" | "antigravity") {
-        CanvasExecutionDelivery::PtyPasteThenSubmit
+        CanvasExecutionDelivery::SessionInput
     } else {
         CanvasExecutionDelivery::PtySubmit
     }
-}
-
-fn canvas_execution_paste_bytes(prompt: &str) -> Vec<u8> {
-    const START: &str = "\x1b[200~";
-    const END: &str = "\x1b[201~";
-
-    let sanitized = prompt.replace(END, "");
-    let mut bytes = Vec::with_capacity(START.len() + sanitized.len() + END.len());
-    bytes.extend_from_slice(START.as_bytes());
-    bytes.extend_from_slice(sanitized.as_bytes());
-    bytes.extend_from_slice(END.as_bytes());
-    bytes
 }
 
 impl SessionEntry {
@@ -1414,20 +1401,13 @@ impl SessionManager {
             canvas_execution_delivery(&*summary)
         };
         match delivery {
+            CanvasExecutionDelivery::SessionInput => {
+                self.send_input(&params.session_id, prompt.clone()).await?;
+            }
             CanvasExecutionDelivery::PtySubmit => {
                 let mut bytes = prompt.clone().into_bytes();
                 bytes.push(b'\r');
                 self.pty_input(&params.session_id, bytes).await?;
-            }
-            CanvasExecutionDelivery::PtyPasteThenSubmit => {
-                self.pty_input_without_capture(
-                    &params.session_id,
-                    canvas_execution_paste_bytes(&prompt),
-                )
-                .await?;
-                tokio::time::sleep(CANVAS_EXTERNAL_PTY_SUBMIT_DELAY).await;
-                self.pty_input_without_capture(&params.session_id, vec![b'\r'])
-                    .await?;
             }
             CanvasExecutionDelivery::AdapterInput => {
                 self.send_input(&params.session_id, prompt.clone()).await?;
@@ -2673,10 +2653,6 @@ impl SessionManager {
 
     pub async fn pty_input(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
         self.pty_input_inner(id, bytes, true).await
-    }
-
-    async fn pty_input_without_capture(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
-        self.pty_input_inner(id, bytes, false).await
     }
 
     async fn pty_input_inner(&self, id: &str, bytes: Vec<u8>, capture: bool) -> Result<()> {
@@ -3973,13 +3949,13 @@ mod tests {
     }
 
     #[test]
-    fn canvas_execution_pastes_then_submits_to_external_agent_pty_sessions() {
+    fn canvas_execution_uses_session_input_for_external_agent_pty_sessions() {
         let mut summary = placement_summary("s1", 0, None, agentd_protocol::SessionKind::User);
         summary.harness = "claude".to_string();
 
         assert_eq!(
             canvas_execution_delivery(&summary),
-            CanvasExecutionDelivery::PtyPasteThenSubmit
+            CanvasExecutionDelivery::SessionInput
         );
     }
 
@@ -3991,14 +3967,6 @@ mod tests {
         assert_eq!(
             canvas_execution_delivery(&summary),
             CanvasExecutionDelivery::AdapterInput
-        );
-    }
-
-    #[test]
-    fn canvas_execution_paste_bytes_wrap_and_sanitize_prompt() {
-        assert_eq!(
-            canvas_execution_paste_bytes("a\x1b[201~b"),
-            b"\x1b[200~ab\x1b[201~".to_vec()
         );
     }
 
