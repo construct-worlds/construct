@@ -19,7 +19,7 @@ Canvas updates use optimistic concurrency. Writers may pass the version they rea
 
 Terminal clients expose canvas through a terminal-deliverable command path rather than modifier-only key gestures. Browser or desktop clients may add richer gestures, but the TUI must keep an explicit keyboard command and palette command for canvas access. That command opens a focused canvas-specific surface that renders Markdown and smart clips, accepts typing/click cursor placement, and saves through the canvas update protocol; raw external-editor workflows are secondary affordances, not the default canvas UI. Opening and closing the surface should use the same reveal/erase visual language as transient browser previews.
 
-The canvas title bar should expose canvas/chat mode with a compact clickable status glyph to the left of the session title instead of a literal `<canvas>` label. The glyph toggles the surface between terminal chat and canvas mode, and its tooltip should describe the current mode, click action, and `C-x Space` shortcut.
+The session title bar should expose canvas/chat mode with a compact clickable status glyph to the left of the session title instead of a literal `<canvas>` label. The glyph toggles the surface between terminal chat and canvas mode, and its tooltip should describe the current mode, click action, and `C-x Space` shortcut.
 
 Client-local canvas visibility is UI state and should survive normal client relaunch. A restarted TUI should reopen the same session canvases by re-reading their documents from the daemon, not by treating its prior render buffer as canonical content.
 

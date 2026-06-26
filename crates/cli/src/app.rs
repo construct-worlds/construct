@@ -5309,6 +5309,16 @@ impl App {
                 // confirmation prompt for the selected session.
                 let (close_x_start, close_x_end, close_y) =
                     crate::ui::view_close_button_range(view);
+                let (toggle_x_start, toggle_x_end, toggle_y) =
+                    crate::ui::view_canvas_toggle_button_range(view);
+                if self.selected_session().is_some()
+                    && row == toggle_y
+                    && col >= toggle_x_start
+                    && col < toggle_x_end
+                {
+                    self.toggle_canvas_popup().await;
+                    return;
+                }
                 if self.selected_session().is_some()
                     && row == close_y
                     && col >= close_x_start
@@ -6619,7 +6629,7 @@ impl App {
         }
     }
 
-    fn open_canvas_session_ids(&self) -> Vec<String> {
+    pub(crate) fn open_canvas_session_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
         let mut seen = HashSet::new();
         if let Some(popup) = self.canvas_popup.as_ref() {
@@ -10205,6 +10215,94 @@ mod tests {
         assert!(app.layout.canvas_title_run_hit.is_some());
         assert!(app.layout.canvas_title_toggle_hit.is_some());
         assert!(app.layout.canvas_selection_run_hit.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_title_canvas_toggle_opens_canvas_from_chat_mode() {
+        use agentd_protocol::ipc_method;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let canvas = serde_json::json!({
+                    "session_id": "s1",
+                    "markdown": "draft",
+                    "version": 1,
+                    "updated_at_ms": 0,
+                    "template_id": null,
+                });
+                let result = match method.as_str() {
+                    ipc_method::CANVAS_GET => serde_json::json!({ "canvas": canvas }),
+                    _ => Value::Null,
+                };
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                });
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(client, vec![summary_with_kind(agentd_protocol::SessionKind::User)]);
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("session title should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(text.contains("○"), "chat mode toggle should render: {text:?}");
+        let view = app.layout.view_area.expect("view area");
+        let (x_start, _x_end, y) = crate::ui::view_canvas_toggle_button_range(view);
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x_start,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: x_start,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert!(app.canvas_popup.is_some(), "clicking the title toggle should open canvas");
         server.abort();
     }
 

@@ -249,6 +249,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_minibuffer(f, minibuffer_area, app);
     render_diamond_tooltip(f, app);
     render_pin_diamond_tooltip(f, app, &pinned_ids);
+    render_view_canvas_toggle_tooltip(f, app);
     render_view_close_tooltip(f, app);
     render_browser_preview_close_tooltip(f, app);
     render_list_title_button_tooltips(f, app);
@@ -693,6 +694,12 @@ pub fn view_close_button_range(view_area: Rect) -> (u16, u16, u16) {
     (x_start, x_end, view_area.y)
 }
 
+pub fn view_canvas_toggle_button_range(view_area: Rect) -> (u16, u16, u16) {
+    let x_start = view_area.x + 2;
+    let x_end = view_area.x + 3;
+    (x_start, x_end, view_area.y)
+}
+
 pub fn dynamic_ui_trigger_range(
     view_area: Rect,
     close_shown: bool,
@@ -796,6 +803,14 @@ fn hovered_view_close_button(app: &App, view_area: Rect) -> bool {
     my == y && mx >= x_start && mx < x_end
 }
 
+fn hovered_view_canvas_toggle_button(app: &App, view_area: Rect) -> bool {
+    let Some((mx, my)) = app.mouse_pos else {
+        return false;
+    };
+    let (x_start, x_end, y) = view_canvas_toggle_button_range(view_area);
+    my == y && mx >= x_start && mx < x_end
+}
+
 /// Hit zone for the pin-tile unpin diamond: 4 cells on the top
 /// border, starting after the corner. Title shape is ` ★ <status>
 /// <label> <harness> `, so cells `tile.x + 1 ..= tile.x + 4`
@@ -882,6 +897,54 @@ fn render_view_close_tooltip(f: &mut Frame, app: &App) {
     }
     let (cx, _, cy) = view_close_button_range(view_area);
     let label = " Close session ";
+    let total = f.area();
+    let inner_w = UnicodeWidthStr::width(label) as u16;
+    let w = inner_w + 2;
+    let h: u16 = 3;
+    let mut tx = cx.saturating_sub(w.saturating_sub(3));
+    let mut ty = cy + 1;
+    if tx + w > total.x + total.width {
+        tx = total.x + total.width.saturating_sub(w);
+    }
+    if ty + h > total.y + total.height {
+        ty = total.y + total.height.saturating_sub(h);
+    }
+    let rect = Rect {
+        x: tx,
+        y: ty,
+        width: w,
+        height: h,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border));
+    let p = Paragraph::new(label)
+        .block(block)
+        .style(Style::default().fg(app.theme.text));
+    f.render_widget(Clear, rect);
+    f.render_widget(p, rect);
+}
+
+fn render_view_canvas_toggle_tooltip(f: &mut Frame, app: &App) {
+    let Some(view_area) = app.layout.view_area else {
+        return;
+    };
+    if !hovered_view_canvas_toggle_button(app, view_area) {
+        return;
+    }
+    let Some(s) = app.selected_session() else {
+        return;
+    };
+    let canvas_open = app
+        .open_canvas_session_ids()
+        .iter()
+        .any(|id| id == &s.id);
+    let (cx, _, cy) = view_canvas_toggle_button_range(view_area);
+    let label = if canvas_open {
+        " Canvas mode: click to return to chat "
+    } else {
+        " Chat mode: click to open canvas "
+    };
     let total = f.area();
     let inner_w = UnicodeWidthStr::width(label) as u16;
     let w = inner_w + 2;
@@ -2811,12 +2874,15 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         .as_ref()
         .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()))
         .unwrap_or(0);
+    let canvas_open = summary
+        .as_ref()
+        .is_some_and(|s| app.open_canvas_session_ids().iter().any(|id| id == &s.id));
     // Label budget = total − 2 corners − right-side blocks − fixed
     // title scaffolding (` <glyph> <label> ` is 3 spaces + glyph
     // width + label).
     let glyph_w = summary
         .as_ref()
-        .map(|s| UnicodeWidthStr::width(session_status_glyph(app, s)))
+        .map(|_| UnicodeWidthStr::width(canvas_mode_glyph(canvas_open)))
         .unwrap_or(0);
     let label_budget = total
         .saturating_sub(2)
@@ -2826,7 +2892,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
     let title = match (summary.as_ref(), group.as_ref()) {
         (Some(s), _) => format!(
             " {} {} ",
-            session_status_glyph(app, s),
+            canvas_mode_glyph(canvas_open),
             truncate_to_width(&primary_label(s), label_budget),
         ),
         (None, Some(g)) => format!(" project: {} ", g.name),
@@ -7169,7 +7235,7 @@ fn render_canvas_popup_at(
     let summary_ref = summary.as_ref();
     let title = canvas_title_line(app, popup, summary_ref, rect, active);
     let title_run_hit = canvas_title_run_button_range(rect, summary_ref);
-    let title_toggle_hit = canvas_title_toggle_button_range(popup, summary_ref, rect);
+    let title_toggle_hit = canvas_title_toggle_button_range(summary_ref, rect);
     let run_hovered = title_run_hit
         .zip(app.mouse_pos)
         .is_some_and(|((xs, xe, y), (mx, my))| my == y && mx >= xs && mx < xe);
@@ -7260,7 +7326,7 @@ fn canvas_title_line<'a>(
     let harness_w = summary
         .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()))
         .unwrap_or(0);
-    let toggle_glyph = canvas_toggle_glyph(popup);
+    let toggle_glyph = canvas_mode_glyph(true);
     let label_budget = (rect.width as usize)
         .saturating_sub(2)
         .saturating_sub(harness_w)
@@ -7311,8 +7377,8 @@ fn canvas_title_marker_width(dirty: bool) -> usize {
     }
 }
 
-fn canvas_toggle_glyph(popup: &crate::app::CanvasPopup) -> &'static str {
-    if popup.closing { "○" } else { "◉" }
+fn canvas_mode_glyph(open: bool) -> &'static str {
+    if open { "◉" } else { "○" }
 }
 
 fn canvas_toggle_style(
@@ -7354,18 +7420,17 @@ fn canvas_title_run_button_range(
 }
 
 fn canvas_title_toggle_button_range(
-    popup: &crate::app::CanvasPopup,
     summary: Option<&agentd_protocol::SessionSummary>,
     rect: Rect,
 ) -> Option<(u16, u16, u16)> {
-    let toggle_w = UnicodeWidthStr::width(canvas_toggle_glyph(popup)) as u16;
+    let toggle_w = UnicodeWidthStr::width(canvas_mode_glyph(true)) as u16;
     if toggle_w == 0 || rect.width < toggle_w.saturating_add(2) {
         return None;
     }
     let harness_w = summary
         .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()) as u16)
         .unwrap_or(0);
-    let x_start = rect.x.saturating_add(1);
+    let x_start = rect.x.saturating_add(2);
     let x_end = x_start.saturating_add(toggle_w);
     let max_x = rect
         .x
@@ -7505,7 +7570,7 @@ fn canvas_title_marker_ranges(
     let harness_w = summary
         .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()))
         .unwrap_or(0);
-    let toggle_w = UnicodeWidthStr::width(canvas_toggle_glyph(popup));
+    let toggle_w = UnicodeWidthStr::width(canvas_mode_glyph(true));
     let label_budget = (rect.width as usize)
         .saturating_sub(2)
         .saturating_sub(harness_w)
