@@ -7328,12 +7328,15 @@ fn render_canvas_smart_clip_picker(
             } else {
                 Style::default().fg(app.theme.muted)
             };
-            lines.push(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(format!("{} ", if selected { ">" } else { " " }), style),
                 Span::styled(candidate.label.clone(), style),
-                Span::styled("  ", style),
-                Span::styled(candidate.detail.clone(), detail_style),
-            ]));
+            ];
+            if !candidate.detail.is_empty() {
+                spans.push(Span::styled("  ", style));
+                spans.push(Span::styled(candidate.detail.clone(), detail_style));
+            }
+            lines.push(Line::from(spans));
         }
     }
     f.render_widget(Paragraph::new(lines), inner);

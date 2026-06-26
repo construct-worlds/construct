@@ -7054,7 +7054,7 @@ impl App {
                     group: CanvasSmartClipGroup::Session,
                     clip: format!("@{{session:{}}}", session.id),
                     label: title,
-                    detail: format!("session · {} · {}", session.harness, session.state.label()),
+                    detail: format!("{} · {}", session.harness, session.state.label()),
                 });
             }
         }
@@ -7067,9 +7067,9 @@ impl App {
             .to_ascii_lowercase();
             if query.is_empty() || haystack.contains(&query) {
                 let detail = if harness.available {
-                    "harness".to_string()
+                    String::new()
                 } else {
-                    "harness · unavailable".to_string()
+                    "unavailable".to_string()
                 };
                 out.push(CanvasSmartClipCandidate {
                     group: CanvasSmartClipGroup::Harness,
@@ -9940,8 +9940,10 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].group, CanvasSmartClipGroup::Session);
         assert_eq!(candidates[0].label, "issue 132");
+        assert_eq!(candidates[0].detail, "shell · running");
         assert_eq!(candidates[1].group, CanvasSmartClipGroup::Harness);
         assert_eq!(candidates[1].label, "codex");
+        assert_eq!(candidates[1].detail, "");
         server.abort();
     }
 
