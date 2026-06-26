@@ -5,7 +5,9 @@ use crate::config::Config;
 use crate::storage::Storage;
 use crate::worktree;
 use agentd_protocol::{
-    ahp_method, ClientView, CreateSessionParams, DeletedNotificationPayload,
+    ahp_method, CanvasDocument, CanvasExecuteParams, CanvasExecuteResult, CanvasGetResult,
+    CanvasListTemplatesResult, CanvasStateNotificationPayload, CanvasUpdateParams,
+    CanvasUpdateResult, ClientView, CreateSessionParams, DeletedNotificationPayload,
     EventNotificationPayload, GroupDeletedNotificationPayload, GroupStateNotificationPayload,
     GroupSummary, HarnessInfo, MessageRole, MoveDirection, PtyReplayResult, PtySize,
     SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
@@ -46,6 +48,7 @@ const PTY_REPLAY_CAP: usize = 8 * 1024 * 1024;
 const RESPAWN_REDRAW_POLL: Duration = Duration::from_millis(100);
 const RESPAWN_REDRAW_SETTLE: Duration = Duration::from_millis(400);
 const RESPAWN_REDRAW_MAX_WAIT: Duration = Duration::from_secs(6);
+const CANVAS_EXTERNAL_PTY_TYPED_CHUNK_DELAY: Duration = Duration::from_millis(12);
 
 /// Whether the post-resume force-redraw should fire now: the child has
 /// produced PTY output and then gone quiet for [`RESPAWN_REDRAW_SETTLE`],
@@ -291,6 +294,7 @@ pub enum BroadcastMsg {
     Deleted(DeletedNotificationPayload),
     GroupState(GroupStateNotificationPayload),
     GroupDeleted(GroupDeletedNotificationPayload),
+    CanvasState(CanvasStateNotificationPayload),
     /// Aggregate state for the remote WS transport. Emitted by
     /// `server::handle_ws_connection` on every accept/drop so the
     /// local TUI can show a "remote attached" badge.
@@ -473,6 +477,23 @@ struct PtyInputCapture {
 
 fn should_record_pty_user_message(harness: &str) -> bool {
     matches!(harness, "claude" | "antigravity")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanvasExecutionDelivery {
+    AdapterInput,
+    ExternalPtyTypedSubmit,
+    PtySubmit,
+}
+
+fn canvas_execution_delivery(summary: &agentd_protocol::SessionSummary) -> CanvasExecutionDelivery {
+    if !summary.has_pty {
+        CanvasExecutionDelivery::AdapterInput
+    } else if matches!(summary.harness.as_str(), "claude" | "codex" | "antigravity") {
+        CanvasExecutionDelivery::ExternalPtyTypedSubmit
+    } else {
+        CanvasExecutionDelivery::PtySubmit
+    }
 }
 
 impl SessionEntry {
@@ -1319,6 +1340,101 @@ impl SessionManager {
         Ok(String::new())
     }
 
+    pub async fn canvas_get(&self, session_id: &str) -> Result<CanvasGetResult> {
+        self.get_entry(session_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", session_id))?;
+        Ok(CanvasGetResult {
+            canvas: self.storage.read_canvas(session_id)?,
+            revisions: self.storage.read_canvas_revisions(session_id)?,
+        })
+    }
+
+    pub async fn canvas_update(&self, params: CanvasUpdateParams) -> Result<CanvasUpdateResult> {
+        self.get_entry(&params.session_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
+        let canvas = self.storage.update_canvas(
+            &params.session_id,
+            params.markdown,
+            params.actor,
+            params.base_version,
+            params.template_id,
+            params.note,
+        )?;
+        self.broadcast_canvas_state(canvas.clone());
+        Ok(CanvasUpdateResult { canvas })
+    }
+
+    pub async fn canvas_execute(&self, params: CanvasExecuteParams) -> Result<CanvasExecuteResult> {
+        let entry = self
+            .get_entry(&params.session_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
+        let result = CanvasGetResult {
+            canvas: self.storage.read_canvas(&params.session_id)?,
+            revisions: self.storage.read_canvas_revisions(&params.session_id)?,
+        };
+        if let Some(base) = params.base_version {
+            if base != result.canvas.version {
+                anyhow::bail!(
+                    "canvas conflict: current version is {}, attempted base version is {}",
+                    result.canvas.version,
+                    base
+                );
+            }
+        }
+        let body = params
+            .selection
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| result.canvas.markdown.trim());
+        if body.is_empty() {
+            anyhow::bail!("canvas is empty");
+        }
+        let prompt = format!(
+            "Execute the following construct canvas instructions. Treat the Markdown as orchestration state. Resolve smart clips written as @{{type:id ...}} references when possible, create subagent sessions for harness clips when appropriate, and update the canvas with construct_canvas_update when task state changes.\n\n```markdown\n{}\n```",
+            body
+        );
+        let delivery = {
+            let summary = entry.summary.read().await;
+            canvas_execution_delivery(&*summary)
+        };
+        match delivery {
+            CanvasExecutionDelivery::ExternalPtyTypedSubmit => {
+                self.canvas_submit_typed_prompt(&params.session_id, &prompt)
+                    .await?;
+            }
+            CanvasExecutionDelivery::PtySubmit => {
+                let mut bytes = prompt.clone().into_bytes();
+                bytes.push(b'\n');
+                self.pty_input(&params.session_id, bytes).await?;
+            }
+            CanvasExecutionDelivery::AdapterInput => {
+                self.send_input(&params.session_id, prompt.clone()).await?;
+            }
+        }
+        Ok(CanvasExecuteResult {
+            canvas: result.canvas,
+            prompt,
+        })
+    }
+
+    pub fn canvas_templates(&self) -> Result<CanvasListTemplatesResult> {
+        Ok(CanvasListTemplatesResult {
+            templates: self.storage.canvas_templates()?,
+        })
+    }
+
+    fn broadcast_canvas_state(&self, canvas: CanvasDocument) {
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::CanvasState(CanvasStateNotificationPayload {
+                canvas,
+            }));
+    }
+
     pub async fn create(self: &Arc<Self>, params: CreateSessionParams) -> Result<String> {
         let harness = params.harness.as_str();
         let adapter_cfg = self
@@ -1408,8 +1524,7 @@ impl SessionManager {
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind: params.kind,
             archived: false,
-            operator_loop_disabled: params.kind
-                == agentd_protocol::SessionKind::Orchestrator,
+            operator_loop_disabled: params.kind == agentd_protocol::SessionKind::Orchestrator,
         };
         self.storage.save_summary(&summary)?;
 
@@ -1710,7 +1825,11 @@ impl SessionManager {
         );
         let (project_id, current_model, operator_loop_disabled) = {
             let s = entry.summary.read().await;
-            (s.group_id.clone(), s.model.clone(), s.operator_loop_disabled)
+            (
+                s.group_id.clone(),
+                s.model.clone(),
+                s.operator_loop_disabled,
+            )
         };
         // The summary's model is the live source of truth — it tracks any
         // mid-session `/model` switch (via `ModelChanged`), whereas the start
@@ -1722,9 +1841,10 @@ impl SessionManager {
         // Re-inject the operator loop toggle so the resumed adapter starts
         // with the same enabled/disabled state the user left it in.
         if operator_loop_disabled {
-            start_params
-                .env
-                .insert("CONSTRUCT_OPERATOR_LOOP_DISABLED".to_string(), "1".to_string());
+            start_params.env.insert(
+                "CONSTRUCT_OPERATOR_LOOP_DISABLED".to_string(),
+                "1".to_string(),
+            );
         } else {
             start_params.env.remove("CONSTRUCT_OPERATOR_LOOP_DISABLED");
         }
@@ -2534,6 +2654,24 @@ impl SessionManager {
     }
 
     pub async fn pty_input(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
+        self.pty_input_inner(id, bytes, true).await
+    }
+
+    async fn pty_input_without_capture(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
+        self.pty_input_inner(id, bytes, false).await
+    }
+
+    async fn canvas_submit_typed_prompt(&self, id: &str, prompt: &str) -> Result<()> {
+        for chunk in prompt.split_inclusive('\n') {
+            self.pty_input_without_capture(id, chunk.as_bytes().to_vec())
+                .await?;
+            tokio::time::sleep(CANVAS_EXTERNAL_PTY_TYPED_CHUNK_DELAY).await;
+        }
+        self.pty_input_without_capture(id, vec![b'\r']).await?;
+        Ok(())
+    }
+
+    async fn pty_input_inner(&self, id: &str, bytes: Vec<u8>, capture: bool) -> Result<()> {
         let entry = self
             .get_entry(id)
             .await
@@ -2541,21 +2679,24 @@ impl SessionManager {
         // Capture submitted PTY lines before forwarding them. Some interactive
         // harnesses do not echo user text as structured `Message` events, so
         // chat-mode transcript history otherwise loses those turns.
-        let input_lines = self.capture_pty_input_lines(&entry, &bytes).await;
-        let harness = entry.summary.read().await.harness.clone();
-        for line in input_lines {
-            if should_record_pty_user_message(&harness) {
-                self.handle_event(
-                    &entry,
-                    SessionEvent::Message {
-                        role: MessageRole::User,
-                        text: line,
-                    },
-                )
-                .await;
-            } else if !entry.title_gen_attempted.load(Ordering::SeqCst) && line.chars().count() >= 2
-            {
-                self.maybe_spawn_auto_title(entry.clone(), line);
+        if capture {
+            let input_lines = self.capture_pty_input_lines(&entry, &bytes).await;
+            let harness = entry.summary.read().await.harness.clone();
+            for line in input_lines {
+                if should_record_pty_user_message(&harness) {
+                    self.handle_event(
+                        &entry,
+                        SessionEvent::Message {
+                            role: MessageRole::User,
+                            text: line,
+                        },
+                    )
+                    .await;
+                } else if !entry.title_gen_attempted.load(Ordering::SeqCst)
+                    && line.chars().count() >= 2
+                {
+                    self.maybe_spawn_auto_title(entry.clone(), line);
+                }
             }
         }
         let adapter = entry
@@ -3811,6 +3952,38 @@ mod tests {
             archived: false,
             operator_loop_disabled: false,
         }
+    }
+
+    #[test]
+    fn canvas_execution_submits_to_pty_backed_sessions() {
+        let summary = placement_summary("s1", 0, None, agentd_protocol::SessionKind::User);
+
+        assert_eq!(
+            canvas_execution_delivery(&summary),
+            CanvasExecutionDelivery::PtySubmit
+        );
+    }
+
+    #[test]
+    fn canvas_execution_typed_submit_for_external_agent_pty_sessions() {
+        let mut summary = placement_summary("s1", 0, None, agentd_protocol::SessionKind::User);
+        summary.harness = "claude".to_string();
+
+        assert_eq!(
+            canvas_execution_delivery(&summary),
+            CanvasExecutionDelivery::ExternalPtyTypedSubmit
+        );
+    }
+
+    #[test]
+    fn canvas_execution_uses_adapter_input_for_headless_sessions() {
+        let mut summary = placement_summary("s1", 0, None, agentd_protocol::SessionKind::User);
+        summary.has_pty = false;
+
+        assert_eq!(
+            canvas_execution_delivery(&summary),
+            CanvasExecutionDelivery::AdapterInput
+        );
     }
 
     #[test]

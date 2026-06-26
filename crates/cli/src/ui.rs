@@ -1,9 +1,10 @@
 //! Ratatui rendering for the TUI.
 
 use crate::app::{
-    App, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
-    MinibufferIntent, PaneFocus, ScreenPoint, Selection, TextSelectionRange, ViewMode,
-    WindowDividerHit, WindowPaneHit, WindowSplitDirection, ZoomMode,
+    App, CANVAS_CONTENT_PADDING_X, CANVAS_CONTENT_PADDING_Y, CANVAS_REVEAL_MS, HarnessHit, HintZone,
+    ListItem as AppListItem, MainWindowTree, Minibuffer, MinibufferIntent, PaneFocus, ScreenPoint,
+    Selection, TextSelectionRange, ViewMode, WindowDividerHit, WindowPaneHit,
+    WindowSplitDirection, ZoomMode,
 };
 use crate::keymap::KeyAction;
 use crate::theme::Theme;
@@ -28,6 +29,10 @@ const MATRIX_WALLPAPER_DIM: f32 = 0.22;
 /// appear, and the top-to-bottom erase on disappear. Applies to both the
 /// terminal-view overlay and the matrix-rain wallpaper.
 const PREVIEW_REVEAL_SECS: f32 = 1.0;
+const CANVAS_REVEAL_SECS: f32 = CANVAS_REVEAL_MS as f32 / 1000.0;
+const CANVAS_RUN_BUTTON: &str = " ▶ ";
+const CANVAS_SELECTION_RUN_MENU_W: u16 = 9;
+const CANVAS_SELECTION_RUN_MENU_H: u16 = 3;
 
 /// Row-fraction range `[start, end)` of a preview image to paint this
 /// frame. On appear the image fills from the top over `PREVIEW_REVEAL_SECS`
@@ -244,12 +249,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_minibuffer(f, minibuffer_area, app);
     render_diamond_tooltip(f, app);
     render_pin_diamond_tooltip(f, app, &pinned_ids);
+    render_view_canvas_toggle_tooltip(f, app);
     render_view_close_tooltip(f, app);
     render_browser_preview_close_tooltip(f, app);
     render_list_title_button_tooltips(f, app);
     render_view_uncollapse_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
+    app.sync_canvas_popup_with_selection();
+    render_canvas_popup(f, app);
     render_tasks_popup(f, app);
     render_remote_control_popup(f, app);
     if app.help_visible {
@@ -686,6 +694,12 @@ pub fn view_close_button_range(view_area: Rect) -> (u16, u16, u16) {
     (x_start, x_end, view_area.y)
 }
 
+pub fn view_canvas_toggle_button_range(view_area: Rect) -> (u16, u16, u16) {
+    let x_start = view_area.x + 2;
+    let x_end = view_area.x + 3;
+    (x_start, x_end, view_area.y)
+}
+
 pub fn dynamic_ui_trigger_range(
     view_area: Rect,
     close_shown: bool,
@@ -786,6 +800,14 @@ fn hovered_view_close_button(app: &App, view_area: Rect) -> bool {
         return false;
     };
     let (x_start, x_end, y) = view_close_button_range(view_area);
+    my == y && mx >= x_start && mx < x_end
+}
+
+fn hovered_view_canvas_toggle_button(app: &App, view_area: Rect) -> bool {
+    let Some((mx, my)) = app.mouse_pos else {
+        return false;
+    };
+    let (x_start, x_end, y) = view_canvas_toggle_button_range(view_area);
     my == y && mx >= x_start && mx < x_end
 }
 
@@ -901,6 +923,71 @@ fn render_view_close_tooltip(f: &mut Frame, app: &App) {
         .style(Style::default().fg(app.theme.text));
     f.render_widget(Clear, rect);
     f.render_widget(p, rect);
+}
+
+fn render_view_canvas_toggle_tooltip(f: &mut Frame, app: &App) {
+    let Some(view_area) = app.layout.view_area else {
+        return;
+    };
+    if !hovered_view_canvas_toggle_button(app, view_area) {
+        return;
+    }
+    let Some(s) = app.selected_session() else {
+        return;
+    };
+    let canvas_open = app
+        .open_canvas_session_ids()
+        .iter()
+        .any(|id| id == &s.id);
+    let (cx, _, cy) = view_canvas_toggle_button_range(view_area);
+    let label = if canvas_open {
+        " Canvas mode: click to return to chat "
+    } else {
+        " Chat mode: click to open canvas "
+    };
+    let inner_w = UnicodeWidthStr::width(label) as u16;
+    let w = inner_w + 2;
+    let h: u16 = 3;
+    let rect = view_canvas_toggle_tooltip_rect(view_area, f.area(), cx, cy, w, h);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border));
+    let p = Paragraph::new(label)
+        .block(block)
+        .style(Style::default().fg(app.theme.text));
+    f.render_widget(Clear, rect);
+    f.render_widget(p, rect);
+}
+
+fn view_canvas_toggle_tooltip_rect(
+    view_area: Rect,
+    total: Rect,
+    anchor_x: u16,
+    anchor_y: u16,
+    width: u16,
+    height: u16,
+) -> Rect {
+    let view_right = view_area.x.saturating_add(view_area.width);
+    let total_right = total.x.saturating_add(total.width);
+    let max_right = view_right.min(total_right);
+    let min_x = view_area.x.max(total.x);
+    let mut x = anchor_x.saturating_add(2).max(min_x);
+    if x.saturating_add(width) > max_right {
+        x = max_right.saturating_sub(width).max(min_x);
+    }
+
+    let total_bottom = total.y.saturating_add(total.height);
+    let mut y = anchor_y.saturating_add(1);
+    if y.saturating_add(height) > total_bottom {
+        y = total_bottom.saturating_sub(height);
+    }
+
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 fn render_browser_preview_close_tooltip(f: &mut Frame, app: &App) {
@@ -2804,13 +2891,20 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         .as_ref()
         .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()))
         .unwrap_or(0);
+    let canvas_open = summary
+        .as_ref()
+        .is_some_and(|s| app.open_canvas_session_ids().iter().any(|id| id == &s.id));
+    let mode_glyph = summary.as_ref().map(|s| {
+        if canvas_open {
+            canvas_mode_glyph()
+        } else {
+            session_status_glyph(app, s)
+        }
+    });
     // Label budget = total − 2 corners − right-side blocks − fixed
     // title scaffolding (` <glyph> <label> ` is 3 spaces + glyph
     // width + label).
-    let glyph_w = summary
-        .as_ref()
-        .map(|s| UnicodeWidthStr::width(session_status_glyph(app, s)))
-        .unwrap_or(0);
+    let glyph_w = mode_glyph.map(UnicodeWidthStr::width).unwrap_or(0);
     let label_budget = total
         .saturating_sub(2)
         .saturating_sub(harness_w)
@@ -2819,7 +2913,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
     let title = match (summary.as_ref(), group.as_ref()) {
         (Some(s), _) => format!(
             " {} {} ",
-            session_status_glyph(app, s),
+            mode_glyph.unwrap_or(""),
             truncate_to_width(&primary_label(s), label_budget),
         ),
         (None, Some(g)) => format!(" project: {} ", g.name),
@@ -5744,6 +5838,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
             "zoomed: view — ",
             vec![
                 ("C-x x operator", KeyAction::OpenCommandPalette),
+                ("C-x Space canvas", KeyAction::OpenCanvas),
                 ("C-x z unzoom", KeyAction::ToggleZoom),
                 ("C-x o list", KeyAction::SwitchFocus),
             ],
@@ -5752,6 +5847,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
             "zoomed: list — ",
             vec![
                 ("C-x x operator", KeyAction::OpenCommandPalette),
+                ("C-x Space canvas", KeyAction::OpenCanvas),
                 ("C-x z unzoom", KeyAction::ToggleZoom),
                 ("C-x o view", KeyAction::SwitchFocus),
             ],
@@ -5760,6 +5856,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
             "",
             vec![
                 ("C-x x operator", KeyAction::OpenCommandPalette),
+                ("C-x Space canvas", KeyAction::OpenCanvas),
                 ("C-x z zoom", KeyAction::ToggleZoom),
             ],
         ),
@@ -5885,6 +5982,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-x b           switch focused window to an existing session
     C-x i           send input to selected session
     C-x k           delete selected session (confirms; kills if running)
+    C-x Space       open selected session's canvas
     C-x d           show diff
     C-x r           rename selected session (clears title on empty submit)
     C-x f           fork selected session into a new harness (seeded w/ history)
@@ -5910,7 +6008,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
 
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
-                    palette commands: new fork send delete rename diff border
+                    palette commands: new fork send delete rename canvas diff border
                                       zoom interrupt refresh harnesses help
     ?               toggle this help
     C-x C-c          quit
@@ -7066,6 +7164,908 @@ fn render_tasks_popup(f: &mut Frame, app: &mut App) {
     f.render_widget(para, inner);
 }
 
+fn render_canvas_popup(f: &mut Frame, app: &mut App) {
+    let now = Instant::now();
+    app.layout.canvas_title_run_hit = None;
+    app.layout.canvas_title_toggle_hit = None;
+    app.layout.canvas_selection_run_hit = None;
+    if app
+        .canvas_popup
+        .as_ref()
+        .is_some_and(|popup| popup.closing && now >= popup.hide_after)
+    {
+        app.canvas_popup = None;
+    }
+
+    let active_session_id = app
+        .canvas_popup
+        .as_ref()
+        .map(|popup| popup.canvas.session_id.clone());
+    let mut popups: Vec<(crate::app::CanvasPopup, Rect, bool)> = Vec::new();
+    for hit in &app.layout.main_window_areas {
+        let Some(crate::app::Selection::Session(session_id)) = app.selection_for_window(hit.id)
+        else {
+            continue;
+        };
+        if active_session_id.as_deref() == Some(session_id.as_str()) {
+            continue;
+        }
+        if let Some(popup) = app.canvas_popups.get(&session_id) {
+            popups.push((popup.clone(), hit.area, false));
+        }
+    }
+    if let Some(popup) = app.canvas_popup.as_ref() {
+        let base_rect = app
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|hit| hit.id == app.active_window_id)
+            .map(|hit| hit.area)
+            .or(app.layout.view_area)
+            .unwrap_or_else(|| f.area());
+        app.layout.modal_area = Some(base_rect);
+        popups.push((popup.clone(), base_rect, true));
+    }
+    for (popup, base_rect, active) in popups {
+        render_canvas_popup_at(f, app, &popup, base_rect, active, now);
+    }
+}
+
+fn render_canvas_popup_at(
+    f: &mut Frame,
+    app: &mut App,
+    popup: &crate::app::CanvasPopup,
+    base_rect: Rect,
+    active: bool,
+    now: Instant,
+) {
+    if base_rect.width < 40 || base_rect.height < 8 {
+        return;
+    }
+
+    let progress = if popup.closing {
+        popup
+            .hide_after
+            .saturating_duration_since(now)
+            .as_secs_f32()
+            / CANVAS_REVEAL_SECS
+    } else {
+        now.saturating_duration_since(popup.revealed_at)
+            .as_secs_f32()
+            / CANVAS_REVEAL_SECS
+    }
+    .clamp(0.0, 1.0);
+    if progress <= 0.0 {
+        return;
+    }
+    let visible_h = ((base_rect.height as f32 * progress).ceil() as u16)
+        .clamp(1, base_rect.height);
+    if visible_h == 0 {
+        return;
+    }
+    let rect = Rect {
+        height: visible_h,
+        ..base_rect
+    };
+
+    let summary = app
+        .sessions
+        .iter()
+        .find(|s| s.id == popup.canvas.session_id)
+        .cloned();
+    let summary_ref = summary.as_ref();
+    let title = canvas_title_line(app, popup, summary_ref, rect, active);
+    let title_run_hit = canvas_title_run_button_range(rect, summary_ref);
+    let title_toggle_hit = canvas_title_toggle_button_range(summary_ref, rect);
+    let run_hovered = title_run_hit
+        .zip(app.mouse_pos)
+        .is_some_and(|((xs, xe, y), (mx, my))| my == y && mx >= xs && mx < xe);
+    let run_style = if run_hovered {
+        Style::default()
+            .fg(app.theme.text)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        let fg = if active {
+            app.theme.accent
+        } else {
+            app.theme.muted
+        };
+        Style::default().fg(fg).add_modifier(Modifier::BOLD)
+    };
+    let run_right = Line::from(Span::styled(CANVAS_RUN_BUTTON, run_style))
+        .alignment(ratatui::layout::Alignment::Right);
+    if active {
+        app.layout.canvas_title_run_hit = title_run_hit;
+        app.layout.canvas_title_toggle_hit = title_toggle_hit;
+    }
+    let harness_right = summary_ref.map(|s| {
+        Line::from(Span::styled(
+            format!(" {} ", harness_label(s)),
+            canvas_border_style(&app.theme, active),
+        ))
+        .alignment(ratatui::layout::Alignment::Right)
+    });
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(canvas_border_style(&app.theme, active))
+        .title(title)
+        .title(run_right);
+    let block = if let Some(h) = harness_right {
+        block.title(h)
+    } else {
+        block
+    };
+    let inner = block.inner(rect).inner(Margin {
+        horizontal: CANVAS_CONTENT_PADDING_X,
+        vertical: CANVAS_CONTENT_PADDING_Y,
+    });
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+
+    let selection = canvas_selection_range(popup);
+    let mut lines = render_canvas_markdown_lines(app, &popup.buffer, selection);
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Type Markdown here. Use @{session:id}, @{harness:codex}, or :::clip blocks.",
+            Style::default().fg(app.theme.dim),
+        )));
+    }
+    let visible: Vec<Line> = lines.into_iter().take(inner.height as usize).collect();
+    let para = Paragraph::new(visible).wrap(Wrap { trim: false });
+    f.render_widget(para, inner);
+    if active && !popup.closing {
+        if let Some(pos) = canvas_cursor_position(Some(app), &popup.buffer, popup.cursor, inner) {
+            render_editor_cursor(f, pos, &app.theme);
+            render_canvas_smart_clip_picker(f, app, popup, pos, inner);
+        }
+    }
+    if active && !popup.closing {
+        render_canvas_selection_context_menu(f, app, popup, inner);
+    }
+    render_canvas_title_tooltip(f, app, popup, summary_ref, rect);
+}
+
+fn canvas_border_style(theme: &Theme, active: bool) -> Style {
+    if active {
+        Style::default()
+            .fg(theme.accent_alt)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.border)
+    }
+}
+
+fn canvas_title_line<'a>(
+    app: &App,
+    popup: &crate::app::CanvasPopup,
+    summary: Option<&agentd_protocol::SessionSummary>,
+    rect: Rect,
+    active: bool,
+) -> Line<'a> {
+    let dirty = popup.buffer != popup.saved_markdown;
+    let marker_w = canvas_title_marker_width(dirty);
+    let harness_w = summary
+        .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()))
+        .unwrap_or(0);
+    let toggle_glyph = canvas_mode_glyph();
+    let label_budget = (rect.width as usize)
+        .saturating_sub(2)
+        .saturating_sub(harness_w)
+        .saturating_sub(3 + marker_w);
+    let border_style = canvas_border_style(&app.theme, active);
+    let canvas_style = canvas_toggle_style(app, popup, active);
+    let modified_style = Style::default()
+        .fg(app.theme.warning)
+        .add_modifier(Modifier::BOLD);
+
+    match summary {
+        Some(s) => {
+            let mut spans = vec![
+                Span::styled(" ", border_style),
+                Span::styled(toggle_glyph.to_string(), canvas_style),
+                Span::styled(" ", border_style),
+                Span::styled(
+                    truncate_to_width(&primary_label(s), label_budget),
+                    border_style,
+                ),
+            ];
+            if dirty {
+                spans.push(Span::styled(" * ", border_style));
+                spans.push(Span::styled("modified", modified_style));
+            }
+            spans.push(Span::styled(" ", border_style));
+            Line::from(spans)
+        }
+        None => Line::from(vec![
+            Span::styled(" ", border_style),
+            Span::styled(toggle_glyph.to_string(), canvas_style),
+            Span::styled(" ", border_style),
+            Span::styled(short_id(&popup.canvas.session_id).to_string(), border_style),
+            if dirty {
+                Span::styled(" * modified ", modified_style)
+            } else {
+                Span::styled(" ", border_style)
+            },
+        ]),
+    }
+}
+
+fn canvas_title_marker_width(dirty: bool) -> usize {
+    if dirty {
+        UnicodeWidthStr::width(" * modified")
+    } else {
+        0
+    }
+}
+
+fn canvas_mode_glyph() -> &'static str {
+    "▣"
+}
+
+fn canvas_toggle_style(
+    app: &App,
+    popup: &crate::app::CanvasPopup,
+    active: bool,
+) -> Style {
+    let style = if popup.closing {
+        Style::default().fg(app.theme.muted)
+    } else if active {
+        Style::default().fg(app.theme.accent_alt)
+    } else {
+        Style::default().fg(app.theme.border)
+    };
+    style.add_modifier(Modifier::BOLD)
+}
+
+fn canvas_title_run_button_range(
+    rect: Rect,
+    summary: Option<&agentd_protocol::SessionSummary>,
+) -> Option<(u16, u16, u16)> {
+    if rect.width < 8 {
+        return None;
+    }
+    let run_w = UnicodeWidthStr::width(CANVAS_RUN_BUTTON) as u16;
+    let harness_w = summary
+        .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()) as u16)
+        .unwrap_or(0);
+    let x_end = rect
+        .x
+        .saturating_add(rect.width)
+        .saturating_sub(1)
+        .saturating_sub(harness_w);
+    let x_start = x_end.saturating_sub(run_w);
+    if x_start <= rect.x {
+        return None;
+    }
+    Some((x_start, x_end, rect.y))
+}
+
+fn canvas_title_toggle_button_range(
+    summary: Option<&agentd_protocol::SessionSummary>,
+    rect: Rect,
+) -> Option<(u16, u16, u16)> {
+    let toggle_w = UnicodeWidthStr::width(canvas_mode_glyph()) as u16;
+    if toggle_w == 0 || rect.width < toggle_w.saturating_add(2) {
+        return None;
+    }
+    let harness_w = summary
+        .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()) as u16)
+        .unwrap_or(0);
+    let x_start = rect.x.saturating_add(2);
+    let x_end = x_start.saturating_add(toggle_w);
+    let max_x = rect
+        .x
+        .saturating_add(rect.width)
+        .saturating_sub(1)
+        .saturating_sub(harness_w);
+    if x_end >= max_x {
+        return None;
+    }
+    Some((x_start, x_end, rect.y))
+}
+
+fn render_canvas_title_tooltip(
+    f: &mut Frame,
+    app: &App,
+    popup: &crate::app::CanvasPopup,
+    summary: Option<&agentd_protocol::SessionSummary>,
+    rect: Rect,
+) {
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    if my != rect.y {
+        return;
+    }
+    if let Some((xs, xe, y)) = app.layout.canvas_title_toggle_hit {
+        if my == y && mx >= xs && mx < xe {
+            let mode = if popup.closing { "Chat" } else { "Canvas" };
+            let action = if popup.closing {
+                "open canvas"
+            } else {
+                "return to chat"
+            };
+            render_button_tooltip(
+                f,
+                &app.theme,
+                &format!(" {mode} mode. Click to {action}. C-x Space "),
+                mx,
+                my,
+            );
+            return;
+        }
+    }
+    if let Some((xs, xe, y)) = app.layout.canvas_title_run_hit {
+        if my == y && mx >= xs && mx < xe {
+            render_button_tooltip(f, &app.theme, " Run canvas ", mx, my);
+            return;
+        }
+    }
+    let dirty = popup.buffer != popup.saved_markdown;
+    let marker_ranges = canvas_title_marker_ranges(popup, summary, rect, dirty);
+    if let Some((start, end)) = marker_ranges.modified {
+        if mx >= start && mx < end {
+            render_button_tooltip(f, &app.theme, " C-x C-s save ", mx, my);
+        }
+    }
+}
+
+fn render_canvas_selection_context_menu(
+    f: &mut Frame,
+    app: &mut App,
+    popup: &crate::app::CanvasPopup,
+    canvas_area: Rect,
+) {
+    if canvas_selection_range(popup).is_none() {
+        app.layout.canvas_selection_run_hit = None;
+        return;
+    }
+    let Some(pos) = canvas_cursor_position(Some(app), &popup.buffer, popup.cursor, canvas_area)
+    else {
+        app.layout.canvas_selection_run_hit = None;
+        return;
+    };
+    let rect = canvas_selection_context_menu_rect(pos, canvas_area);
+    let hit = (
+        rect.x.saturating_add(1),
+        rect.x.saturating_add(rect.width.saturating_sub(1)),
+        rect.y.saturating_add(1),
+    );
+    app.layout.canvas_selection_run_hit = Some(hit);
+    let hovered = app
+        .mouse_pos
+        .is_some_and(|(mx, my)| my == hit.2 && mx >= hit.0 && mx < hit.1);
+    let style = if hovered {
+        Style::default()
+            .fg(app.theme.text)
+            .bg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.accent)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border));
+    let para = Paragraph::new(Line::from(Span::styled("▶ Run", style)));
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        para,
+        Rect {
+            x: hit.0,
+            y: hit.2,
+            width: hit.1.saturating_sub(hit.0),
+            height: 1,
+        },
+    );
+}
+
+fn canvas_selection_context_menu_rect(pos: Position, total: Rect) -> Rect {
+    let max_x = total
+        .x
+        .saturating_add(total.width)
+        .saturating_sub(CANVAS_SELECTION_RUN_MENU_W);
+    let max_y = total
+        .y
+        .saturating_add(total.height)
+        .saturating_sub(CANVAS_SELECTION_RUN_MENU_H);
+    Rect {
+        x: pos.x.saturating_add(1).min(max_x),
+        y: pos.y.saturating_add(1).min(max_y),
+        width: CANVAS_SELECTION_RUN_MENU_W.min(total.width),
+        height: CANVAS_SELECTION_RUN_MENU_H.min(total.height),
+    }
+}
+
+struct CanvasTitleMarkerRanges {
+    modified: Option<(u16, u16)>,
+}
+
+fn canvas_title_marker_ranges(
+    popup: &crate::app::CanvasPopup,
+    summary: Option<&agentd_protocol::SessionSummary>,
+    rect: Rect,
+    dirty: bool,
+) -> CanvasTitleMarkerRanges {
+    let marker_w = canvas_title_marker_width(dirty);
+    let harness_w = summary
+        .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()))
+        .unwrap_or(0);
+    let toggle_w = UnicodeWidthStr::width(canvas_mode_glyph());
+    let label_budget = (rect.width as usize)
+        .saturating_sub(2)
+        .saturating_sub(harness_w)
+        .saturating_sub(3 + marker_w);
+    let prefix_w = match summary {
+        Some(s) => {
+            UnicodeWidthStr::width(" ")
+                + toggle_w
+                + UnicodeWidthStr::width(" ")
+                + UnicodeWidthStr::width(truncate_to_width(&primary_label(s), label_budget).as_str())
+        }
+        None => {
+            UnicodeWidthStr::width(" ")
+                + toggle_w
+                + UnicodeWidthStr::width(" ")
+                + UnicodeWidthStr::width(short_id(&popup.canvas.session_id))
+        }
+    };
+    let modified = dirty.then(|| {
+        let start = rect.x.saturating_add(1).saturating_add(prefix_w as u16);
+        let end = start.saturating_add(UnicodeWidthStr::width("modified") as u16);
+        (start, end)
+    });
+    CanvasTitleMarkerRanges { modified }
+}
+
+fn render_canvas_smart_clip_picker(
+    f: &mut Frame,
+    app: &App,
+    popup: &crate::app::CanvasPopup,
+    cursor_pos: Position,
+    canvas_area: Rect,
+) {
+    let Some(search) = popup.smart_clip.as_ref() else {
+        return;
+    };
+    if canvas_area.width == 0 || canvas_area.height < 3 {
+        return;
+    }
+    let candidates = app.canvas_smart_clip_candidates(popup);
+    let group_count = candidates
+        .iter()
+        .fold((None, 0usize), |(last, count), candidate| {
+            if last != Some(candidate.group) {
+                (Some(candidate.group), count + 1)
+            } else {
+                (last, count)
+            }
+        })
+        .1;
+    let desired_rows = if candidates.is_empty() {
+        1
+    } else {
+        candidates.len().saturating_add(group_count)
+    };
+    let max_rows = canvas_area.height.saturating_sub(2).min(10);
+    let row_count = (desired_rows as u16).min(max_rows);
+    let width = 42u16.min(canvas_area.width.max(1));
+    let x = cursor_pos
+        .x
+        .min(canvas_area.x.saturating_add(canvas_area.width.saturating_sub(width)));
+    let below_y = cursor_pos.y.saturating_add(1);
+    let above_y = cursor_pos.y.saturating_sub(row_count.saturating_add(2));
+    let y = if below_y.saturating_add(row_count).saturating_add(2)
+        <= canvas_area.y.saturating_add(canvas_area.height)
+    {
+        below_y
+    } else {
+        above_y.max(canvas_area.y)
+    };
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height: row_count.saturating_add(2),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.accent_alt))
+        .title(Line::from(Span::styled(
+            " smart clip ",
+            Style::default()
+                .fg(app.theme.accent_alt)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(rect);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+
+    let mut lines = Vec::new();
+    if candidates.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No matches",
+            Style::default().fg(app.theme.dim),
+        )));
+    } else {
+        let mut last_group = None;
+        for (idx, candidate) in candidates.iter().enumerate() {
+            if lines.len() >= row_count as usize {
+                break;
+            }
+            if last_group != Some(candidate.group) {
+                lines.push(Line::from(Span::styled(
+                    candidate.group.label(),
+                    Style::default()
+                        .fg(app.theme.accent_alt)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                last_group = Some(candidate.group);
+                if lines.len() >= row_count as usize {
+                    break;
+                }
+            }
+            let selected = idx == search.selected.min(candidates.len().saturating_sub(1));
+            let style = if selected {
+                Style::default()
+                    .fg(app.theme.highlight_fg)
+                    .bg(app.theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.text)
+            };
+            let detail_style = if selected {
+                style
+            } else {
+                Style::default().fg(app.theme.muted)
+            };
+            let mut spans = vec![
+                Span::styled(format!("{} ", if selected { ">" } else { " " }), style),
+                Span::styled(candidate.label.clone(), style),
+            ];
+            if !candidate.detail.is_empty() {
+                spans.push(Span::styled("  ", style));
+                spans.push(Span::styled(candidate.detail.clone(), detail_style));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn canvas_cursor_position(
+    app: Option<&App>,
+    markdown: &str,
+    cursor: usize,
+    area: Rect,
+) -> Option<Position> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let (line, col) = canvas_line_col(markdown, cursor);
+    let visual_col = canvas_visual_col_for_line(app, markdown.lines().nth(line).unwrap_or(""), col);
+    let width = area.width as usize;
+    let visual_row = line.saturating_add(visual_col / width);
+    if visual_row >= area.height as usize {
+        return None;
+    }
+    Some(Position {
+        x: area.x.saturating_add((visual_col % width) as u16),
+        y: area.y.saturating_add(visual_row as u16),
+    })
+}
+
+fn canvas_line_col(markdown: &str, cursor: usize) -> (usize, usize) {
+    let mut line = 0usize;
+    let mut col = 0usize;
+    for (idx, ch) in markdown.chars().enumerate() {
+        if idx >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn canvas_visual_col_for_line(app: Option<&App>, raw: &str, raw_col: usize) -> usize {
+    let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
+    let trimmed = raw.trim();
+    let col = raw_col.saturating_sub(leading);
+    if canvas_heading_level(trimmed).is_some() {
+        canvas_inline_visual_width(app, trimmed, col)
+    } else if let Some(rest) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+    {
+        let prefix = trimmed.chars().count() - rest.chars().count();
+        4 + canvas_inline_visual_width(app, rest, col.saturating_sub(prefix))
+    } else if raw_col <= leading {
+        raw_col
+    } else {
+        let body = raw
+            .char_indices()
+            .nth(leading)
+            .map(|(idx, _)| &raw[idx..])
+            .unwrap_or("");
+        leading + canvas_inline_visual_width(app, body, raw_col - leading)
+    }
+}
+
+fn canvas_inline_visual_width(app: Option<&App>, text: &str, raw_col: usize) -> usize {
+    let mut visual = 0usize;
+    let mut raw = 0usize;
+    let mut rest = text;
+    while let Some(start_b) = rest.find("@{") {
+        let before = &rest[..start_b];
+        let before_len = before.chars().count();
+        if raw_col <= raw + before_len {
+            return visual + raw_col.saturating_sub(raw);
+        }
+        visual += before_len;
+        raw += before_len;
+
+        let after_marker = &rest[start_b + 2..];
+        let Some(end_b) = after_marker.find('}') else {
+            return visual + raw_col.saturating_sub(raw);
+        };
+        let raw_clip = &after_marker[..end_b];
+        let clip_len = 2 + raw_clip.chars().count() + 1;
+        if raw_col <= raw + clip_len {
+            return visual + canvas_smart_clip_visual_width(app, raw_clip);
+        }
+        visual += canvas_smart_clip_visual_width(app, raw_clip);
+        raw += clip_len;
+        rest = &after_marker[end_b + 1..];
+    }
+    visual + raw_col.saturating_sub(raw)
+}
+
+fn canvas_selection_range(popup: &crate::app::CanvasPopup) -> Option<(usize, usize)> {
+    let selection = popup.selection.as_ref()?;
+    let start = selection.anchor.min(selection.head);
+    let end = selection.anchor.max(selection.head);
+    (start != end).then_some((start, end))
+}
+
+fn render_canvas_markdown_lines<'a>(
+    app: &App,
+    markdown: &'a str,
+    selection: Option<(usize, usize)>,
+) -> Vec<Line<'a>> {
+    let mut out = Vec::new();
+    let mut line_start = 0usize;
+    for raw in markdown.lines() {
+        let trimmed = raw.trim();
+        let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
+        if trimmed.is_empty() {
+            out.push(Line::from(""));
+        } else if let Some(level) = canvas_heading_level(trimmed) {
+            out.push(render_canvas_heading_line(
+                &app.theme,
+                level,
+                trimmed,
+                line_start + leading,
+                selection,
+            ));
+        } else if let Some(rest) = trimmed.strip_prefix("- ") {
+            let mut spans = vec![Span::styled("  • ", Style::default().fg(app.theme.accent))];
+            spans.extend(render_canvas_inline_spans(
+                app,
+                rest,
+                line_start + leading + 2,
+                selection,
+            ));
+            out.push(Line::from(spans));
+        } else if let Some(rest) = trimmed.strip_prefix("* ") {
+            let mut spans = vec![Span::styled("  • ", Style::default().fg(app.theme.accent))];
+            spans.extend(render_canvas_inline_spans(
+                app,
+                rest,
+                line_start + leading + 2,
+                selection,
+            ));
+            out.push(Line::from(spans));
+        } else if let Some(rest) = trimmed.strip_prefix(":::clip") {
+            out.push(Line::from(vec![
+                Span::raw("  "),
+                canvas_chip_span(
+                    format!("clip {}", rest.trim()).trim(),
+                    app.theme.highlight_fg,
+                    app.theme.info,
+                ),
+            ]));
+        } else if trimmed == ":::" {
+            out.push(Line::from(Span::styled(
+                "  end clip",
+                Style::default().fg(app.theme.dim),
+            )));
+        } else {
+            out.push(Line::from(render_canvas_inline_spans(
+                app, raw, line_start, selection,
+            )));
+        }
+        line_start += raw.chars().count() + 1;
+    }
+    out
+}
+
+fn canvas_heading_level(trimmed: &str) -> Option<u8> {
+    if trimmed.starts_with("### ") {
+        Some(3)
+    } else if trimmed.starts_with("## ") {
+        Some(2)
+    } else if trimmed.starts_with("# ") {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+fn render_canvas_heading_line(
+    theme: &Theme,
+    level: u8,
+    text: &str,
+    base: usize,
+    selection: Option<(usize, usize)>,
+) -> Line<'static> {
+    let fg = match level {
+        1 => theme.accent,
+        2 => theme.accent_alt,
+        _ => theme.info,
+    };
+    let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
+    Line::from(canvas_text_spans(theme, text, base, style, selection))
+}
+
+fn render_canvas_inline_spans<'a>(
+    app: &App,
+    text: &'a str,
+    base: usize,
+    selection: Option<(usize, usize)>,
+) -> Vec<Span<'a>> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    let mut offset = 0usize;
+    while let Some(start) = rest.find("@{") {
+        let (before, after_start) = rest.split_at(start);
+        if !before.is_empty() {
+            spans.extend(canvas_text_spans(
+                &app.theme,
+                before,
+                base + offset,
+                Style::default().fg(app.theme.text),
+                selection,
+            ));
+        }
+        let after_marker = &after_start[2..];
+        let Some(end) = after_marker.find('}') else {
+            spans.extend(canvas_text_spans(
+                &app.theme,
+                after_start,
+                base + offset + before.chars().count(),
+                Style::default().fg(app.theme.text),
+                selection,
+            ));
+            return spans;
+        };
+        let raw_clip = &after_marker[..end];
+        spans.push(canvas_smart_clip_span(app, raw_clip));
+        offset += before.chars().count() + 2 + raw_clip.chars().count() + 1;
+        rest = &after_marker[end + 1..];
+    }
+    if !rest.is_empty() {
+        spans.extend(canvas_text_spans(
+            &app.theme,
+            rest,
+            base + offset,
+            Style::default().fg(app.theme.text),
+            selection,
+        ));
+    }
+    spans
+}
+
+fn canvas_text_spans<'a>(
+    theme: &Theme,
+    text: &str,
+    base: usize,
+    style: Style,
+    selection: Option<(usize, usize)>,
+) -> Vec<Span<'a>> {
+    let Some((sel_start, sel_end)) = selection else {
+        return vec![Span::styled(text.to_string(), style)];
+    };
+    let mut spans = Vec::new();
+    let mut chunk = String::new();
+    let mut chunk_selected: Option<bool> = None;
+    for (idx, ch) in text.chars().enumerate() {
+        let selected = base + idx >= sel_start && base + idx < sel_end;
+        if chunk_selected.is_some_and(|current| current != selected) {
+            let mut chunk_style = style;
+            if chunk_selected == Some(true) {
+                chunk_style = chunk_style.bg(theme.inactive_highlight_bg);
+            }
+            spans.push(Span::styled(std::mem::take(&mut chunk), chunk_style));
+        }
+        chunk_selected = Some(selected);
+        chunk.push(ch);
+    }
+    if !chunk.is_empty() {
+        let mut chunk_style = style;
+        if chunk_selected == Some(true) {
+            chunk_style = chunk_style.bg(theme.inactive_highlight_bg);
+        }
+        spans.push(Span::styled(chunk, chunk_style));
+    }
+    spans
+}
+
+fn canvas_smart_clip_span<'a>(app: &App, raw_clip: &str) -> Span<'a> {
+    let (kind, label) = canvas_smart_clip_label(Some(app), raw_clip);
+    let bg = match kind {
+        "session" => app.theme.accent_alt,
+        "harness" => app.theme.harness,
+        "session-response" => app.theme.info,
+        _ => app.theme.inactive_highlight_bg,
+    };
+    canvas_chip_span(label, app.theme.highlight_fg, bg)
+}
+
+fn canvas_smart_clip_visual_width(app: Option<&App>, raw_clip: &str) -> usize {
+    let (_, label) = canvas_smart_clip_label(app, raw_clip);
+    label.chars().count() + 2
+}
+
+fn canvas_smart_clip_label<'a>(app: Option<&App>, raw_clip: &'a str) -> (&'a str, String) {
+    let first = raw_clip.split_whitespace().next().unwrap_or(raw_clip);
+    let (kind, id) = first.split_once(':').unwrap_or(("clip", first));
+    let label = match kind {
+        "session" => app
+            .and_then(|app| {
+                app.sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| {
+                        let model = s.model.as_deref().unwrap_or(s.harness.as_str());
+                        format!(
+                            "session {} · {} · {}",
+                            primary_label(s),
+                            model,
+                            s.state.label()
+                        )
+                    })
+            })
+            .unwrap_or_else(|| format!("session {id}")),
+        "harness" => app
+            .and_then(|app| {
+                app.harnesses.iter().find(|h| h.name == id).map(|h| {
+                    let status = if h.available { "available" } else { "missing" };
+                    format!("harness {} · {status}", h.name)
+                })
+            })
+            .unwrap_or_else(|| format!("harness {id}")),
+        "session-response" => format!("response {id}"),
+        _ => format!("{kind} {id}"),
+    };
+    (kind, label)
+}
+
+fn canvas_chip_span<'a>(
+    label: impl AsRef<str>,
+    fg: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) -> Span<'a> {
+    Span::styled(
+        format!(" {} ", label.as_ref()),
+        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+    )
+}
+
 /// Centered modal that paints either the URL+QR (success) or a
 /// diagnostic (tunnel timeout). Auto-sizes around the actual
 /// content — wide enough for the QR block, tall enough for the
@@ -7302,6 +8302,88 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn view_canvas_toggle_tooltip_stays_inside_session_view() {
+        let view = Rect::new(30, 0, 90, 40);
+        let total = Rect::new(0, 0, 120, 40);
+        let (anchor_x, _, anchor_y) = view_canvas_toggle_button_range(view);
+        let rect = view_canvas_toggle_tooltip_rect(view, total, anchor_x, anchor_y, 40, 3);
+
+        assert!(
+            rect.x >= view.x,
+            "tooltip must not spill over the session list: {rect:?}"
+        );
+        assert!(
+            rect.x.saturating_add(rect.width) <= view.x.saturating_add(view.width),
+            "tooltip should fit within the session view when there is room: {rect:?}"
+        );
+    }
+
+    #[test]
+    fn canvas_cursor_position_targets_current_character_cell() {
+        let area = Rect::new(10, 2, 20, 4);
+        assert_eq!(
+            canvas_cursor_position(None, "abc", 1, area),
+            Some(Position { x: 11, y: 2 })
+        );
+    }
+
+    #[test]
+    fn canvas_cursor_position_accounts_for_wrapped_lines() {
+        let area = Rect::new(10, 2, 5, 4);
+        assert_eq!(
+            canvas_cursor_position(None, "abcdef", 6, area),
+            Some(Position { x: 11, y: 3 })
+        );
+    }
+
+    #[test]
+    fn canvas_cursor_position_uses_rendered_smart_clip_width() {
+        let area = Rect::new(10, 2, 80, 4);
+        let markdown = "run @{harness:codex} now";
+        let cursor = "run @{harness:codex}".chars().count();
+        let chip_width = " harness codex ".chars().count();
+
+        assert_eq!(
+            canvas_cursor_position(None, markdown, cursor, area),
+            Some(Position {
+                x: 10 + "run ".chars().count() as u16 + chip_width as u16,
+                y: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn canvas_heading_rendering_keeps_markdown_marker() {
+        let theme = Theme::default();
+        assert_eq!(
+            line_text(&render_canvas_heading_line(&theme, 1, "# Todo", 0, None)),
+            "# Todo"
+        );
+        assert_eq!(
+            line_text(&render_canvas_heading_line(
+                &theme,
+                2,
+                "## Progress",
+                0,
+                None
+            )),
+            "## Progress"
+        );
+    }
+
+    #[test]
+    fn canvas_focus_styles_are_distinct_from_session_focus() {
+        let theme = Theme::default();
+        assert_eq!(pane_border_style(&theme, true).fg, Some(theme.border_focused));
+        assert_eq!(canvas_border_style(&theme, true).fg, Some(theme.accent_alt));
+        assert_eq!(canvas_border_style(&theme, false).fg, Some(theme.border));
+        assert_ne!(
+            canvas_border_style(&theme, true).fg,
+            pane_border_style(&theme, true).fg
+        );
     }
 
     #[test]

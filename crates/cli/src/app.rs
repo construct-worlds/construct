@@ -47,6 +47,9 @@ pub const SCROLLBACK_MAX: usize = 5_000;
 pub const MINIBUFFER_PANEL_H_DEFAULT: u16 = 13;
 pub const MINIBUFFER_PANEL_H_MIN: u16 = 3;
 pub const MINIBUFFER_PANEL_H_MAX: u16 = 80;
+pub(crate) const CANVAS_REVEAL_MS: u64 = 240;
+pub(crate) const CANVAS_CONTENT_PADDING_X: u16 = 1;
+pub(crate) const CANVAS_CONTENT_PADDING_Y: u16 = 1;
 const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
 
 /// A row in the rendered list view. Sessions and group headers share the
@@ -783,6 +786,13 @@ pub struct App {
     /// /tasks popup state: `None` = closed, `Some(...)` = open with
     /// a snapshot of the session's task registry.
     pub tasks_popup: Option<TasksPopup>,
+    /// Selected session's canvas, rendered in an in-TUI modal.
+    pub canvas_popup: Option<CanvasPopup>,
+    /// Open canvas popups for sessions that are not currently selected.
+    /// Presence means the canvas should be restored when that session is
+    /// focused again, including unsaved draft text and cursor state.
+    pub canvas_popups: HashMap<String, CanvasPopup>,
+    pub canvas_clipboard: Option<String>,
     /// Live `/remote-control` modal — URL + QR for the active
     /// remote-WS deployment. `Some` while open, `None` otherwise.
     /// Dismissed with Esc the same way `tasks_popup` is.
@@ -1262,6 +1272,58 @@ pub struct TasksPopup {
     pub tasks: Vec<agentd_protocol::TaskInfo>,
 }
 
+/// In-TUI canvas surface for the selected session. The renderer treats
+/// Markdown as source and projects smart clips as chips/blocks.
+#[derive(Debug, Clone)]
+pub struct CanvasPopup {
+    pub canvas: agentd_protocol::CanvasDocument,
+    pub buffer: String,
+    pub saved_markdown: String,
+    pub cursor: usize,
+    pub preferred_col: Option<usize>,
+    pub selection: Option<CanvasSelection>,
+    pub smart_clip: Option<CanvasSmartClipSearch>,
+    pub revealed_at: Instant,
+    pub hide_after: Instant,
+    pub closing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanvasSelection {
+    pub anchor: usize,
+    pub head: usize,
+    pub dragged: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanvasSmartClipSearch {
+    pub trigger_start: usize,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanvasSmartClipCandidate {
+    pub group: CanvasSmartClipGroup,
+    pub clip: String,
+    pub label: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasSmartClipGroup {
+    Session,
+    Harness,
+}
+
+impl CanvasSmartClipGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Harness => "harness",
+        }
+    }
+}
+
 /// Live state of the `/remote-control` (or `/remote-control-debug`)
 /// modal. The `url` and `qr` are served verbatim by the daemon
 /// (`remote.start` IPC); the popup just displays them.
@@ -1521,6 +1583,12 @@ pub struct LayoutSnapshot {
     /// Mouse clicks outside this rect dismiss the modal instead of
     /// falling through to panes underneath it.
     pub modal_area: Option<ratatui::layout::Rect>,
+    /// Canvas title-bar Run button bounds: `(x_start, x_end, y)`.
+    pub canvas_title_run_hit: Option<(u16, u16, u16)>,
+    /// Canvas title-bar mode toggle bounds: `(x_start, x_end, y)`.
+    pub canvas_title_toggle_hit: Option<(u16, u16, u16)>,
+    /// Canvas selected-text context Run button bounds: `(x_start, x_end, y)`.
+    pub canvas_selection_run_hit: Option<(u16, u16, u16)>,
     /// Bounds of the browser preview overlay rendered in the terminal view.
     pub browser_preview_area: Option<ratatui::layout::Rect>,
     /// Top-right close button bounds for the browser preview overlay: `(x_start, x_end, y)`.
@@ -1802,6 +1870,9 @@ async fn run_with_socket_initial_selection(
         matrix_reveal_hits: Vec::new(),
         orchestrator_desired_size: None,
         tasks_popup: None,
+        canvas_popup: None,
+        canvas_popups: HashMap::new(),
+        canvas_clipboard: None,
         remote_control_popup: None,
         remote_control_task: None,
         terminal_pane_size: (100, 30),
@@ -1882,6 +1953,8 @@ async fn run_with_socket_initial_selection(
     if app.selected_session().map(|s| s.has_pty).unwrap_or(false) {
         app.view = ViewMode::Terminal;
     }
+    app.restore_open_canvas_popups(&persisted.open_canvas_session_ids)
+        .await;
 
     // Subscribe to all session events.
     if let Err(e) = client.subscribe(None).await {
@@ -1949,6 +2022,8 @@ async fn run_with_socket_initial_selection(
     );
     terminal.show_cursor().ok();
 
+    app.save_open_canvas_popups().await;
+
     let mut widgets: HashMap<String, crate::tui_state::WidgetState> = HashMap::new();
     for (session_id, panel_id) in &app.dynamic_ui_selected {
         widgets
@@ -1973,6 +2048,7 @@ async fn run_with_socket_initial_selection(
         hide_pane_side_borders: app.hide_pane_side_borders,
         main_windows: Some(app.main_windows.clone()),
         active_window_id: Some(app.active_window_id),
+        open_canvas_session_ids: app.open_canvas_session_ids(),
         widgets,
     });
 
@@ -2518,6 +2594,11 @@ impl App {
 
     async fn on_paste(&mut self, text: String) {
         if text.is_empty() {
+            return;
+        }
+
+        if self.canvas_popup.is_some() {
+            self.insert_canvas_text(&text);
             return;
         }
 
@@ -3407,7 +3488,7 @@ impl App {
         self.main_windows.set_selection(active_id, replacement);
     }
 
-    fn selection_for_window(&self, target: u64) -> Option<Selection> {
+    pub(crate) fn selection_for_window(&self, target: u64) -> Option<Selection> {
         fn find(node: &MainWindowTree, target: u64) -> Option<Selection> {
             match node {
                 MainWindowTree::Leaf { id, selection } if *id == target => Some(selection.clone()),
@@ -4473,6 +4554,9 @@ impl App {
         // the child's own scroll/click/selection handling works. Skipped while
         // a construct-owned drag gesture (pane/list resize, scrollbar, text
         // selection) is in flight so those finish under our control.
+        if self.handle_canvas_mouse(&ev).await {
+            return;
+        }
         if self.resizing_list.is_none()
             && self.resizing_pin_strip.is_none()
             && self.resizing_orchestrator_panel.is_none()
@@ -5117,13 +5201,31 @@ impl App {
         }
         if let Some(modal) = self.layout.modal_area {
             if !contains(modal, col, row) {
-                self.dismiss_modal();
+                if self.canvas_popup.is_some() {
+                    if self
+                        .layout
+                        .main_window_areas
+                        .iter()
+                        .any(|hit| hit.id != self.active_window_id && contains(hit.area, col, row))
+                    {
+                        self.stash_active_canvas_popup();
+                    } else {
+                        self.close_canvas_popup().await;
+                        return;
+                    }
+                } else {
+                    self.dismiss_modal();
+                    return;
+                }
+            } else if self.canvas_popup.is_some() {
+                self.place_canvas_cursor(modal, col, row);
+                return;
+            } else {
+                // The current modals are informational/read-only. Clicks
+                // inside them are consumed so they don't focus or activate
+                // controls in panes underneath the modal.
                 return;
             }
-            // The current modals are informational/read-only. Clicks
-            // inside them are consumed so they don't focus or activate
-            // controls in panes underneath the modal.
-            return;
         }
         if let Some(hit) = self.url_hit_at(col, row) {
             match open_url(&hit.url) {
@@ -5247,6 +5349,16 @@ impl App {
                 // confirmation prompt for the selected session.
                 let (close_x_start, close_x_end, close_y) =
                     crate::ui::view_close_button_range(view);
+                let (toggle_x_start, toggle_x_end, toggle_y) =
+                    crate::ui::view_canvas_toggle_button_range(view);
+                if self.selected_session().is_some()
+                    && row == toggle_y
+                    && col >= toggle_x_start
+                    && col < toggle_x_end
+                {
+                    self.toggle_canvas_popup().await;
+                    return;
+                }
                 if self.selected_session().is_some()
                     && row == close_y
                     && col >= close_x_start
@@ -5283,6 +5395,9 @@ impl App {
     }
 
     fn dismiss_modal(&mut self) {
+        if self.canvas_popup.take().is_some() {
+            return;
+        }
         if self.tasks_popup.take().is_some() {
             return;
         }
@@ -6036,6 +6151,13 @@ impl App {
                 return;
             }
         }
+        if self.canvas_popup.is_some() {
+            if self.handle_canvas_global_key(key).await {
+                return;
+            }
+            self.handle_canvas_key(key).await;
+            return;
+        }
         // /remote-control modal: Esc closes the popup *and* the
         // orchestrator panel it was launched from, so a single Esc
         // returns the user to whichever session they had focused
@@ -6220,6 +6342,7 @@ impl App {
                 | KeyAction::ToggleView
                 | KeyAction::ToggleZoom
                 | KeyAction::ToggleHelp
+                | KeyAction::OpenCanvas
                 | KeyAction::OpenCommandPalette
                 | KeyAction::OpenSwitchSession
                 | KeyAction::OpenNewSession
@@ -6495,6 +6618,831 @@ impl App {
             && live
     }
 
+    async fn open_canvas_popup(&mut self) {
+        let Some(session_id) = self.selected_id() else {
+            self.set_status("canvas: no session selected".to_string());
+            return;
+        };
+
+        match self.client.canvas_get(&session_id).await {
+            Ok(result) => {
+                let version = result.canvas.version;
+                let now = Instant::now();
+                self.canvas_popups.remove(&result.canvas.session_id);
+                self.canvas_popup = Some(canvas_popup_from_document(result.canvas, now));
+                self.set_status(format!("canvas opened at version {version}"));
+            }
+            Err(e) => {
+                self.set_status(format!("canvas get failed: {e}"));
+            }
+        }
+    }
+
+    async fn toggle_canvas_popup(&mut self) {
+        if self.canvas_popup.is_some() {
+            self.close_canvas_popup().await;
+        } else {
+            self.open_canvas_popup().await;
+        }
+    }
+
+    async fn restore_open_canvas_popups(&mut self, session_ids: &[String]) {
+        let mut seen = HashSet::new();
+        let live_sessions: HashSet<String> = self
+            .sessions
+            .iter()
+            .filter(|s| is_user_list_session(s))
+            .map(|s| s.id.clone())
+            .collect();
+        let selected_id = self.selection.session_id().map(str::to_string);
+        let now = Instant::now();
+        for session_id in session_ids {
+            if !seen.insert(session_id.clone()) || !live_sessions.contains(session_id) {
+                continue;
+            }
+            match self.client.canvas_get(session_id).await {
+                Ok(result) => {
+                    let popup = canvas_popup_from_document(result.canvas, now);
+                    if selected_id.as_deref() == Some(session_id.as_str()) {
+                        self.canvas_popup = Some(popup);
+                    } else {
+                        self.canvas_popups.insert(session_id.clone(), popup);
+                    }
+                }
+                Err(e) => {
+                    self.status = Some((
+                        format!("canvas restore failed for {}: {e}", short_id(session_id)),
+                        Instant::now(),
+                    ));
+                }
+            }
+        }
+    }
+
+    pub(crate) fn open_canvas_session_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        if let Some(popup) = self.canvas_popup.as_ref() {
+            if !popup.closing && seen.insert(popup.canvas.session_id.clone()) {
+                ids.push(popup.canvas.session_id.clone());
+            }
+        }
+        for popup in self.canvas_popups.values() {
+            if !popup.closing && seen.insert(popup.canvas.session_id.clone()) {
+                ids.push(popup.canvas.session_id.clone());
+            }
+        }
+        ids.sort();
+        ids
+    }
+
+    pub fn sync_canvas_popup_with_selection(&mut self) {
+        let selected_id = self.selection.session_id().map(str::to_string);
+        let active_id = self
+            .canvas_popup
+            .as_ref()
+            .map(|popup| popup.canvas.session_id.clone());
+        if active_id.as_deref() == selected_id.as_deref() {
+            return;
+        }
+        self.stash_active_canvas_popup();
+        if let Some(selected_id) = selected_id {
+            if let Some(mut popup) = self.canvas_popups.remove(&selected_id) {
+                popup.closing = false;
+                self.canvas_popup = Some(popup);
+            }
+        }
+    }
+
+    fn stash_active_canvas_popup(&mut self) {
+        if let Some(popup) = self.canvas_popup.take() {
+            if !popup.closing {
+                self.canvas_popups
+                    .insert(popup.canvas.session_id.clone(), popup);
+            }
+        }
+    }
+
+    async fn save_canvas_popup_document(
+        &self,
+        popup: &CanvasPopup,
+    ) -> Result<Option<agentd_protocol::CanvasDocument>> {
+        let markdown = canvas_normalize_smart_clip_instance_ids(&popup.buffer);
+        if markdown == popup.saved_markdown {
+            return Ok(None);
+        }
+        let params = agentd_protocol::CanvasUpdateParams {
+            session_id: popup.canvas.session_id.clone(),
+            markdown,
+            base_version: Some(popup.canvas.version),
+            actor: agentd_protocol::CanvasUpdateActor::Human,
+            template_id: popup.canvas.template_id.clone(),
+            note: None,
+        };
+        Ok(Some(self.client.canvas_update(params).await?.canvas))
+    }
+
+    async fn save_open_canvas_popups(&mut self) {
+        let active = self.canvas_popup.clone();
+        if let Some(popup) = active.as_ref() {
+            match self.save_canvas_popup_document(popup).await {
+                Ok(Some(canvas)) => {
+                    if let Some(active) = self.canvas_popup.as_mut() {
+                        active.canvas = canvas.clone();
+                        active.buffer = canvas.markdown.clone();
+                        active.saved_markdown = canvas.markdown;
+                        active.cursor = active.cursor.min(active.buffer.chars().count());
+                        active.preferred_col = None;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => self.status = Some((format!("canvas save failed: {e}"), Instant::now())),
+            }
+        }
+
+        let cached: Vec<(String, CanvasPopup)> = self
+            .canvas_popups
+            .iter()
+            .map(|(id, popup)| (id.clone(), popup.clone()))
+            .collect();
+        for (session_id, popup) in cached {
+            match self.save_canvas_popup_document(&popup).await {
+                Ok(Some(canvas)) => {
+                    if let Some(cached) = self.canvas_popups.get_mut(&session_id) {
+                        cached.canvas = canvas.clone();
+                        cached.buffer = canvas.markdown.clone();
+                        cached.saved_markdown = canvas.markdown;
+                        cached.cursor = cached.cursor.min(cached.buffer.chars().count());
+                        cached.preferred_col = None;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => self.status = Some((format!("canvas save failed: {e}"), Instant::now())),
+            }
+        }
+    }
+
+    async fn save_canvas_popup(&mut self) -> bool {
+        let Some(popup) = self.canvas_popup.as_ref() else {
+            return true;
+        };
+        match self.save_canvas_popup_document(popup).await {
+            Ok(Some(canvas)) => {
+                if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.canvas = canvas.clone();
+                    popup.buffer = canvas.markdown.clone();
+                    popup.saved_markdown = canvas.markdown;
+                    popup.cursor = popup.cursor.min(popup.buffer.chars().count());
+                    popup.preferred_col = None;
+                }
+                self.set_status(format!("canvas saved version {}", canvas.version));
+                true
+            }
+            Ok(None) => {
+                true
+            }
+            Err(e) => {
+                self.set_status(format!("canvas save failed: {e}"));
+                false
+            }
+        }
+    }
+
+    async fn execute_canvas_popup(&mut self, selection: Option<String>) -> bool {
+        let Some(session_id) = self
+            .canvas_popup
+            .as_ref()
+            .map(|popup| popup.canvas.session_id.clone())
+        else {
+            self.set_status("canvas run failed: no active canvas".to_string());
+            return false;
+        };
+
+        let dirty = self
+            .canvas_popup
+            .as_ref()
+            .is_some_and(|popup| {
+                canvas_normalize_smart_clip_instance_ids(&popup.buffer) != popup.saved_markdown
+            });
+        if dirty && !self.save_canvas_popup().await {
+            return false;
+        }
+
+        let base_version = self
+            .canvas_popup
+            .as_ref()
+            .map(|popup| popup.canvas.version);
+        let selection = selection.map(|selection| {
+            canvas_normalize_smart_clip_instance_ids(&selection)
+        });
+        let is_selection = selection.is_some();
+        let params = agentd_protocol::CanvasExecuteParams {
+            session_id,
+            selection,
+            base_version,
+        };
+        match self.client.canvas_execute(params).await {
+            Ok(result) => {
+                let scope = if is_selection { "selection" } else { "canvas" };
+                self.set_status(format!(
+                    "canvas run sent ({scope}, version {})",
+                    result.canvas.version
+                ));
+                true
+            }
+            Err(e) => {
+                self.set_status(format!("canvas run failed: {e}"));
+                false
+            }
+        }
+    }
+
+    async fn close_canvas_popup(&mut self) {
+        if !self.save_canvas_popup().await {
+            return;
+        }
+        if let Some(popup) = self.canvas_popup.as_mut() {
+            self.canvas_popups.remove(&popup.canvas.session_id);
+            let now = Instant::now();
+            popup.closing = true;
+            popup.hide_after = now + Duration::from_millis(CANVAS_REVEAL_MS);
+        }
+    }
+
+    fn place_canvas_cursor(&mut self, modal: ratatui::layout::Rect, col: u16, row: u16) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        popup.closing = false;
+        popup.cursor = canvas_cursor_at_modal_point(&popup.buffer, modal, col, row).unwrap_or(0);
+        popup.preferred_col = None;
+        popup.selection = None;
+        popup.smart_clip = None;
+    }
+
+    async fn handle_canvas_mouse(&mut self, ev: &MouseEvent) -> bool {
+        use crossterm::event::MouseButton;
+        let Some(modal) = self.layout.modal_area else {
+            return false;
+        };
+        if self.canvas_popup.is_none() {
+            return false;
+        }
+        let contains = ev.column >= modal.x
+            && ev.column < modal.x.saturating_add(modal.width)
+            && ev.row >= modal.y
+            && ev.row < modal.y.saturating_add(modal.height);
+        if !contains {
+            return false;
+        }
+        let title_run_hit = self.layout.canvas_title_run_hit;
+        let title_toggle_hit = self.layout.canvas_title_toggle_hit;
+        let selection_run_hit = self.layout.canvas_selection_run_hit;
+        let hit_title_toggle = title_toggle_hit
+            .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
+        let hit_title_run = title_run_hit
+            .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
+        let hit_selection_run = selection_run_hit
+            .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
+        if hit_title_toggle || hit_title_run || hit_selection_run {
+            if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if hit_title_toggle {
+                    self.close_canvas_popup().await;
+                } else {
+                    let selection = hit_selection_run
+                        .then(|| {
+                            self.canvas_popup
+                                .as_ref()
+                                .and_then(Self::selected_canvas_text)
+                        })
+                        .flatten();
+                    self.execute_canvas_popup(selection).await;
+                }
+            }
+            return true;
+        }
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(popup) = self.canvas_popup.as_mut() else {
+                    return true;
+                };
+                let cursor = canvas_cursor_at_modal_point(&popup.buffer, modal, ev.column, ev.row)
+                    .unwrap_or(0);
+                popup.cursor = cursor;
+                popup.preferred_col = None;
+                popup.selection = Some(CanvasSelection {
+                    anchor: cursor,
+                    head: cursor,
+                    dragged: false,
+                });
+                popup.smart_clip = None;
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(popup) = self.canvas_popup.as_mut() else {
+                    return true;
+                };
+                let cursor = canvas_cursor_at_modal_point(&popup.buffer, modal, ev.column, ev.row)
+                    .unwrap_or(0);
+                popup.cursor = cursor;
+                popup.preferred_col = None;
+                if let Some(selection) = popup.selection.as_mut() {
+                    selection.dragged = selection.dragged || selection.head != cursor;
+                    selection.head = cursor;
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let should_copy = self
+                    .canvas_popup
+                    .as_ref()
+                    .and_then(|popup| popup.selection.as_ref())
+                    .is_some_and(|selection| selection.dragged);
+                if should_copy {
+                    self.copy_canvas_selection();
+                } else if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.selection = None;
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
+    async fn handle_canvas_key(&mut self, key: KeyEvent) {
+        if self.canvas_popup.as_ref().is_some_and(|p| p.closing) {
+            return;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc if self.canvas_smart_clip_active() => self.cancel_canvas_smart_clip(),
+            KeyCode::Esc => self.close_canvas_popup().await,
+            KeyCode::Enter if self.canvas_smart_clip_active() => self.accept_canvas_smart_clip(),
+            KeyCode::Up if self.canvas_smart_clip_active() => {
+                self.move_canvas_smart_clip_selection(-1)
+            }
+            KeyCode::Down if self.canvas_smart_clip_active() => {
+                self.move_canvas_smart_clip_selection(1)
+            }
+            KeyCode::Char(' ') if ctrl => self.begin_canvas_selection(),
+            KeyCode::Char('a') if ctrl => {
+                if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.cursor = canvas_line_start(&popup.buffer, popup.cursor);
+                    popup.preferred_col = None;
+                    Self::update_canvas_selection_head(popup);
+                    Self::update_canvas_smart_clip_after_cursor_move(popup);
+                }
+            }
+            KeyCode::Char('e') if ctrl => {
+                if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.cursor = canvas_line_end(&popup.buffer, popup.cursor);
+                    popup.preferred_col = None;
+                    Self::update_canvas_selection_head(popup);
+                    Self::update_canvas_smart_clip_after_cursor_move(popup);
+                }
+            }
+            KeyCode::Char('b') if ctrl => self.move_canvas_cursor(-1),
+            KeyCode::Char('f') if ctrl => self.move_canvas_cursor(1),
+            KeyCode::Char('p') if ctrl && self.canvas_smart_clip_active() => {
+                self.move_canvas_smart_clip_selection(-1)
+            }
+            KeyCode::Char('n') if ctrl && self.canvas_smart_clip_active() => {
+                self.move_canvas_smart_clip_selection(1)
+            }
+            KeyCode::Char('p') if ctrl => self.move_canvas_cursor_vertical(-1),
+            KeyCode::Char('n') if ctrl => self.move_canvas_cursor_vertical(1),
+            KeyCode::Char('v') if ctrl => self.paste_canvas_clipboard(),
+            KeyCode::Char('y') if ctrl => self.paste_canvas_clipboard(),
+            KeyCode::Char('w') if ctrl => self.cut_canvas_selection(),
+            KeyCode::Char('d') if ctrl => self.delete_canvas_forward(),
+            KeyCode::Char('h') if ctrl => self.delete_canvas_back(),
+            KeyCode::Char('k') if ctrl => self.cut_canvas_line(),
+            KeyCode::Enter => self.insert_canvas_text("\n"),
+            KeyCode::Backspace => self.delete_canvas_back(),
+            KeyCode::Delete => self.delete_canvas_forward(),
+            KeyCode::Left => self.move_canvas_cursor(-1),
+            KeyCode::Right => self.move_canvas_cursor(1),
+            KeyCode::Up => self.move_canvas_cursor_vertical(-1),
+            KeyCode::Down => self.move_canvas_cursor_vertical(1),
+            KeyCode::Home => {
+                if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.cursor = canvas_line_start(&popup.buffer, popup.cursor);
+                    popup.preferred_col = None;
+                    Self::update_canvas_selection_head(popup);
+                    Self::update_canvas_smart_clip_after_cursor_move(popup);
+                }
+            }
+            KeyCode::End => {
+                if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.cursor = canvas_line_end(&popup.buffer, popup.cursor);
+                    popup.preferred_col = None;
+                    Self::update_canvas_selection_head(popup);
+                    Self::update_canvas_smart_clip_after_cursor_move(popup);
+                }
+            }
+            KeyCode::Char(c) if !ctrl && !alt => self.insert_canvas_text(&c.to_string()),
+            _ => {}
+        }
+    }
+
+    async fn handle_canvas_global_key(&mut self, key: KeyEvent) -> bool {
+        let chord_active = !self.chord_state.is_empty();
+        let is_ctrl_x =
+            matches!(key.code, KeyCode::Char('x')) && key.modifiers.contains(KeyModifiers::CONTROL);
+        if !chord_active && !is_ctrl_x {
+            return false;
+        }
+        let res = self.chord_state.handle(key, &self.keymap);
+        self.chord_label = self.chord_state.label();
+        match res {
+            KeymapResult::Action(action) => {
+                self.chord_label.clear();
+                self.run_action(action).await;
+            }
+            KeymapResult::Pending(label) => {
+                self.chord_label = label;
+            }
+            KeymapResult::Unhandled => {
+                self.chord_label.clear();
+            }
+        }
+        true
+    }
+
+    fn begin_canvas_selection(&mut self) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        popup.smart_clip = None;
+        popup.selection = Some(CanvasSelection {
+            anchor: popup.cursor,
+            head: popup.cursor,
+            dragged: false,
+        });
+        self.set_status("canvas selection started".to_string());
+    }
+
+    fn canvas_smart_clip_active(&self) -> bool {
+        self.canvas_popup
+            .as_ref()
+            .and_then(|popup| popup.smart_clip.as_ref())
+            .is_some()
+    }
+
+    fn cancel_canvas_smart_clip(&mut self) {
+        if let Some(popup) = self.canvas_popup.as_mut() {
+            popup.smart_clip = None;
+        }
+    }
+
+    fn move_canvas_smart_clip_selection(&mut self, delta: isize) {
+        let candidate_count = self
+            .canvas_popup
+            .as_ref()
+            .map(|popup| self.canvas_smart_clip_candidates(popup).len())
+            .unwrap_or(0);
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        let Some(search) = popup.smart_clip.as_mut() else {
+            return;
+        };
+        if candidate_count == 0 {
+            search.selected = 0;
+            return;
+        }
+        let selected = search.selected.min(candidate_count - 1);
+        search.selected = if delta < 0 {
+            selected
+                .saturating_add(candidate_count)
+                .saturating_sub(delta.unsigned_abs() % candidate_count)
+                % candidate_count
+        } else {
+            (selected + delta as usize) % candidate_count
+        };
+    }
+
+    fn accept_canvas_smart_clip(&mut self) {
+        let (trigger_start, candidate) = {
+            let Some(popup) = self.canvas_popup.as_ref() else {
+                return;
+            };
+            let Some(search) = popup.smart_clip.as_ref() else {
+                return;
+            };
+            let candidates = self.canvas_smart_clip_candidates(popup);
+            let Some(candidate) = candidates
+                .get(search.selected.min(candidates.len().saturating_sub(1)))
+                .cloned()
+            else {
+                return;
+            };
+            (search.trigger_start, candidate)
+        };
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        if popup.cursor < trigger_start {
+            popup.smart_clip = None;
+            return;
+        }
+        let clip = canvas_smart_clip_with_instance_id(&candidate.clip, &popup.buffer);
+        let start_b = byte_pos(&popup.buffer, trigger_start);
+        let end_b = byte_pos(&popup.buffer, popup.cursor);
+        popup.buffer.replace_range(start_b..end_b, &clip);
+        popup.cursor = trigger_start + clip.chars().count();
+        popup.preferred_col = None;
+        popup.selection = None;
+        popup.smart_clip = None;
+    }
+
+    fn update_canvas_smart_clip_after_cursor_move(popup: &mut CanvasPopup) {
+        let Some(search) = popup.smart_clip.as_ref() else {
+            return;
+        };
+        if canvas_smart_clip_query(popup, search.trigger_start).is_none() {
+            popup.smart_clip = None;
+        }
+    }
+
+    pub(crate) fn canvas_smart_clip_candidates(
+        &self,
+        popup: &CanvasPopup,
+    ) -> Vec<CanvasSmartClipCandidate> {
+        let query = popup
+            .smart_clip
+            .as_ref()
+            .and_then(|search| canvas_smart_clip_query(popup, search.trigger_start))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut out = Vec::new();
+        for session in self.sessions.iter().filter(|s| is_user_list_session(s)) {
+            let title = session
+                .title
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| short_id(&session.id).to_string());
+            let haystack = format!(
+                "{} {} {} {}",
+                title, session.id, session.harness, session.state.label()
+            )
+            .to_ascii_lowercase();
+            if query.is_empty() || haystack.contains(&query) {
+                out.push(CanvasSmartClipCandidate {
+                    group: CanvasSmartClipGroup::Session,
+                    clip: format!("@{{session:{}}}", session.id),
+                    label: title,
+                    detail: format!("{} · {}", session.harness, session.state.label()),
+                });
+            }
+        }
+        for harness in &self.harnesses {
+            let haystack = format!(
+                "{} {}",
+                harness.name,
+                harness.description.as_deref().unwrap_or_default()
+            )
+            .to_ascii_lowercase();
+            if query.is_empty() || haystack.contains(&query) {
+                let detail = if harness.available {
+                    String::new()
+                } else {
+                    "unavailable".to_string()
+                };
+                out.push(CanvasSmartClipCandidate {
+                    group: CanvasSmartClipGroup::Harness,
+                    clip: format!("@{{harness:{}}}", harness.name),
+                    label: harness.name.clone(),
+                    detail,
+                });
+            }
+        }
+        out.truncate(8);
+        out
+    }
+
+    fn update_canvas_selection_head(popup: &mut CanvasPopup) {
+        if let Some(selection) = popup.selection.as_mut() {
+            selection.head = popup.cursor;
+        }
+    }
+
+    fn canvas_selection_range(popup: &CanvasPopup) -> Option<(usize, usize)> {
+        let selection = popup.selection.as_ref()?;
+        let start = selection.anchor.min(selection.head);
+        let end = selection.anchor.max(selection.head);
+        (start != end).then_some((start, end))
+    }
+
+    fn selected_canvas_text(popup: &CanvasPopup) -> Option<String> {
+        let (start, end) = Self::canvas_selection_range(popup)?;
+        let start_b = byte_pos(&popup.buffer, start);
+        let end_b = byte_pos(&popup.buffer, end);
+        Some(popup.buffer[start_b..end_b].to_string())
+    }
+
+    fn delete_canvas_selection(&mut self) -> Option<String> {
+        let popup = self.canvas_popup.as_mut()?;
+        let (start, end) = Self::canvas_selection_range(popup)?;
+        let start_b = byte_pos(&popup.buffer, start);
+        let end_b = byte_pos(&popup.buffer, end);
+        let deleted = popup.buffer[start_b..end_b].to_string();
+        popup.buffer.replace_range(start_b..end_b, "");
+        popup.cursor = start;
+        popup.preferred_col = None;
+        popup.selection = None;
+        popup.smart_clip = None;
+        Some(deleted)
+    }
+
+    fn copy_canvas_text(&mut self, text: &str, verb: &str) {
+        self.canvas_clipboard = Some(text.to_string());
+        match copy_to_clipboard(text) {
+            Ok(outcome) => self.set_status(outcome.status(text.chars().count())),
+            Err(e) => self.set_status(format!("{verb} failed: {e}")),
+        }
+    }
+
+    fn copy_canvas_selection(&mut self) {
+        let Some(text) = self
+            .canvas_popup
+            .as_ref()
+            .and_then(Self::selected_canvas_text)
+        else {
+            return;
+        };
+        if !text.is_empty() {
+            self.copy_canvas_text(&text, "copy");
+        }
+    }
+
+    fn cut_canvas_selection(&mut self) {
+        let Some(text) = self.delete_canvas_selection() else {
+            return;
+        };
+        if !text.is_empty() {
+            self.copy_canvas_text(&text, "cut");
+        }
+    }
+
+    fn paste_canvas_clipboard(&mut self) {
+        let text = self
+            .canvas_clipboard
+            .clone()
+            .or_else(|| read_from_clipboard().ok());
+        let Some(text) = text else {
+            self.set_status("canvas paste failed: clipboard unavailable".to_string());
+            return;
+        };
+        if !text.is_empty() {
+            self.insert_canvas_text(&text);
+        }
+    }
+
+    fn cut_canvas_line(&mut self) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        let start = byte_pos(&popup.buffer, popup.cursor);
+        let line_end = canvas_line_end(&popup.buffer, popup.cursor);
+        let mut end = byte_pos(&popup.buffer, line_end);
+        if start == end && end < popup.buffer.len() {
+            end += 1;
+        }
+        let cut = popup.buffer[start..end].to_string();
+        popup.buffer.replace_range(start..end, "");
+        popup.preferred_col = None;
+        popup.selection = None;
+        popup.smart_clip = None;
+        if !cut.is_empty() {
+            self.copy_canvas_text(&cut, "cut");
+        }
+    }
+
+    fn insert_canvas_text(&mut self, text: &str) {
+        if self
+            .canvas_popup
+            .as_ref()
+            .and_then(Self::canvas_selection_range)
+            .is_some()
+        {
+            self.delete_canvas_selection();
+        }
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        let trigger_start = if text == "@" {
+            Some(popup.cursor)
+        } else {
+            None
+        };
+        let pos = byte_pos(&popup.buffer, popup.cursor);
+        popup.buffer.insert_str(pos, text);
+        popup.cursor += text.chars().count();
+        popup.preferred_col = None;
+        popup.selection = None;
+        if let Some(trigger_start) = trigger_start {
+            popup.smart_clip = Some(CanvasSmartClipSearch {
+                trigger_start,
+                selected: 0,
+            });
+        } else if popup.smart_clip.is_some() {
+            Self::update_canvas_smart_clip_after_cursor_move(popup);
+        }
+    }
+
+    fn move_canvas_cursor(&mut self, delta: isize) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        if delta < 0 {
+            for _ in 0..delta.unsigned_abs() {
+                popup.cursor = canvas_cursor_left(&popup.buffer, popup.cursor);
+            }
+        } else {
+            for _ in 0..delta as usize {
+                popup.cursor = canvas_cursor_right(&popup.buffer, popup.cursor);
+            }
+        }
+        popup.preferred_col = None;
+        Self::update_canvas_selection_head(popup);
+        Self::update_canvas_smart_clip_after_cursor_move(popup);
+    }
+
+    fn move_canvas_cursor_vertical(&mut self, delta: isize) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        let (line, col) = canvas_line_col(&popup.buffer, popup.cursor);
+        let target_col = popup.preferred_col.unwrap_or(col);
+        let next_line = if delta < 0 {
+            line.saturating_sub(delta.unsigned_abs())
+        } else {
+            line.saturating_add(delta as usize)
+        };
+        popup.cursor = canvas_cursor_for_line_col(&popup.buffer, next_line, target_col);
+        popup.preferred_col = Some(target_col);
+        Self::update_canvas_selection_head(popup);
+        Self::update_canvas_smart_clip_after_cursor_move(popup);
+    }
+
+    fn delete_canvas_back(&mut self) {
+        if self.delete_canvas_selection().is_some() {
+            return;
+        }
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        if popup.cursor == 0 {
+            return;
+        }
+        let (char_start, char_end) =
+            if let Some(range) = canvas_smart_clip_range_before_or_containing(
+                &popup.buffer,
+                popup.cursor,
+            ) {
+                (range.start, range.end)
+            } else {
+                (popup.cursor - 1, popup.cursor)
+            };
+        let start = byte_pos(&popup.buffer, char_start);
+        let end = byte_pos(&popup.buffer, char_end);
+        popup.buffer.replace_range(start..end, "");
+        popup.cursor = char_start;
+        popup.preferred_col = None;
+        popup.selection = None;
+        Self::update_canvas_smart_clip_after_cursor_move(popup);
+    }
+
+    fn delete_canvas_forward(&mut self) {
+        if self.delete_canvas_selection().is_some() {
+            return;
+        }
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        if popup.cursor >= popup.buffer.chars().count() {
+            return;
+        }
+        let (char_start, char_end) =
+            if let Some(range) = canvas_smart_clip_range_at_or_containing(
+                &popup.buffer,
+                popup.cursor,
+            ) {
+                (range.start, range.end)
+            } else {
+                (popup.cursor, popup.cursor + 1)
+            };
+        let start = byte_pos(&popup.buffer, char_start);
+        let end = byte_pos(&popup.buffer, char_end);
+        popup.buffer.replace_range(start..end, "");
+        popup.cursor = char_start;
+        popup.preferred_col = None;
+        popup.selection = None;
+        Self::update_canvas_smart_clip_after_cursor_move(popup);
+    }
+
     async fn run_action(&mut self, action: KeyAction) {
         use KeyAction::*;
         match action {
@@ -6635,6 +7583,12 @@ impl App {
                 // The "N archived" disclosure row isn't a delete target.
                 Selection::ArchivedRow(_) => {}
             },
+            OpenCanvas => {
+                self.toggle_canvas_popup().await;
+            }
+            SaveCanvas => {
+                self.save_canvas_popup().await;
+            }
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
                     match self.client.diff(&id).await {
@@ -7538,6 +8492,7 @@ impl App {
             "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "rename" => self.run_action(KeyAction::OpenRename).await,
             "fork" => self.run_action(KeyAction::OpenFork).await,
+            "canvas" | "edit-canvas" => self.run_action(KeyAction::OpenCanvas).await,
             "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
             "rain" | "matrix" | "matrix-rain" => {
                 self.matrix_rain_hidden = !self.matrix_rain_hidden;
@@ -8365,6 +9320,15 @@ fn copy_with_pbcopy(text: &str) -> Result<()> {
     }
 }
 
+fn read_from_clipboard() -> Result<String> {
+    let output = Command::new("pbpaste").output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        anyhow::bail!("pbpaste exited with {}", output.status)
+    }
+}
+
 /// Build the OSC 52 clipboard-write escape sequence for `text`: the terminal
 /// that receives it copies the (base64-encoded) payload to the system
 /// clipboard of the machine the terminal runs on.
@@ -8472,6 +9436,290 @@ fn byte_pos(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or(s.len())
+}
+
+fn canvas_cursor_at_modal_point(
+    buffer: &str,
+    modal: ratatui::layout::Rect,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    let inner_x = modal
+        .x
+        .saturating_add(1)
+        .saturating_add(CANVAS_CONTENT_PADDING_X);
+    let inner_y = modal
+        .y
+        .saturating_add(1)
+        .saturating_add(CANVAS_CONTENT_PADDING_Y);
+    if row < inner_y {
+        return None;
+    }
+    let target_line = row.saturating_sub(inner_y) as usize;
+    let target_col = col.saturating_sub(inner_x) as usize;
+    Some(canvas_cursor_for_line_col(buffer, target_line, target_col))
+}
+
+fn canvas_smart_clip_query(popup: &CanvasPopup, trigger_start: usize) -> Option<String> {
+    if popup.cursor <= trigger_start {
+        return None;
+    }
+    let trigger = popup.buffer.chars().nth(trigger_start)?;
+    if trigger != '@' {
+        return None;
+    }
+    let mut query = String::new();
+    for ch in popup
+        .buffer
+        .chars()
+        .skip(trigger_start + 1)
+        .take(popup.cursor.saturating_sub(trigger_start + 1))
+    {
+        if ch.is_whitespace() || matches!(ch, '{' | '}' | '[' | ']' | '(' | ')' | ',' | ';') {
+            return None;
+        }
+        query.push(ch);
+    }
+    Some(query)
+}
+
+fn canvas_smart_clip_with_instance_id(clip: &str, buffer: &str) -> String {
+    if canvas_smart_clip_instance_id(clip).is_some() {
+        return clip.to_string();
+    }
+    let Some(body) = clip.strip_prefix("@{").and_then(|s| s.strip_suffix('}')) else {
+        return clip.to_string();
+    };
+    format!("@{{{} clip_id={}}}", body, canvas_next_smart_clip_id(buffer))
+}
+
+fn canvas_normalize_smart_clip_instance_ids(markdown: &str) -> String {
+    let ranges = canvas_smart_clip_ranges(markdown);
+    if ranges.is_empty() {
+        return markdown.to_string();
+    }
+
+    let mut max = 0usize;
+    for range in &ranges {
+        let start_b = byte_pos(markdown, range.start + 2);
+        let end_b = byte_pos(markdown, range.end.saturating_sub(1));
+        if let Some(id) = canvas_smart_clip_instance_id(&markdown[start_b..end_b]) {
+            if let Some(num) = id.strip_prefix("clip_").and_then(|s| s.parse::<usize>().ok()) {
+                max = max.max(num);
+            }
+        }
+    }
+
+    let mut used = HashSet::new();
+    let mut next = max + 1;
+    let mut normalized = String::with_capacity(markdown.len());
+    let mut last_b = 0usize;
+    for range in ranges {
+        let clip_start_b = byte_pos(markdown, range.start);
+        let body_start_b = byte_pos(markdown, range.start + 2);
+        let body_end_b = byte_pos(markdown, range.end.saturating_sub(1));
+        let clip_end_b = byte_pos(markdown, range.end);
+        normalized.push_str(&markdown[last_b..clip_start_b]);
+
+        let body = &markdown[body_start_b..body_end_b];
+        let existing = canvas_smart_clip_instance_id(body).map(str::to_string);
+        if existing.as_ref().is_some_and(|id| used.insert(id.clone())) {
+            normalized.push_str(&markdown[clip_start_b..clip_end_b]);
+        } else {
+            let id = loop {
+                let candidate = format!("clip_{next}");
+                next += 1;
+                if used.insert(candidate.clone()) {
+                    break candidate;
+                }
+            };
+            let body_without_id = canvas_smart_clip_body_without_instance_id(body);
+            normalized.push_str("@{");
+            normalized.push_str(&body_without_id);
+            if !body_without_id.is_empty() {
+                normalized.push(' ');
+            }
+            normalized.push_str("clip_id=");
+            normalized.push_str(&id);
+            normalized.push('}');
+        }
+        last_b = clip_end_b;
+    }
+    normalized.push_str(&markdown[last_b..]);
+    normalized
+}
+
+fn canvas_next_smart_clip_id(buffer: &str) -> String {
+    let mut max = 0usize;
+    for range in canvas_smart_clip_ranges(buffer) {
+        let start_b = byte_pos(buffer, range.start + 2);
+        let end_b = byte_pos(buffer, range.end.saturating_sub(1));
+        if let Some(id) = canvas_smart_clip_instance_id(&buffer[start_b..end_b]) {
+            if let Some(num) = id.strip_prefix("clip_").and_then(|s| s.parse::<usize>().ok()) {
+                max = max.max(num);
+            }
+        }
+    }
+    format!("clip_{}", max + 1)
+}
+
+fn canvas_smart_clip_instance_id(raw_clip: &str) -> Option<&str> {
+    raw_clip.split_whitespace().find_map(|part| {
+        part.strip_prefix("clip_id=")
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn canvas_smart_clip_body_without_instance_id(raw_clip: &str) -> String {
+    raw_clip
+        .split_whitespace()
+        .filter(|part| !part.starts_with("clip_id="))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CanvasSmartClipRange {
+    start: usize,
+    end: usize,
+}
+
+fn canvas_cursor_left(buffer: &str, cursor: usize) -> usize {
+    canvas_smart_clip_range_before_or_containing(buffer, cursor)
+        .map(|range| range.start)
+        .unwrap_or_else(|| cursor.saturating_sub(1))
+}
+
+fn canvas_cursor_right(buffer: &str, cursor: usize) -> usize {
+    let len = buffer.chars().count();
+    canvas_smart_clip_range_at_or_containing(buffer, cursor)
+        .map(|range| range.end)
+        .unwrap_or_else(|| (cursor + 1).min(len))
+}
+
+fn canvas_smart_clip_range_at_or_containing(
+    buffer: &str,
+    cursor: usize,
+) -> Option<CanvasSmartClipRange> {
+    canvas_smart_clip_ranges(buffer)
+        .into_iter()
+        .find(|range| cursor >= range.start && cursor < range.end)
+}
+
+fn canvas_smart_clip_range_before_or_containing(
+    buffer: &str,
+    cursor: usize,
+) -> Option<CanvasSmartClipRange> {
+    canvas_smart_clip_ranges(buffer)
+        .into_iter()
+        .find(|range| cursor > range.start && cursor <= range.end)
+}
+
+fn canvas_smart_clip_ranges(buffer: &str) -> Vec<CanvasSmartClipRange> {
+    let chars: Vec<char> = buffer.chars().collect();
+    let mut ranges = Vec::new();
+    let mut idx = 0usize;
+    while idx + 1 < chars.len() {
+        if chars[idx] != '@' || chars[idx + 1] != '{' {
+            idx += 1;
+            continue;
+        }
+        let mut end = idx + 2;
+        while end < chars.len() && chars[end] != '}' {
+            end += 1;
+        }
+        if end < chars.len() {
+            ranges.push(CanvasSmartClipRange {
+                start: idx,
+                end: end + 1,
+            });
+            idx = end + 1;
+        } else {
+            idx += 2;
+        }
+    }
+    ranges
+}
+
+fn canvas_popup_from_document(
+    canvas: agentd_protocol::CanvasDocument,
+    now: Instant,
+) -> CanvasPopup {
+    let markdown = canvas.markdown.clone();
+    CanvasPopup {
+        canvas,
+        buffer: markdown.clone(),
+        saved_markdown: markdown,
+        cursor: 0,
+        preferred_col: None,
+        selection: None,
+        smart_clip: None,
+        revealed_at: now,
+        hide_after: now + Duration::from_secs(365 * 24 * 60 * 60),
+        closing: false,
+    }
+}
+
+fn canvas_line_col(s: &str, cursor: usize) -> (usize, usize) {
+    let mut line = 0usize;
+    let mut col = 0usize;
+    for (idx, ch) in s.chars().enumerate() {
+        if idx >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn canvas_cursor_for_line_col(s: &str, target_line: usize, target_col: usize) -> usize {
+    let mut line = 0usize;
+    let mut col = 0usize;
+    for (idx, ch) in s.chars().enumerate() {
+        if line == target_line && col >= target_col {
+            return idx;
+        }
+        if line == target_line && ch == '\n' {
+            return idx;
+        }
+        if ch == '\n' {
+            if line == target_line {
+                return idx;
+            }
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    s.chars().count()
+}
+
+fn canvas_line_start(s: &str, cursor: usize) -> usize {
+    let mut line_start = 0usize;
+    for (idx, ch) in s.chars().enumerate() {
+        if idx >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            line_start = idx + 1;
+        }
+    }
+    line_start
+}
+
+fn canvas_line_end(s: &str, cursor: usize) -> usize {
+    for (idx, ch) in s.chars().enumerate().skip(cursor) {
+        if ch == '\n' {
+            return idx;
+        }
+    }
+    s.chars().count()
 }
 
 #[cfg(test)]
@@ -8726,6 +9974,9 @@ mod tests {
             shortcut_hints: Vec::new(),
             minibuffer_harness_hits: Vec::new(),
             modal_area: None,
+            canvas_title_run_hit: None,
+            canvas_title_toggle_hit: None,
+            canvas_selection_run_hit: None,
             browser_preview_area: None,
             browser_preview_close: None,
             terminal_scrollbar: None,
@@ -8811,6 +10062,9 @@ mod tests {
             resizing_main_window: None,
             list_collapsed: false,
             tasks_popup: None,
+            canvas_popup: None,
+            canvas_popups: HashMap::new(),
+            canvas_clipboard: None,
             remote_control_popup: None,
             remote_control_task: None,
             editor_states: HashMap::new(),
@@ -8886,6 +10140,513 @@ mod tests {
             archived: false,
             operator_loop_disabled: false,
         }
+    }
+
+    fn canvas_popup_for_test(session_id: &str, markdown: &str, cursor: usize) -> CanvasPopup {
+        let now = Instant::now();
+        CanvasPopup {
+            canvas: agentd_protocol::CanvasDocument {
+                session_id: session_id.to_string(),
+                markdown: markdown.to_string(),
+                version: 1,
+                updated_at_ms: 0,
+                template_id: None,
+            },
+            buffer: markdown.to_string(),
+            saved_markdown: markdown.to_string(),
+            cursor,
+            preferred_col: None,
+            selection: None,
+            smart_clip: None,
+            revealed_at: now,
+            hide_after: now + Duration::from_secs(60),
+            closing: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn canvas_open_state_is_preserved_per_session() {
+        let (mut app, _dir, server) = empty_app().await;
+        let s1 = summary_with_kind(agentd_protocol::SessionKind::User);
+        let mut s2 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s2.id = "s2".into();
+        app.sessions = vec![s1, s2];
+        app.selection = Selection::Session("s1".into());
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 3));
+
+        app.selection = Selection::Session("s2".into());
+        app.sync_canvas_popup_with_selection();
+        assert!(app.canvas_popup.is_none());
+        assert!(app.canvas_popups.contains_key("s1"));
+
+        app.selection = Selection::Session("s1".into());
+        app.sync_canvas_popup_with_selection();
+        let popup = app.canvas_popup.as_ref().expect("s1 canvas restored");
+        assert_eq!(popup.buffer, "draft");
+        assert_eq!(popup.cursor, 3);
+        assert!(!app.canvas_popups.contains_key("s1"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_selection_cut_and_insert_replaces_selection() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "abcdef", 2));
+        app.begin_canvas_selection();
+        app.move_canvas_cursor(3);
+        app.cut_canvas_selection();
+        assert_eq!(app.canvas_clipboard.as_deref(), Some("cde"));
+        assert_eq!(app.canvas_popup.as_ref().unwrap().buffer, "abf");
+        app.insert_canvas_text("XY");
+        assert_eq!(app.canvas_popup.as_ref().unwrap().buffer, "abXYf");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_ctrl_g_does_not_close_popup() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 0));
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .await;
+
+        assert!(app.canvas_popup.is_some());
+        assert_eq!(app.canvas_popup.as_ref().unwrap().buffer, "draft");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_ctrl_s_is_not_a_save_shortcut() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 0));
+        app.canvas_popup.as_mut().unwrap().buffer = "draft changed".to_string();
+
+        let handled = tokio::time::timeout(
+            Duration::from_millis(100),
+            app.handle_canvas_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        )
+        .await;
+
+        assert!(handled.is_ok(), "raw C-s should not call canvas save");
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "draft changed");
+        assert_eq!(popup.saved_markdown, "draft");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_render_registers_run_affordance_hits() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.canvas_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(CANVAS_REVEAL_MS);
+        }
+        app.begin_canvas_selection();
+        app.move_canvas_cursor(5);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("canvas should render");
+        let text = rendered_text(term.backend().buffer());
+
+        assert!(text.contains("▶"), "title run icon should render: {text:?}");
+        assert!(text.contains("▣"), "canvas mode toggle should render: {text:?}");
+        assert!(
+            !text.contains("<canvas>"),
+            "title should no longer render a literal canvas label: {text:?}"
+        );
+        assert!(text.contains("Run"), "selection run menu should render: {text:?}");
+        assert!(app.layout.canvas_title_run_hit.is_some());
+        assert!(app.layout.canvas_title_toggle_hit.is_some());
+        assert!(app.layout.canvas_selection_run_hit.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_title_canvas_toggle_opens_canvas_from_chat_mode() {
+        use agentd_protocol::ipc_method;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let canvas = serde_json::json!({
+                    "session_id": "s1",
+                    "markdown": "draft",
+                    "version": 1,
+                    "updated_at_ms": 0,
+                    "template_id": null,
+                });
+                let result = match method.as_str() {
+                    ipc_method::CANVAS_GET => serde_json::json!({ "canvas": canvas }),
+                    _ => Value::Null,
+                };
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                });
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(client, vec![summary_with_kind(agentd_protocol::SessionKind::User)]);
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("session title should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(text.contains("●"), "chat mode should keep the status glyph: {text:?}");
+        let view = app.layout.view_area.expect("view area");
+        let (x_start, _x_end, y) = crate::ui::view_canvas_toggle_button_range(view);
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x_start,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: x_start,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert!(app.canvas_popup.is_some(), "clicking the title toggle should open canvas");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_execute_selection_saves_then_runs_selected_text() {
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use tempfile::tempdir;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let params = req.get("params").cloned().unwrap_or(Value::Null);
+                let _ = seen_tx.send((method.clone(), params.clone()));
+                let canvas = serde_json::json!({
+                    "session_id": "s1",
+                    "markdown": params
+                        .get("markdown")
+                        .and_then(Value::as_str)
+                        .unwrap_or("alpha beta"),
+                    "version": 2,
+                    "updated_at_ms": 0,
+                    "template_id": null,
+                });
+                let result = match method.as_str() {
+                    ipc_method::CANVAS_UPDATE => serde_json::json!({ "canvas": canvas }),
+                    ipc_method::CANVAS_EXECUTE => {
+                        serde_json::json!({ "canvas": canvas, "prompt": "sent" })
+                    }
+                    _ => Value::Null,
+                };
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                });
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(client, Vec::new());
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "alpha beta", 0));
+        app.canvas_popup.as_mut().unwrap().buffer = "alpha beta changed".to_string();
+
+        assert!(app.execute_canvas_popup(Some("beta".to_string())).await);
+
+        let (first_method, first_params) = seen_rx.recv().await.expect("canvas update request");
+        let (second_method, second_params) = seen_rx.recv().await.expect("canvas execute request");
+        assert_eq!(first_method, ipc_method::CANVAS_UPDATE);
+        assert_eq!(
+            first_params.get("markdown").and_then(Value::as_str),
+            Some("alpha beta changed")
+        );
+        assert_eq!(second_method, ipc_method::CANVAS_EXECUTE);
+        assert_eq!(
+            second_params.get("selection").and_then(Value::as_str),
+            Some("beta")
+        );
+        assert_eq!(
+            second_params.get("base_version").and_then(Value::as_u64),
+            Some(2)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn open_canvas_session_ids_include_active_and_cached_canvases() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s2", "active", 0));
+        app.canvas_popups
+            .insert("s1".into(), canvas_popup_for_test("s1", "cached", 0));
+        let mut closing = canvas_popup_for_test("s3", "closing", 0);
+        closing.closing = true;
+        app.canvas_popups.insert("s3".into(), closing);
+
+        assert_eq!(app.open_canvas_session_ids(), vec!["s1", "s2"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_at_trigger_filters_and_accepts_harness_smart_clip() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.harnesses = vec![agentd_protocol::HarnessInfo {
+            name: "codex".to_string(),
+            available: true,
+            binary: None,
+            description: Some("coding agent".to_string()),
+            capabilities: Default::default(),
+        }];
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "", 0));
+
+        app.insert_canvas_text("@");
+        assert!(app.canvas_popup.as_ref().unwrap().smart_clip.is_some());
+        app.insert_canvas_text("co");
+        let candidates = app.canvas_smart_clip_candidates(app.canvas_popup.as_ref().unwrap());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].clip, "@{harness:codex}");
+
+        app.accept_canvas_smart_clip();
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "@{harness:codex clip_id=clip_1}");
+        assert_eq!(
+            popup.cursor,
+            "@{harness:codex clip_id=clip_1}".chars().count()
+        );
+        assert!(popup.smart_clip.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn accepted_canvas_smart_clips_get_unique_instance_ids() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.harnesses = vec![agentd_protocol::HarnessInfo {
+            name: "codex".to_string(),
+            available: true,
+            binary: None,
+            description: Some("coding agent".to_string()),
+            capabilities: Default::default(),
+        }];
+        app.canvas_popup = Some(canvas_popup_for_test(
+            "s1",
+            "@{harness:codex clip_id=clip_1} ",
+            "@{harness:codex clip_id=clip_1} ".chars().count(),
+        ));
+
+        app.insert_canvas_text("@");
+        app.insert_canvas_text("co");
+        app.accept_canvas_smart_clip();
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(
+            popup.buffer,
+            "@{harness:codex clip_id=clip_1} @{harness:codex clip_id=clip_2}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_smart_clip_candidates_are_grouped_by_type() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.title = Some("issue 132".to_string());
+        app.sessions = vec![session];
+        app.harnesses = vec![agentd_protocol::HarnessInfo {
+            name: "codex".to_string(),
+            available: true,
+            binary: None,
+            description: Some("coding agent".to_string()),
+            capabilities: Default::default(),
+        }];
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "", 0));
+
+        app.insert_canvas_text("@");
+        let candidates = app.canvas_smart_clip_candidates(app.canvas_popup.as_ref().unwrap());
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].group, CanvasSmartClipGroup::Session);
+        assert_eq!(candidates[0].label, "issue 132");
+        assert_eq!(candidates[0].detail, "shell · running");
+        assert_eq!(candidates[1].group, CanvasSmartClipGroup::Harness);
+        assert_eq!(candidates[1].label, "codex");
+        assert_eq!(candidates[1].detail, "");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_smart_clip_search_cancels_on_separator() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "", 0));
+
+        app.insert_canvas_text("@");
+        app.insert_canvas_text("abc");
+        assert!(app.canvas_popup.as_ref().unwrap().smart_clip.is_some());
+        app.insert_canvas_text(" ");
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "@abc ");
+        assert!(popup.smart_clip.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_cursor_moves_over_smart_clip_as_one_unit() {
+        let (mut app, _dir, server) = empty_app().await;
+        let clip = "@{harness:codex}";
+        let before = "a ";
+        app.canvas_popup = Some(canvas_popup_for_test(
+            "s1",
+            &format!("{before}{clip} z"),
+            before.chars().count(),
+        ));
+
+        app.move_canvas_cursor(1);
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().cursor,
+            before.chars().count() + clip.chars().count()
+        );
+
+        app.move_canvas_cursor(-1);
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().cursor,
+            before.chars().count()
+        );
+
+        app.canvas_popup.as_mut().unwrap().cursor = before.chars().count() + 3;
+        app.move_canvas_cursor(1);
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().cursor,
+            before.chars().count() + clip.chars().count()
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn canvas_normalizes_missing_and_duplicate_smart_clip_instance_ids() {
+        let normalized = canvas_normalize_smart_clip_instance_ids(
+            "a @{harness:codex} b @{harness:claude clip_id=clip_7} c @{harness:codex clip_id=clip_7}",
+        );
+
+        assert_eq!(
+            normalized,
+            "a @{harness:codex clip_id=clip_8} b @{harness:claude clip_id=clip_7} c @{harness:codex clip_id=clip_9}"
+        );
+    }
+
+    #[tokio::test]
+    async fn canvas_delete_removes_smart_clip_as_one_unit() {
+        let (mut app, _dir, server) = empty_app().await;
+        let clip = "@{harness:codex}";
+        let before = "a ";
+        let initial = format!("{before}{clip} z");
+        app.canvas_popup = Some(canvas_popup_for_test(
+            "s1",
+            &initial,
+            before.chars().count() + clip.chars().count(),
+        ));
+
+        app.delete_canvas_back();
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "a  z");
+        assert_eq!(popup.cursor, before.chars().count());
+
+        app.canvas_popup = Some(canvas_popup_for_test(
+            "s1",
+            &initial,
+            before.chars().count(),
+        ));
+        app.delete_canvas_forward();
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "a  z");
+        assert_eq!(popup.cursor, before.chars().count());
+
+        app.canvas_popup = Some(canvas_popup_for_test(
+            "s1",
+            &initial,
+            before.chars().count() + 3,
+        ));
+        app.delete_canvas_forward();
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "a  z");
+        assert_eq!(popup.cursor, before.chars().count());
+        server.abort();
     }
 
     #[test]
@@ -9184,6 +10945,71 @@ mod tests {
         assert!(
             app.terminal_scrollbar_visible_until(Some(1)).is_none(),
             "at-bottom sibling split must not reveal a scrollbar overlay"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_open_state_survives_split_focus_changes() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut second = summary_with_kind(agentd_protocol::SessionKind::User);
+        second.id = "s2".into();
+        second.has_pty = true;
+        app.sessions.push(second);
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        app.focus = PaneFocus::View;
+        app.layout.main_window_areas = vec![
+            WindowPaneHit {
+                id: 1,
+                area: Rect::new(20, 0, 40, 20),
+                inner_area: Rect::new(21, 1, 38, 18),
+            },
+            WindowPaneHit {
+                id: 2,
+                area: Rect::new(60, 0, 40, 20),
+                inner_area: Rect::new(61, 1, 38, 18),
+            },
+        ];
+        app.layout.modal_area = Some(Rect::new(20, 0, 40, 20));
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 3));
+
+        app.handle_left_click(65, 5).await;
+
+        assert_eq!(app.active_window_id, 2);
+        assert_eq!(app.selection, Selection::Session("s2".into()));
+        assert!(app.canvas_popup.is_none());
+        assert!(
+            app.canvas_popups.contains_key("s1"),
+            "clicking another split should stash, not close, the open canvas"
+        );
+
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        app.sync_canvas_popup_with_selection();
+        assert!(app.canvas_popup.is_some());
+
+        app.run_action(KeyAction::SwitchFocus).await;
+        app.sync_canvas_popup_with_selection();
+
+        assert_eq!(app.active_window_id, 2);
+        assert_eq!(app.selection, Selection::Session("s2".into()));
+        assert!(app.canvas_popup.is_none());
+        assert!(
+            app.canvas_popups.contains_key("s1"),
+            "C-x o should keep split 1's canvas attached to split 1's session"
         );
         server.abort();
     }
