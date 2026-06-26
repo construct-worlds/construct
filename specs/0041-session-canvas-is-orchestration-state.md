@@ -13,7 +13,7 @@ Smart clips are persisted as Markdown-native typed references, using inline `@{t
 
 Canvas updates use optimistic concurrency. Writers may pass the version they read as `base_version`; if the current version differs, the daemon rejects the update and the writer must re-read, merge, and retry. Agent-originated canvas updates are trusted session actions and do not require user approval.
 
-Terminal clients expose canvas through a terminal-deliverable command path rather than modifier-only key gestures. Browser or desktop clients may add richer gestures, but the TUI must keep an explicit keyboard command and palette command for canvas access. That command opens a canvas-specific surface that renders Markdown and smart clips; raw external-editor workflows are secondary affordances, not the default canvas UI.
+Terminal clients expose canvas through a terminal-deliverable command path rather than modifier-only key gestures. Browser or desktop clients may add richer gestures, but the TUI must keep an explicit keyboard command and palette command for canvas access. That command opens a focused canvas-specific surface that renders Markdown and smart clips, accepts typing/click cursor placement, and saves through the canvas update protocol; raw external-editor workflows are secondary affordances, not the default canvas UI. Opening and closing the surface should use the same reveal/erase visual language as transient browser previews.
 
 ## Reason
 

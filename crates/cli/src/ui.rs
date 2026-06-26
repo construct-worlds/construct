@@ -7072,6 +7072,15 @@ fn render_tasks_popup(f: &mut Frame, app: &mut App) {
 }
 
 fn render_canvas_popup(f: &mut Frame, app: &mut App) {
+    let now = Instant::now();
+    if app
+        .canvas_popup
+        .as_ref()
+        .is_some_and(|popup| popup.closing && now >= popup.hide_after)
+    {
+        app.canvas_popup = None;
+        return;
+    }
     let Some(popup) = app.canvas_popup.as_ref() else {
         return;
     };
@@ -7090,6 +7099,20 @@ fn render_canvas_popup(f: &mut Frame, app: &mut App) {
         height: h,
     };
     app.layout.modal_area = Some(rect);
+    let row_frac = preview_reveal_range(popup.revealed_at, popup.hide_after, now, false);
+    if row_frac.1 <= row_frac.0 {
+        return;
+    }
+    let start_row = ((rect.height as f32 * row_frac.0).floor() as u16).min(rect.height);
+    let end_row = ((rect.height as f32 * row_frac.1).ceil() as u16).min(rect.height);
+    if end_row <= start_row {
+        return;
+    }
+    let rect = Rect {
+        y: rect.y + start_row,
+        height: end_row - start_row,
+        ..rect
+    };
 
     let template = popup
         .canvas
@@ -7097,11 +7120,17 @@ fn render_canvas_popup(f: &mut Frame, app: &mut App) {
         .as_deref()
         .map(|id| format!(" · {id}"))
         .unwrap_or_default();
+    let dirty = if popup.buffer == popup.saved_markdown {
+        ""
+    } else {
+        " · modified"
+    };
     let title = format!(
-        " canvas — {} · v{}{} — Esc to close ",
+        " canvas — {} · v{}{}{} — C-s save · Esc close ",
         short_id(&popup.canvas.session_id),
         popup.canvas.version,
-        template
+        template,
+        dirty
     );
     let block = Block::default()
         .borders(Borders::ALL)
@@ -7116,16 +7145,34 @@ fn render_canvas_popup(f: &mut Frame, app: &mut App) {
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
 
-    let mut lines = render_canvas_markdown_lines(app, &popup.canvas.markdown);
+    let markdown = canvas_buffer_with_cursor(popup);
+    let mut lines = render_canvas_markdown_lines(app, &markdown);
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Select a template or add Markdown with `construct canvas set`.",
+            "Type Markdown here. Use @{session:id}, @{harness:codex}, or :::clip blocks.",
             Style::default().fg(app.theme.dim),
         )));
     }
     let visible: Vec<Line> = lines.into_iter().take(inner.height as usize).collect();
     let para = Paragraph::new(visible).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
+}
+
+fn canvas_buffer_with_cursor(popup: &crate::app::CanvasPopup) -> String {
+    if popup.closing {
+        return popup.buffer.clone();
+    }
+    let mut out = popup.buffer.clone();
+    let pos = byte_pos_for_chars(&out, popup.cursor);
+    out.insert(pos, '▌');
+    out
+}
+
+fn byte_pos_for_chars(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len())
 }
 
 fn render_canvas_markdown_lines<'a>(app: &App, markdown: &'a str) -> Vec<Line<'a>> {

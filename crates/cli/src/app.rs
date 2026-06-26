@@ -1252,6 +1252,12 @@ pub struct TasksPopup {
 #[derive(Debug, Clone)]
 pub struct CanvasPopup {
     pub canvas: agentd_protocol::CanvasDocument,
+    pub buffer: String,
+    pub saved_markdown: String,
+    pub cursor: usize,
+    pub revealed_at: Instant,
+    pub hide_after: Instant,
+    pub closing: bool,
 }
 
 /// Live state of the `/remote-control` (or `/remote-control-debug`)
@@ -5087,7 +5093,15 @@ impl App {
         }
         if let Some(modal) = self.layout.modal_area {
             if !contains(modal, col, row) {
-                self.dismiss_modal();
+                if self.canvas_popup.is_some() {
+                    self.close_canvas_popup().await;
+                } else {
+                    self.dismiss_modal();
+                }
+                return;
+            }
+            if self.canvas_popup.is_some() {
+                self.place_canvas_cursor(modal, col, row);
                 return;
             }
             // The current modals are informational/read-only. Clicks
@@ -6000,9 +6014,7 @@ impl App {
             }
         }
         if self.canvas_popup.is_some() {
-            if matches!(key.code, KeyCode::Esc) {
-                self.canvas_popup = None;
-            }
+            self.handle_canvas_key(key).await;
             return;
         }
         // /remote-control modal: Esc closes the popup *and* the
@@ -6474,8 +6486,16 @@ impl App {
         match self.client.canvas_get(&session_id).await {
             Ok(result) => {
                 let version = result.canvas.version;
+                let markdown = result.canvas.markdown.clone();
+                let now = Instant::now();
                 self.canvas_popup = Some(CanvasPopup {
                     canvas: result.canvas,
+                    buffer: markdown.clone(),
+                    saved_markdown: markdown,
+                    cursor: 0,
+                    revealed_at: now,
+                    hide_after: now + Duration::from_secs(365 * 24 * 60 * 60),
+                    closing: false,
                 });
                 self.set_status(format!("canvas opened at version {version}"));
             }
@@ -6483,6 +6503,187 @@ impl App {
                 self.set_status(format!("canvas get failed: {e}"));
             }
         }
+    }
+
+    async fn save_canvas_popup(&mut self) -> bool {
+        let Some(popup) = self.canvas_popup.as_ref() else {
+            return true;
+        };
+        if popup.buffer == popup.saved_markdown {
+            return true;
+        }
+        let params = agentd_protocol::CanvasUpdateParams {
+            session_id: popup.canvas.session_id.clone(),
+            markdown: popup.buffer.clone(),
+            base_version: Some(popup.canvas.version),
+            actor: agentd_protocol::CanvasUpdateActor::Human,
+            template_id: popup.canvas.template_id.clone(),
+            note: None,
+        };
+        match self.client.canvas_update(params).await {
+            Ok(result) => {
+                if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.canvas = result.canvas.clone();
+                    popup.buffer = result.canvas.markdown.clone();
+                    popup.saved_markdown = result.canvas.markdown;
+                    popup.cursor = popup.cursor.min(popup.buffer.chars().count());
+                }
+                self.set_status(format!("canvas saved version {}", result.canvas.version));
+                true
+            }
+            Err(e) => {
+                self.set_status(format!("canvas save failed: {e}"));
+                false
+            }
+        }
+    }
+
+    async fn close_canvas_popup(&mut self) {
+        if !self.save_canvas_popup().await {
+            return;
+        }
+        if let Some(popup) = self.canvas_popup.as_mut() {
+            let now = Instant::now();
+            popup.closing = true;
+            popup.hide_after = now + Duration::from_secs(1);
+        }
+    }
+
+    fn place_canvas_cursor(&mut self, modal: ratatui::layout::Rect, col: u16, row: u16) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        popup.closing = false;
+        let inner_x = modal.x.saturating_add(1);
+        let inner_y = modal.y.saturating_add(1);
+        if row < inner_y {
+            popup.cursor = 0;
+            return;
+        }
+        let target_line = row.saturating_sub(inner_y) as usize;
+        let target_col = col.saturating_sub(inner_x) as usize;
+        popup.cursor = canvas_cursor_for_line_col(&popup.buffer, target_line, target_col);
+    }
+
+    async fn handle_canvas_key(&mut self, key: KeyEvent) {
+        if self.canvas_popup.as_ref().is_some_and(|p| p.closing) {
+            return;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => self.close_canvas_popup().await,
+            KeyCode::Char('s') if ctrl => {
+                self.save_canvas_popup().await;
+            }
+            KeyCode::Char('g') if ctrl => self.close_canvas_popup().await,
+            KeyCode::Char('a') if ctrl => {
+                if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.cursor = canvas_line_start(&popup.buffer, popup.cursor);
+                }
+            }
+            KeyCode::Char('e') if ctrl => {
+                if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.cursor = canvas_line_end(&popup.buffer, popup.cursor);
+                }
+            }
+            KeyCode::Char('b') if ctrl => self.move_canvas_cursor(-1),
+            KeyCode::Char('f') if ctrl => self.move_canvas_cursor(1),
+            KeyCode::Char('d') if ctrl => self.delete_canvas_forward(),
+            KeyCode::Char('h') if ctrl => self.delete_canvas_back(),
+            KeyCode::Char('k') if ctrl => self.kill_canvas_line(),
+            KeyCode::Enter => self.insert_canvas_text("\n"),
+            KeyCode::Backspace => self.delete_canvas_back(),
+            KeyCode::Delete => self.delete_canvas_forward(),
+            KeyCode::Left => self.move_canvas_cursor(-1),
+            KeyCode::Right => self.move_canvas_cursor(1),
+            KeyCode::Up => self.move_canvas_cursor_vertical(-1),
+            KeyCode::Down => self.move_canvas_cursor_vertical(1),
+            KeyCode::Home => {
+                if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.cursor = canvas_line_start(&popup.buffer, popup.cursor);
+                }
+            }
+            KeyCode::End => {
+                if let Some(popup) = self.canvas_popup.as_mut() {
+                    popup.cursor = canvas_line_end(&popup.buffer, popup.cursor);
+                }
+            }
+            KeyCode::Char(c) if !ctrl && !alt => self.insert_canvas_text(&c.to_string()),
+            _ => {}
+        }
+    }
+
+    fn insert_canvas_text(&mut self, text: &str) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        let pos = byte_pos(&popup.buffer, popup.cursor);
+        popup.buffer.insert_str(pos, text);
+        popup.cursor += text.chars().count();
+    }
+
+    fn move_canvas_cursor(&mut self, delta: isize) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        let len = popup.buffer.chars().count();
+        if delta < 0 {
+            popup.cursor = popup.cursor.saturating_sub(delta.unsigned_abs());
+        } else {
+            popup.cursor = (popup.cursor + delta as usize).min(len);
+        }
+    }
+
+    fn move_canvas_cursor_vertical(&mut self, delta: isize) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        let (line, col) = canvas_line_col(&popup.buffer, popup.cursor);
+        let next_line = if delta < 0 {
+            line.saturating_sub(delta.unsigned_abs())
+        } else {
+            line.saturating_add(delta as usize)
+        };
+        popup.cursor = canvas_cursor_for_line_col(&popup.buffer, next_line, col);
+    }
+
+    fn delete_canvas_back(&mut self) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        if popup.cursor == 0 {
+            return;
+        }
+        let start = byte_pos(&popup.buffer, popup.cursor - 1);
+        let end = byte_pos(&popup.buffer, popup.cursor);
+        popup.buffer.replace_range(start..end, "");
+        popup.cursor -= 1;
+    }
+
+    fn delete_canvas_forward(&mut self) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        if popup.cursor >= popup.buffer.chars().count() {
+            return;
+        }
+        let start = byte_pos(&popup.buffer, popup.cursor);
+        let end = byte_pos(&popup.buffer, popup.cursor + 1);
+        popup.buffer.replace_range(start..end, "");
+    }
+
+    fn kill_canvas_line(&mut self) {
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        let start = byte_pos(&popup.buffer, popup.cursor);
+        let line_end = canvas_line_end(&popup.buffer, popup.cursor);
+        let mut end = byte_pos(&popup.buffer, line_end);
+        if start == end && end < popup.buffer.len() {
+            end += 1;
+        }
+        popup.buffer.replace_range(start..end, "");
     }
 
     async fn run_action(&mut self, action: KeyAction) {
@@ -8466,6 +8667,68 @@ fn byte_pos(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or(s.len())
+}
+
+fn canvas_line_col(s: &str, cursor: usize) -> (usize, usize) {
+    let mut line = 0usize;
+    let mut col = 0usize;
+    for (idx, ch) in s.chars().enumerate() {
+        if idx >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn canvas_cursor_for_line_col(s: &str, target_line: usize, target_col: usize) -> usize {
+    let mut line = 0usize;
+    let mut col = 0usize;
+    for (idx, ch) in s.chars().enumerate() {
+        if line == target_line && col >= target_col {
+            return idx;
+        }
+        if line == target_line && ch == '\n' {
+            return idx;
+        }
+        if ch == '\n' {
+            if line == target_line {
+                return idx;
+            }
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    s.chars().count()
+}
+
+fn canvas_line_start(s: &str, cursor: usize) -> usize {
+    let mut line_start = 0usize;
+    for (idx, ch) in s.chars().enumerate() {
+        if idx >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            line_start = idx + 1;
+        }
+    }
+    line_start
+}
+
+fn canvas_line_end(s: &str, cursor: usize) -> usize {
+    for (idx, ch) in s.chars().enumerate().skip(cursor) {
+        if ch == '\n' {
+            return idx;
+        }
+    }
+    s.chars().count()
 }
 
 #[cfg(test)]
