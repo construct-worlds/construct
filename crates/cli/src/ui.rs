@@ -7302,7 +7302,7 @@ fn render_canvas_title_tooltip(
         render_button_tooltip(f, &app.theme, " C-x Space ", mx, my);
     } else if let Some((start, end)) = marker_ranges.modified {
         if mx >= start && mx < end {
-            render_button_tooltip(f, &app.theme, " C-s save ", mx, my);
+            render_button_tooltip(f, &app.theme, " C-x C-s save ", mx, my);
         }
     }
 }

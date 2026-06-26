@@ -6843,9 +6843,6 @@ impl App {
             KeyCode::Down if self.canvas_smart_clip_active() => {
                 self.move_canvas_smart_clip_selection(1)
             }
-            KeyCode::Char('s') if ctrl => {
-                self.save_canvas_popup().await;
-            }
             KeyCode::Char(' ') if ctrl => self.begin_canvas_selection(),
             KeyCode::Char('a') if ctrl => {
                 if let Some(popup) = self.canvas_popup.as_mut() {
@@ -7445,6 +7442,9 @@ impl App {
             },
             OpenCanvas => {
                 self.toggle_canvas_popup().await;
+            }
+            SaveCanvas => {
+                self.save_canvas_popup().await;
             }
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
@@ -9971,6 +9971,25 @@ mod tests {
 
         assert!(app.canvas_popup.is_some());
         assert_eq!(app.canvas_popup.as_ref().unwrap().buffer, "draft");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_ctrl_s_is_not_a_save_shortcut() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 0));
+        app.canvas_popup.as_mut().unwrap().buffer = "draft changed".to_string();
+
+        let handled = tokio::time::timeout(
+            Duration::from_millis(100),
+            app.handle_canvas_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        )
+        .await;
+
+        assert!(handled.is_ok(), "raw C-s should not call canvas save");
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "draft changed");
+        assert_eq!(popup.saved_markdown, "draft");
         server.abort();
     }
 
