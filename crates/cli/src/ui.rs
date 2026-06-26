@@ -7742,10 +7742,23 @@ fn canvas_cursor_position(
     if area.width == 0 || area.height == 0 {
         return None;
     }
-    let (line, col) = canvas_line_col(markdown, cursor);
-    let visual_col = canvas_visual_col_for_line(app, markdown.lines().nth(line).unwrap_or(""), col);
     let width = area.width as usize;
-    let visual_row = line.saturating_add(visual_col / width);
+    let (line, col) = canvas_line_col(markdown, cursor);
+
+    // Accumulate the visual rows consumed by every logical line BEFORE the
+    // cursor's line. The canvas body is rendered with `Wrap { trim: false }`,
+    // so a preceding line whose rendered width exceeds the area occupies
+    // `ceil(width / area.width)` visual rows (minimum 1) — not exactly one.
+    // Using the same width logic as the cursor column math keeps the row
+    // count and the intra-line offset below consistent with each other.
+    let mut visual_row = 0usize;
+    for raw in markdown.lines().take(line) {
+        let rendered_width = canvas_visual_col_for_line(app, raw, raw.chars().count());
+        visual_row = visual_row.saturating_add(canvas_wrapped_rows(rendered_width, width));
+    }
+
+    let visual_col = canvas_visual_col_for_line(app, markdown.lines().nth(line).unwrap_or(""), col);
+    let visual_row = visual_row.saturating_add(visual_col / width);
     if visual_row >= area.height as usize {
         return None;
     }
@@ -7753,6 +7766,18 @@ fn canvas_cursor_position(
         x: area.x.saturating_add((visual_col % width) as u16),
         y: area.y.saturating_add(visual_row as u16),
     })
+}
+
+/// Number of visual rows a rendered line of `rendered_width` columns occupies
+/// when wrapped at `width` columns, matching `Wrap { trim: false }`: at least
+/// one row, and `ceil(rendered_width / width)` once it exceeds the area width.
+fn canvas_wrapped_rows(rendered_width: usize, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    (rendered_width / width)
+        .saturating_add(usize::from(rendered_width % width != 0))
+        .max(1)
 }
 
 fn canvas_line_col(markdown: &str, cursor: usize) -> (usize, usize) {
@@ -8352,6 +8377,48 @@ mod tests {
                 x: 10 + "run ".chars().count() as u16 + chip_width as u16,
                 y: 2,
             })
+        );
+    }
+
+    #[test]
+    fn canvas_cursor_position_accounts_for_preceding_wrapped_line() {
+        // "abcdef" wraps to two visual rows at width 5, so the next logical
+        // line ("XY") starts on the third row (y offset 2), not the second.
+        let area = Rect::new(10, 2, 5, 6);
+        let markdown = "abcdef\nXY";
+        let cursor = "abcdef\n".chars().count();
+
+        assert_eq!(
+            canvas_cursor_position(None, markdown, cursor, area),
+            Some(Position { x: 10, y: 4 })
+        );
+    }
+
+    #[test]
+    fn canvas_cursor_position_combines_preceding_wrap_and_intra_line_offset() {
+        // The preceding line wraps (2 rows) AND the cursor sits past a wrap
+        // boundary within its own line: both offsets must accumulate.
+        let area = Rect::new(10, 2, 5, 8);
+        let markdown = "abcdef\nghijklmn";
+        let cursor = "abcdef\nghijklm".chars().count();
+
+        assert_eq!(
+            canvas_cursor_position(None, markdown, cursor, area),
+            Some(Position { x: 12, y: 5 })
+        );
+    }
+
+    #[test]
+    fn canvas_cursor_position_offsets_normal_line_below_wrapped_line() {
+        // "longlineAAAA" (12 cols) wraps to three rows at width 5, so the
+        // following non-wrapping line ("short") starts on the fourth row.
+        let area = Rect::new(10, 2, 5, 8);
+        let markdown = "longlineAAAA\nshort";
+        let cursor = "longlineAAAA\nsh".chars().count();
+
+        assert_eq!(
+            canvas_cursor_position(None, markdown, cursor, area),
+            Some(Position { x: 12, y: 5 })
         );
     }
 
