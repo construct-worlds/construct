@@ -1568,6 +1568,8 @@ pub struct LayoutSnapshot {
     pub modal_area: Option<ratatui::layout::Rect>,
     /// Canvas title-bar Run button bounds: `(x_start, x_end, y)`.
     pub canvas_title_run_hit: Option<(u16, u16, u16)>,
+    /// Canvas title-bar mode toggle bounds: `(x_start, x_end, y)`.
+    pub canvas_title_toggle_hit: Option<(u16, u16, u16)>,
     /// Canvas selected-text context Run button bounds: `(x_start, x_end, y)`.
     pub canvas_selection_run_hit: Option<(u16, u16, u16)>,
     /// Bounds of the browser preview overlay rendered in the terminal view.
@@ -6834,21 +6836,28 @@ impl App {
             return false;
         }
         let title_run_hit = self.layout.canvas_title_run_hit;
+        let title_toggle_hit = self.layout.canvas_title_toggle_hit;
         let selection_run_hit = self.layout.canvas_selection_run_hit;
+        let hit_title_toggle = title_toggle_hit
+            .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
         let hit_title_run = title_run_hit
             .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
         let hit_selection_run = selection_run_hit
             .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
-        if hit_title_run || hit_selection_run {
+        if hit_title_toggle || hit_title_run || hit_selection_run {
             if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
-                let selection = hit_selection_run
-                    .then(|| {
-                        self.canvas_popup
-                            .as_ref()
-                            .and_then(Self::selected_canvas_text)
-                    })
-                    .flatten();
-                self.execute_canvas_popup(selection).await;
+                if hit_title_toggle {
+                    self.close_canvas_popup().await;
+                } else {
+                    let selection = hit_selection_run
+                        .then(|| {
+                            self.canvas_popup
+                                .as_ref()
+                                .and_then(Self::selected_canvas_text)
+                        })
+                        .flatten();
+                    self.execute_canvas_popup(selection).await;
+                }
             }
             return true;
         }
@@ -9906,6 +9915,7 @@ mod tests {
             minibuffer_harness_hits: Vec::new(),
             modal_area: None,
             canvas_title_run_hit: None,
+            canvas_title_toggle_hit: None,
             canvas_selection_run_hit: None,
             browser_preview_area: None,
             browser_preview_close: None,
@@ -10186,8 +10196,14 @@ mod tests {
         let text = rendered_text(term.backend().buffer());
 
         assert!(text.contains("▶"), "title run icon should render: {text:?}");
+        assert!(text.contains("◉"), "canvas mode toggle should render: {text:?}");
+        assert!(
+            !text.contains("<canvas>"),
+            "title should no longer render a literal canvas label: {text:?}"
+        );
         assert!(text.contains("Run"), "selection run menu should render: {text:?}");
         assert!(app.layout.canvas_title_run_hit.is_some());
+        assert!(app.layout.canvas_title_toggle_hit.is_some());
         assert!(app.layout.canvas_selection_run_hit.is_some());
         server.abort();
     }
