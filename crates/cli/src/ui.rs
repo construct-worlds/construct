@@ -7213,15 +7213,8 @@ fn canvas_visual_col_for_line(raw: &str, raw_col: usize) -> usize {
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
     let trimmed = raw.trim();
     let col = raw_col.saturating_sub(leading);
-    if let Some(rest) = trimmed.strip_prefix("### ") {
-        let prefix = trimmed.chars().count() - rest.chars().count();
-        col.saturating_sub(prefix)
-    } else if let Some(rest) = trimmed.strip_prefix("## ") {
-        let prefix = trimmed.chars().count() - rest.chars().count();
-        col.saturating_sub(prefix)
-    } else if let Some(rest) = trimmed.strip_prefix("# ") {
-        let prefix = trimmed.chars().count() - rest.chars().count();
-        col.saturating_sub(prefix)
+    if canvas_heading_level(trimmed).is_some() {
+        col
     } else if let Some(rest) = trimmed
         .strip_prefix("- ")
         .or_else(|| trimmed.strip_prefix("* "))
@@ -7239,27 +7232,8 @@ fn render_canvas_markdown_lines<'a>(app: &App, markdown: &'a str) -> Vec<Line<'a
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             out.push(Line::from(""));
-        } else if let Some(rest) = trimmed.strip_prefix("### ") {
-            out.push(Line::from(Span::styled(
-                rest.to_string(),
-                Style::default()
-                    .fg(app.theme.info)
-                    .add_modifier(Modifier::BOLD),
-            )));
-        } else if let Some(rest) = trimmed.strip_prefix("## ") {
-            out.push(Line::from(Span::styled(
-                rest.to_string(),
-                Style::default()
-                    .fg(app.theme.accent_alt)
-                    .add_modifier(Modifier::BOLD),
-            )));
-        } else if let Some(rest) = trimmed.strip_prefix("# ") {
-            out.push(Line::from(Span::styled(
-                rest.to_string(),
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )));
+        } else if let Some(level) = canvas_heading_level(trimmed) {
+            out.push(render_canvas_heading_line(&app.theme, level, trimmed));
         } else if let Some(rest) = trimmed.strip_prefix("- ") {
             let mut spans = vec![Span::styled("  • ", Style::default().fg(app.theme.accent))];
             spans.extend(render_canvas_inline_spans(app, rest));
@@ -7287,6 +7261,30 @@ fn render_canvas_markdown_lines<'a>(app: &App, markdown: &'a str) -> Vec<Line<'a
         }
     }
     out
+}
+
+fn canvas_heading_level(trimmed: &str) -> Option<u8> {
+    if trimmed.starts_with("### ") {
+        Some(3)
+    } else if trimmed.starts_with("## ") {
+        Some(2)
+    } else if trimmed.starts_with("# ") {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+fn render_canvas_heading_line(theme: &Theme, level: u8, text: &str) -> Line<'static> {
+    let fg = match level {
+        1 => theme.accent,
+        2 => theme.accent_alt,
+        _ => theme.info,
+    };
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default().fg(fg).add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn render_canvas_inline_spans<'a>(app: &App, text: &'a str) -> Vec<Span<'a>> {
@@ -7624,6 +7622,19 @@ mod tests {
         assert_eq!(
             canvas_cursor_position("abcdef", 6, area),
             Some(Position { x: 11, y: 3 })
+        );
+    }
+
+    #[test]
+    fn canvas_heading_rendering_keeps_markdown_marker() {
+        let theme = Theme::default();
+        assert_eq!(
+            line_text(&render_canvas_heading_line(&theme, 1, "# Todo")),
+            "# Todo"
+        );
+        assert_eq!(
+            line_text(&render_canvas_heading_line(&theme, 2, "## Progress")),
+            "## Progress"
         );
     }
 
