@@ -7200,7 +7200,7 @@ fn render_canvas_popup_at(
     let para = Paragraph::new(visible).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
     if active && !popup.closing {
-        if let Some(pos) = canvas_cursor_position(&popup.buffer, popup.cursor, inner) {
+        if let Some(pos) = canvas_cursor_position(Some(app), &popup.buffer, popup.cursor, inner) {
             render_editor_cursor(f, pos, &app.theme);
             render_canvas_smart_clip_picker(f, app, popup, pos, inner);
         }
@@ -7339,12 +7339,17 @@ fn render_canvas_smart_clip_picker(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn canvas_cursor_position(markdown: &str, cursor: usize, area: Rect) -> Option<Position> {
+fn canvas_cursor_position(
+    app: Option<&App>,
+    markdown: &str,
+    cursor: usize,
+    area: Rect,
+) -> Option<Position> {
     if area.width == 0 || area.height == 0 {
         return None;
     }
     let (line, col) = canvas_line_col(markdown, cursor);
-    let visual_col = canvas_visual_col_for_line(markdown.lines().nth(line).unwrap_or(""), col);
+    let visual_col = canvas_visual_col_for_line(app, markdown.lines().nth(line).unwrap_or(""), col);
     let width = area.width as usize;
     let visual_row = line.saturating_add(visual_col / width);
     if visual_row >= area.height as usize {
@@ -7373,21 +7378,57 @@ fn canvas_line_col(markdown: &str, cursor: usize) -> (usize, usize) {
     (line, col)
 }
 
-fn canvas_visual_col_for_line(raw: &str, raw_col: usize) -> usize {
+fn canvas_visual_col_for_line(app: Option<&App>, raw: &str, raw_col: usize) -> usize {
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
     let trimmed = raw.trim();
     let col = raw_col.saturating_sub(leading);
     if canvas_heading_level(trimmed).is_some() {
-        col
+        canvas_inline_visual_width(app, trimmed, col)
     } else if let Some(rest) = trimmed
         .strip_prefix("- ")
         .or_else(|| trimmed.strip_prefix("* "))
     {
         let prefix = trimmed.chars().count() - rest.chars().count();
-        4 + col.saturating_sub(prefix)
-    } else {
+        4 + canvas_inline_visual_width(app, rest, col.saturating_sub(prefix))
+    } else if raw_col <= leading {
         raw_col
+    } else {
+        let body = raw
+            .char_indices()
+            .nth(leading)
+            .map(|(idx, _)| &raw[idx..])
+            .unwrap_or("");
+        leading + canvas_inline_visual_width(app, body, raw_col - leading)
     }
+}
+
+fn canvas_inline_visual_width(app: Option<&App>, text: &str, raw_col: usize) -> usize {
+    let mut visual = 0usize;
+    let mut raw = 0usize;
+    let mut rest = text;
+    while let Some(start_b) = rest.find("@{") {
+        let before = &rest[..start_b];
+        let before_len = before.chars().count();
+        if raw_col <= raw + before_len {
+            return visual + raw_col.saturating_sub(raw);
+        }
+        visual += before_len;
+        raw += before_len;
+
+        let after_marker = &rest[start_b + 2..];
+        let Some(end_b) = after_marker.find('}') else {
+            return visual + raw_col.saturating_sub(raw);
+        };
+        let raw_clip = &after_marker[..end_b];
+        let clip_len = 2 + raw_clip.chars().count() + 1;
+        if raw_col <= raw + clip_len {
+            return visual + canvas_smart_clip_visual_width(app, raw_clip);
+        }
+        visual += canvas_smart_clip_visual_width(app, raw_clip);
+        raw += clip_len;
+        rest = &after_marker[end_b + 1..];
+    }
+    visual + raw_col.saturating_sub(raw)
 }
 
 fn canvas_selection_range(popup: &crate::app::CanvasPopup) -> Option<(usize, usize)> {
@@ -7571,35 +7612,7 @@ fn canvas_text_spans<'a>(
 }
 
 fn canvas_smart_clip_span<'a>(app: &App, raw_clip: &str) -> Span<'a> {
-    let first = raw_clip.split_whitespace().next().unwrap_or(raw_clip);
-    let (kind, id) = first.split_once(':').unwrap_or(("clip", first));
-    let label = match kind {
-        "session" => app
-            .sessions
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| {
-                let model = s.model.as_deref().unwrap_or(s.harness.as_str());
-                format!(
-                    "session {} · {} · {}",
-                    primary_label(s),
-                    model,
-                    s.state.label()
-                )
-            })
-            .unwrap_or_else(|| format!("session {id}")),
-        "harness" => app
-            .harnesses
-            .iter()
-            .find(|h| h.name == id)
-            .map(|h| {
-                let status = if h.available { "available" } else { "missing" };
-                format!("harness {} · {status}", h.name)
-            })
-            .unwrap_or_else(|| format!("harness {id}")),
-        "session-response" => format!("response {id}"),
-        _ => format!("{kind} {id}"),
-    };
+    let (kind, label) = canvas_smart_clip_label(Some(app), raw_clip);
     let bg = match kind {
         "session" => app.theme.accent_alt,
         "harness" => app.theme.harness,
@@ -7607,6 +7620,45 @@ fn canvas_smart_clip_span<'a>(app: &App, raw_clip: &str) -> Span<'a> {
         _ => app.theme.inactive_highlight_bg,
     };
     canvas_chip_span(label, app.theme.highlight_fg, bg)
+}
+
+fn canvas_smart_clip_visual_width(app: Option<&App>, raw_clip: &str) -> usize {
+    let (_, label) = canvas_smart_clip_label(app, raw_clip);
+    label.chars().count() + 2
+}
+
+fn canvas_smart_clip_label<'a>(app: Option<&App>, raw_clip: &'a str) -> (&'a str, String) {
+    let first = raw_clip.split_whitespace().next().unwrap_or(raw_clip);
+    let (kind, id) = first.split_once(':').unwrap_or(("clip", first));
+    let label = match kind {
+        "session" => app
+            .and_then(|app| {
+                app.sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| {
+                        let model = s.model.as_deref().unwrap_or(s.harness.as_str());
+                        format!(
+                            "session {} · {} · {}",
+                            primary_label(s),
+                            model,
+                            s.state.label()
+                        )
+                    })
+            })
+            .unwrap_or_else(|| format!("session {id}")),
+        "harness" => app
+            .and_then(|app| {
+                app.harnesses.iter().find(|h| h.name == id).map(|h| {
+                    let status = if h.available { "available" } else { "missing" };
+                    format!("harness {} · {status}", h.name)
+                })
+            })
+            .unwrap_or_else(|| format!("harness {id}")),
+        "session-response" => format!("response {id}"),
+        _ => format!("{kind} {id}"),
+    };
+    (kind, label)
 }
 
 fn canvas_chip_span<'a>(
@@ -7862,7 +7914,7 @@ mod tests {
     fn canvas_cursor_position_targets_current_character_cell() {
         let area = Rect::new(10, 2, 20, 4);
         assert_eq!(
-            canvas_cursor_position("abc", 1, area),
+            canvas_cursor_position(None, "abc", 1, area),
             Some(Position { x: 11, y: 2 })
         );
     }
@@ -7871,8 +7923,24 @@ mod tests {
     fn canvas_cursor_position_accounts_for_wrapped_lines() {
         let area = Rect::new(10, 2, 5, 4);
         assert_eq!(
-            canvas_cursor_position("abcdef", 6, area),
+            canvas_cursor_position(None, "abcdef", 6, area),
             Some(Position { x: 11, y: 3 })
+        );
+    }
+
+    #[test]
+    fn canvas_cursor_position_uses_rendered_smart_clip_width() {
+        let area = Rect::new(10, 2, 80, 4);
+        let markdown = "run @{harness:codex} now";
+        let cursor = "run @{harness:codex}".chars().count();
+        let chip_width = " harness codex ".chars().count();
+
+        assert_eq!(
+            canvas_cursor_position(None, markdown, cursor, area),
+            Some(Position {
+                x: 10 + "run ".chars().count() as u16 + chip_width as u16,
+                y: 2,
+            })
         );
     }
 
