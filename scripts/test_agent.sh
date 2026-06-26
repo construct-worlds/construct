@@ -23,10 +23,17 @@ export CONSTRUCT_STATE_DIR="$DEMO_DIR/state"
 export CONSTRUCT_DATA_DIR="$DEMO_DIR/data"
 export CONSTRUCT_CONFIG_DIR="$DEMO_DIR/config"
 export CONSTRUCT_SHELL_BIN="${CONSTRUCT_SHELL_BIN:-/bin/bash}"
+export CONSTRUCT_REMOTE_NO_TUNNEL=1
 export PATH="$BIN_DIR:$PATH"
 
 if ! "$CLIENT_BIN" ping >/dev/null 2>&1; then
   "$SCRIPT_DIR/test_agentd.sh" >/dev/null
+fi
+
+if [[ $# -eq 0 ]]; then
+  echo "isolated construct test env: $DEMO_DIR" >&2
+  echo "try: $0 list" >&2
+  echo "try: $0 canvas templates" >&2
 fi
 
 exec "$CLIENT_BIN" "$@"
