@@ -1020,6 +1020,11 @@ pub struct CanvasEdit {
     pub new_string: String,
     #[serde(default)]
     pub replace_all: bool,
+    /// If true, the block(s) touched by this edit are re-added to the canvas
+    /// run's shimmer set after the edit, keeping them animated until a later
+    /// edit or task completion clears them.
+    #[serde(default)]
+    pub shimmer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
