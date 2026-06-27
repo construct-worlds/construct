@@ -531,7 +531,7 @@ fn canvas_bracketed_paste_bytes(prompt: &str) -> Vec<u8> {
 fn canvas_run_instructions() -> Vec<String> {
     vec![
         "Execute this construct canvas as an autonomous run.".to_string(),
-        "Planning pass — your very first canvas action: before starting any task or creating any subagent, make a construct_canvas_edit that updates every block with your execution plan. Annotate blocks you will execute with a status marker (e.g. '⏳ queued') or the subagent clip you are about to create; mark blocks that need no work as done or not applicable. Editing a block's text changes its signature and immediately clears its shimmer animation, so this single early edit makes the canvas reflect your plan within seconds of the Run trigger instead of after the first task completes.".to_string(),
+        "Planning pass — your very first canvas action: before starting any task or creating any subagent, make a construct_canvas_edit that updates every block with your execution plan. For blocks you will delegate to a subagent, annotate them (e.g. add '⏳ queued') and set shimmer: true on that edit so the block stays animated while the subagent runs. For blocks that need no work, annotate or mark them done without shimmer so their animation clears immediately. This single early edit makes the canvas reflect your plan within seconds of the Run trigger instead of after the first task completes.".to_string(),
         "Treat canvas_run.markdown as free-form instructions and state for this turn, not as a request for a one-shot status report or as a fixed task-management schema.".to_string(),
         "Infer the user's intended objective from the document structure and prose, then keep taking useful next actions while there is actionable work you can do.".to_string(),
         "Do not ask the user to run the canvas again; if the document still implies useful work you can perform, continue in this turn.".to_string(),
@@ -587,6 +587,46 @@ fn canvas_run_pending_signatures(body: &str) -> std::collections::HashSet<String
         sigs.insert(lines.join("\n"));
     }
     sigs
+}
+
+/// Return the block signatures in `markdown` that are touched by any edit
+/// with `shimmer: true`. The caller merges these into the run's pending set
+/// so those blocks stay animated after the edit.
+fn canvas_shimmer_signatures(
+    edits: &[agentd_protocol::CanvasEdit],
+    markdown: &str,
+) -> std::collections::HashSet<String> {
+    // Collect the first non-empty trimmed line from each shimmer edit's new_string
+    // as a lookup anchor.
+    let anchors: Vec<&str> = edits
+        .iter()
+        .filter(|e| e.shimmer)
+        .filter_map(|e| e.new_string.lines().find(|l| !l.trim().is_empty()))
+        .map(|l| l.trim())
+        .collect();
+    if anchors.is_empty() {
+        return Default::default();
+    }
+    // Walk the post-edit markdown block by block; a block matches if any
+    // of its trimmed lines equals one of the anchors.
+    let mut result = std::collections::HashSet::new();
+    let mut cur: Vec<String> = Vec::new();
+    let mut flush =
+        |cur: &Vec<String>, result: &mut std::collections::HashSet<String>| {
+            if !cur.is_empty() && anchors.iter().any(|a| cur.iter().any(|l| l == a)) {
+                result.insert(cur.join("\n"));
+            }
+        };
+    for raw in markdown.lines() {
+        if raw.trim().is_empty() {
+            flush(&cur, &mut result);
+            cur.clear();
+        } else {
+            cur.push(raw.trim().to_string());
+        }
+    }
+    flush(&cur, &mut result);
+    result
 }
 
 fn session_event_is_canvas_output(event: &SessionEvent) -> bool {
@@ -909,7 +949,12 @@ impl SessionManager {
         Some(run)
     }
 
-    fn narrow_canvas_run(&self, session_id: &str, markdown: &str) {
+    fn narrow_canvas_run(
+        &self,
+        session_id: &str,
+        markdown: &str,
+        shimmer_add: std::collections::HashSet<String>,
+    ) {
         let now_ms = Utc::now().timestamp_millis();
         let current = canvas_run_pending_signatures(markdown);
         if let Ok(mut runs) = self.canvas_runs.lock() {
@@ -918,6 +963,11 @@ impl SessionManager {
             };
             run.pending_block_signatures
                 .retain(|sig| current.contains(sig));
+            for sig in shimmer_add {
+                if current.contains(&sig) && !run.pending_block_signatures.contains(&sig) {
+                    run.pending_block_signatures.push(sig);
+                }
+            }
             if run.expires_at_ms <= now_ms || run.pending_block_signatures.is_empty() {
                 runs.remove(session_id);
             }
@@ -1601,7 +1651,7 @@ impl SessionManager {
             params.template_id,
             params.note,
         )?;
-        self.narrow_canvas_run(&params.session_id, &canvas.markdown);
+        self.narrow_canvas_run(&params.session_id, &canvas.markdown, Default::default());
         self.broadcast_canvas_state(canvas.clone());
         Ok(CanvasUpdateResult { canvas })
     }
@@ -1613,7 +1663,8 @@ impl SessionManager {
         let canvas =
             self.storage
                 .edit_canvas(&params.session_id, &params.edits, params.actor, params.note)?;
-        self.narrow_canvas_run(&params.session_id, &canvas.markdown);
+        let shimmer_add = canvas_shimmer_signatures(&params.edits, &canvas.markdown);
+        self.narrow_canvas_run(&params.session_id, &canvas.markdown, shimmer_add);
         self.broadcast_canvas_state(canvas.clone());
         Ok(CanvasUpdateResult { canvas })
     }
