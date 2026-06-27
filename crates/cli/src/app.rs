@@ -7287,9 +7287,100 @@ impl App {
                     Self::update_canvas_smart_clip_after_cursor_move(popup);
                 }
             }
+            // Tab / Shift-Tab nest and un-nest the current markdown list
+            // item(s). They operate on every list line the selection spans, or
+            // just the cursor's line when there is no selection.
+            KeyCode::Tab if !ctrl && !alt => self.shift_canvas_indent(false),
+            KeyCode::BackTab if !ctrl && !alt => self.shift_canvas_indent(true),
             KeyCode::Char(c) if !ctrl && !alt => self.insert_canvas_text(&c.to_string()),
             _ => {}
         }
+    }
+
+    /// Indent (or, when `outdent`, un-indent) the markdown list item(s) under
+    /// the cursor / selection by one nesting level. Nesting is encoded as
+    /// leading spaces on the source line (`CANVAS_INDENT_UNIT` per level);
+    /// non-list lines and the empty leading whitespace at the top level are
+    /// left untouched. The cursor and any selection endpoints ride along with
+    /// the text they were sitting on so the same logical characters stay
+    /// selected / under the cursor after the shift.
+    fn shift_canvas_indent(&mut self, outdent: bool) {
+        const CANVAS_INDENT_UNIT: usize = 2;
+        let Some(popup) = self.canvas_popup.as_mut() else {
+            return;
+        };
+        let lines: Vec<String> = popup.buffer.split('\n').map(str::to_string).collect();
+
+        // The inclusive band of lines to touch: the selection's lines, or just
+        // the cursor's line. A selection that ends exactly at a line start does
+        // not pull that trailing line in (its text isn't really selected).
+        let (range_start, range_end) =
+            Self::canvas_selection_range(popup).unwrap_or((popup.cursor, popup.cursor));
+        let (start_line, _) = canvas_offset_to_line_col(&lines, range_start);
+        let (mut end_line, end_col) = canvas_offset_to_line_col(&lines, range_end);
+        if end_line > start_line && end_col == 0 {
+            end_line -= 1;
+        }
+
+        // Per-line edit at column 0, recorded as (removed_chars, inserted_chars)
+        // so cursor/selection offsets can be remapped afterwards.
+        let mut new_lines = lines.clone();
+        let mut deltas = vec![(0usize, 0usize); lines.len()];
+        let mut changed = false;
+        for i in start_line..=end_line.min(lines.len().saturating_sub(1)) {
+            let line = &lines[i];
+            let stripped = line.trim_start();
+            let is_list = stripped.starts_with("- ") || stripped.starts_with("* ");
+            if !is_list {
+                continue;
+            }
+            if outdent {
+                let leading_spaces = line.chars().take_while(|&c| c == ' ').count();
+                let remove = leading_spaces.min(CANVAS_INDENT_UNIT);
+                if remove == 0 {
+                    continue;
+                }
+                new_lines[i] = line.chars().skip(remove).collect();
+                deltas[i] = (remove, 0);
+                changed = true;
+            } else {
+                new_lines[i] = format!("{}{}", " ".repeat(CANVAS_INDENT_UNIT), line);
+                deltas[i] = (0, CANVAS_INDENT_UNIT);
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+
+        // Map an old char offset onto the equivalent offset in `new_lines`. Only
+        // the offset's own line can have shifted (edits are at column 0), so we
+        // shift its column and re-resolve against the rebuilt lines.
+        let remap = |offset: usize| -> usize {
+            let (line, col) = canvas_offset_to_line_col(&lines, offset);
+            let (removed, inserted) = deltas[line];
+            let new_col = if removed > 0 {
+                col.saturating_sub(removed)
+            } else if inserted > 0 && col > 0 {
+                col + inserted
+            } else {
+                col
+            };
+            let new_col = new_col.min(new_lines[line].chars().count());
+            canvas_line_col_to_offset(&new_lines, line, new_col)
+        };
+
+        let new_cursor = remap(popup.cursor);
+        let new_selection = popup.selection.as_ref().map(|sel| CanvasSelection {
+            anchor: remap(sel.anchor),
+            head: remap(sel.head),
+            dragged: sel.dragged,
+        });
+        popup.buffer = new_lines.join("\n");
+        popup.cursor = new_cursor;
+        popup.selection = new_selection;
+        popup.preferred_col = None;
+        popup.smart_clip = None;
     }
 
     async fn handle_canvas_global_key(&mut self, key: KeyEvent) -> bool {
@@ -9955,6 +10046,31 @@ fn canvas_cursor_for_line_col(s: &str, target_line: usize, target_col: usize) ->
     s.chars().count()
 }
 
+/// Resolve a char offset into the buffer to its `(line index, column)` where
+/// column is the char offset within that line and `'\n'` counts as one char.
+/// `lines` must be the buffer split on `'\n'` (so the count is preserved).
+fn canvas_offset_to_line_col(lines: &[String], offset: usize) -> (usize, usize) {
+    let mut consumed = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        let len = line.chars().count();
+        if offset <= consumed + len {
+            return (i, offset - consumed);
+        }
+        consumed += len + 1; // + the trailing newline
+    }
+    let last = lines.len().saturating_sub(1);
+    (last, lines.get(last).map(|l| l.chars().count()).unwrap_or(0))
+}
+
+/// Inverse of [`canvas_offset_to_line_col`]: the char offset of `(line, col)`.
+fn canvas_line_col_to_offset(lines: &[String], line: usize, col: usize) -> usize {
+    let mut offset = 0usize;
+    for l in lines.iter().take(line) {
+        offset += l.chars().count() + 1;
+    }
+    offset + col
+}
+
 fn canvas_line_start(s: &str, cursor: usize) -> usize {
     let mut line_start = 0usize;
     for (idx, ch) in s.chars().enumerate() {
@@ -10524,6 +10640,106 @@ mod tests {
         let popup = app.canvas_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "draft changed");
         assert_eq!(popup.saved_markdown, "draft");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_tab_indents_list_item() {
+        let (mut app, _dir, server) = empty_app().await;
+        // Cursor at the end of "- item" (char offset 6).
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "- item", 6));
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "  - item", "Tab adds one indent level");
+        // The cursor rides along with the text it was on (still end of line).
+        assert_eq!(popup.cursor, 8);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_shift_tab_outdents_list_item() {
+        let (mut app, _dir, server) = empty_app().await;
+        // Cursor at the end of "  - item" (char offset 8).
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "  - item", 8));
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
+            .await;
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "- item", "Shift-Tab removes one indent level");
+        assert_eq!(popup.cursor, 6);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_shift_tab_at_top_level_is_noop() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "- item", 3));
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
+            .await;
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "- item", "outdent at column 0 clamps to a no-op");
+        assert_eq!(popup.cursor, 3, "cursor is undisturbed by a clamped outdent");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_tab_indents_multi_line_selection() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "- one\n- two", 0));
+        // Select from the start of the buffer through the end of the second
+        // list line so both lines fall inside the selection.
+        app.begin_canvas_selection();
+        app.move_canvas_cursor(11);
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(
+            popup.buffer, "  - one\n  - two",
+            "Tab indents every selected list line"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_nested_list_item_renders_more_indented() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "- parent\n  - child", 0));
+        {
+            let popup = app.canvas_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(CANVAS_REVEAL_MS);
+        }
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("canvas should render");
+        let text = rendered_text(term.backend().buffer());
+
+        let parent_line = text
+            .lines()
+            .find(|l| l.contains("parent"))
+            .expect("parent list item rendered");
+        let child_line = text
+            .lines()
+            .find(|l| l.contains("child"))
+            .expect("nested list item rendered");
+        let bullet_col = |line: &str| line.find('•').expect("bullet glyph rendered");
+        assert!(
+            bullet_col(child_line) > bullet_col(parent_line),
+            "nested child bullet must render more indented than its parent:\n  parent={parent_line:?}\n  child={child_line:?}"
+        );
         server.abort();
     }
 

@@ -7936,8 +7936,11 @@ fn canvas_visual_col_for_line(app: Option<&App>, raw: &str, raw_col: usize) -> u
         .strip_prefix("- ")
         .or_else(|| trimmed.strip_prefix("* "))
     {
+        // Mirror the proportional indent rendered for nested bullets: the bullet
+        // glyph and text sit `leading` columns further right than a top-level
+        // item, so the cursor column must account for the same offset.
         let prefix = trimmed.chars().count() - rest.chars().count();
-        4 + canvas_inline_visual_width(app, rest, col.saturating_sub(prefix))
+        leading + 4 + canvas_inline_visual_width(app, rest, col.saturating_sub(prefix))
     } else if raw_col <= leading {
         raw_col
     } else {
@@ -8006,17 +8009,15 @@ fn render_canvas_markdown_lines<'a>(
                 line_start + leading,
                 selection,
             ));
-        } else if let Some(rest) = trimmed.strip_prefix("- ") {
-            let mut spans = vec![Span::styled("  • ", Style::default().fg(app.theme.accent))];
-            spans.extend(render_canvas_inline_spans(
-                app,
-                rest,
-                line_start + leading + 2,
-                selection,
-            ));
-            out.push(Line::from(spans));
-        } else if let Some(rest) = trimmed.strip_prefix("* ") {
-            let mut spans = vec![Span::styled("  • ", Style::default().fg(app.theme.accent))];
+        } else if let Some(rest) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            // Nesting is encoded as leading spaces on the source line; render it
+            // as proportional indentation before the bullet so deeper items sit
+            // visibly further right than their parents.
+            let bullet = format!("{}  • ", " ".repeat(leading));
+            let mut spans = vec![Span::styled(bullet, Style::default().fg(app.theme.accent))];
             spans.extend(render_canvas_inline_spans(
                 app,
                 rest,
