@@ -5,15 +5,15 @@ use crate::config::Config;
 use crate::storage::Storage;
 use crate::worktree;
 use agentd_protocol::{
-    ahp_method, CanvasDocument, CanvasEditParams, CanvasExecuteParams, CanvasExecuteResult,
-    CanvasGetResult, CanvasListTemplatesResult, CanvasStateNotificationPayload, CanvasUpdateParams,
-    CanvasUpdateResult, ClientView, CreateSessionParams, DeletedNotificationPayload,
-    EventNotificationPayload, GroupDeletedNotificationPayload, GroupStateNotificationPayload,
-    GroupSummary, HarnessInfo, MessageRole, MoveDirection, PtyReplayResult, PtySize,
-    SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
-    SessionEmitEventParams, SessionEvent, SessionStartParams, SessionState, SessionSummary,
-    SessionWidgetDeleteParams, StateNotificationPayload, TimestampedEvent, TranscriptResult,
-    CANVAS_SMART_CLIP_DESCRIPTORS,
+    agent_context, ahp_method, CanvasDocument, CanvasEditParams, CanvasExecuteParams,
+    CanvasExecuteResult, CanvasGetResult, CanvasListTemplatesResult,
+    CanvasStateNotificationPayload, CanvasUpdateParams, CanvasUpdateResult, ClientView,
+    CreateSessionParams, DeletedNotificationPayload, EventNotificationPayload,
+    GroupDeletedNotificationPayload, GroupStateNotificationPayload, GroupSummary, HarnessInfo,
+    MessageRole, MoveDirection, PtyReplayResult, PtySize, SessionAttachClipboardParams,
+    SessionAttachClipboardResult, SessionDetail, SessionEmitEventParams, SessionEvent,
+    SessionStartParams, SessionState, SessionSummary, SessionWidgetDeleteParams,
+    StateNotificationPayload, TimestampedEvent, TranscriptResult, CANVAS_SMART_CLIP_DESCRIPTORS,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
@@ -527,27 +527,44 @@ fn canvas_bracketed_paste_bytes(prompt: &str) -> Vec<u8> {
     bytes
 }
 
-fn canvas_smart_clip_prompt_reference() -> String {
-    let mut out =
-        String::from("Smart clips are Markdown-native typed references. Supported forms:");
-    for clip in CANVAS_SMART_CLIP_DESCRIPTORS {
-        out.push_str("\n- ");
-        out.push_str(clip.syntax);
-        out.push_str(" — ");
-        out.push_str(clip.description);
-    }
-    out.push_str(
-        "\nThe clip_id attribute identifies a specific clip instance, not the target itself. Preserve clip_id values when editing existing clips.",
-    );
-    out
+fn canvas_run_instructions() -> Vec<String> {
+    vec![
+        "Execute this construct canvas as an autonomous run.".to_string(),
+        "Treat canvas_run.markdown as free-form instructions and state for this turn, not as a request for a one-shot status report or as a fixed task-management schema.".to_string(),
+        "Infer the user's intended objective from the document structure and prose, then keep taking useful next actions while there is actionable work you can do.".to_string(),
+        "Do not ask the user to run the canvas again; if the document still implies useful work you can perform, continue in this turn.".to_string(),
+        "Record meaningful state changes or results on the canvas with construct_canvas_edit (anchored find/replace edits that merge with concurrent human edits; use construct_canvas_update only for a wholesale rewrite).".to_string(),
+        "If blocked, write the blocker and next required external action on the canvas before ending.".to_string(),
+        "Smart clips are Markdown-native typed references. The clip_id attribute identifies a specific clip instance, not the target itself; preserve clip_id values when editing existing clips.".to_string(),
+    ]
 }
 
-fn canvas_execution_prompt(body: &str) -> String {
-    let smart_clip_reference = canvas_smart_clip_prompt_reference();
-    format!(
-        "Execute the following construct canvas as an autonomous run. Treat the Markdown as free-form instructions and state for this turn, not as a request for a one-shot status report. Infer the user's intended objective from the document structure and prose, then keep taking useful next actions while there is actionable work you can do. Do not ask the user to run the canvas again; if the document still implies useful work you can perform, continue in this turn.\n\n{smart_clip_reference}\n\nRecord meaningful state changes or results on the canvas with construct_canvas_edit (anchored find/replace edits that merge with concurrent human edits; use construct_canvas_update only for a wholesale rewrite). If blocked, write the blocker and next required external action on the canvas before ending.\n\n```markdown\n{}\n```",
-        body
-    )
+fn canvas_execution_prompt() -> String {
+    "Run the current construct canvas autonomously. Before doing work, call agentd_context (or construct_context if you are using MCP) and read the canvas_run field for the latest canvas content, smart clip reference, and run instructions. If canvas_run is unavailable, read the current canvas with the canvas get tool before acting."
+        .to_string()
+}
+
+fn canvas_run_context(
+    canvas: &CanvasDocument,
+    scope: &str,
+    markdown: &str,
+) -> agent_context::CanvasRunContext {
+    agent_context::CanvasRunContext {
+        session_id: canvas.session_id.clone(),
+        canvas_version: canvas.version,
+        canvas_updated_at_ms: canvas.updated_at_ms,
+        scope: scope.to_string(),
+        instructions: canvas_run_instructions(),
+        smart_clips: CANVAS_SMART_CLIP_DESCRIPTORS
+            .iter()
+            .map(|clip| agent_context::CanvasSmartClipReference {
+                type_name: clip.type_name.to_string(),
+                syntax: clip.syntax.to_string(),
+                description: clip.description.to_string(),
+            })
+            .collect(),
+        markdown: markdown.to_string(),
+    }
 }
 
 impl SessionEntry {
@@ -1450,16 +1467,23 @@ impl SessionManager {
                 );
             }
         }
-        let body = params
+        let selected = params
             .selection
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| result.canvas.markdown.trim());
+            .filter(|s| !s.is_empty());
+        let body = selected.unwrap_or_else(|| result.canvas.markdown.trim());
         if body.is_empty() {
             anyhow::bail!("canvas is empty");
         }
-        let prompt = canvas_execution_prompt(body);
+        let scope = if selected.is_some() {
+            "selection"
+        } else {
+            "full"
+        };
+        let run_context = canvas_run_context(&result.canvas, scope, body);
+        self.write_canvas_run_context(&params.session_id, &run_context)?;
+        let prompt = canvas_execution_prompt();
         let delivery = {
             let summary = entry.summary.read().await;
             canvas_execution_delivery(&*summary)
@@ -1496,6 +1520,39 @@ impl SessionManager {
             .send(BroadcastMsg::CanvasState(CanvasStateNotificationPayload {
                 canvas,
             }));
+    }
+
+    fn canvas_run_context_path(&self, session_id: &str) -> PathBuf {
+        self.storage
+            .session_dir(session_id)
+            .join("canvas-run-context.json")
+    }
+
+    fn install_canvas_run_context_env(&self, env: &mut HashMap<String, String>, session_id: &str) {
+        env.insert(
+            agent_context::ENV_CANVAS_RUN_CONTEXT_FILE.to_string(),
+            self.canvas_run_context_path(session_id)
+                .to_string_lossy()
+                .to_string(),
+        );
+    }
+
+    fn write_canvas_run_context(
+        &self,
+        session_id: &str,
+        context: &agent_context::CanvasRunContext,
+    ) -> Result<()> {
+        let path = self.canvas_run_context_path(session_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_vec_pretty(context).context("serialize canvas run context")?;
+        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path)
+            .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+        Ok(())
     }
 
     pub async fn create(self: &Arc<Self>, params: CreateSessionParams) -> Result<String> {
@@ -1638,6 +1695,7 @@ impl SessionManager {
             agentd_protocol::adapter::policy::ENV_AUTO_APPROVE_PATHS.to_string(),
             widgets_dir.to_string_lossy().to_string(),
         );
+        self.install_canvas_run_context_env(&mut env_with_meta, &id);
         env_with_meta.insert(
             "CONSTRUCT_SESSION_KIND".to_string(),
             match params.kind {
@@ -1925,6 +1983,7 @@ impl SessionManager {
             agentd_protocol::adapter::policy::ENV_AUTO_APPROVE_PATHS.to_string(),
             widgets_dir.to_string_lossy().to_string(),
         );
+        self.install_canvas_run_context_env(&mut start_params.env, id);
         // Use the last-known PTY size so the resumed adapter (which
         // sizes its PTY off start_params on session.start) doesn't draw
         // its banner / resume content at the stale creation default.
@@ -4089,31 +4148,63 @@ mod tests {
 
     #[test]
     fn canvas_execution_prompt_requires_autonomous_run() {
-        let prompt = canvas_execution_prompt(
-            "# Research brief\n\nCompare options and summarize findings.\n",
-        );
+        let prompt = canvas_execution_prompt();
 
-        assert!(prompt.contains("autonomous run"));
-        assert!(prompt.contains("free-form instructions and state"));
-        assert!(prompt.contains("Infer the user's intended objective"));
-        assert!(prompt.contains("keep taking useful next actions"));
-        assert!(prompt.contains("Do not ask the user to run the canvas again"));
-        assert!(prompt.contains("Smart clips are Markdown-native typed references"));
+        assert!(prompt.contains("autonomously"));
+        assert!(prompt.contains("agentd_context"));
+        assert!(prompt.contains("construct_context"));
+        assert!(prompt.contains("canvas_run"));
+        assert!(prompt.contains("latest canvas content"));
+        assert!(!prompt.contains("Compare options and summarize findings."));
+    }
+
+    #[test]
+    fn canvas_run_context_carries_run_contract_and_registered_smart_clips() {
+        let canvas = CanvasDocument {
+            session_id: "s123".to_string(),
+            markdown: "# Research brief\n\nCompare options and summarize findings.\n".to_string(),
+            version: 9,
+            updated_at_ms: 1234,
+            template_id: None,
+        };
+        let context = canvas_run_context(&canvas, "selection", "- selected work");
+
+        assert_eq!(context.session_id, "s123");
+        assert_eq!(context.canvas_version, 9);
+        assert_eq!(context.canvas_updated_at_ms, 1234);
+        assert_eq!(context.scope, "selection");
+        assert_eq!(context.markdown, "- selected work");
+        assert!(context
+            .instructions
+            .iter()
+            .any(|s| s.contains("free-form instructions and state")));
+        assert!(context
+            .instructions
+            .iter()
+            .any(|s| s.contains("Infer the user's intended objective")));
+        assert!(context
+            .instructions
+            .iter()
+            .any(|s| s.contains("keep taking useful next actions")));
+        assert!(context
+            .instructions
+            .iter()
+            .any(|s| s.contains("Do not ask the user to run the canvas again")));
+        assert!(context
+            .instructions
+            .iter()
+            .any(|s| s.contains("clip_id attribute identifies a specific clip instance")));
         for clip in CANVAS_SMART_CLIP_DESCRIPTORS {
             assert!(
-                prompt.contains(clip.syntax),
-                "prompt should include registered smart clip syntax {}",
+                context
+                    .smart_clips
+                    .iter()
+                    .any(|registered| registered.syntax == clip.syntax
+                        && registered.description == clip.description),
+                "context should include registered smart clip syntax and description for {}",
                 clip.syntax
             );
-            assert!(
-                prompt.contains(clip.description),
-                "prompt should include registered smart clip description for {}",
-                clip.type_name
-            );
         }
-        assert!(prompt.contains("clip_id attribute identifies a specific clip instance"));
-        assert!(prompt.contains("If blocked, write the blocker"));
-        assert!(prompt.contains("Compare options and summarize findings."));
     }
 
     #[test]
@@ -4666,6 +4757,64 @@ mod tests {
         assert!(env.contains_key(ENV_GLOBAL_MEMORY_FILE));
         assert!(!env.contains_key(ENV_PROJECT_MEMORY_FILE));
         assert!(!env.contains_key(ENV_PROJECT_ID));
+    }
+
+    #[tokio::test]
+    async fn canvas_run_context_env_points_at_session_sidecar() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage.clone(), config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        let mut env = HashMap::new();
+
+        mgr.install_canvas_run_context_env(&mut env, "s123");
+
+        assert_eq!(
+            env.get(agent_context::ENV_CANVAS_RUN_CONTEXT_FILE),
+            Some(
+                &storage
+                    .session_dir("s123")
+                    .join("canvas-run-context.json")
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn write_canvas_run_context_persists_readable_json() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        let context = agent_context::CanvasRunContext {
+            session_id: "s123".to_string(),
+            canvas_version: 1,
+            canvas_updated_at_ms: 2,
+            scope: "full".to_string(),
+            instructions: vec!["run".to_string()],
+            smart_clips: Vec::new(),
+            markdown: "# Canvas".to_string(),
+        };
+
+        mgr.write_canvas_run_context("s123", &context)
+            .expect("write canvas run context");
+
+        let bytes = std::fs::read(mgr.canvas_run_context_path("s123")).unwrap();
+        let parsed: agent_context::CanvasRunContext = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed, context);
     }
 
     #[tokio::test]

@@ -11,7 +11,7 @@ Every user-facing session may have one durable canvas: a Markdown document owned
 
 Smart clips are persisted as Markdown-native typed references, using inline `@{type:target clip_id=instance}` references for compact clips and fenced `:::clip type ... :::` blocks for larger embeds. The `target` identifies the referenced session, harness, or object; `clip_id` uniquely identifies that smart clip instance within the canvas document so repeated references to the same target remain distinguishable. Renderers may present these references as rich chips or blocks, but the stored document remains plain Markdown.
 
-Canvas execution prompts must include a concise reference generated from the registered smart-clip descriptors, not from a separately maintained prompt-only list. Adding or changing a supported smart-clip type should update that registry so agents running canvases learn the syntax and resolution semantics automatically.
+Canvas execution should submit a compact trigger prompt to the owning session and provide the current canvas run payload through the session context tool. The context payload must include the selected or full Markdown, the autonomous run contract, and a concise smart-clip reference generated from the registered smart-clip descriptors, not from a separately maintained prompt-only list. Adding or changing a supported smart-clip type should update that registry so agents running canvases learn the syntax and resolution semantics automatically.
 
 Rich canvas editors should treat a typed `@` as an inline smart clip trigger. The trigger opens a cursor-anchored picker, filters as the user types, and inserts the selected Markdown-native typed reference without changing the surrounding prose.
 
