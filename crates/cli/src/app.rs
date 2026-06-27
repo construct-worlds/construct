@@ -2649,7 +2649,11 @@ impl App {
             return;
         }
 
-        if self.canvas_popup.is_some() {
+        // Mirror the keystroke routing precedence (see `on_key`): pasted
+        // text lands in the canvas only when no minibuffer/palette overlay is
+        // capturing input. With an overlay open, `dispatch_paste_text` below
+        // routes the paste to the minibuffer / orchestrator instead.
+        if self.canvas_popup.is_some() && self.minibuffer.is_none() {
             self.insert_canvas_text(&text);
             return;
         }
@@ -6294,7 +6298,15 @@ impl App {
                 return;
             }
         }
-        if self.canvas_popup.is_some() {
+        // The canvas captures keystrokes only while it is the topmost input
+        // surface. If a minibuffer/palette overlay is open over it (e.g.
+        // `C-x x` opened the command palette or the operator input), that
+        // overlay must capture input instead — otherwise typed keys leak
+        // into the canvas buffer and the palette/operator is unusable. The
+        // `C-x` chord that *opens* an overlay still reaches the canvas global
+        // handler because no minibuffer exists yet at that point; once the
+        // overlay is open the minibuffer block below takes over.
+        if self.canvas_popup.is_some() && self.minibuffer.is_none() {
             if self.handle_canvas_global_key(key).await {
                 return;
             }
@@ -10505,6 +10517,112 @@ mod tests {
         // Esc dismisses just the picker; the canvas surface remains open.
         assert!(!app.canvas_smart_clip_active(), "Esc should cancel the picker");
         assert!(app.canvas_popup.is_some(), "Esc must not close the canvas");
+        server.abort();
+    }
+
+    /// Regression for the canvas/palette input-routing bug: with the
+    /// canvas open, `C-x x` opens the command palette over it, and the
+    /// keys typed afterwards must fill the palette input — not leak into
+    /// the canvas buffer underneath. The top-level dispatch used to route
+    /// every key to the canvas whenever `canvas_popup` was `Some`, so the
+    /// palette was unusable while a canvas was focused.
+    #[tokio::test]
+    async fn canvas_open_command_palette_captures_typed_chars() {
+        let (mut app, _dir, server) = empty_app().await;
+        // No orchestrator session → `C-x x` opens the M-x command palette.
+        app.orchestrator_id = None;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 0));
+
+        // `C-x x` while the canvas is focused opens the command palette.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await;
+        assert!(
+            matches!(
+                app.minibuffer.as_ref().map(|m| &m.intent),
+                Some(MinibufferIntent::CommandPalette)
+            ),
+            "C-x x must open the command palette over the canvas"
+        );
+
+        // Subsequent keystrokes must land in the palette input...
+        app.on_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
+            .await;
+
+        assert_eq!(
+            app.minibuffer.as_ref().map(|m| m.input.as_str()),
+            Some("hi"),
+            "typing must fill the command palette input"
+        );
+        // ...and must NOT leak into the canvas buffer underneath.
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().buffer,
+            "draft",
+            "typing into the palette must not insert into the canvas"
+        );
+        server.abort();
+    }
+
+    /// Same routing precedence for the operator/orchestrator panel: when
+    /// `C-x x` opens the persistent orchestrator input over a focused
+    /// canvas, keys must go to the orchestrator (its PTY), not the canvas.
+    #[tokio::test]
+    async fn canvas_open_orchestrator_panel_captures_typed_chars() {
+        let (mut app, _dir, server) = empty_app().await;
+        // An orchestrator session → `C-x x` opens the operator input panel.
+        app.orchestrator_id = Some("orch".to_string());
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 0));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await;
+        assert!(
+            matches!(
+                app.minibuffer.as_ref().map(|m| &m.intent),
+                Some(MinibufferIntent::Orchestrator)
+            ),
+            "C-x x must open the orchestrator panel over the canvas"
+        );
+
+        // A plain keystroke is forwarded to the orchestrator's PTY, which
+        // snaps its scrollback back to live — an observable side effect of
+        // the orchestrator path running instead of the canvas path.
+        app.orchestrator_scrollback = 7;
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.orchestrator_scrollback, 0,
+            "typing must route to the orchestrator PTY (snaps scrollback to live)"
+        );
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().buffer,
+            "draft",
+            "typing into the orchestrator must not insert into the canvas"
+        );
+        server.abort();
+    }
+
+    /// Counterpart guard: with NO minibuffer/palette overlay open, the
+    /// canvas keeps capturing keystrokes as before.
+    #[tokio::test]
+    async fn canvas_typing_with_no_overlay_still_inserts() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 5));
+        assert!(app.minibuffer.is_none(), "precondition: no overlay open");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
+            .await;
+
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().buffer,
+            "draft!",
+            "with no overlay, a typed char inserts into the canvas"
+        );
+        assert!(app.minibuffer.is_none());
         server.abort();
     }
 
