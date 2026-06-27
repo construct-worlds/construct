@@ -16,8 +16,8 @@ mod observe;
 mod persist;
 mod project_guide;
 mod provider;
-mod sandbox;
 mod provider_watchdog;
+mod sandbox;
 mod skills;
 mod tasks;
 mod title_mode;
@@ -69,12 +69,7 @@ pub async fn run() -> anyhow::Result<()> {
             Ok(r) => r,
             Err(e) => {
                 ctx.emit.emit(SessionEvent::Error {
-                    message: format!(
-                        "{e}\n\nsmith needs one of: CONSTRUCT_SMITH_MODEL set, \
-                         ANTHROPIC_API_KEY set, OPENAI_API_KEY set, \
-                         GEMINI_API_KEY set, or a local Ollama (set OLLAMA_HOST \
-                         if not at localhost:11434)."
-                    ),
+                    message: model_startup_error_message(&params, &e.to_string()),
                 });
                 ctx.emit.emit(SessionEvent::Done { exit_code: 2 });
                 return;
@@ -92,9 +87,101 @@ pub async fn run() -> anyhow::Result<()> {
     .await
 }
 
+fn model_startup_error_message(params: &SessionStartParams, error: &str) -> String {
+    let mut msg = String::new();
+    msg.push_str("smith could not start because the configured model is not usable.");
+    msg.push_str("\n\nTried model: ");
+    msg.push_str(&model_hint(params));
+    msg.push_str("\n\nProvider error:\n");
+    msg.push_str(error);
+
+    let lower = error.to_lowercase();
+    if lower.contains("grok auth token") && lower.contains("expired") {
+        msg.push_str(
+            "\n\nAction: run `grok login`, then restart this session again. \
+             Alternatively set `GROK_API_KEY` or `XAI_API_KEY` before restarting.",
+        );
+    } else if lower.contains("grok provider requires grok_api_key or xai_api_key") {
+        msg.push_str(
+            "\n\nAction: set `GROK_API_KEY` or `XAI_API_KEY`, or use `grok-oauth:<model>` \
+             after running `grok login`.",
+        );
+    } else if lower.contains("anthropic_api_key") {
+        msg.push_str("\n\nAction: set `ANTHROPIC_API_KEY` or switch smith to another model.");
+    } else if lower.contains("openai_api_key") {
+        msg.push_str("\n\nAction: set `OPENAI_API_KEY` or switch smith to another model.");
+    } else if lower.contains("gemini_api_key") || lower.contains("google_api_key") {
+        msg.push_str(
+            "\n\nAction: set `GEMINI_API_KEY` or `GOOGLE_API_KEY`, or switch smith to another model.",
+        );
+    } else if lower.contains("ollama") {
+        msg.push_str("\n\nAction: start Ollama or set `OLLAMA_HOST` to the running Ollama server.");
+    } else {
+        msg.push_str(
+            "\n\nAction: fix credentials for the tried model, or start/fork a smith session \
+             with a different model.",
+        );
+    }
+
+    msg.push_str(
+        "\n\nsmith needs one of: `CONSTRUCT_SMITH_MODEL`, `ANTHROPIC_API_KEY`, \
+         `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROK_API_KEY`/`XAI_API_KEY`, \
+         a valid Grok OAuth login, or a local Ollama.",
+    );
+    msg
+}
+
+fn model_hint(params: &SessionStartParams) -> String {
+    params
+        .model
+        .clone()
+        .or_else(|| params.env.get("CONSTRUCT_SMITH_MODEL").cloned())
+        .or_else(|| std::env::var("CONSTRUCT_SMITH_MODEL").ok())
+        .unwrap_or_else(|| "(auto-detect from available credentials)".to_string())
+}
+
 pub async fn run_title_mode(prompt: &str) -> anyhow::Result<()> {
     match title_mode::suggest_title(prompt).await {
-        Ok(title) => { println!("{title}"); Ok(()) }
-        Err(e) => { eprintln!("title-mode failed: {e}"); std::process::exit(1); }
+        Ok(title) => {
+            println!("{title}");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("title-mode failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn params_with_model(model: &str) -> SessionStartParams {
+        SessionStartParams {
+            session_id: "s1".into(),
+            cwd: "/tmp".into(),
+            prompt: None,
+            model: Some(model.into()),
+            mode: None,
+            pty_size: None,
+            env: HashMap::new(),
+            args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn startup_error_mentions_expired_grok_recovery() {
+        let msg = model_startup_error_message(
+            &params_with_model("grok-oauth:grok-build-0.1"),
+            "grok auth token in /Users/moon/.grok/auth.json is expired; run `grok login` or set GROK_API_KEY/XAI_API_KEY.",
+        );
+
+        assert!(msg.contains("Tried model: grok-oauth:grok-build-0.1"));
+        assert!(msg.contains("run `grok login`"));
+        assert!(msg.contains("restart this session again"));
+        assert!(msg.contains("GROK_API_KEY"));
+        assert!(msg.contains("XAI_API_KEY"));
     }
 }
