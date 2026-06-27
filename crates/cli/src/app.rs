@@ -613,6 +613,71 @@ pub struct DynamicUiHover {
     pub until: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTitleMenuAction {
+    Rename,
+    SplitHorizontal,
+    SplitVertical,
+    CloseSplit,
+    CloseSessionView,
+    CloseSessionProcess,
+    Archive,
+    Delete,
+}
+
+impl SessionTitleMenuAction {
+    pub const ALL: [Self; 8] = [
+        Self::Rename,
+        Self::SplitHorizontal,
+        Self::SplitVertical,
+        Self::CloseSplit,
+        Self::CloseSessionView,
+        Self::CloseSessionProcess,
+        Self::Archive,
+        Self::Delete,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rename => "rename",
+            Self::SplitHorizontal => "split horizontal",
+            Self::SplitVertical => "split vertical",
+            Self::CloseSplit => "close split",
+            Self::CloseSessionView => "close (session view)",
+            Self::CloseSessionProcess => "close (session process)",
+            Self::Archive => "archive",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionTitleMenu {
+    pub session_id: String,
+    pub area: ratatui::layout::Rect,
+}
+
+impl SessionTitleMenu {
+    pub fn item_at(&self, col: u16, row: u16) -> Option<SessionTitleMenuAction> {
+        if col <= self.area.x
+            || col >= self.area.x.saturating_add(self.area.width).saturating_sub(1)
+            || row <= self.area.y
+            || row >= self.area.y.saturating_add(self.area.height).saturating_sub(1)
+        {
+            return None;
+        }
+        let idx = row.saturating_sub(self.area.y).saturating_sub(1) as usize;
+        SessionTitleMenuAction::ALL.get(idx).copied()
+    }
+
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        col >= self.area.x
+            && col < self.area.x.saturating_add(self.area.width)
+            && row >= self.area.y
+            && row < self.area.y.saturating_add(self.area.height)
+    }
+}
+
 /// Operator-rain analogue of [`DynamicUiHover`]: the rain panel shows a single
 /// widget at a time, so only the panel id and expiry are needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -770,6 +835,8 @@ pub struct App {
     /// handler to map terminal coordinates back to UI regions. Filled
     /// by `ui::render` each frame; `None` until the first render lands.
     pub layout: LayoutSnapshot,
+    /// Session-view title hamburger dropdown.
+    pub session_title_menu: Option<SessionTitleMenu>,
     /// Most-recently observed mouse cursor position (terminal cell).
     /// `None` until the first `MouseEventKind::Moved` arrives — and stays
     /// `None` on terminals that don't forward motion events (e.g. macOS
@@ -2070,6 +2137,7 @@ async fn run_with_socket_initial_selection(
         pty_activity: HashMap::new(),
         start_instant: now,
         layout: LayoutSnapshot::default(),
+        session_title_menu: None,
         mouse_pos: None,
         mouse_capture_enabled: true,
         orchestrator_id: initial_orch_id,
@@ -2721,6 +2789,66 @@ impl App {
         self.ensure_pinned_parsers().await;
         self.set_status("reconnected to daemon".to_string());
         Ok(notifications)
+    }
+
+    pub fn open_session_title_menu(&mut self, session_id: String, view: ratatui::layout::Rect) {
+        const MENU_W: u16 = 26;
+        let menu_h = SessionTitleMenuAction::ALL.len() as u16 + 2;
+        let width = MENU_W.min(view.width.saturating_sub(2).max(1));
+        let x = view
+            .x
+            .saturating_add(view.width)
+            .saturating_sub(width.saturating_add(1));
+        self.session_title_menu = Some(SessionTitleMenu {
+            session_id,
+            area: ratatui::layout::Rect {
+                x,
+                y: view.y.saturating_add(1),
+                width,
+                height: menu_h.min(view.height.saturating_sub(1).max(3)),
+            },
+        });
+    }
+
+    async fn run_session_title_menu_action(
+        &mut self,
+        session_id: String,
+        action: SessionTitleMenuAction,
+    ) {
+        self.session_title_menu = None;
+        if self.selected_id().as_deref() != Some(session_id.as_str()) {
+            self.select_session(session_id.clone());
+            self.sync_active_window_selection();
+        }
+        match action {
+            SessionTitleMenuAction::Rename => {
+                self.run_action(crate::keymap::KeyAction::OpenRename).await
+            }
+            SessionTitleMenuAction::SplitHorizontal => {
+                self.split_active_window(WindowSplitDirection::Right)
+            }
+            SessionTitleMenuAction::SplitVertical => {
+                self.split_active_window(WindowSplitDirection::Below)
+            }
+            SessionTitleMenuAction::CloseSplit => self.delete_active_window(),
+            SessionTitleMenuAction::CloseSessionView => {
+                self.focus = PaneFocus::List;
+                if self.zoom == ZoomMode::View {
+                    self.zoom = ZoomMode::List;
+                }
+                self.set_status("session view closed; focus moved to list".into());
+            }
+            SessionTitleMenuAction::CloseSessionProcess | SessionTitleMenuAction::Archive => {
+                match self.client.archive(&session_id).await {
+                    Ok(()) => self.set_status(format!("archived {}", short_id(&session_id))),
+                    Err(e) => self.set_status(format!("archive failed: {e}")),
+                }
+            }
+            SessionTitleMenuAction::Delete => {
+                self.run_action(crate::keymap::KeyAction::OpenDeleteConfirm)
+                    .await
+            }
+        }
     }
 
     pub fn set_status(&mut self, msg: String) {
@@ -5529,6 +5657,17 @@ impl App {
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
         }
+        if let Some(menu) = self.session_title_menu.clone() {
+            if let Some(action) = menu.item_at(col, row) {
+                self.run_session_title_menu_action(menu.session_id, action)
+                    .await;
+                return;
+            }
+            if menu.contains(col, row) {
+                return;
+            }
+            self.session_title_menu = None;
+        }
         if self.handle_dynamic_ui_overlay_click(col, row).await {
             return;
         }
@@ -5671,9 +5810,8 @@ impl App {
                     self.focus = PaneFocus::List;
                     return;
                 }
-                // Top-row close button: ` x ` 3-cell range at the
-                // right edge of the top border. Click → delete
-                // confirmation prompt for the selected session.
+                // Top-row session action button: 3-cell range at the
+                // right edge of the top border. Click opens the dropdown.
                 let (close_x_start, close_x_end, close_y) =
                     crate::ui::view_close_button_range(view);
                 let (toggle_x_start, toggle_x_end, toggle_y) =
@@ -5691,8 +5829,9 @@ impl App {
                     && col >= close_x_start
                     && col < close_x_end
                 {
-                    self.run_action(crate::keymap::KeyAction::OpenDeleteConfirm)
-                        .await;
+                    if let Some(session_id) = self.selected_id() {
+                        self.open_session_title_menu(session_id, view);
+                    }
                     return;
                 }
                 if self.handle_dynamic_ui_overlay_click(col, row).await {
@@ -10947,6 +11086,7 @@ mod tests {
             pty_activity: HashMap::new(),
             start_instant: now,
             layout: LayoutSnapshot::default(),
+            session_title_menu: None,
             mouse_pos: None,
             mouse_capture_enabled: true,
             orchestrator_id: None,

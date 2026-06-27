@@ -3,8 +3,8 @@
 use crate::app::{
     App, CANVAS_CONTENT_PADDING_X, CANVAS_CONTENT_PADDING_Y, CANVAS_REVEAL_MS, HarnessHit, HintZone,
     ListItem as AppListItem, MainWindowTree, Minibuffer, MinibufferIntent, PaneFocus, ScreenPoint,
-    Selection, TextSelectionRange, ViewMode, WindowDividerHit, WindowPaneHit,
-    WindowSplitDirection, ZoomMode,
+    Selection, SessionTitleMenuAction, TextSelectionRange, ViewMode, WindowDividerHit,
+    WindowPaneHit, WindowSplitDirection, ZoomMode,
 };
 use crate::keymap::KeyAction;
 use crate::theme::Theme;
@@ -265,6 +265,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if app.help_visible {
         app.layout.modal_area = Some(render_help(f, area, &app.theme));
     }
+    render_session_title_menu(f, app);
     finish_frame(f, app);
 }
 
@@ -894,11 +895,14 @@ fn render_view_close_tooltip(f: &mut Frame, app: &App) {
     let Some(view_area) = app.layout.view_area else {
         return;
     };
+    if app.session_title_menu.is_some() {
+        return;
+    }
     if !hovered_view_close_button(app, view_area) {
         return;
     }
     let (cx, _, cy) = view_close_button_range(view_area);
-    let label = " Close session ";
+    let label = " Session actions ";
     let total = f.area();
     let inner_w = UnicodeWidthStr::width(label) as u16;
     let w = inner_w + 2;
@@ -2890,6 +2894,7 @@ fn apply_pane_title_right_cluster<'a>(
     summary: Option<&agentd_protocol::SessionSummary>,
     focused: bool,
     show_close: bool,
+    session_actions: bool,
     mut block: Block<'a>,
 ) -> Block<'a> {
     // Harness name right-aligned on the top border so it visually detaches from
@@ -2933,8 +2938,9 @@ fn apply_pane_title_right_cluster<'a>(
     } else {
         Style::default().fg(app.theme.matrix_close)
     };
-    let close =
-        Line::from(Span::styled(" x ", close_style)).alignment(ratatui::layout::Alignment::Right);
+    let close_label = if session_actions { " ☰ " } else { " x " };
+    let close = Line::from(Span::styled(close_label, close_style))
+        .alignment(ratatui::layout::Alignment::Right);
     if let Some(ui) = widget_title {
         block = block.title(ui);
     }
@@ -2945,6 +2951,52 @@ fn apply_pane_title_right_cluster<'a>(
         block = block.title(close);
     }
     block
+}
+
+fn render_session_title_menu(f: &mut Frame, app: &App) {
+    let Some(menu) = &app.session_title_menu else {
+        return;
+    };
+    let area = menu.area;
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
+        .title(Span::styled(
+            " session ",
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+    for (idx, action) in SessionTitleMenuAction::ALL.iter().copied().enumerate() {
+        let row = area.y.saturating_add(1).saturating_add(idx as u16);
+        if row >= area.y.saturating_add(area.height).saturating_sub(1) {
+            break;
+        }
+        let hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+            my == row
+                && mx > area.x
+                && mx < area.x.saturating_add(area.width).saturating_sub(1)
+        });
+        let style = if hovered {
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.inactive_highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else if matches!(action, SessionTitleMenuAction::Delete) {
+            Style::default().fg(app.theme.danger)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        let label = format!(" {} ", action.label());
+        let text = truncate_to_width(&label, area.width.saturating_sub(2) as usize);
+        f.buffer_mut()
+            .set_string(area.x.saturating_add(1), row, text, style);
+    }
 }
 
 fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64>) {
@@ -3010,7 +3062,15 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         .border_style(pane_border_style(&app.theme, focused))
         .title(title);
     let block =
-        apply_pane_title_right_cluster(app, area, summary.as_ref(), focused, show_close, block);
+        apply_pane_title_right_cluster(
+            app,
+            area,
+            summary.as_ref(),
+            focused,
+            show_close,
+            true,
+            block,
+        );
     let inner = block.inner(area);
     f.render_widget(block, area);
     clear_pane_side_borders(f, area, app);
@@ -7394,7 +7454,8 @@ fn render_canvas_popup_at(
         .borders(Borders::ALL)
         .border_style(canvas_border_style(&app.theme, active))
         .title(title);
-    let block = apply_pane_title_right_cluster(app, rect, summary_ref, active, show_close, block);
+    let block =
+        apply_pane_title_right_cluster(app, rect, summary_ref, active, show_close, false, block);
     if active {
         // Run lives in the left cluster; the close button and widget icons reuse
         // the shared session-view geometry (`view_close_button_range` and
