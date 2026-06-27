@@ -7414,7 +7414,9 @@ fn canvas_border_style(theme: &Theme, active: bool) -> Style {
             .fg(theme.accent_alt)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.border)
+        Style::default()
+            .fg(theme.accent_alt)
+            .add_modifier(Modifier::DIM)
     }
 }
 
@@ -7504,7 +7506,9 @@ fn canvas_toggle_style(
     } else if active {
         Style::default().fg(app.theme.accent_alt)
     } else {
-        Style::default().fg(app.theme.border)
+        Style::default()
+            .fg(app.theme.accent_alt)
+            .add_modifier(Modifier::DIM)
     };
     style.add_modifier(Modifier::BOLD)
 }
@@ -8897,13 +8901,20 @@ mod tests {
     #[test]
     fn canvas_focus_styles_are_distinct_from_session_focus() {
         let theme = Theme::default();
+        let active_canvas = canvas_border_style(&theme, true);
+        let inactive_canvas = canvas_border_style(&theme, false);
+
         assert_eq!(pane_border_style(&theme, true).fg, Some(theme.border_focused));
-        assert_eq!(canvas_border_style(&theme, true).fg, Some(theme.accent_alt));
-        assert_eq!(canvas_border_style(&theme, false).fg, Some(theme.border));
-        assert_ne!(
-            canvas_border_style(&theme, true).fg,
-            pane_border_style(&theme, true).fg
+        assert_eq!(active_canvas.fg, Some(theme.accent_alt));
+        assert_eq!(inactive_canvas.fg, active_canvas.fg);
+        assert_ne!(inactive_canvas.fg, Some(theme.border));
+        assert!(active_canvas.add_modifier.contains(Modifier::BOLD));
+        assert!(!inactive_canvas.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            inactive_canvas.add_modifier.contains(Modifier::DIM),
+            "inactive canvas border should dim without switching hue"
         );
+        assert_ne!(active_canvas.fg, pane_border_style(&theme, true).fg);
     }
 
     #[test]
