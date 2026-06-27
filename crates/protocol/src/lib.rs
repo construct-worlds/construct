@@ -922,6 +922,46 @@ pub struct CanvasTemplate {
     pub built_in: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanvasSmartClipDescriptor {
+    pub type_name: &'static str,
+    pub syntax: &'static str,
+    pub description: &'static str,
+}
+
+pub const CANVAS_SMART_CLIP_DESCRIPTORS: &[CanvasSmartClipDescriptor] = &[
+    CanvasSmartClipDescriptor {
+        type_name: "session",
+        syntax: "@{session:<session_id> ...}",
+        description:
+            "References an existing session; inspect, resume, focus, or summarize that session when relevant.",
+    },
+    CanvasSmartClipDescriptor {
+        type_name: "harness",
+        syntax: "@{harness:<name> ...}",
+        description:
+            "References an agent harness such as codex, claude, or shell; create or resume a suitable subagent when the canvas calls for delegated work.",
+    },
+    CanvasSmartClipDescriptor {
+        type_name: "typed-reference",
+        syntax: "@{<type>:<target> ...}",
+        description:
+            "A generic compact typed reference. Preserve unknown types and resolve them only when you have an appropriate tool or context.",
+    },
+    CanvasSmartClipDescriptor {
+        type_name: "clip-block",
+        syntax: ":::clip <type> ... :::",
+        description:
+            "A larger typed clip block. Treat the block body as attached structured context for the surrounding canvas instructions.",
+    },
+    CanvasSmartClipDescriptor {
+        type_name: "session-response",
+        syntax: "session-response",
+        description:
+            "References captured or live session output; summarize or consult the referenced output when it is available.",
+    },
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanvasGetParams {
     pub session_id: String,
