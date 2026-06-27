@@ -13,6 +13,7 @@ use agentd_protocol::{
     SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
     SessionEmitEventParams, SessionEvent, SessionStartParams, SessionState, SessionSummary,
     SessionWidgetDeleteParams, StateNotificationPayload, TimestampedEvent, TranscriptResult,
+    CANVAS_SMART_CLIP_DESCRIPTORS,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
@@ -526,9 +527,25 @@ fn canvas_bracketed_paste_bytes(prompt: &str) -> Vec<u8> {
     bytes
 }
 
+fn canvas_smart_clip_prompt_reference() -> String {
+    let mut out =
+        String::from("Smart clips are Markdown-native typed references. Supported forms:");
+    for clip in CANVAS_SMART_CLIP_DESCRIPTORS {
+        out.push_str("\n- ");
+        out.push_str(clip.syntax);
+        out.push_str(" — ");
+        out.push_str(clip.description);
+    }
+    out.push_str(
+        "\nThe clip_id attribute identifies a specific clip instance, not the target itself. Preserve clip_id values when editing existing clips.",
+    );
+    out
+}
+
 fn canvas_execution_prompt(body: &str) -> String {
+    let smart_clip_reference = canvas_smart_clip_prompt_reference();
     format!(
-        "Execute the following construct canvas as an autonomous run. Treat the Markdown as free-form instructions and state for this turn, not as a request for a one-shot status report. Infer the user's intended objective from the document structure and prose, then keep taking useful next actions while there is actionable work you can do. Do not ask the user to run the canvas again; if the document still implies useful work you can perform, continue in this turn. Resolve smart clips written as @{{type:id ...}} references when possible, create or resume subagent sessions when the canvas calls for delegated work, and record meaningful state changes or results on the canvas with construct_canvas_edit (anchored find/replace edits that merge with concurrent human edits; use construct_canvas_update only for a wholesale rewrite). If blocked, write the blocker and next required external action on the canvas before ending.\n\n```markdown\n{}\n```",
+        "Execute the following construct canvas as an autonomous run. Treat the Markdown as free-form instructions and state for this turn, not as a request for a one-shot status report. Infer the user's intended objective from the document structure and prose, then keep taking useful next actions while there is actionable work you can do. Do not ask the user to run the canvas again; if the document still implies useful work you can perform, continue in this turn.\n\n{smart_clip_reference}\n\nRecord meaningful state changes or results on the canvas with construct_canvas_edit (anchored find/replace edits that merge with concurrent human edits; use construct_canvas_update only for a wholesale rewrite). If blocked, write the blocker and next required external action on the canvas before ending.\n\n```markdown\n{}\n```",
         body
     )
 }
@@ -4072,13 +4089,29 @@ mod tests {
 
     #[test]
     fn canvas_execution_prompt_requires_autonomous_run() {
-        let prompt = canvas_execution_prompt("# Research brief\n\nCompare options and summarize findings.\n");
+        let prompt = canvas_execution_prompt(
+            "# Research brief\n\nCompare options and summarize findings.\n",
+        );
 
         assert!(prompt.contains("autonomous run"));
         assert!(prompt.contains("free-form instructions and state"));
         assert!(prompt.contains("Infer the user's intended objective"));
         assert!(prompt.contains("keep taking useful next actions"));
         assert!(prompt.contains("Do not ask the user to run the canvas again"));
+        assert!(prompt.contains("Smart clips are Markdown-native typed references"));
+        for clip in CANVAS_SMART_CLIP_DESCRIPTORS {
+            assert!(
+                prompt.contains(clip.syntax),
+                "prompt should include registered smart clip syntax {}",
+                clip.syntax
+            );
+            assert!(
+                prompt.contains(clip.description),
+                "prompt should include registered smart clip description for {}",
+                clip.type_name
+            );
+        }
+        assert!(prompt.contains("clip_id attribute identifies a specific clip instance"));
         assert!(prompt.contains("If blocked, write the blocker"));
         assert!(prompt.contains("Compare options and summarize findings."));
     }
