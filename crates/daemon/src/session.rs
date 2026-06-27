@@ -611,7 +611,7 @@ fn canvas_shimmer_signatures(
     // of its trimmed lines equals one of the anchors.
     let mut result = std::collections::HashSet::new();
     let mut cur: Vec<String> = Vec::new();
-    let mut flush =
+    let flush =
         |cur: &Vec<String>, result: &mut std::collections::HashSet<String>| {
             if !cur.is_empty() && anchors.iter().any(|a| cur.iter().any(|l| l == a)) {
                 result.insert(cur.join("\n"));
