@@ -5,8 +5,8 @@ use crate::config::Config;
 use crate::storage::Storage;
 use crate::worktree;
 use agentd_protocol::{
-    ahp_method, CanvasDocument, CanvasExecuteParams, CanvasExecuteResult, CanvasGetResult,
-    CanvasListTemplatesResult, CanvasStateNotificationPayload, CanvasUpdateParams,
+    ahp_method, CanvasDocument, CanvasEditParams, CanvasExecuteParams, CanvasExecuteResult,
+    CanvasGetResult, CanvasListTemplatesResult, CanvasStateNotificationPayload, CanvasUpdateParams,
     CanvasUpdateResult, ClientView, CreateSessionParams, DeletedNotificationPayload,
     EventNotificationPayload, GroupDeletedNotificationPayload, GroupStateNotificationPayload,
     GroupSummary, HarnessInfo, MessageRole, MoveDirection, PtyReplayResult, PtySize,
@@ -1388,6 +1388,17 @@ impl SessionManager {
         Ok(CanvasUpdateResult { canvas })
     }
 
+    pub async fn canvas_edit(&self, params: CanvasEditParams) -> Result<CanvasUpdateResult> {
+        self.get_entry(&params.session_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
+        let canvas =
+            self.storage
+                .edit_canvas(&params.session_id, &params.edits, params.actor, params.note)?;
+        self.broadcast_canvas_state(canvas.clone());
+        Ok(CanvasUpdateResult { canvas })
+    }
+
     pub async fn canvas_execute(&self, params: CanvasExecuteParams) -> Result<CanvasExecuteResult> {
         let entry = self
             .get_entry(&params.session_id)
@@ -1416,7 +1427,7 @@ impl SessionManager {
             anyhow::bail!("canvas is empty");
         }
         let prompt = format!(
-            "Execute the following construct canvas instructions. Treat the Markdown as orchestration state. Resolve smart clips written as @{{type:id ...}} references when possible, create subagent sessions for harness clips when appropriate, and update the canvas with construct_canvas_update when task state changes.\n\n```markdown\n{}\n```",
+            "Execute the following construct canvas instructions. Treat the Markdown as orchestration state. Resolve smart clips written as @{{type:id ...}} references when possible, create subagent sessions for harness clips when appropriate, and record task state changes on the canvas with construct_canvas_edit (anchored find/replace edits that merge with concurrent human edits; use construct_canvas_update only for a wholesale rewrite).\n\n```markdown\n{}\n```",
             body
         );
         let delivery = {

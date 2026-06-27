@@ -753,6 +753,7 @@ pub mod ipc_method {
     pub const HARNESS_LIST: &str = "harness.list";
     pub const CANVAS_GET: &str = "canvas.get";
     pub const CANVAS_UPDATE: &str = "canvas.update";
+    pub const CANVAS_EDIT: &str = "canvas.edit";
     pub const CANVAS_EXECUTE: &str = "canvas.execute";
     pub const CANVAS_LIST_TEMPLATES: &str = "canvas.list_templates";
     pub const SESSION_LIST: &str = "session.list";
@@ -950,6 +951,30 @@ pub struct CanvasUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanvasUpdateResult {
     pub canvas: CanvasDocument,
+}
+
+/// One anchored edit: replace `old_string` with `new_string` in the canvas
+/// Markdown. An empty `old_string` appends `new_string` to the end of the
+/// document. Anchored edits apply to the *latest* document content, so
+/// concurrent edits to other regions merge without a version conflict; the
+/// only failures are a vanished anchor (`old_string` not found) or an
+/// ambiguous one (multiple matches without `replace_all`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanvasEdit {
+    pub old_string: String,
+    pub new_string: String,
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanvasEditParams {
+    pub session_id: String,
+    pub edits: Vec<CanvasEdit>,
+    #[serde(default)]
+    pub actor: CanvasUpdateActor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

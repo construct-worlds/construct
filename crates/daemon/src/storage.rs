@@ -15,7 +15,7 @@
 //! ```
 
 use agentd_protocol::{
-    CanvasDocument, CanvasRevision, CanvasTemplate, CanvasUpdateActor, GroupSummary,
+    CanvasDocument, CanvasEdit, CanvasRevision, CanvasTemplate, CanvasUpdateActor, GroupSummary,
     SessionSummary, TimestampedEvent, TranscriptResult, UiPanel, UiPlacement,
 };
 use anyhow::{Context, Result};
@@ -37,6 +37,50 @@ const INVESTIGATION_CANVAS: &str =
 struct WidgetFrontmatter {
     placement: Option<UiPlacement>,
     title: Option<String>,
+}
+
+/// Apply anchored edits to `base` in order, returning the new content.
+///
+/// Each edit replaces `old_string` with `new_string`. An empty `old_string`
+/// appends `new_string` to the end of the document. A missing anchor or an
+/// ambiguous one (multiple matches without `replace_all`) is an error — the
+/// signal that the targeted text genuinely changed underneath the writer.
+pub fn apply_canvas_edits(base: &str, edits: &[CanvasEdit]) -> Result<String> {
+    let mut working = base.to_string();
+    for (i, edit) in edits.iter().enumerate() {
+        if edit.old_string.is_empty() {
+            if working.is_empty() {
+                working = edit.new_string.clone();
+            } else {
+                if !working.ends_with('\n') {
+                    working.push('\n');
+                }
+                working.push_str(&edit.new_string);
+            }
+            continue;
+        }
+        let matches = working.matches(&edit.old_string).count();
+        match matches {
+            0 => anyhow::bail!(
+                "canvas edit {}: old_string not found in the current canvas:\n{}",
+                i + 1,
+                edit.old_string
+            ),
+            n if n > 1 && !edit.replace_all => anyhow::bail!(
+                "canvas edit {}: old_string is not unique ({} matches); add surrounding context or set replace_all",
+                i + 1,
+                n
+            ),
+            _ => {
+                working = if edit.replace_all {
+                    working.replace(&edit.old_string, &edit.new_string)
+                } else {
+                    working.replacen(&edit.old_string, &edit.new_string, 1)
+                };
+            }
+        }
+    }
+    Ok(working)
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -282,6 +326,57 @@ impl Storage {
             version: current.version.saturating_add(1),
             updated_at_ms: chrono::Utc::now().timestamp_millis(),
             template_id: template_id.or(current.template_id),
+        };
+        let canvas_tmp = self.canvas_path(id).with_extension("md.tmp");
+        std::fs::write(&canvas_tmp, &next.markdown)
+            .with_context(|| format!("write {}", canvas_tmp.display()))?;
+        std::fs::rename(&canvas_tmp, self.canvas_path(id))
+            .with_context(|| format!("rename {}", self.canvas_path(id).display()))?;
+        self.save_canvas_meta(&next)?;
+        Ok(next)
+    }
+
+    /// Apply a sequence of anchored edits to the *latest* canvas content and
+    /// persist the result as a new version. Unlike [`Self::update_canvas`],
+    /// there is no `base_version` gate: edits are anchored to text, so
+    /// concurrent changes to *other* regions merge cleanly. Returns an error
+    /// — and writes nothing — when any edit's anchor is missing or ambiguous,
+    /// so the caller can re-read and retry. A no-op edit set leaves the version
+    /// untouched.
+    pub fn edit_canvas(
+        &self,
+        id: &str,
+        edits: &[CanvasEdit],
+        actor: CanvasUpdateActor,
+        note: Option<String>,
+    ) -> Result<CanvasDocument> {
+        if edits.is_empty() {
+            anyhow::bail!("canvas edit: no edits provided");
+        }
+        let current = self.read_canvas(id)?;
+        let markdown = apply_canvas_edits(&current.markdown, edits)?;
+        if markdown == current.markdown {
+            return Ok(current);
+        }
+        if actor == CanvasUpdateActor::Agent && current.version > 0 {
+            self.append_canvas_revision(
+                id,
+                CanvasRevision {
+                    version: current.version,
+                    actor,
+                    at_ms: current.updated_at_ms,
+                    markdown: current.markdown.clone(),
+                    note: note.clone(),
+                },
+            )?;
+        }
+        self.ensure_session_dir(id)?;
+        let next = CanvasDocument {
+            session_id: id.to_string(),
+            markdown,
+            version: current.version.saturating_add(1),
+            updated_at_ms: chrono::Utc::now().timestamp_millis(),
+            template_id: current.template_id.clone(),
         };
         let canvas_tmp = self.canvas_path(id).with_extension("md.tmp");
         std::fs::write(&canvas_tmp, &next.markdown)
@@ -1140,6 +1235,158 @@ mod canvas_tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("canvas conflict"));
+    }
+
+    fn edit(old: &str, new: &str) -> CanvasEdit {
+        CanvasEdit {
+            old_string: old.into(),
+            new_string: new.into(),
+            replace_all: false,
+        }
+    }
+
+    #[test]
+    fn apply_canvas_edits_replaces_unique_anchor() {
+        let out = apply_canvas_edits(
+            "# Todo\n- ship it\n# Done\n",
+            &[edit("- ship it", "- ship it @{harness:claude}")],
+        )
+        .unwrap();
+        assert_eq!(out, "# Todo\n- ship it @{harness:claude}\n# Done\n");
+    }
+
+    #[test]
+    fn apply_canvas_edits_appends_on_empty_old_string() {
+        // Empty doc: append sets the content.
+        assert_eq!(apply_canvas_edits("", &[edit("", "first")]).unwrap(), "first");
+        // Non-empty without trailing newline: a separator is inserted.
+        assert_eq!(
+            apply_canvas_edits("# Todo", &[edit("", "- new")]).unwrap(),
+            "# Todo\n- new"
+        );
+        // Already ends in newline: no extra blank line forced.
+        assert_eq!(
+            apply_canvas_edits("# Todo\n", &[edit("", "- new")]).unwrap(),
+            "# Todo\n- new"
+        );
+    }
+
+    #[test]
+    fn apply_canvas_edits_errors_on_missing_anchor() {
+        let err = apply_canvas_edits("# Todo\n", &[edit("- nope", "x")]).unwrap_err();
+        assert!(err.to_string().contains("old_string not found"));
+    }
+
+    #[test]
+    fn apply_canvas_edits_errors_on_ambiguous_anchor_then_replace_all_works() {
+        let base = "- a\n- a\n";
+        let err = apply_canvas_edits(base, &[edit("- a", "- b")]).unwrap_err();
+        assert!(err.to_string().contains("not unique"));
+
+        let out = apply_canvas_edits(
+            base,
+            &[CanvasEdit {
+                old_string: "- a".into(),
+                new_string: "- b".into(),
+                replace_all: true,
+            }],
+        )
+        .unwrap();
+        assert_eq!(out, "- b\n- b\n");
+    }
+
+    #[test]
+    fn apply_canvas_edits_are_sequential() {
+        let out = apply_canvas_edits("one two", &[edit("one", "1"), edit("two", "2")]).unwrap();
+        assert_eq!(out, "1 2");
+    }
+
+    #[test]
+    fn edit_canvas_applies_to_latest_without_a_version_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        // A human writes v1.
+        let v1 = storage
+            .update_canvas(
+                "s1",
+                "# Todo\n- a\n# Done\n".into(),
+                agentd_protocol::CanvasUpdateActor::Human,
+                Some(0),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(v1.version, 1);
+        // The agent edits an anchor with no base_version — it lands on the
+        // latest content and bumps the version.
+        let v2 = storage
+            .edit_canvas(
+                "s1",
+                &[edit("- a", "- a (done)")],
+                agentd_protocol::CanvasUpdateActor::Agent,
+                None,
+            )
+            .unwrap();
+        assert_eq!(v2.version, 2);
+        assert_eq!(v2.markdown, "# Todo\n- a (done)\n# Done\n");
+        // The overwritten version is retained in history.
+        let revisions = storage.read_canvas_revisions("s1").unwrap();
+        assert_eq!(revisions.last().unwrap().version, 1);
+    }
+
+    #[test]
+    fn edit_canvas_noop_keeps_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        let v1 = storage
+            .update_canvas(
+                "s1",
+                "# Todo\n- a\n".into(),
+                agentd_protocol::CanvasUpdateActor::Human,
+                Some(0),
+                None,
+                None,
+            )
+            .unwrap();
+        // Replacing text with itself changes nothing → version is unchanged.
+        let same = storage
+            .edit_canvas(
+                "s1",
+                &[edit("- a", "- a")],
+                agentd_protocol::CanvasUpdateActor::Agent,
+                None,
+            )
+            .unwrap();
+        assert_eq!(same.version, v1.version);
+    }
+
+    #[test]
+    fn edit_canvas_errors_on_missing_anchor_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        storage
+            .update_canvas(
+                "s1",
+                "# Todo\n- a\n".into(),
+                agentd_protocol::CanvasUpdateActor::Human,
+                Some(0),
+                None,
+                None,
+            )
+            .unwrap();
+        let err = storage
+            .edit_canvas(
+                "s1",
+                &[edit("- vanished", "x")],
+                agentd_protocol::CanvasUpdateActor::Agent,
+                None,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("old_string not found"));
+        // Unchanged on disk.
+        let current = storage.read_canvas("s1").unwrap();
+        assert_eq!(current.version, 1);
+        assert_eq!(current.markdown, "# Todo\n- a\n");
     }
 
     #[test]
