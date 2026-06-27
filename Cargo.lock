@@ -56,6 +56,7 @@ dependencies = [
  "construct-adapter-smith",
  "construct-mcp",
  "crossterm 0.28.1",
+ "diffy",
  "eventsource-stream",
  "futures",
  "image",
@@ -770,6 +771,15 @@ dependencies = [
  "quote",
  "rustc_version",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "diffy"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b545b8c50194bdd008283985ab0b31dba153cfd5b3066a92770634fbc0d7d291"
+dependencies = [
+ "nu-ansi-term",
 ]
 
 [[package]]

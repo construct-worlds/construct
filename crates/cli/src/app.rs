@@ -1288,6 +1288,18 @@ pub struct CanvasPopup {
     pub closing: bool,
 }
 
+/// Result of flushing a canvas popup's buffer to the daemon.
+struct CanvasSaveOutcome {
+    /// The document as it now lives on the daemon (our content, possibly
+    /// merged with concurrent edits).
+    canvas: agentd_protocol::CanvasDocument,
+    /// A 3-way merge ran because the document advanced underneath us.
+    merged: bool,
+    /// The merge could not reconcile overlapping edits, so the saved content
+    /// carries conflict markers for the user (or agent) to resolve.
+    conflicted: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct CanvasSelection {
     pub anchor: usize,
@@ -4323,8 +4335,54 @@ impl App {
                     }
                 }
             }
+            m if m == agentd_protocol::ipc_notif::CANVAS_STATE => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        agentd_protocol::CanvasStateNotificationPayload,
+                    >(p)
+                    {
+                        self.on_canvas_state(payload.canvas);
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    /// A canvas changed on the daemon (most often the owning agent edited it).
+    /// Keep any open popup for that session in sync: when the user has no
+    /// unsaved edits, adopt the new content live so they see the agent's
+    /// changes and our tracked version stays fresh. When the user is mid-edit,
+    /// leave the buffer and the (now stale) base version alone — the
+    /// merge-on-save path reconciles both sides without losing either.
+    fn on_canvas_state(&mut self, canvas: agentd_protocol::CanvasDocument) {
+        let popup = if self
+            .canvas_popup
+            .as_ref()
+            .is_some_and(|p| p.canvas.session_id == canvas.session_id)
+        {
+            self.canvas_popup.as_mut()
+        } else {
+            self.canvas_popups.get_mut(&canvas.session_id)
+        };
+        let Some(popup) = popup else {
+            return;
+        };
+        if canvas.version <= popup.canvas.version {
+            return;
+        }
+        let dirty =
+            canvas_normalize_smart_clip_instance_ids(&popup.buffer) != popup.saved_markdown;
+        if dirty {
+            // Don't clobber unsaved edits. Keep the stale base version so the
+            // next save detects the conflict and 3-way merges both sides.
+            return;
+        }
+        popup.buffer = canvas.markdown.clone();
+        popup.saved_markdown = canvas.markdown.clone();
+        popup.canvas = canvas;
+        popup.cursor = popup.cursor.min(popup.buffer.chars().count());
+        popup.preferred_col = None;
     }
 
     /// Open the approval prompt if there's no other minibuffer in flight.
@@ -6754,34 +6812,83 @@ impl App {
         }
     }
 
+    /// Flush a popup's edits to the daemon as a whole-document write.
+    ///
+    /// If the document advanced underneath us (an agent edited it while the
+    /// human was typing), the daemon rejects the stale `base_version`; we then
+    /// re-read the latest content and 3-way merge our edits onto it, using the
+    /// last-saved content as the common ancestor. Disjoint edits merge silently;
+    /// only genuinely overlapping edits produce conflict markers. Either way the
+    /// write lands, so hiding the canvas never blocks and no edit is lost.
     async fn save_canvas_popup_document(
         &self,
         popup: &CanvasPopup,
-    ) -> Result<Option<agentd_protocol::CanvasDocument>> {
-        let markdown = canvas_normalize_smart_clip_instance_ids(&popup.buffer);
-        if markdown == popup.saved_markdown {
+    ) -> Result<Option<CanvasSaveOutcome>> {
+        let mut ours = canvas_normalize_smart_clip_instance_ids(&popup.buffer);
+        if ours == popup.saved_markdown {
             return Ok(None);
         }
-        let params = agentd_protocol::CanvasUpdateParams {
-            session_id: popup.canvas.session_id.clone(),
-            markdown,
-            base_version: Some(popup.canvas.version),
-            actor: agentd_protocol::CanvasUpdateActor::Human,
-            template_id: popup.canvas.template_id.clone(),
-            note: None,
-        };
-        Ok(Some(self.client.canvas_update(params).await?.canvas))
+        // The content our edits are based on — the common ancestor for a merge.
+        let mut ancestor = popup.saved_markdown.clone();
+        let mut base = popup.canvas.version;
+        let mut merged = false;
+        let mut conflicted = false;
+        // Retry to absorb further updates that land between our re-read and
+        // our write.
+        for _ in 0..5 {
+            let params = agentd_protocol::CanvasUpdateParams {
+                session_id: popup.canvas.session_id.clone(),
+                markdown: ours.clone(),
+                base_version: Some(base),
+                actor: agentd_protocol::CanvasUpdateActor::Human,
+                template_id: popup.canvas.template_id.clone(),
+                note: None,
+            };
+            match self.client.canvas_update(params).await {
+                Ok(result) => {
+                    return Ok(Some(CanvasSaveOutcome {
+                        canvas: result.canvas,
+                        merged,
+                        conflicted,
+                    }));
+                }
+                Err(e) if e.to_string().contains("canvas conflict") => {
+                    let latest = self
+                        .client
+                        .canvas_get(&popup.canvas.session_id)
+                        .await?
+                        .canvas;
+                    let theirs = latest.markdown;
+                    merged = true;
+                    match diffy::merge(&ancestor, &ours, &theirs) {
+                        Ok(clean) => ours = clean,
+                        Err(with_markers) => {
+                            ours = with_markers;
+                            conflicted = true;
+                        }
+                    }
+                    // The content we just merged onto becomes the ancestor for
+                    // any further round.
+                    ancestor = theirs;
+                    base = latest.version;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(anyhow::anyhow!(
+            "canvas merge: gave up after repeated concurrent updates"
+        ))
     }
 
     async fn save_open_canvas_popups(&mut self) {
         let active = self.canvas_popup.clone();
         if let Some(popup) = active.as_ref() {
             match self.save_canvas_popup_document(popup).await {
-                Ok(Some(canvas)) => {
+                Ok(Some(outcome)) => {
                     if let Some(active) = self.canvas_popup.as_mut() {
-                        active.canvas = canvas.clone();
-                        active.buffer = canvas.markdown.clone();
-                        active.saved_markdown = canvas.markdown;
+                        active.buffer = outcome.canvas.markdown.clone();
+                        active.saved_markdown = outcome.canvas.markdown.clone();
+                        active.canvas = outcome.canvas;
                         active.cursor = active.cursor.min(active.buffer.chars().count());
                         active.preferred_col = None;
                     }
@@ -6798,11 +6905,11 @@ impl App {
             .collect();
         for (session_id, popup) in cached {
             match self.save_canvas_popup_document(&popup).await {
-                Ok(Some(canvas)) => {
+                Ok(Some(outcome)) => {
                     if let Some(cached) = self.canvas_popups.get_mut(&session_id) {
-                        cached.canvas = canvas.clone();
-                        cached.buffer = canvas.markdown.clone();
-                        cached.saved_markdown = canvas.markdown;
+                        cached.buffer = outcome.canvas.markdown.clone();
+                        cached.saved_markdown = outcome.canvas.markdown.clone();
+                        cached.canvas = outcome.canvas;
                         cached.cursor = cached.cursor.min(cached.buffer.chars().count());
                         cached.preferred_col = None;
                     }
@@ -6818,15 +6925,25 @@ impl App {
             return true;
         };
         match self.save_canvas_popup_document(popup).await {
-            Ok(Some(canvas)) => {
+            Ok(Some(outcome)) => {
+                let version = outcome.canvas.version;
+                let (merged, conflicted) = (outcome.merged, outcome.conflicted);
                 if let Some(popup) = self.canvas_popup.as_mut() {
-                    popup.canvas = canvas.clone();
-                    popup.buffer = canvas.markdown.clone();
-                    popup.saved_markdown = canvas.markdown;
+                    popup.buffer = outcome.canvas.markdown.clone();
+                    popup.saved_markdown = outcome.canvas.markdown.clone();
+                    popup.canvas = outcome.canvas;
                     popup.cursor = popup.cursor.min(popup.buffer.chars().count());
                     popup.preferred_col = None;
                 }
-                self.set_status(format!("canvas saved version {}", canvas.version));
+                if conflicted {
+                    self.set_status(format!(
+                        "canvas merged with conflicts to resolve (version {version})"
+                    ));
+                } else if merged {
+                    self.set_status(format!("canvas merged with agent edits (version {version})"));
+                } else {
+                    self.set_status(format!("canvas saved version {version}"));
+                }
                 true
             }
             Ok(None) => {
@@ -10516,6 +10633,168 @@ mod tests {
             second_params.get("base_version").and_then(Value::as_u64),
             Some(2)
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_state_notification_adopts_latest_when_clean() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "# Todo\n- a\n", 0));
+        // The owning agent edited the canvas on the daemon.
+        app.on_canvas_state(agentd_protocol::CanvasDocument {
+            session_id: "s1".into(),
+            markdown: "# Todo\n- a\n- agent added\n".into(),
+            version: 2,
+            updated_at_ms: 0,
+            template_id: None,
+        });
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.canvas.version, 2);
+        assert_eq!(popup.buffer, "# Todo\n- a\n- agent added\n");
+        assert_eq!(popup.saved_markdown, "# Todo\n- a\n- agent added\n");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_state_notification_preserves_unsaved_edits() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "# Todo\n- a\n", 0));
+        // The user is mid-edit (buffer diverges from the saved content).
+        app.canvas_popup.as_mut().unwrap().buffer = "# Todo\n- a\n- human typing\n".into();
+        app.on_canvas_state(agentd_protocol::CanvasDocument {
+            session_id: "s1".into(),
+            markdown: "# Todo\n- a\n- agent added\n".into(),
+            version: 2,
+            updated_at_ms: 0,
+            template_id: None,
+        });
+        let popup = app.canvas_popup.as_ref().unwrap();
+        // Unsaved edits are untouched and the base version stays stale, so the
+        // save path detects the conflict and merges both sides.
+        assert_eq!(popup.buffer, "# Todo\n- a\n- human typing\n");
+        assert_eq!(popup.canvas.version, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_save_merges_disjoint_edits_on_conflict() {
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use tempfile::tempdir;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            let mut update_calls = 0usize;
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let params = req.get("params").cloned().unwrap_or(Value::Null);
+                let _ = seen_tx.send((method.clone(), params.clone()));
+                let resp = match method.as_str() {
+                    m if m == ipc_method::CANVAS_UPDATE => {
+                        update_calls += 1;
+                        if update_calls == 1 {
+                            // The human's base version is stale → conflict.
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {
+                                    "code": -32603,
+                                    "message": "canvas conflict: current version is 2, attempted base version is 1"
+                                }
+                            })
+                        } else {
+                            let md = params
+                                .get("markdown")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": { "canvas": {
+                                    "session_id": "s1",
+                                    "markdown": md,
+                                    "version": 3,
+                                    "updated_at_ms": 0,
+                                    "template_id": null,
+                                }}
+                            })
+                        }
+                    }
+                    m if m == ipc_method::CANVAS_GET => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "canvas": {
+                                "session_id": "s1",
+                                "markdown": "alpha\nbeta\ngamma\n",
+                                "version": 2,
+                                "updated_at_ms": 0,
+                                "template_id": null,
+                            },
+                            "revisions": []
+                        }
+                    }),
+                    _ => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": Value::Null }),
+                };
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(client, Vec::new());
+        // Ancestor "alpha\nbeta\n"; the human edits line 1 while the agent
+        // appended "gamma" (a disjoint region) → a clean 3-way merge.
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "alpha\nbeta\n", 0));
+        app.canvas_popup.as_mut().unwrap().buffer = "alpha CHANGED\nbeta\n".to_string();
+
+        assert!(app.save_canvas_popup().await);
+
+        let (m1, p1) = seen_rx.recv().await.expect("first update");
+        assert_eq!(m1, ipc_method::CANVAS_UPDATE);
+        assert_eq!(p1.get("base_version").and_then(Value::as_u64), Some(1));
+        let (m2, _p2) = seen_rx.recv().await.expect("canvas get");
+        assert_eq!(m2, ipc_method::CANVAS_GET);
+        let (m3, p3) = seen_rx.recv().await.expect("second update");
+        assert_eq!(m3, ipc_method::CANVAS_UPDATE);
+        assert_eq!(p3.get("base_version").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            p3.get("markdown").and_then(Value::as_str),
+            Some("alpha CHANGED\nbeta\ngamma\n")
+        );
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        assert_eq!(popup.canvas.version, 3);
+        assert_eq!(popup.saved_markdown, "alpha CHANGED\nbeta\ngamma\n");
         server.abort();
     }
 

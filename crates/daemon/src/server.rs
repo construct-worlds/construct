@@ -5,7 +5,8 @@ use crate::remote::RemoteState;
 use crate::session::{BroadcastMsg, SessionManager};
 use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
-    ipc_method, ipc_notif, transport, CanvasExecuteParams, CanvasGetParams, CanvasUpdateParams,
+    ipc_method, ipc_notif, transport, CanvasEditParams, CanvasExecuteParams, CanvasGetParams,
+    CanvasUpdateParams,
     ChatViewerActiveResult, CreateSessionParams, ErrorObject, GroupCreateParams, GroupCreateResult,
     GroupDeleteParams, GroupMoveParams, GroupRenameParams, GroupSetCollapsedParams, Notification,
     PingResult, ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams,
@@ -1058,6 +1059,13 @@ async fn dispatch(
         m if m == ipc_method::CANVAS_UPDATE => {
             let p = params!(CanvasUpdateParams);
             match manager.canvas_update(p).await {
+                Ok(result) => ok!(&result),
+                Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
+            }
+        }
+        m if m == ipc_method::CANVAS_EDIT => {
+            let p = params!(CanvasEditParams);
+            match manager.canvas_edit(p).await {
                 Ok(result) => ok!(&result),
                 Err(e) => Response::err(id.clone(), ErrorObject::internal(e.to_string())),
             }
