@@ -2992,7 +2992,19 @@ fn render_session_title_menu(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(app.theme.text)
         };
-        let label = format!(" {} ", action.label());
+        let label_text =
+            if matches!(action, SessionTitleMenuAction::Archive)
+                && app
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == menu.session_id)
+                    .is_some_and(|s| s.archived)
+            {
+                "unarchive"
+            } else {
+                action.label()
+            };
+        let label = format!(" {label_text} ");
         let text = truncate_to_width(&label, area.width.saturating_sub(2) as usize);
         f.buffer_mut()
             .set_string(area.x.saturating_add(1), row, text, style);

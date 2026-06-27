@@ -480,6 +480,15 @@ pub enum MinibufferIntent {
     DeleteConfirm {
         session_id: String,
     },
+    MenuArchiveConfirm {
+        session_id: String,
+    },
+    MenuDeleteConfirm {
+        session_id: String,
+    },
+    MenuUnarchiveConfirm {
+        session_id: String,
+    },
     /// Confirmation prompt for restarting a terminated (`Done` /
     /// `Errored`) session. Single-key dispatch: `y`/Enter respawns
     /// the adapter (with `CONSTRUCT_RESUME=1` so persistent harnesses
@@ -2826,14 +2835,45 @@ impl App {
             }
             SessionTitleMenuAction::CloseSplit => self.delete_active_window(),
             SessionTitleMenuAction::Archive => {
-                match self.client.archive(&session_id).await {
-                    Ok(()) => self.set_status(format!("archived {}", short_id(&session_id))),
-                    Err(e) => self.set_status(format!("archive failed: {e}")),
-                }
+                let archived = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .is_some_and(|s| s.archived);
+                let (verb, intent) = if archived {
+                    (
+                        "Unarchive",
+                        MinibufferIntent::MenuUnarchiveConfirm {
+                            session_id: session_id.clone(),
+                        },
+                    )
+                } else {
+                    (
+                        "Archive",
+                        MinibufferIntent::MenuArchiveConfirm {
+                            session_id: session_id.clone(),
+                        },
+                    )
+                };
+                self.minibuffer = Some(Minibuffer {
+                    prompt: format!("{verb} session {}? (y/N): ", short_id(&session_id)),
+                    input: String::new(),
+                    cursor: 0,
+                    intent,
+                    error: None,
+                });
             }
             SessionTitleMenuAction::Delete => {
-                self.run_action(crate::keymap::KeyAction::OpenDeleteConfirm)
-                    .await
+                self.minibuffer = Some(Minibuffer {
+                    prompt: format!(
+                        "Delete session {}? This drops transcript + worktree. (y/N): ",
+                        short_id(&session_id)
+                    ),
+                    input: String::new(),
+                    cursor: 0,
+                    intent: MinibufferIntent::MenuDeleteConfirm { session_id },
+                    error: None,
+                });
             }
         }
     }
@@ -9409,6 +9449,39 @@ impl App {
                     SessionEndChoice::Cancel => {
                         self.set_status("cancelled".to_string());
                     }
+                }
+            }
+            MinibufferIntent::MenuArchiveConfirm { session_id } => {
+                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                if !yes {
+                    self.set_status("archive cancelled".to_string());
+                    return;
+                }
+                match self.client.archive(&session_id).await {
+                    Ok(()) => self.set_status(format!("archived {}", short_id(&session_id))),
+                    Err(e) => self.set_status(format!("archive failed: {e}")),
+                }
+            }
+            MinibufferIntent::MenuDeleteConfirm { session_id } => {
+                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                if !yes {
+                    self.set_status("delete cancelled".to_string());
+                    return;
+                }
+                match self.client.delete(&session_id).await {
+                    Ok(()) => self.set_status(format!("deleted {}", short_id(&session_id))),
+                    Err(e) => self.set_status(format!("delete failed: {e}")),
+                }
+            }
+            MinibufferIntent::MenuUnarchiveConfirm { session_id } => {
+                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                if !yes {
+                    self.set_status("unarchive cancelled".to_string());
+                    return;
+                }
+                match self.client.restart(&session_id).await {
+                    Ok(()) => self.set_status(format!("unarchived {}", short_id(&session_id))),
+                    Err(e) => self.set_status(format!("unarchive failed: {e}")),
                 }
             }
             MinibufferIntent::RestartConfirm { session_id } => {
