@@ -100,12 +100,12 @@ Use task context and recent user approval decisions as preference signals for si
 
 Approve routine, expected development actions in the current task when they are bounded to the repo or current working directory. Examples include:
 - file edits inside the active git worktree for the requested task, including source, tests, docs, configs, fixtures, and generated assets that are normally committed
-- build, format, lint, and test commands such as `cargo fmt --all`, `cargo build`, `cargo check`, `cargo clippy`, or `cargo test ...`
-- inspection commands such as `git status`, `git diff`, `git log`, `rg`, `ls`, or `sed -n ...`
-- ordinary repo hygiene commands that revert or clean a clearly scoped set of tracked files, especially when the command itself derives that set from `git diff --name-only` and filters it
+- build, format, lint, and test loops for the active project
+- inspection commands (git history/status/diff views, search/list, and similar read-oriented discovery like `rg`, `ls`, `find`, `sed -n`, etc.)
+- ordinary repo hygiene commands that are narrow in scope and explicitly anchored to task-relevant files
 - creating, updating, reading, or removing files inside the session widget directory shown below — the agent's own session-UI scratch space, which it is expected to maintain
 
-Do not ask the user merely because a shell command chains routine steps with `&&` or pipes read-only output into a bounded follow-up command.
+Do not ask the user merely because a shell command chains routine steps with `&&`.
 Do not ask the user merely because an edit changes files in the active git worktree; git makes those changes inspectable and reversible.
 
 Never approve clearly destructive, secret-exfiltrating, unrelated, or user-hostile actions — ask the user, who makes the final call to reject.
@@ -116,8 +116,13 @@ pub async fn auto_review_for_adapter(
     model: &str,
     tool: &str,
     args_summary: &str,
+    input: &serde_json::Value,
     ctx: &AutoReviewContext,
 ) -> AutoReviewResult {
+    if is_auto_review_routine_shell_command(tool, input) {
+        return AutoReviewResult::Approve;
+    }
+
     // Tell the reviewer where this session's widget directory is, so file
     // operations bounded to it (which the agent is expected to maintain) read
     // as routine rather than ambiguous. `edit_file` writes there are already
@@ -164,6 +169,129 @@ fn parse_auto_review_decision(text: &str) -> AutoReviewResult {
         Some("deny") => AutoReviewResult::Deny,
         _ => AutoReviewResult::AskUser,
     }
+}
+
+fn is_auto_review_routine_shell_command(tool: &str, input: &serde_json::Value) -> bool {
+    if tool != "shell" {
+        return false;
+    }
+    if input
+        .get("interactive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let Some(command) = input.get("command").and_then(|c| c.as_str()) else {
+        return false;
+    };
+    if contains_unsafe_shell_syntax(command) {
+        return false;
+    }
+    command
+        .split("&&")
+        .all(|segment| is_routine_dev_shell_segment(segment.trim()))
+}
+
+fn contains_unsafe_shell_syntax(command: &str) -> bool {
+    command.contains('|')
+        || command.contains(';')
+        || command.contains('>')
+        || command.contains('<')
+        || command.contains("$(")
+        || command.contains('`')
+        || command.contains('\n')
+}
+
+fn is_routine_dev_shell_segment(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return false;
+    }
+
+    let mut i = 0;
+    while i < tokens.len() && is_env_assignment(tokens[i]) {
+        i += 1;
+    }
+    if i >= tokens.len() {
+        return false;
+    }
+
+    match tokens[i] {
+        "cd" => true,
+        "ls" | "rg" | "grep" | "head" | "tail" | "wc" => true,
+        "git" => is_routine_git_segment(&tokens[i + 1..]),
+        "cargo" => is_routine_cargo_segment(&tokens[i + 1..]),
+        "sed" => is_routine_sed_segment(&tokens[i + 1..]),
+        "cat" => true,
+        _ => false,
+    }
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    token.contains('=') && !token.starts_with('-')
+}
+
+fn is_routine_git_segment(rest: &[&str]) -> bool {
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--" {
+            i += 1;
+            break;
+        }
+        if rest[i].starts_with('-') {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    matches!(
+        rest.get(i),
+        Some(&"status")
+            | Some(&"log")
+            | Some(&"diff")
+            | Some(&"show")
+            | Some(&"fetch")
+            | Some(&"pull")
+            | Some(&"branch")
+            | Some(&"ls-files")
+            | Some(&"ls-tree")
+            | Some(&"rev-parse")
+            | Some(&"remote")
+    )
+}
+
+fn is_routine_cargo_segment(rest: &[&str]) -> bool {
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--" {
+            i += 1;
+            break;
+        }
+        if rest[i].starts_with('-') {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    matches!(
+        rest.get(i),
+        Some(&"build")
+            | Some(&"check")
+            | Some(&"test")
+            | Some(&"fmt")
+            | Some(&"clippy")
+            | Some(&"doc")
+            | Some(&"metadata")
+    )
+}
+
+fn is_routine_sed_segment(rest: &[&str]) -> bool {
+    !rest.iter().any(|arg| *arg == "-i" || *arg == "--in-place")
 }
 
 /// Sink that pushes each assistant delta as a `SessionEvent::Message`.
@@ -1119,6 +1247,7 @@ async fn run_one_tool(
             model,
             call.name.as_str(),
             &args_summary,
+            &call.input,
             review_ctx,
         )
         .await
@@ -1214,6 +1343,7 @@ async fn run_one_tool(
                                 model,
                                 call.name.as_str(),
                                 &args_summary,
+                                &call.input,
                                 review_ctx,
                             )
                             .await
@@ -1937,13 +2067,47 @@ mod tests {
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("active git worktree"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT
             .contains("git makes those changes inspectable and reversible"));
-        assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("cargo fmt --all"));
-        assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("cargo test"));
-        assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("git diff --name-only"));
-        assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("&&"));
-        assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("pipes read-only output"));
+        assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("build, format, lint, and test loops"));
+        assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("rg"), "grep-like discovery");
+        assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("Do not ask the user merely because a shell command chains"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("broad/unscoped paths"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("secrets or credentials"));
+    }
+
+    #[test]
+    fn routine_dev_shell_command_is_auto_approved_by_decision_logic() {
+        let input = serde_json::json!({"command":"git status && cargo test --all-targets && rg TODO src"});
+        assert!(is_auto_review_routine_shell_command("shell", &input));
+        let noisy_input = serde_json::json!({
+            "command":"git status && cargo test --all-targets && rg TODO src",
+            "interactive": false,
+            "read_only": false,
+        });
+        assert!(is_auto_review_routine_shell_command("shell", &noisy_input));
+    }
+
+    #[test]
+    fn routine_dev_shell_command_rejects_risky_sequences() {
+        assert!(!is_auto_review_routine_shell_command(
+            "shell",
+            &serde_json::json!({"command":"ls | rg TODO"})
+        ));
+        assert!(!is_auto_review_routine_shell_command(
+            "shell",
+            &serde_json::json!({"command":"sed -i \"s/a/b/\" file.txt"})
+        ));
+        assert!(!is_auto_review_routine_shell_command(
+            "shell",
+            &serde_json::json!({"command":"cargo publish"})
+        ));
+        assert!(!is_auto_review_routine_shell_command(
+            "shell",
+            &serde_json::json!({"command":"git status", "interactive": true})
+        ));
+        assert!(!is_auto_review_routine_shell_command(
+            "shell",
+            &serde_json::json!({"command":"rm -rf target && cargo test"})
+        ));
     }
 
     #[test]

@@ -3965,6 +3965,7 @@ async fn run_one_tool(
             model,
             call.name.as_str(),
             &args_summary,
+            &call.input,
             review_ctx,
         )
         .await
@@ -4048,6 +4049,7 @@ async fn run_one_tool(
                         model,
                         call.name.as_str(),
                         &args_summary,
+                        &call.input,
                         review_ctx,
                     )
                     .await
