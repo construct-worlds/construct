@@ -11415,7 +11415,7 @@ mod tests {
     #[tokio::test]
     async fn canvas_ctrl_slash_undo_reverts_last_edit() {
         let (mut app, _dir, server) = empty_app().await;
-        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 5));
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 0));
 
         app.handle_canvas_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
             .await;
@@ -11430,11 +11430,11 @@ mod tests {
     #[tokio::test]
     async fn canvas_c_x_u_undo_reverts_last_edit() {
         let (mut app, _dir, server) = empty_app().await;
-        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 5));
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 0));
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
-        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
             app.canvas_popup.as_ref().unwrap().buffer,
@@ -11448,7 +11448,7 @@ mod tests {
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
-        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
             app.canvas_popup.as_ref().unwrap().buffer,
@@ -11461,7 +11461,7 @@ mod tests {
     #[tokio::test]
     async fn canvas_c_x_u_undo_reverts_multiple_edits_in_order() {
         let (mut app, _dir, server) = empty_app().await;
-        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 5));
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "draft", 0));
 
         app.handle_canvas_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
             .await;
@@ -11475,7 +11475,7 @@ mod tests {
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
-        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
             app.canvas_popup.as_ref().unwrap().buffer,
@@ -11485,7 +11485,7 @@ mod tests {
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
-        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
             app.canvas_popup.as_ref().unwrap().buffer,
