@@ -7221,22 +7221,20 @@ fn render_canvas_popup(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// Pulse rate of the Run-button glyph while a run is in flight, in radians/sec.
+/// Temporal speed of the canvas Run shimmer wave, in radians/sec.
 const CANVAS_SHIMMER_SPEED: f32 = 4.2;
-/// How fast a Run shimmer rain drop descends, in rows per second.
-const CANVAS_RAIN_FALL: f32 = 7.0;
-/// Length of a rain drop's fading tail, in rows. The bright head leads; cells
-/// above it fade back toward the readable dim floor over this many rows.
-const CANVAS_RAIN_TAIL: f32 = 6.0;
+/// Spatial frequency of the shimmer wave, in radians per character. The bright
+/// band spans roughly `2π / DENSITY` characters, so ~0.18 gives a highlight
+/// band ~35 chars wide travelling through the running region.
+const CANVAS_SHIMMER_DENSITY: f32 = 0.18;
 
-/// Which source lines of a canvas are shimmering, plus how long the run has
-/// been going (spec 0042). Derived from the session's `CanvasRun` at render
-/// time; drives the matrix-style rain over the still-running blocks.
+/// Which source lines of a canvas are shimmering, plus the wave phase (spec
+/// 0042). Derived from the session's `CanvasRun` at render time.
 struct CanvasShimmer {
     /// Indexed by source-line; `true` => the line is in a still-running block.
     active_lines: Vec<bool>,
-    /// Seconds since the run started — the time axis for the falling drops.
-    elapsed: f32,
+    /// Phase of the travelling highlight wave, in radians.
+    phase: f32,
 }
 
 /// Build the shimmer overlay for a popup from its session's `CanvasRun`, or
@@ -7269,65 +7267,42 @@ fn canvas_run_shimmer(
     if !any {
         return None;
     }
-    let elapsed = now.saturating_duration_since(run.started_at).as_secs_f32();
-    Some(CanvasShimmer {
-        active_lines,
-        elapsed,
-    })
-}
-
-/// Matrix-style green fall for one shimmering cell at `(row, col)`. Each text
-/// column carries its own drop — a bright falling head with a tail fading back
-/// to a readable dim green — so the running region reads like a calmer slice of
-/// the matrix rain. Columns are scattered in phase and speed so they fall out
-/// of sync. The dim floor is never darker than `theme.muted`, so the Markdown
-/// stays legible the whole time.
-fn canvas_rain_cell_style(base: Style, theme: &Theme, row: usize, col: usize, t: f32, period: f32) -> Style {
-    // Deterministic per-column scatter in 0..1 (Knuth multiplicative hash).
-    let scatter = (((col as u64).wrapping_mul(2654435761) >> 11) & 0xff) as f32 / 255.0;
-    let speed = CANVAS_RAIN_FALL * (0.65 + 0.7 * scatter);
-    let head = (t * speed + scatter * period) % period;
-    let dist = (head - row as f32).rem_euclid(period);
-    if dist >= CANVAS_RAIN_TAIL {
-        // Between drops: hold the readable dim floor so the Markdown stays
-        // legible (same floor as the approved baseline shimmer).
-        return base.fg(theme.muted);
-    }
-    if dist < 1.0 {
-        // The bright falling head — the matrix flash.
-        return base
-            .fg(theme.matrix_flash_good)
-            .add_modifier(Modifier::BOLD);
-    }
-    // Tail: brightest just behind the head, fading back toward the dim floor.
-    let shade = 1.0 - dist / CANVAS_RAIN_TAIL;
-    base.fg(blend_color(theme.muted, theme.text, shade))
+    let phase =
+        now.saturating_duration_since(run.started_at).as_secs_f32() * CANVAS_SHIMMER_SPEED;
+    Some(CanvasShimmer { active_lines, phase })
 }
 
 /// Overlay the Run shimmer onto already-rendered canvas lines: for each active
-/// line, re-emit its text character-by-character and shade each cell as a
-/// falling rain drop keyed on its line (row) and column. Spans carrying a
-/// background (smart-clip chips, selection) are left intact but still advance
-/// the column count so the drops stay column-aligned.
+/// line, re-emit its text character-by-character with a brightness drawn from a
+/// travelling wave, so a highlight band sweeps through the running region. The
+/// global character index advances across active lines so the band is
+/// continuous down the document. Spans carrying a background (smart-clip chips,
+/// selection) are left intact but still advance the wave so its spacing holds.
 fn apply_canvas_shimmer(lines: &mut [Line], shimmer: &CanvasShimmer, theme: &Theme) {
-    let period = shimmer.active_lines.len().max(1) as f32 + CANVAS_RAIN_TAIL;
-    for (row, line) in lines.iter_mut().enumerate() {
-        if !shimmer.active_lines.get(row).copied().unwrap_or(false) {
+    let mut gidx: usize = 0;
+    for (i, line) in lines.iter_mut().enumerate() {
+        if !shimmer.active_lines.get(i).copied().unwrap_or(false) {
             continue;
         }
         let mut new_spans = Vec::new();
-        let mut col: usize = 0;
         for span in std::mem::take(&mut line.spans) {
             if span.style.bg.is_some() {
-                col += span.content.chars().count();
+                gidx += span.content.chars().count();
                 new_spans.push(span);
                 continue;
             }
             let style = span.style;
             for ch in span.content.chars() {
-                let st = canvas_rain_cell_style(style, theme, row, col, shimmer.elapsed, period);
+                let w = (shimmer.phase - gidx as f32 * CANVAS_SHIMMER_DENSITY).sin();
+                // 0..1, eased so most of the region rests dim and the crest pops.
+                let t = (0.5 + 0.5 * w).clamp(0.0, 1.0);
+                let eased = t * t * (3.0 - 2.0 * t);
+                let mut st = style.fg(blend_color(theme.muted, theme.text, eased));
+                if eased > 0.85 {
+                    st = st.add_modifier(Modifier::BOLD);
+                }
                 new_spans.push(Span::styled(ch.to_string(), st));
-                col += 1;
+                gidx += 1;
             }
         }
         line.spans = new_spans;
