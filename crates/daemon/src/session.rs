@@ -6,7 +6,7 @@ use crate::storage::Storage;
 use crate::worktree;
 use agentd_protocol::{
     agent_context, ahp_method, CanvasDocument, CanvasEditParams, CanvasExecuteParams,
-    CanvasExecuteResult, CanvasGetResult, CanvasListTemplatesResult,
+    CanvasExecuteResult, CanvasGetResult, CanvasListTemplatesResult, CanvasRunProgress,
     CanvasStateNotificationPayload, CanvasUpdateParams, CanvasUpdateResult, ClientView,
     CreateSessionParams, DeletedNotificationPayload, EventNotificationPayload,
     GroupDeletedNotificationPayload, GroupStateNotificationPayload, GroupSummary, HarnessInfo,
@@ -56,6 +56,7 @@ const RESPAWN_REDRAW_MAX_WAIT: Duration = Duration::from_secs(6);
 /// settle lets its render/state update land so the trailing `\r` is read as
 /// a clean submit keypress rather than being coalesced into the paste.
 const CANVAS_EXTERNAL_PTY_SUBMIT_DELAY: Duration = Duration::from_millis(120);
+const CANVAS_RUN_MAX_MS: i64 = 10 * 60 * 1000;
 
 /// Whether the post-resume force-redraw should fire now: the child has
 /// produced PTY output and then gone quiet for [`RESPAWN_REDRAW_SETTLE`],
@@ -567,6 +568,43 @@ fn canvas_run_context(
     }
 }
 
+fn canvas_run_pending_signatures(body: &str) -> std::collections::HashSet<String> {
+    let mut sigs = std::collections::HashSet::new();
+    let mut cur: Option<Vec<String>> = None;
+    for raw in body.lines() {
+        if raw.trim().is_empty() {
+            if let Some(lines) = cur.take() {
+                sigs.insert(lines.join("\n"));
+            }
+        } else {
+            cur.get_or_insert_with(Vec::new)
+                .push(raw.trim().to_string());
+        }
+    }
+    if let Some(lines) = cur.take() {
+        sigs.insert(lines.join("\n"));
+    }
+    sigs
+}
+
+fn session_event_is_canvas_output(event: &SessionEvent) -> bool {
+    if event.pty_bytes().as_ref().is_some_and(|b| !b.is_empty()) {
+        return true;
+    }
+    matches!(
+        event,
+        SessionEvent::Reasoning { .. }
+            | SessionEvent::ToolUse { .. }
+            | SessionEvent::ToolResult { .. }
+            | SessionEvent::TaskStart { .. }
+            | SessionEvent::Diff { .. }
+            | SessionEvent::Message {
+                role: MessageRole::Assistant,
+                ..
+            }
+    )
+}
+
 impl SessionEntry {
     pub fn is_deleted(&self) -> bool {
         self.deleted.load(Ordering::SeqCst)
@@ -696,6 +734,7 @@ pub struct SessionManager {
     /// UI in a worktree against a running daemon without rebuilding.
     dev_assets: std::sync::Mutex<Option<PathBuf>>,
     widget_snapshots: tokio::sync::Mutex<HashMap<String, WidgetSnapshot>>,
+    canvas_runs: std::sync::Mutex<HashMap<String, CanvasRunProgress>>,
     /// Monotonic id handed to each client connection so its current
     /// view can be tracked and cleared on disconnect.
     next_conn_id: AtomicU64,
@@ -812,6 +851,92 @@ pub(crate) struct RemoteHandle {
 }
 
 impl SessionManager {
+    fn canvas_run_snapshot(&self, session_id: &str) -> Option<CanvasRunProgress> {
+        let now_ms = Utc::now().timestamp_millis();
+        let mut runs = self.canvas_runs.lock().ok()?;
+        if runs.get(session_id).is_some_and(|run| {
+            run.expires_at_ms <= now_ms || run.pending_block_signatures.is_empty()
+        }) {
+            runs.remove(session_id);
+            return None;
+        }
+        runs.get(session_id).cloned()
+    }
+
+    fn start_canvas_run(
+        &self,
+        session_id: &str,
+        body: &str,
+        is_selection: bool,
+    ) -> Option<CanvasRunProgress> {
+        let body_sigs = canvas_run_pending_signatures(body);
+        if body_sigs.is_empty() {
+            if let Ok(mut runs) = self.canvas_runs.lock() {
+                runs.remove(session_id);
+            }
+            return None;
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        let pending = if is_selection {
+            body_sigs
+        } else if let Ok(runs) = self.canvas_runs.lock() {
+            if let Some(old) = runs.get(session_id) {
+                let old: std::collections::HashSet<String> =
+                    old.pending_block_signatures.iter().cloned().collect();
+                let kept: std::collections::HashSet<String> =
+                    body_sigs.intersection(&old).cloned().collect();
+                if kept.is_empty() {
+                    body_sigs
+                } else {
+                    kept
+                }
+            } else {
+                body_sigs
+            }
+        } else {
+            body_sigs
+        };
+        let run = CanvasRunProgress {
+            run_id: format!("{session_id}:{now_ms}"),
+            started_at_ms: now_ms,
+            expires_at_ms: now_ms + CANVAS_RUN_MAX_MS,
+            pending_block_signatures: pending.into_iter().collect(),
+        };
+        if let Ok(mut runs) = self.canvas_runs.lock() {
+            runs.insert(session_id.to_string(), run.clone());
+        }
+        Some(run)
+    }
+
+    fn narrow_canvas_run(&self, session_id: &str, markdown: &str) {
+        let now_ms = Utc::now().timestamp_millis();
+        let current = canvas_run_pending_signatures(markdown);
+        if let Ok(mut runs) = self.canvas_runs.lock() {
+            let Some(run) = runs.get_mut(session_id) else {
+                return;
+            };
+            run.pending_block_signatures
+                .retain(|sig| current.contains(sig));
+            if run.expires_at_ms <= now_ms || run.pending_block_signatures.is_empty() {
+                runs.remove(session_id);
+            }
+        }
+    }
+
+    fn clear_canvas_run_for_output(&self, session_id: &str) {
+        let removed = self
+            .canvas_runs
+            .lock()
+            .ok()
+            .and_then(|mut runs| runs.remove(session_id))
+            .is_some();
+        if removed {
+            if let Ok(canvas) = self.storage.read_canvas(session_id) {
+                self.broadcast_canvas_state(canvas);
+            }
+        }
+    }
+
     /// Construct the manager along with the receiver side of the
     /// remote-start channel. The caller (`main.rs`) spawns the
     /// supervisor task with that receiver so on-demand
@@ -933,6 +1058,7 @@ impl SessionManager {
                 restart_tx,
                 dev_assets: std::sync::Mutex::new(dev_assets),
                 widget_snapshots: tokio::sync::Mutex::new(widget_snapshots),
+                canvas_runs: std::sync::Mutex::new(HashMap::new()),
                 next_conn_id: AtomicU64::new(1),
                 conn_views: std::sync::Mutex::new(HashMap::new()),
             },
@@ -1419,6 +1545,7 @@ impl SessionManager {
         Ok(CanvasGetResult {
             canvas: self.storage.read_canvas(session_id)?,
             revisions: self.storage.read_canvas_revisions(session_id)?,
+            active_run: self.canvas_run_snapshot(session_id),
         })
     }
 
@@ -1434,6 +1561,7 @@ impl SessionManager {
             params.template_id,
             params.note,
         )?;
+        self.narrow_canvas_run(&params.session_id, &canvas.markdown);
         self.broadcast_canvas_state(canvas.clone());
         Ok(CanvasUpdateResult { canvas })
     }
@@ -1445,6 +1573,7 @@ impl SessionManager {
         let canvas =
             self.storage
                 .edit_canvas(&params.session_id, &params.edits, params.actor, params.note)?;
+        self.narrow_canvas_run(&params.session_id, &canvas.markdown);
         self.broadcast_canvas_state(canvas.clone());
         Ok(CanvasUpdateResult { canvas })
     }
@@ -1457,6 +1586,7 @@ impl SessionManager {
         let result = CanvasGetResult {
             canvas: self.storage.read_canvas(&params.session_id)?,
             revisions: self.storage.read_canvas_revisions(&params.session_id)?,
+            active_run: self.canvas_run_snapshot(&params.session_id),
         };
         if let Some(base) = params.base_version {
             if base != result.canvas.version {
@@ -1476,6 +1606,7 @@ impl SessionManager {
         if body.is_empty() {
             anyhow::bail!("canvas is empty");
         }
+        let active_run = self.start_canvas_run(&params.session_id, body, params.selection.is_some());
         let scope = if selected.is_some() {
             "selection"
         } else {
@@ -1505,6 +1636,7 @@ impl SessionManager {
         Ok(CanvasExecuteResult {
             canvas: result.canvas,
             prompt,
+            active_run,
         })
     }
 
@@ -1515,10 +1647,12 @@ impl SessionManager {
     }
 
     fn broadcast_canvas_state(&self, canvas: CanvasDocument) {
+        let active_run = self.canvas_run_snapshot(&canvas.session_id);
         let _ = self
             .broadcast
             .send(BroadcastMsg::CanvasState(CanvasStateNotificationPayload {
                 canvas,
+                active_run,
             }));
     }
 
@@ -2477,6 +2611,7 @@ impl SessionManager {
         // when a TUI attaches, so we no longer keep a parallel in-memory
         // ring of bytes.
         if let SessionEvent::Pty { .. } = &event {
+            let has_output = event.pty_bytes().as_ref().is_some_and(|b| !b.is_empty());
             if let Some(bytes) = event.pty_bytes() {
                 if let Err(e) = self.storage.append_pty_bytes(&entry.id, &bytes) {
                     tracing::warn!(
@@ -2501,6 +2636,9 @@ impl SessionManager {
                     event,
                     seq,
                 }));
+            if has_output {
+                self.clear_canvas_run_for_output(&entry.id);
+            }
             return;
         }
 
@@ -2582,6 +2720,9 @@ impl SessionManager {
             let snapshot = s.clone();
             drop(s);
             let _ = self.storage.save_summary(&snapshot);
+        }
+        if session_event_is_canvas_output(&event) {
+            self.clear_canvas_run_for_output(&entry.id);
         }
         // Update the per-session task registry from lifecycle events
         // so `session.list_tasks` has live state to return.

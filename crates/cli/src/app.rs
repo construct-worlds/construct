@@ -1360,6 +1360,30 @@ pub struct CanvasRun {
     pub deadline: Instant,
 }
 
+impl CanvasRun {
+    fn from_progress(progress: agentd_protocol::CanvasRunProgress) -> Option<Self> {
+        let now = Instant::now();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_millis() as i64;
+        if progress.expires_at_ms <= now_ms || progress.pending_block_signatures.is_empty() {
+            return None;
+        }
+        let started_at = if progress.started_at_ms <= now_ms {
+            now - Duration::from_millis((now_ms - progress.started_at_ms) as u64)
+        } else {
+            now
+        };
+        let deadline = now + Duration::from_millis((progress.expires_at_ms - now_ms) as u64);
+        Some(Self {
+            started_at,
+            pending: progress.pending_block_signatures.into_iter().collect(),
+            deadline,
+        })
+    }
+}
+
 /// A canvas "block": a maximal run of consecutive non-blank Markdown lines,
 /// identified by its normalized text. The unit of Run shimmer — a block
 /// shimmers as a whole and settles as a whole (spec 0042).
@@ -4588,7 +4612,7 @@ impl App {
                         agentd_protocol::CanvasStateNotificationPayload,
                     >(p)
                     {
-                        self.on_canvas_state(payload.canvas);
+                        self.on_canvas_state(payload.canvas, payload.active_run);
                     }
                 }
             }
@@ -4602,7 +4626,19 @@ impl App {
     /// changes and our tracked version stays fresh. When the user is mid-edit,
     /// leave the buffer and the (now stale) base version alone — the
     /// merge-on-save path reconciles both sides without losing either.
-    fn on_canvas_state(&mut self, canvas: agentd_protocol::CanvasDocument) {
+    fn on_canvas_state(
+        &mut self,
+        canvas: agentd_protocol::CanvasDocument,
+        active_run: Option<agentd_protocol::CanvasRunProgress>,
+    ) {
+        match active_run.and_then(CanvasRun::from_progress) {
+            Some(run) => {
+                self.canvas_runs.insert(canvas.session_id.clone(), run);
+            }
+            None => {
+                self.canvas_runs.remove(&canvas.session_id);
+            }
+        }
         let popup = if self
             .canvas_popup
             .as_ref()
@@ -6978,6 +7014,14 @@ impl App {
             Ok(result) => {
                 let version = result.canvas.version;
                 let now = Instant::now();
+                match result.active_run.and_then(CanvasRun::from_progress) {
+                    Some(run) => {
+                        self.canvas_runs.insert(result.canvas.session_id.clone(), run);
+                    }
+                    None => {
+                        self.canvas_runs.remove(&result.canvas.session_id);
+                    }
+                }
                 self.canvas_popups.remove(&result.canvas.session_id);
                 self.canvas_popup = Some(canvas_popup_from_document(result.canvas, now));
                 self.set_status(format!("canvas opened at version {version}"));
@@ -7012,6 +7056,14 @@ impl App {
             }
             match self.client.canvas_get(session_id).await {
                 Ok(result) => {
+                    match result.active_run.and_then(CanvasRun::from_progress) {
+                        Some(run) => {
+                            self.canvas_runs.insert(result.canvas.session_id.clone(), run);
+                        }
+                        None => {
+                            self.canvas_runs.remove(&result.canvas.session_id);
+                        }
+                    }
                     let popup = canvas_popup_from_document(result.canvas, now);
                     if selected_id.as_deref() == Some(session_id.as_str()) {
                         self.canvas_popup = Some(popup);
@@ -7285,6 +7337,14 @@ impl App {
         };
         match self.client.canvas_execute(params).await {
             Ok(result) => {
+                match result.active_run.and_then(CanvasRun::from_progress) {
+                    Some(run) => {
+                        self.canvas_runs.insert(session_id.clone(), run);
+                    }
+                    None => {
+                        self.canvas_runs.remove(&session_id);
+                    }
+                }
                 let scope = if is_selection { "selection" } else { "canvas" };
                 self.set_status(format!(
                     "canvas run sent ({scope}, version {})",
@@ -11707,7 +11767,7 @@ mod tests {
                 });
                 let result = match method.as_str() {
                     ipc_method::CANVAS_EXECUTE => {
-                        serde_json::json!({ "canvas": canvas, "prompt": "sent" })
+                        serde_json::json!({ "canvas": canvas, "prompt": "sent", "active_run": null })
                     }
                     ipc_method::CANVAS_UPDATE => serde_json::json!({ "canvas": canvas }),
                     _ => Value::Null,
@@ -11964,7 +12024,7 @@ mod tests {
             version: 2,
             updated_at_ms: 0,
             template_id: None,
-        });
+        }, None);
         let popup = app.canvas_popup.as_ref().unwrap();
         assert_eq!(popup.canvas.version, 2);
         assert_eq!(popup.buffer, "# Todo\n- a\n- agent added\n");
@@ -12124,7 +12184,7 @@ mod tests {
             version: 2,
             updated_at_ms: 0,
             template_id: None,
-        });
+        }, None);
         let popup = app.canvas_popup.as_ref().unwrap();
         // Unsaved edits are untouched and the base version stays stale, so the
         // save path detects the conflict and merges both sides.

@@ -34,11 +34,11 @@ The instruction the agent receives is a point-in-time snapshot taken at Run. Edi
 
 ## Consequences
 
-- The affordance is client-side presentation state. It is derived from signals the client already receives (the canvas Run it issued and session output events); it is not persisted into the Markdown and does not participate in canvas versioning or optimistic concurrency.
+- The affordance is shared transient canvas state owned by the daemon, with an optimistic client-side start for the initiating TUI. The daemon publishes the active run's start time, expiry, and pending block signatures in canvas get/state payloads so other TUIs and restarted TUIs can render the same shimmer. It is not persisted into the Markdown and does not participate in canvas versioning or optimistic concurrency.
 - Narrowing is best-effort. A block the agent never rewrites keeps shimmering until the first observed output; that is acceptable and is bounded by the stop signal. Two blocks with identical text are indistinguishable and settle together.
-- Session status transitions are intentionally ignored as stop signals; they do not uniquely identify canvas-originating activity and can arrive in the absence of output. A hard time cap remains as a backstop for silent runs.
+- Session status transitions are intentionally ignored as stop signals; they do not uniquely identify canvas-originating activity and can arrive in the absence of output. Until the daemon has an explicit canvas-turn id, it clears shared run state on first observed agent-visible output. A hard time cap remains as a backstop for silent runs.
 - Once every executed block has settled but the turn is still running, the body animation has nothing left to shimmer. Clients may keep a small secondary running indicator to cover that window, but must not block input or imply the canvas is locked.
-- Any rich canvas client (web, desktop) should follow the same start / narrow / stop lifecycle so the affordance is consistent across surfaces. Promoting the run state into broadcast canvas state would let all clients share one definition rather than each re-deriving it.
+- Any rich canvas client (web, desktop) should follow the same start / narrow / stop lifecycle so the affordance is consistent across surfaces. Clients render animation locally from the daemon-published run facts; they do not invent independent run state except for the initiating client's optimistic pre-response affordance.
 
 ## Non-Goals
 
