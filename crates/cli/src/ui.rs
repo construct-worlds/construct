@@ -8023,6 +8023,9 @@ fn render_canvas_title_tooltip(
     }
     if let Some((xs, xe, y)) = app.layout.canvas_title_close_hit {
         if my == y && mx >= xs && mx < xe {
+            if app.session_title_menu.is_some() {
+                return;
+            }
             render_button_tooltip(f, &app.theme, " Session actions ", mx, my);
             return;
         }

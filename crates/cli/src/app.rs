@@ -5087,6 +5087,22 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(hit) = self
+                    .layout
+                    .main_window_areas
+                    .iter()
+                    .find(|hit| {
+                        let (x_start, x_end, y) = crate::ui::view_close_button_range(hit.area);
+                        ev.row == y && ev.column >= x_start && ev.column < x_end
+                    })
+                    .copied()
+                {
+                    self.focus_main_window(hit.id);
+                    if let Some(session_id) = self.selected_id() {
+                        self.open_session_title_menu(session_id, hit.area);
+                    }
+                    return;
+                }
                 // List ↔ view divider: clicking the list pane's
                 // right border (col = list_width - 1), the view's
                 // left border (col = list_width), or the first pin
