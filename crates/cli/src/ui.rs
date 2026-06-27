@@ -7179,6 +7179,7 @@ fn render_canvas_popup(f: &mut Frame, app: &mut App) {
     app.layout.canvas_title_close_hit = None;
     app.layout.canvas_title_widget_hits.clear();
     app.layout.canvas_selection_run_hit = None;
+    app.layout.canvas_inner_area = None;
     if app
         .canvas_popup
         .as_ref()
@@ -7393,19 +7394,89 @@ fn render_canvas_popup_at(
             Style::default().fg(app.theme.dim),
         )));
     }
-    let visible: Vec<Line> = lines.into_iter().take(inner.height as usize).collect();
-    let para = Paragraph::new(visible).wrap(Wrap { trim: false });
+    // Vertical scroll: the body can exceed `inner.height` wrapped rows. Clamp
+    // the popup's stored offset to the current geometry (content edits or a
+    // resize may have shrunk the scrollable range) and skip that many wrapped
+    // rows when rendering. `Paragraph::scroll` with `Wrap` skips *wrapped* rows,
+    // matching the wrapped-row coordinate space the cursor math uses.
+    let viewport_rows = inner.height as usize;
+    let total_rows = canvas_total_visual_rows(Some(app), &popup.buffer, inner.width as usize);
+    let max_scroll = total_rows.saturating_sub(viewport_rows);
+    let scroll_offset = popup.scroll_offset.min(max_scroll);
+    if active {
+        // Remember the live viewport so cursor-move handlers can keep the caret
+        // visible on the next keystroke, and persist the clamped offset.
+        app.layout.canvas_inner_area = Some(inner);
+        if let Some(real) = app.canvas_popup.as_mut() {
+            real.scroll_offset = scroll_offset;
+        }
+    }
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_offset.min(u16::MAX as usize) as u16, 0));
     f.render_widget(para, inner);
+    render_canvas_scroll_indicator(
+        f,
+        &app.theme,
+        rect,
+        inner,
+        scroll_offset,
+        total_rows,
+        viewport_rows,
+    );
     if active && !popup.closing {
-        if let Some(pos) = canvas_cursor_position(Some(app), &popup.buffer, popup.cursor, inner) {
+        if let Some(pos) =
+            canvas_cursor_position(Some(app), &popup.buffer, popup.cursor, scroll_offset, inner)
+        {
             render_editor_cursor(f, pos, &app.theme);
             render_canvas_smart_clip_picker(f, app, popup, pos, inner);
         }
     }
     if active && !popup.closing {
-        render_canvas_selection_context_menu(f, app, popup, inner);
+        render_canvas_selection_context_menu(f, app, popup, scroll_offset, inner);
     }
     render_canvas_title_tooltip(f, app, popup, summary_ref, rect);
+}
+
+/// Paint a slim vertical scroll thumb on the canvas popup's right border when
+/// the body overflows its viewport. Like the terminal scrollback bar, it tints
+/// only the cell background so the border glyph underneath stays intact, and it
+/// sits on the border column so it never clobbers body text.
+fn render_canvas_scroll_indicator(
+    f: &mut Frame,
+    theme: &Theme,
+    rect: Rect,
+    inner: Rect,
+    scroll_offset: usize,
+    total_rows: usize,
+    viewport_rows: usize,
+) {
+    if viewport_rows == 0 || inner.height == 0 || rect.width == 0 || total_rows <= viewport_rows {
+        return;
+    }
+    let track_h = inner.height as usize;
+    let max_scroll = total_rows.saturating_sub(viewport_rows);
+    let thumb_h = ((viewport_rows * track_h + total_rows - 1) / total_rows).clamp(1, track_h);
+    let max_thumb_top = track_h.saturating_sub(thumb_h);
+    let thumb_top = if max_scroll == 0 {
+        0
+    } else {
+        (scroll_offset.min(max_scroll) * max_thumb_top) / max_scroll
+    };
+    let x = rect.x + rect.width.saturating_sub(1);
+    let track_color = blend_color(Color::Black, theme.text, 0.30);
+    let thumb_color = blend_color(Color::Black, theme.text, 0.80);
+    for row in 0..track_h {
+        let y = inner.y + row as u16;
+        let color = if row >= thumb_top && row < thumb_top + thumb_h {
+            thumb_color
+        } else {
+            track_color
+        };
+        if let Some(cell) = f.buffer_mut().cell_mut(Position { x, y }) {
+            cell.set_bg(color);
+        }
+    }
 }
 
 fn canvas_border_style(theme: &Theme, active: bool) -> Style {
@@ -7704,13 +7775,15 @@ fn render_canvas_selection_context_menu(
     f: &mut Frame,
     app: &mut App,
     popup: &crate::app::CanvasPopup,
+    scroll_offset: usize,
     canvas_area: Rect,
 ) {
     if canvas_selection_range(popup).is_none() {
         app.layout.canvas_selection_run_hit = None;
         return;
     }
-    let Some(pos) = canvas_cursor_position(Some(app), &popup.buffer, popup.cursor, canvas_area)
+    let Some(pos) =
+        canvas_cursor_position(Some(app), &popup.buffer, popup.cursor, scroll_offset, canvas_area)
     else {
         app.layout.canvas_selection_run_hit = None;
         return;
@@ -7923,16 +7996,21 @@ fn render_canvas_smart_clip_picker(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn canvas_cursor_position(
+/// Absolute wrapped position of the cursor within the canvas body:
+/// `(visual_row, column_within_row)`, both in the `Wrap { trim: false }`
+/// word-wrap coordinate space the body is laid out with (see
+/// [`canvas_wrap_row_starts`] / [`canvas_wrap_locate`]). `width` is the inner
+/// content width in cells; a zero width collapses the whole buffer onto row 0,
+/// column 0.
+fn canvas_cursor_visual_pos(
     app: Option<&App>,
     markdown: &str,
     cursor: usize,
-    area: Rect,
-) -> Option<Position> {
-    if area.width == 0 || area.height == 0 {
-        return None;
+    width: usize,
+) -> (usize, usize) {
+    if width == 0 {
+        return (0, 0);
     }
-    let width = area.width as usize;
     let (line, col) = canvas_line_col(markdown, cursor);
 
     // The canvas body is rendered with `Wrap { trim: false }`, which WORD-wraps
@@ -7953,11 +8031,75 @@ fn canvas_cursor_position(
     let starts = canvas_wrap_row_starts(&canvas_rendered_line_text(app, cur_raw), width);
     let (row_in_line, col_in_row) = canvas_wrap_locate(&starts, visual_col, width);
     let visual_row = visual_row.saturating_add(row_in_line);
+    (visual_row, col_in_row)
+}
+
+/// Wrapped visual row of the cursor (see [`canvas_cursor_visual_pos`]). Drives
+/// the cursor-follow scroll so the caret stays inside the visible window.
+pub(crate) fn canvas_cursor_visual_row(
+    app: Option<&App>,
+    markdown: &str,
+    cursor: usize,
+    width: usize,
+) -> usize {
+    canvas_cursor_visual_pos(app, markdown, cursor, width).0
+}
+
+/// Total number of wrapped visual rows the whole buffer occupies at `width`,
+/// including the trailing empty row the cursor can sit on when the buffer ends
+/// in a newline (or is empty). Bounds the scroll offset and drives the scroll
+/// indicator. Defined as "the cursor's row at the very end of the buffer, plus
+/// one" so the last reachable caret row is always `< total`.
+pub(crate) fn canvas_total_visual_rows(app: Option<&App>, markdown: &str, width: usize) -> usize {
+    if width == 0 {
+        return markdown.matches('\n').count() + 1;
+    }
+    canvas_cursor_visual_pos(app, markdown, markdown.chars().count(), width)
+        .0
+        .saturating_add(1)
+}
+
+/// New vertical scroll offset (in wrapped rows) that keeps `cursor_row` inside a
+/// `viewport_height`-row window. Scrolls up so the cursor is the top row when it
+/// sits above the window, and down so it is the bottom row when it sits below;
+/// otherwise the offset is left unchanged.
+pub(crate) fn canvas_follow_scroll(
+    scroll_offset: usize,
+    cursor_row: usize,
+    viewport_height: usize,
+) -> usize {
+    if viewport_height == 0 {
+        return scroll_offset;
+    }
+    if cursor_row < scroll_offset {
+        cursor_row
+    } else if cursor_row >= scroll_offset + viewport_height {
+        cursor_row - viewport_height + 1
+    } else {
+        scroll_offset
+    }
+}
+
+fn canvas_cursor_position(
+    app: Option<&App>,
+    markdown: &str,
+    cursor: usize,
+    scroll_offset: usize,
+    area: Rect,
+) -> Option<Position> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let width = area.width as usize;
+    let (visual_row, x) = canvas_cursor_visual_pos(app, markdown, cursor, width);
+    // Translate the absolute wrapped row into a row within the scrolled window;
+    // a cursor scrolled above the top or below the bottom has no on-screen cell.
+    let visual_row = visual_row.checked_sub(scroll_offset)?;
     if visual_row >= area.height as usize {
         return None;
     }
     Some(Position {
-        x: area.x.saturating_add(col_in_row as u16),
+        x: area.x.saturating_add(x as u16),
         y: area.y.saturating_add(visual_row as u16),
     })
 }
@@ -8721,7 +8863,7 @@ mod tests {
     fn canvas_cursor_position_targets_current_character_cell() {
         let area = Rect::new(10, 2, 20, 4);
         assert_eq!(
-            canvas_cursor_position(None, "abc", 1, area),
+            canvas_cursor_position(None, "abc", 1, 0, area),
             Some(Position { x: 11, y: 2 })
         );
     }
@@ -8730,7 +8872,7 @@ mod tests {
     fn canvas_cursor_position_accounts_for_wrapped_lines() {
         let area = Rect::new(10, 2, 5, 4);
         assert_eq!(
-            canvas_cursor_position(None, "abcdef", 6, area),
+            canvas_cursor_position(None, "abcdef", 6, 0, area),
             Some(Position { x: 11, y: 3 })
         );
     }
@@ -8743,7 +8885,7 @@ mod tests {
         let chip_width = " harness codex ".chars().count();
 
         assert_eq!(
-            canvas_cursor_position(None, markdown, cursor, area),
+            canvas_cursor_position(None, markdown, cursor, 0, area),
             Some(Position {
                 x: 10 + "run ".chars().count() as u16 + chip_width as u16,
                 y: 2,
@@ -8760,7 +8902,7 @@ mod tests {
         let cursor = "abcdef\n".chars().count();
 
         assert_eq!(
-            canvas_cursor_position(None, markdown, cursor, area),
+            canvas_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 10, y: 4 })
         );
     }
@@ -8774,7 +8916,7 @@ mod tests {
         let cursor = "abcdef\nghijklm".chars().count();
 
         assert_eq!(
-            canvas_cursor_position(None, markdown, cursor, area),
+            canvas_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 12, y: 5 })
         );
     }
@@ -8788,7 +8930,7 @@ mod tests {
         let cursor = "longlineAAAA\nsh".chars().count();
 
         assert_eq!(
-            canvas_cursor_position(None, markdown, cursor, area),
+            canvas_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 12, y: 5 })
         );
     }
@@ -8805,7 +8947,7 @@ mod tests {
         let cursor = "hello world ".chars().count();
 
         assert_eq!(
-            canvas_cursor_position(None, markdown, cursor, area),
+            canvas_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 10, y: 4 })
         );
     }
@@ -8821,7 +8963,7 @@ mod tests {
         let cursor = "hello world foo\n".chars().count();
 
         assert_eq!(
-            canvas_cursor_position(None, markdown, cursor, area),
+            canvas_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 10, y: 5 })
         );
     }
@@ -8838,7 +8980,7 @@ mod tests {
         let cursor = "abcd ".chars().count();
 
         assert_eq!(
-            canvas_cursor_position(None, markdown, cursor, area),
+            canvas_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 10, y: 3 })
         );
     }
@@ -8856,7 +8998,7 @@ mod tests {
         let markdown = "hello world foo";
         let cursor = "hello world ".chars().count();
 
-        let pos = canvas_cursor_position(None, markdown, cursor, area).expect("cursor pos");
+        let pos = canvas_cursor_position(None, markdown, cursor, 0, area).expect("cursor pos");
 
         let backend = ratatui::backend::TestBackend::new(w, h);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -8877,6 +9019,51 @@ mod tests {
             glyph, "f",
             "computed cursor {pos:?} should sit on the painted 'f' starting the wrapped row"
         );
+    }
+
+    #[test]
+    fn canvas_follow_scroll_advances_when_cursor_below_window() {
+        // Cursor on visual row 19 with a 5-row window anchored at offset 0 must
+        // scroll down so the cursor becomes the bottom visible row (offset 15).
+        assert_eq!(canvas_follow_scroll(0, 19, 5), 15);
+    }
+
+    #[test]
+    fn canvas_follow_scroll_returns_to_top_when_cursor_above_window() {
+        // Cursor back on row 0 while scrolled to 15 snaps the window to the top.
+        assert_eq!(canvas_follow_scroll(15, 0, 5), 0);
+    }
+
+    #[test]
+    fn canvas_follow_scroll_unchanged_when_cursor_already_visible() {
+        assert_eq!(canvas_follow_scroll(0, 2, 5), 0);
+        assert_eq!(canvas_follow_scroll(10, 12, 5), 10);
+    }
+
+    #[test]
+    fn canvas_cursor_position_subtracts_scroll_offset() {
+        // Ten single-row lines at width 20; the cursor sits on logical line 7.
+        let area = Rect::new(10, 0, 20, 5);
+        let markdown = (0..10).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
+        let cursor = markdown.find("L7").unwrap();
+        // Scrolled past the first 5 rows, row 7 renders two rows into the view.
+        assert_eq!(
+            canvas_cursor_position(None, &markdown, cursor, 5, area),
+            Some(Position { x: 10, y: 2 })
+        );
+        // Without scrolling, that row is below the 5-row window: no cell to draw.
+        assert_eq!(canvas_cursor_position(None, &markdown, cursor, 0, area), None);
+    }
+
+    #[test]
+    fn canvas_total_visual_rows_counts_trailing_empty_line() {
+        // "a\n" is two rows: the text row and the trailing empty row the cursor
+        // can sit on. The count must include that final row so the scroll clamp
+        // keeps it reachable.
+        assert_eq!(canvas_total_visual_rows(None, "a\n", 20), 2);
+        assert_eq!(canvas_total_visual_rows(None, "", 20), 1);
+        // "abcdef" wraps to two rows at width 5.
+        assert_eq!(canvas_total_visual_rows(None, "abcdef", 5), 2);
     }
 
     #[test]

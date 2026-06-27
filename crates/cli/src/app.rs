@@ -50,6 +50,8 @@ pub const MINIBUFFER_PANEL_H_MAX: u16 = 80;
 pub(crate) const CANVAS_REVEAL_MS: u64 = 240;
 pub(crate) const CANVAS_CONTENT_PADDING_X: u16 = 1;
 pub(crate) const CANVAS_CONTENT_PADDING_Y: u16 = 1;
+/// Wrapped rows the canvas body scrolls per mouse-wheel notch.
+pub(crate) const CANVAS_WHEEL_SCROLL_ROWS: usize = 3;
 const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
 
 /// A row in the rendered list view. Sessions and group headers share the
@@ -1310,6 +1312,10 @@ pub struct CanvasPopup {
     pub revealed_at: Instant,
     pub hide_after: Instant,
     pub closing: bool,
+    /// Vertical scroll offset measured in wrapped (visual) rows — the number of
+    /// rows skipped off the top so the body can scroll when it overflows the
+    /// viewport. Cursor moves follow the caret; the mouse wheel scrolls freely.
+    pub scroll_offset: usize,
 }
 
 /// Result of flushing a canvas popup's buffer to the daemon.
@@ -1629,6 +1635,10 @@ pub struct LayoutSnapshot {
     pub canvas_title_widget_hits: Vec<DynamicUiWidgetHit>,
     /// Canvas selected-text context Run button bounds: `(x_start, x_end, y)`.
     pub canvas_selection_run_hit: Option<(u16, u16, u16)>,
+    /// Inner content rect of the active canvas popup from the last frame.
+    /// Cursor-move handlers and the mouse wheel read its width/height to keep
+    /// the caret on-screen and to bound scrolling; `None` when no canvas is open.
+    pub canvas_inner_area: Option<ratatui::layout::Rect>,
     /// Bounds of the browser preview overlay rendered in the terminal view.
     pub browser_preview_area: Option<ratatui::layout::Rect>,
     /// Top-right close button bounds for the browser preview overlay: `(x_start, x_end, y)`.
@@ -7154,7 +7164,9 @@ impl App {
             return;
         };
         popup.closing = false;
-        popup.cursor = canvas_cursor_at_modal_point(&popup.buffer, modal, col, row).unwrap_or(0);
+        popup.cursor =
+            canvas_cursor_at_modal_point(&popup.buffer, modal, popup.scroll_offset, col, row)
+                .unwrap_or(0);
         popup.preferred_col = None;
         popup.selection = None;
         popup.smart_clip = None;
@@ -7225,8 +7237,14 @@ impl App {
                 let Some(popup) = self.canvas_popup.as_mut() else {
                     return true;
                 };
-                let cursor = canvas_cursor_at_modal_point(&popup.buffer, modal, ev.column, ev.row)
-                    .unwrap_or(0);
+                let cursor = canvas_cursor_at_modal_point(
+                    &popup.buffer,
+                    modal,
+                    popup.scroll_offset,
+                    ev.column,
+                    ev.row,
+                )
+                .unwrap_or(0);
                 popup.cursor = cursor;
                 popup.preferred_col = None;
                 popup.selection = Some(CanvasSelection {
@@ -7241,8 +7259,14 @@ impl App {
                 let Some(popup) = self.canvas_popup.as_mut() else {
                     return true;
                 };
-                let cursor = canvas_cursor_at_modal_point(&popup.buffer, modal, ev.column, ev.row)
-                    .unwrap_or(0);
+                let cursor = canvas_cursor_at_modal_point(
+                    &popup.buffer,
+                    modal,
+                    popup.scroll_offset,
+                    ev.column,
+                    ev.row,
+                )
+                .unwrap_or(0);
                 popup.cursor = cursor;
                 popup.preferred_col = None;
                 if let Some(selection) = popup.selection.as_mut() {
@@ -7262,6 +7286,16 @@ impl App {
                 } else if let Some(popup) = self.canvas_popup.as_mut() {
                     popup.selection = None;
                 }
+                true
+            }
+            // Mouse wheel scrolls the body without moving the caret. The next
+            // keystroke re-anchors the scroll to the cursor via follow.
+            MouseEventKind::ScrollDown => {
+                self.scroll_canvas_popup(CANVAS_WHEEL_SCROLL_ROWS as isize);
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_canvas_popup(-(CANVAS_WHEEL_SCROLL_ROWS as isize));
                 true
             }
             _ => true,
@@ -7379,6 +7413,9 @@ impl App {
             KeyCode::Char(c) if !ctrl && !alt => self.insert_canvas_text(&c.to_string()),
             _ => {}
         }
+        // Any cursor move or edit above may have pushed the caret out of the
+        // visible window; re-anchor the scroll so it stays on-screen.
+        self.follow_canvas_scroll();
     }
 
     /// Indent (or, when `outdent`, un-indent) the markdown list item(s) under
@@ -7817,6 +7854,61 @@ impl App {
         popup.preferred_col = Some(target_col);
         Self::update_canvas_selection_head(popup);
         Self::update_canvas_smart_clip_after_cursor_move(popup);
+    }
+
+    /// After a cursor move or edit, scroll the canvas popup so the caret stays
+    /// inside the visible window. Uses the inner viewport captured during the
+    /// last render, so it is a no-op until the canvas has rendered at least once
+    /// (the cursor starts at the top, where offset 0 is already correct).
+    fn follow_canvas_scroll(&mut self) {
+        let Some(inner) = self.layout.canvas_inner_area else {
+            return;
+        };
+        let width = inner.width as usize;
+        let viewport = inner.height as usize;
+        if width == 0 || viewport == 0 {
+            return;
+        }
+        let Some(popup) = self.canvas_popup.as_ref() else {
+            return;
+        };
+        let cursor_row =
+            crate::ui::canvas_cursor_visual_row(Some(self), &popup.buffer, popup.cursor, width);
+        let total_rows = crate::ui::canvas_total_visual_rows(Some(self), &popup.buffer, width);
+        let max_scroll = total_rows.saturating_sub(viewport);
+        let next = crate::ui::canvas_follow_scroll(popup.scroll_offset, cursor_row, viewport)
+            .min(max_scroll);
+        if let Some(popup) = self.canvas_popup.as_mut() {
+            popup.scroll_offset = next;
+        }
+    }
+
+    /// Scroll the canvas popup by `delta` wrapped rows (negative scrolls up)
+    /// without moving the caret — the mouse-wheel path. Bounds against the
+    /// last-rendered viewport so it never scrolls past the end of the content.
+    fn scroll_canvas_popup(&mut self, delta: isize) {
+        let Some(inner) = self.layout.canvas_inner_area else {
+            return;
+        };
+        let width = inner.width as usize;
+        let viewport = inner.height as usize;
+        if width == 0 || viewport == 0 {
+            return;
+        }
+        let Some(popup) = self.canvas_popup.as_ref() else {
+            return;
+        };
+        let total_rows = crate::ui::canvas_total_visual_rows(Some(self), &popup.buffer, width);
+        let max_scroll = total_rows.saturating_sub(viewport);
+        let current = popup.scroll_offset;
+        let next = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            current.saturating_add(delta as usize).min(max_scroll)
+        };
+        if let Some(popup) = self.canvas_popup.as_mut() {
+            popup.scroll_offset = next;
+        }
     }
 
     fn delete_canvas_back(&mut self) {
@@ -9885,6 +9977,7 @@ fn byte_pos(s: &str, char_idx: usize) -> usize {
 fn canvas_cursor_at_modal_point(
     buffer: &str,
     modal: ratatui::layout::Rect,
+    scroll_offset: usize,
     col: u16,
     row: u16,
 ) -> Option<usize> {
@@ -9899,7 +9992,11 @@ fn canvas_cursor_at_modal_point(
     if row < inner_y {
         return None;
     }
-    let target_line = row.saturating_sub(inner_y) as usize;
+    // Map the clicked screen row back to a source row, accounting for how far
+    // the body has scrolled. Like the rest of this hit-test it treats screen
+    // rows as logical lines (no intra-line wrap), so it lands exactly on
+    // unwrapped content and approximately when a line wraps.
+    let target_line = (row.saturating_sub(inner_y) as usize).saturating_add(scroll_offset);
     let target_col = col.saturating_sub(inner_x) as usize;
     Some(canvas_cursor_for_line_col(buffer, target_line, target_col))
 }
@@ -10101,6 +10198,7 @@ fn canvas_popup_from_document(
         revealed_at: now,
         hide_after: now + Duration::from_secs(365 * 24 * 60 * 60),
         closing: false,
+        scroll_offset: 0,
     }
 }
 
@@ -10448,6 +10546,7 @@ mod tests {
             canvas_title_close_hit: None,
             canvas_title_widget_hits: Vec::new(),
             canvas_selection_run_hit: None,
+            canvas_inner_area: None,
             browser_preview_area: None,
             browser_preview_close: None,
             terminal_scrollbar: None,
@@ -10634,7 +10733,38 @@ mod tests {
             revealed_at: now,
             hide_after: now + Duration::from_secs(60),
             closing: false,
+            scroll_offset: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn canvas_scroll_offset_follows_cursor_down_and_back() {
+        let (mut app, _dir, _server) = empty_app().await;
+        // Twenty short, non-wrapping lines rendered into a 5-row-tall viewport.
+        let markdown = (0..20).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        app.canvas_popup = Some(canvas_popup_for_test("s1", &markdown, 0));
+        app.layout.canvas_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 5));
+
+        // (3) Short content / cursor near the top keeps the offset pinned to 0.
+        app.follow_canvas_scroll();
+        assert_eq!(app.canvas_popup.as_ref().unwrap().scroll_offset, 0);
+
+        // (1) Cursor jumps to the final line: the window scrolls so the cursor
+        // (visual row 19) stays inside the 5-row viewport.
+        app.canvas_popup.as_mut().unwrap().cursor = markdown.chars().count();
+        app.follow_canvas_scroll();
+        let offset = app.canvas_popup.as_ref().unwrap().scroll_offset;
+        assert!(offset > 0, "offset should advance below the fold, got {offset}");
+        assert!(
+            (offset..offset + 5).contains(&19),
+            "cursor row 19 must be visible within [{offset}, {})",
+            offset + 5
+        );
+
+        // (2) Cursor returns to the top: the window snaps back to offset 0.
+        app.canvas_popup.as_mut().unwrap().cursor = 0;
+        app.follow_canvas_scroll();
+        assert_eq!(app.canvas_popup.as_ref().unwrap().scroll_offset, 0);
     }
 
     #[tokio::test]
