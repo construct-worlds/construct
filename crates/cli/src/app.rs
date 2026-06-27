@@ -619,20 +619,16 @@ pub enum SessionTitleMenuAction {
     SplitHorizontal,
     SplitVertical,
     CloseSplit,
-    CloseSessionView,
-    CloseSessionProcess,
     Archive,
     Delete,
 }
 
 impl SessionTitleMenuAction {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 6] = [
         Self::Rename,
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::CloseSplit,
-        Self::CloseSessionView,
-        Self::CloseSessionProcess,
         Self::Archive,
         Self::Delete,
     ];
@@ -643,8 +639,6 @@ impl SessionTitleMenuAction {
             Self::SplitHorizontal => "split horizontal",
             Self::SplitVertical => "split vertical",
             Self::CloseSplit => "close split",
-            Self::CloseSessionView => "close (session view)",
-            Self::CloseSessionProcess => "close (session process)",
             Self::Archive => "archive",
             Self::Delete => "delete",
         }
@@ -2831,14 +2825,7 @@ impl App {
                 self.split_active_window(WindowSplitDirection::Below)
             }
             SessionTitleMenuAction::CloseSplit => self.delete_active_window(),
-            SessionTitleMenuAction::CloseSessionView => {
-                self.focus = PaneFocus::List;
-                if self.zoom == ZoomMode::View {
-                    self.zoom = ZoomMode::List;
-                }
-                self.set_status("session view closed; focus moved to list".into());
-            }
-            SessionTitleMenuAction::CloseSessionProcess | SessionTitleMenuAction::Archive => {
+            SessionTitleMenuAction::Archive => {
                 match self.client.archive(&session_id).await {
                     Ok(()) => self.set_status(format!("archived {}", short_id(&session_id))),
                     Err(e) => self.set_status(format!("archive failed: {e}")),
