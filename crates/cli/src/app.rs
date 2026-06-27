@@ -481,6 +481,15 @@ pub enum MinibufferIntent {
     DeleteConfirm {
         session_id: String,
     },
+    MenuArchiveConfirm {
+        session_id: String,
+    },
+    MenuDeleteConfirm {
+        session_id: String,
+    },
+    MenuUnarchiveConfirm {
+        session_id: String,
+    },
     /// Confirmation prompt for restarting a terminated (`Done` /
     /// `Errored`) session. Single-key dispatch: `y`/Enter respawns
     /// the adapter (with `CONSTRUCT_RESUME=1` so persistent harnesses
@@ -612,6 +621,65 @@ pub struct DynamicUiHover {
     pub session_id: String,
     pub panel_id: String,
     pub until: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTitleMenuAction {
+    Rename,
+    SplitHorizontal,
+    SplitVertical,
+    CloseSplit,
+    Archive,
+    Delete,
+}
+
+impl SessionTitleMenuAction {
+    pub const ALL: [Self; 6] = [
+        Self::Rename,
+        Self::SplitHorizontal,
+        Self::SplitVertical,
+        Self::CloseSplit,
+        Self::Archive,
+        Self::Delete,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rename => "rename",
+            Self::SplitHorizontal => "split horizontal",
+            Self::SplitVertical => "split vertical",
+            Self::CloseSplit => "close split",
+            Self::Archive => "archive",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionTitleMenu {
+    pub session_id: String,
+    pub area: ratatui::layout::Rect,
+}
+
+impl SessionTitleMenu {
+    pub fn item_at(&self, col: u16, row: u16) -> Option<SessionTitleMenuAction> {
+        if col <= self.area.x
+            || col >= self.area.x.saturating_add(self.area.width).saturating_sub(1)
+            || row <= self.area.y
+            || row >= self.area.y.saturating_add(self.area.height).saturating_sub(1)
+        {
+            return None;
+        }
+        let idx = row.saturating_sub(self.area.y).saturating_sub(1) as usize;
+        SessionTitleMenuAction::ALL.get(idx).copied()
+    }
+
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        col >= self.area.x
+            && col < self.area.x.saturating_add(self.area.width)
+            && row >= self.area.y
+            && row < self.area.y.saturating_add(self.area.height)
+    }
 }
 
 /// Operator-rain analogue of [`DynamicUiHover`]: the rain panel shows a single
@@ -771,6 +839,8 @@ pub struct App {
     /// handler to map terminal coordinates back to UI regions. Filled
     /// by `ui::render` each frame; `None` until the first render lands.
     pub layout: LayoutSnapshot,
+    /// Session-view title hamburger dropdown.
+    pub session_title_menu: Option<SessionTitleMenu>,
     /// Most-recently observed mouse cursor position (terminal cell).
     /// `None` until the first `MouseEventKind::Moved` arrives — and stays
     /// `None` on terminals that don't forward motion events (e.g. macOS
@@ -2091,6 +2161,7 @@ async fn run_with_socket_initial_selection(
         pty_activity: HashMap::new(),
         start_instant: now,
         layout: LayoutSnapshot::default(),
+        session_title_menu: None,
         mouse_pos: None,
         mouse_capture_enabled: true,
         orchestrator_id: initial_orch_id,
@@ -2742,6 +2813,90 @@ impl App {
         self.ensure_pinned_parsers().await;
         self.set_status("reconnected to daemon".to_string());
         Ok(notifications)
+    }
+
+    pub fn open_session_title_menu(&mut self, session_id: String, view: ratatui::layout::Rect) {
+        const MENU_W: u16 = 26;
+        let menu_h = SessionTitleMenuAction::ALL.len() as u16 + 2;
+        let width = MENU_W.min(view.width.saturating_sub(2).max(1));
+        let x = view
+            .x
+            .saturating_add(view.width)
+            .saturating_sub(width.saturating_add(1));
+        self.session_title_menu = Some(SessionTitleMenu {
+            session_id,
+            area: ratatui::layout::Rect {
+                x,
+                y: view.y.saturating_add(1),
+                width,
+                height: menu_h.min(view.height.saturating_sub(1).max(3)),
+            },
+        });
+    }
+
+    async fn run_session_title_menu_action(
+        &mut self,
+        session_id: String,
+        action: SessionTitleMenuAction,
+    ) {
+        self.session_title_menu = None;
+        if self.selected_id().as_deref() != Some(session_id.as_str()) {
+            self.select_session(session_id.clone());
+            self.sync_active_window_selection();
+        }
+        match action {
+            SessionTitleMenuAction::Rename => {
+                self.run_action(crate::keymap::KeyAction::OpenRename).await
+            }
+            SessionTitleMenuAction::SplitHorizontal => {
+                self.split_active_window(WindowSplitDirection::Right)
+            }
+            SessionTitleMenuAction::SplitVertical => {
+                self.split_active_window(WindowSplitDirection::Below)
+            }
+            SessionTitleMenuAction::CloseSplit => self.delete_active_window(),
+            SessionTitleMenuAction::Archive => {
+                let archived = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .is_some_and(|s| s.archived);
+                let (verb, intent) = if archived {
+                    (
+                        "Unarchive",
+                        MinibufferIntent::MenuUnarchiveConfirm {
+                            session_id: session_id.clone(),
+                        },
+                    )
+                } else {
+                    (
+                        "Archive",
+                        MinibufferIntent::MenuArchiveConfirm {
+                            session_id: session_id.clone(),
+                        },
+                    )
+                };
+                self.minibuffer = Some(Minibuffer {
+                    prompt: format!("{verb} session {}? (y/N): ", short_id(&session_id)),
+                    input: String::new(),
+                    cursor: 0,
+                    intent,
+                    error: None,
+                });
+            }
+            SessionTitleMenuAction::Delete => {
+                self.minibuffer = Some(Minibuffer {
+                    prompt: format!(
+                        "Delete session {}? This drops transcript + worktree. (y/N): ",
+                        short_id(&session_id)
+                    ),
+                    input: String::new(),
+                    cursor: 0,
+                    intent: MinibufferIntent::MenuDeleteConfirm { session_id },
+                    error: None,
+                });
+            }
+        }
     }
 
     pub fn set_status(&mut self, msg: String) {
@@ -4954,6 +5109,22 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(hit) = self
+                    .layout
+                    .main_window_areas
+                    .iter()
+                    .find(|hit| {
+                        let (x_start, x_end, y) = crate::ui::view_close_button_range(hit.area);
+                        ev.row == y && ev.column >= x_start && ev.column < x_end
+                    })
+                    .copied()
+                {
+                    self.focus_main_window(hit.id);
+                    if let Some(session_id) = self.selected_id() {
+                        self.open_session_title_menu(session_id, hit.area);
+                    }
+                    return;
+                }
                 // List ↔ view divider: clicking the list pane's
                 // right border (col = list_width - 1), the view's
                 // left border (col = list_width), or the first pin
@@ -5551,6 +5722,17 @@ impl App {
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
         }
+        if let Some(menu) = self.session_title_menu.clone() {
+            if let Some(action) = menu.item_at(col, row) {
+                self.run_session_title_menu_action(menu.session_id, action)
+                    .await;
+                return;
+            }
+            if menu.contains(col, row) {
+                return;
+            }
+            self.session_title_menu = None;
+        }
         if self.handle_dynamic_ui_overlay_click(col, row).await {
             return;
         }
@@ -5693,9 +5875,8 @@ impl App {
                     self.focus = PaneFocus::List;
                     return;
                 }
-                // Top-row close button: ` x ` 3-cell range at the
-                // right edge of the top border. Click → delete
-                // confirmation prompt for the selected session.
+                // Top-row session action button: 3-cell range at the
+                // right edge of the top border. Click opens the dropdown.
                 let (close_x_start, close_x_end, close_y) =
                     crate::ui::view_close_button_range(view);
                 let (toggle_x_start, toggle_x_end, toggle_y) =
@@ -5708,13 +5889,14 @@ impl App {
                     self.toggle_canvas_popup().await;
                     return;
                 }
-                if self.selected_session().is_some()
+                if self.selected_id().is_some()
                     && row == close_y
                     && col >= close_x_start
                     && col < close_x_end
                 {
-                    self.run_action(crate::keymap::KeyAction::OpenDeleteConfirm)
-                        .await;
+                    if let Some(session_id) = self.selected_id() {
+                        self.open_session_title_menu(session_id, view);
+                    }
                     return;
                 }
                 if self.handle_dynamic_ui_overlay_click(col, row).await {
@@ -7472,6 +7654,21 @@ impl App {
         if self.canvas_popup.is_none() {
             return false;
         }
+        if let Some(menu) = self.session_title_menu.clone() {
+            if let Some(action) = menu.item_at(ev.column, ev.row) {
+                if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    self.run_session_title_menu_action(menu.session_id, action)
+                        .await;
+                }
+                return true;
+            }
+            if menu.contains(ev.column, ev.row) {
+                return true;
+            }
+            if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.session_title_menu = None;
+            }
+        }
         let contains = ev.column >= modal.x
             && ev.column < modal.x.saturating_add(modal.width)
             && ev.row >= modal.y
@@ -7493,10 +7690,16 @@ impl App {
             .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
         if hit_title_toggle || hit_title_run || hit_title_close || hit_selection_run {
             if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
-                // The close button and the mode toggle both dismiss the canvas
-                // (same path as `C-x Space` / the existing toggle).
-                if hit_title_toggle || hit_title_close {
+                if hit_title_toggle {
                     self.close_canvas_popup().await;
+                } else if hit_title_close {
+                    if let Some(session_id) = self
+                        .canvas_popup
+                        .as_ref()
+                        .map(|popup| popup.canvas.session_id.clone())
+                    {
+                        self.open_session_title_menu(session_id, modal);
+                    }
                 } else {
                     let selection = hit_selection_run
                         .then(|| {
@@ -9531,6 +9734,39 @@ impl App {
                     }
                 }
             }
+            MinibufferIntent::MenuArchiveConfirm { session_id } => {
+                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                if !yes {
+                    self.set_status("archive cancelled".to_string());
+                    return;
+                }
+                match self.client.archive(&session_id).await {
+                    Ok(()) => self.set_status(format!("archived {}", short_id(&session_id))),
+                    Err(e) => self.set_status(format!("archive failed: {e}")),
+                }
+            }
+            MinibufferIntent::MenuDeleteConfirm { session_id } => {
+                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                if !yes {
+                    self.set_status("delete cancelled".to_string());
+                    return;
+                }
+                match self.client.delete(&session_id).await {
+                    Ok(()) => self.set_status(format!("deleted {}", short_id(&session_id))),
+                    Err(e) => self.set_status(format!("delete failed: {e}")),
+                }
+            }
+            MinibufferIntent::MenuUnarchiveConfirm { session_id } => {
+                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                if !yes {
+                    self.set_status("unarchive cancelled".to_string());
+                    return;
+                }
+                match self.client.restart(&session_id).await {
+                    Ok(()) => self.set_status(format!("unarchived {}", short_id(&session_id))),
+                    Err(e) => self.set_status(format!("unarchive failed: {e}")),
+                }
+            }
             MinibufferIntent::RestartConfirm { session_id } => {
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
                 if !yes {
@@ -11258,6 +11494,7 @@ mod tests {
             pty_activity: HashMap::new(),
             start_instant: now,
             layout: LayoutSnapshot::default(),
+            session_title_menu: None,
             mouse_pos: None,
             mouse_capture_enabled: true,
             orchestrator_id: None,
@@ -12163,11 +12400,11 @@ mod tests {
         server.abort();
     }
 
-    /// The canvas close button must reuse the session chat view's geometry AND
-    /// styling: same `view_close_button_range` slot, painted in the shared
-    /// `matrix_close` color rather than the canvas accent.
+    /// The canvas session-actions button must reuse the session chat view's
+    /// geometry AND styling: same `view_close_button_range` slot, painted in
+    /// the shared `matrix_close` color rather than the canvas accent.
     #[tokio::test]
-    async fn canvas_title_close_matches_session_view_styling() {
+    async fn canvas_title_actions_matches_session_view_styling() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
         session.id = "s1".into();
@@ -12188,15 +12425,17 @@ mod tests {
         assert_eq!(
             app.layout.canvas_title_close_hit,
             Some(crate::ui::view_close_button_range(modal)),
-            "canvas close must reuse the session-view close geometry"
+            "canvas actions must reuse the session-view action geometry"
         );
-        let (cx, _ce, cy) = crate::ui::view_close_button_range(modal);
-        let x_cell = buf.cell((cx + 1, cy)).expect("close glyph cell");
-        assert_eq!(x_cell.symbol(), "x", "close glyph paints in its range");
+        let (cx, ce, cy) = crate::ui::view_close_button_range(modal);
+        let glyph_cell = (cx..ce)
+            .filter_map(|x| buf.cell((x, cy)))
+            .find(|cell| cell.symbol() == "☰")
+            .expect("hamburger glyph paints in its range");
         assert_eq!(
-            x_cell.style().fg,
+            glyph_cell.style().fg,
             Some(matrix_close),
-            "canvas close glyph should use the shared session-view close color"
+            "canvas action glyph should use the shared session-view action color"
         );
         server.abort();
     }
@@ -12311,7 +12550,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canvas_title_renders_close_button_and_widget_icons() {
+    async fn canvas_title_renders_action_button_and_widget_icons() {
         let (mut app, _dir, server) = canvas_with_widget_app().await;
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -12321,23 +12560,23 @@ mod tests {
         let buf = term.backend().buffer();
         let modal = app.layout.modal_area.expect("modal area");
 
-        // Close button reuses the chat-view geometry, and its `x` glyph paints
-        // inside that range.
+        // The actions button reuses the chat-view geometry, and its hamburger
+        // glyph paints inside that range.
         let close = app
             .layout
             .canvas_title_close_hit
-            .expect("close hit registered");
+            .expect("actions hit registered");
         assert_eq!(
             close,
             crate::ui::view_close_button_range(modal),
-            "canvas close must reuse the session-view close geometry"
+            "canvas actions must reuse the session-view action geometry"
         );
         let close_text: String = (close.0..close.1)
             .filter_map(|x| buf.cell((x, close.2)).map(|c| c.symbol().to_string()))
             .collect();
         assert!(
-            close_text.contains('x'),
-            "close button glyph should paint within its hit range: {close_text:?}"
+            close_text.contains('☰'),
+            "actions button glyph should paint within its hit range: {close_text:?}"
         );
 
         // The sticky widget registers a title-bar indicator via the SHARED
@@ -12370,7 +12609,7 @@ mod tests {
                 .map(|c| c.symbol().to_string())
                 .unwrap_or_default()
         };
-        let near_glyph = (w.start_col.saturating_sub(1)..=w.start_col)
+        let near_glyph = (w.start_col.saturating_sub(2)..=w.start_col)
             .any(|x| painted_at(x) == "□" || painted_at(x) == "■");
         assert!(
             near_glyph,
@@ -12381,7 +12620,7 @@ mod tests {
         );
 
         // Run now lives in the LEFT cluster (left of the widget icon), and the
-        // widget icon sits left of the rightmost close button.
+        // widget icon sits left of the rightmost actions button.
         let run = app
             .layout
             .canvas_title_run_hit
@@ -12393,19 +12632,19 @@ mod tests {
         );
         assert!(
             w.end_col <= close.0,
-            "widget icon (..{}) should sit left of close {close:?}",
+            "widget icon (..{}) should sit left of actions {close:?}",
             w.end_col
         );
         assert_eq!(
             close.1,
             modal.x + modal.width - 1,
-            "close should be the rightmost control: {close:?}"
+            "actions should be the rightmost control: {close:?}"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn canvas_title_close_button_click_dismisses_canvas() {
+    async fn canvas_title_action_button_click_opens_session_menu() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, server) = canvas_with_widget_app().await;
 
@@ -12416,10 +12655,10 @@ mod tests {
         let close = app
             .layout
             .canvas_title_close_hit
-            .expect("close hit registered");
+            .expect("actions hit registered");
 
-        // Clicking the close button starts the canvas dismissal animation,
-        // exactly like the mode toggle / `C-x Space`.
+        // Clicking the hamburger opens the same session actions menu as the
+        // normal session view; it no longer dismisses the canvas.
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: close.0 + 1,
@@ -12429,8 +12668,14 @@ mod tests {
         .await;
 
         assert!(
-            app.canvas_popup.as_ref().is_some_and(|p| p.closing),
-            "clicking the close button should begin dismissing the canvas"
+            app.canvas_popup.as_ref().is_some_and(|p| !p.closing),
+            "clicking the actions button should leave the canvas open"
+        );
+        assert!(
+            app.session_title_menu
+                .as_ref()
+                .is_some_and(|menu| menu.session_id == "s1"),
+            "clicking the actions button should open the session menu"
         );
         server.abort();
     }
