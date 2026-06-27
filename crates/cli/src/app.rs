@@ -1732,8 +1732,6 @@ pub struct LayoutSnapshot {
     pub canvas_title_toggle_hit: Option<(u16, u16, u16)>,
     /// Canvas title-bar close button bounds: `(x_start, x_end, y)`.
     pub canvas_title_close_hit: Option<(u16, u16, u16)>,
-    /// Canvas title-bar session-widget indicator hitboxes from the last frame.
-    pub canvas_title_widget_hits: Vec<DynamicUiWidgetHit>,
     /// Canvas selected-text context Run button bounds: `(x_start, x_end, y)`.
     pub canvas_selection_run_hit: Option<(u16, u16, u16)>,
     /// Inner content rect of the active canvas popup from the last frame.
@@ -7461,11 +7459,13 @@ impl App {
             }
             return true;
         }
-        // Clicking a title-bar widget indicator pins/unpins that widget,
-        // mirroring the same affordance in the session pane title bar.
+        // Clicking a title-bar widget indicator pins/unpins that widget. The
+        // canvas reuses the session view's shared widget geometry, so its icons
+        // register into `dynamic_ui_widget_hits` (via `render_session_widget_title`)
+        // — the same list the pane title bar uses.
         if let Some(hit) = self
             .layout
-            .canvas_title_widget_hits
+            .dynamic_ui_widget_hits
             .iter()
             .find(|hit| hit.contains(ev.column, ev.row))
             .cloned()
@@ -10809,7 +10809,6 @@ mod tests {
             canvas_title_run_hit: None,
             canvas_title_toggle_hit: None,
             canvas_title_close_hit: None,
-            canvas_title_widget_hits: Vec::new(),
             canvas_selection_run_hit: None,
             canvas_inner_area: None,
             canvas_clip_hits: Vec::new(),
@@ -11515,6 +11514,98 @@ mod tests {
         server.abort();
     }
 
+    /// The Run button now lives in the LEFT cluster of the canvas title bar,
+    /// between the session name and the ` * modified` marker — not pinned to the
+    /// right side any more.
+    #[tokio::test]
+    async fn canvas_title_run_button_sits_in_left_cluster() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "alpha", 0));
+        {
+            let popup = app.canvas_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(CANVAS_REVEAL_MS);
+            // Diverge the buffer from the saved markdown so the ` * modified`
+            // marker renders to the right of the Run button.
+            popup.buffer = "alpha beta".into();
+        }
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("canvas should render");
+        let buf = term.backend().buffer();
+        let modal = app.layout.modal_area.expect("modal area");
+
+        let run = app
+            .layout
+            .canvas_title_run_hit
+            .expect("run hit registered");
+        assert_eq!(run.2, modal.y, "run sits on the title border row");
+        assert!(
+            run.0 < modal.x + modal.width / 2,
+            "run {run:?} must sit in the left cluster, not the right side"
+        );
+
+        // Locate the ▶ glyph and the dirty-marker `*` on the title row.
+        let col_of = |needle: &str| -> Option<u16> {
+            (modal.x..modal.x + modal.width)
+                .find(|&x| buf.cell((x, modal.y)).map(|c| c.symbol()) == Some(needle))
+        };
+        let run_col = col_of("▶").expect("run glyph renders on the title row");
+        let star_col = col_of("*").expect("dirty marker renders on the title row");
+        assert!(
+            run.0 <= run_col && run_col < run.1,
+            "run glyph (col {run_col}) paints inside its hit range {run:?}"
+        );
+        assert!(
+            run_col < star_col,
+            "Run ▶ (col {run_col}) must sit left of the ` * modified` marker (col {star_col})"
+        );
+        server.abort();
+    }
+
+    /// The canvas close button must reuse the session chat view's geometry AND
+    /// styling: same `view_close_button_range` slot, painted in the shared
+    /// `matrix_close` color rather than the canvas accent.
+    #[tokio::test]
+    async fn canvas_title_close_matches_session_view_styling() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "alpha", 0));
+        app.canvas_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(CANVAS_REVEAL_MS);
+        let matrix_close = app.theme.matrix_close;
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("canvas should render");
+        let buf = term.backend().buffer();
+        let modal = app.layout.modal_area.expect("modal area");
+
+        assert_eq!(
+            app.layout.canvas_title_close_hit,
+            Some(crate::ui::view_close_button_range(modal)),
+            "canvas close must reuse the session-view close geometry"
+        );
+        let (cx, _ce, cy) = crate::ui::view_close_button_range(modal);
+        let x_cell = buf.cell((cx + 1, cy)).expect("close glyph cell");
+        assert_eq!(x_cell.symbol(), "x", "close glyph paints in its range");
+        assert_eq!(
+            x_cell.style().fg,
+            Some(matrix_close),
+            "canvas close glyph should use the shared session-view close color"
+        );
+        server.abort();
+    }
+
     /// Seed `app` with one selected session that owns a single sticky widget,
     /// plus a fully-revealed canvas popup over it. Returns the keep-alive dir
     /// and mock-daemon handle.
@@ -11554,12 +11645,19 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("canvas should render");
         let buf = term.backend().buffer();
+        let modal = app.layout.modal_area.expect("modal area");
 
-        // Close button registered, and its `x` glyph paints inside its range.
+        // Close button reuses the chat-view geometry, and its `x` glyph paints
+        // inside that range.
         let close = app
             .layout
             .canvas_title_close_hit
             .expect("close hit registered");
+        assert_eq!(
+            close,
+            crate::ui::view_close_button_range(modal),
+            "canvas close must reuse the session-view close geometry"
+        );
         let close_text: String = (close.0..close.1)
             .filter_map(|x| buf.cell((x, close.2)).map(|c| c.symbol().to_string()))
             .collect();
@@ -11568,33 +11666,55 @@ mod tests {
             "close button glyph should paint within its hit range: {close_text:?}"
         );
 
-        // The single sticky widget renders one indicator, and a rectangle
-        // glyph paints exactly at the registered hit cell.
-        assert_eq!(
-            app.layout.canvas_title_widget_hits.len(),
-            1,
-            "one title-bar indicator per sticky widget"
-        );
-        let w = &app.layout.canvas_title_widget_hits[0];
-        assert_eq!(w.panel_id, "w1");
-        let glyph = buf
-            .cell((w.start_col, w.row))
-            .map(|c| c.symbol().to_string())
-            .unwrap_or_default();
+        // The sticky widget registers a title-bar indicator via the SHARED
+        // `render_session_widget_title` helper, so it lands in
+        // `dynamic_ui_widget_hits` — the same list the pane title bar uses. The
+        // session view and the canvas both render it at identical geometry.
+        let widget_hits: Vec<_> = app
+            .layout
+            .dynamic_ui_widget_hits
+            .iter()
+            .filter(|h| h.panel_id == "w1")
+            .cloned()
+            .collect();
         assert!(
-            glyph == "□" || glyph == "■",
-            "widget icon glyph should paint at its hit cell: {glyph:?}"
+            !widget_hits.is_empty(),
+            "the sticky widget should register a title-bar indicator"
+        );
+        let w = &widget_hits[0];
+        assert!(
+            widget_hits
+                .iter()
+                .all(|h| h.start_col == w.start_col && h.row == w.row),
+            "every registration of the widget icon must share one geometry: {widget_hits:?}"
+        );
+        // The □/■ indicator paints on the title row at the hit (ratatui's
+        // right-aligned title placement lands the glyph within one cell of the
+        // registered square — the same as the session-view pane title bar).
+        let painted_at = |x: u16| {
+            buf.cell((x, w.row))
+                .map(|c| c.symbol().to_string())
+                .unwrap_or_default()
+        };
+        let near_glyph = (w.start_col.saturating_sub(1)..=w.start_col)
+            .any(|x| painted_at(x) == "□" || painted_at(x) == "■");
+        assert!(
+            near_glyph,
+            "a widget indicator glyph should paint at the hit {w:?}: row={:?}",
+            (w.start_col.saturating_sub(2)..w.start_col + 2)
+                .map(painted_at)
+                .collect::<Vec<_>>()
         );
 
-        // New right-cluster ordering, left→right: [Run] [widgets] [x]. The
-        // close button is the rightmost control, mirroring the chat view.
+        // Run now lives in the LEFT cluster (left of the widget icon), and the
+        // widget icon sits left of the rightmost close button.
         let run = app
             .layout
             .canvas_title_run_hit
             .expect("run hit registered");
         assert!(
             run.1 <= w.start_col,
-            "run {run:?} should sit left of the widget icon at {}",
+            "run {run:?} (left cluster) should sit left of the widget icon at {}",
             w.start_col
         );
         assert!(
@@ -11602,7 +11722,6 @@ mod tests {
             "widget icon (..{}) should sit left of close {close:?}",
             w.end_col
         );
-        let modal = app.layout.modal_area.expect("modal area");
         assert_eq!(
             close.1,
             modal.x + modal.width - 1,
@@ -11653,8 +11772,9 @@ mod tests {
             .expect("canvas should render");
         let hit = app
             .layout
-            .canvas_title_widget_hits
-            .first()
+            .dynamic_ui_widget_hits
+            .iter()
+            .find(|h| h.panel_id == "w1")
             .cloned()
             .expect("widget hit registered");
         assert!(!app.dynamic_ui_panel_pinned("s1", "w1"));
