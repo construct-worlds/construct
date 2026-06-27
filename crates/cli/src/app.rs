@@ -11901,11 +11901,11 @@ mod tests {
         server.abort();
     }
 
-    /// The canvas close button must reuse the session chat view's geometry AND
-    /// styling: same `view_close_button_range` slot, painted in the shared
-    /// `matrix_close` color rather than the canvas accent.
+    /// The canvas session-actions button must reuse the session chat view's
+    /// geometry AND styling: same `view_close_button_range` slot, painted in
+    /// the shared `matrix_close` color rather than the canvas accent.
     #[tokio::test]
-    async fn canvas_title_close_matches_session_view_styling() {
+    async fn canvas_title_actions_matches_session_view_styling() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
         session.id = "s1".into();
@@ -11926,15 +11926,17 @@ mod tests {
         assert_eq!(
             app.layout.canvas_title_close_hit,
             Some(crate::ui::view_close_button_range(modal)),
-            "canvas close must reuse the session-view close geometry"
+            "canvas actions must reuse the session-view action geometry"
         );
-        let (cx, _ce, cy) = crate::ui::view_close_button_range(modal);
-        let x_cell = buf.cell((cx + 1, cy)).expect("close glyph cell");
-        assert_eq!(x_cell.symbol(), "x", "close glyph paints in its range");
+        let (cx, ce, cy) = crate::ui::view_close_button_range(modal);
+        let glyph_cell = (cx..ce)
+            .filter_map(|x| buf.cell((x, cy)))
+            .find(|cell| cell.symbol() == "☰")
+            .expect("hamburger glyph paints in its range");
         assert_eq!(
-            x_cell.style().fg,
+            glyph_cell.style().fg,
             Some(matrix_close),
-            "canvas close glyph should use the shared session-view close color"
+            "canvas action glyph should use the shared session-view action color"
         );
         server.abort();
     }
@@ -12049,7 +12051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canvas_title_renders_close_button_and_widget_icons() {
+    async fn canvas_title_renders_action_button_and_widget_icons() {
         let (mut app, _dir, server) = canvas_with_widget_app().await;
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -12059,23 +12061,23 @@ mod tests {
         let buf = term.backend().buffer();
         let modal = app.layout.modal_area.expect("modal area");
 
-        // Close button reuses the chat-view geometry, and its `x` glyph paints
-        // inside that range.
+        // The actions button reuses the chat-view geometry, and its hamburger
+        // glyph paints inside that range.
         let close = app
             .layout
             .canvas_title_close_hit
-            .expect("close hit registered");
+            .expect("actions hit registered");
         assert_eq!(
             close,
             crate::ui::view_close_button_range(modal),
-            "canvas close must reuse the session-view close geometry"
+            "canvas actions must reuse the session-view action geometry"
         );
         let close_text: String = (close.0..close.1)
             .filter_map(|x| buf.cell((x, close.2)).map(|c| c.symbol().to_string()))
             .collect();
         assert!(
-            close_text.contains('x'),
-            "close button glyph should paint within its hit range: {close_text:?}"
+            close_text.contains('☰'),
+            "actions button glyph should paint within its hit range: {close_text:?}"
         );
 
         // The sticky widget registers a title-bar indicator via the SHARED
@@ -12108,7 +12110,7 @@ mod tests {
                 .map(|c| c.symbol().to_string())
                 .unwrap_or_default()
         };
-        let near_glyph = (w.start_col.saturating_sub(1)..=w.start_col)
+        let near_glyph = (w.start_col.saturating_sub(2)..=w.start_col)
             .any(|x| painted_at(x) == "□" || painted_at(x) == "■");
         assert!(
             near_glyph,
@@ -12119,7 +12121,7 @@ mod tests {
         );
 
         // Run now lives in the LEFT cluster (left of the widget icon), and the
-        // widget icon sits left of the rightmost close button.
+        // widget icon sits left of the rightmost actions button.
         let run = app
             .layout
             .canvas_title_run_hit
@@ -12131,19 +12133,19 @@ mod tests {
         );
         assert!(
             w.end_col <= close.0,
-            "widget icon (..{}) should sit left of close {close:?}",
+            "widget icon (..{}) should sit left of actions {close:?}",
             w.end_col
         );
         assert_eq!(
             close.1,
             modal.x + modal.width - 1,
-            "close should be the rightmost control: {close:?}"
+            "actions should be the rightmost control: {close:?}"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn canvas_title_close_button_click_dismisses_canvas() {
+    async fn canvas_title_action_button_click_opens_session_menu() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, server) = canvas_with_widget_app().await;
 
@@ -12154,10 +12156,10 @@ mod tests {
         let close = app
             .layout
             .canvas_title_close_hit
-            .expect("close hit registered");
+            .expect("actions hit registered");
 
-        // Clicking the close button starts the canvas dismissal animation,
-        // exactly like the mode toggle / `C-x Space`.
+        // Clicking the hamburger opens the same session actions menu as the
+        // normal session view; it no longer dismisses the canvas.
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: close.0 + 1,
@@ -12167,8 +12169,14 @@ mod tests {
         .await;
 
         assert!(
-            app.canvas_popup.as_ref().is_some_and(|p| p.closing),
-            "clicking the close button should begin dismissing the canvas"
+            app.canvas_popup.as_ref().is_some_and(|p| !p.closing),
+            "clicking the actions button should leave the canvas open"
+        );
+        assert!(
+            app.session_title_menu
+                .as_ref()
+                .is_some_and(|menu| menu.session_id == "s1"),
+            "clicking the actions button should open the session menu"
         );
         server.abort();
     }
