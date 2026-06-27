@@ -902,6 +902,15 @@ pub struct CanvasDocument {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanvasRunProgress {
+    pub run_id: String,
+    pub started_at_ms: i64,
+    pub expires_at_ms: i64,
+    #[serde(default)]
+    pub pending_block_signatures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanvasRevision {
     pub version: u64,
     pub actor: CanvasUpdateActor,
@@ -972,6 +981,8 @@ pub struct CanvasGetResult {
     pub canvas: CanvasDocument,
     #[serde(default)]
     pub revisions: Vec<CanvasRevision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_run: Option<CanvasRunProgress>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1030,6 +1041,8 @@ pub struct CanvasExecuteParams {
 pub struct CanvasExecuteResult {
     pub canvas: CanvasDocument,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_run: Option<CanvasRunProgress>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1040,6 +1053,8 @@ pub struct CanvasListTemplatesResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanvasStateNotificationPayload {
     pub canvas: CanvasDocument,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_run: Option<CanvasRunProgress>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
