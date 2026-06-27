@@ -588,9 +588,6 @@ fn canvas_run_pending_signatures(body: &str) -> std::collections::HashSet<String
 }
 
 fn session_event_is_canvas_output(event: &SessionEvent) -> bool {
-    if event.pty_bytes().as_ref().is_some_and(|b| !b.is_empty()) {
-        return true;
-    }
     matches!(
         event,
         SessionEvent::Reasoning { .. }
@@ -2613,7 +2610,6 @@ impl SessionManager {
         // when a TUI attaches, so we no longer keep a parallel in-memory
         // ring of bytes.
         if let SessionEvent::Pty { .. } = &event {
-            let has_output = event.pty_bytes().as_ref().is_some_and(|b| !b.is_empty());
             if let Some(bytes) = event.pty_bytes() {
                 if let Err(e) = self.storage.append_pty_bytes(&entry.id, &bytes) {
                     tracing::warn!(
@@ -2638,9 +2634,6 @@ impl SessionManager {
                     event,
                     seq,
                 }));
-            if has_output {
-                self.clear_canvas_run_for_output(&entry.id);
-            }
             return;
         }
 
