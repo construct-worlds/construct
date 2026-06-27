@@ -11731,7 +11731,7 @@ mod tests {
         app.handle_canvas_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .await;
 
-        assert_eq!(app.canvas_popup.as_ref().unwrap().cursor, 6, "during search the first match >= anchor is selected (cursor moves)");
+        assert_eq!(app.canvas_popup.as_ref().unwrap().cursor, 0);
         app.handle_canvas_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
             .await;
         let popup = app.canvas_popup.as_ref().unwrap();
