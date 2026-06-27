@@ -10362,9 +10362,43 @@ fn canvas_cursor_at_modal_point(
     let target_row = (row.saturating_sub(inner_y) as usize).saturating_add(scroll_offset);
     let target_col = col.saturating_sub(inner_x) as usize;
     let width = ui::canvas_modal_inner_width(modal);
-    Some(ui::canvas_visual_to_cursor(
-        app, buffer, target_row, target_col, width,
+    Some(canvas_normalize_canvas_cursor(
+        buffer,
+        ui::canvas_visual_to_cursor(app, buffer, target_row, target_col, width),
     ))
+}
+
+fn canvas_list_marker_content_start(raw_line: &str) -> Option<usize> {
+    let trimmed = raw_line.trim();
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+        Some(raw_line.chars().take_while(|ch| ch.is_whitespace()).count() + 2)
+    } else {
+        None
+    }
+}
+
+fn canvas_list_marker_cursor(buffer: &str, cursor: usize) -> Option<usize> {
+    let mut line_start = 0usize;
+    for (idx, ch) in buffer.chars().enumerate() {
+        if idx >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            line_start = idx + 1;
+        }
+    }
+    let raw_line: String = buffer
+        .chars()
+        .skip(line_start)
+        .take_while(|ch| *ch != '\n')
+        .collect();
+    canvas_list_marker_content_start(&raw_line).map(|offset| line_start + offset)
+}
+
+fn canvas_normalize_canvas_cursor(buffer: &str, cursor: usize) -> usize {
+    canvas_list_marker_cursor(buffer, cursor)
+        .map(|marker_start| marker_start.max(cursor))
+        .unwrap_or(cursor)
 }
 
 fn canvas_smart_clip_query(popup: &CanvasPopup, trigger_start: usize) -> Option<String> {
@@ -10601,6 +10635,11 @@ fn canvas_line_start(s: &str, cursor: usize) -> usize {
         }
         if ch == '\n' {
             line_start = idx + 1;
+        }
+    }
+    if let Some(marker_start) = canvas_list_marker_cursor(s, cursor) {
+        if marker_start >= line_start {
+            return marker_start;
         }
     }
     line_start
@@ -12812,6 +12851,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canvas_ctrl_a_then_ctrl_f_does_not_skip_list_marker() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "* alpha beta gamma", 0));
+        app.layout.canvas_inner_area = Some(Rect::new(2, 2, 5, 12));
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().cursor,
+            2,
+            "Ctrl-A must jump to list content, not the list marker"
+        );
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().cursor,
+            3,
+            "first Ctrl-F must move to the first content char, not jump over it"
+        );
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().cursor,
+            4,
+            "single-step right should behave like Ctrl-F from list content start"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_click_on_list_prefix_normalizes_to_content_start() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "* alpha beta gamma", 0));
+        let modal = Rect::new(0, 0, 9, 20);
+
+        // Click leftmost painted column on the first row. Without normalization
+        // this resolves to cursor 0 (inside the hidden '* ' marker), then
+        // moves with the next keypress.
+        app.place_canvas_cursor(modal, 1, 2);
+
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().cursor,
+            2,
+            "clicking list marker area should land on list content start"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_click_on_wrapped_list_continuation_row_maps_to_offset() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "* alpha beta gamma", 0));
+        let modal = Rect::new(0, 0, 9, 20);
+
+        // inner width = 9 - 2 border - 2 pad = 6.
+        // This line wraps and places continuation rows; clicking continuation
+        // row 2 must stay inside the list content, not land before marker.
+        app.place_canvas_cursor(modal, 2, 3);
+        assert!(
+            app.canvas_popup.as_ref().unwrap().cursor >= 2,
+            "wrapped list hit-testing should remain within list content"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_ctrl_a_from_wrapped_list_continuation_row_preserves_content_start() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "* alpha beta gamma", 0));
+        let modal = Rect::new(0, 0, 9, 20);
+
+        app.place_canvas_cursor(modal, 2, 3);
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .await;
+
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().cursor,
+            2,
+            "Ctrl-A must land on list content even when cursor starts on wrapped row"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn canvas_vertical_nav_preserves_preferred_column_across_wrap() {
         let (mut app, _dir, server) = empty_app().await;
         // "abcdefghij" wraps to two visual rows; "XY" is a short line below it.
@@ -12880,6 +13006,15 @@ mod tests {
             normalized,
             "a @{harness:codex clip_id=clip_8} b @{harness:claude clip_id=clip_7} c @{harness:codex clip_id=clip_9}"
         );
+    }
+
+    #[test]
+    fn canvas_line_start_skips_list_markers_for_cursor_commands() {
+        assert_eq!(canvas_line_start("- alpha", 0), 2);
+        assert_eq!(canvas_line_start("* alpha", 4), 2);
+        assert_eq!(canvas_line_start("  - alpha", 0), 4);
+        assert_eq!(canvas_line_start("- alpha", 7), 2);
+        assert_eq!(canvas_line_start("plain", 0), 0);
     }
 
     #[tokio::test]
