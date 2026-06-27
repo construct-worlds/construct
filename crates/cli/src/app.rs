@@ -688,6 +688,18 @@ pub struct App {
     /// tick is a safety net so nothing can stay stale for long.
     /// Reset to false every loop iteration.
     pub skip_redraw_after_event: bool,
+    /// Set by `on_notification` to report whether the just-handled
+    /// notification changed something currently *visible* (a focused /
+    /// split / pinned pane, the orchestrator panel, or any structural /
+    /// status change shown in the list). The run loop reads it to avoid a
+    /// full-frame `terminal.draw()` for the high-frequency background
+    /// `Pty` chunks of off-screen sessions — those only warm history /
+    /// feed the spinner + matrix rain, which animate on the 120ms tick
+    /// anyway. Defaults to `true` (every notification kind except an
+    /// off-screen `Pty` forces a redraw), so the gate can never *miss* a
+    /// needed repaint. A heartbeat in the loop still forces a draw at
+    /// least every tick under sustained background load.
+    pub notification_dirtied_view: bool,
     /// Sessions whose selected/pinned terminal history is being rehydrated in
     /// the background. Renderers use this to show a loading placeholder while
     /// the TUI stays responsive instead of blocking startup on full transcript
@@ -1883,6 +1895,7 @@ async fn run_with_socket_initial_selection(
         window_scrollback: HashMap::new(),
         terminal_scrollbar_visible_until: HashMap::new(),
         skip_redraw_after_event: false,
+        notification_dirtied_view: true,
         hydrating_sessions: HashSet::new(),
         orchestrator_scrollback: 0,
         operator_monolog: None,
@@ -2069,6 +2082,12 @@ async fn run_loop(
     let mut reconnect: Option<ReconnectState> = None;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
+    // Wall-clock of the last actual `terminal.draw`. The notification arm uses
+    // it as a heartbeat: a burst that touched nothing visible skips its repaint
+    // only while a draw happened within the last tick, so sustained background
+    // output still repaints (spinner / rain / list) at ~8fps and can never
+    // freeze the foreground.
+    let mut last_draw = Instant::now();
 
     // Debounce window for resize events. Terminal-app drags and
     // list/view divider drags both flood `terminal_pane_size` (and
@@ -2156,6 +2175,7 @@ async fn run_loop(
         let skip_draw = std::mem::take(&mut app.skip_redraw_after_event);
         if !skip_draw {
             terminal.draw(|f| ui::render(f, app))?;
+            last_draw = Instant::now();
         }
 
         // A PTY-passthrough keystroke has already queued bytes to the input
@@ -2420,6 +2440,7 @@ async fn run_loop(
                 match notif {
                     Some(n) => {
                         app.on_notification(n).await;
+                        let mut dirtied_view = app.notification_dirtied_view;
                         // Drain any additional pending notifications
                         // before looping back to the per-iteration
                         // `terminal.draw`. A burst of PtyChunks
@@ -2442,10 +2463,25 @@ async fn run_loop(
                             match notifications.try_recv() {
                                 Ok(n) => {
                                     app.on_notification(n).await;
+                                    dirtied_view |= app.notification_dirtied_view;
                                     drained += 1;
                                 }
                                 Err(_) => break,
                             }
+                        }
+                        // If the whole burst only touched off-screen session
+                        // state (the common case with a large mostly-idle
+                        // fleet — background `Pty` chunks warming history /
+                        // spinner / rain), skip this iteration's full-frame
+                        // render. The heartbeat still forces a draw once a tick
+                        // has elapsed since the last one, so the list + rain
+                        // keep animating and the foreground never freezes under
+                        // sustained background output.
+                        if !dirtied_view
+                            && last_draw.elapsed()
+                                < Duration::from_millis(SPINNER_FRAME_MS as u64)
+                        {
+                            app.skip_redraw_after_event = true;
                         }
                     }
                     None => {
@@ -3845,7 +3881,28 @@ impl App {
             .unwrap_or(Selection::None);
     }
 
+    /// True when the session is currently rendered somewhere on screen:
+    /// a pane of the active window (including splits), the orchestrator
+    /// panel, or the pinned strip. Used to decide whether a background
+    /// `Pty` chunk needs an immediate full-frame repaint. Conservative —
+    /// treats pinned / orchestrator as always-visible so the gate never
+    /// drops a needed redraw; the cost of an occasional extra paint is
+    /// far cheaper than missing one.
+    fn session_visible_on_screen(&self, id: &str) -> bool {
+        if self.main_windows.visible_session_ids().iter().any(|s| *s == id) {
+            return true;
+        }
+        if self.orchestrator_id.as_deref() == Some(id) {
+            return true;
+        }
+        self.sessions.iter().any(|s| s.id == id && s.pinned)
+    }
+
     async fn on_notification(&mut self, n: agentd_protocol::Notification) {
+        // Default: assume the notification changes something visible, so the
+        // run loop repaints. Only an off-screen `Pty` chunk clears this (see
+        // the `Pty` arm below) — every other event kind keeps it set.
+        self.notification_dirtied_view = true;
         match n.method.as_str() {
             m if m == agentd_protocol::ipc_notif::EVENT => {
                 if let Some(p) = n.params {
@@ -3969,6 +4026,14 @@ impl App {
                                 now,
                                 self.matrix_rain_intensity,
                             );
+                            // A PTY chunk only changes the screen if this
+                            // session is currently rendered. For off-screen
+                            // sessions we've still warmed history / spinner /
+                            // rain above, but the visible frame is unchanged —
+                            // let the loop skip the immediate repaint (the tick
+                            // still animates the list + rain at ~8fps).
+                            self.notification_dirtied_view =
+                                self.session_visible_on_screen(&payload.session_id);
                             return;
                         }
                         // Tool events feed the same history so the
@@ -10084,6 +10149,7 @@ mod tests {
             window_scrollback: HashMap::new(),
             terminal_scrollbar_visible_until: HashMap::new(),
             skip_redraw_after_event: false,
+            notification_dirtied_view: true,
             hydrating_sessions: HashSet::new(),
             orchestrator_scrollback: 0,
             operator_monolog: None,
@@ -11858,6 +11924,78 @@ mod tests {
         assert!(
             app.operator_monolog.is_none(),
             "expired monolog not cleared"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn pty_notification_dirties_view_only_for_visible_session() {
+        // The run loop reads `notification_dirtied_view` to skip a full-frame
+        // repaint for background PTY chunks. Verify the gate: visible session
+        // PTY -> dirties; off-screen session PTY -> does not; structural events
+        // and pinned/orchestrator sessions -> always dirty.
+        let (mut app, _dir, server) = empty_app().await;
+        let mut vis = summary_with_kind(agentd_protocol::SessionKind::User);
+        vis.id = "vis".into();
+        vis.has_pty = true;
+        let mut bg = summary_with_kind(agentd_protocol::SessionKind::User);
+        bg.id = "bg".into();
+        bg.has_pty = true;
+        app.sessions = vec![vis, bg];
+        app.selection = Selection::Session("vis".into());
+        app.main_windows = MainWindowTree::single(1, Selection::Session("vis".into()));
+        app.active_window_id = 1;
+
+        async fn feed(app: &mut App, session: &str, event: SessionEvent) {
+            app.on_notification(Notification {
+                jsonrpc: "2.0".into(),
+                method: agentd_protocol::ipc_notif::EVENT.into(),
+                params: Some(
+                    serde_json::to_value(EventNotificationPayload {
+                        session_id: session.into(),
+                        at: chrono::Utc::now(),
+                        event,
+                        seq: 1,
+                    })
+                    .unwrap(),
+                ),
+            })
+            .await;
+        }
+        let pty = || SessionEvent::Pty { data: String::new() };
+
+        feed(&mut app, "vis", pty()).await;
+        assert!(app.notification_dirtied_view, "visible session PTY must repaint");
+
+        feed(&mut app, "bg", pty()).await;
+        assert!(
+            !app.notification_dirtied_view,
+            "off-screen session PTY must NOT force a repaint"
+        );
+
+        // A structural/status event for the same off-screen session still
+        // repaints (it changes the list), because only the `Pty` arm clears it.
+        feed(
+            &mut app,
+            "bg",
+            SessionEvent::Status {
+                state: agentd_protocol::SessionState::Done,
+                detail: None,
+            },
+        )
+        .await;
+        assert!(
+            app.notification_dirtied_view,
+            "non-PTY events must always repaint"
+        );
+
+        // Pinning the off-screen session makes its PTY visible (pin strip).
+        app.sessions[1].pinned = true;
+        feed(&mut app, "bg", pty()).await;
+        assert!(
+            app.notification_dirtied_view,
+            "pinned session PTY is visible and must repaint"
         );
 
         server.abort();
