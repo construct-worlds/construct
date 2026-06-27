@@ -8586,7 +8586,9 @@ fn canvas_rendered_line_text(app: Option<&App>, raw: &str) -> String {
         .strip_prefix("- ")
         .or_else(|| trimmed.strip_prefix("* "))
     {
-        format!("  • {}", canvas_inline_rendered_text(app, rest))
+        let marker_len = trimmed.chars().count().saturating_sub(rest.chars().count());
+        let marker: String = raw.chars().take(leading + marker_len).collect();
+        format!("{marker}{}", canvas_inline_rendered_text(app, rest))
     } else {
         // Normal line: the renderer keeps the raw leading whitespace and
         // expands any inline chips in the remainder.
@@ -8688,8 +8690,10 @@ fn canvas_rendered_line_with_clips(app: Option<&App>, raw: &str) -> (String, Vec
         .strip_prefix("- ")
         .or_else(|| trimmed.strip_prefix("* "))
     {
-        let (body, clips) = canvas_inline_with_clips(app, rest, 4);
-        (format!("  • {body}"), clips)
+        let marker_len = trimmed.chars().count().saturating_sub(rest.chars().count());
+        let marker: String = raw.chars().take(leading + marker_len).collect();
+        let (body, clips) = canvas_inline_with_clips(app, rest, leading + marker_len);
+        (format!("{marker}{body}"), clips)
     } else {
         let body = raw
             .char_indices()
@@ -8809,11 +8813,12 @@ fn canvas_visual_col_for_line(app: Option<&App>, raw: &str, raw_col: usize) -> u
         .strip_prefix("- ")
         .or_else(|| trimmed.strip_prefix("* "))
     {
-        // Mirror the proportional indent rendered for nested bullets: the bullet
-        // glyph and text sit `leading` columns further right than a top-level
-        // item, so the cursor column must account for the same offset.
         let prefix = trimmed.chars().count() - rest.chars().count();
-        leading + 4 + canvas_inline_visual_width(app, rest, col.saturating_sub(prefix))
+        if raw_col <= leading + prefix {
+            raw_col
+        } else {
+            leading + prefix + canvas_inline_visual_width(app, rest, col.saturating_sub(prefix))
+        }
     } else if raw_col <= leading {
         raw_col
     } else {
@@ -8890,11 +8895,9 @@ fn render_canvas_markdown_lines<'a>(
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
         {
-            // Nesting is encoded as leading spaces on the source line; render it
-            // as proportional indentation before the bullet so deeper items sit
-            // visibly further right than their parents.
-            let bullet = format!("{}  • ", " ".repeat(leading));
-            let mut spans = vec![Span::styled(bullet, Style::default().fg(app.theme.accent))];
+            let marker_len = trimmed.chars().count().saturating_sub(rest.chars().count());
+            let marker: String = raw.chars().take(leading + marker_len).collect();
+            let mut spans = vec![Span::styled(marker, Style::default().fg(app.theme.accent))];
             spans.extend(render_canvas_inline_spans(
                 app,
                 rest,
