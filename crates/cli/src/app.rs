@@ -735,9 +735,15 @@ pub struct App {
     pub minibuffer: Option<Minibuffer>,
     pub harnesses: Vec<HarnessInfo>,
     /// Program templates offered as clickable buttons in the empty-program
-    /// placeholder. Fetched at startup and on reload (same cadence as
-    /// `harnesses`); rarely changes within a session.
+    /// placeholder. Fetched at startup and on reconnect, and refreshed in the
+    /// background every time the program pane opens so edits to template files
+    /// (or newly dropped files) appear on the next open without a daemon restart.
     pub program_templates: Vec<agentd_protocol::ProgramTemplate>,
+    /// Background channel for live-reloaded program templates. `open_program_popup`
+    /// spawns a non-blocking fetch that delivers the latest list here; the event
+    /// loop applies it on the next iteration (no flicker — the placeholder keeps
+    /// the cached list until the fresh one lands).
+    pub program_templates_tx: mpsc::UnboundedSender<Vec<agentd_protocol::ProgramTemplate>>,
     pub theme: crate::theme::Theme,
     pub help_visible: bool,
     pub profile: Profile,
@@ -2142,6 +2148,8 @@ async fn run_with_socket_initial_selection(
     let now = Instant::now();
     let socket = client.socket_path().to_path_buf();
     let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
+    // Placeholder sender; `run_loop` installs the live channel it actually drains.
+    let program_templates_tx = mpsc::unbounded_channel().0;
     let mut app = App {
         client: client.clone(),
         last_reported_view: None,
@@ -2162,6 +2170,7 @@ async fn run_with_socket_initial_selection(
         minibuffer: None,
         harnesses,
         program_templates,
+        program_templates_tx,
         theme,
         help_visible: false,
         profile,
@@ -2381,6 +2390,12 @@ async fn run_loop(
         .take_notifications()
         .await
         .context("notifications channel already taken")?;
+    // Live-reload channel for program templates. The sender lives on `app` so
+    // `open_program_popup` can kick off a background refresh; this loop drains the
+    // receiver and applies the freshest list.
+    let (program_templates_tx, mut program_templates_rx) =
+        mpsc::unbounded_channel::<Vec<agentd_protocol::ProgramTemplate>>();
+    app.program_templates_tx = program_templates_tx;
     let mut reconnect: Option<ReconnectState> = None;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
@@ -2795,6 +2810,20 @@ async fn run_loop(
                                     .to_string(),
                             );
                         }
+                    }
+                }
+            }
+            templates = program_templates_rx.recv() => {
+                // Live-reloaded program templates from a background fetch
+                // (`refresh_program_templates`, kicked off when the program pane
+                // opens). Apply only the freshest value: drain any queued
+                // refreshes so a burst of opens collapses to the latest list.
+                if let Some(mut latest) = templates {
+                    while let Ok(next) = program_templates_rx.try_recv() {
+                        latest = next;
+                    }
+                    if !latest.is_empty() {
+                        app.program_templates = latest;
                     }
                 }
             }
@@ -7326,11 +7355,30 @@ impl App {
                 self.program_popups.remove(&result.program.session_id);
                 self.program_popup = Some(program_popup_from_document(result.program, now));
                 self.set_status(format!("program opened at version {version}"));
+                // Live reload: the daemon re-reads the templates dir on every
+                // call, but the client caches the list. Kick off a non-blocking
+                // refresh on open so edits / new template files surface in the
+                // empty-state placeholder without a daemon restart.
+                self.refresh_program_templates();
             }
             Err(e) => {
                 self.set_status(format!("program get failed: {e}"));
             }
         }
+    }
+
+    /// Fetch program templates from the daemon in the background and deliver them
+    /// to the event loop via `program_templates_tx`. Non-blocking: the program
+    /// opens immediately against the cached list and swaps to the fresh one when
+    /// it lands, so there's no flicker and a slow daemon never stalls the open.
+    fn refresh_program_templates(&self) {
+        let client = self.client.clone();
+        let tx = self.program_templates_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(result) = client.program_templates().await {
+                let _ = tx.send(result.templates);
+            }
+        });
     }
 
     async fn toggle_program_popup(&mut self) {
@@ -11780,6 +11828,7 @@ mod tests {
             minibuffer: None,
             harnesses: Vec::new(),
             program_templates: Vec::new(),
+            program_templates_tx: mpsc::unbounded_channel().0,
             theme: crate::theme::Theme::default(),
             help_visible: false,
             profile: Profile::Emacs,

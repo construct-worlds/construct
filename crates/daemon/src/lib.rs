@@ -111,7 +111,14 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
         "loaded config"
     );
 
-    let storage = Arc::new(storage::Storage::new(paths.data_dir.clone())?);
+    let program_templates_dir = config.program_templates_dir_override();
+    if let Some(dir) = program_templates_dir.as_ref() {
+        tracing::info!(dir = %dir.display(), "program templates dir override");
+    }
+    let storage = Arc::new(
+        storage::Storage::new(paths.data_dir.clone())?
+            .with_program_templates_dir(program_templates_dir),
+    );
     let (manager, remote_rx, mut restart_rx) =
         session::SessionManager::new(storage.clone(), Arc::new(config), paths.runtime_dir.clone())
             .await

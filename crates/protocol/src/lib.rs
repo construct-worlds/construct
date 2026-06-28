@@ -930,10 +930,20 @@ pub struct ProgramTemplate {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Optional URL / Markdown link to related documentation, surfaced near the
+    /// template in the empty-state placeholder. Built-in templates carry a
+    /// default reference to the program docs; user templates may set it via a
+    /// `reference:` frontmatter key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
     pub markdown: String,
     #[serde(default)]
     pub built_in: bool,
 }
+
+/// Default reference link offered by built-in program templates and surfaced in
+/// the empty-state placeholder footer.
+pub const PROGRAM_DOCS_REFERENCE: &str = "https://github.com/zarvis-ai/agentd";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgramSmartClipDescriptor {

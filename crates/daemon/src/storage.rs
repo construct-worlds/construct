@@ -147,10 +147,17 @@ struct ProgramMeta {
 struct ProgramTemplateFrontmatter {
     name: Option<String>,
     description: Option<String>,
+    reference: Option<String>,
 }
 
 pub struct Storage {
     data_dir: PathBuf,
+    /// When set, program templates are read from this directory instead of the
+    /// default `data_dir/program/templates`. Resolved at daemon start from the
+    /// `[program].templates_dir` config option / `CONSTRUCT_PROGRAM_TEMPLATES_DIR`
+    /// env override. `None` keeps the legacy default location (and its
+    /// `canvas/templates` → `program/templates` migration).
+    program_templates_dir_override: Option<PathBuf>,
 }
 
 impl Storage {
@@ -159,7 +166,17 @@ impl Storage {
             .with_context(|| format!("create {}", data_dir.display()))?;
         std::fs::create_dir_all(data_dir.join("projects"))
             .with_context(|| format!("create {}", data_dir.join("projects").display()))?;
-        Ok(Self { data_dir })
+        Ok(Self {
+            data_dir,
+            program_templates_dir_override: None,
+        })
+    }
+
+    /// Override the directory program templates are read from. Set once at
+    /// daemon start from config; `None` (the default) keeps `data_dir/program/templates`.
+    pub fn with_program_templates_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.program_templates_dir_override = dir;
+        self
     }
 
     pub fn global_memory_path(&self) -> PathBuf {
@@ -322,7 +339,9 @@ impl Storage {
     }
 
     pub fn program_templates_dir(&self) -> PathBuf {
-        self.data_dir.join("program").join("templates")
+        self.program_templates_dir_override
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("program").join("templates"))
     }
 
     /// One-time, idempotent migration: the per-session program document was
@@ -483,11 +502,13 @@ impl Storage {
     }
 
     pub fn program_templates(&self) -> Result<Vec<ProgramTemplate>> {
+        let docs_ref = || Some(agentd_protocol::PROGRAM_DOCS_REFERENCE.to_string());
         let mut templates = vec![
             ProgramTemplate {
                 id: "blank".to_string(),
                 name: "Blank".to_string(),
                 description: Some("Start with an empty orchestration program".to_string()),
+                reference: docs_ref(),
                 markdown: BLANK_PROGRAM.to_string(),
                 built_in: true,
             },
@@ -497,6 +518,7 @@ impl Storage {
                 description: Some(
                     "Todo / Progress / Done board the agent runs and delegates".to_string(),
                 ),
+                reference: docs_ref(),
                 markdown: TASKS_PROGRAM.to_string(),
                 built_in: true,
             },
@@ -506,19 +528,24 @@ impl Storage {
                 description: Some(
                     "Question, context, plan, findings, and done — run to investigate".to_string(),
                 ),
+                reference: docs_ref(),
                 markdown: INVESTIGATION_PROGRAM.to_string(),
                 built_in: true,
             },
         ];
         let dir = self.program_templates_dir();
         // Migrate user templates from the former `canvas/templates` location.
-        let legacy_dir = self.data_dir.join("canvas").join("templates");
-        if legacy_dir.exists() && !dir.exists() {
-            if let Some(parent) = dir.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::rename(&legacy_dir, &dir) {
-                tracing::warn!(error = %e, "migrate legacy canvas templates dir failed");
+        // Only for the default location — when an explicit override is set the
+        // operator owns that directory, so we never move files into it.
+        if self.program_templates_dir_override.is_none() {
+            let legacy_dir = self.data_dir.join("canvas").join("templates");
+            if legacy_dir.exists() && !dir.exists() {
+                if let Some(parent) = dir.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::rename(&legacy_dir, &dir) {
+                    tracing::warn!(error = %e, "migrate legacy canvas templates dir failed");
+                }
             }
         }
         if dir.exists() {
@@ -547,6 +574,7 @@ impl Storage {
                         .name
                         .unwrap_or_else(|| stem.replace(['-', '_'], " ")),
                     description: frontmatter.description,
+                    reference: frontmatter.reference,
                     markdown,
                     built_in: false,
                 });
@@ -1070,6 +1098,7 @@ fn parse_program_template_frontmatter_fields(frontmatter: &str) -> ProgramTempla
         match key.trim() {
             "name" if !value.is_empty() => parsed.name = Some(value.to_string()),
             "description" if !value.is_empty() => parsed.description = Some(value.to_string()),
+            "reference" if !value.is_empty() => parsed.reference = Some(value.to_string()),
             _ => {}
         }
     }
@@ -1497,6 +1526,59 @@ mod program_tests {
         assert_eq!(review.markdown, "# Review\n");
         assert!(!review.built_in);
         assert!(templates.iter().any(|t| t.id == "tasks" && t.built_in));
+    }
+
+    #[test]
+    fn program_templates_parse_reference_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        let dir = storage.program_templates_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // A URL value carries colons — the parser must keep everything after the
+        // first `key:` separator.
+        std::fs::write(
+            dir.join("review.md"),
+            "---\nname: Review\nreference: https://example.com/docs#program\n---\n# Review\n",
+        )
+        .unwrap();
+
+        let templates = storage.program_templates().unwrap();
+        let review = templates.iter().find(|t| t.id == "review").unwrap();
+        assert_eq!(
+            review.reference.as_deref(),
+            Some("https://example.com/docs#program"),
+        );
+
+        // Built-ins carry the default docs reference.
+        let tasks = templates.iter().find(|t| t.id == "tasks").unwrap();
+        assert_eq!(
+            tasks.reference.as_deref(),
+            Some(agentd_protocol::PROGRAM_DOCS_REFERENCE),
+        );
+    }
+
+    #[test]
+    fn program_templates_dir_override_redirects_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("custom-templates");
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(custom.join("ops.md"), "---\nname: Ops\n---\n# Ops\n").unwrap();
+
+        let storage = Storage::new(tmp.path().join("data"))
+            .unwrap()
+            .with_program_templates_dir(Some(custom.clone()));
+
+        // The override directory is the one consulted.
+        assert_eq!(storage.program_templates_dir(), custom);
+        let templates = storage.program_templates().unwrap();
+        assert!(templates.iter().any(|t| t.id == "ops" && t.name == "Ops"));
+        // A user template dropped under the default location is NOT read when an
+        // override is set.
+        let default_dir = tmp.path().join("data").join("program").join("templates");
+        std::fs::create_dir_all(&default_dir).unwrap();
+        std::fs::write(default_dir.join("ignored.md"), "# Ignored\n").unwrap();
+        let templates = storage.program_templates().unwrap();
+        assert!(!templates.iter().any(|t| t.id == "ignored"));
     }
 }
 
