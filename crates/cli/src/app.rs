@@ -8184,25 +8184,35 @@ impl App {
     }
 
     fn update_canvas_search_after_edit(&mut self) {
-        let Some(popup) = self.canvas_popup.as_mut() else {
-            return;
+        let (buffer, query, anchor_cursor) = {
+            let Some(popup) = self.canvas_popup.as_ref() else {
+                return;
+            };
+            let Some(search) = popup.search.as_ref() else {
+                return;
+            };
+            (popup.buffer.clone(), search.query.clone(), search.anchor_cursor)
         };
-        let Some(search) = popup.search.as_mut() else {
-            return;
-        };
-        search.matches = if search.query.is_empty() {
+        let matches = if query.is_empty() {
             Vec::new()
         } else {
-            canvas_search_matches(&popup.buffer, &search.query)
+            let mut matches = canvas_search_matches(&buffer, &query);
+            canvas_search_add_clip_label_matches(self, &buffer, &query, &mut matches);
+            matches.sort_unstable_by_key(|(start, _)| *start);
+            matches.dedup();
+            matches
         };
+        let popup = self.canvas_popup.as_mut().unwrap();
+        let search = popup.search.as_mut().unwrap();
+        search.matches = matches;
         if search.matches.is_empty() {
             search.selected = 0;
-            popup.cursor = search.anchor_cursor;
+            popup.cursor = anchor_cursor;
         } else {
             let anchor_match = search
                 .matches
                 .iter()
-                .position(|(start, _)| *start >= search.anchor_cursor);
+                .position(|(start, _)| *start >= anchor_cursor);
             search.selected = anchor_match.unwrap_or(0);
             popup.cursor = search.matches[search.selected].0;
         }
@@ -10979,6 +10989,47 @@ fn canvas_search_matches(buffer: &str, query: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// Add search matches for smart clips whose resolved label text contains `query`.
+/// Each match spans the entire raw `@{...}` clip in the buffer so the chip gets
+/// highlighted and the cursor navigates to it.  Clips that are already covered by
+/// an existing raw-buffer match (e.g. the query happens to appear inside the clip
+/// syntax itself) are skipped to avoid duplicate matches at overlapping ranges.
+fn canvas_search_add_clip_label_matches(
+    app: &App,
+    buffer: &str,
+    query: &str,
+    matches: &mut Vec<(usize, usize)>,
+) {
+    let mut char_offset = 0usize;
+    let mut byte_offset = 0usize;
+    while byte_offset < buffer.len() {
+        let rest = &buffer[byte_offset..];
+        let Some(at_pos) = rest.find("@{") else { break };
+        let before_bytes = &rest[..at_pos];
+        let before_chars = before_bytes.chars().count();
+        let clip_char_start = char_offset + before_chars;
+        let after_marker = &rest[at_pos + 2..];
+        let Some(end_pos) = after_marker.find('}') else {
+            break;
+        };
+        let raw_clip = &after_marker[..end_pos];
+        let raw_clip_chars = raw_clip.chars().count();
+        let clip_char_end = clip_char_start + 2 + raw_clip_chars + 1;
+        let already_covered = matches
+            .iter()
+            .any(|&(ms, me)| ms < clip_char_end && me > clip_char_start);
+        if !already_covered {
+            let (_, label) = crate::ui::canvas_smart_clip_label(Some(app), raw_clip);
+            if label.contains(query) {
+                matches.push((clip_char_start, clip_char_end));
+            }
+        }
+        let full_clip_bytes = 2 + end_pos + 1;
+        byte_offset += at_pos + full_clip_bytes;
+        char_offset = clip_char_end;
+    }
+}
+
 fn canvas_smart_clip_with_instance_id(clip: &str, buffer: &str) -> String {
     if canvas_smart_clip_instance_id(clip).is_some() {
         return clip.to_string();
@@ -12272,6 +12323,81 @@ mod tests {
         let popup = app.canvas_popup.as_ref().unwrap();
         assert!(popup.search.is_none(), "C-g exits search");
         assert_eq!(popup.cursor, 6);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_search_finds_smart_clip_by_label() {
+        // Buffer: "hello @{session:stest} world"
+        // Session "stest" has title "my-task" and harness "shell", state Done.
+        // Searching "my-task" should find the clip (label "✓ my-task · shell")
+        // even though "my-task" does not appear in the raw buffer text.
+        //
+        // "@{" starts at char 6; body "session:stest" is 13 chars; "}" at char 21.
+        // Clip char range: [6, 22) = 6..(6+2+13+1)=22.
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "stest".into();
+        session.title = Some("my-task".into());
+        session.harness = "shell".into();
+        session.state = agentd_protocol::SessionState::Done;
+        app.sessions = vec![session];
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "hello @{session:stest} world", 0));
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await;
+        for ch in "my-task".chars() {
+            app.handle_canvas_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        let search = popup.search.as_ref().expect("search active");
+        assert_eq!(search.query, "my-task");
+        assert!(
+            !search.matches.is_empty(),
+            "smart clip label 'my-task' should produce a search match"
+        );
+        let (match_start, match_end) = search.matches[search.selected];
+        assert_eq!(match_start, 6, "match should start at the '@' of the clip");
+        assert_eq!(match_end, 22, "match should end after the '}}' of the clip");
+        assert_eq!(popup.cursor, 6, "cursor should navigate to the clip");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_search_highlights_raw_text_match_inside_smart_clip() {
+        // Buffer: "hello @{session:stest} world"
+        // Searching "stest" — it appears literally inside the raw clip body.
+        // The raw-buffer match must be found and its start must sit inside the
+        // clip range so the rendering overlap check will highlight the chip.
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "stest".into();
+        app.sessions = vec![session];
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "hello @{session:stest} world", 0));
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await;
+        for ch in "stest".chars() {
+            app.handle_canvas_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        let search = popup.search.as_ref().expect("search active");
+        assert_eq!(search.query, "stest");
+        assert!(
+            !search.matches.is_empty(),
+            "raw text 'stest' inside clip should produce a search match"
+        );
+        // "stest" starts at char 16 inside "@{session:stest}": h(0)e(1)l(2)l(3)o(4) (5)@(6){(7)s(8)...(16)s(16)t(17)e(18)s(19)t(20)
+        // Clip range is [6, 22); match at (16, 21) is inside the clip — overlap check covers it.
+        let (match_start, _) = search.matches[0];
+        assert!(
+            match_start >= 6 && match_start < 22,
+            "raw match start {match_start} should fall inside the clip range [6, 22)"
+        );
         server.abort();
     }
 

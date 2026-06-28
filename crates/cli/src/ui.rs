@@ -9191,8 +9191,24 @@ fn render_canvas_inline_spans<'a>(
             return spans;
         };
         let raw_clip = &after_marker[..end];
-        spans.push(canvas_smart_clip_span(app, raw_clip));
-        offset += before.chars().count() + 2 + raw_clip.chars().count() + 1;
+        let before_chars = before.chars().count();
+        let raw_clip_chars = raw_clip.chars().count();
+        let clip_char_start = base + offset + before_chars;
+        let clip_char_end = clip_char_start + 2 + raw_clip_chars + 1;
+        let clip_match_idx = search_matches.and_then(|matches| {
+            matches.iter().enumerate().find_map(|(i, &(ms, me))| {
+                (ms < clip_char_end && me > clip_char_start).then_some(i)
+            })
+        });
+        let clip_is_active_match = clip_match_idx
+            .is_some_and(|idx| search_selected == Some(idx));
+        spans.push(canvas_smart_clip_span(
+            app,
+            raw_clip,
+            clip_match_idx.is_some(),
+            clip_is_active_match,
+        ));
+        offset += before_chars + 2 + raw_clip_chars + 1;
         rest = &after_marker[end + 1..];
     }
     if !rest.is_empty() {
@@ -9294,15 +9310,25 @@ fn canvas_search_match_index(matches: &[(usize, usize)], idx: usize) -> Option<u
         .find_map(|(i, &(start, end))| (idx >= start && idx < end).then_some(i))
 }
 
-fn canvas_smart_clip_span<'a>(app: &App, raw_clip: &str) -> Span<'a> {
+fn canvas_smart_clip_span<'a>(app: &App, raw_clip: &str, in_match: bool, is_active_match: bool) -> Span<'a> {
     let (kind, label) = canvas_smart_clip_label(Some(app), raw_clip);
-    let bg = match kind {
-        "session" => app.theme.accent_alt,
-        "harness" => app.theme.harness,
-        "session-response" => app.theme.info,
-        _ => app.theme.inactive_highlight_bg,
+    let bg = if is_active_match {
+        app.theme.highlight_bg
+    } else if in_match {
+        app.theme.highlight_bg
+    } else {
+        match kind {
+            "session" => app.theme.accent_alt,
+            "harness" => app.theme.harness,
+            "session-response" => app.theme.info,
+            _ => app.theme.inactive_highlight_bg,
+        }
     };
-    canvas_chip_span(label, app.theme.highlight_fg, bg)
+    let mut style = Style::default().fg(app.theme.highlight_fg).bg(bg).add_modifier(Modifier::BOLD);
+    if is_active_match {
+        style = style.fg(app.theme.highlight_fg);
+    }
+    Span::styled(format!(" {} ", label), style)
 }
 
 fn canvas_smart_clip_visual_width(app: Option<&App>, raw_clip: &str) -> usize {
@@ -9326,7 +9352,7 @@ fn canvas_session_clip_label(s: &agentd_protocol::SessionSummary) -> String {
     format!("{} {} · {}", s.state.glyph(), primary_label(s), harness_label(s))
 }
 
-fn canvas_smart_clip_label<'a>(app: Option<&App>, raw_clip: &'a str) -> (&'a str, String) {
+pub(crate) fn canvas_smart_clip_label<'a>(app: Option<&App>, raw_clip: &'a str) -> (&'a str, String) {
     let (kind, id) = canvas_smart_clip_target(raw_clip);
     let label = match kind {
         "session" => app
