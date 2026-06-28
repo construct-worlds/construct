@@ -1,4 +1,4 @@
-# 0048-canvas-builtin-template-content
+# 0050-canvas-builtin-template-content
 
 Status: accepted
 Date: 2026-06-28
