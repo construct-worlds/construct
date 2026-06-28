@@ -707,18 +707,41 @@ pub fn view_program_toggle_button_range(view_area: Rect) -> (u16, u16, u16) {
     (x_start, x_end, view_area.y)
 }
 
+/// On-screen span of the right-aligned sticky-widget title cluster
+/// (`─ □ □ …`) on a pane's top border. Returns `(x_start, x_end_exclusive, y)`
+/// where `x_start` is the column of the cluster's leading `─`.
+///
+/// This mirrors ratatui's right-aligned title stacking exactly so hover/click
+/// hit-testing lands on the visible glyphs. Ratatui lays right-aligned titles
+/// out from the right border leftward, inserting one blank separator cell
+/// between each. To this cluster's right sit (rightmost first) the actions
+/// button (`close_width` cells — e.g. `" ☰ "` is 4, since ☰ is two cells wide;
+/// 0 when hidden) and the harness label (`reserved_right_width`), each
+/// consuming its own width plus one separator. `label_width` is this cluster's
+/// own width. The harness label is always rendered alongside the widget
+/// cluster, so its separator is always reserved.
 pub fn dynamic_ui_trigger_range(
     view_area: Rect,
-    close_shown: bool,
+    close_width: u16,
     label_width: u16,
     reserved_right_width: u16,
 ) -> (u16, u16, u16) {
-    let right = view_area
+    // The right border column is the exclusive right edge of the title area.
+    let titles_right = view_area
         .x
         .saturating_add(view_area.width)
-        .saturating_sub(if close_shown { 4 } else { 1 })
-        .saturating_sub(reserved_right_width);
-    (right.saturating_sub(label_width), right, view_area.y)
+        .saturating_sub(1);
+    // Each title to the right of this cluster consumes its width + 1 separator.
+    let close_reserved = if close_width > 0 {
+        close_width.saturating_add(1)
+    } else {
+        0
+    };
+    let harness_reserved = reserved_right_width.saturating_add(1);
+    let x_end = titles_right
+        .saturating_sub(close_reserved)
+        .saturating_sub(harness_reserved);
+    (x_end.saturating_sub(label_width), x_end, view_area.y)
 }
 
 fn session_sticky_widget_panels(app: &App, session_id: &str) -> Vec<agentd_protocol::UiPanel> {
@@ -743,28 +766,30 @@ fn render_session_widget_title(
     view_area: Rect,
     session_id: String,
     panels: Vec<agentd_protocol::UiPanel>,
-    close_shown: bool,
+    close_width: u16,
     reserved_right_width: u16,
     border_style: Style,
 ) -> Line<'static> {
     let label_width = 2u16.saturating_add((panels.len() as u16).saturating_mul(2));
     let (x_start, _x_end, y) =
-        dynamic_ui_trigger_range(view_area, close_shown, label_width, reserved_right_width);
+        dynamic_ui_trigger_range(view_area, close_width, label_width, reserved_right_width);
     // The leading "─ " stitches the indicator into the top border, so it must
     // carry the pane's own border color (the session view's focus-aware border,
     // the program's accent border). Passing the style in keeps the two title bars
     // from drifting — a hardcoded `pane_border_style` here painted a green dash
     // on the program's accent border.
     let mut spans = vec![Span::styled("─ ", border_style)];
-    // Ratatui right-aligned block titles paint one cell left of the simple
-    // `right - width` geometry used for layout reservation; mirror that for
-    // hit-testing so hover/click lands on the visible square, not one cell over.
+    // `x_start` is the on-screen column of the cluster's leading `─` (see
+    // `dynamic_ui_trigger_range`, which reproduces ratatui's right-aligned
+    // title geometry). The first square glyph sits two cells in, past the
+    // leading "─ "; advancing by 2 per square then tracks each "□ " pair. This
+    // puts the hover test and the registered hit exactly on the visible glyph.
     let now = Instant::now();
     // Drop a lapsed hover preview so a stale square doesn't read as filled.
     if app.dynamic_ui_hover.as_ref().is_some_and(|h| h.until <= now) {
         app.dynamic_ui_hover = None;
     }
-    let mut icon_x = x_start.saturating_add(1);
+    let mut icon_x = x_start.saturating_add(2);
     for panel in panels {
         let hovered = app
             .mouse_pos
@@ -2921,6 +2946,17 @@ fn apply_pane_title_right_cluster<'a>(
         Line::from(Span::styled(text.clone(), border_style))
             .alignment(ratatui::layout::Alignment::Right)
     });
+    // The close / session-actions button is the rightmost right-aligned title.
+    // Its on-screen width must be known up front so the widget cluster's
+    // hit geometry can account for it — the ☰ glyph is two cells wide, so
+    // `" ☰ "` is 4 cells, not 3. Measure with the same width function ratatui
+    // uses when it lays the title out, so the two never disagree.
+    let close_label = if session_actions { " ☰ " } else { " x " };
+    let close_width = if show_close {
+        UnicodeWidthStr::width(close_label) as u16
+    } else {
+        0
+    };
     let widget_title = summary.and_then(|s| {
         let panels = session_sticky_widget_panels(app, &s.id);
         (!panels.is_empty()).then(|| {
@@ -2929,7 +2965,7 @@ fn apply_pane_title_right_cluster<'a>(
                 area,
                 s.id.clone(),
                 panels,
-                show_close,
+                close_width,
                 harness_width,
                 border_style,
             )
@@ -2944,7 +2980,6 @@ fn apply_pane_title_right_cluster<'a>(
     // hue (program view passes its border color so the ☰ matches the frame).
     let close_hovered = show_close && hovered_view_close_button(app, area);
     let close_style = session_menu_icon_style(&app.theme, menu_icon_color, close_hovered, focused);
-    let close_label = if session_actions { " ☰ " } else { " x " };
     let close = Line::from(Span::styled(close_label, close_style))
         .alignment(ratatui::layout::Alignment::Right);
     if let Some(ui) = widget_title {
