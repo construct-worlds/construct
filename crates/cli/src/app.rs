@@ -4810,14 +4810,15 @@ impl App {
                 self.canvas_runs.remove(&canvas.session_id);
             }
         }
+        let updating_session_id = canvas.session_id.clone();
         let popup = if self
             .canvas_popup
             .as_ref()
-            .is_some_and(|p| p.canvas.session_id == canvas.session_id)
+            .is_some_and(|p| p.canvas.session_id == updating_session_id)
         {
             self.canvas_popup.as_mut()
         } else {
-            self.canvas_popups.get_mut(&canvas.session_id)
+            self.canvas_popups.get_mut(&updating_session_id)
         };
         let Some(popup) = popup else {
             return;
@@ -4835,9 +4836,16 @@ impl App {
         popup.buffer = canvas.markdown.clone();
         popup.saved_markdown = canvas.markdown.clone();
         popup.canvas = canvas;
-        popup.cursor = popup.cursor.min(popup.buffer.chars().count());
+        let buffer_len = popup.buffer.chars().count();
+        popup.cursor = popup.cursor.min(buffer_len);
+        if let Some(search) = popup.search.as_mut() {
+            search.anchor_cursor = search.anchor_cursor.min(buffer_len);
+        }
         popup.preferred_col = None;
         popup.undo_stack.clear();
+        if popup.search.is_some() {
+            self.refresh_canvas_search_for_session(&updating_session_id);
+        }
     }
 
     /// Open the approval prompt if there's no other minibuffer in flight.
@@ -8184,14 +8192,33 @@ impl App {
     }
 
     fn update_canvas_search_after_edit(&mut self) {
-        let (buffer, query, anchor_cursor) = {
-            let Some(popup) = self.canvas_popup.as_ref() else {
-                return;
-            };
-            let Some(search) = popup.search.as_ref() else {
-                return;
-            };
-            (popup.buffer.clone(), search.query.clone(), search.anchor_cursor)
+        let Some(session_id) = self
+            .canvas_popup
+            .as_ref()
+            .map(|popup| popup.canvas.session_id.clone())
+        else {
+            return;
+        };
+        self.refresh_canvas_search_for_session(&session_id);
+    }
+
+    fn refresh_canvas_search_for_session(&mut self, session_id: &str) {
+        let snapshot = self
+            .canvas_popup
+            .as_ref()
+            .filter(|popup| popup.canvas.session_id == session_id)
+            .or_else(|| self.canvas_popups.get(session_id))
+            .and_then(|popup| {
+                popup.search.as_ref().map(|search| {
+                    (
+                        popup.buffer.clone(),
+                        search.query.clone(),
+                        search.anchor_cursor,
+                    )
+                })
+            });
+        let Some((buffer, query, anchor_cursor)) = snapshot else {
+            return;
         };
         let matches = if query.is_empty() {
             Vec::new()
@@ -8202,8 +8229,21 @@ impl App {
             matches.dedup();
             matches
         };
-        let popup = self.canvas_popup.as_mut().unwrap();
-        let search = popup.search.as_mut().unwrap();
+        let popup = if self
+            .canvas_popup
+            .as_ref()
+            .is_some_and(|popup| popup.canvas.session_id == session_id)
+        {
+            self.canvas_popup.as_mut()
+        } else {
+            self.canvas_popups.get_mut(session_id)
+        };
+        let Some(popup) = popup else {
+            return;
+        };
+        let Some(search) = popup.search.as_mut() else {
+            return;
+        };
         search.matches = matches;
         if search.matches.is_empty() {
             search.selected = 0;
@@ -13390,6 +13430,66 @@ mod tests {
         assert_eq!(popup.canvas.version, 2);
         assert_eq!(popup.buffer, "# Todo\n- a\n- agent added\n");
         assert_eq!(popup.saved_markdown, "# Todo\n- a\n- agent added\n");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_state_notification_recomputes_active_search_when_clean() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "alpha beta", 0));
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await;
+        for ch in "alpha".chars() {
+            app.handle_canvas_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+        assert_eq!(
+            app.canvas_popup.as_ref().unwrap().search.as_ref().unwrap().matches,
+            vec![(0, 5)]
+        );
+
+        app.on_canvas_state(agentd_protocol::CanvasDocument {
+            session_id: "s1".into(),
+            markdown: "zero alpha".into(),
+            version: 2,
+            updated_at_ms: 0,
+            template_id: None,
+        }, None);
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        let search = popup.search.as_ref().expect("search remains active");
+        assert_eq!(search.query, "alpha");
+        assert_eq!(search.matches, vec![(5, 10)]);
+        assert_eq!(search.selected, 0);
+        assert_eq!(popup.cursor, 5);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canvas_state_notification_clamps_active_search_anchor_when_clean() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.canvas_popup = Some(canvas_popup_for_test("s1", "alpha beta", 10));
+
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await;
+        app.handle_canvas_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
+            .await;
+
+        app.on_canvas_state(agentd_protocol::CanvasDocument {
+            session_id: "s1".into(),
+            markdown: "tiny".into(),
+            version: 2,
+            updated_at_ms: 0,
+            template_id: None,
+        }, None);
+
+        let popup = app.canvas_popup.as_ref().unwrap();
+        let search = popup.search.as_ref().expect("search remains active");
+        assert_eq!(search.query, "z");
+        assert_eq!(search.anchor_cursor, 4);
+        assert!(search.matches.is_empty());
+        assert_eq!(popup.cursor, 4);
         server.abort();
     }
 
