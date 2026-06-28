@@ -7417,8 +7417,8 @@ struct ProgramShimmer {
 
 /// Build the shimmer overlay for a popup from its session's `ProgramRun`, or
 /// `None` if no run is active, it has lapsed, or every block has settled. A
-/// block shimmers while its current text still matches a pending signature, so
-/// agent rewrites and user edits both take blocks out of the animation.
+/// block shimmers while its stable id is in the run's pending set (spec 0051);
+/// editing a block changes its id, taking it out of the animation by default.
 fn program_run_shimmer(
     app: &App,
     popup: &crate::app::ProgramPopup,
@@ -7431,7 +7431,7 @@ fn program_run_shimmer(
     let mut active_lines = vec![false; popup.buffer.lines().count()];
     let mut any = false;
     for block in crate::app::program_blocks(&popup.buffer) {
-        if run.pending.contains(&block.signature) {
+        if run.pending.contains(&block.id) {
             for slot in active_lines
                 .iter_mut()
                 .take(block.end_line)

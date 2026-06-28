@@ -660,6 +660,7 @@ async fn run_program_command(client: &Client, command: ProgramCommand) -> Result
                     actor: agentd_protocol::ProgramUpdateActor::Human,
                     template_id,
                     note: None,
+                    shimmer: None,
                 })
                 .await?;
             println!("updated program version {}", result.program.version);
@@ -688,6 +689,7 @@ async fn run_program_command(client: &Client, command: ProgramCommand) -> Result
                     actor: agentd_protocol::ProgramUpdateActor::Human,
                     template_id: current.template_id,
                     note: None,
+                    shimmer: None,
                 })
                 .await?;
             println!("updated program version {}", result.program.version);
@@ -703,6 +705,7 @@ async fn run_program_command(client: &Client, command: ProgramCommand) -> Result
                     session_id,
                     selection,
                     base_version,
+                    shimmer: None,
                 })
                 .await?;
             println!(

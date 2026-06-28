@@ -901,13 +901,107 @@ pub struct ProgramDocument {
     pub template_id: Option<String>,
 }
 
+/// A program "block": a maximal run of consecutive non-blank Markdown lines.
+/// Blocks are the unit of program-run shimmer (see specs 0042 and 0051).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProgramBlockSpan {
+    /// Source-line range `[start_line, end_line)` into `markdown.lines()`.
+    pub start_line: usize,
+    pub end_line: usize,
+    /// Normalized content: each line trimmed, joined by `\n`. Equal-content
+    /// blocks share a signature (and therefore an id) and settle together.
+    pub signature: String,
+    /// Stable, content-derived block id (spec 0051): a hash of `signature`.
+    pub id: String,
+    /// Raw block text: source lines `[start_line, end_line)` joined by `\n`
+    /// (original indentation preserved), usable directly as an edit anchor.
+    pub text: String,
+}
+
+/// One block of a program with its current shimmer state — the per-block
+/// projection returned by program get/edit/update so an agent reads and
+/// declares shimmer by stable block id (spec 0051).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProgramBlockView {
+    pub id: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub text: String,
+    pub shimmer: bool,
+}
+
+/// A declaration that a program block (addressed by its stable id) is pending
+/// (`shimmer: true`) or settled (`shimmer: false`) — the unit of the per-block
+/// shimmer declaration carried by program edits (spec 0051).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProgramShimmerDecl {
+    pub id: String,
+    pub shimmer: bool,
+}
+
+/// Stable, content-derived id for a program block (spec 0051). Derived from the
+/// block's normalized signature with a dependency-free FNV-1a hash so the daemon
+/// and every client compute the same id for the same content. The id is stable
+/// against position but changes when the block's own text changes; equal content
+/// yields equal ids (such blocks shimmer and settle together).
+pub fn program_block_id(signature: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in signature.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Split Markdown into ordered blocks (maximal runs of non-blank lines). The
+/// daemon uses this to compute the shimmer pending set and the per-block
+/// projection; clients use it to map shimmer back onto source lines. Keeping a
+/// single shared parser guarantees daemon and clients agree on block identity.
+pub fn program_block_spans(markdown: &str) -> Vec<ProgramBlockSpan> {
+    let raw_lines: Vec<&str> = markdown.lines().collect();
+    let mut blocks = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut norm: Vec<String> = Vec::new();
+    let push = |start: usize, end: usize, norm: &[String], blocks: &mut Vec<ProgramBlockSpan>| {
+        let signature = norm.join("\n");
+        let id = program_block_id(&signature);
+        let text = raw_lines[start..end].join("\n");
+        blocks.push(ProgramBlockSpan {
+            start_line: start,
+            end_line: end,
+            signature,
+            id,
+            text,
+        });
+    };
+    for (i, line) in raw_lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            if let Some(s) = start.take() {
+                push(s, i, &norm, &mut blocks);
+                norm.clear();
+            }
+        } else {
+            if start.is_none() {
+                start = Some(i);
+            }
+            norm.push(line.trim().to_string());
+        }
+    }
+    if let Some(s) = start {
+        push(s, raw_lines.len(), &norm, &mut blocks);
+    }
+    blocks
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramRunProgress {
     pub run_id: String,
     pub started_at_ms: i64,
     pub expires_at_ms: i64,
-    #[serde(default)]
-    pub pending_block_signatures: Vec<String>,
+    /// Stable content-derived ids of the blocks still pending in this run
+    /// (spec 0051). A block shimmers exactly while its id is in this set.
+    #[serde(default, alias = "pending_block_signatures")]
+    pub pending_block_ids: Vec<String>,
     #[serde(default)]
     pub seen_running: bool,
     #[serde(default)]
@@ -987,6 +1081,10 @@ pub struct ProgramGetResult {
     pub revisions: Vec<ProgramRevision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_run: Option<ProgramRunProgress>,
+    /// Ordered per-block projection with each block's stable id and current
+    /// shimmer state (spec 0051). Derived from the live markdown; not persisted.
+    #[serde(default)]
+    pub blocks: Vec<ProgramBlockView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1001,11 +1099,23 @@ pub struct ProgramUpdateParams {
     pub template_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Complete shimmer declaration over the blocks of `markdown`, in document
+    /// order: `shimmer[i]` is the pending state of the i-th block (spec 0051).
+    /// `None` leaves any active run's shimmer to narrow by content change only
+    /// (the co-editing human-save path); the MCP tool requires it for agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shimmer: Option<Vec<bool>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramUpdateResult {
     pub program: ProgramDocument,
+    /// Fresh per-block projection after the write, so the caller rides the echo
+    /// instead of re-reading (spec 0051).
+    #[serde(default)]
+    pub blocks: Vec<ProgramBlockView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_run: Option<ProgramRunProgress>,
 }
 
 /// One anchored edit: replace `old_string` with `new_string` in the program
@@ -1020,11 +1130,6 @@ pub struct ProgramEdit {
     pub new_string: String,
     #[serde(default)]
     pub replace_all: bool,
-    /// If true, the block(s) touched by this edit are re-added to the program
-    /// run's shimmer set after the edit, keeping them animated until a later
-    /// edit or task completion clears them.
-    #[serde(default)]
-    pub shimmer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1035,6 +1140,12 @@ pub struct ProgramEditParams {
     pub actor: ProgramUpdateActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Partial shimmer declaration applied after the edits (spec 0051): each
+    /// entry sets the pending state of a block addressed by its stable id, and
+    /// may target any block, not only blocks this edit changed. Ids that match
+    /// no post-edit block are dropped (the block changed underneath the caller).
+    #[serde(default)]
+    pub shimmer: Vec<ProgramShimmerDecl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1044,6 +1155,11 @@ pub struct ProgramExecuteParams {
     pub selection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_version: Option<u64>,
+    /// Optional initial pending set over the executed body's blocks, in order
+    /// (spec 0051). `None` keeps the optimistic default: the whole executed
+    /// region shimmers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shimmer: Option<Vec<bool>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1052,6 +1168,9 @@ pub struct ProgramExecuteResult {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_run: Option<ProgramRunProgress>,
+    /// Per-block projection of the program after the run was seeded (spec 0051).
+    #[serde(default)]
+    pub blocks: Vec<ProgramBlockView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1813,5 +1932,57 @@ mod project_compat_tests {
         })
         .unwrap();
         assert_eq!(v, serde_json::json!({ "project_id": "p1" }));
+    }
+}
+
+#[cfg(test)]
+mod program_block_tests {
+    use super::*;
+
+    #[test]
+    fn block_id_is_stable_against_position_and_changes_with_content() {
+        let a = program_block_id("- item");
+        // Same content, different surrounding document position → same id.
+        let doc1 = program_block_spans("- item\n\n- other\n");
+        let doc2 = program_block_spans("- other\n\n- different\n\n- item\n");
+        let id1 = &doc1.iter().find(|b| b.signature == "- item").unwrap().id;
+        let id2 = &doc2.iter().find(|b| b.signature == "- item").unwrap().id;
+        assert_eq!(&a, id1);
+        assert_eq!(id1, id2, "id is position-independent");
+        // Editing the block's text changes its id.
+        assert_ne!(a, program_block_id("- item done"));
+    }
+
+    #[test]
+    fn identical_blocks_share_one_id() {
+        let spans = program_block_spans("- dup\n\n- dup\n");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].id, spans[1].id, "equal content → equal id");
+    }
+
+    #[test]
+    fn spans_track_ranges_and_preserve_raw_text() {
+        // A heading glued to its items is one block (no blank line between).
+        let spans = program_block_spans("## In progress\n  * one\n* two\n\n## Done\n");
+        assert_eq!(spans.len(), 2);
+        assert_eq!((spans[0].start_line, spans[0].end_line), (0, 3));
+        // Signature trims each line; raw text keeps original indentation.
+        assert_eq!(spans[0].signature, "## In progress\n* one\n* two");
+        assert_eq!(spans[0].text, "## In progress\n  * one\n* two");
+        assert_eq!(spans[1].start_line, 4);
+        // Empty / whitespace-only input has no blocks.
+        assert!(program_block_spans("  \n\n").is_empty());
+    }
+
+    #[test]
+    fn run_progress_accepts_legacy_pending_block_signatures() {
+        let run: ProgramRunProgress = serde_json::from_value(serde_json::json!({
+            "run_id": "r1",
+            "started_at_ms": 0,
+            "expires_at_ms": 1,
+            "pending_block_signatures": ["abc"],
+        }))
+        .unwrap();
+        assert_eq!(run.pending_block_ids, vec!["abc".to_string()]);
     }
 }

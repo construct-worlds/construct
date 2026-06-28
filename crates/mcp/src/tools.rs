@@ -68,7 +68,7 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "construct_program_get",
-            "Fetch a session's program Markdown document, version, and retained revisions. Defaults to the current session when `session_id` is omitted.",
+            "Fetch a session's program Markdown document, version, retained revisions, and — when a Run is active — the per-block shimmer projection. The `blocks` array lists each block in document order with a stable `id`, its `text`, and its current `shimmer` state (true = pending, false = settled). Use these ids to declare shimmer back via construct_program_edit or construct_program_update. Defaults to the current session when `session_id` is omitted.",
             schema_obj(&[("session_id", "string", false)]),
         ),
         tool(
@@ -79,7 +79,7 @@ pub fn catalog() -> Vec<Value> {
         // ----- Write -----
         tool(
             "construct_program_edit",
-            "PREFERRED for changing a session's program: apply one or more anchored find/replace edits (like the code Edit tool). Each edit replaces `old_string` with `new_string`; set `replace_all` to replace every occurrence, or include enough surrounding context to make `old_string` unique. An empty `old_string` appends `new_string` to the document. Edits apply to the LATEST program content, so a human editing a different region at the same time merges cleanly — no version to pass and no conflict. The call fails (writing nothing) only if an `old_string` is missing or ambiguous, which means that exact text changed underneath you: re-read with construct_program_get and retry. Agent edits need no user confirmation. Set `shimmer: true` on an individual edit to keep the block(s) it touches in shimmer animation after the edit — shimmer means the block's work is still pending in this run (queued, in progress, or not yet done) regardless of how it runs. Useful during a planning pass to keep pending blocks shimmering while immediately clearing shimmer on blocks that need no work.",
+            "PREFERRED for changing a session's program: apply one or more anchored find/replace edits (like the code Edit tool). Each edit replaces `old_string` with `new_string`; set `replace_all` to replace every occurrence, or include enough surrounding context to make `old_string` unique. An empty `old_string` appends `new_string` to the document. Edits apply to the LATEST program content, so a human editing a different region at the same time merges cleanly — no version to pass and no conflict. The call fails (writing nothing) only if an `old_string` is missing or ambiguous, which means that exact text changed underneath you: re-read with construct_program_get and retry. Agent edits need no user confirmation. Shimmer (the program-run progress animation) is declared per block by stable id: pass a `shimmer` array of `{id, shimmer}` entries to mark blocks pending (true) or settled (false). The list is PARTIAL and may target ANY block — not only the ones these edits change — so a planning pass can settle no-work blocks without touching their text; blocks you omit keep their current shimmer. Get block ids from construct_program_get or the `blocks` echoed by this call. Editing a block's text changes its id, so to keep an edited block shimmering, declare its new id `shimmer: true` here. Ids that no longer match a block are ignored (that block changed underneath you).",
             json!({
                 "type": "object",
                 "properties": {
@@ -92,10 +92,21 @@ pub fn catalog() -> Vec<Value> {
                             "properties": {
                                 "old_string": { "type": "string" },
                                 "new_string": { "type": "string" },
-                                "replace_all": { "type": "boolean" },
-                                "shimmer": { "type": "boolean", "description": "Keep the edited block shimmering after this edit because its work is still pending (queued, in progress, or not yet done, regardless of how it runs); omit once the block is settled" }
+                                "replace_all": { "type": "boolean" }
                             },
                             "required": ["old_string", "new_string"]
+                        }
+                    },
+                    "shimmer": {
+                        "type": "array",
+                        "description": "Partial per-block shimmer declaration applied after the edits. Each entry sets one block's pending state by its stable id (from construct_program_get or a prior call's `blocks`). Omitted blocks keep their current shimmer.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Stable block id" },
+                                "shimmer": { "type": "boolean", "description": "true = pending (keep shimmering); false = settled (clear)" }
+                            },
+                            "required": ["id", "shimmer"]
                         }
                     },
                     "note": { "type": "string" }
@@ -105,7 +116,7 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "construct_program_update",
-            "Replace a session's ENTIRE program Markdown. Prefer construct_program_edit for targeted changes — it merges with concurrent human edits, whereas a whole-document replace can clobber them. Use this only for wholesale rewrites or initial population. Pass `base_version` from construct_program_get for optimistic conflict detection; on conflict, re-read the program and retry with a resolved document. Agent updates need no user confirmation.",
+            "Replace a session's ENTIRE program Markdown. Prefer construct_program_edit for targeted changes — it merges with concurrent human edits, whereas a whole-document replace can clobber them. Use this only for wholesale rewrites or initial population. Pass `base_version` from construct_program_get for optimistic conflict detection; on conflict, re-read the program and retry with a resolved document. Agent updates need no user confirmation. Because this replaces the whole document, you must also pass `shimmer`: a COMPLETE array of booleans, one per block of the new Markdown in document order (true = pending, false = settled). Blocks are maximal runs of non-blank lines; count them top to bottom. The array length must equal the block count or the call fails.",
             json!({
                 "type": "object",
                 "properties": {
@@ -113,20 +124,30 @@ pub fn catalog() -> Vec<Value> {
                     "markdown": { "type": "string" },
                     "base_version": { "type": "integer", "minimum": 0 },
                     "template_id": { "type": "string" },
-                    "note": { "type": "string" }
+                    "note": { "type": "string" },
+                    "shimmer": {
+                        "type": "array",
+                        "description": "Complete per-block shimmer state for the new Markdown, one boolean per block in document order (true = pending, false = settled).",
+                        "items": { "type": "boolean" }
+                    }
                 },
-                "required": ["markdown"]
+                "required": ["markdown", "shimmer"]
             }),
         ),
         tool(
             "construct_program_execute",
-            "Ask the owning session to execute the full program or a selected Markdown fragment. Defaults to the current session when `session_id` is omitted.",
+            "Ask the owning session to execute the full program or a selected Markdown fragment. The whole executed region starts shimmering optimistically; the run's first program action should be a planning-pass construct_program_edit that narrows it. Defaults to the current session when `session_id` is omitted.",
             json!({
                 "type": "object",
                 "properties": {
                     "session_id": { "type": "string" },
                     "selection": { "type": "string" },
-                    "base_version": { "type": "integer", "minimum": 0 }
+                    "base_version": { "type": "integer", "minimum": 0 },
+                    "shimmer": {
+                        "type": "array",
+                        "description": "Optional initial pending set: one boolean per block of the executed body in document order (true = pending). Omit to shimmer the whole executed region.",
+                        "items": { "type": "boolean" }
+                    }
                 }
             }),
         ),
@@ -461,6 +482,12 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
         // ----- Write -----
         "construct_program_update" => {
             let sid = optional_session_arg(&args, session_id)?;
+            let shimmer: Vec<bool> = serde_json::from_value(
+                args.get("shimmer").cloned().ok_or_else(|| {
+                    anyhow!("missing `shimmer`: a boolean per program block, in document order")
+                })?,
+            )
+            .map_err(|e| anyhow!("invalid `shimmer` (expected an array of booleans): {e}"))?;
             let params = agentd_protocol::ProgramUpdateParams {
                 session_id: sid,
                 markdown: arg_str(&args, "markdown")?,
@@ -468,6 +495,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 actor: agentd_protocol::ProgramUpdateActor::Agent,
                 template_id: arg_str(&args, "template_id").ok(),
                 note: arg_str(&args, "note").ok(),
+                shimmer: Some(shimmer),
             };
             serde_json::to_value(client.program_update(params).await?)?
         }
@@ -482,20 +510,34 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             if edits.is_empty() {
                 return Err(anyhow!("`edits` must contain at least one edit"));
             }
+            let shimmer: Vec<agentd_protocol::ProgramShimmerDecl> = match args.get("shimmer") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                    anyhow!("invalid `shimmer` (expected an array of {{id, shimmer}}): {e}")
+                })?,
+                None => Vec::new(),
+            };
             let params = agentd_protocol::ProgramEditParams {
                 session_id: sid,
                 edits,
                 actor: agentd_protocol::ProgramUpdateActor::Agent,
                 note: arg_str(&args, "note").ok(),
+                shimmer,
             };
             serde_json::to_value(client.program_edit(params).await?)?
         }
         "construct_program_execute" => {
             let sid = optional_session_arg(&args, session_id)?;
+            let shimmer: Option<Vec<bool>> = match args.get("shimmer") {
+                Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| {
+                    anyhow!("invalid `shimmer` (expected an array of booleans): {e}")
+                })?),
+                None => None,
+            };
             let params = agentd_protocol::ProgramExecuteParams {
                 session_id: sid,
                 selection: arg_str(&args, "selection").ok(),
                 base_version: args.get("base_version").and_then(|v| v.as_u64()),
+                shimmer,
             };
             serde_json::to_value(client.program_execute(params).await?)?
         }

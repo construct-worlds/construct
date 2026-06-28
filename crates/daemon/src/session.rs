@@ -581,8 +581,8 @@ fn start_params_for_create(
 fn program_run_instructions() -> Vec<String> {
     vec![
         "Execute this construct program as an autonomous run.".to_string(),
-        "Shimmer semantics: a shimmering block means 'work on this block is still pending in this run — queued, in progress, or not yet done; outcome unknown'. No shimmer means 'settled — done, skipped, or no work needed'. Pending is about the state of the work, not how it runs: it applies the same whether you do the block yourself, delegate it, or drive it some other way, and a block counts as pending the moment you decide to act on it. A Run starts every executed block shimmering. Editing a block clears its shimmer unless you pass shimmer: true on that edit, which keeps it shimmering. Pass shimmer: true on any block whose work is still pending; only let shimmer clear (omit it) once the block is settled. Never leave a settled block shimmering, and never drop shimmer from a block whose work is still in flight.".to_string(),
-        "Planning pass — this MUST be your first program action, before doing or delegating any work: make one construct_program_edit touching every executed block. Pass shimmer: true on every block whose work is still pending (however you intend to run it), and omit shimmer on every block that needs no work, is already done, or you are skipping, so those clear immediately. Doing this first makes the program reflect your plan within seconds of the Run instead of only after the first task completes; skipping it strands settled blocks shimmering and risks dropping shimmer from blocks still in flight.".to_string(),
+        "Shimmer semantics: a shimmering block means 'work on this block is still pending in this run — queued, in progress, or not yet done; outcome unknown'. No shimmer means 'settled — done, skipped, or no work needed'. Pending is about the state of the work, not how it runs: it applies the same whether you do the block yourself, delegate it, or drive it some other way, and a block counts as pending the moment you decide to act on it. A Run starts every executed block shimmering. Shimmer is a declared per-block state addressed by a stable block id: read each block's id from the program get tool (or from the `blocks` returned by an edit/update), then declare a block pending or settled with the construct_program_edit `shimmer` list, e.g. `shimmer: [{id, shimmer: true|false}]`. The list is partial — it may target any block, not only the ones your edits change — and declaring a block settled clears it WITHOUT changing its text. Editing a block's text changes its id, so to keep an edited block shimmering, declare its new id shimmer: true in that same edit. Never leave a settled block shimmering, and never drop shimmer from a block whose work is still in flight.".to_string(),
+        "Planning pass — this MUST be your first program action, before doing or delegating any work: read the program with the get tool to obtain every block's id, then make one construct_program_edit whose `shimmer` list declares each still-pending block's id shimmer: true and each settled block's id shimmer: false. This needs no change to the blocks' text — declaring an id settled clears it. Doing this first makes the program reflect your plan within seconds of the Run instead of only after the first task completes; skipping it strands settled blocks shimmering and risks dropping shimmer from blocks still in flight.".to_string(),
         "Treat program_run.markdown as free-form instructions and state for this turn, not as a request for a one-shot status report or as a fixed task-management schema.".to_string(),
         "Infer the user's intended objective from the document structure and prose, then keep taking useful next actions while there is actionable work you can do.".to_string(),
         "Do not ask the user to run the program again; if the document still implies useful work you can perform, continue in this turn.".to_string(),
@@ -595,7 +595,7 @@ fn program_run_instructions() -> Vec<String> {
 }
 
 fn program_execution_prompt() -> String {
-    "Run the current construct program autonomously. Before doing work, call agentd_context (or construct_context if you are using MCP) and read the program_run field for the latest program content, smart clip reference, and run instructions. If program_run is unavailable, read the current program with the program get tool before acting. Then, before starting or delegating any task, your first program action must be a single planning-pass construct_program_edit: pass shimmer: true on every block whose work is still pending (however you intend to run it) and omit shimmer on every block that needs no work, is already done, or you are skipping so it stops shimmering immediately."
+    "Run the current construct program autonomously. Before doing work, call agentd_context (or construct_context if you are using MCP) and read the program_run field for the latest program content, smart clip reference, and run instructions. If program_run is unavailable, read the current program with the program get tool before acting. Then, before starting or delegating any task, your first program action must be a single planning-pass construct_program_edit whose shimmer list declares every still-pending block's id shimmer: true and every settled block's id shimmer: false (read the block ids from the program get tool), so settled blocks stop shimmering immediately."
         .to_string()
 }
 
@@ -622,63 +622,13 @@ fn program_run_context(
     }
 }
 
-fn program_run_pending_signatures(body: &str) -> std::collections::HashSet<String> {
-    let mut sigs = std::collections::HashSet::new();
-    let mut cur: Option<Vec<String>> = None;
-    for raw in body.lines() {
-        if raw.trim().is_empty() {
-            if let Some(lines) = cur.take() {
-                sigs.insert(lines.join("\n"));
-            }
-        } else {
-            cur.get_or_insert_with(Vec::new)
-                .push(raw.trim().to_string());
-        }
-    }
-    if let Some(lines) = cur.take() {
-        sigs.insert(lines.join("\n"));
-    }
-    sigs
-}
-
-/// Return the block signatures in `markdown` that are touched by any edit
-/// with `shimmer: true`. The caller merges these into the run's pending set
-/// so those blocks stay animated after the edit.
-fn program_shimmer_signatures(
-    edits: &[agentd_protocol::ProgramEdit],
-    markdown: &str,
-) -> std::collections::HashSet<String> {
-    // Collect the first non-empty trimmed line from each shimmer edit's new_string
-    // as a lookup anchor.
-    let anchors: Vec<&str> = edits
-        .iter()
-        .filter(|e| e.shimmer)
-        .filter_map(|e| e.new_string.lines().find(|l| !l.trim().is_empty()))
-        .map(|l| l.trim())
-        .collect();
-    if anchors.is_empty() {
-        return Default::default();
-    }
-    // Walk the post-edit markdown block by block; a block matches if any
-    // of its trimmed lines equals one of the anchors.
-    let mut result = std::collections::HashSet::new();
-    let mut cur: Vec<String> = Vec::new();
-    let flush =
-        |cur: &Vec<String>, result: &mut std::collections::HashSet<String>| {
-            if !cur.is_empty() && anchors.iter().any(|a| cur.iter().any(|l| l == a)) {
-                result.insert(cur.join("\n"));
-            }
-        };
-    for raw in markdown.lines() {
-        if raw.trim().is_empty() {
-            flush(&cur, &mut result);
-            cur.clear();
-        } else {
-            cur.push(raw.trim().to_string());
-        }
-    }
-    flush(&cur, &mut result);
-    result
+/// Stable block ids of every block in `body` (spec 0051) — the set a Run over
+/// `body` shimmers, and the set against which shimmer declarations resolve.
+fn program_block_ids(body: &str) -> std::collections::HashSet<String> {
+    agentd_protocol::program_block_spans(body)
+        .into_iter()
+        .map(|span| span.id)
+        .collect()
 }
 
 fn session_event_is_program_output(event: &SessionEvent) -> bool {
@@ -946,7 +896,7 @@ impl SessionManager {
         let now_ms = Utc::now().timestamp_millis();
         let mut runs = self.program_runs.lock().ok()?;
         if runs.get(session_id).is_some_and(|run| {
-            run.expires_at_ms <= now_ms || run.pending_block_signatures.is_empty()
+            run.expires_at_ms <= now_ms || run.pending_block_ids.is_empty()
         }) {
             runs.remove(session_id);
             return None;
@@ -954,44 +904,88 @@ impl SessionManager {
         runs.get(session_id).cloned()
     }
 
+    /// Build the per-block projection (spec 0051): each block of `markdown` with
+    /// its stable id, text, and current shimmer state from the active run.
+    fn program_blocks_projection(
+        &self,
+        session_id: &str,
+        markdown: &str,
+    ) -> Vec<agentd_protocol::ProgramBlockView> {
+        let pending: std::collections::HashSet<String> = self
+            .program_run_snapshot(session_id)
+            .map(|run| run.pending_block_ids.into_iter().collect())
+            .unwrap_or_default();
+        agentd_protocol::program_block_spans(markdown)
+            .into_iter()
+            .map(|span| agentd_protocol::ProgramBlockView {
+                shimmer: pending.contains(&span.id),
+                id: span.id,
+                start_line: span.start_line,
+                end_line: span.end_line,
+                text: span.text,
+            })
+            .collect()
+    }
+
     fn start_program_run(
         &self,
         session_id: &str,
         body: &str,
         is_selection: bool,
+        initial: Option<&[bool]>,
     ) -> Option<ProgramRunProgress> {
-        let body_sigs = program_run_pending_signatures(body);
-        if body_sigs.is_empty() {
+        let spans = agentd_protocol::program_block_spans(body);
+        if spans.is_empty() {
             if let Ok(mut runs) = self.program_runs.lock() {
                 runs.remove(session_id);
             }
             return None;
         }
+        let body_ids: std::collections::HashSet<String> =
+            spans.iter().map(|s| s.id.clone()).collect();
         let now_ms = Utc::now().timestamp_millis();
-        let pending = if is_selection {
-            body_sigs
-        } else if let Ok(runs) = self.program_runs.lock() {
-            if let Some(old) = runs.get(session_id) {
-                let old: std::collections::HashSet<String> =
-                    old.pending_block_signatures.iter().cloned().collect();
-                let kept: std::collections::HashSet<String> =
-                    body_sigs.intersection(&old).cloned().collect();
-                if kept.is_empty() {
-                    body_sigs
+        let pending: std::collections::HashSet<String> =
+            if let Some(decl) = initial.filter(|d| d.len() == spans.len()) {
+                // Explicit initial pending set, in document order (spec 0051).
+                spans
+                    .iter()
+                    .zip(decl.iter())
+                    .filter(|(_, &on)| on)
+                    .map(|(s, _)| s.id.clone())
+                    .collect()
+            } else if is_selection {
+                body_ids
+            } else if let Ok(runs) = self.program_runs.lock() {
+                if let Some(old) = runs.get(session_id) {
+                    // Re-run mid-flight preserves the agent's prior narrowing:
+                    // keep only blocks that are still pending and still present.
+                    let old_ids: std::collections::HashSet<String> =
+                        old.pending_block_ids.iter().cloned().collect();
+                    let kept: std::collections::HashSet<String> =
+                        body_ids.intersection(&old_ids).cloned().collect();
+                    if kept.is_empty() {
+                        body_ids
+                    } else {
+                        kept
+                    }
                 } else {
-                    kept
+                    body_ids
                 }
             } else {
-                body_sigs
+                body_ids
+            };
+        if pending.is_empty() {
+            // An explicit all-settled initial set leaves nothing to shimmer.
+            if let Ok(mut runs) = self.program_runs.lock() {
+                runs.remove(session_id);
             }
-        } else {
-            body_sigs
-        };
+            return None;
+        }
         let run = ProgramRunProgress {
             run_id: format!("{session_id}:{now_ms}"),
             started_at_ms: now_ms,
             expires_at_ms: now_ms + PROGRAM_RUN_MAX_MS,
-            pending_block_signatures: pending.into_iter().collect(),
+            pending_block_ids: pending.into_iter().collect(),
             seen_running: false,
             first_output_seen: false,
         };
@@ -1001,26 +995,61 @@ impl SessionManager {
         Some(run)
     }
 
+    /// Apply a partial shimmer declaration after an edit (spec 0051): drop
+    /// blocks whose id no longer exists (changed/removed), then set each
+    /// declared id pending or settled. Ids absent from the post-edit document
+    /// are ignored (fail closed — the block changed underneath the caller).
     fn narrow_program_run(
         &self,
         session_id: &str,
         markdown: &str,
-        shimmer_add: std::collections::HashSet<String>,
+        decls: &[agentd_protocol::ProgramShimmerDecl],
     ) {
         let now_ms = Utc::now().timestamp_millis();
-        let current = program_run_pending_signatures(markdown);
+        let current = program_block_ids(markdown);
         if let Ok(mut runs) = self.program_runs.lock() {
             let Some(run) = runs.get_mut(session_id) else {
                 return;
             };
-            run.pending_block_signatures
-                .retain(|sig| current.contains(sig));
-            for sig in shimmer_add {
-                if current.contains(&sig) && !run.pending_block_signatures.contains(&sig) {
-                    run.pending_block_signatures.push(sig);
+            run.pending_block_ids.retain(|id| current.contains(id));
+            for decl in decls {
+                if !current.contains(&decl.id) {
+                    continue;
+                }
+                if decl.shimmer {
+                    if !run.pending_block_ids.contains(&decl.id) {
+                        run.pending_block_ids.push(decl.id.clone());
+                    }
+                } else {
+                    run.pending_block_ids.retain(|id| id != &decl.id);
                 }
             }
-            if run.expires_at_ms <= now_ms || run.pending_block_signatures.is_empty() {
+            if run.expires_at_ms <= now_ms || run.pending_block_ids.is_empty() {
+                runs.remove(session_id);
+            }
+        }
+    }
+
+    /// Authoritatively replace a run's pending set with `pending_ids`
+    /// (intersected with blocks present in `markdown`). Used by a program
+    /// update's complete declaration (spec 0051); a no-op when no run is active.
+    fn set_program_run_pending(
+        &self,
+        session_id: &str,
+        markdown: &str,
+        pending_ids: std::collections::HashSet<String>,
+    ) {
+        let now_ms = Utc::now().timestamp_millis();
+        let current = program_block_ids(markdown);
+        if let Ok(mut runs) = self.program_runs.lock() {
+            let Some(run) = runs.get_mut(session_id) else {
+                return;
+            };
+            run.pending_block_ids = pending_ids
+                .into_iter()
+                .filter(|id| current.contains(id))
+                .collect();
+            if run.expires_at_ms <= now_ms || run.pending_block_ids.is_empty() {
                 runs.remove(session_id);
             }
         }
@@ -1684,10 +1713,15 @@ impl SessionManager {
         self.get_entry(session_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", session_id))?;
+        let program = self.storage.read_program(session_id)?;
+        let revisions = self.storage.read_program_revisions(session_id)?;
+        let active_run = self.program_run_snapshot(session_id);
+        let blocks = self.program_blocks_projection(session_id, &program.markdown);
         Ok(ProgramGetResult {
-            program: self.storage.read_program(session_id)?,
-            revisions: self.storage.read_program_revisions(session_id)?,
-            active_run: self.program_run_snapshot(session_id),
+            program,
+            revisions,
+            active_run,
+            blocks,
         })
     }
 
@@ -1695,17 +1729,53 @@ impl SessionManager {
         self.get_entry(&params.session_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
+        // A complete shimmer declaration must cover every block of the new
+        // document, in order (spec 0051). Validate before writing so a miscount
+        // fails the call rather than persisting a doc with a stale shimmer set.
+        if let Some(decl) = &params.shimmer {
+            let block_count = agentd_protocol::program_block_spans(&params.markdown).len();
+            if decl.len() != block_count {
+                anyhow::bail!(
+                    "shimmer declaration has {} entries but the program has {} blocks",
+                    decl.len(),
+                    block_count
+                );
+            }
+        }
+        let shimmer = params.shimmer;
+        let session_id = params.session_id;
         let program = self.storage.update_program(
-            &params.session_id,
+            &session_id,
             params.markdown,
             params.actor,
             params.base_version,
             params.template_id,
             params.note,
         )?;
-        self.narrow_program_run(&params.session_id, &program.markdown, Default::default());
+        match shimmer {
+            Some(decl) => {
+                let pending: std::collections::HashSet<String> =
+                    agentd_protocol::program_block_spans(&program.markdown)
+                        .into_iter()
+                        .zip(decl)
+                        .filter(|(_, on)| *on)
+                        .map(|(span, _)| span.id)
+                        .collect();
+                self.set_program_run_pending(&session_id, &program.markdown, pending);
+            }
+            None => {
+                // Co-editing human-save path: narrow by content change only.
+                self.narrow_program_run(&session_id, &program.markdown, &[]);
+            }
+        }
+        let blocks = self.program_blocks_projection(&session_id, &program.markdown);
+        let active_run = self.program_run_snapshot(&session_id);
         self.broadcast_program_state(program.clone());
-        Ok(ProgramUpdateResult { program })
+        Ok(ProgramUpdateResult {
+            program,
+            blocks,
+            active_run,
+        })
     }
 
     pub async fn program_edit(&self, params: ProgramEditParams) -> Result<ProgramUpdateResult> {
@@ -1715,10 +1785,18 @@ impl SessionManager {
         let program =
             self.storage
                 .edit_program(&params.session_id, &params.edits, params.actor, params.note)?;
-        let shimmer_add = program_shimmer_signatures(&params.edits, &program.markdown);
-        self.narrow_program_run(&params.session_id, &program.markdown, shimmer_add);
+        // Apply the partial shimmer declaration against the post-edit document
+        // (spec 0051): changed blocks drop their prior shimmer; declared ids set
+        // pending/settled; ids that no longer exist are ignored (fail closed).
+        self.narrow_program_run(&params.session_id, &program.markdown, &params.shimmer);
+        let blocks = self.program_blocks_projection(&params.session_id, &program.markdown);
+        let active_run = self.program_run_snapshot(&params.session_id);
         self.broadcast_program_state(program.clone());
-        Ok(ProgramUpdateResult { program })
+        Ok(ProgramUpdateResult {
+            program,
+            blocks,
+            active_run,
+        })
     }
 
     pub async fn program_execute(&self, params: ProgramExecuteParams) -> Result<ProgramExecuteResult> {
@@ -1730,6 +1808,7 @@ impl SessionManager {
             program: self.storage.read_program(&params.session_id)?,
             revisions: self.storage.read_program_revisions(&params.session_id)?,
             active_run: self.program_run_snapshot(&params.session_id),
+            blocks: Vec::new(),
         };
         if let Some(base) = params.base_version {
             if base != result.program.version {
@@ -1776,11 +1855,18 @@ impl SessionManager {
                 self.send_input(&params.session_id, prompt.clone()).await?;
             }
         }
-        let active_run = self.start_program_run(&params.session_id, &run_body, is_selection);
+        let active_run = self.start_program_run(
+            &params.session_id,
+            &run_body,
+            is_selection,
+            params.shimmer.as_deref(),
+        );
+        let blocks = self.program_blocks_projection(&params.session_id, &result.program.markdown);
         Ok(ProgramExecuteResult {
             program: result.program,
             prompt,
             active_run,
+            blocks,
         })
     }
 
@@ -5891,7 +5977,7 @@ mod tests {
 
         // Start a program run
         let body = "# Todo\n- a\n";
-        let run = mgr.start_program_run(id, body, false).expect("start_program_run");
+        let run = mgr.start_program_run(id, body, false, None).expect("start_program_run");
         assert!(!run.seen_running);
         assert!(!run.first_output_seen);
 
@@ -5935,5 +6021,211 @@ mod tests {
 
         // Run should now be cleared
         assert!(mgr.program_run_snapshot(id).is_none());
+    }
+
+    // Build a SessionManager with one synthetic session that owns `markdown` as
+    // its program. Returns (manager, storage, session_id) for program tests.
+    async fn program_test_mgr(
+        markdown: &str,
+    ) -> (SessionManager, Arc<crate::storage::Storage>, String) {
+        use tempfile::tempdir;
+        let tmp = Box::leak(Box::new(tempdir().expect("tempdir")));
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage.clone(), config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        let id = "sprog".to_string();
+        mgr.sessions.write().await.insert(
+            id.clone(),
+            synthetic_entry(&id, agentd_protocol::SessionKind::User, 0),
+        );
+        storage
+            .update_program(
+                &id,
+                markdown.to_string(),
+                agentd_protocol::ProgramUpdateActor::Human,
+                None,
+                None,
+                None,
+            )
+            .expect("seed program");
+        (mgr, storage, id)
+    }
+
+    // The bug that motivated spec 0051: a planning pass must clear shimmer on
+    // no-work blocks WITHOUT changing their text, while keeping the worked
+    // block pending. Under the old content-change inference this was impossible
+    // (inert blocks never change, so they could never settle) and the animation
+    // came out inverted.
+    #[tokio::test]
+    async fn program_planning_pass_clears_inert_blocks_without_text_change() {
+        // `## In progress` and its two items are one block (no blank line between).
+        let md = "# Rule\n\n## TODO\n\n## In progress\n* item one\n* item two\n\n## Done\n";
+        let (mgr, _storage, id) = program_test_mgr(md).await;
+
+        // A Run starts every block shimmering (optimistic).
+        mgr.start_program_run(&id, md, false, None)
+            .expect("start run");
+        let before = mgr.program_get(&id).await.expect("get");
+        assert!(
+            before.blocks.iter().all(|b| b.shimmer),
+            "every block shimmers at run start"
+        );
+        let id_of = |needle: &str| {
+            before
+                .blocks
+                .iter()
+                .find(|b| b.text.contains(needle))
+                .unwrap_or_else(|| panic!("no block containing {needle:?}"))
+                .id
+                .clone()
+        };
+
+        // Planning pass: declare the in-progress block pending and the inert
+        // headings settled. The only edit is a content no-op (anchor == new),
+        // so no block's text — and no id — changes.
+        let res = mgr
+            .program_edit(ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "# Rule".into(),
+                    new_string: "# Rule".into(),
+                    replace_all: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                note: None,
+                shimmer: vec![
+                    agentd_protocol::ProgramShimmerDecl {
+                        id: id_of("# Rule"),
+                        shimmer: false,
+                    },
+                    agentd_protocol::ProgramShimmerDecl {
+                        id: id_of("## TODO"),
+                        shimmer: false,
+                    },
+                    agentd_protocol::ProgramShimmerDecl {
+                        id: id_of("## Done"),
+                        shimmer: false,
+                    },
+                    agentd_protocol::ProgramShimmerDecl {
+                        id: id_of("item one"),
+                        shimmer: true,
+                    },
+                ],
+            })
+            .await
+            .expect("planning-pass edit");
+
+        let shimmering = |needle: &str| {
+            res.blocks
+                .iter()
+                .find(|b| b.text.contains(needle))
+                .unwrap()
+                .shimmer
+        };
+        assert!(!shimmering("# Rule"), "inert Rule heading must settle");
+        assert!(!shimmering("## TODO"), "empty TODO heading must settle");
+        assert!(!shimmering("## Done"), "Done heading must settle");
+        assert!(
+            shimmering("item one"),
+            "the in-progress block stays pending"
+        );
+    }
+
+    // A complete declaration on update authoritatively sets the pending set, and
+    // a length mismatch is rejected before anything is written.
+    #[tokio::test]
+    async fn program_update_complete_shimmer_declaration() {
+        let md = "# A\n\n# B\n\n# C\n";
+        let (mgr, _storage, id) = program_test_mgr(md).await;
+        mgr.start_program_run(&id, md, false, None)
+            .expect("start run");
+
+        // Wrong length fails (3 blocks, 2 booleans).
+        let err = mgr
+            .program_update(ProgramUpdateParams {
+                session_id: id.clone(),
+                markdown: md.to_string(),
+                base_version: None,
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                template_id: None,
+                note: None,
+                shimmer: Some(vec![true, false]),
+            })
+            .await
+            .expect_err("length mismatch must fail");
+        assert!(err.to_string().contains("blocks"), "got: {err}");
+
+        // Correct length: only the middle block stays pending.
+        let res = mgr
+            .program_update(ProgramUpdateParams {
+                session_id: id.clone(),
+                markdown: md.to_string(),
+                base_version: None,
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                template_id: None,
+                note: None,
+                shimmer: Some(vec![false, true, false]),
+            })
+            .await
+            .expect("update");
+        let shimmering = |needle: &str| {
+            res.blocks
+                .iter()
+                .find(|b| b.text.contains(needle))
+                .unwrap()
+                .shimmer
+        };
+        assert!(!shimmering("# A"));
+        assert!(shimmering("# B"));
+        assert!(!shimmering("# C"));
+    }
+
+    // An edit's shimmer declaration for an id that no longer exists is dropped
+    // (fail closed), and other blocks are untouched.
+    #[tokio::test]
+    async fn program_edit_shimmer_unknown_id_is_ignored() {
+        let md = "# A\n\n# B\n";
+        let (mgr, _storage, id) = program_test_mgr(md).await;
+        mgr.start_program_run(&id, md, false, None)
+            .expect("start run");
+        let a = agentd_protocol::program_block_id("# A");
+        let res = mgr
+            .program_edit(ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "# A".into(),
+                    new_string: "# A".into(),
+                    replace_all: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                note: None,
+                shimmer: vec![
+                    agentd_protocol::ProgramShimmerDecl {
+                        id: "deadbeefdeadbeef".into(),
+                        shimmer: false,
+                    },
+                    agentd_protocol::ProgramShimmerDecl {
+                        id: a,
+                        shimmer: false,
+                    },
+                ],
+            })
+            .await
+            .expect("edit");
+        let shimmering = |needle: &str| {
+            res.blocks
+                .iter()
+                .find(|b| b.text.contains(needle))
+                .unwrap()
+                .shimmer
+        };
+        // The bogus id changed nothing; the real declaration settled "# A";
+        // "# B" was never declared and keeps its run-start shimmer.
+        assert!(!shimmering("# A"));
+        assert!(shimmering("# B"));
     }
 }

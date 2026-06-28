@@ -1458,10 +1458,10 @@ pub struct ProgramPopup {
 pub struct ProgramRun {
     /// When Run was pressed. The shimmer wave is a function of elapsed time.
     pub started_at: Instant,
-    /// Content signatures of blocks still considered running (shimmering). A
-    /// block shimmers while its current normalized text is in this set; any
-    /// edit — by the agent writing back or the user typing — changes the
-    /// block's text and drops it from the shimmer.
+    /// Stable content-derived ids of blocks still pending (shimmering), per
+    /// spec 0051. A block shimmers while its id is in this set; the daemon
+    /// owns the set and publishes it, and clients map it back onto source lines
+    /// via the shared block parser.
     pub pending: HashSet<String>,
     /// Absolute backstop: clear no later than this regardless of signals.
     pub deadline: Instant,
@@ -1476,7 +1476,7 @@ impl ProgramRun {
             .duration_since(UNIX_EPOCH)
             .ok()?
             .as_millis() as i64;
-        if progress.expires_at_ms <= now_ms || progress.pending_block_signatures.is_empty() {
+        if progress.expires_at_ms <= now_ms || progress.pending_block_ids.is_empty() {
             return None;
         }
         let started_at = if progress.started_at_ms <= now_ms {
@@ -1487,7 +1487,7 @@ impl ProgramRun {
         let deadline = now + Duration::from_millis((progress.expires_at_ms - now_ms) as u64);
         Some(Self {
             started_at,
-            pending: progress.pending_block_signatures.into_iter().collect(),
+            pending: progress.pending_block_ids.into_iter().collect(),
             deadline,
             first_output_seen: progress.first_output_seen,
         })
@@ -1495,57 +1495,37 @@ impl ProgramRun {
 }
 
 /// A program "block": a maximal run of consecutive non-blank Markdown lines,
-/// identified by its normalized text. The unit of Run shimmer — a block
-/// shimmers as a whole and settles as a whole (spec 0042).
+/// identified by its stable content-derived id. The unit of Run shimmer — a
+/// block shimmers as a whole and settles as a whole (specs 0042, 0051).
 pub(crate) struct ProgramBlock {
     /// Source-line index range `[start_line, end_line)` into `markdown.lines()`.
     pub start_line: usize,
     pub end_line: usize,
-    /// Normalized content signature: trimmed lines joined by `\n`.
-    pub signature: String,
+    /// Stable content-derived block id (spec 0051) — what the shimmer set keys on.
+    pub id: String,
 }
 
-/// Split Markdown into blocks (runs of consecutive non-blank lines). Both the
-/// Run start (which records the executed blocks' signatures) and the renderer
-/// (which decides which source lines shimmer) derive from this so their notion
-/// of a block stays identical.
+/// Split Markdown into blocks (runs of consecutive non-blank lines), via the
+/// shared protocol parser so the TUI and the daemon agree on block boundaries
+/// and ids. The renderer uses this to decide which source lines shimmer.
 pub(crate) fn program_blocks(markdown: &str) -> Vec<ProgramBlock> {
-    let mut blocks = Vec::new();
-    let mut cur: Option<(usize, Vec<String>)> = None;
-    let mut total = 0usize;
-    for (i, raw) in markdown.lines().enumerate() {
-        total = i + 1;
-        if raw.trim().is_empty() {
-            if let Some((start, lines)) = cur.take() {
-                blocks.push(ProgramBlock {
-                    start_line: start,
-                    end_line: i,
-                    signature: lines.join("\n"),
-                });
-            }
-        } else {
-            cur.get_or_insert_with(|| (i, Vec::new()))
-                .1
-                .push(raw.trim().to_string());
-        }
-    }
-    if let Some((start, lines)) = cur.take() {
-        blocks.push(ProgramBlock {
-            start_line: start,
-            end_line: total,
-            signature: lines.join("\n"),
-        });
-    }
-    blocks
+    agentd_protocol::program_block_spans(markdown)
+        .into_iter()
+        .map(|span| ProgramBlock {
+            start_line: span.start_line,
+            end_line: span.end_line,
+            id: span.id,
+        })
+        .collect()
 }
 
-/// Signatures of the blocks contained in `body` — the set of blocks that a Run
-/// over `body` should shimmer. For a full-program run `body` is the whole
+/// Stable block ids of the blocks contained in `body` — the set of blocks that
+/// a Run over `body` should shimmer. For a full-program run `body` is the whole
 /// document; for a selection run it is the selected text.
-pub(crate) fn program_run_pending_signatures(body: &str) -> HashSet<String> {
-    program_blocks(body)
+pub(crate) fn program_run_pending_ids(body: &str) -> HashSet<String> {
+    agentd_protocol::program_block_spans(body)
         .into_iter()
-        .map(|b| b.signature)
+        .map(|span| span.id)
         .collect()
 }
 
@@ -7468,6 +7448,9 @@ impl App {
                 actor: agentd_protocol::ProgramUpdateActor::Human,
                 template_id: popup.program.template_id.clone(),
                 note: None,
+                // Human co-edit save: no shimmer declaration — the daemon
+                // narrows the active run by content change only (spec 0051).
+                shimmer: None,
             };
             match self.client.program_update(params).await {
                 Ok(result) => {
@@ -7635,6 +7618,8 @@ impl App {
             session_id: session_id.clone(),
             selection,
             base_version,
+            // Optimistic full-region shimmer; the run's planning pass narrows it.
+            shimmer: None,
         };
         match self.client.program_execute(params).await {
             Ok(result) => {
@@ -7679,8 +7664,8 @@ impl App {
         is_selection: bool,
         prev_saved: &str,
     ) {
-        let body_sigs = program_run_pending_signatures(body);
-        if body_sigs.is_empty() {
+        let body_ids = program_run_pending_ids(body);
+        if body_ids.is_empty() {
             // Empty body has nothing to shimmer; drop any stale run.
             self.program_runs.remove(session_id);
             return;
@@ -7692,15 +7677,15 @@ impl App {
             // `prev_saved` and absent from `old.pending`, so both terms skip
             // them and they stop re-shimmering.
             Some(old) if !is_selection => {
-                let prev_sigs = program_run_pending_signatures(prev_saved);
-                body_sigs
-                    .difference(&prev_sigs)
-                    .chain(body_sigs.intersection(&old.pending))
+                let prev_ids = program_run_pending_ids(prev_saved);
+                body_ids
+                    .difference(&prev_ids)
+                    .chain(body_ids.intersection(&old.pending))
                     .cloned()
                     .collect()
             }
             // Fresh run, or a selection run scoped by the user: shimmer it all.
-            _ => body_sigs,
+            _ => body_ids,
         };
         let now = Instant::now();
         self.program_runs.insert(
@@ -13844,29 +13829,32 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         // First block spans source lines 0..3 ("# Todo", "- a", "- b").
         assert_eq!((blocks[0].start_line, blocks[0].end_line), (0, 3));
-        assert_eq!(blocks[0].signature, "# Todo\n- a\n- b");
         // Second block is the "# Done" heading after the blank line.
         assert_eq!(blocks[1].start_line, 4);
-        assert_eq!(blocks[1].signature, "# Done");
+        // Block identity (signature → id) is owned by the shared protocol parser.
+        let spans = agentd_protocol::program_block_spans(md);
+        assert_eq!(spans[0].signature, "# Todo\n- a\n- b");
+        assert_eq!(spans[1].signature, "# Done");
+        assert_eq!(blocks[1].id, agentd_protocol::program_block_id("# Done"));
     }
 
     #[test]
     fn program_blocks_normalize_indentation_in_signature() {
         // Signatures trim each line so cosmetic indentation does not change a
         // block's identity (keeps shimmer stable across whitespace-only edits).
-        let blocks = program_blocks("  - a\n    - b\n");
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].signature, "- a\n- b");
+        let spans = agentd_protocol::program_block_spans("  - a\n    - b\n");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].signature, "- a\n- b");
     }
 
     #[test]
-    fn program_run_pending_signatures_cover_each_block() {
-        let sigs = program_run_pending_signatures("# Todo\n- a\n\n# Done\n");
-        assert_eq!(sigs.len(), 2);
-        assert!(sigs.contains("# Todo\n- a"));
-        assert!(sigs.contains("# Done"));
+    fn program_run_pending_ids_cover_each_block() {
+        let ids = program_run_pending_ids("# Todo\n- a\n\n# Done\n");
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&agentd_protocol::program_block_id("# Todo\n- a")));
+        assert!(ids.contains(&agentd_protocol::program_block_id("# Done")));
         // An empty body has nothing to shimmer.
-        assert!(program_run_pending_signatures("   \n").is_empty());
+        assert!(program_run_pending_ids("   \n").is_empty());
     }
 
     #[tokio::test]
@@ -13959,12 +13947,13 @@ mod tests {
         let (mut app, _dir, server) = empty_app().await;
         // Run 1 over a list where each item is its own block (blank-separated):
         // every block shimmers.
+        let id = agentd_protocol::program_block_id;
         let original = "# Todo\n\n- alpha\n\n- beta\n\n- gamma\n";
         app.start_program_run("s1", original, false, "");
         let pending1 = &app.program_runs["s1"].pending;
-        assert!(pending1.contains("- alpha"));
-        assert!(pending1.contains("- beta"));
-        assert!(pending1.contains("- gamma"));
+        assert!(pending1.contains(&id("- alpha")));
+        assert!(pending1.contains(&id("- beta")));
+        assert!(pending1.contains(&id("- gamma")));
 
         // The agent settled the "alpha" block (rewrote it) — that's now the
         // last daemon-synced content. The user then edits "gamma" and re-Runs.
@@ -13975,13 +13964,13 @@ mod tests {
         let pending2 = &app.program_runs["s1"].pending;
         // The agent's settled block does NOT re-shimmer.
         assert!(
-            !pending2.contains("- alpha done"),
+            !pending2.contains(&id("- alpha done")),
             "a block the agent already settled must not re-shimmer on re-Run"
         );
         // The user's fresh edit shimmers (new instruction).
-        assert!(pending2.contains("- gamma rework"));
+        assert!(pending2.contains(&id("- gamma rework")));
         // A block that was still pending and untouched keeps shimmering.
-        assert!(pending2.contains("- beta"));
+        assert!(pending2.contains(&id("- beta")));
         server.abort();
     }
 
@@ -13993,8 +13982,8 @@ mod tests {
         app.start_program_run("s1", "# Todo\n\n- alpha\n", false, "");
         app.start_program_run("s1", "- alpha\n\n- beta\n", true, "- alpha\n");
         let pending = &app.program_runs["s1"].pending;
-        assert!(pending.contains("- alpha"));
-        assert!(pending.contains("- beta"));
+        assert!(pending.contains(&agentd_protocol::program_block_id("- alpha")));
+        assert!(pending.contains(&agentd_protocol::program_block_id("- beta")));
         server.abort();
     }
 
