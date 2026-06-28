@@ -22,6 +22,7 @@ Canvas editing is now a primary markdown editing surface; it needs the same disc
 
 - Search state is tracked on the canvas popup and does not interfere with smart-clip suggestions or selection gestures.
 - Search mode can be re-entered and edited from the current cursor position without closing the canvas.
+- When a clean canvas adopts newer Markdown from the daemon, any active search query remains open and recomputes matches against the adopted document.
 - Paste routing checks active canvas search before ordinary canvas editing so a pasted search term cannot mutate the document under the prompt.
 - The modeline should prefer search status text while search mode is active so users can tell whether a query is empty, failing, or positioned.
 - Search highlights must preserve existing canvas visuals (selection, smart-clip spans, and running-shimmer overlay) and remain compatible with wrapped rows.
