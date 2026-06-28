@@ -143,13 +143,6 @@ struct ProgramMeta {
     template_id: Option<String>,
 }
 
-#[derive(Debug, Default)]
-struct ProgramTemplateFrontmatter {
-    name: Option<String>,
-    description: Option<String>,
-    reference: Option<String>,
-}
-
 pub struct Storage {
     data_dir: PathBuf,
     /// When set, program templates are read from this directory instead of the
@@ -502,13 +495,11 @@ impl Storage {
     }
 
     pub fn program_templates(&self) -> Result<Vec<ProgramTemplate>> {
-        let docs_ref = || Some(agentd_protocol::PROGRAM_DOCS_REFERENCE.to_string());
         let mut templates = vec![
             ProgramTemplate {
                 id: "blank".to_string(),
                 name: "Blank".to_string(),
                 description: Some("Start with an empty orchestration program".to_string()),
-                reference: docs_ref(),
                 markdown: BLANK_PROGRAM.to_string(),
                 built_in: true,
             },
@@ -518,7 +509,6 @@ impl Storage {
                 description: Some(
                     "Todo / Progress / Done board the agent runs and delegates".to_string(),
                 ),
-                reference: docs_ref(),
                 markdown: TASKS_PROGRAM.to_string(),
                 built_in: true,
             },
@@ -528,7 +518,6 @@ impl Storage {
                 description: Some(
                     "Question, context, plan, findings, and done — run to investigate".to_string(),
                 ),
-                reference: docs_ref(),
                 markdown: INVESTIGATION_PROGRAM.to_string(),
                 built_in: true,
             },
@@ -567,15 +556,11 @@ impl Storage {
                         continue;
                     }
                 };
-                let (frontmatter, markdown) = parse_program_template_frontmatter(&raw);
                 templates.push(ProgramTemplate {
                     id: stem.to_string(),
-                    name: frontmatter
-                        .name
-                        .unwrap_or_else(|| stem.replace(['-', '_'], " ")),
-                    description: frontmatter.description,
-                    reference: frontmatter.reference,
-                    markdown,
+                    name: prettify_template_name(stem),
+                    description: None,
+                    markdown: raw,
                     built_in: false,
                 });
             }
@@ -1063,46 +1048,20 @@ fn parse_widget_frontmatter_fields(frontmatter: &str) -> WidgetFrontmatter {
     parsed
 }
 
-fn parse_program_template_frontmatter(raw: &str) -> (ProgramTemplateFrontmatter, String) {
-    let Some(rest) = raw
-        .strip_prefix("---\n")
-        .or_else(|| raw.strip_prefix("---\r\n"))
-    else {
-        return (ProgramTemplateFrontmatter::default(), raw.to_string());
-    };
-    let mut byte_offset = raw.len().saturating_sub(rest.len());
-    let mut frontmatter = String::new();
-    for line in rest.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        byte_offset += line.len();
-        if trimmed == "---" {
-            let parsed = parse_program_template_frontmatter_fields(&frontmatter);
-            return (parsed, raw[byte_offset..].to_string());
-        }
-        frontmatter.push_str(line);
-    }
-    (ProgramTemplateFrontmatter::default(), raw.to_string())
-}
-
-fn parse_program_template_frontmatter_fields(frontmatter: &str) -> ProgramTemplateFrontmatter {
-    let mut parsed = ProgramTemplateFrontmatter::default();
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim().trim_matches(['"', '\'']);
-        match key.trim() {
-            "name" if !value.is_empty() => parsed.name = Some(value.to_string()),
-            "description" if !value.is_empty() => parsed.description = Some(value.to_string()),
-            "reference" if !value.is_empty() => parsed.reference = Some(value.to_string()),
-            _ => {}
-        }
-    }
-    parsed
+/// Derive a display name from a custom template's filename stem: `-`/`_` become
+/// spaces and each word is title-cased (e.g. `code-review` → "Code Review").
+fn prettify_template_name(stem: &str) -> String {
+    stem.replace(['-', '_'], " ")
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn ensure_memory_file(path: &Path, template: &str) -> Result<PathBuf> {
@@ -1507,54 +1466,24 @@ mod program_tests {
     }
 
     #[test]
-    fn program_templates_include_user_markdown_with_frontmatter() {
+    fn program_templates_use_filename_as_name_with_verbatim_markdown() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
         let dir = storage.program_templates_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("review.md"),
-            "---\nname: Review Board\ndescription: Review active work\n---\n# Review\n",
-        )
-        .unwrap();
+        // No frontmatter handling: the filename stem is the name and the file
+        // contents are the markdown verbatim, including any leading `---`.
+        let contents = "---\nstill: body\n---\n# Code Review\n- look\n";
+        std::fs::write(dir.join("code-review.md"), contents).unwrap();
 
         let templates = storage.program_templates().unwrap();
-        let review = templates.iter().find(|t| t.id == "review").unwrap();
+        let review = templates.iter().find(|t| t.id == "code-review").unwrap();
 
-        assert_eq!(review.name, "Review Board");
-        assert_eq!(review.description.as_deref(), Some("Review active work"));
-        assert_eq!(review.markdown, "# Review\n");
+        assert_eq!(review.name, "Code Review");
+        assert_eq!(review.markdown, contents);
+        assert_eq!(review.description, None);
         assert!(!review.built_in);
         assert!(templates.iter().any(|t| t.id == "tasks" && t.built_in));
-    }
-
-    #[test]
-    fn program_templates_parse_reference_frontmatter() {
-        let tmp = tempfile::tempdir().unwrap();
-        let storage = Storage::new(tmp.path().join("data")).unwrap();
-        let dir = storage.program_templates_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        // A URL value carries colons — the parser must keep everything after the
-        // first `key:` separator.
-        std::fs::write(
-            dir.join("review.md"),
-            "---\nname: Review\nreference: https://example.com/docs#program\n---\n# Review\n",
-        )
-        .unwrap();
-
-        let templates = storage.program_templates().unwrap();
-        let review = templates.iter().find(|t| t.id == "review").unwrap();
-        assert_eq!(
-            review.reference.as_deref(),
-            Some("https://example.com/docs#program"),
-        );
-
-        // Built-ins carry the default docs reference.
-        let tasks = templates.iter().find(|t| t.id == "tasks").unwrap();
-        assert_eq!(
-            tasks.reference.as_deref(),
-            Some(agentd_protocol::PROGRAM_DOCS_REFERENCE),
-        );
     }
 
     #[test]
@@ -1562,7 +1491,7 @@ mod program_tests {
         let tmp = tempfile::tempdir().unwrap();
         let custom = tmp.path().join("custom-templates");
         std::fs::create_dir_all(&custom).unwrap();
-        std::fs::write(custom.join("ops.md"), "---\nname: Ops\n---\n# Ops\n").unwrap();
+        std::fs::write(custom.join("ops.md"), "# Ops\n").unwrap();
 
         let storage = Storage::new(tmp.path().join("data"))
             .unwrap()

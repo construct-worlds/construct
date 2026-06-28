@@ -7454,7 +7454,7 @@ fn apply_program_shimmer(lines: &mut [Line], shimmer: &ProgramShimmer, theme: &T
 
 /// Build the empty-program onboarding placeholder: a one-line description of what
 /// the program is, every non-blank template as a clickable button wrapped across
-/// as many rows as fit, a divider, a smart-clip syntax reference, and a docs link.
+/// as many rows as fit, a divider, and a smart-clip syntax reference.
 /// Returns the lines to render plus the button hitboxes. Coordinates are absolute
 /// screen cells — safe because an empty program never scrolls (offset is always 0)
 /// and every line is kept within `inner.width`, so no wrapping shifts the rows.
@@ -7480,36 +7480,14 @@ fn program_empty_placeholder(
     let syntax_line = Line::from(Span::styled(truncate_to_width(SYNTAX, width), dim));
     let divider = Line::from(Span::styled("─".repeat(width), dim));
 
-    // Reference footer: the first available reference among the templates, drawn
-    // as an underlined link. Built-ins always carry the program docs link and the
-    // daemon returns them first, so the footer is a stable "Docs:" link; a user
-    // template's `reference:` only surfaces when no earlier template has one.
-    // Decoupled from which buttons actually fit so it never perturbs the height
-    // budget below.
-    let reference = templates
-        .iter()
-        .filter(|t| t.id != "blank")
-        .find_map(|t| t.reference.as_deref());
-    let reference_line = reference.map(|url| {
-        Line::from(Span::styled(
-            truncate_to_width(&format!("Docs: {url}"), width),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::UNDERLINED),
-        ))
-    });
-
     let plain = || {
-        let mut lines = vec![
+        let lines = vec![
             desc_line.clone(),
             Line::from(""),
             divider.clone(),
             Line::from(""),
             syntax_line.clone(),
         ];
-        if let Some(ref_line) = reference_line.clone() {
-            lines.push(ref_line);
-        }
         (lines, Vec::new())
     };
 
@@ -7559,11 +7537,11 @@ fn program_empty_placeholder(
     let packed: usize = rows.iter().map(|r| r.len()).sum();
 
     // Height budget. Header = desc + blank (2). Footer = blank + divider + blank +
-    // syntax (4), plus the reference line (1) when present. Each button row spans 3
-    // lines. Reserve one line for the "+N more" indicator whenever some template
-    // can't be shown — whether dropped for width or trimmed for height.
+    // syntax (4). Each button row spans 3 lines. Reserve one line for the "+N more"
+    // indicator whenever some template can't be shown — whether dropped for width or
+    // trimmed for height.
     let header = 2usize;
-    let footer = 4usize + reference_line.is_some() as usize;
+    let footer = 4usize;
     let avail = (inner.height as usize).saturating_sub(header + footer);
     if avail < 3 {
         return plain();
@@ -7643,9 +7621,6 @@ fn program_empty_placeholder(
     lines.push(divider);
     lines.push(Line::from(""));
     lines.push(syntax_line);
-    if let Some(ref_line) = reference_line {
-        lines.push(ref_line);
-    }
     (lines, hits)
 }
 
@@ -10087,7 +10062,6 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             description: None,
-            reference: None,
             markdown: format!("# {name}\n"),
             built_in: true,
         }
@@ -10216,29 +10190,6 @@ mod tests {
         for line in &lines {
             assert!(line.width() <= inner.width as usize);
         }
-    }
-
-    #[test]
-    fn program_empty_placeholder_shows_reference_footer() {
-        let theme = crate::theme::Theme::default();
-        let mut tasks = placeholder_template("tasks", "Tasks");
-        tasks.reference = Some("https://example.com/program-docs".to_string());
-        let templates = vec![placeholder_template("blank", "Blank"), tasks];
-        let (lines, _) = program_empty_placeholder(&theme, &templates, Rect::new(0, 0, 80, 20));
-        let rendered: String = lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            rendered.contains("https://example.com/program-docs"),
-            "expected reference link in footer:\n{rendered}"
-        );
     }
 
     #[test]

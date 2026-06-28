@@ -11,7 +11,7 @@ When a program has no content, its body renders an onboarding placeholder instea
 
 1. A one-line description of what the program is.
 2. Every non-blank template as a clickable button, drawn as bordered boxes. Buttons wrap across as many rows as fit the pane width, ordered by name (case-insensitive). When more templates exist than fit the available height, the placeholder shows as many as fit and a trailing "+N more" indicator for the remainder. Clicking a button fills the program with that template's Markdown as a starting point the user then edits.
-3. A divider, a smart-clip syntax reference line (session/harness embeds, select-and-Run, `:::clip` fences), and — when available — a reference/docs link footer.
+3. A divider and a smart-clip syntax reference line (session/harness embeds, select-and-Run, `:::clip` fences).
 
 The placeholder appears exactly when the program body is empty, and disappears as soon as any content exists — including the moment a template button is clicked or the first character is typed. The "blank" template is never offered as a button, since it is the empty state itself.
 
@@ -31,11 +31,11 @@ The program is a primary surface, but a bare "type here" prompt does not tell a 
 
 ## Non-Goals
 
-This spec does not define a full template gallery, template management/editing UI, or hover/focus styling for the buttons. The template source directory, live-reload, and reference metadata are covered in [0051](0051-program-custom-templates-source.md).
+This spec does not define a full template gallery, template management/editing UI, or hover/focus styling for the buttons. The template source directory and live-reload are covered in [0051](0051-program-custom-templates-source.md).
 
 ## Examples
 
-- Opening a fresh program shows the description, the non-blank templates as bordered buttons (ordered by name, wrapping across rows), a divider, a syntax line, and a docs link.
+- Opening a fresh program shows the description, the non-blank templates as bordered buttons (ordered by name, wrapping across rows), a divider, and a syntax line.
 - Clicking the Tasks button replaces the empty body with the Tasks template's Markdown, places the cursor at the end, and the placeholder vanishes; `C-/` undoes back to the empty state.
 - Deleting all program content brings the placeholder back.
 - On a very narrow program, the same program shows only the description and syntax line, with no buttons.
