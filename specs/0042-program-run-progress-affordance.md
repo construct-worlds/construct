@@ -1,7 +1,7 @@
 # 0042-program-run-progress-affordance
 
 Status: accepted
-Date: 2026-06-27
+Date: 2026-06-28
 Area: ux
 Scope: Visual feedback shown on a session program while a program Run is executing in the owning session.
 
@@ -11,7 +11,7 @@ Pressing Run on a program must give immediate, continuous visual feedback that t
 
 - **Start (optimistic).** The shimmer begins the instant Run is pressed, on the client, before the execute call returns. A full-program run shimmers the whole document; a selection run shimmers only the selected region. The affordance must not wait on the round trip, because the latency it exists to mask is the agent's, not the request's.
 
-- **Narrow (best-effort).** The shimmer is tracked per *block* — a contiguous run of non-blank Markdown lines. A block stays shimmering only while its content is unchanged from when the run started. Any change to a block's content removes it from the shimmer, whether the change comes from the agent writing progress back or from the user editing. As the agent resolves parts of the document, those parts settle out of the animation; untouched parts keep shimmering.
+- **Narrow (best-effort).** The shimmer is tracked per *block* — a contiguous run of non-blank Markdown lines. Which blocks shimmer is a declared per-block state addressed by a stable, content-derived block id (see `0051-program-shimmer-block-addressing`), not an inference from whether a block's text changed: a block shimmers because it is declared pending and settles because it is declared settled. Changing a block's content changes its id, so its prior shimmer does not carry over — an edited block is settled by default unless the same change re-declares it pending. As the agent declares parts of the document settled, those parts recede from the animation; blocks left pending keep shimmering.
 
 - **Re-running preserves prior narrowing.** Running again while a run is still in flight must not re-shimmer the whole document and discard the progress the agent already showed. A re-Run re-shimmers only the blocks the user changed since the last synced version plus the blocks that were still pending; blocks the agent had already settled stay calm. A first run, or a run scoped to an explicit selection, shimmers its whole executed region.
 
@@ -19,7 +19,7 @@ Pressing Run on a program must give immediate, continuous visual feedback that t
 
 - **Run Button Spinner.** The pulsing Run glyph in the title bar is a secondary indicator that stops pulsing early on the first program-relevant output signal (tool call, reasoning, or other assistant-visible content) to signal that the agent has started active work, even while the program shimmer continues.
 
-Editing during a run is never blocked: the program is co-editable, and a run does not lock it. Because editing a block changes its content, editing inherently takes that block out of the shimmer — touching a block transfers it from "agent is working here" to "the user owns this now." This falls out of block-content tracking; no separate edit gesture is required.
+Editing during a run is never blocked: the program is co-editable, and a run does not lock it. Because editing a block changes its content and therefore its id, an edited block's prior shimmer does not carry to the new content — editing transfers a block from "agent is working here" to "the user owns this now" unless the change re-declares it pending (see `0051-program-shimmer-block-addressing`). No separate edit gesture is required.
 
 Session activity alone must not drive the program affordance. A session can be busy because the user typed an ordinary prompt, not because a program run is active. The shimmer therefore starts only on a program Run, and a robust implementation distinguishes the program-originating turn from any other turn rather than treating generic session busyness as "program is running."
 
@@ -33,9 +33,9 @@ The instruction the agent receives is a point-in-time snapshot taken at Run. Edi
 
 ## Consequences
 
-- The affordance is shared transient program state owned by the daemon, with an optimistic client-side start for the initiating TUI. The daemon publishes the active run's start time, expiry, and pending block signatures in program get/state payloads so other TUIs and restarted TUIs can render the same shimmer. It is not persisted into the Markdown and does not participate in program versioning or optimistic concurrency.
+- The affordance is shared transient program state owned by the daemon, with an optimistic client-side start for the initiating TUI. The daemon publishes the active run's start time, expiry, and the per-block shimmer projection (block ids plus shimmer state; see `0051-program-shimmer-block-addressing`) in program get/state payloads so other TUIs and restarted TUIs can render the same shimmer. It is not persisted into the Markdown and does not participate in program versioning or optimistic concurrency.
 - The daemon starts shared run state only after the Run prompt has been delivered to the owning session. The initiating client still starts optimistically before the round trip returns, but daemon-owned shared state must not be clearable by prompt echo or other delivery artifacts.
-- Narrowing is best-effort. A block the agent never rewrites keeps shimmering until the turn completes; that is acceptable and is bounded by the stop signal. Two blocks with identical text are indistinguishable and settle together.
+- Narrowing is best-effort. A block the agent never declares settled keeps shimmering until the turn completes; that is acceptable and is bounded by the stop signal. Two blocks with identical text are indistinguishable and settle together.
 - Session status transitions are the authoritative stop signals for the shimmer: the daemon clears shared run state when the session transitions back to idle after being seen running. A hard time cap remains as a backstop for silent runs. The first observed agent-visible output stops only the Run button's pulsing indicator.
 - Raw PTY bytes are not a program-run stop signal. PTY-backed harnesses can emit prompt echo, screen redraws, bracketed-paste artifacts, or other delivery noise around Run submission, and those bytes are not distinguishable enough to clear program progress. Program edits still narrow or clear the run, and structured agent-visible events may clear it for harnesses that provide them.
 - Clients do not independently clear shared run state from session output events. They render optimistic/local state until the daemon reports active or cleared program run state through program get/state payloads.
