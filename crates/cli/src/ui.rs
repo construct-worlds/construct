@@ -31,7 +31,8 @@ const MATRIX_WALLPAPER_DIM: f32 = 0.22;
 const PREVIEW_REVEAL_SECS: f32 = 1.0;
 const CANVAS_REVEAL_SECS: f32 = CANVAS_REVEAL_MS as f32 / 1000.0;
 const CANVAS_RUN_BUTTON: &str = " ▶ ";
-const CANVAS_CLIP_HOVER_PREVIEW_ROWS: u16 = 8;
+const CANVAS_CLIP_HOVER_PREVIEW_COLS: u16 = 102;
+const CANVAS_CLIP_HOVER_PREVIEW_ROWS: u16 = 12;
 /// How long the canvas shimmer-text preview lingers after the pointer stops
 /// moving before it self-dismisses. The clip-chip preview, by contrast, stays
 /// up for as long as the chip is hovered.
@@ -7603,13 +7604,12 @@ fn render_canvas_popup_at(
             render_visible_dynamic_ui_panels(f, rect, app, &popup.canvas.session_id, &panels);
         }
     }
-    // Capture session-clip hitboxes for the active canvas so hover/click can map
-    // a cell → session id. Only the active canvas is interactive; the same
-    // `scroll_offset` applied to the paragraph is applied here so the hitboxes
-    // track the visible (scrolled) rows.
+    // Capture session-clip hitboxes for this canvas so hover can work for any
+    // visible canvas, even when another split is focused. Only the active canvas
+    // publishes click hitboxes into layout state.
+    let clip_hits = canvas_session_clip_hits(Some(app), &popup.buffer, scroll_offset, inner);
     if active {
-        let hits = canvas_session_clip_hits(Some(app), &popup.buffer, scroll_offset, inner);
-        app.layout.canvas_clip_hits = hits;
+        app.layout.canvas_clip_hits = clip_hits.clone();
     }
     if active && !popup.closing {
         if let Some(pos) =
@@ -7623,8 +7623,10 @@ fn render_canvas_popup_at(
         render_canvas_selection_context_menu(f, app, popup, scroll_offset, inner);
     }
     render_canvas_title_tooltip(f, app, popup, summary_ref, rect);
+    if !popup.closing {
+        render_canvas_clip_hover(f, app, rect, &clip_hits);
+    }
     if active && !popup.closing {
-        render_canvas_clip_hover(f, app, rect);
         render_canvas_shimmer_hover(f, app, popup, rect, scroll_offset, inner, now);
     }
 }
@@ -7633,20 +7635,23 @@ fn render_canvas_popup_at(
 /// smart-clip in the canvas body. Reads the freshly captured clip hitboxes,
 /// resolves the hovered session, and paints the shared session card anchored to
 /// the hovered chip. Persists for as long as the chip is hovered.
-fn render_canvas_clip_hover(f: &mut Frame, app: &mut App, modal: Rect) {
+fn render_canvas_clip_hover(
+    f: &mut Frame,
+    app: &mut App,
+    modal: Rect,
+    hits: &[crate::app::CanvasClipHit],
+) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
-    let Some((session_id, col, row)) = app
-        .layout
-        .canvas_clip_hits
+    let Some(session_id) = hits
         .iter()
         .find(|hit| hit.contains(mx, my))
-        .map(|hit| (hit.session_id.clone(), hit.col_start, hit.row))
+        .map(|hit| hit.session_id.clone())
     else {
         return;
     };
-    render_session_hover_card(f, app, modal, &session_id, col, row);
+    render_session_hover_card(f, app, modal, &session_id, mx, my);
 }
 
 /// Lay out the floating session hover card so it reads as a landscape tile: its
@@ -7661,6 +7666,35 @@ fn session_hover_card_size(content_w: u16, content_h: u16, max_w: u16) -> (u16, 
     // caller's fit check drops the card entirely.
     let width = base.max(height.saturating_add(1)).min(cap);
     (width, height)
+}
+
+fn session_hover_card_rect(
+    modal: Rect,
+    width: u16,
+    height: u16,
+    anchor_col: u16,
+    anchor_row: u16,
+) -> Option<Rect> {
+    if modal.height < height || modal.width < width {
+        return None;
+    }
+    let modal_bottom = modal.y.saturating_add(modal.height);
+    let modal_right = modal.x.saturating_add(modal.width);
+    let y = if anchor_row.saturating_add(1).saturating_add(height) <= modal_bottom {
+        anchor_row.saturating_add(1)
+    } else {
+        anchor_row.saturating_sub(height)
+    };
+    let y = y.clamp(modal.y, modal_bottom.saturating_sub(height));
+    let x = anchor_col
+        .min(modal_right.saturating_sub(width))
+        .max(modal.x);
+    Some(Rect {
+        x,
+        y,
+        width,
+        height,
+    })
 }
 
 /// Render the floating session hover card — a live tail of the session's PTY
@@ -7680,7 +7714,10 @@ fn render_session_hover_card(
         return;
     };
 
-    let max_w = modal.width.saturating_sub(2).clamp(1, 128);
+    let max_w = modal
+        .width
+        .saturating_sub(2)
+        .clamp(1, CANVAS_CLIP_HOVER_PREVIEW_COLS);
     let preview_output = app
         .histories
         .get_mut(session_id)
@@ -7695,28 +7732,8 @@ fn render_session_hover_card(
     let content_w = max_w;
     let content_h = CANVAS_CLIP_HOVER_PREVIEW_ROWS;
     let (width, height) = session_hover_card_size(content_w, content_h, max_w);
-    if modal.height < height || modal.width < width {
+    let Some(area) = session_hover_card_rect(modal, width, height, anchor_col, anchor_row) else {
         return;
-    }
-
-    // Anchor below the cursor/chip when there's room, otherwise above it; keep
-    // the box fully inside the canvas modal horizontally and vertically.
-    let modal_bottom = modal.y.saturating_add(modal.height);
-    let modal_right = modal.x.saturating_add(modal.width);
-    let y = if anchor_row.saturating_add(1).saturating_add(height) <= modal_bottom {
-        anchor_row.saturating_add(1)
-    } else {
-        anchor_row.saturating_sub(height)
-    };
-    let y = y.clamp(modal.y, modal_bottom.saturating_sub(height));
-    let x = anchor_col
-        .min(modal_right.saturating_sub(width))
-        .max(modal.x);
-    let area = Rect {
-        x,
-        y,
-        width,
-        height,
     };
 
     f.render_widget(Clear, area);
@@ -8817,7 +8834,7 @@ fn canvas_rendered_line_with_clips(app: Option<&App>, raw: &str) -> (String, Vec
 /// [`CanvasClipHit`]s (one per wrapped-row segment) so the mouse handler can
 /// resolve a cell → session id for hover-preview and click-to-focus. Clips of
 /// other kinds (harness, response) are skipped.
-fn canvas_session_clip_hits(
+pub(crate) fn canvas_session_clip_hits(
     app: Option<&App>,
     markdown: &str,
     scroll_offset: usize,
@@ -9592,6 +9609,29 @@ mod tests {
         // Shorter card, still wider than tall.
         let (w, h) = session_hover_card_size(4, 3, 64);
         assert!(w > h, "expected landscape card without preview, got {w}x{h}");
+    }
+
+    #[test]
+    fn session_hover_card_uses_narrower_taller_preview_geometry() {
+        let (w, h) = session_hover_card_size(
+            CANVAS_CLIP_HOVER_PREVIEW_COLS,
+            CANVAS_CLIP_HOVER_PREVIEW_ROWS,
+            CANVAS_CLIP_HOVER_PREVIEW_COLS,
+        );
+        assert_eq!(w, 102, "outer width should be about 20% narrower than 128");
+        assert_eq!(h, 14, "outer height should be about 40% taller than 10");
+    }
+
+    #[test]
+    fn session_hover_card_rect_anchors_to_mouse_position() {
+        let modal = Rect::new(10, 5, 120, 40);
+        let rect = session_hover_card_rect(modal, 50, 14, 42, 12).expect("card fits");
+        assert_eq!(rect.x, 42);
+        assert_eq!(rect.y, 13);
+
+        let rect = session_hover_card_rect(modal, 50, 14, 125, 42).expect("card fits");
+        assert_eq!(rect.x, 80, "right edge should stay inside the modal");
+        assert_eq!(rect.y, 28, "card should flip above the mouse near the bottom");
     }
 
     #[test]

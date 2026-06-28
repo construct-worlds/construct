@@ -12846,6 +12846,74 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn canvas_session_hover_card_works_on_unfocused_split_canvas() {
+        use crate::pty_render::ItemHistory;
+
+        let (mut app, _dir, server) = empty_app().await;
+        let mut s1 = summary_with_kind(agentd_protocol::SessionKind::User);
+        let mut s2 = summary_with_kind(agentd_protocol::SessionKind::User);
+        let mut s3 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s2.id = "s2".into();
+        s3.id = "s3".into();
+        s3.title = Some("Worker".into());
+        app.sessions = vec![s1, s2, s3];
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 2;
+        app.selection = Selection::Session("s2".into());
+        let mut inactive_canvas = canvas_popup_for_test("s1", "talk @{session:s3}", 0);
+        inactive_canvas.revealed_at = Instant::now() - Duration::from_millis(CANVAS_REVEAL_MS);
+        app.canvas_popups.insert("s1".into(), inactive_canvas);
+
+        let mut history = ItemHistory::new();
+        history.feed_pty(b"UNFOCUSED_SPLIT_PREVIEW\nsecond line");
+        app.histories.insert("s3".into(), history);
+
+        let backend = ratatui::backend::TestBackend::new(160, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("canvas should render");
+
+        let pane = app
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|hit| hit.id == 1)
+            .expect("inactive split pane")
+            .area;
+        let inner = pane.inner(ratatui::layout::Margin {
+            horizontal: 1 + CANVAS_CONTENT_PADDING_X,
+            vertical: 1 + CANVAS_CONTENT_PADDING_Y,
+        });
+        let popup = app.canvas_popups.get("s1").expect("stashed s1 canvas");
+        let hit = crate::ui::canvas_session_clip_hits(Some(&app), &popup.buffer, 0, inner)
+            .into_iter()
+            .find(|hit| hit.session_id == "s3")
+            .expect("inactive canvas clip hit");
+        app.mouse_pos = Some((hit.col_start, hit.row));
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("inactive canvas hover card should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("UNFOCUSED_SPLIT_"),
+            "hovering a clip in an unfocused split canvas should show the session tail"
+        );
+        server.abort();
+    }
+
     /// Seed `app` with one selected session that owns a single sticky widget,
     /// plus a fully-revealed canvas popup over it. Returns the keep-alive dir
     /// and mock-daemon handle.
