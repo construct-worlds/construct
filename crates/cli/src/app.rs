@@ -13312,19 +13312,19 @@ mod tests {
                 .all(|h| h.start_col == w.start_col && h.row == w.row),
             "every registration of the widget icon must share one geometry: {widget_hits:?}"
         );
-        // The □/■ indicator paints on the title row at the hit (ratatui's
-        // right-aligned title placement lands the glyph within one cell of the
-        // registered square — the same as the session-view pane title bar).
+        // The □/■ indicator paints on the title row exactly at the registered
+        // hit cell: ratatui's right-aligned title placement lands the glyph on
+        // the same column the hover/click hitbox covers — the same as the
+        // session-view pane title bar. (Aiming one cell off used to be required;
+        // see `dynamic_ui_trigger_range`.)
         let painted_at = |x: u16| {
             buf.cell((x, w.row))
                 .map(|c| c.symbol().to_string())
                 .unwrap_or_default()
         };
-        let near_glyph = (w.start_col.saturating_sub(2)..=w.start_col)
-            .any(|x| painted_at(x) == "□" || painted_at(x) == "■");
         assert!(
-            near_glyph,
-            "a widget indicator glyph should paint at the hit {w:?}: row={:?}",
+            painted_at(w.start_col) == "□" || painted_at(w.start_col) == "■",
+            "the widget indicator glyph must paint exactly on its hit cell {w:?}: {:?}",
             (w.start_col.saturating_sub(2)..w.start_col + 2)
                 .map(painted_at)
                 .collect::<Vec<_>>()
@@ -17148,16 +17148,26 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("session widget title indicators should render");
 
-        let hit_ids: Vec<_> = app
-            .layout
-            .dynamic_ui_widget_hits
-            .iter()
-            .map(|hit| hit.panel_id.as_str())
-            .collect();
+        let hits: Vec<_> = app.layout.dynamic_ui_widget_hits.clone();
+        let hit_ids: Vec<_> = hits.iter().map(|hit| hit.panel_id.as_str()).collect();
         assert_eq!(hit_ids, vec!["older", "newer"]);
-        let text = rendered_text(term.backend().buffer());
+        let buf = term.backend().buffer();
+        let text = rendered_text(buf);
         assert!(text.contains("□"));
         assert!(text.contains("■"));
+        // Each registered hit cell must paint the visible □/■ glyph — the
+        // session title bar's hover/click hitbox aligns exactly with the
+        // square the user sees, with no off-by-one aiming gap.
+        for hit in &hits {
+            let glyph = buf
+                .cell((hit.start_col, hit.row))
+                .map(|c| c.symbol().to_string())
+                .unwrap_or_default();
+            assert!(
+                glyph == "□" || glyph == "■",
+                "widget hit {hit:?} must land on the visible glyph, got {glyph:?}"
+            );
+        }
         server.abort();
     }
 
