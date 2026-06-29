@@ -1234,6 +1234,7 @@ mod tests {
             kind: SessionKind::Subagent,
             archived: false,
             operator_loop_disabled: false,
+            needs_attention: false,
         }
     }
 }
