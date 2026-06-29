@@ -25,6 +25,7 @@ use agentd_protocol::{
     Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
     SessionState,
 };
+use construct_adapter_common::{drive_turn, spawn_stderr_log, TurnOutcome};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -33,7 +34,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
 
 const MAX_CLAUDE_INITIAL_PROMPT_ARG_BYTES: usize = 3500;
 
@@ -490,57 +490,6 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
     emit.emit(SessionEvent::Done { exit_code });
 }
 
-#[derive(Debug)]
-enum TurnOutcome {
-    Completed,
-    Interrupted,
-    Stopped,
-}
-
-async fn drive_turn(
-    child: &mut tokio::process::Child,
-    inbox: &mut mpsc::Receiver<AdapterInboxMsg>,
-    emit: &EventEmitter,
-    pending: &mut VecDeque<String>,
-) -> TurnOutcome {
-    loop {
-        tokio::select! {
-            biased;
-            msg = inbox.recv() => {
-                match msg {
-                    None => {
-                        // daemon channel closed
-                        let _ = child.start_kill();
-                        return TurnOutcome::Stopped;
-                    }
-                    Some(AdapterInboxMsg::Stop) => {
-                        let _ = child.start_kill();
-                        return TurnOutcome::Stopped;
-                    }
-                    Some(AdapterInboxMsg::Interrupt) => {
-                        let _ = child.start_kill();
-                        return TurnOutcome::Interrupted;
-                    }
-                    Some(AdapterInboxMsg::Input(t)) => {
-                        emit.log(format!("queued input for next turn: {}", short(&t, 60)));
-                        pending.push_back(t);
-                    }
-                    Some(AdapterInboxMsg::PtyInput(_))
-                    | Some(AdapterInboxMsg::PtyResize { .. })
-                    | Some(AdapterInboxMsg::ToolDecision { .. })
-                    | Some(AdapterInboxMsg::SetApprovalMode(_))
-                    | Some(AdapterInboxMsg::ToolAction { .. }) => {
-                        // headless claude doesn't gate tools; ignore.
-                    }
-                }
-            }
-            _ = child.wait() => {
-                return TurnOutcome::Completed;
-            }
-        }
-    }
-}
-
 fn spawn_writer(
     mut stdin: tokio::process::ChildStdin,
     user_text: String,
@@ -593,18 +542,6 @@ where
                     text: line,
                 }),
             }
-        }
-    })
-}
-
-fn spawn_stderr_log<R>(reader: R, emit: EventEmitter) -> tokio::task::JoinHandle<()>
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            emit.log(format!("stderr: {line}"));
         }
     })
 }
@@ -783,14 +720,6 @@ fn tool_results_from_message(msg: Option<&Value>) -> Vec<SessionEvent> {
         }
     }
     out
-}
-
-fn short(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        s.chars().take(max).collect::<String>() + "..."
-    }
 }
 
 #[cfg(test)]

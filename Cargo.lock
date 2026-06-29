@@ -513,6 +513,7 @@ version = "0.11.5"
 dependencies = [
  "agentd-protocol",
  "anyhow",
+ "construct-adapter-common",
  "serde_json",
  "tokio",
  "tracing",
@@ -525,6 +526,7 @@ version = "0.11.5"
 dependencies = [
  "agentd-protocol",
  "anyhow",
+ "construct-adapter-common",
  "serde_json",
  "tokio",
  "tracing",
@@ -537,9 +539,18 @@ version = "0.11.5"
 dependencies = [
  "agentd-protocol",
  "anyhow",
+ "construct-adapter-common",
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "construct-adapter-common"
+version = "0.11.5"
+dependencies = [
+ "agentd-protocol",
+ "tokio",
 ]
 
 [[package]]
@@ -548,6 +559,7 @@ version = "0.11.5"
 dependencies = [
  "agentd-protocol",
  "anyhow",
+ "construct-adapter-common",
  "serde_json",
  "tokio",
  "tracing",

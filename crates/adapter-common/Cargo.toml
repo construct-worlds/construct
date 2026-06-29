@@ -1,0 +1,18 @@
+[package]
+name = "construct-adapter-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Common utilities shared by headless adapter implementations"
+
+[lib]
+name = "construct_adapter_common"
+path = "src/lib.rs"
+
+[dependencies]
+agentd-protocol = { workspace = true }
+tokio.workspace = true
+
