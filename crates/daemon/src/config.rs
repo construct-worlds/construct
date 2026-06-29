@@ -5,6 +5,12 @@ use agentd_protocol::paths::Paths;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+
+/// Env override for the program-templates directory. Wins over the
+/// `[program].templates_dir` config option; both fall back to the default
+/// `data_dir/program/templates`.
+pub const PROGRAM_TEMPLATES_DIR_ENV: &str = "CONSTRUCT_PROGRAM_TEMPLATES_DIR";
 
 /// The full config template written to `config.toml.template` on every daemon
 /// start. All configurable parameters are listed with their default values and
@@ -119,6 +125,21 @@ harness = "smith"
 # Default: true
 enabled = true
 
+# ── Program ──────────────────────────────────────────────────────────────────
+#
+# The program is the shared Markdown space each session can run. Built-in
+# templates (Blank, Tasks, Investigation) are always offered; drop your own
+# `<name>.md` files in the templates directory to add custom templates. A custom
+# template is just a Markdown file — its filename is its name and its contents are
+# the program. Custom templates reload on every program open — no daemon restart
+# needed.
+
+# [program]
+# Directory custom program templates are read from.
+# Default: <data_dir>/program/templates  (e.g. ~/.local/share/construct/program/templates)
+# The CONSTRUCT_PROGRAM_TEMPLATES_DIR env var overrides this.
+# templates_dir = "/path/to/my/program-templates"
+
 # ── Smith named model profiles ────────────────────────────────────────────────
 #
 # Named endpoint profiles for the smith harness. Reference at runtime with
@@ -179,6 +200,7 @@ enabled = true
 # Daemon:
 #   CONSTRUCT_WEBUI_PORT      — local web UI port (default: 5746)
 #   CONSTRUCT_REMOTE_WS_PORT  — auto-start remote WS listener on this port at boot
+#   CONSTRUCT_PROGRAM_TEMPLATES_DIR — program templates dir (overrides [program].templates_dir)
 #
 # Smith harness (can also be set per-adapter via [adapters.smith.env]):
 #   CONSTRUCT_SMITH_MODEL         — default model (provider:name, @profile, or oauth prefix)
@@ -230,6 +252,41 @@ pub struct Config {
     pub defaults: Defaults,
     #[serde(default)]
     pub orchestrator: OrchestratorConfig,
+    #[serde(default)]
+    pub program: ProgramConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProgramConfig {
+    /// Directory program templates are read from. When unset, the daemon uses
+    /// `<data_dir>/program/templates`. The `CONSTRUCT_PROGRAM_TEMPLATES_DIR`
+    /// env var overrides this.
+    #[serde(default)]
+    pub templates_dir: Option<String>,
+}
+
+impl Config {
+    /// Resolve the program-templates directory override. Precedence:
+    /// `CONSTRUCT_PROGRAM_TEMPLATES_DIR` env > `[program].templates_dir` config >
+    /// default (`None`, leaving the daemon's `data_dir/program/templates`).
+    pub fn program_templates_dir_override(&self) -> Option<PathBuf> {
+        let env = std::env::var(PROGRAM_TEMPLATES_DIR_ENV).ok();
+        resolve_program_templates_dir(self, env.as_deref())
+    }
+}
+
+/// Pure resolver for the program-templates directory override, separated from
+/// the live env read so precedence (env > config > default) is unit-testable.
+pub fn resolve_program_templates_dir(cfg: &Config, env_override: Option<&str>) -> Option<PathBuf> {
+    if let Some(v) = env_override.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(v));
+    }
+    cfg.program
+        .templates_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -464,5 +521,46 @@ mod tests {
             smith.env.get("CONSTRUCT_SMITH_MODEL").map(String::as_str),
             Some("codex-oauth:gpt-5.5"),
         );
+    }
+
+    /// `[program].templates_dir` parses out of TOML.
+    #[test]
+    fn program_templates_dir_parses() {
+        let toml = r#"
+            [program]
+            templates_dir = "/srv/program-templates"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.program.templates_dir.as_deref(), Some("/srv/program-templates"));
+    }
+
+    /// Resolution precedence: env override > `[program].templates_dir` > default.
+    #[test]
+    fn resolve_program_templates_dir_precedence() {
+        let mut cfg = Config::default();
+
+        // Default: no env, no config → None (daemon uses data_dir/program/templates).
+        assert_eq!(resolve_program_templates_dir(&cfg, None), None);
+
+        // Config only.
+        cfg.program.templates_dir = Some("/from/config".to_string());
+        assert_eq!(
+            resolve_program_templates_dir(&cfg, None),
+            Some(PathBuf::from("/from/config")),
+        );
+
+        // Env wins over config.
+        assert_eq!(
+            resolve_program_templates_dir(&cfg, Some("/from/env")),
+            Some(PathBuf::from("/from/env")),
+        );
+
+        // Blank/whitespace values are ignored (fall through to the next source).
+        assert_eq!(
+            resolve_program_templates_dir(&cfg, Some("   ")),
+            Some(PathBuf::from("/from/config")),
+        );
+        cfg.program.templates_dir = Some("  ".to_string());
+        assert_eq!(resolve_program_templates_dir(&cfg, Some("")), None);
     }
 }

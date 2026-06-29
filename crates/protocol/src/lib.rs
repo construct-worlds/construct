@@ -902,7 +902,7 @@ pub struct ProgramDocument {
 }
 
 /// A program "block": a maximal run of consecutive non-blank Markdown lines.
-/// Blocks are the unit of program-run shimmer (see specs 0042 and 0051).
+/// Blocks are the unit of program-run shimmer (see specs 0042 and 0053).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProgramBlockSpan {
     /// Source-line range `[start_line, end_line)` into `markdown.lines()`.
@@ -911,7 +911,7 @@ pub struct ProgramBlockSpan {
     /// Normalized content: each line trimmed, joined by `\n`. Equal-content
     /// blocks share a signature (and therefore an id) and settle together.
     pub signature: String,
-    /// Stable, content-derived block id (spec 0051): a hash of `signature`.
+    /// Stable, content-derived block id (spec 0053): a hash of `signature`.
     pub id: String,
     /// Raw block text: source lines `[start_line, end_line)` joined by `\n`
     /// (original indentation preserved), usable directly as an edit anchor.
@@ -920,7 +920,7 @@ pub struct ProgramBlockSpan {
 
 /// One block of a program with its current shimmer state — the per-block
 /// projection returned by program get/edit/update so an agent reads and
-/// declares shimmer by stable block id (spec 0051).
+/// declares shimmer by stable block id (spec 0053).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProgramBlockView {
     pub id: String,
@@ -932,14 +932,14 @@ pub struct ProgramBlockView {
 
 /// A declaration that a program block (addressed by its stable id) is pending
 /// (`shimmer: true`) or settled (`shimmer: false`) — the unit of the per-block
-/// shimmer declaration carried by program edits (spec 0051).
+/// shimmer declaration carried by program edits (spec 0053).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProgramShimmerDecl {
     pub id: String,
     pub shimmer: bool,
 }
 
-/// Stable, content-derived id for a program block (spec 0051). Derived from the
+/// Stable, content-derived id for a program block (spec 0053). Derived from the
 /// block's normalized signature with a dependency-free FNV-1a hash so the daemon
 /// and every client compute the same id for the same content. The id is stable
 /// against position but changes when the block's own text changes; equal content
@@ -999,13 +999,24 @@ pub struct ProgramRunProgress {
     pub started_at_ms: i64,
     pub expires_at_ms: i64,
     /// Stable content-derived ids of the blocks still pending in this run
-    /// (spec 0051). A block shimmers exactly while its id is in this set.
-    #[serde(default, alias = "pending_block_signatures")]
+    /// (spec 0053). A block shimmers exactly while its id is in this set.
+    #[serde(default)]
     pub pending_block_ids: Vec<String>,
     #[serde(default)]
     pub seen_running: bool,
     #[serde(default)]
     pub first_output_seen: bool,
+    /// True once an in-run program declaration/edit has narrowed this run —
+    /// i.e. the run is actively managed via per-block declarations rather than
+    /// riding the untouched optimistic full-program shimmer. A managed run is
+    /// cleared by its pending set emptying, a terminal owning-session state, or
+    /// the inactivity backstop — NOT by the owning session merely returning to
+    /// awaiting-input (a self-scheduling agent goes idle while delegated or
+    /// background work is still in flight). An unmanaged run that no
+    /// declaration has narrowed still clears when the owning session goes idle
+    /// after being seen running. See `specs/0042-program-run-progress-affordance.md`.
+    #[serde(default)]
+    pub agent_managed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1082,7 +1093,7 @@ pub struct ProgramGetResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_run: Option<ProgramRunProgress>,
     /// Ordered per-block projection with each block's stable id and current
-    /// shimmer state (spec 0051). Derived from the live markdown; not persisted.
+    /// shimmer state (spec 0053). Derived from the live markdown; not persisted.
     #[serde(default)]
     pub blocks: Vec<ProgramBlockView>,
 }
@@ -1100,7 +1111,7 @@ pub struct ProgramUpdateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// Complete shimmer declaration over the blocks of `markdown`, in document
-    /// order: `shimmer[i]` is the pending state of the i-th block (spec 0051).
+    /// order: `shimmer[i]` is the pending state of the i-th block (spec 0053).
     /// `None` leaves any active run's shimmer to narrow by content change only
     /// (the co-editing human-save path); the MCP tool requires it for agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1111,7 +1122,7 @@ pub struct ProgramUpdateParams {
 pub struct ProgramUpdateResult {
     pub program: ProgramDocument,
     /// Fresh per-block projection after the write, so the caller rides the echo
-    /// instead of re-reading (spec 0051).
+    /// instead of re-reading (spec 0053).
     #[serde(default)]
     pub blocks: Vec<ProgramBlockView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1140,7 +1151,7 @@ pub struct ProgramEditParams {
     pub actor: ProgramUpdateActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// Partial shimmer declaration applied after the edits (spec 0051): each
+    /// Partial shimmer declaration applied after the edits (spec 0053): each
     /// entry sets the pending state of a block addressed by its stable id, and
     /// may target any block, not only blocks this edit changed. Ids that match
     /// no post-edit block are dropped (the block changed underneath the caller).
@@ -1156,7 +1167,7 @@ pub struct ProgramExecuteParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_version: Option<u64>,
     /// Optional initial pending set over the executed body's blocks, in order
-    /// (spec 0051). `None` keeps the optimistic default: the whole executed
+    /// (spec 0053). `None` keeps the optimistic default: the whole executed
     /// region shimmers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shimmer: Option<Vec<bool>>,
@@ -1168,7 +1179,7 @@ pub struct ProgramExecuteResult {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_run: Option<ProgramRunProgress>,
-    /// Per-block projection of the program after the run was seeded (spec 0051).
+    /// Per-block projection of the program after the run was seeded (spec 0053).
     #[serde(default)]
     pub blocks: Vec<ProgramBlockView>,
 }
@@ -1972,17 +1983,5 @@ mod program_block_tests {
         assert_eq!(spans[1].start_line, 4);
         // Empty / whitespace-only input has no blocks.
         assert!(program_block_spans("  \n\n").is_empty());
-    }
-
-    #[test]
-    fn run_progress_accepts_legacy_pending_block_signatures() {
-        let run: ProgramRunProgress = serde_json::from_value(serde_json::json!({
-            "run_id": "r1",
-            "started_at_ms": 0,
-            "expires_at_ms": 1,
-            "pending_block_signatures": ["abc"],
-        }))
-        .unwrap();
-        assert_eq!(run.pending_block_ids, vec!["abc".to_string()]);
     }
 }

@@ -622,7 +622,7 @@ fn program_run_context(
     }
 }
 
-/// Stable block ids of every block in `body` (spec 0051) — the set a Run over
+/// Stable block ids of every block in `body` (spec 0053) — the set a Run over
 /// `body` shimmers, and the set against which shimmer declarations resolve.
 fn program_block_ids(body: &str) -> std::collections::HashSet<String> {
     agentd_protocol::program_block_spans(body)
@@ -904,7 +904,7 @@ impl SessionManager {
         runs.get(session_id).cloned()
     }
 
-    /// Build the per-block projection (spec 0051): each block of `markdown` with
+    /// Build the per-block projection (spec 0053): each block of `markdown` with
     /// its stable id, text, and current shimmer state from the active run.
     fn program_blocks_projection(
         &self,
@@ -946,7 +946,7 @@ impl SessionManager {
         let now_ms = Utc::now().timestamp_millis();
         let pending: std::collections::HashSet<String> =
             if let Some(decl) = initial.filter(|d| d.len() == spans.len()) {
-                // Explicit initial pending set, in document order (spec 0051).
+                // Explicit initial pending set, in document order (spec 0053).
                 spans
                     .iter()
                     .zip(decl.iter())
@@ -988,6 +988,10 @@ impl SessionManager {
             pending_block_ids: pending.into_iter().collect(),
             seen_running: false,
             first_output_seen: false,
+            // Unmanaged until the agent narrows it with a declaration/edit.
+            // Until then it is the optimistic full-program shimmer and stays
+            // subject to the owning-session idle stop signal.
+            agent_managed: false,
         };
         if let Ok(mut runs) = self.program_runs.lock() {
             runs.insert(session_id.to_string(), run.clone());
@@ -995,7 +999,7 @@ impl SessionManager {
         Some(run)
     }
 
-    /// Apply a partial shimmer declaration after an edit (spec 0051): drop
+    /// Apply a partial shimmer declaration after an edit (spec 0053): drop
     /// blocks whose id no longer exists (changed/removed), then set each
     /// declared id pending or settled. Ids absent from the post-edit document
     /// are ignored (fail closed — the block changed underneath the caller).
@@ -1011,6 +1015,14 @@ impl SessionManager {
             let Some(run) = runs.get_mut(session_id) else {
                 return;
             };
+            // A declaration/edit during the run means the agent is actively
+            // managing it: from here on, trust the declarations and the
+            // inactivity backstop to clear it, not the owning session's idle
+            // transition (a self-scheduling agent goes idle while delegated or
+            // background work is still in flight). See spec 0042.
+            run.agent_managed = true;
+            // Refresh the inactivity backstop — the run is still being worked.
+            run.expires_at_ms = now_ms + PROGRAM_RUN_MAX_MS;
             run.pending_block_ids.retain(|id| current.contains(id));
             for decl in decls {
                 if !current.contains(&decl.id) {
@@ -1032,7 +1044,7 @@ impl SessionManager {
 
     /// Authoritatively replace a run's pending set with `pending_ids`
     /// (intersected with blocks present in `markdown`). Used by a program
-    /// update's complete declaration (spec 0051); a no-op when no run is active.
+    /// update's complete declaration (spec 0053); a no-op when no run is active.
     fn set_program_run_pending(
         &self,
         session_id: &str,
@@ -1045,6 +1057,10 @@ impl SessionManager {
             let Some(run) = runs.get_mut(session_id) else {
                 return;
             };
+            // A complete declaration is active management (spec 0042): keep the
+            // run alive past owning-session idle and refresh the backstop.
+            run.agent_managed = true;
+            run.expires_at_ms = now_ms + PROGRAM_RUN_MAX_MS;
             run.pending_block_ids = pending_ids
                 .into_iter()
                 .filter(|id| current.contains(id))
@@ -1089,8 +1105,24 @@ impl SessionManager {
                             updated = true;
                         }
                     }
-                    SessionState::AwaitingInput | SessionState::Done | SessionState::Errored => {
+                    SessionState::Done | SessionState::Errored => {
+                        // Terminal: the owning agent is gone and can never
+                        // settle the remaining blocks, so clear authoritatively
+                        // once the run was seen running — whether or not it is
+                        // agent-managed.
                         if run.seen_running {
+                            clear = true;
+                        }
+                    }
+                    SessionState::AwaitingInput => {
+                        // Idle but still alive. For an unmanaged run (a
+                        // non-declaring harness's optimistic shimmer, never
+                        // narrowed) this is the turn-end stop signal. For a
+                        // managed run it is NOT: a self-scheduling agent goes
+                        // idle while delegated/background work is still pending,
+                        // so keep shimmering and let a later declaration or the
+                        // inactivity backstop clear it. See spec 0042.
+                        if run.seen_running && !run.agent_managed {
                             clear = true;
                         }
                     }
@@ -1730,7 +1762,7 @@ impl SessionManager {
             .await
             .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
         // A complete shimmer declaration must cover every block of the new
-        // document, in order (spec 0051). Validate before writing so a miscount
+        // document, in order (spec 0053). Validate before writing so a miscount
         // fails the call rather than persisting a doc with a stale shimmer set.
         if let Some(decl) = &params.shimmer {
             let block_count = agentd_protocol::program_block_spans(&params.markdown).len();
@@ -1786,7 +1818,7 @@ impl SessionManager {
             self.storage
                 .edit_program(&params.session_id, &params.edits, params.actor, params.note)?;
         // Apply the partial shimmer declaration against the post-edit document
-        // (spec 0051): changed blocks drop their prior shimmer; declared ids set
+        // (spec 0053): changed blocks drop their prior shimmer; declared ids set
         // pending/settled; ids that no longer exist are ignored (fail closed).
         self.narrow_program_run(&params.session_id, &program.markdown, &params.shimmer);
         let blocks = self.program_blocks_projection(&params.session_id, &program.markdown);
@@ -3475,17 +3507,42 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Collect the ids of direct child subagent sessions parented under
+    /// `parent_id`. Used by [`archive`](Self::archive) and
+    /// [`delete`](Self::delete) to cascade onto a session's subagents instead
+    /// of leaving them as orphaned rows once their owner is gone.
+    async fn child_subagent_ids(&self, parent_id: &str) -> Vec<String> {
+        let sessions = self.sessions.read().await;
+        let mut ids = Vec::new();
+        for (sid, entry) in sessions.iter() {
+            let s = entry.summary.read().await;
+            if s.parent_session_id.as_deref() == Some(parent_id)
+                && matches!(s.kind, agentd_protocol::SessionKind::Subagent)
+            {
+                ids.push(sid.clone());
+            }
+        }
+        ids
+    }
+
     /// Archive a session: terminate its adapter (if any) but keep the
     /// transcript, worktree, and start params on disk so it can be restarted
     /// later. The session is marked `archived` (hidden from the list by
     /// default and skipped by startup auto-resume) and persisted. Archiving an
     /// already-terminal session just sets the flag. Reversed by `restart`,
     /// which clears `archived` and brings the session back to the active list.
+    ///
+    /// Cascades onto the session's subagents: archiving an owner archives the
+    /// child subagents it spawned (recursively), so they don't linger as
+    /// orphaned rows once their parent is gone.
     pub async fn archive(&self, id: &str) -> Result<()> {
         let entry = self
             .get_entry(id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", id))?;
+        // Snapshot the child subagents before we start mutating state so a
+        // concurrently-finishing subagent can't slip out of the cascade.
+        let child_subagents = self.child_subagent_ids(id).await;
         // Record the archive intent before anything that can yield. Terminating
         // the adapter (below) makes its `drain_adapter` Closed handler fire on a
         // separate task and race this bookkeeping; that handler reads this flag
@@ -3533,12 +3590,29 @@ impl SessionManager {
                 let _ = tokio::time::timeout(Duration::from_secs(3), adapter.shutdown()).await;
             });
         }
+        // Cascade onto subagents. Recurses through each child's own `archive`,
+        // so nested subagents archive too. A failure on one child is logged but
+        // never aborts the rest or the parent archive.
+        for sid in &child_subagents {
+            if let Err(e) = Box::pin(self.archive(sid)).await {
+                tracing::warn!(
+                    parent = %id,
+                    subagent = %sid,
+                    error = %e,
+                    "subagent cascade-archive failed",
+                );
+            }
+        }
         Ok(())
     }
 
     /// Delete a session entirely: kill the adapter if still alive, remove the
     /// worktree (best effort), drop the on-disk record, evict from the live
     /// map, and broadcast a `session/deleted` notification.
+    ///
+    /// Cascades onto the session's subagents: deleting an owner deletes the
+    /// child subagents it spawned (recursively), so they don't linger as
+    /// orphaned rows once their parent is gone.
     pub async fn delete(&self, id: &str) -> Result<()> {
         // Pull out the entry so the in-memory map releases the Arc; the
         // entry itself stays alive via our local Arc until the function ends.
@@ -3547,6 +3621,11 @@ impl SessionManager {
             map.remove(id)
                 .ok_or_else(|| anyhow!("session not found: {}", id))?
         };
+
+        // Snapshot child subagents now (the parent is out of the map, the
+        // children are still in it) so a deleted owner takes its subagents with
+        // it instead of leaving them orphaned in the list.
+        let child_subagents = self.child_subagent_ids(id).await;
 
         // Tell the drain task and event handler not to write storage anymore
         // before we tear the adapter down (killing the adapter triggers a
@@ -3603,6 +3682,20 @@ impl SessionManager {
                 let _ = std::fs::remove_file(&mcp_path);
             }
         });
+
+        // Cascade onto subagents. Recurses through each child's own `delete`,
+        // so nested subagents are torn down too. A failure on one child is
+        // logged but never aborts the rest or the parent delete.
+        for sid in &child_subagents {
+            if let Err(e) = Box::pin(self.delete(sid)).await {
+                tracing::warn!(
+                    parent = %id,
+                    subagent = %sid,
+                    error = %e,
+                    "subagent cascade-delete failed",
+                );
+            }
+        }
 
         Ok(())
     }
@@ -4860,6 +4953,19 @@ mod tests {
         })
     }
 
+    /// A `SessionKind::Subagent` entry whose `parent_session_id` points at
+    /// `parent_id`, mirroring how `construct_subagent_create` links a child to
+    /// its owner.
+    async fn synthetic_subagent_entry(
+        id: &str,
+        parent_id: &str,
+        position: i64,
+    ) -> Arc<SessionEntry> {
+        let entry = synthetic_entry(id, agentd_protocol::SessionKind::Subagent, position);
+        entry.summary.write().await.parent_session_id = Some(parent_id.to_string());
+        entry
+    }
+
     #[tokio::test]
     async fn move_session_ignores_hidden_subagents_in_reorder_region() {
         use tempfile::tempdir;
@@ -5872,6 +5978,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_cascades_to_subagents() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        // A user session owning two subagents, one of which itself owns a
+        // nested subagent. Deleting the owner must take all three with it.
+        mgr.sessions.write().await.insert(
+            "parent".into(),
+            synthetic_entry("parent", agentd_protocol::SessionKind::User, 0),
+        );
+        for (id, parent) in [("subA", "parent"), ("subB", "parent"), ("subA1", "subA")] {
+            let e = synthetic_subagent_entry(id, parent, 0).await;
+            mgr.sessions.write().await.insert(id.into(), e);
+        }
+        // An unrelated user session must survive the cascade untouched.
+        mgr.sessions.write().await.insert(
+            "other".into(),
+            synthetic_entry("other", agentd_protocol::SessionKind::User, 10),
+        );
+
+        mgr.delete("parent").await.expect("delete parent");
+
+        let ids: Vec<String> = mgr.list().await.into_iter().map(|s| s.id).collect();
+        assert!(!ids.contains(&"parent".to_string()), "parent must be deleted");
+        assert!(!ids.contains(&"subA".to_string()), "direct subagent must be deleted");
+        assert!(!ids.contains(&"subB".to_string()), "direct subagent must be deleted");
+        assert!(!ids.contains(&"subA1".to_string()), "nested subagent must be deleted");
+        assert!(
+            ids.contains(&"other".to_string()),
+            "unrelated session must survive the cascade",
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_cascades_to_subagents() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        mgr.sessions.write().await.insert(
+            "parent".into(),
+            synthetic_entry("parent", agentd_protocol::SessionKind::User, 0),
+        );
+        for (id, parent) in [("subA", "parent"), ("subA1", "subA")] {
+            let e = synthetic_subagent_entry(id, parent, 0).await;
+            mgr.sessions.write().await.insert(id.into(), e);
+        }
+        // A subagent owned by a *different* parent must not be archived.
+        mgr.sessions.write().await.insert(
+            "other".into(),
+            synthetic_subagent_entry("other", "someone-else", 10).await,
+        );
+
+        mgr.archive("parent").await.expect("archive parent");
+
+        // Archived sessions stay in the manager (unlike delete) but carry the
+        // archived flag — recursively, down to the nested subagent.
+        for id in ["parent", "subA", "subA1"] {
+            let entry = mgr.get_entry(id).await.expect("entry present");
+            assert!(
+                entry.summary.read().await.archived,
+                "{id} should be archived by the cascade",
+            );
+        }
+        let other = mgr.get_entry("other").await.expect("other present");
+        assert!(
+            !other.summary.read().await.archived,
+            "a subagent of a different parent must not be archived",
+        );
+    }
+
+    #[tokio::test]
     async fn archive_and_delete_return_quickly_without_blocking_caller() {
         // TDD test: before the spawn change these would block on slow adapter
         // stop / worktree remove. After the change the public methods return
@@ -6055,7 +6248,7 @@ mod tests {
         (mgr, storage, id)
     }
 
-    // The bug that motivated spec 0051: a planning pass must clear shimmer on
+    // The bug that motivated spec 0053: a planning pass must clear shimmer on
     // no-work blocks WITHOUT changing their text, while keeping the worked
     // block pending. Under the old content-change inference this was impossible
     // (inert blocks never change, so they could never settle) and the animation
@@ -6227,5 +6420,116 @@ mod tests {
         // "# B" was never declared and keeps its run-start shimmer.
         assert!(!shimmering("# A"));
         assert!(shimmering("# B"));
+    }
+
+    // A run the agent is actively managing (it has narrowed it with a
+    // declaration/edit) must survive the owning session returning to idle —
+    // the agent delegated work and its own turn ended while that work is still
+    // pending. It clears only when its pending set empties (spec 0042).
+    #[tokio::test]
+    async fn program_run_managed_survives_idle_and_clears_on_settle() {
+        use agentd_protocol::SessionState;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage.clone(), config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let id = "smanagedrun";
+        let body = "# Alpha\n\n# Beta\n";
+
+        // Fresh run: unmanaged, both blocks pending.
+        let run = mgr
+            .start_program_run(id, body, false, None)
+            .expect("start_program_run");
+        assert!(!run.agent_managed, "a fresh run is unmanaged");
+        assert_eq!(run.pending_block_ids.len(), 2);
+
+        // Owning session is seen running.
+        mgr.note_session_state_for_program_run(id, SessionState::Running);
+        assert!(
+            mgr.program_run_snapshot(id)
+                .expect("run present")
+                .seen_running
+        );
+
+        // Planning-pass-style declaration narrows the run (text unchanged, so
+        // both blocks stay pending) and marks it agent-managed.
+        mgr.narrow_program_run(id, body, &[]);
+        let run = mgr.program_run_snapshot(id).expect("managed run present");
+        assert!(run.agent_managed, "an in-run declaration marks it managed");
+        assert_eq!(run.pending_block_ids.len(), 2);
+
+        // The agent delegates and its own turn ends → AwaitingInput. The
+        // managed run must NOT clear: delegated work is still pending.
+        mgr.note_session_state_for_program_run(id, SessionState::AwaitingInput);
+        assert_eq!(
+            mgr.program_run_snapshot(id)
+                .expect("managed run survives the owning session going idle")
+                .pending_block_ids
+                .len(),
+            2
+        );
+
+        // Repeated wake/idle cycles (e.g. a /loop monitor) keep it alive.
+        mgr.note_session_state_for_program_run(id, SessionState::Running);
+        mgr.note_session_state_for_program_run(id, SessionState::AwaitingInput);
+        assert!(mgr.program_run_snapshot(id).is_some(), "still pending");
+
+        // Settle one block (its text changes, dropping its signature); the
+        // other stays pending and the run lives on.
+        mgr.narrow_program_run(id, "# Alpha done\n\n# Beta\n", &[]);
+        assert_eq!(
+            mgr.program_run_snapshot(id)
+                .expect("one block still pending")
+                .pending_block_ids,
+            vec![agentd_protocol::program_block_id("# Beta")]
+        );
+
+        // Settling the last block empties the pending set → the run clears.
+        mgr.narrow_program_run(id, "# Alpha done\n\n# Beta done\n", &[]);
+        assert!(
+            mgr.program_run_snapshot(id).is_none(),
+            "an empty pending set clears the run"
+        );
+    }
+
+    // A terminal owning-session state clears even a managed run with pending
+    // blocks: the agent is gone and can never settle them (spec 0042).
+    #[tokio::test]
+    async fn program_run_managed_clears_on_terminal_state() {
+        use agentd_protocol::SessionState;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage.clone(), config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let id = "sterminalrun";
+        let body = "# Alpha\n\n# Beta\n";
+        mgr.start_program_run(id, body, false, None).expect("start");
+        mgr.note_session_state_for_program_run(id, SessionState::Running);
+        mgr.narrow_program_run(id, body, &[]);
+        assert!(
+            mgr.program_run_snapshot(id).expect("managed").agent_managed,
+            "run is managed with pending blocks"
+        );
+
+        // Errored is terminal → clear despite still-pending blocks.
+        mgr.note_session_state_for_program_run(id, SessionState::Errored);
+        assert!(
+            mgr.program_run_snapshot(id).is_none(),
+            "a terminal state clears a managed run"
+        );
     }
 }

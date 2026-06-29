@@ -143,14 +143,14 @@ struct ProgramMeta {
     template_id: Option<String>,
 }
 
-#[derive(Debug, Default)]
-struct ProgramTemplateFrontmatter {
-    name: Option<String>,
-    description: Option<String>,
-}
-
 pub struct Storage {
     data_dir: PathBuf,
+    /// When set, program templates are read from this directory instead of the
+    /// default `data_dir/program/templates`. Resolved at daemon start from the
+    /// `[program].templates_dir` config option / `CONSTRUCT_PROGRAM_TEMPLATES_DIR`
+    /// env override. `None` keeps the legacy default location (and its
+    /// `canvas/templates` → `program/templates` migration).
+    program_templates_dir_override: Option<PathBuf>,
 }
 
 impl Storage {
@@ -159,7 +159,17 @@ impl Storage {
             .with_context(|| format!("create {}", data_dir.display()))?;
         std::fs::create_dir_all(data_dir.join("projects"))
             .with_context(|| format!("create {}", data_dir.join("projects").display()))?;
-        Ok(Self { data_dir })
+        Ok(Self {
+            data_dir,
+            program_templates_dir_override: None,
+        })
+    }
+
+    /// Override the directory program templates are read from. Set once at
+    /// daemon start from config; `None` (the default) keeps `data_dir/program/templates`.
+    pub fn with_program_templates_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.program_templates_dir_override = dir;
+        self
     }
 
     pub fn global_memory_path(&self) -> PathBuf {
@@ -322,7 +332,9 @@ impl Storage {
     }
 
     pub fn program_templates_dir(&self) -> PathBuf {
-        self.data_dir.join("program").join("templates")
+        self.program_templates_dir_override
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("program").join("templates"))
     }
 
     /// One-time, idempotent migration: the per-session program document was
@@ -512,13 +524,17 @@ impl Storage {
         ];
         let dir = self.program_templates_dir();
         // Migrate user templates from the former `canvas/templates` location.
-        let legacy_dir = self.data_dir.join("canvas").join("templates");
-        if legacy_dir.exists() && !dir.exists() {
-            if let Some(parent) = dir.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::rename(&legacy_dir, &dir) {
-                tracing::warn!(error = %e, "migrate legacy canvas templates dir failed");
+        // Only for the default location — when an explicit override is set the
+        // operator owns that directory, so we never move files into it.
+        if self.program_templates_dir_override.is_none() {
+            let legacy_dir = self.data_dir.join("canvas").join("templates");
+            if legacy_dir.exists() && !dir.exists() {
+                if let Some(parent) = dir.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::rename(&legacy_dir, &dir) {
+                    tracing::warn!(error = %e, "migrate legacy canvas templates dir failed");
+                }
             }
         }
         if dir.exists() {
@@ -540,14 +556,11 @@ impl Storage {
                         continue;
                     }
                 };
-                let (frontmatter, markdown) = parse_program_template_frontmatter(&raw);
                 templates.push(ProgramTemplate {
                     id: stem.to_string(),
-                    name: frontmatter
-                        .name
-                        .unwrap_or_else(|| stem.replace(['-', '_'], " ")),
-                    description: frontmatter.description,
-                    markdown,
+                    name: prettify_template_name(stem),
+                    description: None,
+                    markdown: raw,
                     built_in: false,
                 });
             }
@@ -1035,45 +1048,20 @@ fn parse_widget_frontmatter_fields(frontmatter: &str) -> WidgetFrontmatter {
     parsed
 }
 
-fn parse_program_template_frontmatter(raw: &str) -> (ProgramTemplateFrontmatter, String) {
-    let Some(rest) = raw
-        .strip_prefix("---\n")
-        .or_else(|| raw.strip_prefix("---\r\n"))
-    else {
-        return (ProgramTemplateFrontmatter::default(), raw.to_string());
-    };
-    let mut byte_offset = raw.len().saturating_sub(rest.len());
-    let mut frontmatter = String::new();
-    for line in rest.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        byte_offset += line.len();
-        if trimmed == "---" {
-            let parsed = parse_program_template_frontmatter_fields(&frontmatter);
-            return (parsed, raw[byte_offset..].to_string());
-        }
-        frontmatter.push_str(line);
-    }
-    (ProgramTemplateFrontmatter::default(), raw.to_string())
-}
-
-fn parse_program_template_frontmatter_fields(frontmatter: &str) -> ProgramTemplateFrontmatter {
-    let mut parsed = ProgramTemplateFrontmatter::default();
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim().trim_matches(['"', '\'']);
-        match key.trim() {
-            "name" if !value.is_empty() => parsed.name = Some(value.to_string()),
-            "description" if !value.is_empty() => parsed.description = Some(value.to_string()),
-            _ => {}
-        }
-    }
-    parsed
+/// Derive a display name from a custom template's filename stem: `-`/`_` become
+/// spaces and each word is title-cased (e.g. `code-review` → "Code Review").
+fn prettify_template_name(stem: &str) -> String {
+    stem.replace(['-', '_'], " ")
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn ensure_memory_file(path: &Path, template: &str) -> Result<PathBuf> {
@@ -1476,25 +1464,48 @@ mod program_tests {
     }
 
     #[test]
-    fn program_templates_include_user_markdown_with_frontmatter() {
+    fn program_templates_use_filename_as_name_with_verbatim_markdown() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
         let dir = storage.program_templates_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("review.md"),
-            "---\nname: Review Board\ndescription: Review active work\n---\n# Review\n",
-        )
-        .unwrap();
+        // No frontmatter handling: the filename stem is the name and the file
+        // contents are the markdown verbatim, including any leading `---`.
+        let contents = "---\nstill: body\n---\n# Code Review\n- look\n";
+        std::fs::write(dir.join("code-review.md"), contents).unwrap();
 
         let templates = storage.program_templates().unwrap();
-        let review = templates.iter().find(|t| t.id == "review").unwrap();
+        let review = templates.iter().find(|t| t.id == "code-review").unwrap();
 
-        assert_eq!(review.name, "Review Board");
-        assert_eq!(review.description.as_deref(), Some("Review active work"));
-        assert_eq!(review.markdown, "# Review\n");
+        assert_eq!(review.name, "Code Review");
+        assert_eq!(review.markdown, contents);
+        assert_eq!(review.description, None);
         assert!(!review.built_in);
         assert!(templates.iter().any(|t| t.id == "tasks" && t.built_in));
+    }
+
+    #[test]
+    fn program_templates_dir_override_redirects_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("custom-templates");
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(custom.join("ops.md"), "# Ops\n").unwrap();
+
+        let storage = Storage::new(tmp.path().join("data"))
+            .unwrap()
+            .with_program_templates_dir(Some(custom.clone()));
+
+        // The override directory is the one consulted.
+        assert_eq!(storage.program_templates_dir(), custom);
+        let templates = storage.program_templates().unwrap();
+        assert!(templates.iter().any(|t| t.id == "ops" && t.name == "Ops"));
+        // A user template dropped under the default location is NOT read when an
+        // override is set.
+        let default_dir = tmp.path().join("data").join("program").join("templates");
+        std::fs::create_dir_all(&default_dir).unwrap();
+        std::fs::write(default_dir.join("ignored.md"), "# Ignored\n").unwrap();
+        let templates = storage.program_templates().unwrap();
+        assert!(!templates.iter().any(|t| t.id == "ignored"));
     }
 }
 

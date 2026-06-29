@@ -1,4 +1,4 @@
-# 0051-program-shimmer-block-addressing
+# 0053-program-shimmer-block-addressing
 
 Status: accepted
 Date: 2026-06-28
