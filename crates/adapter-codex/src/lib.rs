@@ -21,6 +21,7 @@ use agentd_protocol::{
     Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
     SessionState,
 };
+use construct_adapter_common::{drive_turn, spawn_stderr_log, TurnOutcome};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -29,7 +30,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
 
 pub async fn run() -> anyhow::Result<()> {
     let metadata = InitializeResult {
@@ -592,7 +592,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         let child_stderr = child.stderr.take().expect("piped");
         let captured_sid = Arc::new(StdMutex::new(None::<String>));
         let stdout_task = spawn_stdout(child_stdout, emit.clone(), captured_sid.clone());
-        let stderr_task = spawn_stderr(child_stderr, emit.clone());
+        let stderr_task = spawn_stderr_log(child_stderr, emit.clone());
 
         let outcome = drive_turn(&mut child, &mut inbox, &emit, &mut pending).await;
 
@@ -615,56 +615,6 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
     };
 
     emit.emit(SessionEvent::Done { exit_code });
-}
-
-#[derive(Debug)]
-enum TurnOutcome {
-    Completed,
-    Interrupted,
-    Stopped,
-}
-
-async fn drive_turn(
-    child: &mut tokio::process::Child,
-    inbox: &mut mpsc::Receiver<AdapterInboxMsg>,
-    emit: &EventEmitter,
-    pending: &mut VecDeque<String>,
-) -> TurnOutcome {
-    loop {
-        tokio::select! {
-            biased;
-            msg = inbox.recv() => {
-                match msg {
-                    None => {
-                        let _ = child.start_kill();
-                        return TurnOutcome::Stopped;
-                    }
-                    Some(AdapterInboxMsg::Stop) => {
-                        let _ = child.start_kill();
-                        return TurnOutcome::Stopped;
-                    }
-                    Some(AdapterInboxMsg::Interrupt) => {
-                        let _ = child.start_kill();
-                        return TurnOutcome::Interrupted;
-                    }
-                    Some(AdapterInboxMsg::Input(t)) => {
-                        emit.log(format!("queued input for next turn: {}", short(&t, 60)));
-                        pending.push_back(t);
-                    }
-                    Some(AdapterInboxMsg::PtyInput(_))
-                    | Some(AdapterInboxMsg::PtyResize { .. })
-                    | Some(AdapterInboxMsg::ToolDecision { .. })
-                    | Some(AdapterInboxMsg::SetApprovalMode(_))
-                    | Some(AdapterInboxMsg::ToolAction { .. }) => {
-                        // headless codex doesn't gate tools; ignore.
-                    }
-                }
-            }
-            _ = child.wait() => {
-                return TurnOutcome::Completed;
-            }
-        }
-    }
 }
 
 fn spawn_stdout<R>(
@@ -743,18 +693,6 @@ fn parse_token_count(line: &str) -> Option<u64> {
         return None;
     }
     cleaned.parse::<u64>().ok()
-}
-
-fn spawn_stderr<R>(reader: R, emit: EventEmitter) -> tokio::task::JoinHandle<()>
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            emit.log(format!("stderr: {line}"));
-        }
-    })
 }
 
 /// Try to pull structured fields out of a codex JSON event. Returns `true` if
@@ -840,14 +778,6 @@ fn extract_text_from_blocks(v: Option<&Value>) -> Option<String> {
         None
     } else {
         Some(out)
-    }
-}
-
-fn short(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        s.chars().take(max).collect::<String>() + "..."
     }
 }
 

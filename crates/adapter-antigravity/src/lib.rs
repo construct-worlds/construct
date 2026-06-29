@@ -54,13 +54,13 @@ use agentd_protocol::{
     Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
     SessionState,
 };
+use construct_adapter_common::{drive_turn, TurnOutcome};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
-use tokio::sync::mpsc;
 
 pub async fn run() -> anyhow::Result<()> {
     let metadata = InitializeResult {
@@ -450,54 +450,6 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
     emit.emit(SessionEvent::Done { exit_code });
 }
 
-#[derive(Debug)]
-enum TurnOutcome {
-    Completed,
-    Interrupted,
-    Stopped,
-}
-
-async fn drive_turn(
-    child: &mut tokio::process::Child,
-    inbox: &mut mpsc::Receiver<AdapterInboxMsg>,
-    emit: &EventEmitter,
-    pending: &mut VecDeque<String>,
-) -> TurnOutcome {
-    loop {
-        tokio::select! {
-            biased;
-            msg = inbox.recv() => {
-                match msg {
-                    None => {
-                        let _ = child.start_kill();
-                        return TurnOutcome::Stopped;
-                    }
-                    Some(AdapterInboxMsg::Stop) => {
-                        let _ = child.start_kill();
-                        return TurnOutcome::Stopped;
-                    }
-                    Some(AdapterInboxMsg::Interrupt) => {
-                        let _ = child.start_kill();
-                        return TurnOutcome::Interrupted;
-                    }
-                    Some(AdapterInboxMsg::Input(t)) => {
-                        emit.log(format!("queued input for next turn: {}", short(&t, 60)));
-                        pending.push_back(t);
-                    }
-                    Some(AdapterInboxMsg::PtyInput(_))
-                    | Some(AdapterInboxMsg::PtyResize { .. })
-                    | Some(AdapterInboxMsg::ToolDecision { .. })
-                    | Some(AdapterInboxMsg::SetApprovalMode(_))
-                    | Some(AdapterInboxMsg::ToolAction { .. }) => {}
-                }
-            }
-            _ = child.wait() => {
-                return TurnOutcome::Completed;
-            }
-        }
-    }
-}
-
 async fn drain_to_void<R>(reader: R)
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -644,14 +596,6 @@ fn antigravity_events_from_step(v: &Value) -> Vec<SessionEvent> {
                 call_id: None,
             }]
         }
-    }
-}
-
-fn short(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        s.chars().take(max).collect::<String>() + "..."
     }
 }
 
