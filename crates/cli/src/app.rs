@@ -505,6 +505,13 @@ pub enum MinibufferIntent {
     GroupDeleteConfirm {
         group_id: String,
     },
+    /// Confirmation prompt for cascade-deleting every archived session a
+    /// "N archived" disclosure row stands in for. `y`/`yes` deletes each
+    /// archived session in the section (drops transcript + worktree, with
+    /// the subagent cascade applied per session); anything else cancels.
+    ArchivedDeleteConfirm {
+        section: ArchiveSection,
+    },
     GroupRename {
         group_id: String,
     },
@@ -3262,6 +3269,56 @@ impl App {
     pub fn selected_group(&self) -> Option<&GroupSummary> {
         let id = self.selection.group_id()?;
         self.groups.iter().find(|g| g.id == id)
+    }
+
+    /// Collect the ids of every archived session a "N archived" disclosure
+    /// row stands in for. Mirrors the membership filters in `list_items` so
+    /// the count shown on the row matches what a cascade delete removes.
+    fn archived_sessions_in_section(&self, section: &ArchiveSection) -> Vec<String> {
+        let orch_id = self.orchestrator_id.as_deref();
+        match section {
+            ArchiveSection::Ungrouped => self
+                .sessions
+                .iter()
+                .filter(|s| s.archived)
+                .filter(|s| s.group_id.is_none())
+                .filter(|s| Some(s.id.as_str()) != orch_id)
+                .filter(|s| is_user_list_session(s))
+                .map(|s| s.id.clone())
+                .collect(),
+            ArchiveSection::Group(group_id) => self
+                .sessions
+                .iter()
+                .filter(|s| s.archived)
+                .filter(|s| s.group_id.as_deref() == Some(group_id.as_str()))
+                .filter(|s| is_user_list_session(s))
+                .map(|s| s.id.clone())
+                .collect(),
+            ArchiveSection::Subagents(parent_id) => self
+                .sessions
+                .iter()
+                .filter(|s| s.archived)
+                .filter(|s| is_subagent_session(s))
+                .filter(|s| s.parent_session_id.as_deref() == Some(parent_id.as_str()))
+                .map(|s| s.id.clone())
+                .collect(),
+        }
+    }
+
+    /// Human-readable name for an archive section, used in confirm prompts.
+    fn archive_section_label(&self, section: &ArchiveSection) -> String {
+        match section {
+            ArchiveSection::Ungrouped => "ungrouped".to_string(),
+            ArchiveSection::Group(group_id) => self
+                .groups
+                .iter()
+                .find(|g| g.id == *group_id)
+                .map(|g| format!("project '{}'", g.name))
+                .unwrap_or_else(|| "project".to_string()),
+            ArchiveSection::Subagents(parent_id) => {
+                format!("subagents of {}", short_id(parent_id))
+            }
+        }
     }
 
     fn selected_session_has_subagents(&self) -> Option<String> {
@@ -9211,8 +9268,28 @@ impl App {
                     });
                 }
                 Selection::None => {}
-                // The "N archived" disclosure row isn't a delete target.
-                Selection::ArchivedRow(_) => {}
+                // The "N archived" disclosure row cascade-deletes every
+                // archived session it stands in for (each with the subagent
+                // cascade applied daemon-side).
+                Selection::ArchivedRow(section) => {
+                    let ids = self.archived_sessions_in_section(&section);
+                    if ids.is_empty() {
+                        self.set_status("no archived sessions to delete".to_string());
+                    } else {
+                        let label = self.archive_section_label(&section);
+                        self.minibuffer = Some(Minibuffer {
+                            prompt: format!(
+                                "Delete all {} archived session(s) in {}? (drops transcript + worktree) [y/N]: ",
+                                ids.len(),
+                                label
+                            ),
+                            input: String::new(),
+                            cursor: 0,
+                            intent: MinibufferIntent::ArchivedDeleteConfirm { section },
+                            error: None,
+                        });
+                    }
+                }
             },
             OpenProgram => {
                 self.toggle_program_popup().await;
@@ -10031,6 +10108,39 @@ impl App {
                     SessionEndChoice::Cancel => {
                         self.set_status("cancelled".to_string());
                     }
+                }
+            }
+            MinibufferIntent::ArchivedDeleteConfirm { section } => {
+                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                if !yes {
+                    self.set_status("archived delete cancelled".to_string());
+                    return;
+                }
+                // Re-resolve members at confirm time so a session that
+                // un-archived or moved out of the section since the prompt
+                // opened isn't deleted out from under the user.
+                let ids = self.archived_sessions_in_section(&section);
+                if ids.is_empty() {
+                    self.set_status("no archived sessions to delete".to_string());
+                    return;
+                }
+                let mut deleted = 0usize;
+                let mut failed = 0usize;
+                for id in &ids {
+                    match self.client.delete(id).await {
+                        Ok(()) => deleted += 1,
+                        Err(e) => {
+                            failed += 1;
+                            tracing::warn!(session = %id, error = %e, "archived cascade-delete failed");
+                        }
+                    }
+                }
+                if failed == 0 {
+                    self.set_status(format!("deleted {deleted} archived session(s)"));
+                } else {
+                    self.set_status(format!(
+                        "deleted {deleted} archived session(s), {failed} failed"
+                    ));
                 }
             }
             MinibufferIntent::MenuArchiveConfirm { session_id } => {
@@ -17656,6 +17766,88 @@ mod tests {
         assert_eq!(
             app.selection,
             Selection::ArchivedRow(ArchiveSection::Ungrouped)
+        );
+    }
+
+    #[tokio::test]
+    async fn archived_section_resolves_only_its_archived_members() {
+        use agentd_client::Client;
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let _server = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+
+        // Ungrouped: one active + one archived.
+        let mut ung_active = summary_with_kind(agentd_protocol::SessionKind::User);
+        ung_active.id = "ung_active".into();
+        let mut ung_arch = summary_with_kind(agentd_protocol::SessionKind::User);
+        ung_arch.id = "ung_arch".into();
+        ung_arch.archived = true;
+
+        // Project "p1": one active + one archived member.
+        let mut grp_active = summary_with_kind(agentd_protocol::SessionKind::User);
+        grp_active.id = "grp_active".into();
+        grp_active.group_id = Some("p1".into());
+        let mut grp_arch = summary_with_kind(agentd_protocol::SessionKind::User);
+        grp_arch.id = "grp_arch".into();
+        grp_arch.group_id = Some("p1".into());
+        grp_arch.archived = true;
+
+        // Subagents of "ung_active": one active + one archived.
+        let mut sub_active = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        sub_active.id = "sub_active".into();
+        sub_active.parent_session_id = Some("ung_active".into());
+        let mut sub_arch = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        sub_arch.id = "sub_arch".into();
+        sub_arch.parent_session_id = Some("ung_active".into());
+        sub_arch.archived = true;
+
+        let mut app = test_app(
+            client,
+            vec![
+                ung_active, ung_arch, grp_active, grp_arch, sub_active, sub_arch,
+            ],
+        );
+        app.groups = vec![GroupSummary {
+            id: "p1".into(),
+            name: "Project One".into(),
+            created_at: chrono::Utc::now(),
+            position: 0,
+            collapsed: false,
+        }];
+
+        // Each section resolves exactly its own archived members — never the
+        // active ones, and never another section's.
+        assert_eq!(
+            app.archived_sessions_in_section(&ArchiveSection::Ungrouped),
+            vec!["ung_arch".to_string()],
+        );
+        assert_eq!(
+            app.archived_sessions_in_section(&ArchiveSection::Group("p1".into())),
+            vec!["grp_arch".to_string()],
+        );
+        assert_eq!(
+            app.archived_sessions_in_section(&ArchiveSection::Subagents("ung_active".into())),
+            vec!["sub_arch".to_string()],
+        );
+
+        // The label distinguishes a project by name from the ungrouped run.
+        assert_eq!(
+            app.archive_section_label(&ArchiveSection::Group("p1".into())),
+            "project 'Project One'",
+        );
+        assert_eq!(
+            app.archive_section_label(&ArchiveSection::Ungrouped),
+            "ungrouped",
         );
     }
 
