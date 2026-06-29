@@ -663,6 +663,7 @@ async fn run_program_command(client: &Client, command: ProgramCommand) -> Result
                     template_id,
                     note: None,
                     shimmer: None,
+                    shimmer_tooltips: None,
                 })
                 .await?;
             println!("updated program version {}", result.program.version);
@@ -692,6 +693,7 @@ async fn run_program_command(client: &Client, command: ProgramCommand) -> Result
                     template_id: current.template_id,
                     note: None,
                     shimmer: None,
+                    shimmer_tooltips: None,
                 })
                 .await?;
             println!("updated program version {}", result.program.version);

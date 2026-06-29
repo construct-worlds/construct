@@ -79,7 +79,7 @@ pub fn catalog() -> Vec<Value> {
         // ----- Write -----
         tool(
             "construct_program_edit",
-            "PREFERRED for changing a session's program: apply one or more anchored find/replace edits (like the code Edit tool). Each edit replaces `old_string` with `new_string`; set `replace_all` to replace every occurrence, or include enough surrounding context to make `old_string` unique. An empty `old_string` appends `new_string` to the document. Edits apply to the LATEST program content, so a human editing a different region at the same time merges cleanly — no version to pass and no conflict. The call fails (writing nothing) only if an `old_string` is missing or ambiguous, which means that exact text changed underneath you: re-read with construct_program_get and retry. Agent edits need no user confirmation. Shimmer (the program-run progress animation) is declared per block by stable id: pass a `shimmer` array of `{id, shimmer}` entries to mark blocks pending (true) or settled (false). The list is PARTIAL and may target ANY block — not only the ones these edits change — so a planning pass can settle no-work blocks without touching their text; blocks you omit keep their current shimmer. Get block ids from construct_program_get or the `blocks` echoed by this call. Editing a block's text changes its id, so to keep an edited block shimmering set `keep_pending: true` on that edit (preferred — it re-adds the resulting block's new id atomically, so you need not know the new id and the block never goes dark; use this when moving an in-flight task into an In progress section or appending a @{session} clip). Ids that no longer match a block are ignored (that block changed underneath you).",
+            "PREFERRED for changing a session's program: apply one or more anchored find/replace edits (like the code Edit tool). Each edit replaces `old_string` with `new_string`; set `replace_all` to replace every occurrence, or include enough surrounding context to make `old_string` unique. An empty `old_string` appends `new_string` to the document. Edits apply to the LATEST program content, so a human editing a different region at the same time merges cleanly — no version to pass and no conflict. The call fails (writing nothing) only if an `old_string` is missing or ambiguous, which means that exact text changed underneath you: re-read with construct_program_get and retry. Agent edits need no user confirmation. Shimmer (the program-run progress animation) is declared per block by stable id: pass a `shimmer` array of `{id, shimmer}` entries to mark blocks pending (true) or settled (false). The list is PARTIAL and may target ANY block — not only the ones these edits change — so a planning pass can settle no-work blocks without touching their text; blocks you omit keep their current shimmer. Get block ids from construct_program_get or the `blocks` echoed by this call. Editing a block's text changes its id, so to keep an edited block shimmering set `keep_pending: true` on that edit (preferred — it re-adds the resulting block's new id atomically, so you need not know the new id and the block never goes dark; use this when moving an in-flight task into an In progress section or appending a @{session} clip). Ids that no longer match a block are ignored (that block changed underneath you). Every entry that sets `shimmer: true` MUST include a `tooltip`: a concise (≤10-word) description of that block's run status (e.g. \"Building PR\", \"Waiting on CI\"); it is shown when a user hovers the shimmering block. Tooltips are ignored for `shimmer: false`.",
             json!({
                 "type": "object",
                 "properties": {
@@ -105,7 +105,8 @@ pub fn catalog() -> Vec<Value> {
                             "type": "object",
                             "properties": {
                                 "id": { "type": "string", "description": "Stable block id" },
-                                "shimmer": { "type": "boolean", "description": "true = pending (keep shimmering); false = settled (clear)" }
+                                "shimmer": { "type": "boolean", "description": "true = pending (keep shimmering); false = settled (clear)" },
+                                "tooltip": { "type": "string", "description": "Required when shimmer is true: a concise (≤10-word) description of this block's run status, shown on hover (e.g. \"Building PR\", \"Waiting on CI\"). Ignored when shimmer is false." }
                             },
                             "required": ["id", "shimmer"]
                         }
@@ -117,7 +118,7 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "construct_program_update",
-            "Replace a session's ENTIRE program Markdown. Prefer construct_program_edit for targeted changes — it merges with concurrent human edits, whereas a whole-document replace can clobber them. Use this only for wholesale rewrites or initial population. Pass `base_version` from construct_program_get for optimistic conflict detection; on conflict, re-read the program and retry with a resolved document. Agent updates need no user confirmation. Because this replaces the whole document, you must also pass `shimmer`: a COMPLETE array of booleans, one per block of the new Markdown in document order (true = pending, false = settled). Blocks are maximal runs of non-blank lines; count them top to bottom. The array length must equal the block count or the call fails.",
+            "Replace a session's ENTIRE program Markdown. Prefer construct_program_edit for targeted changes — it merges with concurrent human edits, whereas a whole-document replace can clobber them. Use this only for wholesale rewrites or initial population. Pass `base_version` from construct_program_get for optimistic conflict detection; on conflict, re-read the program and retry with a resolved document. Agent updates need no user confirmation. Because this replaces the whole document, you must also pass `shimmer`: a COMPLETE array of booleans, one per block of the new Markdown in document order (true = pending, false = settled). Blocks are maximal runs of non-blank lines; count them top to bottom. The array length must equal the block count or the call fails. You must also pass `tooltips`: an array the same length as `shimmer` where, for every block you mark pending (true), the matching entry is a concise (≤10-word) run-status string shown on hover (e.g. \"Building PR\"); entries for settled blocks may be null or empty.",
             json!({
                 "type": "object",
                 "properties": {
@@ -130,9 +131,14 @@ pub fn catalog() -> Vec<Value> {
                         "type": "array",
                         "description": "Complete per-block shimmer state for the new Markdown, one boolean per block in document order (true = pending, false = settled).",
                         "items": { "type": "boolean" }
+                    },
+                    "tooltips": {
+                        "type": "array",
+                        "description": "Per-block run-status tooltips parallel to `shimmer`, in document order. Every block marked pending (shimmer true) must have a concise (≤10-word) tooltip here (e.g. \"Building PR\", \"Waiting on CI\"), shown on hover. Settled-block entries may be null or empty.",
+                        "items": { "type": ["string", "null"] }
                     }
                 },
-                "required": ["markdown", "shimmer"]
+                "required": ["markdown", "shimmer", "tooltips"]
             }),
         ),
         tool(
@@ -489,6 +495,28 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 })?,
             )
             .map_err(|e| anyhow!("invalid `shimmer` (expected an array of booleans): {e}"))?;
+            // Per-block tooltips parallel to `shimmer` (spec 0056): required, and
+            // every pending block must carry a non-empty tooltip.
+            let tooltips: Vec<Option<String>> = serde_json::from_value(
+                args.get("tooltips").cloned().ok_or_else(|| {
+                    anyhow!("missing `tooltips`: a run-status string for each pending block, parallel to `shimmer`")
+                })?,
+            )
+            .map_err(|e| anyhow!("invalid `tooltips` (expected an array of strings or nulls): {e}"))?;
+            if tooltips.len() != shimmer.len() {
+                return Err(anyhow!(
+                    "`tooltips` has {} entries but `shimmer` has {}; they must be parallel arrays",
+                    tooltips.len(),
+                    shimmer.len()
+                ));
+            }
+            for (i, (&pending, tip)) in shimmer.iter().zip(&tooltips).enumerate() {
+                if pending && tip.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    return Err(anyhow!(
+                        "block {i} is shimmer:true but has no tooltip — every pending block needs a concise (≤10-word) run-status tooltip"
+                    ));
+                }
+            }
             let params = agentd_protocol::ProgramUpdateParams {
                 session_id: sid,
                 markdown: arg_str(&args, "markdown")?,
@@ -497,6 +525,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 template_id: arg_str(&args, "template_id").ok(),
                 note: arg_str(&args, "note").ok(),
                 shimmer: Some(shimmer),
+                shimmer_tooltips: Some(tooltips),
             };
             serde_json::to_value(client.program_update(params).await?)?
         }
@@ -517,6 +546,18 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 })?,
                 None => Vec::new(),
             };
+            // A block declared pending must carry a concise run-status tooltip
+            // (spec 0056); settling needs none.
+            for decl in &shimmer {
+                if decl.shimmer
+                    && decl.tooltip.as_deref().map(str::trim).unwrap_or("").is_empty()
+                {
+                    return Err(anyhow!(
+                        "shimmer entry for block {} is shimmer:true but has no tooltip — a pending block needs a concise (≤10-word) run-status tooltip",
+                        decl.id
+                    ));
+                }
+            }
             let params = agentd_protocol::ProgramEditParams {
                 session_id: sid,
                 edits,
