@@ -3297,7 +3297,12 @@ async function selectSession(id, { replaceUrl = false } = {}) {
   hydrateWidgets(id);
   if (state.mode === "program") {
     // Program is a per-session surface; keep showing it for the new session.
-    await enterProgramMode(id);
+    // Don't auto-focus the contenteditable here: a session switch is a
+    // programmatic restore, not an edit intent. On mobile, focusing the
+    // program input pops the native keyboard on every switch even though the
+    // user never tapped to edit. Focus only happens on an explicit gesture
+    // (the view-mode toggle in switchCurrentViewMode, or tapping the input).
+    await enterProgramMode(id, { focus: false });
   } else if (preferredViewModeForSession(s) === "terminal") {
     await enterTerminalMode(id, { focusTerminal: focusTerminalAfterSwitch });
   } else {
