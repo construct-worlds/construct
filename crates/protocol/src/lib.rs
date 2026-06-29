@@ -696,6 +696,48 @@ impl SessionEvent {
     }
 }
 
+/// Helper to determine if a PTY byte slice contains actual visible activity,
+/// ignoring ignorable styling (SGR) and synchronized update escape sequences.
+pub fn is_pty_active_payload(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0x1b { // ESC
+            if i + 1 < bytes.len() && bytes[i + 1] == b'[' { // CSI
+                let start = i;
+                i += 2;
+                let mut is_ignorable = false;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    i += 1;
+                    if (0x40..=0x7e).contains(&c) {
+                        let seq = &bytes[start..i];
+                        if c == b'm' {
+                            is_ignorable = true;
+                        } else if (c == b'h' || c == b'l') && seq.starts_with(b"\x1b[?2026") {
+                            is_ignorable = true;
+                        }
+                        break;
+                    }
+                }
+                if is_ignorable {
+                    continue;
+                } else {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        } else if b == 0 {
+            i += 1;
+            continue;
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
@@ -2218,5 +2260,33 @@ mod program_block_tests {
             normalize_program_tooltip(eleven),
             Some("one two three four five six seven eight nine ten…".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod pty_activity_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_pty_active_payload() {
+        // Purely synchronized updates + style resets -> inactive
+        assert!(!is_pty_active_payload(b"\x1b[?2026h\x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?2026l"));
+        // Purely style resets -> inactive
+        assert!(!is_pty_active_payload(b"\x1b[31m\x1b[0m"));
+        // Empty -> inactive
+        assert!(!is_pty_active_payload(b""));
+        // Null bytes -> inactive
+        assert!(!is_pty_active_payload(b"\0\0"));
+
+        // Text character -> active
+        assert!(is_pty_active_payload(b"a"));
+        // Space -> active
+        assert!(is_pty_active_payload(b" "));
+        // Newline -> active
+        assert!(is_pty_active_payload(b"\n"));
+        // Cursor home -> active
+        assert!(is_pty_active_payload(b"\x1b[H"));
+        // Text after ignorable sequence -> active
+        assert!(is_pty_active_payload(b"\x1b[?2026hhello\x1b[?2026l"));
     }
 }

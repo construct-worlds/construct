@@ -4576,15 +4576,21 @@ impl App {
                         if let SessionEvent::Pty { .. } = &payload.event {
                             let now = Instant::now();
                             let bytes = payload.event.pty_bytes();
+                            let mut is_active = true;
                             if let Some(b) = bytes.as_deref() {
+                                if !agentd_protocol::is_pty_active_payload(b) {
+                                    is_active = false;
+                                }
                                 let history = self
                                     .histories
                                     .entry(payload.session_id.clone())
                                     .or_default();
                                 history.feed_pty(b);
                             }
-                            // Mark the session as freshly active for the spinner.
-                            self.pty_activity.insert(payload.session_id.clone(), now);
+                            if is_active {
+                                // Mark the session as freshly active for the spinner.
+                                self.pty_activity.insert(payload.session_id.clone(), now);
+                            }
                             // PTY-only harnesses (codex/claude in interactive
                             // mode, shell) don't emit structured ToolUse/Status
                             // events while working, so feed the matrix-rain
