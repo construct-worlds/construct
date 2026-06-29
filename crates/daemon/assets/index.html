@@ -2175,8 +2175,10 @@ const state = {
   // or "terminal" (xterm.js mounted to a PTY-backed session). Set by
   // `selectSession` based on `has_pty` plus the session mode.
   mode: "chat",
-  // Explicit per-session view preference for PTY-capable sessions.
-  // Absent means "terminal", preserving the existing default.
+  // Explicit per-session view preference: "chat", "terminal", or "program".
+  // Absent falls back to the session's natural surface (terminal for PTY
+  // sessions, otherwise chat). "program" is a per-session choice too, so
+  // switching sessions restores whatever view each one last showed.
   viewModeById: loadViewModePrefs(),
   // Lazily-initialized xterm.js handles + fit addons keyed by session id.
   // Keeping each xterm mounted offscreen avoids replaying long PTY history
@@ -2276,7 +2278,9 @@ function loadViewModePrefs() {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return new Map();
     return new Map(
-      Object.entries(parsed).filter(([, mode]) => mode === "chat" || mode === "terminal"),
+      Object.entries(parsed).filter(
+        ([, mode]) => mode === "chat" || mode === "terminal" || mode === "program",
+      ),
     );
   } catch {
     return new Map();
@@ -2286,7 +2290,7 @@ function loadViewModePrefs() {
 function saveViewModePrefs() {
   const obj = {};
   for (const [id, mode] of state.viewModeById.entries()) {
-    if (mode === "chat" || mode === "terminal") obj[id] = mode;
+    if (mode === "chat" || mode === "terminal" || mode === "program") obj[id] = mode;
   }
   localStorage.setItem(VIEW_MODE_PREFS_KEY, JSON.stringify(obj));
 }
@@ -3185,6 +3189,10 @@ async function handleRowAction(action, sessionId) {
 }
 
 function preferredViewModeForSession(s) {
+  // Program is available for every session, so an explicit "program"
+  // preference wins regardless of whether the session has a PTY or a
+  // semantic chat view.
+  if (state.viewModeById.get(s.id) === "program") return "program";
   if (!isTerminalSession(s)) return "chat";
   if (!hasSemanticChatView(s)) return "terminal";
   return state.viewModeById.get(s.id) === "chat" ? "chat" : "terminal";
@@ -3200,7 +3208,10 @@ function renderViewModeToggle(s) {
   viewModeChatBtn.hidden = !chat;
   viewModeProgramBtn.hidden = false;
   viewModeToggleEl.hidden = false;
-  const mode = state.mode === "program" ? "program" : preferredViewModeForSession(s);
+  // Reflect the per-session preference (which now includes "program") rather
+  // than the global `state.mode`: during a session switch `state.mode` still
+  // holds the outgoing session's view until the new surface is entered.
+  const mode = preferredViewModeForSession(s);
   viewModeTerminalBtn.setAttribute("aria-pressed", mode === "terminal" ? "true" : "false");
   viewModeChatBtn.setAttribute("aria-pressed", mode === "chat" ? "true" : "false");
   viewModeProgramBtn.setAttribute("aria-pressed", mode === "program" ? "true" : "false");
@@ -3237,6 +3248,11 @@ async function switchCurrentViewMode(mode) {
     if (state.mode === "program") return;
     if (state.mode === "terminal") rememberActiveTerminalState();
     else if (state.mode === "chat") rememberTranscriptViewport(id);
+    // Remember program as this session's view so switching away and back
+    // restores it (and so a session switch doesn't carry program onto the
+    // next session via the global state.mode).
+    state.viewModeById.set(id, "program");
+    saveViewModePrefs();
     await enterProgramMode(id);
     renderViewModeToggle(s);
     setComposerEnabled(false);
@@ -3253,6 +3269,11 @@ async function switchCurrentViewMode(mode) {
 
   if (isTerminalSession(s) && hasSemanticChatView(s)) {
     state.viewModeById.set(id, mode);
+    saveViewModePrefs();
+  } else if (state.viewModeById.delete(id)) {
+    // Single-surface session leaving program: drop the stored "program"
+    // preference so its natural surface (terminal or chat) is restored on the
+    // next switch instead of program sticking around.
     saveViewModePrefs();
   }
   renderViewModeToggle(s);
@@ -3295,15 +3316,18 @@ async function selectSession(id, { replaceUrl = false } = {}) {
     setSessionListVisible(false, false);
   }
   hydrateWidgets(id);
-  if (state.mode === "program") {
-    // Program is a per-session surface; keep showing it for the new session.
+  // Restore the view the *incoming* session last used, not the outgoing
+  // session's global state.mode. Program is a per-session surface like
+  // terminal/chat, so each session reopens in whatever view it last showed.
+  const preferred = preferredViewModeForSession(s);
+  if (preferred === "program") {
     // Don't auto-focus the contenteditable here: a session switch is a
     // programmatic restore, not an edit intent. On mobile, focusing the
     // program input pops the native keyboard on every switch even though the
     // user never tapped to edit. Focus only happens on an explicit gesture
     // (the view-mode toggle in switchCurrentViewMode, or tapping the input).
     await enterProgramMode(id, { focus: false });
-  } else if (preferredViewModeForSession(s) === "terminal") {
+  } else if (preferred === "terminal") {
     await enterTerminalMode(id, { focusTerminal: focusTerminalAfterSwitch });
   } else {
     enterChatMode();
