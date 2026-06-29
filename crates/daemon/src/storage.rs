@@ -1316,7 +1316,6 @@ mod program_tests {
             old_string: old.into(),
             new_string: new.into(),
             replace_all: false,
-            shimmer: false,
         }
     }
 
@@ -1364,7 +1363,6 @@ mod program_tests {
                 old_string: "- a".into(),
                 new_string: "- b".into(),
                 replace_all: true,
-                shimmer: false,
             }],
         )
         .unwrap();
