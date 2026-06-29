@@ -163,6 +163,21 @@ fn release_tag(latest: &str) -> String {
     }
 }
 
+/// The version string to show on the right side of the `FROM -> TO` upgrade
+/// summary. An explicit `--version` wins; otherwise we use the fetched latest
+/// tag, falling back to the literal `"latest"` when we couldn't resolve it
+/// (offline / no public release). This is display-only — the installer does the
+/// authoritative resolution and download.
+fn target_display(explicit: Option<&str>, fetched_latest: Option<&str>) -> String {
+    match explicit {
+        Some(v) => release_tag(v),
+        None => match fetched_latest {
+            Some(l) => release_tag(l),
+            None => "latest".to_string(),
+        },
+    }
+}
+
 fn wants_yes(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
@@ -260,8 +275,14 @@ pub async fn run(
             .context("write temp installer")?;
     }
 
-    let target = version.as_deref().unwrap_or("latest");
-    println!("Upgrading construct to {target} in {}", dir.display());
+    // Resolve the version we're moving TO so the summary line is concrete. An
+    // explicit `--version` wins; otherwise resolve "latest" to a real tag (best
+    // effort — the installer below does the authoritative fetch). Print the
+    // FROM -> TO summary up front, before the download starts.
+    let to_display = target_display(version.as_deref(), fetch_latest().await.as_deref());
+    let from_display = release_tag(current);
+    println!("construct upgrade: {from_display} -> {to_display}");
+    println!("Installing into {}", dir.display());
 
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg(script.path()).env("CONSTRUCT_BIN_DIR", &dir);
@@ -273,6 +294,10 @@ pub async fn run(
         anyhow::bail!("upgrade failed (installer exited with {status})");
     }
 
+    // The new binary is on disk, but any already-running daemon/TUI is still
+    // executing the old one. Tell the user exactly how to start using the new
+    // version, tailored to whether a daemon is currently up.
+    println!();
     if restart {
         match Client::connect(socket).await {
             Ok(c) => {
@@ -280,12 +305,22 @@ pub async fn run(
                 // broken-pipe error here means the restart is in flight —
                 // both outcomes count as success.
                 let _ = c.daemon_restart(None, false).await;
-                println!("Requested daemon restart — the upgrade is now live.");
+                println!("Upgraded to {to_display}. Restarted the daemon — the new binary is now live.");
             }
-            Err(_) => println!("Upgraded. (No running daemon to restart.)"),
+            Err(_) => println!(
+                "Upgraded to {to_display}. No daemon was running; the new binary will be used the next time you start one."
+            ),
         }
+    } else if Client::connect(socket).await.is_ok() {
+        println!("Upgraded to {to_display}. A daemon is still running the previous binary.");
+        println!("To apply the upgrade, restart the daemon with one of:");
+        println!("    construct upgrade --restart   (restart it now)");
+        println!("    construct daemon restart      (restart it directly)");
+        println!("    /construct restart            (from inside the TUI)");
     } else {
-        println!("Upgraded. Run `/construct restart` in the TUI (or restart the daemon) to apply.");
+        println!(
+            "Upgraded to {to_display}. No daemon is running; the new binary will be used the next time you start one (e.g. `construct`)."
+        );
     }
     Ok(())
 }
@@ -340,5 +375,16 @@ mod tests {
         assert_eq!(release_tag("0.11.2"), "v0.11.2");
         assert_eq!(release_tag("v0.11.2"), "v0.11.2");
         assert_eq!(release_tag(" 0.11.2 "), "v0.11.2");
+    }
+
+    #[test]
+    fn target_display_prefers_explicit_then_latest_then_literal() {
+        // Explicit --version wins and is normalized to a `v`-prefixed tag.
+        assert_eq!(target_display(Some("0.12.0"), Some("0.13.0")), "v0.12.0");
+        assert_eq!(target_display(Some("v0.12.0"), None), "v0.12.0");
+        // No explicit version: use the fetched latest tag.
+        assert_eq!(target_display(None, Some("0.12.0")), "v0.12.0");
+        // Offline / unresolved latest falls back to the literal "latest".
+        assert_eq!(target_display(None, None), "latest");
     }
 }
