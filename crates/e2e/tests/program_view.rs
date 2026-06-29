@@ -96,7 +96,7 @@ async fn web_program_view_full_parity() {
               return {
                 wrapVisible: !programWrapEl.hidden,
                 transcriptHidden: transcriptEl.hidden,
-                value: programInputEl.value,
+                value: programSerialize(),
                 version: programVersionEl.textContent,
                 programPressed: viewModeProgramBtn.getAttribute("aria-pressed"),
                 mode: state.mode,
@@ -139,7 +139,7 @@ async fn web_program_view_full_parity() {
               const tmplButtons = Array.from(programEmptyEl.querySelectorAll("[data-tmpl]")).map((b) => b.dataset.tmpl);
               programEmptyEl.querySelector('[data-tmpl="tasks"]').click();
               await new Promise((r) => setTimeout(r, 40));
-              return { emptyVisible, tmplButtons, updates: window.__updates, valueAfter: programInputEl.value, emptyHiddenAfter: programEmptyEl.hidden };
+              return { emptyVisible, tmplButtons, updates: window.__updates, valueAfter: programSerialize(), emptyHiddenAfter: programEmptyEl.hidden };
             })
             "###,
         )
@@ -166,8 +166,7 @@ async fn web_program_view_full_parity() {
               window.__updates = [];
               setSession("s-save", "shell");
               await switchCurrentViewMode("program");
-              programInputEl.value = "old\nnew line\n";
-              programOnInput();
+              programTestSet("old\nnew line\n");
               const dirtyBefore = programSaveBtn.getAttribute("data-dirty");
               await programSave();
               return { dirtyBefore, dirtyAfter: programSaveBtn.getAttribute("data-dirty"), updates: window.__updates, versionAfter: programVersionEl.textContent, msg: programMsgEl.textContent };
@@ -203,11 +202,10 @@ async fn web_program_view_full_parity() {
               setSession("s-merge", "shell");
               await switchCurrentViewMode("program");
               // local change to line 1; concurrent agent change to line 3.
-              programInputEl.value = "OURS\nL2\nL3\n";
-              programOnInput();
+              programTestSet("OURS\nL2\nL3\n");
               window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-merge", markdown: "L1\nL2\nTHEIRS\n", version: 6, template_id: null }, active_run: null, blocks: [], revisions: [] });
               await programSave();
-              return { updates: window.__updates, finalValue: programInputEl.value, msg: programMsgEl.textContent };
+              return { updates: window.__updates, finalValue: programSerialize(), msg: programMsgEl.textContent };
             })
             "###,
         )
@@ -238,11 +236,10 @@ async fn web_program_view_full_parity() {
               };
               setSession("s-run", "shell");
               await switchCurrentViewMode("program");
-              programInputEl.setSelectionRange(0, 0);
+              programTestClearSel();
               await programRun();
-              programRenderOverlay();
               const r = state.program.runById.get("s-run");
-              return { execs: window.__execs, runPending: r ? r.pendingIds.size : 0, overlayHasShimmer: programOverlayEl.innerHTML.includes("color:rgb("), msg: programMsgEl.textContent };
+              return { execs: window.__execs, runPending: r ? r.pendingIds.size : 0, shimmerActive: !!programInputEl.querySelector(".program-line.is-running"), msg: programMsgEl.textContent };
             })
             "###,
         )
@@ -252,7 +249,7 @@ async fn web_program_view_full_parity() {
         .expect("json");
     assert_eq!(run["execs"][0]["selection"], serde_json::Value::Null, "whole-program run sends no selection: {run:?}");
     assert!(run["runPending"].as_u64().unwrap_or(0) >= 3, "{run:?}");
-    assert_eq!(run["overlayHasShimmer"], true, "shimmer spans should render: {run:?}");
+    assert_eq!(run["shimmerActive"], true, "running lines should get the shimmer class: {run:?}");
     assert!(run["msg"].as_str().unwrap_or_default().contains("run sent (program"), "{run:?}");
 
     // --- 7. Run with a selection scopes execute to the selected text. --------
@@ -268,9 +265,7 @@ async fn web_program_view_full_parity() {
               window.__mockProgramHandlers["program.execute"] = (p) => { window.__execs.push(p); const now = Date.now(); return { program: { session_id: "s-runsel", markdown: md, version: 1, template_id: null }, blocks: [], active_run: { run_id: "r2", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: [], pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } }; };
               setSession("s-runsel", "shell");
               await switchCurrentViewMode("program");
-              const start = md.indexOf("- alpha");
-              const end = md.indexOf("- beta") + "- beta".length;
-              programInputEl.setSelectionRange(start, end);
+              programTestSelectLines(1, 2); // "- alpha" + "- beta"
               await programRun();
               return { execs: window.__execs, msg: programMsgEl.textContent };
             })
@@ -295,9 +290,9 @@ async fn web_program_view_full_parity() {
               state.harnesses = [{ name: "codex", available: true }, { name: "claude", available: true }];
               state.currentId = "s-clip";
               await switchCurrentViewMode("program");
-              programInputEl.value = "ping @";
-              programInputEl.setSelectionRange(6, 6);
-              programOnInput();
+              programTestSet("ping @");
+              programTestCaretEnd();
+              programUpdateClipMenu();
               const menuOpen = !programClipMenuEl.hidden;
               const itemCount = programClipMenuEl.querySelectorAll("[data-i]").length;
               // Arrow-down selects the 2nd item; the keyup must NOT reset it to 0.
@@ -307,12 +302,14 @@ async fn web_program_view_full_parity() {
               programInputEl.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowDown", bubbles: true }));
               const selAfterKeyup = state.program.clip.selected;
               programAcceptClip(0);
-              programRenderOverlay();
               return {
-                menuOpen, itemCount, value: programInputEl.value, menuClosedAfter: programClipMenuEl.hidden,
+                menuOpen, itemCount, value: programSerialize(), menuClosedAfter: programClipMenuEl.hidden,
                 sel0, selAfterDown, selAfterKeyup,
-                overlayHasLabel: programOverlayEl.innerHTML.includes("Builder"),
-                overlayShowsRaw: programOverlayEl.innerHTML.includes("@{session:sAAA111"),
+                // The chip is an atomic widget: its visible text is the friendly
+                // label; the raw @{…} lives only in data-raw, never as text.
+                chipHasLabel: programInputEl.textContent.includes("Builder"),
+                chipShowsRaw: programInputEl.textContent.includes("@{session:sAAA111"),
+                chipIsAtomic: !!programInputEl.querySelector('.program-clip[contenteditable="false"]'),
               };
             })
             "###,
@@ -329,9 +326,11 @@ async fn web_program_view_full_parity() {
     assert_eq!(clip["sel0"], 0, "{clip:?}");
     assert_eq!(clip["selAfterDown"], 1, "{clip:?}");
     assert_eq!(clip["selAfterKeyup"], 1, "arrow-down selection must persist through keyup: {clip:?}");
-    // #1: the clip renders a friendly label, never the raw @{…} syntax.
-    assert_eq!(clip["overlayHasLabel"], true, "clip should render its friendly label: {clip:?}");
-    assert_eq!(clip["overlayShowsRaw"], false, "clip must not render raw @{{…}} syntax: {clip:?}");
+    // #1: the clip renders a friendly, content-fit label, never the raw @{…}; it
+    // is an atomic contenteditable=false widget (one cursor stop, deletes whole).
+    assert_eq!(clip["chipHasLabel"], true, "clip should render its friendly label: {clip:?}");
+    assert_eq!(clip["chipShowsRaw"], false, "clip text must not be the raw @{{…}} syntax: {clip:?}");
+    assert_eq!(clip["chipIsAtomic"], true, "clip must be an atomic contenteditable=false widget: {clip:?}");
 
     // --- 9. Find highlights matches and reports a count. ---------------------
     let find: serde_json::Value = page
@@ -372,12 +371,11 @@ async fn web_program_view_full_parity() {
               setSession("s-live", "shell");
               await switchCurrentViewMode("program");
               handleProgramState({ program: { session_id: "s-live", markdown: "agent edit v2\n", version: 2, template_id: null }, active_run: null });
-              const adopted = programInputEl.value;
+              const adopted = programSerialize();
               const adoptedVersion = programVersionEl.textContent;
-              programInputEl.value = "agent edit v2\nmy unsaved line\n";
-              programOnInput();
+              programTestSet("agent edit v2\nmy unsaved line\n");
               handleProgramState({ program: { session_id: "s-live", markdown: "agent edit v3 different\n", version: 3, template_id: null }, active_run: null });
-              return { adopted, adoptedVersion, keptDirty: programInputEl.value, dirty: programSaveBtn.getAttribute("data-dirty") };
+              return { adopted, adoptedVersion, keptDirty: programSerialize(), dirty: programSaveBtn.getAttribute("data-dirty") };
             })
             "###,
         )
@@ -410,8 +408,8 @@ async fn web_program_view_full_parity() {
         r###"
         (() => {
           const sid = state.program.mountedId;
-          programStartOptimisticRun(sid, programInputEl.value, false, "", null);
-          programRenderOverlay();
+          programStartOptimisticRun(sid, programSerialize(), false, "", null);
+          programApplyShimmer();
           return true;
         })()
         "###,
@@ -422,12 +420,10 @@ async fn web_program_view_full_parity() {
         (() => {
           programStopShimmer();
           state.program.runById.clear();
-          programRenderOverlay();
-          programInputEl.value = programInputEl.value + "\nrun @";
-          const caret = programInputEl.value.length;
-          programInputEl.setSelectionRange(caret, caret);
+          programTestSet(programSerialize() + "\nrun @");
+          programTestCaretEnd();
           programInputEl.focus();
-          programOnInput();
+          programUpdateClipMenu();
           return true;
         })()
         "###,
@@ -486,6 +482,25 @@ const SETUP_JS: &str = r###"
     window.setSession = function (id, harness) {
       state.sessions = [{ id, title: id, harness, state: "running", kind: "user", has_pty: false }];
       state.currentId = id;
+    };
+    // contenteditable test helpers (the editor is no longer a <textarea>).
+    window.programTestSet = function (md) { programRenderDoc(md); programOnInput(); };
+    window.programTestClearSel = function () { const s = window.getSelection(); if (s) s.removeAllRanges(); };
+    window.programTestCaretEnd = function () {
+      const walker = document.createTreeWalker(programInputEl, NodeFilter.SHOW_TEXT);
+      let last = null, n; while ((n = walker.nextNode())) last = n;
+      const sel = window.getSelection(); sel.removeAllRanges();
+      const r = document.createRange();
+      if (last) r.setStart(last, last.data.length); else r.setStart(programInputEl, 0);
+      r.collapse(true); sel.addRange(r);
+    };
+    window.programTestSelectLines = function (a, b) {
+      const lines = programInputEl.querySelectorAll(":scope > div");
+      const sel = window.getSelection(); sel.removeAllRanges();
+      const r = document.createRange();
+      r.setStart(lines[a], 0);
+      r.setEnd(lines[b], lines[b].childNodes.length);
+      sel.addRange(r);
     };
     window.withMockProgram = async function (handlers, fn) {
       const saved = {
