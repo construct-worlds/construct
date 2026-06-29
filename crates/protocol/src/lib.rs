@@ -988,10 +988,10 @@ pub fn normalize_program_tooltip(raw: &str) -> Option<String> {
 }
 
 /// Stable, content-derived id for a program block (spec 0053). Derived from the
-/// block's normalized signature with a dependency-free FNV-1a hash so the daemon
+/// block's identity signature with a dependency-free FNV-1a hash so the daemon
 /// and every client compute the same id for the same content. The id is stable
-/// against position but changes when the block's own text changes; equal content
-/// yields equal ids (such blocks shimmer and settle together).
+/// against position but changes when the block's own semantic text changes;
+/// equal content yields equal ids (such blocks shimmer and settle together).
 pub fn program_block_id(signature: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in signature.as_bytes() {
@@ -999,6 +999,41 @@ pub fn program_block_id(signature: &str) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{hash:016x}")
+}
+
+/// Signature used for block identity. It intentionally ignores smart-clip
+/// instance ids (`clip_id=...`) because those are client-assigned references to
+/// a specific rendered clip, not task content. Adding or repairing clip ids must
+/// not settle a block whose work is still pending.
+fn program_block_identity_signature(signature: &str) -> String {
+    let mut out = String::with_capacity(signature.len());
+    let mut rest = signature;
+    loop {
+        let Some(start) = rest.find("@{") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find('}') else {
+            out.push_str(&rest[start..]);
+            break;
+        };
+        let body = &after_start[..end];
+        out.push_str("@{");
+        out.push_str(&program_smart_clip_body_without_instance_id(body));
+        out.push('}');
+        rest = &after_start[end + 1..];
+    }
+    out
+}
+
+fn program_smart_clip_body_without_instance_id(raw_clip: &str) -> String {
+    raw_clip
+        .split_whitespace()
+        .filter(|part| !part.starts_with("clip_id="))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// True if a trimmed line is a Markdown ATX heading (`#`..`######` then a space).
@@ -1040,7 +1075,7 @@ pub fn program_block_spans(markdown: &str) -> Vec<ProgramBlockSpan> {
     let mut norm: Vec<String> = Vec::new();
     let push = |start: usize, end: usize, norm: &[String], blocks: &mut Vec<ProgramBlockSpan>| {
         let signature = norm.join("\n");
-        let id = program_block_id(&signature);
+        let id = program_block_id(&program_block_identity_signature(&signature));
         let text = raw_lines[start..end].join("\n");
         blocks.push(ProgramBlockSpan {
             start_line: start,
@@ -2090,6 +2125,36 @@ mod program_block_tests {
         assert_eq!(id1, id2, "id is position-independent");
         // Editing the block's text changes its id.
         assert_ne!(a, program_block_id("- item done"));
+    }
+
+    #[test]
+    fn block_id_ignores_smart_clip_instance_ids() {
+        let without_clip_id =
+            program_block_spans("* task — @{session:s1}\n").pop().unwrap();
+        let with_clip_id =
+            program_block_spans("* task — @{session:s1 clip_id=clip_4}\n")
+                .pop()
+                .unwrap();
+        let changed_clip_id =
+            program_block_spans("* task — @{session:s1 clip_id=clip_9}\n")
+                .pop()
+                .unwrap();
+        assert_eq!(without_clip_id.signature, "* task — @{session:s1}");
+        assert_eq!(
+            with_clip_id.signature,
+            "* task — @{session:s1 clip_id=clip_4}"
+        );
+        assert_eq!(without_clip_id.id, with_clip_id.id);
+        assert_eq!(with_clip_id.id, changed_clip_id.id);
+
+        let changed_target =
+            program_block_spans("* task — @{session:s2 clip_id=clip_4}\n")
+                .pop()
+                .unwrap();
+        assert_ne!(
+            with_clip_id.id, changed_target.id,
+            "changing the smart-clip target is still semantic content"
+        );
     }
 
     #[test]

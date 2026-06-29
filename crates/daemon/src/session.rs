@@ -6885,6 +6885,76 @@ mod tests {
         );
     }
 
+    // Smart clip instance ids are UI identity metadata. The TUI can normalize a
+    // missing clip_id after an agent moved a pending task into In progress; that
+    // should not settle the task's shimmer by changing only the block id input.
+    #[tokio::test]
+    async fn program_update_adding_smart_clip_id_preserves_pending_block() {
+        let md = "# In progress\n\n* task — @{session:s1}\n";
+        let normalized = "# In progress\n\n* task — @{session:s1 clip_id=clip_4}\n";
+        let (mgr, _storage, id) = program_test_mgr(md).await;
+        mgr.start_program_run(&id, md, false, None).expect("start");
+        let g = mgr.program_get(&id).await.expect("get");
+        let id_of = |n: &str| {
+            g.blocks
+                .iter()
+                .find(|b| b.text.contains(n))
+                .unwrap()
+                .id
+                .clone()
+        };
+        mgr.program_edit(ProgramEditParams {
+            session_id: id.clone(),
+            edits: vec![agentd_protocol::ProgramEdit {
+                old_string: "# In progress".into(),
+                new_string: "# In progress".into(),
+                replace_all: false,
+                keep_pending: false,
+            }],
+            actor: agentd_protocol::ProgramUpdateActor::Agent,
+            note: None,
+            shimmer: vec![
+                agentd_protocol::ProgramShimmerDecl {
+                    id: id_of("# In progress"),
+                    shimmer: false,
+                    tooltip: None,
+                },
+                agentd_protocol::ProgramShimmerDecl {
+                    id: id_of("task"),
+                    shimmer: true,
+                    tooltip: Some("Still working".into()),
+                },
+            ],
+        })
+        .await
+        .expect("planning");
+
+        let res = mgr
+            .program_update(ProgramUpdateParams {
+                session_id: id.clone(),
+                markdown: normalized.to_string(),
+                base_version: None,
+                actor: agentd_protocol::ProgramUpdateActor::Human,
+                template_id: None,
+                note: Some("Normalize smart clip ids".into()),
+                shimmer: None,
+                shimmer_tooltips: None,
+            })
+            .await
+            .expect("normalize clip id");
+
+        let task = res
+            .blocks
+            .iter()
+            .find(|b| b.text.contains("task"))
+            .unwrap();
+        assert!(
+            task.shimmer,
+            "adding only clip_id metadata must not settle pending work"
+        );
+        assert_eq!(task.tooltip.as_deref(), Some("Still working"));
+    }
+
     // Finer block granularity: a section of consecutive list items (no blank
     // lines between them) is many blocks, so one item can settle while its
     // siblings keep shimmering — and the heading is its own block too.
