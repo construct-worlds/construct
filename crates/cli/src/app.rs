@@ -13329,6 +13329,74 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn program_shimmer_tooltip_works_on_unfocused_split_program() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut s1 = summary_with_kind(agentd_protocol::SessionKind::User);
+        let mut s2 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s2.id = "s2".into();
+        app.sessions = vec![s1, s2];
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 2;
+        app.selection = Selection::Session("s2".into());
+        let markdown = "running shimmer";
+        let mut inactive_program = program_popup_for_test("s1", markdown, 0);
+        inactive_program.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.program_popups.insert("s1".into(), inactive_program);
+
+        let block_id = agentd_protocol::program_block_id(markdown);
+        app.program_runs.insert(
+            "s1".into(),
+            ProgramRun {
+                started_at: Instant::now(),
+                pending: HashSet::from([block_id.clone()]),
+                pending_tooltips: HashMap::from([(block_id, "Still running".into())]),
+                deadline: Instant::now() + Duration::from_secs(60),
+                first_output_seen: true,
+            },
+        );
+
+        let backend = ratatui::backend::TestBackend::new(160, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let pane = app
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|hit| hit.id == 1)
+            .expect("inactive split pane")
+            .area;
+        let inner = pane.inner(ratatui::layout::Margin {
+            horizontal: 1 + PROGRAM_CONTENT_PADDING_X,
+            vertical: 1 + PROGRAM_CONTENT_PADDING_Y,
+        });
+        app.mouse_pos = Some((inner.x, inner.y));
+        app.last_mouse_move = Some(Instant::now());
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("inactive program hover tooltip should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("Still running"),
+            "hovering shimmer in an unfocused split program should show its tooltip"
+        );
+        server.abort();
+    }
+
     /// Seed `app` with one selected session that owns a single sticky widget,
     /// plus a fully-revealed program popup over it. Returns the keep-alive dir
     /// and mock-daemon handle.
