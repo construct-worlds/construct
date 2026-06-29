@@ -576,12 +576,24 @@ pub fn is_on_view_uncollapse_handle(app: &super::app::App, col: u16, row: u16) -
 /// `render_diamond_tooltip` / `render_view_close_tooltip` so all
 /// tooltips look uniform.
 fn render_button_tooltip(f: &mut Frame, theme: &Theme, label: &str, anchor_x: u16, anchor_y: u16) {
+    render_tooltip_at(f, theme, label, anchor_x, anchor_y, 2, -1);
+}
+
+fn render_tooltip_at(
+    f: &mut Frame,
+    theme: &Theme,
+    label: &str,
+    anchor_x: u16,
+    anchor_y: u16,
+    x_offset: i16,
+    y_offset: i16,
+) {
     let total = f.area();
     let inner_w = UnicodeWidthStr::width(label) as u16;
     let w = inner_w + 2;
     let h: u16 = 3;
-    let mut tx = anchor_x.saturating_add(2);
-    let mut ty = anchor_y.saturating_sub(1);
+    let mut tx = anchor_x.saturating_add_signed(x_offset);
+    let mut ty = anchor_y.saturating_add_signed(y_offset);
     if tx + w > total.x + total.width {
         tx = total.x + total.width.saturating_sub(w);
     }
@@ -594,12 +606,14 @@ fn render_button_tooltip(f: &mut Frame, theme: &Theme, label: &str, anchor_x: u1
         width: w,
         height: h,
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border));
+    render_tooltip_rect(f, theme, label, rect);
+}
+
+fn render_tooltip_rect(f: &mut Frame, theme: &Theme, label: &str, rect: Rect) {
+    let block = theme.themed_block("");
     let p = Paragraph::new(label)
         .block(block)
-        .style(Style::default().fg(theme.text));
+        .style(theme.text_style());
     f.render_widget(Clear, rect);
     f.render_widget(p, rect);
 }
@@ -893,36 +907,7 @@ fn render_pin_diamond_tooltip(f: &mut Frame, app: &App, pinned_ids: &[String]) {
         .add_modifier(Modifier::BOLD);
     f.buffer_mut().set_string(dx, dy, "★", overlay_style);
 
-    let label = " Unpin session ";
-    let total = f.area();
-    let inner_w = UnicodeWidthStr::width(label) as u16;
-    let w = inner_w + 2; // borders
-    let h: u16 = 3;
-    // Default: place tooltip just right of the diamond, vertically
-    // centered on the row. Fall back leftward / upward if it would
-    // overflow the screen. Mirrors `render_diamond_tooltip`.
-    let mut tx = dx + 2;
-    let mut ty = dy.saturating_sub(1);
-    if tx + w > total.x + total.width {
-        tx = total.x + total.width.saturating_sub(w);
-    }
-    if ty + h > total.y + total.height {
-        ty = total.y + total.height.saturating_sub(h);
-    }
-    let rect = Rect {
-        x: tx,
-        y: ty,
-        width: w,
-        height: h,
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border));
-    let p = Paragraph::new(label)
-        .block(block)
-        .style(Style::default().fg(app.theme.text));
-    f.render_widget(Clear, rect);
-    f.render_widget(p, rect);
+    render_tooltip_at(f, &app.theme, " Unpin session ", dx, dy, 2, -1);
 }
 
 fn render_view_close_tooltip(f: &mut Frame, app: &App) {
@@ -949,20 +934,17 @@ fn render_view_close_tooltip(f: &mut Frame, app: &App) {
     if ty + h > total.y + total.height {
         ty = total.y + total.height.saturating_sub(h);
     }
-    let rect = Rect {
-        x: tx,
-        y: ty,
-        width: w,
-        height: h,
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border));
-    let p = Paragraph::new(label)
-        .block(block)
-        .style(Style::default().fg(app.theme.text));
-    f.render_widget(Clear, rect);
-    f.render_widget(p, rect);
+    render_tooltip_rect(
+        f,
+        &app.theme,
+        label,
+        Rect {
+            x: tx,
+            y: ty,
+            width: w,
+            height: h,
+        },
+    );
 }
 
 fn render_view_program_toggle_tooltip(f: &mut Frame, app: &App) {
@@ -989,14 +971,7 @@ fn render_view_program_toggle_tooltip(f: &mut Frame, app: &App) {
     let w = inner_w + 2;
     let h: u16 = 3;
     let rect = view_program_toggle_tooltip_rect(view_area, f.area(), cx, cy, w, h);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border));
-    let p = Paragraph::new(label)
-        .block(block)
-        .style(Style::default().fg(app.theme.text));
-    f.render_widget(Clear, rect);
-    f.render_widget(p, rect);
+    render_tooltip_rect(f, &app.theme, label, rect);
 }
 
 fn view_program_toggle_tooltip_rect(
@@ -1067,20 +1042,17 @@ fn render_harness_unavailable_tooltip(f: &mut Frame, app: &App) {
         tx = total.x + total.width.saturating_sub(w);
     }
     let ty = hit.y.saturating_sub(h);
-    let rect = Rect {
-        x: tx,
-        y: ty,
-        width: w,
-        height: h,
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border));
-    let p = Paragraph::new(label)
-        .block(block)
-        .style(Style::default().fg(app.theme.text));
-    f.render_widget(Clear, rect);
-    f.render_widget(p, rect);
+    render_tooltip_rect(
+        f,
+        &app.theme,
+        label.as_str(),
+        Rect {
+            x: tx,
+            y: ty,
+            width: w,
+            height: h,
+        },
+    );
 }
 
 /// Render the new-session harness picker with each name as a
@@ -1197,35 +1169,7 @@ fn render_diamond_tooltip(f: &mut Frame, app: &App) {
     } else {
         " Pin session "
     };
-    let total = f.area();
-    let inner_w = UnicodeWidthStr::width(label) as u16;
-    let w = inner_w + 2; // borders
-    let h: u16 = 3;
-    // Default: place tooltip just right of the diamond, vertically
-    // centered on the row. Fall back leftward / upward if it would
-    // overflow the screen.
-    let mut tx = dx + 2;
-    let mut ty = dy.saturating_sub(1);
-    if tx + w > total.x + total.width {
-        tx = total.x + total.width.saturating_sub(w);
-    }
-    if ty + h > total.y + total.height {
-        ty = total.y + total.height.saturating_sub(h);
-    }
-    let rect = Rect {
-        x: tx,
-        y: ty,
-        width: w,
-        height: h,
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border));
-    let p = Paragraph::new(label)
-        .block(block)
-        .style(Style::default().fg(app.theme.text));
-    f.render_widget(Clear, rect);
-    f.render_widget(p, rect);
+    render_tooltip_at(f, &app.theme, label, dx, dy, 2, -1);
 }
 
 fn pin_strip_height(total_h: u16) -> u16 {

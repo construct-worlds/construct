@@ -15,7 +15,9 @@
 //! ```
 
 use agentd_protocol::paths::Paths;
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -207,6 +209,29 @@ impl Theme {
     pub fn load_or_default() -> (Self, Option<String>) {
         let cfg = ThemeConfig::load();
         (cfg.resolve(Some(false)), cfg.warning)
+    }
+
+    pub fn accent_style(&self) -> Style {
+        Style::default().fg(self.accent)
+    }
+
+    pub fn border_style(&self) -> Style {
+        Style::default().fg(self.border)
+    }
+
+    pub fn dim_style(&self) -> Style {
+        Style::default().fg(self.dim)
+    }
+
+    pub fn text_style(&self) -> Style {
+        Style::default().fg(self.text)
+    }
+
+    pub fn themed_block(&self, title: impl Into<String>) -> Block<'static> {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(self.border_style())
+            .title(Line::from(title.into()))
     }
 }
 
