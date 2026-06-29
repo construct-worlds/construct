@@ -2712,7 +2712,11 @@ impl SessionManager {
         // when a TUI attaches, so we no longer keep a parallel in-memory
         // ring of bytes.
         if let SessionEvent::Pty { .. } = &event {
+            let mut is_active = true;
             if let Some(bytes) = event.pty_bytes() {
+                if !agentd_protocol::is_pty_active_payload(&bytes) {
+                    is_active = false;
+                }
                 if let Err(e) = self.storage.append_pty_bytes(&entry.id, &bytes) {
                     tracing::warn!(
                         session = %entry.id,
@@ -2725,13 +2729,13 @@ impl SessionManager {
             // PTY output the operator isn't looking at is unseen activity — it's
             // what makes a later idle "need you". Output in the focused session
             // (their own keystrokes echoing) must not count. See spec 0054.
-            if self.focused_session.lock().unwrap().as_deref() != Some(entry.id.as_str()) {
+            if is_active && self.focused_session.lock().unwrap().as_deref() != Some(entry.id.as_str()) {
                 entry.unseen_activity.store(true, Ordering::Relaxed);
             }
             // Track activity for the "session looks busy" signal, and undo a
             // quiescence-driven AwaitingInput the moment output resumes — so the
             // session reads as Running again and its marker clears.
-            let resumed = {
+            let resumed = if is_active {
                 let mut s = entry.summary.write().await;
                 s.last_pty_at_ms = Some(now.timestamp_millis());
                 if harness_uses_quiescence(&s) && s.state == SessionState::AwaitingInput {
@@ -2742,6 +2746,8 @@ impl SessionManager {
                 } else {
                     None
                 }
+            } else {
+                None
             };
             if let Some(snapshot) = resumed {
                 let _ = self.storage.save_summary(&snapshot);
@@ -5768,6 +5774,96 @@ mod tests {
             !harness_uses_quiescence(&s),
             "headless (no PTY) sessions emit their own AwaitingInput",
         );
+    }
+
+    #[tokio::test]
+    async fn pty_activity_filtering_avoids_quiescence_reset() {
+        use tempfile::tempdir;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use tokio::sync::RwLock;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        let manager = Arc::new(mgr);
+
+        let id = "stest_pty_activity".to_string();
+        let summary = agentd_protocol::SessionSummary {
+            id: id.clone(),
+            harness: "grok".into(),
+            cwd: "/tmp".into(),
+            title: None,
+            state: SessionState::AwaitingInput,
+            created_at: Utc::now(),
+            last_event_at: None,
+            cost_usd: None,
+            model: None,
+            worktree: None,
+            pending_input: false,
+            last_prompt: None,
+            event_count: 0,
+            has_pty: true,
+            mode: None,
+            pinned: false,
+            position: 0,
+            group_id: None,
+            parent_session_id: None,
+            last_pty_at_ms: None,
+            approval_mode: agentd_protocol::ApprovalMode::Manual,
+            kind: agentd_protocol::SessionKind::User,
+            archived: false,
+            operator_loop_disabled: false,
+            needs_attention: false,
+        };
+        let entry = Arc::new(SessionEntry {
+            id: id.clone(),
+            summary: RwLock::new(summary),
+            transcript_count: AtomicU64::new(0),
+            adapter: tokio::sync::Mutex::new(None),
+            pty: tokio::sync::Mutex::new(PtyState::default()),
+            deleted: AtomicBool::new(false),
+            archived: AtomicBool::new(false),
+            title_gen_attempted: AtomicBool::new(false),
+            pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+            tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
+            pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
+            unseen_activity: AtomicBool::new(false),
+        });
+        manager
+            .sessions
+            .write()
+            .await
+            .insert(id.clone(), entry.clone());
+
+        // 1. Send ignorable PTY event (synchronized update + SGR color style resets).
+        manager
+            .handle_event(
+                &entry,
+                SessionEvent::pty(b"\x1b[?2026h\x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?2026l"),
+            )
+            .await;
+        
+        let sum = entry.summary.read().await;
+        assert_eq!(sum.state, SessionState::AwaitingInput, "should stay in AwaitingInput");
+        assert!(sum.last_pty_at_ms.is_none(), "should NOT update last_pty_at_ms");
+        drop(sum);
+
+        // 2. Send active/visible PTY event (actual printable character).
+        manager
+            .handle_event(
+                &entry,
+                SessionEvent::pty(b"visible output"),
+            )
+            .await;
+        
+        let sum = entry.summary.read().await;
+        assert_eq!(sum.state, SessionState::Running, "should transition to Running");
+        assert!(sum.last_pty_at_ms.is_some(), "should update last_pty_at_ms");
     }
 
     /// The `needs_attention` marker tracks "this session needs you": raised when
