@@ -37,14 +37,17 @@ impl SessionManager {
         session_id: &str,
         markdown: &str,
     ) -> Vec<agentd_protocol::ProgramBlockView> {
-        let pending: std::collections::HashSet<String> = self
-            .program_run_snapshot(session_id)
-            .map(|run| run.pending_block_ids.into_iter().collect())
+        let run = self.program_run_snapshot(session_id);
+        let pending: std::collections::HashSet<String> = run
+            .as_ref()
+            .map(|run| run.pending_block_ids.iter().cloned().collect())
             .unwrap_or_default();
+        let tooltips = run.map(|run| run.pending_block_tooltips).unwrap_or_default();
         agentd_protocol::program_block_spans(markdown)
             .into_iter()
             .map(|span| agentd_protocol::ProgramBlockView {
                 shimmer: pending.contains(&span.id),
+                tooltip: tooltips.get(&span.id).cloned(),
                 id: span.id,
                 start_line: span.start_line,
                 end_line: span.end_line,
@@ -112,6 +115,7 @@ impl SessionManager {
             started_at_ms: now_ms,
             expires_at_ms: now_ms + PROGRAM_RUN_MAX_MS,
             pending_block_ids: pending.into_iter().collect(),
+            pending_block_tooltips: std::collections::HashMap::new(),
             seen_running: false,
             first_output_seen: false,
             // Unmanaged until the agent narrows it with a declaration/edit.
@@ -158,10 +162,20 @@ impl SessionManager {
                     if !run.pending_block_ids.contains(&decl.id) {
                         run.pending_block_ids.push(decl.id.clone());
                     }
+                    if let Some(tip) = decl
+                        .tooltip
+                        .as_deref()
+                        .and_then(agentd_protocol::normalize_program_tooltip)
+                    {
+                        run.pending_block_tooltips.insert(decl.id.clone(), tip);
+                    }
                 } else {
                     run.pending_block_ids.retain(|id| id != &decl.id);
+                    run.pending_block_tooltips.remove(&decl.id);
                 }
             }
+            run.pending_block_tooltips
+                .retain(|id, _| run.pending_block_ids.contains(id));
             // Reap only on the inactivity backstop. An empty pending set does
             // NOT remove the run mid-turn (spec 0053): a still-running agent may
             // re-declare a moved block's new id next, and destroying the run
@@ -173,14 +187,15 @@ impl SessionManager {
         }
     }
 
-    /// Authoritatively replace a run's pending set with `pending_ids`
-    /// (intersected with blocks present in `markdown`). Used by a program
-    /// update's complete declaration (spec 0053); a no-op when no run is active.
+    /// Authoritatively replace a run's pending set with `pending` — a map from
+    /// each pending block's id to its optional run-status tooltip, intersected
+    /// with blocks present in `markdown`. Used by a program update's complete
+    /// declaration (specs 0053, 0056); a no-op when no run is active.
     pub(super) fn set_program_run_pending(
         &self,
         session_id: &str,
         markdown: &str,
-        pending_ids: std::collections::HashSet<String>,
+        pending: std::collections::HashMap<String, Option<String>>,
     ) {
         let now_ms = Utc::now().timestamp_millis();
         let current = program_block_ids(markdown);
@@ -192,10 +207,19 @@ impl SessionManager {
             // run alive past owning-session idle and refresh the backstop.
             run.agent_managed = true;
             run.expires_at_ms = now_ms + PROGRAM_RUN_MAX_MS;
-            run.pending_block_ids = pending_ids
+            let pending: Vec<(String, Option<String>)> = pending
                 .into_iter()
-                .filter(|id| current.contains(id))
+                .filter(|(id, _)| current.contains(id))
                 .collect();
+            run.pending_block_tooltips = pending
+                .iter()
+                .filter_map(|(id, tip)| {
+                    tip.as_deref()
+                        .and_then(agentd_protocol::normalize_program_tooltip)
+                        .map(|t| (id.clone(), t))
+                })
+                .collect();
+            run.pending_block_ids = pending.into_iter().map(|(id, _)| id).collect();
             // Reap only on the inactivity backstop (spec 0053); an empty
             // declaration mid-turn keeps the run alive for revival.
             if run.expires_at_ms <= now_ms {
