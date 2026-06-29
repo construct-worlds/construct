@@ -283,11 +283,21 @@ impl App {
             // while editing program prose doesn't blow away the surface.
             KeyCode::Esc => {}
             KeyCode::Enter if self.program_smart_clip_active() => self.accept_program_smart_clip(),
+            KeyCode::Tab if self.program_smart_clip_active() && !ctrl && !alt => {
+                self.accept_program_smart_clip()
+            }
             KeyCode::Up if self.program_smart_clip_active() => {
                 self.move_program_smart_clip_selection(-1)
             }
             KeyCode::Down if self.program_smart_clip_active() => {
                 self.move_program_smart_clip_selection(1)
+            }
+            // Right drills into the highlighted category's submenu; Left backs out.
+            KeyCode::Right if self.program_smart_clip_active() => {
+                self.program_smart_clip_expand()
+            }
+            KeyCode::Left if self.program_smart_clip_active() => {
+                self.program_smart_clip_collapse()
             }
             KeyCode::Char(' ') if ctrl => self.begin_program_selection(),
             KeyCode::Char('g') if ctrl => {
@@ -686,10 +696,10 @@ impl App {
     }
 
     pub(super) fn move_program_smart_clip_selection(&mut self, delta: isize) {
-        let candidate_count = self
+        let selectable = self
             .program_popup
             .as_ref()
-            .map(|popup| self.program_smart_clip_candidates(popup).len())
+            .map(|popup| Self::program_smart_clip_selectable_count(&self.program_smart_clip_rows(popup)))
             .unwrap_or(0);
         let Some(popup) = self.program_popup.as_mut() else {
             return;
@@ -697,21 +707,23 @@ impl App {
         let Some(search) = popup.smart_clip.as_mut() else {
             return;
         };
-        if candidate_count == 0 {
+        if selectable == 0 {
             search.selected = 0;
             return;
         }
-        let selected = search.selected.min(candidate_count - 1);
+        let selected = search.selected.min(selectable - 1);
         search.selected = if delta < 0 {
             selected
-                .saturating_add(candidate_count)
-                .saturating_sub(delta.unsigned_abs() % candidate_count)
-                % candidate_count
+                .saturating_add(selectable)
+                .saturating_sub(delta.unsigned_abs() % selectable)
+                % selectable
         } else {
-            (selected + delta as usize) % candidate_count
+            (selected + delta as usize) % selectable
         };
     }
 
+    /// Accept the highlighted row: a category expands into its submenu, a clip is
+    /// inserted into the buffer. Bound to Enter (and Tab).
     pub(super) fn accept_program_smart_clip(&mut self) {
         let Some(popup) = self.program_popup.as_ref() else {
             return;
@@ -719,24 +731,93 @@ impl App {
         let Some(search) = popup.smart_clip.as_ref() else {
             return;
         };
-        let candidates = self.program_smart_clip_candidates(popup);
-        let Some(candidate) = candidates
-            .get(search.selected.min(candidates.len().saturating_sub(1)))
-            .cloned()
-        else {
+        let rows = self.program_smart_clip_rows(popup);
+        let Some(row) = Self::program_smart_clip_selected_row(&rows, search.selected).cloned() else {
+            return;
+        };
+        match row {
+            ProgramSmartClipRow::Category { group, .. } => {
+                self.enter_program_smart_clip_submenu(group);
+            }
+            ProgramSmartClipRow::Clip { candidate, .. } => {
+                self.insert_program_smart_clip_candidate(&candidate);
+            }
+            ProgramSmartClipRow::Separator | ProgramSmartClipRow::Header(_) => {}
+        }
+    }
+
+    /// Right-arrow: drill into the highlighted category's submenu (no-op when the
+    /// highlighted row is a clip).
+    pub(super) fn program_smart_clip_expand(&mut self) {
+        let group = self.program_popup.as_ref().and_then(|popup| {
+            let search = popup.smart_clip.as_ref()?;
+            let rows = self.program_smart_clip_rows(popup);
+            match Self::program_smart_clip_selected_row(&rows, search.selected)? {
+                ProgramSmartClipRow::Category { group, .. } => Some(*group),
+                _ => None,
+            }
+        });
+        if let Some(group) = group {
+            self.enter_program_smart_clip_submenu(group);
+        }
+    }
+
+    /// Left-arrow: back out of a submenu to the root view, re-highlighting the
+    /// category we came from so Right/Left are reversible. No-op at the root.
+    pub(super) fn program_smart_clip_collapse(&mut self) {
+        let selected = {
+            let Some(popup) = self.program_popup.as_ref() else {
+                return;
+            };
+            let Some(search) = popup.smart_clip.as_ref() else {
+                return;
+            };
+            let ProgramSmartClipView::Submenu(group) = search.view else {
+                return;
+            };
+            self.program_smart_clip_root_rows(popup)
+                .iter()
+                .filter(|r| r.is_selectable())
+                .position(|r| {
+                    matches!(r, ProgramSmartClipRow::Category { group: g, .. } if *g == group)
+                })
+                .unwrap_or(0)
+        };
+        if let Some(popup) = self.program_popup.as_mut() {
+            if let Some(search) = popup.smart_clip.as_mut() {
+                search.view = ProgramSmartClipView::Root;
+                search.selected = selected;
+            }
+        }
+    }
+
+    fn enter_program_smart_clip_submenu(&mut self, group: ProgramSmartClipGroup) {
+        if let Some(popup) = self.program_popup.as_mut() {
+            if let Some(search) = popup.smart_clip.as_mut() {
+                search.view = ProgramSmartClipView::Submenu(group);
+                search.selected = 0;
+            }
+        }
+    }
+
+    fn insert_program_smart_clip_candidate(&mut self, candidate: &ProgramSmartClipCandidate) {
+        let Some(popup) = self.program_popup.as_ref() else {
+            return;
+        };
+        let Some(search) = popup.smart_clip.as_ref() else {
             return;
         };
         if popup.cursor < search.trigger_start {
-            let Some(popup) = self.program_popup.as_mut() else {
-                return;
-            };
-            popup.smart_clip = None;
+            if let Some(popup) = self.program_popup.as_mut() {
+                popup.smart_clip = None;
+            }
             return;
         }
+        let trigger_start = search.trigger_start;
         let clip = program_smart_clip_with_instance_id(&candidate.clip, &popup.buffer);
-        let start_b = byte_pos(&popup.buffer, search.trigger_start);
+        let start_b = byte_pos(&popup.buffer, trigger_start);
         let end_b = byte_pos(&popup.buffer, popup.cursor);
-        let new_cursor = search.trigger_start + clip.chars().count();
+        let new_cursor = trigger_start + clip.chars().count();
         self.push_program_undo_state();
         let Some(popup) = self.program_popup.as_mut() else {
             return;
@@ -757,60 +838,243 @@ impl App {
         }
     }
 
+    fn program_smart_clip_selectable_count(rows: &[ProgramSmartClipRow]) -> usize {
+        rows.iter().filter(|r| r.is_selectable()).count()
+    }
+
+    /// The selectable row at logical position `selected` (clamped to range), or
+    /// `None` when there is nothing selectable.
+    fn program_smart_clip_selected_row(
+        rows: &[ProgramSmartClipRow],
+        selected: usize,
+    ) -> Option<&ProgramSmartClipRow> {
+        let selectable: Vec<&ProgramSmartClipRow> =
+            rows.iter().filter(|r| r.is_selectable()).collect();
+        if selectable.is_empty() {
+            return None;
+        }
+        Some(selectable[selected.min(selectable.len() - 1)])
+    }
+
+    /// The rows on screen for the picker's current view — the single source of
+    /// truth shared by navigation, acceptance, and rendering.
+    pub(crate) fn program_smart_clip_rows(
+        &self,
+        popup: &ProgramPopup,
+    ) -> Vec<ProgramSmartClipRow> {
+        match popup.smart_clip.as_ref().map(|search| search.view) {
+            Some(ProgramSmartClipView::Submenu(group)) => {
+                self.program_smart_clip_submenu_rows(popup, group)
+            }
+            _ => self.program_smart_clip_root_rows(popup),
+        }
+    }
+
+    /// Root view: up-to-5 most-relevant clips, a separator, then a category row
+    /// per non-empty clip type.
+    fn program_smart_clip_root_rows(&self, popup: &ProgramPopup) -> Vec<ProgramSmartClipRow> {
+        let mut rows: Vec<ProgramSmartClipRow> = self
+            .program_smart_clip_candidates(popup)
+            .into_iter()
+            .map(|candidate| ProgramSmartClipRow::Clip {
+                candidate,
+                dimmed: false,
+            })
+            .collect();
+
+        let mut categories: Vec<ProgramSmartClipRow> = Vec::new();
+        let session_count = self.program_smart_clip_session_candidates().len();
+        if session_count > 0 {
+            categories.push(ProgramSmartClipRow::Category {
+                group: ProgramSmartClipGroup::Session,
+                count: session_count,
+            });
+        }
+        let harness_count = self.harnesses.len();
+        if harness_count > 0 {
+            categories.push(ProgramSmartClipRow::Category {
+                group: ProgramSmartClipGroup::Harness,
+                count: harness_count,
+            });
+        }
+        if !rows.is_empty() && !categories.is_empty() {
+            rows.push(ProgramSmartClipRow::Separator);
+        }
+        rows.extend(categories);
+        rows
+    }
+
+    /// The top relevance section: up to 5 clips across all types, ranked by the
+    /// type-ahead query (empty query → the 5 most-recent, sessions before
+    /// harnesses).
     pub(crate) fn program_smart_clip_candidates(
         &self,
         popup: &ProgramPopup,
     ) -> Vec<ProgramSmartClipCandidate> {
-        let query = popup
+        let query = Self::program_smart_clip_query_text(popup);
+        let mut pool = self.program_smart_clip_session_candidates();
+        pool.extend(self.program_smart_clip_harness_candidates());
+        if query.is_empty() {
+            pool.truncate(5);
+            return pool;
+        }
+        let mut scored: Vec<(i32, usize, ProgramSmartClipCandidate)> = pool
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, candidate)| {
+                let haystack = Self::program_smart_clip_haystack(&candidate);
+                program_clip_match_score(&query, &candidate.label, &haystack)
+                    .map(|score| (score, idx, candidate))
+            })
+            .collect();
+        // Best score first; ties keep canonical (recency-then-harness) order.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        scored.into_iter().take(5).map(|(_, _, c)| c).collect()
+    }
+
+    fn program_smart_clip_submenu_rows(
+        &self,
+        popup: &ProgramPopup,
+        group: ProgramSmartClipGroup,
+    ) -> Vec<ProgramSmartClipRow> {
+        let query = Self::program_smart_clip_query_text(popup);
+        match group {
+            ProgramSmartClipGroup::Session => self.program_smart_clip_session_submenu_rows(&query),
+            ProgramSmartClipGroup::Harness => self.program_smart_clip_harness_submenu_rows(&query),
+        }
+    }
+
+    /// Harness submenu: every harness, in config order. Non-matching items are
+    /// dimmed (kept visible) rather than hidden.
+    fn program_smart_clip_harness_submenu_rows(&self, query: &str) -> Vec<ProgramSmartClipRow> {
+        self.program_smart_clip_harness_candidates()
+            .into_iter()
+            .map(|candidate| {
+                let dimmed = Self::program_smart_clip_dimmed(query, &candidate);
+                ProgramSmartClipRow::Clip { candidate, dimmed }
+            })
+            .collect()
+    }
+
+    /// Session submenu: mirrors the session-list view — ungrouped sessions first
+    /// (position, then recency), then each project/group behind its header
+    /// (position order within the group). Non-matching items are dimmed.
+    fn program_smart_clip_session_submenu_rows(&self, query: &str) -> Vec<ProgramSmartClipRow> {
+        let mut rows: Vec<ProgramSmartClipRow> = Vec::new();
+        let push_clip = |rows: &mut Vec<ProgramSmartClipRow>, s: &SessionSummary| {
+            let candidate = Self::session_smart_clip_candidate(s);
+            let dimmed = Self::program_smart_clip_dimmed(query, &candidate);
+            rows.push(ProgramSmartClipRow::Clip { candidate, dimmed });
+        };
+
+        let mut ungrouped: Vec<&SessionSummary> = self
+            .sessions
+            .iter()
+            .filter(|s| s.group_id.is_none())
+            .filter(|s| is_user_list_session(s))
+            .collect();
+        ungrouped.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
+        for s in &ungrouped {
+            push_clip(&mut rows, s);
+        }
+
+        let mut groups: Vec<&GroupSummary> = self.groups.iter().collect();
+        groups.sort_by_key(|g| g.position);
+        for g in groups {
+            let mut members: Vec<&SessionSummary> = self
+                .sessions
+                .iter()
+                .filter(|s| s.group_id.as_deref() == Some(g.id.as_str()))
+                .filter(|s| is_user_list_session(s))
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            members.sort_by_key(|s| s.position);
+            rows.push(ProgramSmartClipRow::Header(g.name.clone()));
+            for s in &members {
+                push_clip(&mut rows, s);
+            }
+        }
+        rows
+    }
+
+    /// All user sessions as clip candidates, most-recently-created first — the
+    /// canonical ordering for the top relevance section's empty-query fallback.
+    fn program_smart_clip_session_candidates(&self) -> Vec<ProgramSmartClipCandidate> {
+        let mut sessions: Vec<&SessionSummary> = self
+            .sessions
+            .iter()
+            .filter(|s| is_user_list_session(s))
+            .collect();
+        sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        sessions
+            .iter()
+            .map(|s| Self::session_smart_clip_candidate(s))
+            .collect()
+    }
+
+    fn program_smart_clip_harness_candidates(&self) -> Vec<ProgramSmartClipCandidate> {
+        self.harnesses
+            .iter()
+            .map(|harness| ProgramSmartClipCandidate {
+                group: ProgramSmartClipGroup::Harness,
+                clip: format!("@{{harness:{}}}", harness.name),
+                label: harness.name.clone(),
+                detail: if harness.available {
+                    String::new()
+                } else {
+                    "unavailable".to_string()
+                },
+            })
+            .collect()
+    }
+
+    fn session_smart_clip_candidate(session: &SessionSummary) -> ProgramSmartClipCandidate {
+        let title = session
+            .title
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| short_id(&session.id).to_string());
+        ProgramSmartClipCandidate {
+            group: ProgramSmartClipGroup::Session,
+            clip: format!("@{{session:{}}}", session.id),
+            label: title,
+            detail: format!("{} · {}", session.harness, session.state.label()),
+        }
+    }
+
+    /// Lowercased blob of a candidate's searchable text (label, detail, and the
+    /// raw clip body, which carries the session id / harness name).
+    fn program_smart_clip_haystack(candidate: &ProgramSmartClipCandidate) -> String {
+        format!(
+            "{} {} {}",
+            candidate.label, candidate.detail, candidate.clip
+        )
+        .to_ascii_lowercase()
+    }
+
+    /// Whether a candidate fails the active type-ahead query (so it should render
+    /// dimmed inside a submenu). An empty query dims nothing.
+    fn program_smart_clip_dimmed(query: &str, candidate: &ProgramSmartClipCandidate) -> bool {
+        if query.is_empty() {
+            return false;
+        }
+        let haystack = Self::program_smart_clip_haystack(candidate);
+        program_clip_match_score(query, &candidate.label, &haystack).is_none()
+    }
+
+    fn program_smart_clip_query_text(popup: &ProgramPopup) -> String {
+        popup
             .smart_clip
             .as_ref()
             .and_then(|search| program_smart_clip_query(popup, search.trigger_start))
             .unwrap_or_default()
-            .to_ascii_lowercase();
-        let mut out = Vec::new();
-        for session in self.sessions.iter().filter(|s| is_user_list_session(s)) {
-            let title = session
-                .title
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| short_id(&session.id).to_string());
-            let haystack = format!(
-                "{} {} {} {}",
-                title, session.id, session.harness, session.state.label()
-            )
-            .to_ascii_lowercase();
-            if query.is_empty() || haystack.contains(&query) {
-                out.push(ProgramSmartClipCandidate {
-                    group: ProgramSmartClipGroup::Session,
-                    clip: format!("@{{session:{}}}", session.id),
-                    label: title,
-                    detail: format!("{} · {}", session.harness, session.state.label()),
-                });
-            }
-        }
-        for harness in &self.harnesses {
-            let haystack = format!(
-                "{} {}",
-                harness.name,
-                harness.description.as_deref().unwrap_or_default()
-            )
-            .to_ascii_lowercase();
-            if query.is_empty() || haystack.contains(&query) {
-                let detail = if harness.available {
-                    String::new()
-                } else {
-                    "unavailable".to_string()
-                };
-                out.push(ProgramSmartClipCandidate {
-                    group: ProgramSmartClipGroup::Harness,
-                    clip: format!("@{{harness:{}}}", harness.name),
-                    label: harness.name.clone(),
-                    detail,
-                });
-            }
-        }
-        out.truncate(8);
-        out
+            .to_ascii_lowercase()
     }
 
     pub(super) fn update_program_selection_head(popup: &mut ProgramPopup) {
@@ -1057,6 +1321,7 @@ impl App {
             popup.smart_clip = Some(ProgramSmartClipSearch {
                 trigger_start,
                 selected: 0,
+                view: ProgramSmartClipView::Root,
             });
         } else if popup.smart_clip.is_some() {
             Self::update_program_smart_clip_after_cursor_move(popup);

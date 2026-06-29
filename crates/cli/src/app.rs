@@ -1620,6 +1620,51 @@ pub(crate) struct ProgramUndoState {
 pub struct ProgramSmartClipSearch {
     pub trigger_start: usize,
     pub selected: usize,
+    /// Which menu level is on screen. The picker opens at [`ProgramSmartClipView::Root`]
+    /// (top-relevance section + category headers) and drills into a category's
+    /// full submenu when one is activated.
+    pub view: ProgramSmartClipView,
+}
+
+/// The level the `@` smart-clip picker is showing. `Root` is the two-part menu
+/// (up-to-5 most-relevant clips, a separator, then expandable category rows).
+/// `Submenu` is one category's full, list-view-ordered set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramSmartClipView {
+    Root,
+    Submenu(ProgramSmartClipGroup),
+}
+
+/// One rendered/​navigable line of the smart-clip picker. The picker is built as
+/// a flat row list so the TUI and web UI share the same shape: selectable rows
+/// ([`Self::Clip`], [`Self::Category`]) interleave with non-selectable
+/// decoration ([`Self::Separator`], [`Self::Header`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramSmartClipRow {
+    /// A selectable clip. `dimmed` is set inside a submenu for items that do not
+    /// match the active type-ahead query — shown (so the full list stays
+    /// visible) but de-emphasized so matches stand out.
+    Clip {
+        candidate: ProgramSmartClipCandidate,
+        dimmed: bool,
+    },
+    /// Divider between the top relevance section and the category list.
+    Separator,
+    /// A root-view category header that expands into a submenu. `count` is the
+    /// number of clips the submenu holds.
+    Category {
+        group: ProgramSmartClipGroup,
+        count: usize,
+    },
+    /// A non-selectable project/group header inside the session submenu, mirroring
+    /// the session-list view's grouping.
+    Header(String),
+}
+
+impl ProgramSmartClipRow {
+    pub fn is_selectable(&self) -> bool {
+        matches!(self, Self::Clip { .. } | Self::Category { .. })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -7920,6 +7965,56 @@ fn program_smart_clip_query(popup: &ProgramPopup, trigger_start: usize) -> Optio
     Some(query)
 }
 
+/// Relevance score of a non-empty, lowercased `query` against a candidate.
+/// `label` is the primary field (session title / harness name); `haystack` is a
+/// lowercased blob of every searchable field. Higher is better; `None` means no
+/// match at all. Drives both the top relevance section (rank, take 5) and submenu
+/// dimming (matched = `Some`).
+pub(crate) fn program_clip_match_score(query: &str, label: &str, haystack: &str) -> Option<i32> {
+    debug_assert!(!query.is_empty());
+    let label = label.to_ascii_lowercase();
+    if label == query {
+        return Some(1000);
+    }
+    if label.starts_with(query) {
+        return Some(900);
+    }
+    if label
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| !word.is_empty() && word.starts_with(query))
+    {
+        return Some(750);
+    }
+    if label.contains(query) {
+        return Some(600);
+    }
+    if haystack.contains(query) {
+        return Some(400);
+    }
+    // Loose fuzzy fallback, but only against the visible label — a subsequence
+    // over the whole haystack matches almost anything for short queries (so it
+    // would never dim a submenu item).
+    if program_clip_is_subsequence(query, &label) {
+        return Some(250);
+    }
+    None
+}
+
+/// Whether `needle`'s chars appear in `haystack` in order (gaps allowed) — the
+/// loose fuzzy fallback used for ranking when no contiguous match exists.
+fn program_clip_is_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut hay = haystack.chars();
+    'next: for nc in needle.chars() {
+        for hc in hay.by_ref() {
+            if hc == nc {
+                continue 'next;
+            }
+        }
+        return false;
+    }
+    true
+}
+
 fn program_search_matches(buffer: &str, query: &str) -> Vec<(usize, usize)> {
     if query.is_empty() {
         return Vec::new();
@@ -11543,6 +11638,199 @@ mod tests {
         let popup = app.program_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "@abc ");
         assert!(popup.smart_clip.is_none());
+        server.abort();
+    }
+
+    fn harness_info(name: &str, available: bool) -> agentd_protocol::HarnessInfo {
+        agentd_protocol::HarnessInfo {
+            name: name.to_string(),
+            available,
+            binary: None,
+            description: None,
+            capabilities: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn program_smart_clip_root_shows_top_then_separator_then_categories() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.title = Some("issue 132".to_string());
+        app.sessions = vec![session];
+        app.harnesses = vec![harness_info("codex", true)];
+        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.insert_program_text("@");
+
+        let popup = app.program_popup.as_ref().unwrap();
+        let rows = app.program_smart_clip_rows(popup);
+        // 2 top clips, a separator, then a category per non-empty type.
+        assert!(matches!(rows[0], ProgramSmartClipRow::Clip { .. }));
+        assert!(matches!(rows[1], ProgramSmartClipRow::Clip { .. }));
+        assert!(matches!(rows[2], ProgramSmartClipRow::Separator));
+        assert!(matches!(
+            rows[3],
+            ProgramSmartClipRow::Category {
+                group: ProgramSmartClipGroup::Session,
+                count: 1
+            }
+        ));
+        assert!(matches!(
+            rows[4],
+            ProgramSmartClipRow::Category {
+                group: ProgramSmartClipGroup::Harness,
+                count: 1
+            }
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_smart_clip_top_section_ranks_across_types_by_query() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.title = Some("codex helper".to_string());
+        app.sessions = vec![session];
+        app.harnesses = vec![harness_info("codex", true)];
+        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+
+        app.insert_program_text("@");
+        app.insert_program_text("codex");
+        let top = app.program_smart_clip_candidates(app.program_popup.as_ref().unwrap());
+        // Exact harness-name match outranks the session's prefix match.
+        assert_eq!(top[0].clip, "@{harness:codex}");
+        assert_eq!(top[1].group, ProgramSmartClipGroup::Session);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_smart_clip_category_expands_into_session_submenu() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut alpha = summary_with_kind(agentd_protocol::SessionKind::User);
+        alpha.id = "a".into();
+        alpha.title = Some("alpha".into());
+        alpha.position = 0;
+        let mut beta = summary_with_kind(agentd_protocol::SessionKind::User);
+        beta.id = "b".into();
+        beta.title = Some("beta".into());
+        beta.position = 1;
+        app.sessions = vec![alpha, beta];
+        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.insert_program_text("@");
+
+        // Root selectables: clip, clip, then the session category at position 2.
+        app.program_popup
+            .as_mut()
+            .unwrap()
+            .smart_clip
+            .as_mut()
+            .unwrap()
+            .selected = 2;
+        app.accept_program_smart_clip();
+
+        let popup = app.program_popup.as_ref().unwrap();
+        assert!(matches!(
+            popup.smart_clip.as_ref().unwrap().view,
+            ProgramSmartClipView::Submenu(ProgramSmartClipGroup::Session)
+        ));
+        // Buffer is untouched — expanding a category inserts nothing.
+        assert_eq!(popup.buffer, "@");
+        let rows = app.program_smart_clip_rows(popup);
+        let clips: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                ProgramSmartClipRow::Clip { candidate, .. } => Some(candidate.label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(clips, vec!["alpha", "beta"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_smart_clip_session_submenu_groups_and_dims() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut alpha = summary_with_kind(agentd_protocol::SessionKind::User);
+        alpha.id = "a".into();
+        alpha.title = Some("alpha".into());
+        alpha.position = 0;
+        let mut beta = summary_with_kind(agentd_protocol::SessionKind::User);
+        beta.id = "b".into();
+        beta.title = Some("beta".into());
+        beta.position = 0;
+        beta.group_id = Some("g1".into());
+        app.sessions = vec![alpha, beta];
+        app.groups = vec![agentd_protocol::GroupSummary {
+            id: "g1".into(),
+            name: "Proj".into(),
+            created_at: chrono::Utc::now(),
+            position: 0,
+            collapsed: false,
+        }];
+        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.insert_program_text("@");
+        app.insert_program_text("al");
+        app.program_popup
+            .as_mut()
+            .unwrap()
+            .smart_clip
+            .as_mut()
+            .unwrap()
+            .view = ProgramSmartClipView::Submenu(ProgramSmartClipGroup::Session);
+
+        let popup = app.program_popup.as_ref().unwrap();
+        let rows = app.program_smart_clip_rows(popup);
+        // Ungrouped "alpha" first, then the "Proj" group header, then "beta".
+        match &rows[0] {
+            ProgramSmartClipRow::Clip { candidate, dimmed } => {
+                assert_eq!(candidate.label, "alpha");
+                assert!(!dimmed, "query 'al' matches alpha");
+            }
+            other => panic!("expected alpha clip, got {other:?}"),
+        }
+        assert!(matches!(&rows[1], ProgramSmartClipRow::Header(h) if h == "Proj"));
+        match &rows[2] {
+            ProgramSmartClipRow::Clip { candidate, dimmed } => {
+                assert_eq!(candidate.label, "beta");
+                assert!(dimmed, "query 'al' does not match beta — dimmed, not hidden");
+            }
+            other => panic!("expected beta clip, got {other:?}"),
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_smart_clip_collapse_returns_to_root_on_category() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.title = Some("alpha".into());
+        app.sessions = vec![session];
+        app.harnesses = vec![harness_info("codex", true)];
+        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.insert_program_text("@");
+        app.program_popup
+            .as_mut()
+            .unwrap()
+            .smart_clip
+            .as_mut()
+            .unwrap()
+            .view = ProgramSmartClipView::Submenu(ProgramSmartClipGroup::Harness);
+
+        app.program_smart_clip_collapse();
+
+        let popup = app.program_popup.as_ref().unwrap();
+        let search = popup.smart_clip.as_ref().unwrap();
+        assert!(matches!(search.view, ProgramSmartClipView::Root));
+        // Re-highlights the harness category we backed out of.
+        let rows = app.program_smart_clip_rows(popup);
+        let selectable: Vec<&ProgramSmartClipRow> =
+            rows.iter().filter(|r| r.is_selectable()).collect();
+        assert!(matches!(
+            selectable[search.selected],
+            ProgramSmartClipRow::Category {
+                group: ProgramSmartClipGroup::Harness,
+                ..
+            }
+        ));
         server.abort();
     }
 

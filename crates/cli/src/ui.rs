@@ -8492,25 +8492,42 @@ fn render_program_smart_clip_picker(
     if program_area.width == 0 || program_area.height < 3 {
         return;
     }
-    let candidates = app.program_smart_clip_candidates(popup);
-    let group_count = candidates
+    let rows = app.program_smart_clip_rows(popup);
+
+    // Raw indices of the selectable rows, and the raw index currently highlighted.
+    let selectable_raw: Vec<usize> = rows
         .iter()
-        .fold((None, 0usize), |(last, count), candidate| {
-            if last != Some(candidate.group) {
-                (Some(candidate.group), count + 1)
-            } else {
-                (last, count)
-            }
-        })
-        .1;
-    let desired_rows = if candidates.is_empty() {
-        1
+        .enumerate()
+        .filter(|(_, r)| r.is_selectable())
+        .map(|(i, _)| i)
+        .collect();
+    let sel_raw = if selectable_raw.is_empty() {
+        None
     } else {
-        candidates.len().saturating_add(group_count)
+        Some(selectable_raw[search.selected.min(selectable_raw.len() - 1)])
     };
-    let max_rows = program_area.height.saturating_sub(2).min(10);
-    let row_count = (desired_rows as u16).min(max_rows);
-    let width = 42u16.min(program_area.width.max(1));
+
+    let total = rows.len().max(1);
+    let max_rows = program_area.height.saturating_sub(2).min(14);
+    let row_count = (total as u16).min(max_rows).max(1);
+
+    // Scroll the visible window so the highlighted row stays on screen.
+    let mut offset = 0usize;
+    if let Some(sr) = sel_raw {
+        if sr >= row_count as usize {
+            offset = sr + 1 - row_count as usize;
+        }
+        offset = offset.min(total.saturating_sub(row_count as usize));
+    }
+
+    let title = match search.view {
+        crate::app::ProgramSmartClipView::Root => " smart clip ".to_string(),
+        crate::app::ProgramSmartClipView::Submenu(group) => {
+            format!(" smart clip › {} ", group.label())
+        }
+    };
+
+    let width = 46u16.min(program_area.width.max(1));
     let x = cursor_pos
         .x
         .min(program_area.x.saturating_add(program_area.width.saturating_sub(width)));
@@ -8533,7 +8550,7 @@ fn render_program_smart_clip_picker(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.accent_alt))
         .title(Line::from(Span::styled(
-            " smart clip ",
+            title,
             Style::default()
                 .fg(app.theme.accent_alt)
                 .add_modifier(Modifier::BOLD),
@@ -8542,56 +8559,101 @@ fn render_program_smart_clip_picker(
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
 
+    let inner_w = inner.width as usize;
     let mut lines = Vec::new();
-    if candidates.is_empty() {
+    if rows.is_empty() {
         lines.push(Line::from(Span::styled(
             "No matches",
             Style::default().fg(app.theme.dim),
         )));
     } else {
-        let mut last_group = None;
-        for (idx, candidate) in candidates.iter().enumerate() {
-            if lines.len() >= row_count as usize {
-                break;
-            }
-            if last_group != Some(candidate.group) {
-                lines.push(Line::from(Span::styled(
-                    candidate.group.label(),
-                    Style::default()
-                        .fg(app.theme.accent_alt)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                last_group = Some(candidate.group);
-                if lines.len() >= row_count as usize {
-                    break;
-                }
-            }
-            let selected = idx == search.selected.min(candidates.len().saturating_sub(1));
-            let style = if selected {
+        for (raw_idx, row) in rows.iter().enumerate().skip(offset).take(row_count as usize) {
+            let selected = sel_raw == Some(raw_idx);
+            lines.push(render_program_smart_clip_row(app, row, selected, inner_w));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// One line of the smart-clip picker: a relevance/submenu clip, a divider, an
+/// expandable category header, or a project/group header inside the session
+/// submenu.
+fn render_program_smart_clip_row(
+    app: &App,
+    row: &crate::app::ProgramSmartClipRow,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
+    use crate::app::ProgramSmartClipRow;
+    match row {
+        ProgramSmartClipRow::Separator => Line::from(Span::styled(
+            "─".repeat(width.max(1)),
+            Style::default().fg(app.theme.dim),
+        )),
+        ProgramSmartClipRow::Header(label) => Line::from(Span::styled(
+            label.clone(),
+            Style::default()
+                .fg(app.theme.muted)
+                .add_modifier(Modifier::BOLD),
+        )),
+        ProgramSmartClipRow::Category { group, count } => {
+            let base = if selected {
                 Style::default()
                     .fg(app.theme.highlight_fg)
                     .bg(app.theme.highlight_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(app.theme.text)
+                Style::default()
+                    .fg(app.theme.text)
+                    .add_modifier(Modifier::BOLD)
             };
-            let detail_style = if selected {
-                style
+            let count_style = if selected {
+                base
             } else {
                 Style::default().fg(app.theme.muted)
             };
+            let left = format!("{} {}", if selected { ">" } else { " " }, group.label());
+            let count_str = format!("({count})");
+            // Right-align the "(n) ▸" affordance; the chevron marks a submenu.
+            let right_len = count_str.chars().count() + 2; // " " + "▸"
+            let pad = width.saturating_sub(left.chars().count() + right_len);
+            Line::from(vec![
+                Span::styled(left, base),
+                Span::styled(" ".repeat(pad), base),
+                Span::styled(format!("{count_str} "), count_style),
+                Span::styled("▸".to_string(), base),
+            ])
+        }
+        ProgramSmartClipRow::Clip { candidate, dimmed } => {
+            let (label_style, detail_style) = if selected {
+                let s = Style::default()
+                    .fg(app.theme.highlight_fg)
+                    .bg(app.theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD);
+                (s, s)
+            } else if *dimmed {
+                let s = Style::default().fg(app.theme.dim);
+                (s, s)
+            } else {
+                (
+                    Style::default().fg(app.theme.text),
+                    Style::default().fg(app.theme.muted),
+                )
+            };
             let mut spans = vec![
-                Span::styled(format!("{} ", if selected { ">" } else { " " }), style),
-                Span::styled(candidate.label.clone(), style),
+                Span::styled(
+                    format!("{} ", if selected { ">" } else { " " }),
+                    label_style,
+                ),
+                Span::styled(candidate.label.clone(), label_style),
             ];
             if !candidate.detail.is_empty() {
-                spans.push(Span::styled("  ", style));
+                spans.push(Span::styled("  ", label_style));
                 spans.push(Span::styled(candidate.detail.clone(), detail_style));
             }
-            lines.push(Line::from(spans));
+            Line::from(spans)
         }
     }
-    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Absolute wrapped position of the cursor within the program body:

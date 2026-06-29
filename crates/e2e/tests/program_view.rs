@@ -294,7 +294,7 @@ async fn web_program_view_full_parity() {
               programTestCaretEnd();
               programUpdateClipMenu();
               const menuOpen = !programClipMenuEl.hidden;
-              const itemCount = programClipMenuEl.querySelectorAll("[data-i]").length;
+              const itemCount = programClipMenuEl.querySelectorAll("[data-sel]").length;
               // Arrow-down selects the 2nd item; the keyup must NOT reset it to 0.
               const sel0 = state.program.clip.selected;
               programInputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
