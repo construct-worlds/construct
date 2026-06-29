@@ -14304,6 +14304,109 @@ mod tests {
         );
     }
 
+    /// `C-x C-x` in a captured PTY is the escape hatch: the first C-x opens
+    /// the chord prefix, the second C-x cancels it *and* forwards a literal
+    /// C-x byte (0x18) to the focused session — so harnesses that bind C-x
+    /// internally (grok, bash's `C-x C-e`, vim completion) still receive it.
+    #[tokio::test]
+    async fn ctrl_x_ctrl_x_forwards_literal_ctrl_x_to_focused_pty() {
+        let (mut app, _dir, _srv) = captured_app().await;
+        assert!(app.is_pty_captured(), "precondition: PTY-capture mode");
+
+        // Swap in a channel we own so the forwarded bytes are observable
+        // instead of being drained straight to the (mock) daemon.
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        assert!(
+            !app.chord_state.is_empty(),
+            "first C-x must arm the chord prefix"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the prefix C-x must not be forwarded on its own"
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+
+        let job = rx
+            .try_recv()
+            .expect("second C-x must forward a byte to the PTY");
+        assert_eq!(
+            job.bytes,
+            vec![0x18],
+            "C-x C-x forwards a literal C-x (0x18) to the focused session"
+        );
+        assert!(
+            app.chord_state.is_empty(),
+            "the second C-x must cancel the chord prefix"
+        );
+        assert!(
+            app.chord_label.is_empty(),
+            "the chord indicator must be cleared after the escape hatch fires"
+        );
+    }
+
+    /// The orchestrator/operator panel ("the minibuffer is just another
+    /// session") has its own copy of the escape hatch: `C-x C-x` inside the
+    /// panel cancels the chord and forwards a literal C-x (0x18) to the
+    /// orchestrator's PTY, matching the main-view behavior.
+    #[tokio::test]
+    async fn orchestrator_panel_ctrl_x_ctrl_x_forwards_literal_ctrl_x() {
+        let (mut app, _dir, server) = empty_app().await;
+        // An orchestrator session → `C-x x` opens the operator input panel.
+        app.orchestrator_id = Some("orch".to_string());
+
+        // Swap in a channel we own so the forwarded bytes are observable.
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+
+        // Open the orchestrator panel (`C-x x`) — this routes later keys
+        // through `handle_orchestrator_key` and forwards no PTY bytes itself.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await;
+        assert!(
+            matches!(
+                app.minibuffer.as_ref().map(|m| &m.intent),
+                Some(MinibufferIntent::Orchestrator)
+            ),
+            "precondition: the orchestrator panel must be open"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "opening the panel must not forward any PTY bytes"
+        );
+
+        // C-x C-x inside the panel forwards a literal C-x to the orchestrator.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+
+        let job = rx
+            .try_recv()
+            .expect("C-x C-x must forward a byte to the orchestrator PTY");
+        assert_eq!(
+            job.session_id, "orch",
+            "the byte must target the orchestrator session"
+        );
+        assert_eq!(
+            job.bytes,
+            vec![0x18],
+            "C-x C-x forwards a literal C-x (0x18) to the orchestrator"
+        );
+        assert!(
+            app.chord_state.is_empty(),
+            "the second C-x must cancel the chord prefix"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn disconnected_c_x_c_quits_even_when_pty_would_capture_keys() {
         use tokio::net::UnixListener;
