@@ -3051,9 +3051,14 @@ impl App {
 
         // Mirror the keystroke routing precedence (see `on_key`): pasted
         // text lands in the program only when no minibuffer/palette overlay is
-        // capturing input. With an overlay open, `dispatch_paste_text` below
-        // routes the paste to the minibuffer / orchestrator instead.
-        if self.program_popup.is_some() && self.minibuffer.is_none() {
+        // capturing input *and* the view pane holds focus. With an overlay open,
+        // `dispatch_paste_text` below routes the paste to the minibuffer /
+        // orchestrator instead; with focus on the list, it routes to the
+        // selected session rather than editing the program.
+        if self.program_popup.is_some()
+            && self.minibuffer.is_none()
+            && self.focus == PaneFocus::View
+        {
             self.insert_program_text(&text);
             return;
         }
@@ -6876,14 +6881,25 @@ impl App {
             }
         }
         // The program captures keystrokes only while it is the topmost input
-        // surface. If a minibuffer/palette overlay is open over it (e.g.
-        // `C-x x` opened the command palette or the operator input), that
-        // overlay must capture input instead — otherwise typed keys leak
-        // into the program buffer and the palette/operator is unusable. The
-        // `C-x` chord that *opens* an overlay still reaches the program global
-        // handler because no minibuffer exists yet at that point; once the
-        // overlay is open the minibuffer block below takes over.
-        if self.program_popup.is_some() && self.minibuffer.is_none() {
+        // surface *and* the view pane holds focus. If a minibuffer/palette
+        // overlay is open over it (e.g. `C-x x` opened the command palette or
+        // the operator input), that overlay must capture input instead —
+        // otherwise typed keys leak into the program buffer and the
+        // palette/operator is unusable. The `C-x` chord that *opens* an overlay
+        // still reaches the program global handler because no minibuffer exists
+        // yet at that point; once the overlay is open the minibuffer block below
+        // takes over.
+        //
+        // The `PaneFocus::View` gate is what lets `C-x o` hand control back to
+        // the session list while the program stays visible in the view pane.
+        // With focus on the list, Up/Down and `C-n`/`C-p` fall through to the
+        // keymap and move the list selection instead of the program cursor.
+        // Opening a program focuses the view (see `open_program_popup`), so the
+        // common open-then-type flow is unchanged.
+        if self.program_popup.is_some()
+            && self.minibuffer.is_none()
+            && self.focus == PaneFocus::View
+        {
             if self.handle_program_global_key(key).await {
                 return;
             }
@@ -7353,6 +7369,13 @@ impl App {
     }
 
     fn should_autofocus_view_from_list(&self, key: KeyEvent) -> bool {
+        // With a program visible in the view pane, the list-focused state is
+        // purely for navigation: a stray letter must not auto-focus the view
+        // (which would leak the keystroke into the shadowed PTY rather than the
+        // program). Editing the program is an explicit `C-x o` away.
+        if self.program_popup.is_some() {
+            return false;
+        }
         should_autofocus_view_from_list(self.focus, self.zoom, self.chord_state.is_empty(), key)
     }
 
@@ -7391,6 +7414,11 @@ impl App {
                 }
                 self.program_popups.remove(&result.program.session_id);
                 self.program_popup = Some(program_popup_from_document(result.program, now));
+                // Opening a program focuses the view pane so its keystrokes are
+                // captured immediately for editing. `C-x o` then hands focus
+                // back to the list for navigation while the program stays
+                // visible (see the focus gate in `on_key`).
+                self.focus = PaneFocus::View;
                 self.set_status(format!("program opened at version {version}"));
                 // Live reload: the daemon re-reads the templates dir on every
                 // call, but the client caches the list. Kick off a non-blocking
@@ -12673,6 +12701,73 @@ mod tests {
         server.abort();
     }
 
+    /// Regression: with a program visible in the view pane, switching focus to
+    /// the session list (`C-x o`) must let Up/Down and `C-n`/`C-p` move the
+    /// list selection. The top-level dispatch used to route every keystroke to
+    /// the program whenever `program_popup` was `Some`, ignoring focus — so
+    /// list navigation appeared dead while a program was open.
+    #[tokio::test]
+    async fn program_open_list_focus_navigates_session_list() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.focus = PaneFocus::List;
+        assert_eq!(app.selection.session_id(), Some("s1"));
+
+        // Down -> NextSession moves the list selection, not the program cursor.
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.selection.session_id(),
+            Some("s2"),
+            "Down must move the list selection while the list is focused"
+        );
+
+        // Up -> PrevSession moves back.
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.selection.session_id(), Some("s1"));
+
+        // `C-n` / `C-p` are the explicit next/prev-session bindings and behave
+        // the same way.
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.selection.session_id(), Some("s2"));
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.selection.session_id(), Some("s1"));
+
+        server.abort();
+    }
+
+    /// Counterpart guard: when the program itself holds focus, arrow keys still
+    /// drive the program cursor and never touch the list selection. (Vertical
+    /// movement needs a rendered viewport, so this exercises the horizontal
+    /// Right key, which routes through the same focus-gated dispatch.)
+    #[tokio::test]
+    async fn program_open_view_focus_moves_program_cursor() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.program_popup = Some(program_popup_for_test("s1", "ab\ncd\nef", 0));
+        app.focus = PaneFocus::View;
+        assert_eq!(app.selection.session_id(), Some("s1"));
+
+        // Right advances the program cursor one character, leaving the list
+        // selection untouched.
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().cursor,
+            1,
+            "Right moves the program cursor while the view is focused"
+        );
+        assert_eq!(
+            app.selection.session_id(),
+            Some("s1"),
+            "moving the program cursor must not change the list selection"
+        );
+
+        server.abort();
+    }
+
     #[tokio::test]
     async fn program_ctrl_s_starts_program_search() {
         let (mut app, _dir, server) = empty_app().await;
@@ -16009,6 +16104,30 @@ mod tests {
         });
         let client = Client::connect(&sock).await.expect("client connects");
         let app = test_app(client, Vec::new());
+        (app, dir, server)
+    }
+
+    /// Like `empty_app`, but pre-populated with two live user sessions (`s1`,
+    /// `s2`); selection and the active window both start on `s1`. The minimum
+    /// fixture for exercising list navigation.
+    async fn two_session_app() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        use tokio::net::UnixListener;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut s1 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        let mut s2 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s2.id = "s2".into();
+        let app = test_app(client, vec![s1, s2]);
         (app, dir, server)
     }
 
