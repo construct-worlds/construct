@@ -300,8 +300,20 @@ async fn web_program_view_full_parity() {
               programOnInput();
               const menuOpen = !programClipMenuEl.hidden;
               const itemCount = programClipMenuEl.querySelectorAll("[data-i]").length;
+              // Arrow-down selects the 2nd item; the keyup must NOT reset it to 0.
+              const sel0 = state.program.clip.selected;
+              programInputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+              const selAfterDown = state.program.clip.selected;
+              programInputEl.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowDown", bubbles: true }));
+              const selAfterKeyup = state.program.clip.selected;
               programAcceptClip(0);
-              return { menuOpen, itemCount, value: programInputEl.value, menuClosedAfter: programClipMenuEl.hidden };
+              programRenderOverlay();
+              return {
+                menuOpen, itemCount, value: programInputEl.value, menuClosedAfter: programClipMenuEl.hidden,
+                sel0, selAfterDown, selAfterKeyup,
+                overlayHasLabel: programOverlayEl.innerHTML.includes("Builder"),
+                overlayShowsRaw: programOverlayEl.innerHTML.includes("@{session:sAAA111"),
+              };
             })
             "###,
         )
@@ -313,6 +325,13 @@ async fn web_program_view_full_parity() {
     assert!(clip["itemCount"].as_u64().unwrap_or(0) >= 2, "session + harness candidates: {clip:?}");
     assert_eq!(clip["value"], "ping @{session:sAAA111}", "{clip:?}");
     assert_eq!(clip["menuClosedAfter"], true, "{clip:?}");
+    // #2: arrow-down navigation persists (keyup must not snap back to item 0).
+    assert_eq!(clip["sel0"], 0, "{clip:?}");
+    assert_eq!(clip["selAfterDown"], 1, "{clip:?}");
+    assert_eq!(clip["selAfterKeyup"], 1, "arrow-down selection must persist through keyup: {clip:?}");
+    // #1: the clip renders a friendly label, never the raw @{…} syntax.
+    assert_eq!(clip["overlayHasLabel"], true, "clip should render its friendly label: {clip:?}");
+    assert_eq!(clip["overlayShowsRaw"], false, "clip must not render raw @{{…}} syntax: {clip:?}");
 
     // --- 9. Find highlights matches and reports a count. ---------------------
     let find: serde_json::Value = page

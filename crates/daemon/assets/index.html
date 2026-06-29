@@ -1606,11 +1606,14 @@
   .program-input::selection { background: rgba(57, 255, 136, 0.28); }
   .program-input:focus { outline: none; }
   /* Smart-clip chip painted in the overlay under the transparent clip text. */
+  /* No horizontal padding: the chip overlays the raw `@{…}` source cells in the
+     transparent textarea, so it must stay on the monospace grid. The friendly
+     label is rendered padded to the source width instead. */
   .program-clip {
     background: color-mix(in srgb, var(--accent-alt) 22%, transparent);
     color: var(--accent-alt);
     border-radius: 3px;
-    padding: 0 1px;
+    padding: 0;
   }
   .program-shimmer-bold { font-weight: 700; }
   /* Empty-state template picker. */
@@ -3566,6 +3569,31 @@ function programLineClipRanges(line) {
   return ranges;
 }
 
+// The friendly chip label the overlay paints in place of a raw `@{…}` clip
+// body — mirrors the TUI: `<glyph> <title> · <harness>` for a session, `✓ name`
+// for a harness, dropping the `clip_id=…` noise (spec 0059).
+function programClipLabel(body) {
+  const first = (body.trim().split(/\s+/)[0]) || body;
+  const colon = first.indexOf(":");
+  const kind = colon === -1 ? "clip" : first.slice(0, colon);
+  const id = colon === -1 ? first : first.slice(colon + 1);
+  if (kind === "session") {
+    const s = state.sessions.find((x) => x.id === id);
+    if (s) {
+      const title = (s.title && s.title.trim()) ? s.title : id.slice(0, 6);
+      return `${sessionStatusGlyph(s)} ${title} · ${s.harness || "session"}`;
+    }
+    return `session ${id}`;
+  }
+  if (kind === "harness") {
+    const h = state.harnesses.find((x) => x.name === id);
+    if (h) return `${h.available === false ? "✗" : "✓"} ${h.name}`;
+    return `harness ${id}`;
+  }
+  if (kind === "session-response") return `response ${id}`;
+  return `${kind} ${id}`;
+}
+
 // Render one source line to overlay HTML. Smart-clip ranges become chips; on a
 // shimmering line every non-chip char gets a brightness drawn from a travelling
 // wave (chips keep their style but still advance the wave so its spacing holds).
@@ -3587,9 +3615,14 @@ function programRenderLineHtml(line, isActive, phase, colors, gidx) {
   };
   for (const [cs, ce] of clipRanges) {
     if (cs > pos) emitPlain(pos, cs);
-    const clipText = line.slice(cs, ce);
-    html += `<span class="program-clip">${escape(clipText)}</span>`;
-    if (isActive) gidx += [...clipText].length;
+    // Paint the friendly label in place of the raw `@{…}`, padded/truncated to
+    // the source width so the (transparent) textarea caret stays aligned.
+    const cells = ce - cs;
+    let label = programClipLabel(line.slice(cs + 2, ce - 1));
+    if (label.length > cells) label = cells > 1 ? label.slice(0, cells - 1) + "…" : label.slice(0, cells);
+    else label = label + " ".repeat(cells - label.length);
+    html += `<span class="program-clip">${escape(label)}</span>`;
+    if (isActive) gidx += cells;
     pos = ce;
   }
   if (pos < line.length) emitPlain(pos, line.length);
@@ -4219,6 +4252,9 @@ function programWireEvents() {
   programInputEl.addEventListener("scroll", programSyncScroll);
   programInputEl.addEventListener("keydown", programOnKeyDown);
   programInputEl.addEventListener("keyup", (e) => {
+    // While the clip menu is open, Up/Down drive its selection (handled in
+    // keydown, caret unmoved) — recomputing here would reset it to the first item.
+    if (state.program.clip && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) programUpdateClipMenu();
   });
   programInputEl.addEventListener("click", programUpdateClipMenu);
