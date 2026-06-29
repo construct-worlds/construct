@@ -3907,24 +3907,12 @@ impl App {
         if !replayed_ui_panels.is_empty() {
             self.ui_panels.insert(id.to_string(), replayed_ui_panels);
         }
+        self.histories.insert(id.to_string(), history);
         // Tell the daemon what size we'd like — this session's own pane width
         // when it's visible in a split, not the active pane's.
         let (cols, rows) = self
             .session_pane_size(id)
             .unwrap_or_else(|| self.active_pane_size());
-        // Same bump-resize logic as apply_hydration_state: force SIGWINCH for
-        // alt-screen sessions so they repaint after reconnect.
-        let is_alt_screen = history
-            .replay(cols.max(1), rows.max(1), 0)
-            .screen
-            .alternate_screen();
-        self.histories.insert(id.to_string(), history);
-        if is_alt_screen && cols > 1 {
-            let _ = self
-                .client
-                .pty_resize(id, cols.saturating_add(1), rows)
-                .await;
-        }
         let _ = self.client.pty_resize(id, cols, rows).await;
     }
 
