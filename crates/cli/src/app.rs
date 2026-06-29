@@ -1478,6 +1478,9 @@ pub struct ProgramRun {
     /// owns the set and publishes it, and clients map it back onto source lines
     /// via the shared block parser.
     pub pending: HashSet<String>,
+    /// Per-block run-status tooltips keyed by stable block id (spec 0057). Missing
+    /// entries render the hardcoded fallback label on hover.
+    pub pending_tooltips: HashMap<String, String>,
     /// Absolute backstop: clear no later than this regardless of signals.
     pub deadline: Instant,
     /// Whether the first output has been observed.
@@ -1503,6 +1506,7 @@ impl ProgramRun {
         Some(Self {
             started_at,
             pending: progress.pending_block_ids.into_iter().collect(),
+            pending_tooltips: progress.pending_block_tooltips,
             deadline,
             first_output_seen: progress.first_output_seen,
         })
@@ -7308,6 +7312,7 @@ impl App {
                 // Human co-edit save: no shimmer declaration — the daemon
                 // narrows the active run by content change only (spec 0053).
                 shimmer: None,
+                shimmer_tooltips: None,
             };
             match self.client.program_update(params).await {
                 Ok(result) => {
@@ -7550,6 +7555,7 @@ impl App {
             ProgramRun {
                 started_at: now,
                 pending,
+                pending_tooltips: HashMap::new(),
                 deadline: now + Duration::from_millis(PROGRAM_RUN_MAX_MS),
                 first_output_seen: false,
             },

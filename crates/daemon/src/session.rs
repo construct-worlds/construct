@@ -594,8 +594,8 @@ fn start_params_for_create(
 fn program_run_instructions() -> Vec<String> {
     vec![
         "Execute this construct program as an autonomous run.".to_string(),
-        "Shimmer semantics: a shimmering block means 'work on this block is still pending in this run — queued, in progress, or not yet done; outcome unknown'. No shimmer means 'settled — done, skipped, or no work needed'. Pending is about the state of the work, not how it runs: it applies the same whether you do the block yourself, delegate it, or drive it some other way, and a block counts as pending the moment you decide to act on it. A Run starts every executed block shimmering. Shimmer is a declared per-block state addressed by a stable block id: read each block's id from the program get tool (or from the `blocks` returned by an edit/update), then declare a block pending or settled with the construct_program_edit `shimmer` list, e.g. `shimmer: [{id, shimmer: true|false}]`. The list is partial — it may target any block, not only the ones your edits change — and declaring a block settled clears it WITHOUT changing its text. Editing a block's text changes its id, so to keep an edited block shimmering — e.g. when you move a still-in-flight task into an In progress section or append a @{session} clip — set keep_pending: true on that edit; it re-adds the resulting block's new id in the same call, so you need not know the new id and the block never goes dark. Never leave a settled block shimmering, and never drop shimmer from a block whose work is still in flight.".to_string(),
-        "Planning pass — this MUST be your first program action, before doing or delegating any work: read the program with the get tool to obtain every block's id, then make one construct_program_edit whose `shimmer` list declares each still-pending block's id shimmer: true and each settled block's id shimmer: false. This needs no change to the blocks' text — declaring an id settled clears it. Doing this first makes the program reflect your plan within seconds of the Run instead of only after the first task completes; skipping it strands settled blocks shimmering and risks dropping shimmer from blocks still in flight.".to_string(),
+        "Shimmer semantics: a shimmering block means 'work on this block is still pending in this run — queued, in progress, or not yet done; outcome unknown'. No shimmer means 'settled — done, skipped, or no work needed'. Pending is about the state of the work, not how it runs: it applies the same whether you do the block yourself, delegate it, or drive it some other way, and a block counts as pending the moment you decide to act on it. A Run starts every executed block shimmering. Shimmer is a declared per-block state addressed by a stable block id: read each block's id from the program get tool (or from the `blocks` returned by an edit/update), then declare a block pending or settled with the construct_program_edit `shimmer` list, e.g. `shimmer: [{id, shimmer: true, tooltip: \"Building PR\"}]`. When you set a block shimmer: true you MUST include a `tooltip`: a concise (≤10-word) description of that block's run status, shown when a viewer hovers the shimmering block; it is ignored when settling. The list is partial — it may target any block, not only the ones your edits change — and declaring a block settled clears it WITHOUT changing its text. Editing a block's text changes its id, so to keep an edited block shimmering — e.g. when you move a still-in-flight task into an In progress section or append a @{session} clip — set keep_pending: true on that edit; it re-adds the resulting block's new id in the same call, so you need not know the new id and the block never goes dark. Never leave a settled block shimmering, and never drop shimmer from a block whose work is still in flight.".to_string(),
+        "Planning pass — this MUST be your first program action, before doing or delegating any work: read the program with the get tool to obtain every block's id, then make one construct_program_edit whose `shimmer` list declares each still-pending block's id shimmer: true (each with a concise ≤10-word `tooltip` of its run status) and each settled block's id shimmer: false. This needs no change to the blocks' text — declaring an id settled clears it. Doing this first makes the program reflect your plan within seconds of the Run instead of only after the first task completes; skipping it strands settled blocks shimmering and risks dropping shimmer from blocks still in flight.".to_string(),
         "Treat program_run.markdown as free-form instructions and state for this turn, not as a request for a one-shot status report or as a fixed task-management schema.".to_string(),
         "Infer the user's intended objective from the document structure and prose, then keep taking useful next actions while there is actionable work you can do.".to_string(),
         "Do not ask the user to run the program again; if the document still implies useful work you can perform, continue in this turn.".to_string(),
@@ -1556,8 +1556,20 @@ impl SessionManager {
                     block_count
                 );
             }
+            // When present, the parallel tooltip array must line up one-to-one
+            // with the shimmer declaration (spec 0057).
+            if let Some(tips) = &params.shimmer_tooltips {
+                if tips.len() != decl.len() {
+                    anyhow::bail!(
+                        "shimmer_tooltips has {} entries but shimmer has {}",
+                        tips.len(),
+                        decl.len()
+                    );
+                }
+            }
         }
         let shimmer = params.shimmer;
+        let shimmer_tooltips = params.shimmer_tooltips;
         let session_id = params.session_id;
         let program = self.storage.update_program(
             &session_id,
@@ -1569,12 +1581,22 @@ impl SessionManager {
         )?;
         match shimmer {
             Some(decl) => {
-                let pending: std::collections::HashSet<String> =
+                // Pair each pending block with its tooltip (spec 0057): the
+                // tooltip array is parallel to the shimmer array in document
+                // order, so index i carries block i's tooltip.
+                let pending: std::collections::HashMap<String, Option<String>> =
                     agentd_protocol::program_block_spans(&program.markdown)
                         .into_iter()
                         .zip(decl)
-                        .filter(|(_, on)| *on)
-                        .map(|(span, _)| span.id)
+                        .enumerate()
+                        .filter(|(_, (_, on))| *on)
+                        .map(|(i, (span, _))| {
+                            let tip = shimmer_tooltips
+                                .as_ref()
+                                .and_then(|tips| tips.get(i))
+                                .and_then(|t| t.clone());
+                            (span.id, tip)
+                        })
                         .collect();
                 self.set_program_run_pending(&session_id, &program.markdown, pending);
             }
@@ -1626,7 +1648,14 @@ impl SessionManager {
             if before_ids.contains(&id) || decls.iter().any(|d| d.id == id) {
                 continue;
             }
-            decls.push(agentd_protocol::ProgramShimmerDecl { id, shimmer: true });
+            // keep_pending re-adds the produced block's new id with no
+            // agent tooltip (spec 0057); it renders the fallback until the
+            // agent declares the new id with a tooltip.
+            decls.push(agentd_protocol::ProgramShimmerDecl {
+                id,
+                shimmer: true,
+                tooltip: None,
+            });
         }
         self.narrow_program_run(&params.session_id, &program.markdown, &decls);
         let blocks = self.program_blocks_projection(&params.session_id, &program.markdown);
@@ -6460,18 +6489,22 @@ mod tests {
                     agentd_protocol::ProgramShimmerDecl {
                         id: id_of("# Rule"),
                         shimmer: false,
+                        tooltip: None,
                     },
                     agentd_protocol::ProgramShimmerDecl {
                         id: id_of("## TODO"),
                         shimmer: false,
+                        tooltip: None,
                     },
                     agentd_protocol::ProgramShimmerDecl {
                         id: id_of("## Done"),
                         shimmer: false,
+                        tooltip: None,
                     },
                     agentd_protocol::ProgramShimmerDecl {
                         id: id_of("item one"),
                         shimmer: true,
+                        tooltip: Some("Running item one".into()),
                     },
                 ],
             })
@@ -6492,6 +6525,18 @@ mod tests {
             shimmering("item one"),
             "the in-progress block stays pending"
         );
+        // The declared tooltip travels with the projection (spec 0057); settled
+        // blocks carry none.
+        let tooltip = |needle: &str| {
+            res.blocks
+                .iter()
+                .find(|b| b.text.contains(needle))
+                .unwrap()
+                .tooltip
+                .clone()
+        };
+        assert_eq!(tooltip("item one").as_deref(), Some("Running item one"));
+        assert_eq!(tooltip("# Rule"), None, "settled block has no tooltip");
     }
 
     // A complete declaration on update authoritatively sets the pending set, and
@@ -6513,6 +6558,7 @@ mod tests {
                 template_id: None,
                 note: None,
                 shimmer: Some(vec![true, false]),
+                shimmer_tooltips: None,
             })
             .await
             .expect_err("length mismatch must fail");
@@ -6528,6 +6574,7 @@ mod tests {
                 template_id: None,
                 note: None,
                 shimmer: Some(vec![false, true, false]),
+                shimmer_tooltips: Some(vec![None, Some("Building B".into()), None]),
             })
             .await
             .expect("update");
@@ -6541,6 +6588,17 @@ mod tests {
         assert!(!shimmering("# A"));
         assert!(shimmering("# B"));
         assert!(!shimmering("# C"));
+        // The parallel tooltip array lands on the pending block (spec 0057).
+        let tooltip = |needle: &str| {
+            res.blocks
+                .iter()
+                .find(|b| b.text.contains(needle))
+                .unwrap()
+                .tooltip
+                .clone()
+        };
+        assert_eq!(tooltip("# B").as_deref(), Some("Building B"));
+        assert_eq!(tooltip("# A"), None);
     }
 
     // An edit's shimmer declaration for an id that no longer exists is dropped
@@ -6567,10 +6625,12 @@ mod tests {
                     agentd_protocol::ProgramShimmerDecl {
                         id: "deadbeefdeadbeef".into(),
                         shimmer: false,
+                        tooltip: None,
                     },
                     agentd_protocol::ProgramShimmerDecl {
                         id: a,
                         shimmer: false,
+                        tooltip: None,
                     },
                 ],
             })
@@ -6632,8 +6692,8 @@ mod tests {
             &id,
             "# Tasks",
             vec![
-                agentd_protocol::ProgramShimmerDecl { id: id_of("# Tasks"), shimmer: false },
-                agentd_protocol::ProgramShimmerDecl { id: id_of("do the thing"), shimmer: true },
+                agentd_protocol::ProgramShimmerDecl { id: id_of("# Tasks"), shimmer: false, tooltip: None },
+                agentd_protocol::ProgramShimmerDecl { id: id_of("do the thing"), shimmer: true, tooltip: Some("Doing the thing".into()) },
             ],
         )
         .await;
@@ -6673,7 +6733,11 @@ mod tests {
             &mgr,
             &id,
             "# Tasks",
-            vec![agentd_protocol::ProgramShimmerDecl { id: new_id, shimmer: true }],
+            vec![agentd_protocol::ProgramShimmerDecl {
+                id: new_id,
+                shimmer: true,
+                tooltip: Some("Reviving moved task".into()),
+            }],
         )
         .await;
         assert!(
@@ -6700,8 +6764,8 @@ mod tests {
             &id,
             "# Tasks",
             vec![
-                agentd_protocol::ProgramShimmerDecl { id: id_of("# Tasks"), shimmer: false },
-                agentd_protocol::ProgramShimmerDecl { id: id_of("do the thing"), shimmer: true },
+                agentd_protocol::ProgramShimmerDecl { id: id_of("# Tasks"), shimmer: false, tooltip: None },
+                agentd_protocol::ProgramShimmerDecl { id: id_of("do the thing"), shimmer: true, tooltip: Some("Doing the thing".into()) },
             ],
         )
         .await;
@@ -6725,6 +6789,14 @@ mod tests {
             .expect("move keep_pending");
         let shim = |n: &str| res.blocks.iter().find(|b| b.text.contains(n)).unwrap().shimmer;
         assert!(shim("do the thing"), "keep_pending kept the moved block pending");
+        // keep_pending re-adds the block under its NEW id with no carried-over
+        // tooltip (spec 0057): the projection reports none, so a renderer falls
+        // back to the hardcoded label until the agent re-declares with a tooltip.
+        assert_eq!(
+            res.blocks.iter().find(|b| b.text.contains("do the thing")).unwrap().tooltip,
+            None,
+            "moved block has no stored tooltip; renderer falls back"
+        );
         assert!(!shim("# Tasks"), "the settled heading stays settled");
     }
 
@@ -6752,9 +6824,21 @@ mod tests {
             actor: agentd_protocol::ProgramUpdateActor::Agent,
             note: None,
             shimmer: vec![
-                agentd_protocol::ProgramShimmerDecl { id: id_of("# Todo"), shimmer: false },
-                agentd_protocol::ProgramShimmerDecl { id: id_of("# In progress"), shimmer: false },
-                agentd_protocol::ProgramShimmerDecl { id: id_of("ship X"), shimmer: true },
+                agentd_protocol::ProgramShimmerDecl {
+                    id: id_of("# Todo"),
+                    shimmer: false,
+                    tooltip: Some("Task list settled".into()),
+                },
+                agentd_protocol::ProgramShimmerDecl {
+                    id: id_of("# In progress"),
+                    shimmer: false,
+                    tooltip: None,
+                },
+                agentd_protocol::ProgramShimmerDecl {
+                    id: id_of("ship X"),
+                    shimmer: true,
+                    tooltip: Some("Shipping X".into()),
+                },
             ],
         })
         .await
@@ -6825,10 +6909,10 @@ mod tests {
             actor: agentd_protocol::ProgramUpdateActor::Agent,
             note: None,
             shimmer: vec![
-                agentd_protocol::ProgramShimmerDecl { id: id_of("# In progress"), shimmer: false },
-                agentd_protocol::ProgramShimmerDecl { id: id_of("task A"), shimmer: true },
-                agentd_protocol::ProgramShimmerDecl { id: id_of("task B"), shimmer: true },
-                agentd_protocol::ProgramShimmerDecl { id: id_of("task C"), shimmer: true },
+                agentd_protocol::ProgramShimmerDecl { id: id_of("# In progress"), shimmer: false, tooltip: None },
+                agentd_protocol::ProgramShimmerDecl { id: id_of("task A"), shimmer: true, tooltip: None },
+                agentd_protocol::ProgramShimmerDecl { id: id_of("task B"), shimmer: true, tooltip: None },
+                agentd_protocol::ProgramShimmerDecl { id: id_of("task C"), shimmer: true, tooltip: None },
             ],
         })
         .await
@@ -6845,7 +6929,7 @@ mod tests {
                 }],
                 actor: agentd_protocol::ProgramUpdateActor::Agent,
                 note: None,
-                shimmer: vec![agentd_protocol::ProgramShimmerDecl { id: id_of("task B"), shimmer: false }],
+                shimmer: vec![agentd_protocol::ProgramShimmerDecl { id: id_of("task B"), shimmer: false, tooltip: None }],
             })
             .await
             .expect("settle B");
@@ -6872,15 +6956,15 @@ mod tests {
             &id,
             md,
             &[
-                agentd_protocol::ProgramShimmerDecl { id: agentd_protocol::program_block_id("# A"), shimmer: false },
-                agentd_protocol::ProgramShimmerDecl { id: b.clone(), shimmer: false },
+                agentd_protocol::ProgramShimmerDecl { id: agentd_protocol::program_block_id("# A"), shimmer: false, tooltip: None },
+                agentd_protocol::ProgramShimmerDecl { id: b.clone(), shimmer: false, tooltip: None },
             ],
         );
         assert!(mgr.program_run_snapshot(&id).is_none(), "empty pending shows no shimmer");
         // Owning session goes idle with nothing pending → the empty run is reaped.
         mgr.note_session_state_for_program_run(&id, SessionState::AwaitingInput);
         // A re-declaration can no longer revive it: the record is gone.
-        mgr.narrow_program_run(&id, md, &[agentd_protocol::ProgramShimmerDecl { id: b, shimmer: true }]);
+        mgr.narrow_program_run(&id, md, &[agentd_protocol::ProgramShimmerDecl { id: b, shimmer: true, tooltip: None }]);
         assert!(
             mgr.program_run_snapshot(&id).is_none(),
             "reaped on idle; a re-declaration does not revive a cleared run"

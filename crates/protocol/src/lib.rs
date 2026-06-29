@@ -935,15 +935,56 @@ pub struct ProgramBlockView {
     pub end_line: usize,
     pub text: String,
     pub shimmer: bool,
+    /// Concise (≤10-word) run-status tooltip stored alongside this block's
+    /// shimmer state (spec 0057). `Some` only for a pending block whose shimmer
+    /// was declared with a tooltip; `None` for settled blocks and for blocks
+    /// shimmering without a stored tooltip (optimistic/legacy/in-flight), where
+    /// a renderer falls back to a hardcoded label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip: Option<String>,
 }
 
 /// A declaration that a program block (addressed by its stable id) is pending
 /// (`shimmer: true`) or settled (`shimmer: false`) — the unit of the per-block
-/// shimmer declaration carried by program edits (spec 0053).
+/// shimmer declaration carried by program edits (spec 0053). When declaring a
+/// block pending, a concise `tooltip` describing its run status is required of
+/// agent callers (spec 0057) and stored alongside the shimmer state; it is
+/// ignored when settling a block.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProgramShimmerDecl {
     pub id: String,
     pub shimmer: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip: Option<String>,
+}
+
+/// Hardcoded fallback tooltip for a block that is shimmering without a stored
+/// tooltip — optimistic client-side shimmer before an agent supplies one,
+/// legacy run state, or a block kept pending across an edit (spec 0057).
+pub const PROGRAM_SHIMMER_FALLBACK_TOOLTIP: &str = "Working…";
+
+/// Maximum word count for a program-shimmer tooltip (spec 0057). Longer
+/// tooltips are gracefully truncated rather than rejected.
+pub const PROGRAM_SHIMMER_TOOLTIP_MAX_WORDS: usize = 10;
+
+/// Normalize a program-shimmer tooltip to its stored form (spec 0057): trim,
+/// collapse internal whitespace to single spaces, and truncate to at most
+/// [`PROGRAM_SHIMMER_TOOLTIP_MAX_WORDS`] words (appending `…` when truncated).
+/// Returns `None` for an empty/whitespace-only string so an absent tooltip is
+/// never stored as an empty label.
+pub fn normalize_program_tooltip(raw: &str) -> Option<String> {
+    let words: Vec<&str> = raw.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+    if words.len() <= PROGRAM_SHIMMER_TOOLTIP_MAX_WORDS {
+        Some(words.join(" "))
+    } else {
+        Some(format!(
+            "{}…",
+            words[..PROGRAM_SHIMMER_TOOLTIP_MAX_WORDS].join(" ")
+        ))
+    }
 }
 
 /// Stable, content-derived id for a program block (spec 0053). Derived from the
@@ -1059,6 +1100,13 @@ pub struct ProgramRunProgress {
     /// (spec 0053). A block shimmers exactly while its id is in this set.
     #[serde(default)]
     pub pending_block_ids: Vec<String>,
+    /// Per-block run-status tooltips keyed by stable block id (spec 0057), kept
+    /// in sync with `pending_block_ids`: an entry exists only for a pending
+    /// block whose shimmer was declared with a tooltip. Settling a block, or
+    /// dropping it from the pending set, removes its entry. A pending block with
+    /// no entry (optimistic/legacy/keep_pending) renders the hardcoded fallback.
+    #[serde(default)]
+    pub pending_block_tooltips: HashMap<String, String>,
     #[serde(default)]
     pub seen_running: bool,
     #[serde(default)]
@@ -1173,6 +1221,14 @@ pub struct ProgramUpdateParams {
     /// (the co-editing human-save path); the MCP tool requires it for agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shimmer: Option<Vec<bool>>,
+    /// Per-block run-status tooltips parallel to `shimmer`, in document order
+    /// (spec 0057): `shimmer_tooltips[i]` is the tooltip for the i-th block,
+    /// used only when `shimmer[i]` is `true`. `None`, or a `None` entry, stores
+    /// no tooltip for that block (the renderer falls back). When present its
+    /// length must equal `shimmer`'s; the MCP tool requires a tooltip for every
+    /// block declared pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shimmer_tooltips: Option<Vec<Option<String>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2076,5 +2132,26 @@ mod program_block_tests {
         assert_eq!(spans[0].signature, "intro paragraph\nsecond line");
         assert_eq!(spans[1].signature, "1. first step\nwrapped detail");
         assert_eq!(spans[2].signature, "2. second step");
+    }
+
+    #[test]
+    fn normalize_tooltip_trims_collapses_and_truncates() {
+        // Empty / whitespace-only → None (never stored as an empty label).
+        assert_eq!(normalize_program_tooltip("   "), None);
+        assert_eq!(normalize_program_tooltip(""), None);
+        // Trims and collapses internal whitespace.
+        assert_eq!(
+            normalize_program_tooltip("  Building   the   PR \n"),
+            Some("Building the PR".to_string())
+        );
+        // Exactly the max word count is kept verbatim.
+        let ten = "one two three four five six seven eight nine ten";
+        assert_eq!(normalize_program_tooltip(ten), Some(ten.to_string()));
+        // Over the max is truncated to the first N words with an ellipsis.
+        let eleven = "one two three four five six seven eight nine ten eleven";
+        assert_eq!(
+            normalize_program_tooltip(eleven),
+            Some("one two three four five six seven eight nine ten…".to_string())
+        );
     }
 }

@@ -439,6 +439,7 @@ impl Client {
                 template_id: source_program.template_id,
                 note: Some(format!("copied from fork source {}", short_id(source_id))),
                 shimmer: None,
+                shimmer_tooltips: None,
             })
             .await?;
         }

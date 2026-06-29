@@ -7938,7 +7938,7 @@ fn render_program_shimmer_hover(
     f: &mut Frame,
     app: &mut App,
     popup: &crate::app::ProgramPopup,
-    modal: Rect,
+    _modal: Rect,
     scroll_offset: usize,
     body: Rect,
     now: Instant,
@@ -7967,12 +7967,10 @@ fn render_program_shimmer_hover(
     let Some(shimmer) = program_run_shimmer(app, popup, now) else {
         return;
     };
-    let line_sessions =
-        program_shimmer_line_sessions(Some(app), &popup.buffer, &shimmer.active_lines);
-    let Some(session_id) = program_shimmer_session_at(
+    let Some(block_id) = program_shimmer_block_at(
         Some(app),
         &popup.buffer,
-        &line_sessions,
+        &shimmer.active_lines,
         scroll_offset,
         body,
         mx,
@@ -7980,7 +7978,12 @@ fn render_program_shimmer_hover(
     ) else {
         return;
     };
-    render_session_hover_card(f, app, modal, &session_id, mx, my);
+    let tooltip = app
+        .program_runs
+        .get(&popup.program.session_id)
+        .and_then(|run| run.pending_tooltips.get(&block_id))
+        .map_or(agentd_protocol::PROGRAM_SHIMMER_FALLBACK_TOOLTIP, |t| t.as_str());
+    render_tooltip_at(f, &app.theme, tooltip, mx, my, 2, -1);
 }
 
 /// For each source line of `markdown`, the session id of the shimmering block it
@@ -8055,6 +8058,48 @@ fn program_shimmer_session_at(
         visual_row_base = next_base;
     }
     None
+}
+
+fn program_shimmer_block_at(
+    app: Option<&App>,
+    markdown: &str,
+    active_lines: &[bool],
+    scroll_offset: usize,
+    area: Rect,
+    col: u16,
+    row: u16,
+) -> Option<String> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    if col < area.x || col >= area.x.saturating_add(area.width) {
+        return None;
+    }
+    if row < area.y || row >= area.y.saturating_add(area.height) {
+        return None;
+    }
+    let target_abs_row = scroll_offset.saturating_add((row - area.y) as usize);
+    let width = area.width as usize;
+    let mut visual_row_base = 0usize;
+    let mut source_line = None;
+    for (i, raw) in markdown.lines().enumerate() {
+        let (rendered, _clips) = program_rendered_line_with_clips(app, raw);
+        let rows = program_wrap_row_starts(&rendered, width).len();
+        let next_base = visual_row_base.saturating_add(rows);
+        if target_abs_row >= visual_row_base && target_abs_row < next_base {
+            source_line = Some(i);
+            break;
+        }
+        visual_row_base = next_base;
+    }
+    let source_line = source_line?;
+    if !active_lines.get(source_line).copied().unwrap_or(false) {
+        return None;
+    }
+    crate::app::program_blocks(markdown)
+        .into_iter()
+        .find(|block| (block.start_line..block.end_line).contains(&source_line))
+        .map(|block| block.id)
 }
 
 /// Paint a slim vertical scroll thumb on the program popup's right border when
