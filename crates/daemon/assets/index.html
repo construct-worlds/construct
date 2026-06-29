@@ -862,6 +862,9 @@
     align-items: end;
     box-shadow: inset 0 1px 0 rgba(57, 255, 136, 0.12);
   }
+  /* Program view hides the composer (the editor is the input surface); the
+     `display` above otherwise overrides the `hidden` attribute. */
+  .composer[hidden] { display: none; }
   .composer textarea {
     flex: 1;
     resize: none;
@@ -1486,6 +1489,193 @@
       scroll-behavior: auto !important;
     }
   }
+  /* ---- Program view (per-session Markdown program surface, spec 0059) ---- */
+  .program-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    overflow: hidden;
+  }
+  /* A `display` rule on the class beats the `hidden` attribute's UA
+     `display:none`, so restore it for the toggled program elements. */
+  .program-wrap[hidden],
+  .program-find[hidden],
+  .program-empty[hidden],
+  .program-clip-menu[hidden] { display: none; }
+  .program-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elev);
+    font-size: 13px;
+  }
+  .program-bar-label {
+    color: var(--accent);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .program-version { color: var(--fg-faint); font-size: 12px; }
+  .program-flex { flex: 1 1 auto; }
+  .program-msg { color: var(--fg-dim); font-size: 12px; max-width: 42ch;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .program-msg.is-error { color: var(--err); }
+  .program-bar button {
+    background: var(--bg-elev-2);
+    color: var(--fg);
+    border: 1px solid var(--border-faint);
+    border-radius: 5px;
+    padding: 3px 12px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .program-bar button:hover { border-color: var(--accent); }
+  #programSaveBtn[data-dirty="true"] {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .program-find {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border-faint);
+    background: var(--bg-elev);
+  }
+  .program-find input {
+    flex: 1 1 auto;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border-faint);
+    border-radius: 5px;
+    padding: 3px 8px;
+    font: inherit;
+    font-size: 13px;
+  }
+  .program-find-count { color: var(--fg-faint); font-size: 12px; min-width: 6ch; }
+  .program-find button {
+    background: var(--bg-elev-2); color: var(--fg);
+    border: 1px solid var(--border-faint); border-radius: 5px;
+    padding: 2px 9px; font: inherit; cursor: pointer;
+  }
+  .program-find button:hover { border-color: var(--accent); }
+  /* The editor stacks a styled overlay under a transparent-text textarea so the
+     native caret/selection stay live while the overlay paints chips + shimmer. */
+  .program-editor {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .program-overlay, .program-input {
+    margin: 0;
+    border: 0;
+    padding: 12px 14px;
+    font-family: "SFMono-Regular", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    letter-spacing: 0;
+    tab-size: 2;
+    white-space: pre;
+    word-wrap: normal;
+    overflow-wrap: normal;
+    box-sizing: border-box;
+  }
+  .program-overlay {
+    position: absolute;
+    inset: 0;
+    overflow: auto;
+    color: var(--fg);
+    pointer-events: none;
+    z-index: 1;
+  }
+  .program-input {
+    position: absolute;
+    inset: 0;
+    overflow: auto;
+    resize: none;
+    background: transparent;
+    color: transparent;
+    caret-color: var(--accent);
+    z-index: 2;
+  }
+  .program-input::selection { background: rgba(57, 255, 136, 0.28); }
+  .program-input:focus { outline: none; }
+  /* Smart-clip chip painted in the overlay under the transparent clip text. */
+  .program-clip {
+    background: color-mix(in srgb, var(--accent-alt) 22%, transparent);
+    color: var(--accent-alt);
+    border-radius: 3px;
+    padding: 0 1px;
+  }
+  .program-shimmer-bold { font-weight: 700; }
+  /* Empty-state template picker. */
+  .program-empty {
+    position: absolute;
+    inset: 0;
+    overflow: auto;
+    padding: 24px 22px;
+    z-index: 3;
+    background: var(--bg);
+    color: var(--fg-dim);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .program-empty .pe-desc { color: var(--fg-dim); margin-bottom: 14px; max-width: 70ch; }
+  .program-empty .pe-templates { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+  .program-empty .pe-tmpl {
+    background: var(--bg-elev-2);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--accent);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+  }
+  .program-empty .pe-tmpl:hover { border-color: var(--accent); }
+  .program-empty .pe-tmpl .pe-tmpl-desc { display: block; font-weight: 400;
+    color: var(--fg-faint); font-size: 12px; margin-top: 3px; }
+  .program-empty .pe-divider { border-top: 1px solid var(--border-faint); margin: 14px 0; }
+  .program-empty .pe-syntax { color: var(--fg-faint); font-size: 12.5px; max-width: 78ch; }
+  .program-empty .pe-syntax code { color: var(--accent-alt); }
+  /* Smart-clip (@) autocomplete menu. */
+  .program-clip-menu {
+    position: absolute;
+    z-index: 5;
+    min-width: 240px;
+    max-width: 380px;
+    max-height: 260px;
+    overflow-y: auto;
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    padding: 4px;
+  }
+  .program-clip-item {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 5px 9px;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .program-clip-item .pc-label { color: var(--fg); font-size: 13px; }
+  .program-clip-item .pc-detail { color: var(--fg-faint); font-size: 11px; }
+  .program-clip-item .pc-kind {
+    color: var(--accent-alt); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.06em; margin-right: 6px;
+  }
+  .program-clip-item.is-active, .program-clip-item:hover {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+  }
 </style>
 </head>
 <body>
@@ -1498,6 +1688,8 @@
               aria-pressed="false">Terminal</button>
       <button type="button" id="viewModeChat" data-view-mode="chat"
               aria-pressed="false">Chat</button>
+      <button type="button" id="viewModeProgram" data-view-mode="program"
+              aria-pressed="false">Program</button>
     </div>
     <div class="conn" id="conn" data-state="connecting" aria-label="connecting">
       <canvas class="mini-matrix" id="miniMatrix" width="192" height="84"
@@ -1578,6 +1770,42 @@
                   aria-label="close browser preview" title="close">×</button>
           <img id="browserPreviewImg" alt="browser preview" />
           <div class="browser-preview-caption" id="browserPreviewCaption"></div>
+        </div>
+      </div>
+      <!--
+        Program: a per-session shared Markdown space the user and agents edit
+        and run together (the web peer of the TUI program surface, spec 0059).
+        A native <textarea> drives editing (caret / selection / clipboard / undo
+        / IME); the <pre> overlay behind it paints smart-clip chips and the
+        run shimmer, kept in pixel-lockstep with the textarea. Mutually
+        exclusive with transcript / terminal via the `hidden` attribute.
+      -->
+      <div class="program-wrap" id="programWrap" hidden>
+        <div class="program-bar">
+          <span class="program-bar-label">Program</span>
+          <span class="program-version" id="programVersion"></span>
+          <span class="program-flex"></span>
+          <span class="program-msg" id="programMsg" aria-live="polite"></span>
+          <button type="button" id="programFindBtn" title="Find (Ctrl+F)">Find</button>
+          <button type="button" id="programRunBtn" title="Run program (Ctrl+Enter) — runs the selection if text is selected">Run</button>
+          <button type="button" id="programSaveBtn" title="Save (Ctrl+S)">Save</button>
+        </div>
+        <div class="program-find" id="programFind" hidden>
+          <input type="text" id="programFindInput" placeholder="Find in program…"
+                 autocomplete="off" autocapitalize="off" spellcheck="false" />
+          <span class="program-find-count" id="programFindCount"></span>
+          <button type="button" id="programFindPrev" title="Previous (Shift+Enter)">↑</button>
+          <button type="button" id="programFindNext" title="Next (Enter)">↓</button>
+          <button type="button" id="programFindClose" title="Close (Esc)">×</button>
+        </div>
+        <div class="program-editor" id="programEditor">
+          <pre class="program-overlay" id="programOverlay" aria-hidden="true"></pre>
+          <textarea class="program-input" id="programInput" spellcheck="false"
+                    autocomplete="off" autocapitalize="off" autocorrect="off"
+                    wrap="off" aria-label="program markdown"></textarea>
+          <div class="program-empty" id="programEmpty" hidden></div>
+          <div class="program-clip-menu" id="programClipMenu" hidden role="listbox"
+               aria-label="smart-clip suggestions"></div>
         </div>
       </div>
       <!--
@@ -1770,6 +1998,21 @@ const sessionTitleEl = $("sessionTitle");
 const viewModeToggleEl = $("viewModeToggle");
 const viewModeTerminalBtn = $("viewModeTerminal");
 const viewModeChatBtn = $("viewModeChat");
+const viewModeProgramBtn = $("viewModeProgram");
+const programWrapEl = $("programWrap");
+const programEditorEl = $("programEditor");
+const programOverlayEl = $("programOverlay");
+const programInputEl = $("programInput");
+const programEmptyEl = $("programEmpty");
+const programClipMenuEl = $("programClipMenu");
+const programVersionEl = $("programVersion");
+const programMsgEl = $("programMsg");
+const programSaveBtn = $("programSaveBtn");
+const programRunBtn = $("programRunBtn");
+const programFindBtn = $("programFindBtn");
+const programFindEl = $("programFind");
+const programFindInputEl = $("programFindInput");
+const programFindCountEl = $("programFindCount");
 const connEl = $("conn");
 const miniMatrixEl = $("miniMatrix");
 const composerEl = $("composer");
@@ -1949,6 +2192,28 @@ const state = {
   // responsive CSS classes because narrow-screen auto-hide after
   // selecting a session is intentionally not persisted to storage.
   sessionListVisible: true,
+  // Program view (per-session Markdown program surface, spec 0059).
+  program: {
+    // Last daemon snapshot per session id: { version, templateId, saved }.
+    // `saved` is the normalized markdown last synced from / written to the
+    // daemon — the dirty-check baseline and the 3-way-merge ancestor.
+    docById: new Map(),
+    // In-flight run shimmer per session id:
+    // { pendingIds:Set, tooltips:Map, startPerf, deadlinePerf }.
+    runById: new Map(),
+    // Cached templates from program.list_templates (fetched lazily once).
+    templates: null,
+    // Session id whose program is currently mounted in the editor, or null.
+    mountedId: null,
+    // requestAnimationFrame handle for the shimmer loop, or 0.
+    raf: 0,
+    // Smart-clip (@) autocomplete: { triggerStart, query, items, selected } | null.
+    clip: null,
+    // Find state: { query, matches:[[start,end]], idx } | null.
+    find: null,
+    // Cached [muted, text] rgb triples for the shimmer brightness blend.
+    shimmerColors: null,
+  },
 };
 
 const LARGE_TEXT_PASTE_CHARS = 16 * 1024;
@@ -2890,12 +3155,19 @@ function preferredViewModeForSession(s) {
 }
 
 function renderViewModeToggle(s) {
-  const show = isTerminalSession(s) && hasSemanticChatView(s);
-  viewModeToggleEl.hidden = !show;
-  if (!show) return;
-  const mode = preferredViewModeForSession(s);
+  if (!s) { viewModeToggleEl.hidden = true; return; }
+  // Program is available for every session; Terminal/Chat appear only when the
+  // session actually offers that surface. A non-terminal session is chat-only.
+  const term = isTerminalSession(s);
+  const chat = hasSemanticChatView(s) || !term;
+  viewModeTerminalBtn.hidden = !term;
+  viewModeChatBtn.hidden = !chat;
+  viewModeProgramBtn.hidden = false;
+  viewModeToggleEl.hidden = false;
+  const mode = state.mode === "program" ? "program" : preferredViewModeForSession(s);
   viewModeTerminalBtn.setAttribute("aria-pressed", mode === "terminal" ? "true" : "false");
   viewModeChatBtn.setAttribute("aria-pressed", mode === "chat" ? "true" : "false");
+  viewModeProgramBtn.setAttribute("aria-pressed", mode === "program" ? "true" : "false");
 }
 
 let lastReportedView = null;
@@ -2911,7 +3183,7 @@ function reportView() {
   const s = state.sessions.find((x) => x.id === id);
   if (!s) return;
   const view =
-    isTerminalSession(s) && preferredViewModeForSession(s) === "terminal"
+    state.mode !== "program" && isTerminalSession(s) && preferredViewModeForSession(s) === "terminal"
       ? "terminal"
       : "chat";
   const key = id + ":" + view;
@@ -2921,18 +3193,32 @@ function reportView() {
 }
 
 async function switchCurrentViewMode(mode) {
-  if (mode !== "terminal" && mode !== "chat") return;
   const id = state.currentId;
   const s = state.sessions.find((x) => x.id === id);
-  if (
-    !id ||
-    !isTerminalSession(s) ||
-    !hasSemanticChatView(s) ||
-    preferredViewModeForSession(s) === mode
-  ) return;
+  if (!id || !s) return;
 
-  state.viewModeById.set(id, mode);
-  saveViewModePrefs();
+  if (mode === "program") {
+    if (state.mode === "program") return;
+    if (state.mode === "terminal") rememberActiveTerminalState();
+    else if (state.mode === "chat") rememberTranscriptViewport(id);
+    await enterProgramMode(id);
+    renderViewModeToggle(s);
+    setComposerEnabled(false);
+    reportView();
+    return;
+  }
+  if (mode !== "terminal" && mode !== "chat") return;
+  // Switching to terminal/chat. From program mode this is always allowed; from a
+  // normal toggle keep the original guard (only meaningful when both surfaces exist).
+  const leavingProgram = state.mode === "program";
+  if (mode === "terminal" && !isTerminalSession(s)) return;
+  if (mode === "chat" && !(hasSemanticChatView(s) || !isTerminalSession(s))) return;
+  if (!leavingProgram && preferredViewModeForSession(s) === mode) return;
+
+  if (isTerminalSession(s) && hasSemanticChatView(s)) {
+    state.viewModeById.set(id, mode);
+    saveViewModePrefs();
+  }
   renderViewModeToggle(s);
 
   if (mode === "terminal") {
@@ -2973,7 +3259,10 @@ async function selectSession(id, { replaceUrl = false } = {}) {
     setSessionListVisible(false, false);
   }
   hydrateWidgets(id);
-  if (preferredViewModeForSession(s) === "terminal") {
+  if (state.mode === "program") {
+    // Program is a per-session surface; keep showing it for the new session.
+    await enterProgramMode(id);
+  } else if (preferredViewModeForSession(s) === "terminal") {
     await enterTerminalMode(id, { focusTerminal: focusTerminalAfterSwitch });
   } else {
     enterChatMode();
@@ -2986,6 +3275,982 @@ async function selectSession(id, { replaceUrl = false } = {}) {
   setComposerEnabled(!!(state.ws && state.ws.readyState === 1 && state.currentId));
   reportView();
 }
+
+// --- Program view (per-session Markdown program surface, spec 0059) ------
+//
+// The web peer of the TUI program editor. Editing rides a native <textarea>
+// (caret / selection / clipboard / undo / IME); a <pre> overlay behind it
+// paints smart-clip chips and the run shimmer in lockstep. Block identity, the
+// shimmer pending set, clip-instance-id normalization, and the 3-way merge use
+// the SAME shared rules as the daemon/TUI so block ids agree across clients.
+
+const PROGRAM_SHIMMER_SPEED = 4.2;      // rad/sec (matches TUI)
+const PROGRAM_SHIMMER_DENSITY = 0.18;   // rad/char
+const PROGRAM_RUN_MAX_MS = 10 * 60 * 1000;
+const PROGRAM_SHIMMER_FRAME_MS = 33;    // ~30fps throttle for the per-char repaint
+const PROGRAM_TEXT_ENCODER = new TextEncoder();
+
+// --- shared block-identity rules (ports of agentd_protocol) ---
+
+// FNV-1a 64-bit over the UTF-8 bytes of the identity signature → 16-hex id.
+function programBlockId(signature) {
+  let hash = 0xcbf29ce484222325n;
+  const mask = (1n << 64n) - 1n;
+  const prime = 0x100000001b3n;
+  const bytes = PROGRAM_TEXT_ENCODER.encode(signature);
+  for (let i = 0; i < bytes.length; i++) {
+    hash ^= BigInt(bytes[i]);
+    hash = (hash * prime) & mask;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+function programSmartClipBodyWithoutInstanceId(body) {
+  return body.split(/\s+/).filter((p) => p && !p.startsWith("clip_id=")).join(" ");
+}
+
+// Identity signature strips clip_id=... inside @{...} so repairing a clip id
+// never settles a still-pending block.
+function programBlockIdentitySignature(signature) {
+  let out = "";
+  let rest = signature;
+  while (true) {
+    const start = rest.indexOf("@{");
+    if (start === -1) { out += rest; break; }
+    out += rest.slice(0, start);
+    const afterStart = rest.slice(start + 2);
+    const end = afterStart.indexOf("}");
+    if (end === -1) { out += rest.slice(start); break; }
+    const body = afterStart.slice(0, end);
+    out += "@{" + programSmartClipBodyWithoutInstanceId(body) + "}";
+    rest = afterStart.slice(end + 1);
+  }
+  return out;
+}
+
+function programIsHeading(trimmed) {
+  let hashes = 0;
+  while (hashes < trimmed.length && trimmed[hashes] === "#") hashes++;
+  return hashes >= 1 && hashes <= 6 && trimmed[hashes] === " ";
+}
+
+function programIsListItem(trimmed) {
+  if (trimmed === "-" || trimmed === "*" || trimmed === "+") return true;
+  if (trimmed.startsWith("- ") || trimmed.startsWith("* ") || trimmed.startsWith("+ ")) return true;
+  let digits = 0;
+  while (digits < trimmed.length && trimmed[digits] >= "0" && trimmed[digits] <= "9") digits++;
+  if (digits > 0) {
+    const rest = trimmed.slice(digits);
+    if (rest.startsWith(". ") || rest.startsWith(") ") || rest === "." || rest === ")") return true;
+  }
+  return false;
+}
+
+// Mirror Rust str::lines(): split on \n, strip a trailing \r per line, and a
+// single trailing newline does NOT yield a final empty line.
+function programLines(s) {
+  if (s === "") return [];
+  const parts = s.split("\n");
+  if (parts[parts.length - 1] === "") parts.pop();
+  return parts.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+}
+
+// Split markdown into blocks (heading / list-item / paragraph), each with a
+// stable content-derived id — the shimmer addressing unit (specs 0053/0059).
+function programBlockSpans(markdown) {
+  const rawLines = programLines(markdown);
+  const blocks = [];
+  let start = null;
+  let norm = [];
+  const push = (s, e, normArr) => {
+    const signature = normArr.join("\n");
+    const id = programBlockId(programBlockIdentitySignature(signature));
+    blocks.push({ start_line: s, end_line: e, id });
+  };
+  for (let i = 0; i < rawLines.length; i++) {
+    const trimmed = rawLines[i].trim();
+    if (trimmed === "") {
+      if (start !== null) { push(start, i, norm); start = null; norm = []; }
+      continue;
+    }
+    if (programIsHeading(trimmed)) {
+      if (start !== null) { push(start, i, norm); start = null; norm = []; }
+      push(i, i + 1, [trimmed]);
+      continue;
+    }
+    if (programIsListItem(trimmed)) {
+      if (start !== null) { push(start, i, norm); start = null; norm = []; }
+      start = i; norm = [trimmed];
+      continue;
+    }
+    if (start === null) start = i;
+    norm.push(trimmed);
+  }
+  if (start !== null) push(start, rawLines.length, norm);
+  return blocks;
+}
+
+// --- smart-clip instance-id normalization (port of the TUI) ---
+
+function programSmartClipRanges(s) {
+  const ranges = [];
+  let idx = 0;
+  while (idx + 1 < s.length) {
+    if (s[idx] !== "@" || s[idx + 1] !== "{") { idx++; continue; }
+    let end = idx + 2;
+    while (end < s.length && s[end] !== "}") end++;
+    if (end < s.length) { ranges.push({ start: idx, end: end + 1 }); idx = end + 1; }
+    else idx += 2;
+  }
+  return ranges;
+}
+
+function programSmartClipInstanceId(body) {
+  for (const part of body.split(/\s+/)) {
+    if (part.startsWith("clip_id=")) {
+      const v = part.slice("clip_id=".length);
+      if (v) return v;
+    }
+  }
+  return null;
+}
+
+// Assign a unique clip_id=clip_N to every @{...} that lacks (or duplicates) one,
+// so the dirty-check baseline is stable and clip instances are addressable.
+function programNormalizeClipIds(markdown) {
+  const ranges = programSmartClipRanges(markdown);
+  if (!ranges.length) return markdown;
+  let max = 0;
+  for (const r of ranges) {
+    const id = programSmartClipInstanceId(markdown.slice(r.start + 2, r.end - 1));
+    const m = id && /^clip_(\d+)$/.exec(id);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  const used = new Set();
+  let next = max + 1;
+  let out = "";
+  let last = 0;
+  for (const r of ranges) {
+    out += markdown.slice(last, r.start);
+    const body = markdown.slice(r.start + 2, r.end - 1);
+    const existing = programSmartClipInstanceId(body);
+    if (existing && !used.has(existing)) {
+      used.add(existing);
+      out += markdown.slice(r.start, r.end);
+    } else {
+      let id;
+      while (true) { const c = "clip_" + next; next++; if (!used.has(c)) { used.add(c); id = c; break; } }
+      const bodyNoId = programSmartClipBodyWithoutInstanceId(body);
+      out += "@{" + bodyNoId + (bodyNoId ? " " : "") + "clip_id=" + id + "}";
+    }
+    last = r.end;
+  }
+  out += markdown.slice(last);
+  return out;
+}
+
+// --- line-based 3-way merge (diff3 with git-style conflict markers) ---
+
+function programLcsMatches(x, y) {
+  const n = x.length, m = y.length;
+  const dp = [];
+  for (let i = 0; i <= n; i++) dp.push(new Int32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = x[i] === y[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const mx = new Int32Array(n).fill(-1);
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (x[i] === y[j]) { mx[i] = j; i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+    else j++;
+  }
+  return mx;
+}
+
+// Three-way merge of ours/base/theirs. Anchors are base lines matched in both
+// sides; between anchors, take the side that changed (or emit conflict markers).
+function programDiff3(ours, base, theirs) {
+  const A = ours.split("\n"), O = base.split("\n"), B = theirs.split("\n");
+  const ma = programLcsMatches(O, A);
+  const mb = programLcsMatches(O, B);
+  const anchors = [];
+  for (let i = 0; i < O.length; i++) if (ma[i] !== -1 && mb[i] !== -1) anchors.push(i);
+  const out = [];
+  let conflict = false;
+  const eq = (p, q) => p.length === q.length && p.every((v, k) => v === q[k]);
+  const region = (iLo, iHi, aLo, aHi, bLo, bHi) => {
+    const baseR = O.slice(iLo, iHi);
+    const oursR = A.slice(aLo, aHi);
+    const theirsR = B.slice(bLo, bHi);
+    if (eq(oursR, baseR)) out.push(...theirsR);
+    else if (eq(theirsR, baseR)) out.push(...oursR);
+    else if (eq(oursR, theirsR)) out.push(...oursR);
+    else {
+      conflict = true;
+      out.push("<<<<<<< ours", ...oursR, "=======", ...theirsR, ">>>>>>> theirs");
+    }
+  };
+  let iPrev = -1, aPrev = -1, bPrev = -1;
+  for (const i of anchors) {
+    region(iPrev + 1, i, aPrev + 1, ma[i], bPrev + 1, mb[i]);
+    out.push(O[i]);
+    iPrev = i; aPrev = ma[i]; bPrev = mb[i];
+  }
+  region(iPrev + 1, O.length, aPrev + 1, A.length, bPrev + 1, B.length);
+  return { text: out.join("\n"), conflict };
+}
+
+// --- run shimmer ---
+
+function programRunFromProgress(progress) {
+  if (!progress) return null;
+  const nowMs = Date.now();
+  const ids = progress.pending_block_ids || [];
+  if (progress.expires_at_ms <= nowMs || ids.length === 0) return null;
+  const perf = performance.now();
+  const startPerf = progress.started_at_ms <= nowMs ? perf - (nowMs - progress.started_at_ms) : perf;
+  return {
+    pendingIds: new Set(ids),
+    tooltips: new Map(Object.entries(progress.pending_block_tooltips || {})),
+    startPerf,
+    deadlinePerf: perf + (progress.expires_at_ms - nowMs),
+  };
+}
+
+function programActiveLines(buffer, pendingSet) {
+  const n = programLines(buffer).length;
+  const active = new Array(n).fill(false);
+  let any = false;
+  for (const b of programBlockSpans(buffer)) {
+    if (pendingSet.has(b.id)) {
+      for (let i = b.start_line; i < b.end_line && i < n; i++) { active[i] = true; any = true; }
+    }
+  }
+  return any ? active : null;
+}
+
+function programEnsureShimmerColors() {
+  if (state.program.shimmerColors) return state.program.shimmerColors;
+  const cs = getComputedStyle(document.documentElement);
+  const parse = (v, fb) => {
+    v = (v || "").trim();
+    let m = /^#([0-9a-f]{6})$/i.exec(v);
+    if (m) return [parseInt(m[1].slice(0, 2), 16), parseInt(m[1].slice(2, 4), 16), parseInt(m[1].slice(4, 6), 16)];
+    m = /rgba?\(([^)]+)\)/.exec(v);
+    if (m) { const p = m[1].split(",").map((x) => parseFloat(x)); return [p[0] | 0, p[1] | 0, p[2] | 0]; }
+    return fb;
+  };
+  state.program.shimmerColors = [
+    parse(cs.getPropertyValue("--fg-dim"), [76, 150, 92]),
+    parse(cs.getPropertyValue("--fg"), [190, 255, 205]),
+  ];
+  return state.program.shimmerColors;
+}
+
+function programBlend(m, t, e) {
+  return `rgb(${Math.round(m[0] + (t[0] - m[0]) * e)},${Math.round(m[1] + (t[1] - m[1]) * e)},${Math.round(m[2] + (t[2] - m[2]) * e)})`;
+}
+
+function programLineClipRanges(line) {
+  const ranges = [];
+  let idx = 0;
+  while (true) {
+    const start = line.indexOf("@{", idx);
+    if (start === -1) break;
+    const end = line.indexOf("}", start + 2);
+    if (end === -1) break;
+    ranges.push([start, end + 1]);
+    idx = end + 1;
+  }
+  return ranges;
+}
+
+// Render one source line to overlay HTML. Smart-clip ranges become chips; on a
+// shimmering line every non-chip char gets a brightness drawn from a travelling
+// wave (chips keep their style but still advance the wave so its spacing holds).
+function programRenderLineHtml(line, isActive, phase, colors, gidx) {
+  const clipRanges = programLineClipRanges(line);
+  let html = "";
+  let pos = 0;
+  const emitPlain = (a, b) => {
+    const seg = line.slice(a, b);
+    if (!isActive) { html += escape(seg); return; }
+    for (const ch of seg) {
+      const w = Math.sin(phase - gidx * PROGRAM_SHIMMER_DENSITY);
+      const t = Math.min(1, Math.max(0, 0.5 + 0.5 * w));
+      const eased = t * t * (3 - 2 * t);
+      const cls = eased > 0.85 ? ' class="program-shimmer-bold"' : "";
+      html += `<span${cls} style="color:${programBlend(colors[0], colors[1], eased)}">${escape(ch)}</span>`;
+      gidx++;
+    }
+  };
+  for (const [cs, ce] of clipRanges) {
+    if (cs > pos) emitPlain(pos, cs);
+    const clipText = line.slice(cs, ce);
+    html += `<span class="program-clip">${escape(clipText)}</span>`;
+    if (isActive) gidx += [...clipText].length;
+    pos = ce;
+  }
+  if (pos < line.length) emitPlain(pos, line.length);
+  return { html, gidx };
+}
+
+function programRenderOverlay() {
+  const id = state.program.mountedId;
+  if (!id) return;
+  const value = programInputEl.value;
+  const lines = value.split("\n");
+  const run = state.program.runById.get(id);
+  let active = null, phase = 0, colors = null;
+  if (run && performance.now() < run.deadlinePerf) {
+    active = programActiveLines(value, run.pendingIds);
+    if (active) {
+      phase = ((performance.now() - run.startPerf) / 1000) * PROGRAM_SHIMMER_SPEED;
+      colors = programEnsureShimmerColors();
+    }
+  }
+  let html = "";
+  let gidx = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const r = programRenderLineHtml(lines[i], !!(active && active[i]), phase, colors, gidx);
+    html += r.html;
+    gidx = r.gidx;
+    if (i < lines.length - 1) html += "\n";
+  }
+  // Trailing newline so the overlay's last (empty) line keeps height parity.
+  programOverlayEl.innerHTML = html + "\n";
+  programSyncScroll();
+}
+
+function programSyncScroll() {
+  programOverlayEl.scrollTop = programInputEl.scrollTop;
+  programOverlayEl.scrollLeft = programInputEl.scrollLeft;
+}
+
+function programStartShimmer(id) {
+  programStopShimmer();
+  const tick = () => {
+    state.program.raf = 0;
+    if (state.mode !== "program" || state.program.mountedId !== id) return;
+    const run = state.program.runById.get(id);
+    if (!run || performance.now() >= run.deadlinePerf || run.pendingIds.size === 0) {
+      state.program.runById.delete(id);
+      programRenderOverlay();
+      return;
+    }
+    const now = performance.now();
+    if (now - (state.program._lastShimmer || 0) >= PROGRAM_SHIMMER_FRAME_MS) {
+      state.program._lastShimmer = now;
+      programRenderOverlay();
+    }
+    state.program.raf = requestAnimationFrame(tick);
+  };
+  state.program.raf = requestAnimationFrame(tick);
+}
+
+function programStopShimmer() {
+  if (state.program.raf) { cancelAnimationFrame(state.program.raf); state.program.raf = 0; }
+}
+
+// --- view lifecycle ---
+
+// Tear the program surface down when switching to chat / terminal so its
+// shimmer loop, autocomplete, and find bar don't linger behind the other views.
+function leaveProgramView() {
+  programStopShimmer();
+  programCloseClipMenu();
+  programCloseFind();
+  programWrapEl.hidden = true;
+  state.program.mountedId = null;
+}
+
+async function enterProgramMode(id, opts = {}) {
+  state.mode = "program";
+  transcriptEl.hidden = true;
+  composerEl.hidden = true;
+  terminalWrapEl.hidden = true;
+  terminalScrollOverlayEl.hidden = true;
+  if (typeof vkbdEl !== "undefined" && vkbdEl) vkbdEl.hidden = true;
+  programWrapEl.hidden = false;
+  programSetMsg("");
+  await programMountSession(id);
+  if (opts.focus !== false) { try { programInputEl.focus(); } catch (e) {} }
+}
+
+async function programMountSession(id) {
+  state.program.mountedId = id;
+  programStopShimmer();
+  programCloseClipMenu();
+  programCloseFind();
+  programVersionEl.textContent = "";
+  programInputEl.value = "";
+  programOverlayEl.textContent = "";
+  programEmptyEl.hidden = true;
+  programSaveBtn.setAttribute("data-dirty", "false");
+  let result;
+  try {
+    result = await rpc("program.get", { session_id: id });
+  } catch (e) {
+    if (state.program.mountedId === id) programSetMsg("failed to load program: " + e.message, true);
+    return;
+  }
+  if (state.program.mountedId !== id || state.mode !== "program") return;
+  const p = result.program;
+  state.program.docById.set(id, {
+    version: p.version,
+    templateId: p.template_id || null,
+    saved: programNormalizeClipIds(p.markdown),
+  });
+  const run = programRunFromProgress(result.active_run);
+  if (run) state.program.runById.set(id, run); else state.program.runById.delete(id);
+  programInputEl.value = p.markdown;
+  programVersionEl.textContent = "v" + p.version;
+  programRefreshEmptyState();
+  programUpdateDirty();
+  programRenderOverlay();
+  if (run) programStartShimmer(id);
+  programEnsureTemplates();
+}
+
+function programSetMsg(text, isError) {
+  programMsgEl.textContent = text || "";
+  programMsgEl.classList.toggle("is-error", !!isError);
+}
+
+function programUpdateDirty() {
+  const id = state.program.mountedId;
+  const doc = id && state.program.docById.get(id);
+  const dirty = !!doc && programNormalizeClipIds(programInputEl.value) !== doc.saved;
+  programSaveBtn.setAttribute("data-dirty", dirty ? "true" : "false");
+  return dirty;
+}
+
+function programCaptureCaret() { return { s: programInputEl.selectionStart, e: programInputEl.selectionEnd }; }
+function programRestoreCaret(c) {
+  if (!c) return;
+  const len = programInputEl.value.length;
+  try { programInputEl.setSelectionRange(Math.min(c.s, len), Math.min(c.e, len)); } catch (e) {}
+}
+
+// --- live program/state notifications ---
+
+function handleProgramState(params) {
+  const program = params.program;
+  if (!program) return;
+  const id = program.session_id;
+  const run = programRunFromProgress(params.active_run);
+  if (run) state.program.runById.set(id, run); else state.program.runById.delete(id);
+  const isMounted = state.program.mountedId === id && state.mode === "program";
+  const doc = state.program.docById.get(id);
+  const refreshShimmer = () => {
+    if (!isMounted) return;
+    if (run) programStartShimmer(id);
+    else { programStopShimmer(); programRenderOverlay(); }
+  };
+  if (doc && program.version <= doc.version) { refreshShimmer(); return; }
+  const dirty = isMounted && programNormalizeClipIds(programInputEl.value) !== (doc ? doc.saved : "");
+  if (dirty) {
+    // Keep unsaved edits and the stale base version so the next save 3-way
+    // merges both sides (spec 0059); only the shimmer follows the run.
+    refreshShimmer();
+    return;
+  }
+  state.program.docById.set(id, {
+    version: program.version,
+    templateId: program.template_id || null,
+    saved: programNormalizeClipIds(program.markdown),
+  });
+  if (isMounted) {
+    const caret = programCaptureCaret();
+    programInputEl.value = program.markdown;
+    programRestoreCaret(caret);
+    programVersionEl.textContent = "v" + program.version;
+    programRefreshEmptyState();
+    programUpdateDirty();
+    if (state.program.find) programRecomputeFind();
+    refreshShimmer();
+    if (!run) programRenderOverlay();
+  }
+}
+
+// --- save (optimistic version + 3-way merge) ---
+
+async function programSave() {
+  const id = state.program.mountedId;
+  if (!id) return;
+  const doc = state.program.docById.get(id);
+  if (!doc) return;
+  let ours = programNormalizeClipIds(programInputEl.value);
+  if (ours === doc.saved) { programSetMsg("no changes"); return; }
+  programSetMsg("saving…");
+  let ancestor = doc.saved;
+  let base = doc.version;
+  let merged = false, conflicted = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let result;
+    try {
+      const params = { session_id: id, markdown: ours, base_version: base };
+      if (doc.templateId) params.template_id = doc.templateId;
+      result = await rpc("program.update", params);
+    } catch (e) {
+      if (/program conflict/i.test(e.message || "")) {
+        let latest;
+        try { latest = await rpc("program.get", { session_id: id }); }
+        catch (e2) { programSetMsg("save failed: " + e2.message, true); return; }
+        const theirs = latest.program.markdown;
+        merged = true;
+        const m = programDiff3(ours, ancestor, theirs);
+        ours = m.text;
+        if (m.conflict) conflicted = true;
+        ancestor = theirs;
+        base = latest.program.version;
+        continue;
+      }
+      programSetMsg("save failed: " + e.message, true);
+      return;
+    }
+    const p = result.program;
+    state.program.docById.set(id, {
+      version: p.version,
+      templateId: p.template_id || null,
+      saved: programNormalizeClipIds(p.markdown),
+    });
+    const runP = programRunFromProgress(result.active_run);
+    if (runP) state.program.runById.set(id, runP); else state.program.runById.delete(id);
+    if (state.program.mountedId === id) {
+      const caret = programCaptureCaret();
+      programInputEl.value = p.markdown;
+      programRestoreCaret(caret);
+      programVersionEl.textContent = "v" + p.version;
+      programRefreshEmptyState();
+      programUpdateDirty();
+      if (runP) programStartShimmer(id); else programRenderOverlay();
+    }
+    programSetMsg(
+      conflicted ? `merged with conflicts — resolve the markers (v${p.version})`
+        : merged ? `merged with agent edits (v${p.version})`
+          : `saved v${p.version}`,
+      conflicted
+    );
+    return;
+  }
+  programSetMsg("save failed: gave up after repeated concurrent updates", true);
+}
+
+// --- run (whole program, or the current selection) ---
+
+function programSelectedBlockIds(buffer, selStart, selEnd) {
+  const raw = buffer.split("\n");
+  const lineRanges = [];
+  let pos = 0;
+  for (let k = 0; k < raw.length; k++) {
+    const start = pos;
+    const end = start + raw[k].length;
+    lineRanges.push([start, end]);
+    pos = end + 1;
+  }
+  const ids = new Set();
+  for (const b of programBlockSpans(buffer)) {
+    const sr = lineRanges[b.start_line];
+    const er = lineRanges[b.end_line - 1];
+    if (!sr || !er) continue;
+    if (selStart < er[1] && selEnd > sr[0]) ids.add(b.id);
+  }
+  return ids;
+}
+
+function programStartOptimisticRun(id, body, isSelection, prevSaved, selectedBlockIds) {
+  let pending;
+  if (isSelection && selectedBlockIds && selectedBlockIds.size) {
+    pending = selectedBlockIds;
+  } else {
+    const bodyIds = new Set(programBlockSpans(body).map((b) => b.id));
+    const old = state.program.runById.get(id);
+    if (old && !isSelection) {
+      const prevIds = new Set(programBlockSpans(prevSaved).map((b) => b.id));
+      pending = new Set();
+      for (const x of bodyIds) if (!prevIds.has(x)) pending.add(x);
+      for (const x of bodyIds) if (old.pendingIds.has(x)) pending.add(x);
+    } else {
+      pending = bodyIds;
+    }
+  }
+  if (!pending.size) {
+    state.program.runById.delete(id);
+    if (state.program.mountedId === id) { programStopShimmer(); programRenderOverlay(); }
+    return;
+  }
+  const perf = performance.now();
+  state.program.runById.set(id, { pendingIds: pending, tooltips: new Map(), startPerf: perf, deadlinePerf: perf + PROGRAM_RUN_MAX_MS });
+  if (state.program.mountedId === id) programStartShimmer(id);
+}
+
+async function programRun() {
+  const id = state.program.mountedId;
+  if (!id) return;
+  let doc = state.program.docById.get(id);
+  if (!doc) return;
+  const selStart = programInputEl.selectionStart, selEnd = programInputEl.selectionEnd;
+  const hasSel = selEnd > selStart;
+  const prevSaved = doc.saved;
+  if (programNormalizeClipIds(programInputEl.value) !== doc.saved) {
+    await programSave();
+    doc = state.program.docById.get(id);
+    if (!doc) return;
+  }
+  let selection = null, selectedBlockIds = null;
+  if (hasSel) {
+    selection = programNormalizeClipIds(programInputEl.value.slice(selStart, selEnd));
+    selectedBlockIds = programSelectedBlockIds(programInputEl.value, selStart, selEnd);
+  }
+  const runBody = hasSel ? selection : programInputEl.value;
+  programStartOptimisticRun(id, runBody, hasSel, prevSaved, selectedBlockIds);
+  programSetMsg(hasSel ? "running selection…" : "running program…");
+  try {
+    const params = { session_id: id, base_version: doc.version };
+    if (selection != null) params.selection = selection;
+    const result = await rpc("program.execute", params);
+    const runP = programRunFromProgress(result.active_run);
+    if (runP) { state.program.runById.set(id, runP); if (state.program.mountedId === id) programStartShimmer(id); }
+    else { state.program.runById.delete(id); if (state.program.mountedId === id) { programStopShimmer(); programRenderOverlay(); } }
+    programSetMsg(`run sent (${hasSel ? "selection" : "program"}, v${result.program.version})`);
+  } catch (e) {
+    state.program.runById.delete(id);
+    if (state.program.mountedId === id) { programStopShimmer(); programRenderOverlay(); }
+    programSetMsg("run failed: " + e.message, true);
+  }
+}
+
+// --- templates / empty state ---
+
+async function programEnsureTemplates() {
+  if (state.program.templates) return state.program.templates;
+  try {
+    const r = await rpc("program.list_templates", {});
+    state.program.templates = r.templates || [];
+  } catch (e) { state.program.templates = []; }
+  programRefreshEmptyState();
+  return state.program.templates;
+}
+
+function programRefreshEmptyState() {
+  if (!state.program.mountedId) { programEmptyEl.hidden = true; return; }
+  if (programInputEl.value.trim() !== "") { programEmptyEl.hidden = true; return; }
+  programRenderEmpty();
+  programEmptyEl.hidden = false;
+}
+
+function programRenderEmpty() {
+  const tmpls = (state.program.templates || [])
+    .filter((t) => t.id !== "blank")
+    .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  let html = '<div class="pe-desc">Program — a shared Markdown space you and your agents edit and run together.</div>';
+  if (tmpls.length) {
+    html += '<div class="pe-templates">';
+    for (const t of tmpls) {
+      html += `<button type="button" class="pe-tmpl" data-tmpl="${escape(t.id)}">${escape(t.name)}`;
+      if (t.description) html += `<span class="pe-tmpl-desc">${escape(t.description)}</span>`;
+      html += "</button>";
+    }
+    html += "</div>";
+  }
+  html += '<div class="pe-divider"></div>';
+  html += '<div class="pe-syntax">Syntax: <code>@{session:id}</code> embeds a session · <code>@{harness:name}</code> delegates · select text + Run dispatches · <code>:::clip … :::</code> groups output.</div>';
+  programEmptyEl.innerHTML = html;
+}
+
+async function programApplyTemplate(tmplId) {
+  const id = state.program.mountedId;
+  if (!id) return;
+  const t = (state.program.templates || []).find((x) => x.id === tmplId);
+  if (!t) return;
+  const doc = state.program.docById.get(id) || { version: 0 };
+  programSetMsg("applying template…");
+  try {
+    const result = await rpc("program.update", { session_id: id, markdown: t.markdown, base_version: doc.version, template_id: t.id });
+    const p = result.program;
+    state.program.docById.set(id, { version: p.version, templateId: p.template_id || null, saved: programNormalizeClipIds(p.markdown) });
+    if (state.program.mountedId === id) {
+      programInputEl.value = p.markdown;
+      programVersionEl.textContent = "v" + p.version;
+      programRefreshEmptyState();
+      programUpdateDirty();
+      programRenderOverlay();
+      try { programInputEl.focus(); } catch (e) {}
+    }
+    programSetMsg(`template applied (v${p.version})`);
+  } catch (e) { programSetMsg("template failed: " + e.message, true); }
+}
+
+// --- smart-clip (@) autocomplete ---
+
+function programClipContext() {
+  const value = programInputEl.value;
+  const caret = programInputEl.selectionStart;
+  if (caret !== programInputEl.selectionEnd) return null;
+  let i = caret - 1;
+  while (i >= 0) {
+    const c = value[i];
+    if (c === "@") {
+      const query = value.slice(i + 1, caret);
+      if (/[\s{}]/.test(query)) return null;
+      const prev = i > 0 ? value[i - 1] : "";
+      if (prev && /[A-Za-z0-9_]/.test(prev)) return null;
+      return { triggerStart: i, query };
+    }
+    if (/[\s{}@]/.test(c)) return null;
+    i--;
+  }
+  return null;
+}
+
+function programClipCandidates(query) {
+  const q = (query || "").toLowerCase();
+  const out = [];
+  for (const s of state.sessions) {
+    if (s.archived) continue;
+    if (s.kind && s.kind !== "user") continue;
+    const title = (s.title && s.title.trim()) ? s.title : s.id.slice(0, 6);
+    const stateLabel = sessionStatusLabel(s);
+    const hay = `${title} ${s.id} ${s.harness || ""} ${stateLabel}`.toLowerCase();
+    if (!q || hay.includes(q)) {
+      out.push({ kind: "session", clip: `@{session:${s.id}}`, label: title, detail: `${s.harness || ""} · ${stateLabel}` });
+    }
+  }
+  for (const h of state.harnesses) {
+    const hay = `${h.name} ${h.description || ""}`.toLowerCase();
+    if (!q || hay.includes(q)) {
+      out.push({ kind: "harness", clip: `@{harness:${h.name}}`, label: h.name, detail: h.available === false ? "unavailable" : "" });
+    }
+  }
+  return out.slice(0, 8);
+}
+
+function programUpdateClipMenu() {
+  const ctx = programClipContext();
+  if (!ctx) { programCloseClipMenu(); return; }
+  const items = programClipCandidates(ctx.query);
+  if (!items.length) { programCloseClipMenu(); return; }
+  state.program.clip = { triggerStart: ctx.triggerStart, query: ctx.query, items, selected: 0 };
+  programRenderClipMenu();
+}
+
+function programRenderClipMenu() {
+  const clip = state.program.clip;
+  if (!clip) return;
+  let html = "";
+  clip.items.forEach((it, i) => {
+    html += `<div class="program-clip-item${i === clip.selected ? " is-active" : ""}" data-i="${i}" role="option">`;
+    html += `<span class="pc-label"><span class="pc-kind">${escape(it.kind)}</span>${escape(it.label)}</span>`;
+    if (it.detail) html += `<span class="pc-detail">${escape(it.detail)}</span>`;
+    html += "</div>";
+  });
+  programClipMenuEl.innerHTML = html;
+  programClipMenuEl.hidden = false;
+  programPositionClipMenu();
+}
+
+function programPositionClipMenu() {
+  const clip = state.program.clip;
+  if (!clip) return;
+  const c = programCaretCoords(clip.triggerStart);
+  const left = Math.max(4, Math.min(c.left - programInputEl.scrollLeft, programEditorEl.clientWidth - 250));
+  const top = c.top - programInputEl.scrollTop + c.lineHeight + 2;
+  programClipMenuEl.style.left = left + "px";
+  programClipMenuEl.style.top = top + "px";
+}
+
+function programCloseClipMenu() {
+  state.program.clip = null;
+  programClipMenuEl.hidden = true;
+  programClipMenuEl.innerHTML = "";
+}
+
+function programAcceptClip(idx) {
+  const clip = state.program.clip;
+  if (!clip) return;
+  const item = clip.items[idx != null ? idx : clip.selected];
+  if (!item) return;
+  const value = programInputEl.value;
+  const caret = programInputEl.selectionStart;
+  const before = value.slice(0, clip.triggerStart);
+  const after = value.slice(caret);
+  programInputEl.value = before + item.clip + after;
+  const newCaret = (before + item.clip).length;
+  programCloseClipMenu();
+  programInputEl.setSelectionRange(newCaret, newCaret);
+  try { programInputEl.focus(); } catch (e) {}
+  programOnInput();
+}
+
+function programMoveClip(delta) {
+  const clip = state.program.clip;
+  if (!clip) return;
+  clip.selected = (clip.selected + delta + clip.items.length) % clip.items.length;
+  programRenderClipMenu();
+}
+
+let programMirror = null;
+function programCaretCoords(pos) {
+  const ta = programInputEl;
+  if (!programMirror) {
+    programMirror = document.createElement("div");
+    programMirror.style.position = "absolute";
+    programMirror.style.visibility = "hidden";
+    programMirror.style.whiteSpace = "pre";
+    programMirror.style.top = "0";
+    programMirror.style.left = "-9999px";
+    document.body.appendChild(programMirror);
+  }
+  const cs = getComputedStyle(ta);
+  ["fontFamily", "fontSize", "lineHeight", "letterSpacing", "paddingTop", "paddingLeft", "paddingRight", "paddingBottom", "tabSize", "fontWeight", "boxSizing"].forEach((p) => { programMirror.style[p] = cs[p]; });
+  programMirror.style.width = ta.clientWidth + "px";
+  programMirror.textContent = ta.value.slice(0, pos);
+  const marker = document.createElement("span");
+  marker.textContent = "​";
+  programMirror.appendChild(marker);
+  const lineHeight = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) * 1.5);
+  const coords = { left: marker.offsetLeft, top: marker.offsetTop, lineHeight };
+  programMirror.removeChild(marker);
+  return coords;
+}
+
+// --- find ---
+
+function programOpenFind() {
+  state.program.find = state.program.find || { query: "", matches: [], idx: 0 };
+  programFindEl.hidden = false;
+  programFindInputEl.value = state.program.find.query;
+  programRecomputeFind();
+  programFindInputEl.focus();
+  programFindInputEl.select();
+}
+
+function programCloseFind() {
+  state.program.find = null;
+  programFindEl.hidden = true;
+  programFindCountEl.textContent = "";
+}
+
+function programRecomputeFind() {
+  const f = state.program.find;
+  if (!f) return;
+  f.query = programFindInputEl.value;
+  f.matches = [];
+  if (f.query) {
+    const hay = programInputEl.value.toLowerCase();
+    const needle = f.query.toLowerCase();
+    let i = hay.indexOf(needle);
+    while (i !== -1) { f.matches.push([i, i + f.query.length]); i = hay.indexOf(needle, i + Math.max(1, f.query.length)); }
+  }
+  if (f.idx >= f.matches.length) f.idx = 0;
+  programRenderFindCount();
+  if (f.matches.length) programFindSelect(f.idx, true);
+}
+
+function programRenderFindCount() {
+  const f = state.program.find;
+  if (!f) { programFindCountEl.textContent = ""; return; }
+  programFindCountEl.textContent = f.matches.length ? `${f.idx + 1}/${f.matches.length}` : (f.query ? "0/0" : "");
+}
+
+function programFindSelect(idx, keepFindFocus) {
+  const f = state.program.find;
+  if (!f || !f.matches.length) return;
+  f.idx = (idx + f.matches.length) % f.matches.length;
+  const [s, e] = f.matches[f.idx];
+  programInputEl.focus();
+  programInputEl.setSelectionRange(s, e);
+  programScrollPosIntoView(s);
+  if (keepFindFocus) programFindInputEl.focus();
+  programRenderFindCount();
+}
+
+function programScrollPosIntoView(pos) {
+  const c = programCaretCoords(pos);
+  const viewH = programInputEl.clientHeight;
+  if (c.top < programInputEl.scrollTop + 20) programInputEl.scrollTop = Math.max(0, c.top - 40);
+  else if (c.top > programInputEl.scrollTop + viewH - 40) programInputEl.scrollTop = c.top - viewH + 60;
+  programSyncScroll();
+}
+
+function programFindMove(delta) {
+  const f = state.program.find;
+  if (!f || !f.matches.length) return;
+  programFindSelect(f.idx + delta, true);
+}
+
+// --- input / key handling ---
+
+function programOnInput() {
+  programRefreshEmptyState();
+  programUpdateDirty();
+  programRenderOverlay();
+  programUpdateClipMenu();
+  if (state.program.find) programRecomputeFind();
+}
+
+function programOnKeyDown(e) {
+  const mod = e.ctrlKey || e.metaKey;
+  if (state.program.clip) {
+    if (e.key === "ArrowDown") { e.preventDefault(); programMoveClip(1); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); programMoveClip(-1); return; }
+    if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); programAcceptClip(); return; }
+    if (e.key === "Escape") { e.preventDefault(); programCloseClipMenu(); return; }
+  }
+  if (mod && (e.key === "s" || e.key === "S")) { e.preventDefault(); programSave(); return; }
+  if (mod && e.key === "Enter") { e.preventDefault(); programRun(); return; }
+  if (mod && (e.key === "f" || e.key === "F")) { e.preventDefault(); programOpenFind(); return; }
+  if (e.key === "Escape" && state.program.find) { e.preventDefault(); programCloseFind(); programInputEl.focus(); return; }
+  if (e.key === "Tab" && !mod) {
+    e.preventDefault();
+    const s = programInputEl.selectionStart, en = programInputEl.selectionEnd;
+    const v = programInputEl.value;
+    programInputEl.value = v.slice(0, s) + "  " + v.slice(en);
+    programInputEl.setSelectionRange(s + 2, s + 2);
+    programOnInput();
+    return;
+  }
+}
+
+function programWireEvents() {
+  programInputEl.addEventListener("input", programOnInput);
+  programInputEl.addEventListener("scroll", programSyncScroll);
+  programInputEl.addEventListener("keydown", programOnKeyDown);
+  programInputEl.addEventListener("keyup", (e) => {
+    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) programUpdateClipMenu();
+  });
+  programInputEl.addEventListener("click", programUpdateClipMenu);
+  programInputEl.addEventListener("blur", () => { setTimeout(programCloseClipMenu, 120); });
+  programSaveBtn.addEventListener("click", () => programSave());
+  programRunBtn.addEventListener("click", () => programRun());
+  programFindBtn.addEventListener("click", () => {
+    if (state.program.find) { programCloseFind(); programInputEl.focus(); } else programOpenFind();
+  });
+  $("programFindPrev").addEventListener("click", () => programFindMove(-1));
+  $("programFindNext").addEventListener("click", () => programFindMove(1));
+  $("programFindClose").addEventListener("click", () => { programCloseFind(); programInputEl.focus(); });
+  programFindInputEl.addEventListener("input", programRecomputeFind);
+  programFindInputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); programFindMove(e.shiftKey ? -1 : 1); }
+    else if (e.key === "Escape") { e.preventDefault(); programCloseFind(); programInputEl.focus(); }
+  });
+  // mousedown (not click) so accepting fires before the textarea blur closes it.
+  programClipMenuEl.addEventListener("mousedown", (e) => {
+    const item = e.target.closest("[data-i]");
+    if (!item) return;
+    e.preventDefault();
+    programAcceptClip(parseInt(item.dataset.i, 10));
+  });
+  programEmptyEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-tmpl]");
+    if (!btn) return;
+    programApplyTemplate(btn.dataset.tmpl);
+  });
+  window.addEventListener("resize", () => { if (state.mode === "program") programRenderOverlay(); });
+}
+programWireEvents();
 
 // --- PTY / xterm.js mode -------------------------------------------------
 
@@ -3019,6 +4284,7 @@ function blurActiveTerminalInput() {
 }
 
 function enterChatMode() {
+  leaveProgramView();
   state.mode = "chat";
   const pane = showTranscriptPane(state.currentId);
   transcriptEl.hidden = false;
@@ -3085,6 +4351,7 @@ function resetTerminalReplay(handle) {
 
 async function enterTerminalMode(id, options = {}) {
   if (state.mode === "chat") rememberTranscriptViewport(id);
+  leaveProgramView();
   rememberActiveTerminalState();
   state.mode = "terminal";
   activeTranscriptEl = null;
@@ -4603,6 +5870,10 @@ async function backgroundLoadOlderTranscript(id, pane, minTailSeq, alreadyLoaded
 }
 
 function handleNotification(method, params) {
+  if (method === "program/state") {
+    handleProgramState(params);
+    return;
+  }
   if (method === "session/event") {
     const { session_id, event } = params;
     // Tool-approval requests are interactive and time-sensitive —
@@ -4649,6 +5920,9 @@ function handleNotification(method, params) {
       markTranscriptStale(session_id);
     }
     if (session_id !== state.currentId) return;
+    // In program mode the transcript is offscreen and was marked stale above;
+    // it rebuilds on return to chat, so don't render live events into it now.
+    if (state.mode === "program") return;
     if (state.mode === "chat") showTranscriptPane(session_id);
     renderEvent(event, params.at);
     scrollToBottom();
@@ -4703,9 +5977,12 @@ function handleNotification(method, params) {
     state.chatWorkingById.delete(params.session_id);
     state.ptyActivityById.delete(params.session_id);
     state.widgetsById.delete(params.session_id);
+    state.program.docById.delete(params.session_id);
+    state.program.runById.delete(params.session_id);
     if (state.viewModeById.delete(params.session_id)) saveViewModePrefs();
     clearBrowserPreview(params.session_id);
     if (params.session_id === state.currentId) {
+      if (state.mode === "program") leaveProgramView();
       state.currentId = null;
       state.urlRequestedSessionId = null;
       setLocationSessionId(null, { replace: true });
