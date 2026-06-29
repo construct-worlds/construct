@@ -7793,9 +7793,13 @@ fn render_program_popup_at(
     if !popup.closing {
         render_program_clip_hover(f, app, rect, &clip_hits);
     }
-    if active && !popup.closing {
+    if should_render_program_shimmer_hover(active, popup.closing) {
         render_program_shimmer_hover(f, app, popup, rect, scroll_offset, inner, now);
     }
+}
+
+fn should_render_program_shimmer_hover(_active: bool, closing: bool) -> bool {
+    !closing
 }
 
 /// Mini session-preview popover shown while the mouse hovers a `@{session:id}`
@@ -9965,6 +9969,13 @@ mod tests {
             program_shimmer_session_at(None, md, &line_sessions, 2, area, 0, 0),
             Some("s2".to_string())
         );
+    }
+
+    #[test]
+    fn program_shimmer_hover_renders_for_unfocused_visible_program() {
+        assert!(should_render_program_shimmer_hover(true, false));
+        assert!(should_render_program_shimmer_hover(false, false));
+        assert!(!should_render_program_shimmer_hover(false, true));
     }
 
     #[test]
