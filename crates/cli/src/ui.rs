@@ -7793,7 +7793,7 @@ fn render_program_popup_at(
     if !popup.closing {
         render_program_clip_hover(f, app, rect, &clip_hits);
     }
-    if active && !popup.closing {
+    if !popup.closing {
         render_program_shimmer_hover(f, app, popup, rect, scroll_offset, inner, now);
     }
 }
