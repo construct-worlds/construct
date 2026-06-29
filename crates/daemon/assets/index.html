@@ -3943,22 +3943,20 @@ async function programSave() {
 
 // --- run (whole program, or the current selection) ---
 
-function programStartOptimisticRun(id, body, isSelection, prevSaved, selectedBlockIds) {
-  let pending;
-  if (isSelection && selectedBlockIds && selectedBlockIds.size) {
-    pending = selectedBlockIds;
-  } else {
-    const bodyIds = new Set(programBlockSpans(body).map((b) => b.id));
-    const old = state.program.runById.get(id);
-    if (old && !isSelection) {
-      const prevIds = new Set(programBlockSpans(prevSaved).map((b) => b.id));
-      pending = new Set();
-      for (const x of bodyIds) if (!prevIds.has(x)) pending.add(x);
-      for (const x of bodyIds) if (old.pendingIds.has(x)) pending.add(x);
-    } else {
-      pending = bodyIds;
-    }
-  }
+function programStartOptimisticRun(id, body, isSelection, selectedBlockIds) {
+  // A run optimistically shimmers its whole executed region — the selected
+  // blocks for a selection run, or every block of the program otherwise. This
+  // covers ALL un-settled blocks even when an active run already has the agent's
+  // shimmer on a subset: hitting Run re-runs the whole region, so every block
+  // should light up, not just the ones still pending. The daemon's authoritative
+  // active_run (returned by program.execute) narrows it immediately after.
+  //
+  // (Previously a whole-program re-run mid-flight diffed the body against the
+  // prior saved snapshot and the old pending set, so blocks the agent had
+  // already settled stayed dark — an inconsistent partial shimmer.)
+  const pending = (isSelection && selectedBlockIds && selectedBlockIds.size)
+    ? selectedBlockIds
+    : new Set(programBlockSpans(body).map((b) => b.id));
   if (!pending.size) {
     state.program.runById.delete(id);
     if (state.program.mountedId === id) { programStopShimmer(); programApplyShimmer(); }
@@ -3976,7 +3974,6 @@ async function programRun() {
   if (!doc) return;
   const selMarkdown = programSelectionMarkdown();
   const hasSel = selMarkdown != null && selMarkdown.trim() !== "";
-  const prevSaved = doc.saved;
   if (programNormalizeClipIds(programSerialize()) !== doc.saved) {
     await programSave();
     doc = state.program.docById.get(id);
@@ -3988,7 +3985,7 @@ async function programRun() {
     selectedBlockIds = new Set(programBlockSpans(selection).map((b) => b.id));
   }
   const runBody = hasSel ? selection : programSerialize();
-  programStartOptimisticRun(id, runBody, hasSel, prevSaved, selectedBlockIds);
+  programStartOptimisticRun(id, runBody, hasSel, selectedBlockIds);
   programSetMsg(hasSel ? "running selection…" : "running program…");
   try {
     const params = { session_id: id, base_version: doc.version };

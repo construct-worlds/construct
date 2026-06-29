@@ -408,7 +408,7 @@ async fn web_program_view_full_parity() {
         r###"
         (() => {
           const sid = state.program.mountedId;
-          programStartOptimisticRun(sid, programSerialize(), false, "", null);
+          programStartOptimisticRun(sid, programSerialize(), false, null);
           programApplyShimmer();
           return true;
         })()
