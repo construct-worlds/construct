@@ -1,4 +1,4 @@
-# 0054-view-pane-input-requires-view-focus
+# 0055-view-pane-input-requires-view-focus
 
 Status: accepted
 Date: 2026-06-28
