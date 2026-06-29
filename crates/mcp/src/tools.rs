@@ -495,7 +495,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 })?,
             )
             .map_err(|e| anyhow!("invalid `shimmer` (expected an array of booleans): {e}"))?;
-            // Per-block tooltips parallel to `shimmer` (spec 0056): required, and
+            // Per-block tooltips parallel to `shimmer` (spec 0057): required, and
             // every pending block must carry a non-empty tooltip.
             let tooltips: Vec<Option<String>> = serde_json::from_value(
                 args.get("tooltips").cloned().ok_or_else(|| {
@@ -547,7 +547,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 None => Vec::new(),
             };
             // A block declared pending must carry a concise run-status tooltip
-            // (spec 0056); settling needs none.
+            // (spec 0057); settling needs none.
             for decl in &shimmer {
                 if decl.shimmer
                     && decl.tooltip.as_deref().map(str::trim).unwrap_or("").is_empty()

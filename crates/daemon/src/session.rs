@@ -1557,7 +1557,7 @@ impl SessionManager {
                 );
             }
             // When present, the parallel tooltip array must line up one-to-one
-            // with the shimmer declaration (spec 0056).
+            // with the shimmer declaration (spec 0057).
             if let Some(tips) = &params.shimmer_tooltips {
                 if tips.len() != decl.len() {
                     anyhow::bail!(
@@ -1581,7 +1581,7 @@ impl SessionManager {
         )?;
         match shimmer {
             Some(decl) => {
-                // Pair each pending block with its tooltip (spec 0056): the
+                // Pair each pending block with its tooltip (spec 0057): the
                 // tooltip array is parallel to the shimmer array in document
                 // order, so index i carries block i's tooltip.
                 let pending: std::collections::HashMap<String, Option<String>> =
@@ -1649,7 +1649,7 @@ impl SessionManager {
                 continue;
             }
             // keep_pending re-adds the produced block's new id with no
-            // agent tooltip (spec 0056); it renders the fallback until the
+            // agent tooltip (spec 0057); it renders the fallback until the
             // agent declares the new id with a tooltip.
             decls.push(agentd_protocol::ProgramShimmerDecl {
                 id,
@@ -6525,7 +6525,7 @@ mod tests {
             shimmering("item one"),
             "the in-progress block stays pending"
         );
-        // The declared tooltip travels with the projection (spec 0056); settled
+        // The declared tooltip travels with the projection (spec 0057); settled
         // blocks carry none.
         let tooltip = |needle: &str| {
             res.blocks
@@ -6588,7 +6588,7 @@ mod tests {
         assert!(!shimmering("# A"));
         assert!(shimmering("# B"));
         assert!(!shimmering("# C"));
-        // The parallel tooltip array lands on the pending block (spec 0056).
+        // The parallel tooltip array lands on the pending block (spec 0057).
         let tooltip = |needle: &str| {
             res.blocks
                 .iter()
@@ -6790,7 +6790,7 @@ mod tests {
         let shim = |n: &str| res.blocks.iter().find(|b| b.text.contains(n)).unwrap().shimmer;
         assert!(shim("do the thing"), "keep_pending kept the moved block pending");
         // keep_pending re-adds the block under its NEW id with no carried-over
-        // tooltip (spec 0056): the projection reports none, so a renderer falls
+        // tooltip (spec 0057): the projection reports none, so a renderer falls
         // back to the hardcoded label until the agent re-declares with a tooltip.
         assert_eq!(
             res.blocks.iter().find(|b| b.text.contains("do the thing")).unwrap().tooltip,

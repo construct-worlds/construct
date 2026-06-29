@@ -1478,7 +1478,7 @@ pub struct ProgramRun {
     /// owns the set and publishes it, and clients map it back onto source lines
     /// via the shared block parser.
     pub pending: HashSet<String>,
-    /// Per-block run-status tooltips keyed by stable block id (spec 0056). Missing
+    /// Per-block run-status tooltips keyed by stable block id (spec 0057). Missing
     /// entries render the hardcoded fallback label on hover.
     pub pending_tooltips: HashMap<String, String>,
     /// Absolute backstop: clear no later than this regardless of signals.

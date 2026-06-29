@@ -936,7 +936,7 @@ pub struct ProgramBlockView {
     pub text: String,
     pub shimmer: bool,
     /// Concise (≤10-word) run-status tooltip stored alongside this block's
-    /// shimmer state (spec 0056). `Some` only for a pending block whose shimmer
+    /// shimmer state (spec 0057). `Some` only for a pending block whose shimmer
     /// was declared with a tooltip; `None` for settled blocks and for blocks
     /// shimmering without a stored tooltip (optimistic/legacy/in-flight), where
     /// a renderer falls back to a hardcoded label.
@@ -948,7 +948,7 @@ pub struct ProgramBlockView {
 /// (`shimmer: true`) or settled (`shimmer: false`) — the unit of the per-block
 /// shimmer declaration carried by program edits (spec 0053). When declaring a
 /// block pending, a concise `tooltip` describing its run status is required of
-/// agent callers (spec 0056) and stored alongside the shimmer state; it is
+/// agent callers (spec 0057) and stored alongside the shimmer state; it is
 /// ignored when settling a block.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProgramShimmerDecl {
@@ -960,14 +960,14 @@ pub struct ProgramShimmerDecl {
 
 /// Hardcoded fallback tooltip for a block that is shimmering without a stored
 /// tooltip — optimistic client-side shimmer before an agent supplies one,
-/// legacy run state, or a block kept pending across an edit (spec 0056).
+/// legacy run state, or a block kept pending across an edit (spec 0057).
 pub const PROGRAM_SHIMMER_FALLBACK_TOOLTIP: &str = "Working…";
 
-/// Maximum word count for a program-shimmer tooltip (spec 0056). Longer
+/// Maximum word count for a program-shimmer tooltip (spec 0057). Longer
 /// tooltips are gracefully truncated rather than rejected.
 pub const PROGRAM_SHIMMER_TOOLTIP_MAX_WORDS: usize = 10;
 
-/// Normalize a program-shimmer tooltip to its stored form (spec 0056): trim,
+/// Normalize a program-shimmer tooltip to its stored form (spec 0057): trim,
 /// collapse internal whitespace to single spaces, and truncate to at most
 /// [`PROGRAM_SHIMMER_TOOLTIP_MAX_WORDS`] words (appending `…` when truncated).
 /// Returns `None` for an empty/whitespace-only string so an absent tooltip is
@@ -1100,7 +1100,7 @@ pub struct ProgramRunProgress {
     /// (spec 0053). A block shimmers exactly while its id is in this set.
     #[serde(default)]
     pub pending_block_ids: Vec<String>,
-    /// Per-block run-status tooltips keyed by stable block id (spec 0056), kept
+    /// Per-block run-status tooltips keyed by stable block id (spec 0057), kept
     /// in sync with `pending_block_ids`: an entry exists only for a pending
     /// block whose shimmer was declared with a tooltip. Settling a block, or
     /// dropping it from the pending set, removes its entry. A pending block with
@@ -1222,7 +1222,7 @@ pub struct ProgramUpdateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shimmer: Option<Vec<bool>>,
     /// Per-block run-status tooltips parallel to `shimmer`, in document order
-    /// (spec 0056): `shimmer_tooltips[i]` is the tooltip for the i-th block,
+    /// (spec 0057): `shimmer_tooltips[i]` is the tooltip for the i-th block,
     /// used only when `shimmer[i]` is `true`. `None`, or a `None` entry, stores
     /// no tooltip for that block (the renderer falls back). When present its
     /// length must equal `shimmer`'s; the MCP tool requires a tooltip for every
