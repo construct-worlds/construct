@@ -15,6 +15,7 @@ use agentd_protocol::{
     SessionAttachClipboardParams, SessionIdParams, SessionInputParams, SessionMoveParams,
     SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
     SessionSetGroupParams, SessionSetPinnedParams, SessionSetProjectParams, SessionSetTitleParams,
+    SessionSetFocusedParams,
     SessionSetViewParams, SessionToolActionParams, SessionToolDecisionParams, SubscribeParams,
     TranscriptParams, IPC_VERSION,
 };
@@ -1230,6 +1231,13 @@ async fn dispatch(
     dispatch_entry!(ipc_method::SESSION_MARK_SEEN, {
         let p = params!(req, SessionIdParams);
         match manager.mark_seen(&p.session_id).await {
+            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::SESSION_SET_FOCUSED, {
+        let p = params!(req, SessionSetFocusedParams);
+        match manager.set_focused_sessions(&p.session_ids).await {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }

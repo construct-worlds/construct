@@ -14,6 +14,7 @@ use agentd_protocol::{
     SessionEmitEventParams, SessionIdParams, SessionInputParams, SessionMoveParams,
     SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
     SessionSetPinnedParams, SessionSetProjectParams, SessionSetTitleParams, SessionSetViewParams,
+    SessionSetFocusedParams,
     SessionSummary, SessionToolDecisionParams, SubscribeParams, TranscriptParams, TranscriptResult,
 };
 use anyhow::{anyhow, Context, Result};
@@ -649,6 +650,18 @@ impl Client {
                 ipc_method::SESSION_MARK_SEEN,
                 &SessionIdParams {
                     session_id: id.to_string(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+    /// Update the set of visible/focused sessions in the daemon.
+    pub async fn set_focused_sessions(&self, ids: Vec<String>) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::SESSION_SET_FOCUSED,
+                &SessionSetFocusedParams {
+                    session_ids: ids,
                 },
             )
             .await?;
