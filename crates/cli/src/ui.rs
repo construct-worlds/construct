@@ -9032,7 +9032,7 @@ fn program_inline_with_clips(app: Option<&App>, text: &str, base: usize) -> (Str
     while let Some(start) = rest.find("@{") {
         let before = &rest[..start];
         out.push_str(before);
-        visual += before.chars().count();
+        visual += UnicodeWidthStr::width(before);
         let after_marker = &rest[start + 2..];
         let Some(end) = after_marker.find('}') else {
             out.push_str(&rest[start..]);
@@ -9556,7 +9556,7 @@ fn program_smart_clip_span<'a>(app: &App, raw_clip: &str, in_match: bool, is_act
 
 fn program_smart_clip_visual_width(app: Option<&App>, raw_clip: &str) -> usize {
     let (_, label) = program_smart_clip_label(app, raw_clip);
-    label.chars().count() + 2
+    UnicodeWidthStr::width(label.as_str()) + 2
 }
 
 /// Parse a smart-clip body (`session:abc`, `harness:codex`, or
@@ -10084,6 +10084,31 @@ mod tests {
         // A cell inside the first chip resolves to s1; the gap between chips does not.
         assert!(hits.iter().any(|h| h.contains(5, 0) && h.session_id == "s1"));
         assert!(!hits.iter().any(|h| h.contains(20, 0)));
+    }
+
+    #[test]
+    fn program_session_clip_hits_use_terminal_display_width() {
+        // Hit-testing must track terminal cells, not Unicode scalar counts. Wide
+        // glyphs before the chip shift its painted start, and wide glyphs inside
+        // the fallback session label expand its painted end.
+        let area = Rect::new(0, 0, 80, 6);
+        let md = "🚀 @{session:火}";
+        let hits = program_session_clip_hits(None, md, 0, area);
+        assert_eq!(
+            hits,
+            vec![crate::app::ProgramClipHit {
+                col_start: UnicodeWidthStr::width("🚀 ") as u16,
+                col_end: UnicodeWidthStr::width("🚀  session 火 ") as u16,
+                row: 0,
+                session_id: "火".into(),
+            }]
+        );
+        let hit = &hits[0];
+        assert!(
+            hit.contains(hit.col_end - 1, 0),
+            "rightmost painted wide-label cell must hover"
+        );
+        assert!(!hit.contains(hit.col_end, 0));
     }
 
     #[test]
