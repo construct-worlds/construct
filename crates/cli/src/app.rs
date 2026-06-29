@@ -1098,6 +1098,11 @@ struct SessionHydration {
     agent_status: Option<agentd_protocol::AgentStatus>,
     ui_panels: HashMap<String, agentd_protocol::UiPanel>,
     status_messages: Vec<String>,
+    /// True when the pre-rendered screen was in alt-screen mode (e.g. grok,
+    /// interactive codex). Used by `apply_hydration_state` to force a bump
+    /// resize so the child gets SIGWINCH and repaints even when the terminal
+    /// dimensions haven't changed since the last TUI session.
+    history_is_alt_screen: bool,
 }
 
 struct SessionHydrationRequest {
@@ -1305,8 +1310,10 @@ async fn load_session_hydration(req: SessionHydrationRequest) -> Result<SessionH
                 req.is_headless,
             );
             let (cols, rows) = req.terminal_pane_size;
-            let _ = h.replay(cols.max(1), rows.max(1), 0);
-            (Some(h), editor_state, agent_status, ui_panels)
+            let pre_render = h.replay(cols.max(1), rows.max(1), 0);
+            let is_alt_screen = pre_render.screen.alternate_screen();
+            drop(pre_render);
+            (Some(h), editor_state, agent_status, ui_panels, is_alt_screen)
         } else {
             let mut ui_panels: HashMap<String, agentd_protocol::UiPanel> = detail
                 .ui_panels
@@ -1325,7 +1332,7 @@ async fn load_session_hydration(req: SessionHydrationRequest) -> Result<SessionH
                     _ => {}
                 }
             }
-            (None, None, None, ui_panels)
+            (None, None, None, ui_panels, false)
         };
 
         Ok(SessionHydration {
@@ -1336,6 +1343,7 @@ async fn load_session_hydration(req: SessionHydrationRequest) -> Result<SessionH
             agent_status: history.2,
             ui_panels: history.3,
             status_messages,
+            history_is_alt_screen: history.4,
         })
     })
     .await
@@ -3452,6 +3460,18 @@ impl App {
             let (cols, rows) = self
                 .session_pane_size(&session_id)
                 .unwrap_or(self.terminal_pane_size);
+            // For alt-screen PTY sessions (grok, interactive codex, etc.), the
+            // daemon's pty_resize dedup silently drops a same-size resize, which
+            // means the child never gets SIGWINCH and doesn't repaint after a
+            // TUI-only restart. Send a one-column bump first — mirroring the
+            // force_redraw_size_on_resume pattern — to guarantee a SIGWINCH even
+            // when the terminal dimensions haven't changed since the last session.
+            if hydration.history_is_alt_screen && cols > 1 {
+                let _ = self
+                    .client
+                    .pty_resize(&session_id, cols.saturating_add(1), rows)
+                    .await;
+            }
             let _ = self.client.pty_resize(&session_id, cols, rows).await;
         }
         if let Some(state) = hydration.editor_state {
@@ -14856,6 +14876,7 @@ mod tests {
             agent_status: None,
             ui_panels: HashMap::new(),
             status_messages: Vec::new(),
+            history_is_alt_screen: false,
         };
 
         app.apply_session_hydration(hydration).await;
@@ -15971,6 +15992,7 @@ mod tests {
             agent_status: None,
             ui_panels: HashMap::new(),
             status_messages: Vec::new(),
+            history_is_alt_screen: false,
         })
         .await;
 
@@ -16026,6 +16048,7 @@ mod tests {
                 },
             )]),
             status_messages: Vec::new(),
+            history_is_alt_screen: false,
         })
         .await;
 
