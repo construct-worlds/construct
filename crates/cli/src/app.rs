@@ -3201,8 +3201,8 @@ impl App {
             self.start_session_transition();
         }
         // Switching to a session consumes its "needs you" marker.
-        self.report_seen(&id);
         self.selection = Selection::Session(id);
+        self.report_focused_sessions();
         self.transcript.clear();
         self.transcript_session = None;
         self.transcript_scroll = u16::MAX;
@@ -3249,6 +3249,21 @@ impl App {
         let id = id.to_string();
         tokio::spawn(async move {
             let _ = client.mark_seen(&id).await;
+        });
+    }
+
+    /// Tell the daemon which sessions are currently visible on the screen so it
+    /// can suppress / clear the unblock markers (`needs_attention`) for all of them.
+    fn report_focused_sessions(&self) {
+        let client = self.client.clone();
+        let ids: Vec<String> = self
+            .main_windows
+            .visible_session_ids()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        tokio::spawn(async move {
+            let _ = client.set_focused_sessions(ids).await;
         });
     }
 
@@ -4151,6 +4166,7 @@ impl App {
             // the outgoing one, reveal the incoming). A no-op when the
             // selection didn't actually change.
             self.sync_program_popup_with_selection();
+            self.report_focused_sessions();
         }
     }
 
@@ -4245,6 +4261,7 @@ impl App {
         let selection = self.selection.clone();
         self.main_windows = MainWindowTree::single(self.active_window_id, selection);
         self.set_status("only current window".into());
+        self.report_focused_sessions();
     }
 
     fn set_split_ratio_by_order(&mut self, target_parent: u64, ratio: u16) -> bool {
@@ -4899,11 +4916,9 @@ impl App {
                             self.sessions
                                 .sort_by(|a, b| b.created_at.cmp(&a.created_at));
                         }
-                        // If the session that just changed is the one we're
-                        // viewing, consume its marker right away — covers a stop
-                        // that lands while it's focused and re-asserts focus
-                        // after a daemon restart.
-                        if self.selection.session_id() == Some(id.as_str())
+                        // If the session that just changed is visible on screen,
+                        // consume its marker right away.
+                        if self.session_visible_on_screen(&id)
                             && self
                                 .sessions
                                 .iter()

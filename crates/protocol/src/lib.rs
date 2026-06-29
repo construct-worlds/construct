@@ -161,6 +161,11 @@ pub struct SessionIdParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSetFocusedParams {
+    pub session_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInputParams {
     pub session_id: String,
     pub text: String,
@@ -825,6 +830,7 @@ pub mod ipc_method {
     /// Clear a session's `needs_attention` marker and record it as the focused
     /// session (so a concurrent non-`Running` transition won't re-raise it).
     pub const SESSION_MARK_SEEN: &str = "session.mark_seen";
+    pub const SESSION_SET_FOCUSED: &str = "session.set_focused";
     pub const SESSION_SET_TITLE: &str = "session.set_title";
     pub const SESSION_SET_APPROVAL_MODE: &str = "session.set_approval_mode";
     pub const SESSION_TOOL_DECISION: &str = "session.tool_decision";

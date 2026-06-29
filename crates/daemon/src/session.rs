@@ -748,10 +748,9 @@ pub struct SessionManager {
     config: Arc<Config>,
     adapter_runtime_dir: PathBuf,
     sessions: RwLock<HashMap<String, Arc<SessionEntry>>>,
-    /// The session the operator most recently switched to (via `mark_seen`).
-    /// Suppresses the `needs_attention` marker for the session being actively
-    /// viewed. In-memory only; global (last switch wins). See spec 0054.
-    focused_session: std::sync::Mutex<Option<String>>,
+    /// The sessions the operator currently has visible/focused (via `mark_seen` or `set_focused_sessions`).
+    /// Suppresses the `needs_attention` marker for these sessions. In-memory only. See spec 0054.
+    focused_sessions: std::sync::Mutex<std::collections::HashSet<String>>,
     groups: RwLock<HashMap<String, Arc<GroupEntry>>>,
     broadcast: broadcast::Sender<BroadcastMsg>,
     /// Recurring-prompt loops attached to sessions. The scheduler
@@ -1033,7 +1032,7 @@ impl SessionManager {
                 config,
                 adapter_runtime_dir,
                 sessions: RwLock::new(sessions),
-                focused_session: std::sync::Mutex::new(None),
+                focused_sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
                 groups: RwLock::new(groups),
                 broadcast,
                 loops,
@@ -2729,7 +2728,7 @@ impl SessionManager {
             // PTY output the operator isn't looking at is unseen activity — it's
             // what makes a later idle "need you". Output in the focused session
             // (their own keystrokes echoing) must not count. See spec 0054.
-            if is_active && self.focused_session.lock().unwrap().as_deref() != Some(entry.id.as_str()) {
+            if is_active && !self.focused_sessions.lock().unwrap().contains(&entry.id) {
                 entry.unseen_activity.store(true, Ordering::Relaxed);
             }
             // Track activity for the "session looks busy" signal, and undo a
@@ -2782,7 +2781,7 @@ impl SessionManager {
         }
         // Update summary based on event semantics.
         let is_focused =
-            self.focused_session.lock().unwrap().as_deref() == Some(entry.id.as_str());
+            self.focused_sessions.lock().unwrap().contains(&entry.id);
         // Genuine activity in an unfocused session is what makes a later stop
         // "need you" — record it so the marker logic below can require it.
         if !is_focused && event_is_unseen_activity(&event) {
@@ -4042,7 +4041,11 @@ impl SessionManager {
     /// currently-focused session, so a concurrent non-`Running` transition
     /// won't immediately re-raise the marker for the session being viewed.
     pub async fn mark_seen(&self, id: &str) -> Result<()> {
-        *self.focused_session.lock().unwrap() = Some(id.to_string());
+        {
+            let mut focused = self.focused_sessions.lock().unwrap();
+            focused.clear();
+            focused.insert(id.to_string());
+        }
         let entry = self
             .get_entry(id)
             .await
@@ -4064,6 +4067,42 @@ impl SessionManager {
             .send(BroadcastMsg::State(StateNotificationPayload {
                 session: snapshot,
             }));
+        Ok(())
+    }
+
+    /// Update the set of visible/focused sessions, consuming their unseen activity
+    /// and clearing their needs_attention markers.
+    pub async fn set_focused_sessions(&self, ids: &[String]) -> Result<()> {
+        {
+            let mut focused = self.focused_sessions.lock().unwrap();
+            focused.clear();
+            for id in ids {
+                focused.insert(id.clone());
+            }
+        }
+        for id in ids {
+            if let Some(entry) = self.get_entry(id).await {
+                // Viewing the session also consumes any unseen activity.
+                entry.unseen_activity.store(false, Ordering::Relaxed);
+                let snapshot = {
+                    let mut s = entry.summary.write().await;
+                    if s.needs_attention {
+                        s.needs_attention = false;
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(snapshot) = snapshot {
+                    self.storage.save_summary(&snapshot)?;
+                    let _ = self
+                        .broadcast
+                        .send(BroadcastMsg::State(StateNotificationPayload {
+                            session: snapshot,
+                        }));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -6048,6 +6087,75 @@ mod tests {
         assert!(
             !s.summary.read().await.needs_attention,
             "own keystrokes in a focused session must not raise the marker on idle",
+        );
+    }
+
+    #[tokio::test]
+    async fn marker_ignores_own_typing_in_split_view_focused_sessions() {
+        use tempfile::tempdir;
+        use tokio::sync::RwLock;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+            let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        let manager = Arc::new(mgr);
+
+        let build = |id: &str, state: SessionState| {
+            let mut summary =
+                placement_summary(id, 0, None, agentd_protocol::SessionKind::User);
+            summary.harness = "claude".into();
+            summary.has_pty = true;
+            summary.state = state;
+            Arc::new(SessionEntry {
+                id: id.to_string(),
+                summary: RwLock::new(summary),
+                transcript_count: AtomicU64::new(0),
+                adapter: tokio::sync::Mutex::new(None),
+                pty: tokio::sync::Mutex::new(PtyState::default()),
+                deleted: AtomicBool::new(false),
+                archived: AtomicBool::new(false),
+                title_gen_attempted: AtomicBool::new(false),
+                pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+                tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
+                pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
+                unseen_activity: AtomicBool::new(false),
+            })
+        };
+
+        // Create two sessions running in split view.
+        let s1 = build("s1", SessionState::Running);
+        let s2 = build("s2", SessionState::Running);
+        {
+            let mut sessions = manager.sessions.write().await;
+            sessions.insert("s1".into(), s1.clone());
+            sessions.insert("s2".into(), s2.clone());
+        }
+
+        // Both s1 and s2 are visible/focused.
+        manager.set_focused_sessions(&["s1".to_string(), "s2".to_string()]).await.expect("set_focused_sessions");
+
+        // PTY activity in s2 (the sibling pane) happens while it is visible.
+        manager.handle_event(&s2, SessionEvent::pty(b"active output")).await;
+        
+        // Quiescence sweep flips s2 back to AwaitingInput.
+        manager
+            .handle_event(
+                &s2,
+                SessionEvent::Status {
+                    state: SessionState::AwaitingInput,
+                    detail: None,
+                },
+            )
+            .await;
+
+        assert!(
+            !s2.summary.read().await.needs_attention,
+            "visible split-pane sessions must not raise the needs_attention marker on idle",
         );
     }
 
