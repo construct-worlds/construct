@@ -1,7 +1,12 @@
 use super::*;
 
 impl App {
-    pub(super) fn place_program_cursor(&mut self, modal: ratatui::layout::Rect, col: u16, row: u16) {
+    pub(super) fn place_program_cursor(
+        &mut self,
+        modal: ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) {
         let cursor = {
             let app: &App = self;
             let Some(popup) = app.program_popup.as_ref() else {
@@ -256,6 +261,10 @@ impl App {
         if self.program_popup.as_ref().is_some_and(|p| p.closing) {
             return;
         }
+        let before = self
+            .program_popup
+            .as_ref()
+            .map(|popup| popup.buffer.clone());
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let super_mod = key.modifiers.contains(KeyModifiers::SUPER);
@@ -293,12 +302,8 @@ impl App {
                 self.move_program_smart_clip_selection(1)
             }
             // Right drills into the highlighted category's submenu; Left backs out.
-            KeyCode::Right if self.program_smart_clip_active() => {
-                self.program_smart_clip_expand()
-            }
-            KeyCode::Left if self.program_smart_clip_active() => {
-                self.program_smart_clip_collapse()
-            }
+            KeyCode::Right if self.program_smart_clip_active() => self.program_smart_clip_expand(),
+            KeyCode::Left if self.program_smart_clip_active() => self.program_smart_clip_collapse(),
             KeyCode::Char(' ') if ctrl => self.begin_program_selection(),
             KeyCode::Char('g') if ctrl => {
                 // C-g cancels: dismiss the transient smart-clip picker and
@@ -398,6 +403,60 @@ impl App {
         // Any cursor move or edit above may have pushed the caret out of the
         // visible window; re-anchor the scroll so it stays on-screen.
         self.follow_program_scroll();
+        self.publish_program_cursor().await;
+        if let Some(before) = before {
+            self.flush_program_live_edit(before).await;
+        }
+    }
+
+    async fn publish_program_cursor(&mut self) {
+        let Some(popup) = self.program_popup.as_ref() else {
+            return;
+        };
+        let params = agentd_protocol::ProgramCursorParams {
+            session_id: popup.program.session_id.clone(),
+            cursor: popup.cursor,
+            selection_anchor: popup.selection.as_ref().map(|s| s.anchor),
+            selection_head: popup.selection.as_ref().map(|s| s.head),
+            version: Some(popup.program.version),
+            label: Some("TUI".to_string()),
+            clear: false,
+        };
+        if let Ok(result) = self.client.program_cursor(params).await {
+            self.own_program_client_id = Some(result.cursor.client_id);
+        }
+    }
+
+    async fn flush_program_live_edit(&mut self, before: String) {
+        let Some(popup) = self.program_popup.as_ref() else {
+            return;
+        };
+        if before == popup.buffer {
+            return;
+        }
+        let Some(edit) = program_anchored_live_edit(&before, &popup.buffer) else {
+            return;
+        };
+        let session_id = popup.program.session_id.clone();
+        let params = agentd_protocol::ProgramEditParams {
+            session_id: session_id.clone(),
+            edits: vec![edit],
+            actor: agentd_protocol::ProgramUpdateActor::Human,
+            note: None,
+            shimmer: Vec::new(),
+        };
+        let Ok(result) = self.client.program_edit(params).await else {
+            return;
+        };
+        let Some(popup) = self.program_popup.as_mut() else {
+            return;
+        };
+        if popup.program.session_id != session_id {
+            return;
+        }
+        popup.program = result.program;
+        popup.saved_markdown = popup.buffer.clone();
+        popup.blocks = result.blocks;
     }
 
     /// Indent (or, when `outdent`, un-indent) the markdown list item(s) under
@@ -699,7 +758,9 @@ impl App {
         let selectable = self
             .program_popup
             .as_ref()
-            .map(|popup| Self::program_smart_clip_selectable_count(&self.program_smart_clip_rows(popup)))
+            .map(|popup| {
+                Self::program_smart_clip_selectable_count(&self.program_smart_clip_rows(popup))
+            })
             .unwrap_or(0);
         let Some(popup) = self.program_popup.as_mut() else {
             return;
@@ -732,7 +793,8 @@ impl App {
             return;
         };
         let rows = self.program_smart_clip_rows(popup);
-        let Some(row) = Self::program_smart_clip_selected_row(&rows, search.selected).cloned() else {
+        let Some(row) = Self::program_smart_clip_selected_row(&rows, search.selected).cloned()
+        else {
             return;
         };
         match row {
@@ -793,9 +855,9 @@ impl App {
             self.program_smart_clip_root_rows(popup)
                 .iter()
                 .filter(|r| r.is_selectable())
-                .position(|r| {
-                    matches!(r, ProgramSmartClipRow::Category { group: g, .. } if *g == group)
-                })
+                .position(
+                    |r| matches!(r, ProgramSmartClipRow::Category { group: g, .. } if *g == group),
+                )
                 .unwrap_or(0)
         };
         if let Some(popup) = self.program_popup.as_mut() {
@@ -916,10 +978,7 @@ impl App {
 
     /// The rows on screen for the picker's current view — the single source of
     /// truth shared by navigation, acceptance, and rendering.
-    pub(crate) fn program_smart_clip_rows(
-        &self,
-        popup: &ProgramPopup,
-    ) -> Vec<ProgramSmartClipRow> {
+    pub(crate) fn program_smart_clip_rows(&self, popup: &ProgramPopup) -> Vec<ProgramSmartClipRow> {
         match popup.smart_clip.as_ref().map(|search| search.view) {
             Some(ProgramSmartClipView::Submenu(group)) => {
                 self.program_smart_clip_submenu_rows(popup, group)
@@ -1404,7 +1463,11 @@ impl App {
         Self::update_program_smart_clip_after_cursor_move(popup);
     }
 
-    pub(super) fn program_horizontal_cursor_target(&self, popup: &ProgramPopup, delta: isize) -> usize {
+    pub(super) fn program_horizontal_cursor_target(
+        &self,
+        popup: &ProgramPopup,
+        delta: isize,
+    ) -> usize {
         let mut cursor = popup.cursor;
         let steps = delta.unsigned_abs();
         let direction = delta.signum();
@@ -1615,15 +1678,13 @@ impl App {
         if popup.cursor == 0 {
             return;
         }
-        let (char_start, char_end) =
-            if let Some(range) = program_smart_clip_range_before_or_containing(
-                &popup.buffer,
-                popup.cursor,
-            ) {
-                (range.start, range.end)
-            } else {
-                (popup.cursor - 1, popup.cursor)
-            };
+        let (char_start, char_end) = if let Some(range) =
+            program_smart_clip_range_before_or_containing(&popup.buffer, popup.cursor)
+        {
+            (range.start, range.end)
+        } else {
+            (popup.cursor - 1, popup.cursor)
+        };
         let (start, end) = {
             let start = byte_pos(&popup.buffer, char_start);
             let end = byte_pos(&popup.buffer, char_end);
@@ -1658,15 +1719,13 @@ impl App {
         if popup.cursor >= popup.buffer.chars().count() {
             return;
         }
-        let (char_start, char_end) =
-            if let Some(range) = program_smart_clip_range_at_or_containing(
-                &popup.buffer,
-                popup.cursor,
-            ) {
-                (range.start, range.end)
-            } else {
-                (popup.cursor, popup.cursor + 1)
-            };
+        let (char_start, char_end) = if let Some(range) =
+            program_smart_clip_range_at_or_containing(&popup.buffer, popup.cursor)
+        {
+            (range.start, range.end)
+        } else {
+            (popup.cursor, popup.cursor + 1)
+        };
         let (start, end) = {
             let start = byte_pos(&popup.buffer, char_start);
             let end = byte_pos(&popup.buffer, char_end);
@@ -1683,5 +1742,56 @@ impl App {
         popup.smart_clip = None;
         Self::update_program_smart_clip_after_cursor_move(popup);
     }
+}
 
+fn program_anchored_live_edit(before: &str, after: &str) -> Option<agentd_protocol::ProgramEdit> {
+    if before == after {
+        return None;
+    }
+    let before_chars: Vec<char> = before.chars().collect();
+    let after_chars: Vec<char> = after.chars().collect();
+    let mut start = 0usize;
+    while start < before_chars.len()
+        && start < after_chars.len()
+        && before_chars[start] == after_chars[start]
+    {
+        start += 1;
+    }
+    let mut old_end = before_chars.len();
+    let mut new_end = after_chars.len();
+    while old_end > start
+        && new_end > start
+        && before_chars[old_end - 1] == after_chars[new_end - 1]
+    {
+        old_end -= 1;
+        new_end -= 1;
+    }
+    let max_context = before_chars.len().min(240);
+    for ctx in 0..=max_context {
+        let a = start.saturating_sub(ctx);
+        let b = (old_end + ctx).min(before_chars.len());
+        if a == b {
+            continue;
+        }
+        let old_string: String = before_chars[a..b].iter().collect();
+        if before.matches(&old_string).count() != 1 {
+            continue;
+        }
+        let mut new_string = String::new();
+        new_string.extend(before_chars[a..start].iter());
+        new_string.extend(after_chars[start..new_end].iter());
+        new_string.extend(before_chars[old_end..b].iter());
+        return Some(agentd_protocol::ProgramEdit {
+            old_string,
+            new_string,
+            replace_all: false,
+            keep_pending: false,
+        });
+    }
+    Some(agentd_protocol::ProgramEdit {
+        old_string: before.to_string(),
+        new_string: after.to_string(),
+        replace_all: false,
+        keep_pending: false,
+    })
 }

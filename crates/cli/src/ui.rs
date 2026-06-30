@@ -5559,6 +5559,16 @@ fn render_editor_cursor(f: &mut Frame, pos: Position, theme: &Theme) {
     );
 }
 
+fn program_collab_cursor_style(theme: &Theme, color_index: u8) -> Style {
+    let fg = match color_index % 4 {
+        1 => theme.accent,
+        2 => Color::Yellow,
+        3 => Color::Magenta,
+        _ => theme.accent_alt,
+    };
+    Style::default().fg(fg).add_modifier(Modifier::BOLD)
+}
+
 fn editor_pane_rows(
     state: Option<&crate::app::EditorState>,
     agent_status: Option<&agentd_protocol::AgentStatus>,
@@ -7935,6 +7945,7 @@ fn render_program_popup_at(
             }
             render_program_smart_clip_picker(f, app, popup, pos, inner);
         }
+        render_program_collab_cursors(f, app, popup, scroll_offset, inner);
     }
     if active && !popup.closing {
         render_program_selection_context_menu(f, app, popup, scroll_offset, inner);
@@ -7945,6 +7956,54 @@ fn render_program_popup_at(
     }
     if !popup.closing {
         render_program_shimmer_hover(f, app, popup, rect, scroll_offset, inner, now);
+    }
+}
+
+fn render_program_collab_cursors(
+    f: &mut Frame,
+    app: &App,
+    popup: &crate::app::ProgramPopup,
+    scroll_offset: usize,
+    inner: Rect,
+) {
+    let max_cursor = popup.buffer.chars().count();
+    for cursor in app.program_collaborators.values() {
+        if !cursor.active || cursor.session_id != popup.program.session_id {
+            continue;
+        }
+        if app.own_program_client_id.as_deref() == Some(cursor.client_id.as_str()) {
+            continue;
+        }
+        let Some(pos) = program_cursor_position(
+            Some(app),
+            &popup.buffer,
+            cursor.cursor.min(max_cursor),
+            scroll_offset,
+            inner,
+        ) else {
+            continue;
+        };
+        let Some(cell) = f.buffer_mut().cell_mut(pos) else {
+            continue;
+        };
+        cell.set_symbol("│");
+        cell.set_style(program_collab_cursor_style(&app.theme, cursor.color_index));
+        let label = cursor.label.trim();
+        if !label.is_empty() && pos.y > inner.y {
+            let max_w = inner
+                .right()
+                .saturating_sub(pos.x.saturating_add(1))
+                .min(12) as usize;
+            if max_w > 0 {
+                let label: String = label.chars().take(max_w).collect();
+                let rect = Rect::new(pos.x.saturating_add(1), pos.y - 1, max_w as u16, 1);
+                f.render_widget(
+                    Paragraph::new(label)
+                        .style(program_collab_cursor_style(&app.theme, cursor.color_index)),
+                    rect,
+                );
+            }
+        }
     }
 }
 
@@ -11515,10 +11574,7 @@ mod tests {
         let lines = chat_lines(&Theme::default(), &events);
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(lines.len(), 4, "expected 4 visual lines, got {rendered:?}");
-        assert!(
-            rendered[0].contains("agent: first line"),
-            "{rendered:?}"
-        );
+        assert!(rendered[0].contains("agent: first line"), "{rendered:?}");
         assert_eq!(rendered[1], "second line");
         assert_eq!(rendered[2], "");
         assert_eq!(rendered[3], "fourth line");

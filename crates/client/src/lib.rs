@@ -2,20 +2,20 @@
 
 use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
-    ipc_method, transport, ProgramEditParams, ProgramExecuteParams, ProgramExecuteResult,
-    ProgramGetParams, ProgramGetResult, ProgramListTemplatesResult, ProgramUpdateActor,
-    ProgramUpdateParams, ProgramUpdateResult,
-    ChatViewerActiveResult, ClientView, CreateSessionParams, DiffResult, ErrorObject,
-    GroupCreateParams, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
+    ipc_method, transport, ChatViewerActiveResult, ClientView, CreateSessionParams, DiffResult,
+    ErrorObject, GroupCreateParams, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
     GroupSetCollapsedParams, GroupSummary, HarnessInfo, MoveDirection, Notification, PingResult,
-    ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams, ProjectMoveParams,
-    ProjectRenameParams, ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, PtySize,
-    Request, Response, SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
+    ProgramCursorParams, ProgramCursorResult, ProgramEditParams, ProgramExecuteParams,
+    ProgramExecuteResult, ProgramGetParams, ProgramGetResult, ProgramListTemplatesResult,
+    ProgramUpdateActor, ProgramUpdateParams, ProgramUpdateResult, ProjectCreateParams,
+    ProjectCreateResult, ProjectDeleteParams, ProjectMoveParams, ProjectRenameParams,
+    ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, PtySize, Request, Response,
+    SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
     SessionEmitEventParams, SessionIdParams, SessionInputParams, SessionMoveParams,
     SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
-    SessionSetPinnedParams, SessionSetProjectParams, SessionSetTitleParams, SessionSetViewParams,
-    SessionSetFocusedParams,
-    SessionSummary, SessionToolDecisionParams, SubscribeParams, TranscriptParams, TranscriptResult,
+    SessionSetFocusedParams, SessionSetPinnedParams, SessionSetProjectParams,
+    SessionSetTitleParams, SessionSetViewParams, SessionSummary, SessionToolDecisionParams,
+    SubscribeParams, TranscriptParams, TranscriptResult,
 };
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
@@ -223,7 +223,13 @@ impl Client {
     pub async fn program_edit(&self, params: ProgramEditParams) -> Result<ProgramUpdateResult> {
         self.request(ipc_method::PROGRAM_EDIT, &params).await
     }
-    pub async fn program_execute(&self, params: ProgramExecuteParams) -> Result<ProgramExecuteResult> {
+    pub async fn program_cursor(&self, params: ProgramCursorParams) -> Result<ProgramCursorResult> {
+        self.request(ipc_method::PROGRAM_CURSOR, &params).await
+    }
+    pub async fn program_execute(
+        &self,
+        params: ProgramExecuteParams,
+    ) -> Result<ProgramExecuteResult> {
         self.request(ipc_method::PROGRAM_EXECUTE, &params).await
     }
     pub async fn program_templates(&self) -> Result<ProgramListTemplatesResult> {
@@ -413,20 +419,20 @@ impl Client {
 
         let new_id = self
             .create(CreateSessionParams {
-            harness: harness.to_string(),
-            cwd: src.cwd.clone(),
-            prompt,
-            model,
-            title,
-            mode,
-            pty_size,
-            worktree: false,
-            env: HashMap::new(),
-            args: Vec::new(),
-            kind: agentd_protocol::SessionKind::User,
-            parent_session_id: None,        // sibling, not a subagent
-            group_id: src.group_id.clone(), // same group → rendered alongside the source
-            position_after_session_id: Some(src.id.clone()),
+                harness: harness.to_string(),
+                cwd: src.cwd.clone(),
+                prompt,
+                model,
+                title,
+                mode,
+                pty_size,
+                worktree: false,
+                env: HashMap::new(),
+                args: Vec::new(),
+                kind: agentd_protocol::SessionKind::User,
+                parent_session_id: None,        // sibling, not a subagent
+                group_id: src.group_id.clone(), // same group → rendered alongside the source
+                position_after_session_id: Some(src.id.clone()),
             })
             .await?;
 
@@ -660,9 +666,7 @@ impl Client {
         let _: serde_json::Value = self
             .request(
                 ipc_method::SESSION_SET_FOCUSED,
-                &SessionSetFocusedParams {
-                    session_ids: ids,
-                },
+                &SessionSetFocusedParams { session_ids: ids },
             )
             .await?;
         Ok(())

@@ -5,19 +5,18 @@ use crate::remote::RemoteState;
 use crate::session::{BroadcastMsg, SessionManager};
 use agentd_protocol::jsonrpc::{self, MessageKind};
 use agentd_protocol::{
-    ipc_method, ipc_notif, transport, ProgramEditParams, ProgramExecuteParams, ProgramGetParams,
-    ProgramUpdateParams,
-    ChatViewerActiveResult, CreateSessionParams, ErrorObject, GroupCreateParams, GroupCreateResult,
-    GroupDeleteParams, GroupMoveParams, GroupRenameParams, GroupSetCollapsedParams, Notification,
-    PingResult, ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams,
-    ProjectDeletedNotificationPayload, ProjectMoveParams, ProjectRenameParams,
-    ProjectSetCollapsedParams, ProjectStateNotificationPayload, PtyReplayParams, Request, Response,
-    SessionAttachClipboardParams, SessionIdParams, SessionInputParams, SessionMoveParams,
-    SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
-    SessionSetGroupParams, SessionSetPinnedParams, SessionSetProjectParams, SessionSetTitleParams,
-    SessionSetFocusedParams,
-    SessionSetViewParams, SessionToolActionParams, SessionToolDecisionParams, SubscribeParams,
-    TranscriptParams, IPC_VERSION,
+    ipc_method, ipc_notif, transport, ChatViewerActiveResult, CreateSessionParams, ErrorObject,
+    GroupCreateParams, GroupCreateResult, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
+    GroupSetCollapsedParams, Notification, PingResult, ProgramCursorParams, ProgramEditParams,
+    ProgramExecuteParams, ProgramGetParams, ProgramUpdateParams, ProjectCreateParams,
+    ProjectCreateResult, ProjectDeleteParams, ProjectDeletedNotificationPayload, ProjectMoveParams,
+    ProjectRenameParams, ProjectSetCollapsedParams, ProjectStateNotificationPayload,
+    PtyReplayParams, Request, Response, SessionAttachClipboardParams, SessionIdParams,
+    SessionInputParams, SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams,
+    SessionSetApprovalModeParams, SessionSetFocusedParams, SessionSetGroupParams,
+    SessionSetPinnedParams, SessionSetProjectParams, SessionSetTitleParams, SessionSetViewParams,
+    SessionToolActionParams, SessionToolDecisionParams, SubscribeParams, TranscriptParams,
+    IPC_VERSION,
 };
 use anyhow::{Context, Result};
 use futures::{SinkExt as _, StreamExt as _};
@@ -924,6 +923,7 @@ fn forward_broadcast(
             BroadcastMsg::State(s) => s.session.id == *f,
             BroadcastMsg::Deleted(d) => d.session_id == *f,
             BroadcastMsg::ProgramState(c) => c.program.session_id == *f,
+            BroadcastMsg::ProgramCursor(c) => c.cursor.session_id == *f,
             // Group + remote-state notifications aren't session-
             // specific; always forward even when a session filter
             // is set so the local TUI's remote badge stays accurate
@@ -965,6 +965,13 @@ fn forward_broadcast(
                 Err(_) => return,
             };
             Notification::new(ipc_notif::PROGRAM_STATE, Some(p))
+        }
+        BroadcastMsg::ProgramCursor(c) => {
+            let p = match serde_json::to_value(&c) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            Notification::new(ipc_notif::PROGRAM_CURSOR, Some(p))
         }
         BroadcastMsg::GroupState(g) => {
             let p = match serde_json::to_value(&g) {
@@ -1031,9 +1038,7 @@ async fn dispatch(
         ($request:expr, $v:expr) => {{
             match serde_json::to_value($v) {
                 Ok(v) => Response::ok($request.id.clone(), v),
-                Err(e) => {
-                    Response::err($request.id.clone(), ErrorObject::internal(e.to_string()))
-                }
+                Err(e) => Response::err($request.id.clone(), ErrorObject::internal(e.to_string())),
             }
         }};
     }
@@ -1054,14 +1059,15 @@ async fn dispatch(
     }
 
     dispatch_entry!(ipc_method::PING, {
-        ok!(req, &PingResult {
-            pong: true,
-            version: IPC_VERSION.to_string(),
-            })
+        ok!(
+            req,
+            &PingResult {
+                pong: true,
+                version: IPC_VERSION.to_string(),
+            }
+        )
     });
-    dispatch_entry!(ipc_method::HARNESS_LIST, {
-        ok!(req, &manager.harnesses())
-    });
+    dispatch_entry!(ipc_method::HARNESS_LIST, { ok!(req, &manager.harnesses()) });
     dispatch_entry!(ipc_method::PROGRAM_GET, {
         let p = params!(req, ProgramGetParams);
         match manager.program_get(&p.session_id).await {
@@ -1079,6 +1085,17 @@ async fn dispatch(
     dispatch_entry!(ipc_method::PROGRAM_EDIT, {
         let p = params!(req, ProgramEditParams);
         match manager.program_edit(p).await {
+            Ok(result) => ok!(req, &result),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::PROGRAM_CURSOR, {
+        let p = params!(req, ProgramCursorParams);
+        let kind_label = match kind {
+            ClientKind::Remote => "web",
+            ClientKind::Tui => "tui",
+        };
+        match manager.program_cursor(conn_id, kind_label, p).await {
             Ok(result) => ok!(req, &result),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
@@ -1120,9 +1137,12 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::SESSION_CHAT_VIEWER_ACTIVE, {
         let p = params!(req, SessionIdParams);
-        ok!(req, &ChatViewerActiveResult {
-            active: manager.chat_viewer_active(&p.session_id),
-        })
+        ok!(
+            req,
+            &ChatViewerActiveResult {
+                active: manager.chat_viewer_active(&p.session_id),
+            }
+        )
     });
     dispatch_entry!(ipc_method::SESSION_INPUT, {
         let p = params!(req, SessionInputParams);
@@ -1268,7 +1288,10 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::SESSION_TOOL_ACTION, {
         let p = params!(req, SessionToolActionParams);
-        match manager.tool_action(&p.session_id, p.call_id, p.action).await {
+        match manager
+            .tool_action(&p.session_id, p.call_id, p.action)
+            .await
+        {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
@@ -1411,7 +1434,10 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::PROJECT_SET_COLLAPSED, {
         let p = params!(req, ProjectSetCollapsedParams);
-        match manager.set_group_collapsed(&p.project_id, p.collapsed).await {
+        match manager
+            .set_group_collapsed(&p.project_id, p.collapsed)
+            .await
+        {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
@@ -1439,7 +1465,10 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::SESSION_TRANSCRIPT, {
         let p = params!(req, TranscriptParams);
-        match manager.transcript(&p.session_id, p.from, p.limit, p.tail).await {
+        match manager
+            .transcript(&p.session_id, p.from, p.limit, p.tail)
+            .await
+        {
             Ok(r) => ok!(req, &r),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
@@ -1497,21 +1526,30 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::DAEMON_SHUTDOWN, {
         match manager.request_daemon_restart(None, crate::session::RestartAction::Stop) {
-            Ok(_) => ok!(req, &agentd_protocol::DaemonShutdownResult {
-                pid: std::process::id(),
-            }),
+            Ok(_) => ok!(
+                req,
+                &agentd_protocol::DaemonShutdownResult {
+                    pid: std::process::id(),
+                }
+            ),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
     dispatch_entry!(ipc_method::DEV_SET_ASSETS, {
         let p = params!(req, agentd_protocol::DevSetAssetsParams);
         manager.set_dev_assets(p.dir.map(std::path::PathBuf::from));
-        ok!(req, &agentd_protocol::DevAssetsResult {
-            dir: manager.dev_assets().map(|d| d.display().to_string()),
-        })
+        ok!(
+            req,
+            &agentd_protocol::DevAssetsResult {
+                dir: manager.dev_assets().map(|d| d.display().to_string()),
+            }
+        )
     });
 
-    Response::err(req.id.clone(), ErrorObject::method_not_found(req.method.as_str()))
+    Response::err(
+        req.id.clone(),
+        ErrorObject::method_not_found(req.method.as_str()),
+    )
 }
 
 #[cfg(test)]

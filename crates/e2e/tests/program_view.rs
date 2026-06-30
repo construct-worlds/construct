@@ -150,10 +150,23 @@ async fn web_program_view_full_parity() {
         .into_value()
         .expect("json");
     assert_eq!(templates["emptyVisible"], true, "{templates:?}");
-    assert_eq!(templates["tmplButtons"], serde_json::json!(["tasks"]), "{templates:?}");
-    assert_eq!(templates["updates"][0]["template_id"], "tasks", "{templates:?}");
-    assert_eq!(templates["updates"][0]["markdown"], "## Todo\n- first\n", "{templates:?}");
-    assert_eq!(templates["valueAfter"], "## Todo\n- first\n", "{templates:?}");
+    assert_eq!(
+        templates["tmplButtons"],
+        serde_json::json!(["tasks"]),
+        "{templates:?}"
+    );
+    assert_eq!(
+        templates["updates"][0]["template_id"], "tasks",
+        "{templates:?}"
+    );
+    assert_eq!(
+        templates["updates"][0]["markdown"], "## Todo\n- first\n",
+        "{templates:?}"
+    );
+    assert_eq!(
+        templates["valueAfter"], "## Todo\n- first\n",
+        "{templates:?}"
+    );
     assert_eq!(templates["emptyHiddenAfter"], true, "{templates:?}");
 
     // --- 4. Edit + clean save sends program.update with the base version. ----
@@ -182,9 +195,18 @@ async fn web_program_view_full_parity() {
     assert_eq!(save["dirtyBefore"], "true", "{save:?}");
     assert_eq!(save["dirtyAfter"], "false", "{save:?}");
     assert_eq!(save["updates"][0]["base_version"], 3, "{save:?}");
-    assert_eq!(save["updates"][0]["markdown"], "old\nnew line\n", "{save:?}");
+    assert_eq!(
+        save["updates"][0]["markdown"], "old\nnew line\n",
+        "{save:?}"
+    );
     assert_eq!(save["versionAfter"], "v4", "{save:?}");
-    assert!(save["msg"].as_str().unwrap_or_default().contains("saved v4"), "{save:?}");
+    assert!(
+        save["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("saved v4"),
+        "{save:?}"
+    );
 
     // --- 5. Save conflict → clean 3-way merge of non-overlapping edits. ------
     let merge: serde_json::Value = page
@@ -215,10 +237,16 @@ async fn web_program_view_full_parity() {
         .expect("evaluate merge")
         .into_value()
         .expect("json");
-    assert_eq!(merge["updates"][1]["markdown"], "OURS\nL2\nTHEIRS\n", "{merge:?}");
+    assert_eq!(
+        merge["updates"][1]["markdown"], "OURS\nL2\nTHEIRS\n",
+        "{merge:?}"
+    );
     assert_eq!(merge["updates"][1]["base_version"], 6, "{merge:?}");
     assert_eq!(merge["finalValue"], "OURS\nL2\nTHEIRS\n", "{merge:?}");
-    assert!(merge["msg"].as_str().unwrap_or_default().contains("merged"), "{merge:?}");
+    assert!(
+        merge["msg"].as_str().unwrap_or_default().contains("merged"),
+        "{merge:?}"
+    );
 
     // --- 6. Run dispatches execute and shimmers the program's blocks. --------
     let run: serde_json::Value = page
@@ -249,10 +277,23 @@ async fn web_program_view_full_parity() {
         .expect("evaluate run")
         .into_value()
         .expect("json");
-    assert_eq!(run["execs"][0]["selection"], serde_json::Value::Null, "whole-program run sends no selection: {run:?}");
+    assert_eq!(
+        run["execs"][0]["selection"],
+        serde_json::Value::Null,
+        "whole-program run sends no selection: {run:?}"
+    );
     assert!(run["runPending"].as_u64().unwrap_or(0) >= 3, "{run:?}");
-    assert_eq!(run["shimmerActive"], true, "running lines should get the shimmer class: {run:?}");
-    assert!(run["msg"].as_str().unwrap_or_default().contains("run sent (program"), "{run:?}");
+    assert_eq!(
+        run["shimmerActive"], true,
+        "running lines should get the shimmer class: {run:?}"
+    );
+    assert!(
+        run["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("run sent (program"),
+        "{run:?}"
+    );
 
     // --- 6a. Run gives immediate optimistic affordance before execute returns.
     let immediate_run: serde_json::Value = page
@@ -304,11 +345,32 @@ async fn web_program_view_full_parity() {
         .into_value()
         .expect("json");
     assert_eq!(immediate_run["before"]["execCount"], 1, "{immediate_run:?}");
-    assert!(immediate_run["before"]["runPending"].as_u64().unwrap_or(0) >= 3, "{immediate_run:?}");
-    assert_eq!(immediate_run["before"]["shimmerActive"], true, "shimmer should be active before execute resolves: {immediate_run:?}");
-    assert_eq!(immediate_run["before"]["button"], "true", "Run button should pulse before execute resolves: {immediate_run:?}");
-    assert!(immediate_run["before"]["msg"].as_str().unwrap_or_default().contains("running program"), "{immediate_run:?}");
-    assert!(immediate_run["after"]["msg"].as_str().unwrap_or_default().contains("run sent (program"), "{immediate_run:?}");
+    assert!(
+        immediate_run["before"]["runPending"].as_u64().unwrap_or(0) >= 3,
+        "{immediate_run:?}"
+    );
+    assert_eq!(
+        immediate_run["before"]["shimmerActive"], true,
+        "shimmer should be active before execute resolves: {immediate_run:?}"
+    );
+    assert_eq!(
+        immediate_run["before"]["button"], "true",
+        "Run button should pulse before execute resolves: {immediate_run:?}"
+    );
+    assert!(
+        immediate_run["before"]["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("running program"),
+        "{immediate_run:?}"
+    );
+    assert!(
+        immediate_run["after"]["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("run sent (program"),
+        "{immediate_run:?}"
+    );
 
     // --- 6b. Mid-flight re-Run preserves narrowed shimmer and pulses Run. ----
     let rerun: serde_json::Value = page
@@ -370,8 +432,14 @@ async fn web_program_view_full_parity() {
         serde_json::json!(["- changed settled", "- pending"]),
         "optimistic run should keep old pending and add the user edit: {rerun:?}"
     );
-    assert_eq!(rerun["beforeTool"], "true", "Run button should pulse until tool output: {rerun:?}");
-    assert_eq!(rerun["afterTool"], "false", "tool_use should clear Run button pulse: {rerun:?}");
+    assert_eq!(
+        rerun["beforeTool"], "true",
+        "Run button should pulse until tool output: {rerun:?}"
+    );
+    assert_eq!(
+        rerun["afterTool"], "false",
+        "tool_use should clear Run button pulse: {rerun:?}"
+    );
 
     // --- 7. Run with a selection scopes execute to the selected text. --------
     let run_sel: serde_json::Value = page
@@ -396,8 +464,17 @@ async fn web_program_view_full_parity() {
         .expect("evaluate run selection")
         .into_value()
         .expect("json");
-    assert_eq!(run_sel["execs"][0]["selection"], "- alpha\n- beta", "{run_sel:?}");
-    assert!(run_sel["msg"].as_str().unwrap_or_default().contains("selection"), "{run_sel:?}");
+    assert_eq!(
+        run_sel["execs"][0]["selection"], "- alpha\n- beta",
+        "{run_sel:?}"
+    );
+    assert!(
+        run_sel["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("selection"),
+        "{run_sel:?}"
+    );
 
     // --- 8. Smart-clip (@) autocomplete inserts a session clip. --------------
     let clip: serde_json::Value = page
@@ -440,18 +517,33 @@ async fn web_program_view_full_parity() {
         .into_value()
         .expect("json");
     assert_eq!(clip["menuOpen"], true, "{clip:?}");
-    assert!(clip["itemCount"].as_u64().unwrap_or(0) >= 2, "session + harness candidates: {clip:?}");
+    assert!(
+        clip["itemCount"].as_u64().unwrap_or(0) >= 2,
+        "session + harness candidates: {clip:?}"
+    );
     assert_eq!(clip["value"], "ping @{session:sAAA111}", "{clip:?}");
     assert_eq!(clip["menuClosedAfter"], true, "{clip:?}");
     // #2: arrow-down navigation persists (keyup must not snap back to item 0).
     assert_eq!(clip["sel0"], 0, "{clip:?}");
     assert_eq!(clip["selAfterDown"], 1, "{clip:?}");
-    assert_eq!(clip["selAfterKeyup"], 1, "arrow-down selection must persist through keyup: {clip:?}");
+    assert_eq!(
+        clip["selAfterKeyup"], 1,
+        "arrow-down selection must persist through keyup: {clip:?}"
+    );
     // #1: the clip renders a friendly, content-fit label, never the raw @{…}; it
     // is an atomic contenteditable=false widget (one cursor stop, deletes whole).
-    assert_eq!(clip["chipHasLabel"], true, "clip should render its friendly label: {clip:?}");
-    assert_eq!(clip["chipShowsRaw"], false, "clip text must not be the raw @{{…}} syntax: {clip:?}");
-    assert_eq!(clip["chipIsAtomic"], true, "clip must be an atomic contenteditable=false widget: {clip:?}");
+    assert_eq!(
+        clip["chipHasLabel"], true,
+        "clip should render its friendly label: {clip:?}"
+    );
+    assert_eq!(
+        clip["chipShowsRaw"], false,
+        "clip text must not be the raw @{{…}} syntax: {clip:?}"
+    );
+    assert_eq!(
+        clip["chipIsAtomic"], true,
+        "clip must be an atomic contenteditable=false widget: {clip:?}"
+    );
 
     // --- 9. Find highlights matches and reports a count. ---------------------
     let find: serde_json::Value = page
@@ -504,10 +596,75 @@ async fn web_program_view_full_parity() {
         .expect("evaluate live")
         .into_value()
         .expect("json");
-    assert_eq!(live["adopted"], "agent edit v2\n", "clean buffer adopts agent edit: {live:?}");
+    assert_eq!(
+        live["adopted"], "agent edit v2\n",
+        "clean buffer adopts agent edit: {live:?}"
+    );
     assert_eq!(live["adoptedVersion"], "v2", "{live:?}");
-    assert_eq!(live["keptDirty"], "agent edit v2\nmy unsaved line\n", "dirty buffer keeps local edits: {live:?}");
+    assert_eq!(
+        live["keptDirty"], "agent edit v2\nmy unsaved line\n",
+        "dirty buffer keeps local edits: {live:?}"
+    );
     assert_eq!(live["dirty"], "true", "{live:?}");
+
+    // --- 11. Live collaboration: local edit RPC + remote cursor overlay. ----
+    let collab: serde_json::Value = page
+        .evaluate(
+            r###"
+            withMockProgram({
+              "program.get": () => ({ program: { session_id: "s-collab", markdown: "abc\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [], collaborators: [] }),
+              "program.list_templates": () => ({ templates: [] }),
+              "program.edit": (p) => {
+                window.__programEdits.push(p);
+                return { program: { session_id: "s-collab", markdown: "abcX\n", version: 2, template_id: null }, active_run: null, blocks: [] };
+              },
+              "program.cursor": (p) => {
+                window.__programCursors.push(p);
+                return { cursor: { session_id: p.session_id, client_id: "web-self", label: "Web", kind: "web", cursor: p.cursor, color_index: 1, updated_at_ms: Date.now(), active: !p.clear } };
+              },
+            }, async () => {
+              window.__programEdits = [];
+              window.__programCursors = [];
+              setSession("s-collab", "shell");
+              await switchCurrentViewMode("program");
+              programTestCaretEnd();
+              document.execCommand("insertText", false, "X");
+              await new Promise((r) => setTimeout(r, 120));
+              handleProgramCursor({ cursor: { session_id: "s-collab", client_id: "peer-1", label: "TUI", kind: "tui", cursor: 1, color_index: 2, updated_at_ms: Date.now(), active: true } });
+              return {
+                text: programSerialize(),
+                editCount: window.__programEdits.length,
+                firstEdit: window.__programEdits[0] || null,
+                cursorCount: window.__programCursors.length,
+                remoteCursorCount: programCursorLayerEl.querySelectorAll(".program-remote-cursor").length,
+                remoteLabel: programCursorLayerEl.querySelector(".program-remote-cursor")?.dataset.label || "",
+              };
+            })
+            "###,
+        )
+        .await
+        .expect("evaluate collab")
+        .into_value()
+        .expect("json");
+    assert_eq!(
+        collab["text"], "abcX\n",
+        "typed text should stay local immediately: {collab:?}"
+    );
+    assert_eq!(
+        collab["editCount"], 1,
+        "one live program.edit should be sent: {collab:?}"
+    );
+    assert_eq!(collab["firstEdit"]["session_id"], "s-collab", "{collab:?}");
+    assert_eq!(
+        collab["cursorCount"].as_i64().unwrap_or_default() >= 1,
+        true,
+        "cursor presence should publish: {collab:?}"
+    );
+    assert_eq!(
+        collab["remoteCursorCount"], 1,
+        "remote cursor overlay should render: {collab:?}"
+    );
+    assert_eq!(collab["remoteLabel"], "TUI", "{collab:?}");
 
     // --- Visual artifacts: drive the REAL session's program (it has a smart
     //     clip from step 1) and leave it mounted so the screenshots show the
@@ -523,7 +680,9 @@ async fn web_program_view_full_parity() {
           return true;
         })()
         "###,
-    ).await.ok();
+    )
+    .await
+    .ok();
     screenshot(&page, "program_view_rendered.png").await;
     page.evaluate(
         r###"
@@ -534,7 +693,9 @@ async fn web_program_view_full_parity() {
           return true;
         })()
         "###,
-    ).await.ok();
+    )
+    .await
+    .ok();
     screenshot(&page, "program_view_shimmer.png").await;
     page.evaluate(
         r###"
@@ -548,7 +709,9 @@ async fn web_program_view_full_parity() {
           return true;
         })()
         "###,
-    ).await.ok();
+    )
+    .await
+    .ok();
     screenshot(&page, "program_view_clip_menu.png").await;
 
     page.evaluate("enterChatMode(); true").await.ok();
@@ -605,7 +768,11 @@ const SETUP_JS: &str = r###"
       state.currentId = id;
     };
     // contenteditable test helpers (the editor is no longer a <textarea>).
-    window.programTestSet = function (md) { programRenderDoc(md); programOnInput(); };
+    window.programTestSet = function (md) {
+      state.program.applyingRemote = true;
+      try { programRenderDoc(md); programOnInput(); }
+      finally { state.program.applyingRemote = false; }
+    };
     window.programTestClearSel = function () { const s = window.getSelection(); if (s) s.removeAllRanges(); };
     window.programTestCaretEnd = function () {
       const walker = document.createTreeWalker(programInputEl, NodeFilter.SHOW_TEXT);

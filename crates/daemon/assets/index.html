@@ -1640,6 +1640,42 @@
     from { background-position: 140% 0; }
     to { background-position: -40% 0; }
   }
+  .program-cursor-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .program-remote-cursor {
+    position: absolute;
+    width: 2px;
+    height: 1.6em;
+    background: var(--accent-alt);
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg) 75%, transparent);
+  }
+  .program-remote-cursor::after {
+    content: attr(data-label);
+    position: absolute;
+    left: 3px;
+    top: -1.45em;
+    max-width: 18ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: var(--accent-alt);
+    color: var(--bg);
+    border-radius: 3px;
+    padding: 0 4px;
+    font: 11px/1.35 system-ui, -apple-system, sans-serif;
+  }
+  .program-remote-cursor[data-color="1"] { background: var(--accent); }
+  .program-remote-cursor[data-color="1"]::after { background: var(--accent); }
+  .program-remote-cursor[data-color="2"] { background: var(--warn); }
+  .program-remote-cursor[data-color="2"]::after { background: var(--warn); }
+  .program-remote-cursor[data-color="3"] { background: var(--err); }
+  .program-remote-cursor[data-color="3"]::after { background: var(--err); color: var(--fg); }
   /* Empty-state template picker. */
   .program-empty {
     position: absolute;
@@ -1857,6 +1893,7 @@
           <div class="program-input" id="programInput" contenteditable="true"
                spellcheck="false" role="textbox" aria-multiline="true"
                aria-label="program markdown"></div>
+          <div class="program-cursor-layer" id="programCursorLayer"></div>
           <div class="program-empty" id="programEmpty" hidden></div>
           <div class="program-clip-menu" id="programClipMenu" hidden role="listbox"
                aria-label="smart-clip suggestions"></div>
@@ -2056,6 +2093,7 @@ const viewModeProgramBtn = $("viewModeProgram");
 const programWrapEl = $("programWrap");
 const programEditorEl = $("programEditor");
 const programInputEl = $("programInput");
+const programCursorLayerEl = $("programCursorLayer");
 const programEmptyEl = $("programEmpty");
 const programClipMenuEl = $("programClipMenu");
 const programVersionEl = $("programVersion");
@@ -2261,6 +2299,11 @@ const state = {
     // already narrowed and has already seen output.
     runButtonById: new Map(),
     runButtonTimer: 0,
+    // Ephemeral Program collaboration cursors keyed by daemon client id.
+    collaboratorById: new Map(),
+    ownClientId: null,
+    cursorPublishTimer: 0,
+    applyingRemote: false,
     // Cached templates from program.list_templates (fetched lazily once).
     templates: null,
     // Session id whose program is currently mounted in the editor, or null.
@@ -3700,6 +3743,7 @@ function programRenderDoc(markdown) {
   while (programInputEl.firstChild) programInputEl.removeChild(programInputEl.firstChild);
   for (const line of markdown.split("\n")) programInputEl.appendChild(programLineDiv(line));
   programApplyShimmer();
+  programRenderCursors();
 }
 
 // Serialize a container's line elements back to Markdown: each top-level line
@@ -3729,6 +3773,160 @@ function programSerializeContainer(root) {
 }
 
 function programSerialize() { return programSerializeContainer(programInputEl); }
+
+function programUniqueCount(haystack, needle) {
+  if (!needle) return 0;
+  let count = 0, idx = 0;
+  while ((idx = haystack.indexOf(needle, idx)) !== -1) {
+    count++;
+    if (count > 1) return count;
+    idx += Math.max(1, needle.length);
+  }
+  return count;
+}
+
+function programAnchoredEdit(prev, next) {
+  if (prev === next) return null;
+  let start = 0;
+  while (start < prev.length && start < next.length && prev[start] === next[start]) start++;
+  let oldEnd = prev.length;
+  let newEnd = next.length;
+  while (oldEnd > start && newEnd > start && prev[oldEnd - 1] === next[newEnd - 1]) {
+    oldEnd--;
+    newEnd--;
+  }
+  const maxContext = Math.min(prev.length, 240);
+  for (let ctx = 0; ctx <= maxContext; ctx++) {
+    const a = Math.max(0, start - ctx);
+    const b = Math.min(prev.length, oldEnd + ctx);
+    if (a === b) continue;
+    const oldString = prev.slice(a, b);
+    if (programUniqueCount(prev, oldString) !== 1) continue;
+    return {
+      old_string: oldString,
+      new_string: prev.slice(a, start) + next.slice(start, newEnd) + prev.slice(oldEnd, b),
+    };
+  }
+  return { old_string: prev, new_string: next };
+}
+
+function programCharCount(s) { return Array.from(s || "").length; }
+
+function programSelectionOffsets() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  if (!programInputEl.contains(range.startContainer) || !programInputEl.contains(range.endContainer)) return null;
+  const start = programDomPointToOffset(range.startContainer, range.startOffset);
+  const end = programDomPointToOffset(range.endContainer, range.endOffset);
+  if (start == null || end == null) return null;
+  return { anchor: start, head: end };
+}
+
+function programDomPointToOffset(targetNode, targetOffset) {
+  let offset = 0;
+  for (const line of programInputEl.childNodes) {
+    if (line.nodeType !== 1) continue;
+    if (line === targetNode) {
+      for (let i = 0; i < Math.min(targetOffset, line.childNodes.length); i++) {
+        offset += programNodeRawLength(line.childNodes[i]);
+      }
+      return offset;
+    }
+    for (const node of line.childNodes) {
+      if (node === targetNode) return offset + Math.min(targetOffset, programNodeRawLength(node));
+      if (node.contains && node.contains(targetNode)) return offset + Math.min(targetOffset, programNodeRawLength(node));
+      offset += programNodeRawLength(node);
+    }
+    if (line.nextSibling) offset += 1;
+  }
+  return offset;
+}
+
+function programNodeRawLength(node) {
+  if (!node) return 0;
+  if (node.nodeType === 3) return programCharCount(node.data);
+  if (node.nodeType === 1 && node.classList && node.classList.contains("program-clip")) return programCharCount(node.dataset.raw || "");
+  if (node.nodeType === 1 && node.tagName === "BR") return 0;
+  if (node.nodeType === 1) return programCharCount(programSerializeInline(node));
+  return 0;
+}
+
+function programRangeForOffset(rawOffset) {
+  let remaining = Math.max(0, rawOffset);
+  const range = document.createRange();
+  let lastLine = null;
+  for (const line of programInputEl.childNodes) {
+    if (line.nodeType !== 1) continue;
+    lastLine = line;
+    for (const node of line.childNodes) {
+      const len = programNodeRawLength(node);
+      if (remaining <= len) {
+        if (node.nodeType === 3) {
+          range.setStart(node, Math.min(remaining, node.data.length));
+        } else if (remaining > len / 2) {
+          range.setStartAfter(node);
+        } else {
+          range.setStartBefore(node);
+        }
+        range.collapse(true);
+        return range;
+      }
+      remaining -= len;
+    }
+    if (line.nextSibling) {
+      if (remaining === 0) {
+        range.setStart(line, line.childNodes.length);
+        range.collapse(true);
+        return range;
+      }
+      remaining -= 1;
+    }
+  }
+  if (lastLine) range.setStart(lastLine, lastLine.childNodes.length);
+  else range.setStart(programInputEl, 0);
+  range.collapse(true);
+  return range;
+}
+
+function programCursorRectForOffset(rawOffset) {
+  const range = programRangeForOffset(rawOffset);
+  let rect = range.getBoundingClientRect();
+  if (!rect || (rect.width === 0 && rect.height === 0)) {
+    const rects = range.getClientRects();
+    if (rects && rects.length) rect = rects[0];
+  }
+  if (!rect) return null;
+  const editor = programEditorEl.getBoundingClientRect();
+  if (rect.bottom < editor.top || rect.top > editor.bottom) return null;
+  return {
+    left: rect.left - editor.left,
+    top: rect.top - editor.top,
+    height: rect.height || 22,
+  };
+}
+
+function programRenderCursors() {
+  while (programCursorLayerEl.firstChild) programCursorLayerEl.removeChild(programCursorLayerEl.firstChild);
+  const id = state.program.mountedId;
+  if (!id || state.mode !== "program") return;
+  const now = Date.now();
+  for (const cursor of state.program.collaboratorById.values()) {
+    if (!cursor.active || cursor.session_id !== id) continue;
+    if (cursor.client_id && cursor.client_id === state.program.ownClientId) continue;
+    if (now - (cursor.updated_at_ms || 0) > 30000) continue;
+    const rect = programCursorRectForOffset(cursor.cursor || 0);
+    if (!rect) continue;
+    const el = document.createElement("div");
+    el.className = "program-remote-cursor";
+    el.dataset.label = cursor.label || cursor.kind || "peer";
+    el.dataset.color = String((cursor.color_index || 0) % 4);
+    el.style.left = Math.round(rect.left) + "px";
+    el.style.top = Math.round(rect.top) + "px";
+    el.style.height = Math.max(18, Math.round(rect.height)) + "px";
+    programCursorLayerEl.appendChild(el);
+  }
+}
 
 // Markdown of the current selection (for run-selection), or null if collapsed.
 function programSelectionMarkdown() {
@@ -3855,6 +4053,7 @@ function programStopShimmer() {
 // Tear the program surface down when switching to chat / terminal so its
 // shimmer loop, autocomplete, and find bar don't linger behind the other views.
 function leaveProgramView() {
+  programClearCursor();
   programStopShimmer();
   if (state.program.runButtonTimer) { clearTimeout(state.program.runButtonTimer); state.program.runButtonTimer = 0; }
   programRunBtn.dataset.running = "false";
@@ -3862,6 +4061,7 @@ function leaveProgramView() {
   programCloseFind();
   programWrapEl.hidden = true;
   state.program.mountedId = null;
+  programRenderCursors();
 }
 
 async function enterProgramMode(id, opts = {}) {
@@ -3899,8 +4099,13 @@ async function programMountSession(id) {
     version: p.version,
     templateId: p.template_id || null,
     saved: programNormalizeClipIds(p.markdown),
+    live: programNormalizeClipIds(p.markdown),
     blocks: result.blocks || [],
+    pendingLive: 0,
   });
+  for (const cursor of result.collaborators || []) {
+    state.program.collaboratorById.set(cursor.client_id, cursor);
+  }
   const run = programRunFromProgress(result.active_run);
   if (run) state.program.runById.set(id, run); else state.program.runById.delete(id);
   if (run && run.firstOutputSeen) programClearRunButton(id);
@@ -3909,6 +4114,7 @@ async function programMountSession(id) {
   programVersionEl.textContent = "v" + p.version;
   programRefreshEmptyState();
   programUpdateDirty();
+  programPublishCursor(0);
   if (run) programStartShimmer(id); else programApplyShimmer();
   programEnsureTemplates();
 }
@@ -3924,6 +4130,94 @@ function programUpdateDirty() {
   const dirty = !!doc && programNormalizeClipIds(programSerialize()) !== doc.saved;
   programSaveBtn.setAttribute("data-dirty", dirty ? "true" : "false");
   return dirty;
+}
+
+async function programFlushLiveEdit(id, prev, next, cursor) {
+  const edit = programAnchoredEdit(prev, next);
+  if (!edit) return;
+  const doc = state.program.docById.get(id);
+  if (doc) doc.pendingLive = (doc.pendingLive || 0) + 1;
+  try {
+    const result = await rpc("program.edit", {
+      session_id: id,
+      edits: [edit],
+      actor: "human",
+    });
+    const p = result.program;
+    const current = state.program.docById.get(id) || {};
+    state.program.docById.set(id, {
+      ...current,
+      version: p.version,
+      templateId: p.template_id || null,
+      saved: programNormalizeClipIds(p.markdown),
+      live: p.markdown,
+      blocks: result.blocks || [],
+      pendingLive: Math.max(0, (current.pendingLive || 1) - 1),
+    });
+    if (state.program.mountedId === id) {
+      programVersionEl.textContent = "v" + p.version;
+      programUpdateDirty();
+      programApplyShimmer();
+      programRenderCursors();
+      programPublishCursor(cursor);
+    }
+  } catch (e) {
+    const current = state.program.docById.get(id);
+    if (current) current.pendingLive = Math.max(0, (current.pendingLive || 1) - 1);
+    programSetMsg("live edit pending save: " + e.message, true);
+  }
+}
+
+function programOnLocalEdit() {
+  const id = state.program.mountedId;
+  const doc = id && state.program.docById.get(id);
+  if (!id || !doc || state.program.applyingRemote) return;
+  const prev = doc.live != null ? doc.live : doc.saved;
+  const next = programNormalizeClipIds(programSerialize());
+  if (next === prev) return;
+  doc.live = next;
+  const offsets = programSelectionOffsets();
+  const cursor = offsets ? offsets.head : programCharCount(next);
+  programFlushLiveEdit(id, prev, next, cursor);
+  programPublishCursor(cursor);
+}
+
+function programPublishCursor(explicitCursor) {
+  const id = state.program.mountedId;
+  if (!id || state.mode !== "program") return;
+  const doc = state.program.docById.get(id);
+  const offsets = programSelectionOffsets();
+  const cursor = explicitCursor != null ? explicitCursor : (offsets ? offsets.head : 0);
+  const params = {
+    session_id: id,
+    cursor,
+    version: doc ? doc.version : null,
+    label: "Web",
+  };
+  if (offsets && offsets.anchor !== offsets.head) {
+    params.selection_anchor = offsets.anchor;
+    params.selection_head = offsets.head;
+  }
+  if (state.program.cursorPublishTimer) clearTimeout(state.program.cursorPublishTimer);
+  state.program.cursorPublishTimer = setTimeout(async () => {
+    state.program.cursorPublishTimer = 0;
+    try {
+      const result = await rpc("program.cursor", params);
+      state.program.ownClientId = result.cursor.client_id;
+    } catch (e) {}
+  }, 35);
+}
+
+async function programClearCursor() {
+  const id = state.program.mountedId;
+  if (!id) return;
+  if (state.program.cursorPublishTimer) {
+    clearTimeout(state.program.cursorPublishTimer);
+    state.program.cursorPublishTimer = 0;
+  }
+  try {
+    await rpc("program.cursor", { session_id: id, cursor: 0, label: "Web", clear: true });
+  } catch (e) {}
 }
 
 // --- live program/state notifications ---
@@ -3943,8 +4237,9 @@ function handleProgramState(params) {
     else { programStopShimmer(); programApplyShimmer(); }
   };
   if (doc && program.version <= doc.version) { refreshShimmer(); return; }
-  const dirty = isMounted && programNormalizeClipIds(programSerialize()) !== (doc ? doc.saved : "");
-  if (dirty) {
+  const pendingLive = doc && (doc.pendingLive || 0) > 0;
+  const dirty = isMounted && programNormalizeClipIds(programSerialize()) !== (doc ? (doc.live || doc.saved) : "");
+  if (pendingLive || dirty) {
     // Keep unsaved edits and the stale base version so the next save 3-way
     // merges both sides (spec 0059); only the shimmer follows the run.
     refreshShimmer();
@@ -3954,16 +4249,33 @@ function handleProgramState(params) {
     version: program.version,
     templateId: program.template_id || null,
     saved: programNormalizeClipIds(program.markdown),
+    live: programNormalizeClipIds(program.markdown),
     blocks: params.blocks || [],
+    pendingLive: 0,
   });
   if (isMounted) {
+    const offsets = programSelectionOffsets();
     programRenderDoc(program.markdown);
+    if (offsets) {
+      const range = programRangeForOffset(Math.min(offsets.head, programCharCount(program.markdown)));
+      const sel = window.getSelection();
+      if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+    }
     programVersionEl.textContent = "v" + program.version;
     programRefreshEmptyState();
     programUpdateDirty();
     if (state.program.find) programRecomputeFind();
     refreshShimmer();
+    programPublishCursor();
   }
+}
+
+function handleProgramCursor(params) {
+  const cursor = params && params.cursor;
+  if (!cursor || !cursor.client_id) return;
+  if (cursor.active === false) state.program.collaboratorById.delete(cursor.client_id);
+  else state.program.collaboratorById.set(cursor.client_id, cursor);
+  programRenderCursors();
 }
 
 // --- save (optimistic version + 3-way merge) ---
@@ -4007,7 +4319,9 @@ async function programSave() {
       version: p.version,
       templateId: p.template_id || null,
       saved: programNormalizeClipIds(p.markdown),
+      live: programNormalizeClipIds(p.markdown),
       blocks: result.blocks || [],
+      pendingLive: 0,
     });
     const runP = programRunFromProgress(result.active_run);
     if (runP) state.program.runById.set(id, runP); else state.program.runById.delete(id);
@@ -4155,7 +4469,14 @@ async function programApplyTemplate(tmplId) {
   try {
     const result = await rpc("program.update", { session_id: id, markdown: t.markdown, base_version: doc.version, template_id: t.id });
     const p = result.program;
-    state.program.docById.set(id, { version: p.version, templateId: p.template_id || null, saved: programNormalizeClipIds(p.markdown), blocks: result.blocks || [] });
+    state.program.docById.set(id, {
+      version: p.version,
+      templateId: p.template_id || null,
+      saved: programNormalizeClipIds(p.markdown),
+      live: programNormalizeClipIds(p.markdown),
+      blocks: result.blocks || [],
+      pendingLive: 0,
+    });
     if (state.program.mountedId === id) {
       programRenderDoc(p.markdown);
       programVersionEl.textContent = "v" + p.version;
@@ -4541,8 +4862,10 @@ function programOnInput() {
   programRefreshEmptyState();
   programUpdateDirty();
   programApplyShimmer();
+  programRenderCursors();
   programUpdateClipMenu();
   if (state.program.find) programRecomputeFind();
+  programOnLocalEdit();
 }
 
 function programOnKeyDown(e) {
@@ -4586,8 +4909,17 @@ function programWireEvents() {
     // reset the view and highlight.
     if (state.program.clip && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) programUpdateClipMenu();
+    programPublishCursor();
+    programRenderCursors();
   });
-  programInputEl.addEventListener("click", programUpdateClipMenu);
+  programInputEl.addEventListener("click", () => { programUpdateClipMenu(); programPublishCursor(); programRenderCursors(); });
+  programInputEl.addEventListener("scroll", programRenderCursors);
+  document.addEventListener("selectionchange", () => {
+    if (document.activeElement === programInputEl && state.program.mountedId) {
+      programPublishCursor();
+      programRenderCursors();
+    }
+  });
   programInputEl.addEventListener("blur", () => { setTimeout(programCloseClipMenu, 120); });
   // Keep the editor plain text: paste as text/plain, never rich HTML.
   programInputEl.addEventListener("paste", (e) => {
@@ -6246,6 +6578,10 @@ async function backgroundLoadOlderTranscript(id, pane, minTailSeq, alreadyLoaded
 function handleNotification(method, params) {
   if (method === "program/state") {
     handleProgramState(params);
+    return;
+  }
+  if (method === "program/cursor") {
+    handleProgramCursor(params);
     return;
   }
   if (method === "session/event") {

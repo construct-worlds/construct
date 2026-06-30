@@ -1005,6 +1005,9 @@ pub struct App {
     /// entry means a program Run is believed to still be executing for that
     /// session; it drives the shimmer over the executed Markdown.
     pub program_runs: HashMap<String, ProgramRun>,
+    /// Ephemeral Program collaboration cursors, keyed by daemon client id.
+    pub program_collaborators: HashMap<String, agentd_protocol::ProgramCursor>,
+    pub own_program_client_id: Option<String>,
     pub program_clipboard: Option<String>,
     /// Live `/remote-control` modal — URL + QR for the active
     /// remote-WS deployment. `Some` while open, `None` otherwise.
@@ -2349,6 +2352,8 @@ async fn run_with_socket_initial_selection(
         program_popups: HashMap::new(),
         program_view_memory: HashMap::new(),
         program_runs: HashMap::new(),
+        program_collaborators: HashMap::new(),
+        own_program_client_id: None,
         program_clipboard: None,
         remote_control_popup: None,
         remote_control_task: None,
@@ -5298,6 +5303,21 @@ impl App {
                     >(p)
                     {
                         self.on_program_state(payload.program, payload.active_run, payload.blocks);
+                    }
+                }
+            }
+            m if m == agentd_protocol::ipc_notif::PROGRAM_CURSOR => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        agentd_protocol::ProgramCursorNotificationPayload,
+                    >(p)
+                    {
+                        if payload.cursor.active {
+                            self.program_collaborators
+                                .insert(payload.cursor.client_id.clone(), payload.cursor);
+                        } else {
+                            self.program_collaborators.remove(&payload.cursor.client_id);
+                        }
                     }
                 }
             }
@@ -9008,6 +9028,8 @@ mod tests {
             program_popups: HashMap::new(),
             program_view_memory: HashMap::new(),
             program_runs: HashMap::new(),
+            program_collaborators: HashMap::new(),
+            own_program_client_id: None,
             program_clipboard: None,
             remote_control_popup: None,
             remote_control_task: None,
