@@ -24,6 +24,10 @@ impl App {
                         self.program_runs.remove(&result.program.session_id);
                     }
                 }
+                for cursor in result.collaborators {
+                    self.program_collaborators
+                        .insert(cursor.client_id.clone(), cursor);
+                }
                 self.program_popups.remove(&result.program.session_id);
                 let mut popup = program_popup_from_document(result.program, result.blocks, now);
                 // Restore the caret + scroll the user left when this program was
@@ -95,6 +99,10 @@ impl App {
                         None => {
                             self.program_runs.remove(&result.program.session_id);
                         }
+                    }
+                    for cursor in result.collaborators {
+                        self.program_collaborators
+                            .insert(cursor.client_id.clone(), cursor);
                     }
                     let popup = program_popup_from_document(result.program, result.blocks, now);
                     if selected_id.as_deref() == Some(session_id.as_str()) {
@@ -483,6 +491,24 @@ impl App {
     pub(super) async fn close_program_popup(&mut self) {
         if !self.save_program_popup().await {
             return;
+        }
+        if let Some(session_id) = self
+            .program_popup
+            .as_ref()
+            .map(|popup| popup.program.session_id.clone())
+        {
+            let _ = self
+                .client
+                .program_cursor(agentd_protocol::ProgramCursorParams {
+                    session_id,
+                    cursor: 0,
+                    selection_anchor: None,
+                    selection_head: None,
+                    version: None,
+                    label: Some("TUI".to_string()),
+                    clear: true,
+                })
+                .await;
         }
         // Capture caret + scroll before the popup fades so reopening this
         // session's program restores them (the popup itself is dropped once the

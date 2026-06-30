@@ -803,6 +803,7 @@ pub mod ipc_method {
     pub const PROGRAM_GET: &str = "program.get";
     pub const PROGRAM_UPDATE: &str = "program.update";
     pub const PROGRAM_EDIT: &str = "program.edit";
+    pub const PROGRAM_CURSOR: &str = "program.cursor";
     pub const PROGRAM_EXECUTE: &str = "program.execute";
     pub const PROGRAM_LIST_TEMPLATES: &str = "program.list_templates";
     pub const SESSION_LIST: &str = "session.list";
@@ -918,6 +919,7 @@ pub mod ipc_notif {
     pub const EVENT: &str = "session/event";
     pub const STATE: &str = "session/state";
     pub const PROGRAM_STATE: &str = "program/state";
+    pub const PROGRAM_CURSOR: &str = "program/cursor";
     pub const DELETED: &str = "session/deleted";
     pub const GROUP_STATE: &str = "group/state";
     pub const GROUP_DELETED: &str = "group/deleted";
@@ -1306,6 +1308,10 @@ pub struct ProgramGetResult {
     /// shimmer state (spec 0053). Derived from the live markdown; not persisted.
     #[serde(default)]
     pub blocks: Vec<ProgramBlockView>,
+    /// Ephemeral remote cursor/presence entries currently editing this Program
+    /// (spec 0065). Not persisted; clients render them as advisory UI only.
+    #[serde(default)]
+    pub collaborators: Vec<ProgramCursor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1383,6 +1389,63 @@ pub struct ProgramEditParams {
     /// no post-edit block are dropped (the block changed underneath the caller).
     #[serde(default)]
     pub shimmer: Vec<ProgramShimmerDecl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProgramCursor {
+    pub session_id: String,
+    /// Daemon-scoped connection identity, stable until disconnect.
+    pub client_id: String,
+    /// Short human-readable source label such as "TUI" or "Web".
+    pub label: String,
+    /// Client surface/kind, e.g. "tui" or "web".
+    pub kind: String,
+    /// Caret offset in Unicode scalar values within the current Program
+    /// markdown. This matches the TUI's existing Program cursor units.
+    pub cursor: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_anchor: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_head: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
+    pub color_index: u8,
+    pub updated_at_ms: i64,
+    /// `false` is a best-effort tombstone sent when a client leaves or
+    /// disconnects; it should clear any rendered cursor for `client_id`.
+    #[serde(default = "program_cursor_default_active")]
+    pub active: bool,
+}
+
+fn program_cursor_default_active() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgramCursorParams {
+    pub session_id: String,
+    pub cursor: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_anchor: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_head: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// When true, clears this connection's cursor for the Program.
+    #[serde(default)]
+    pub clear: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgramCursorResult {
+    pub cursor: ProgramCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgramCursorNotificationPayload {
+    pub cursor: ProgramCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

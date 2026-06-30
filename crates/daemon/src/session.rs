@@ -226,6 +226,7 @@ pub enum BroadcastMsg {
     GroupState(GroupStateNotificationPayload),
     GroupDeleted(GroupDeletedNotificationPayload),
     ProgramState(ProgramStateNotificationPayload),
+    ProgramCursor(agentd_protocol::ProgramCursorNotificationPayload),
     /// Aggregate state for the remote WS transport. Emitted by
     /// `server::handle_ws_connection` on every accept/drop so the
     /// local TUI can show a "remote attached" badge.
@@ -643,6 +644,7 @@ pub struct SessionManager {
     dev_assets: std::sync::Mutex<Option<PathBuf>>,
     widget_snapshots: tokio::sync::Mutex<HashMap<String, WidgetSnapshot>>,
     program_runs: std::sync::Mutex<HashMap<String, ProgramRunProgress>>,
+    program_cursors: std::sync::Mutex<HashMap<u64, agentd_protocol::ProgramCursor>>,
     /// Monotonic id handed to each client connection so its current
     /// view can be tracked and cleared on disconnect.
     next_conn_id: AtomicU64,
@@ -883,6 +885,7 @@ impl SessionManager {
                 dev_assets: std::sync::Mutex::new(dev_assets),
                 widget_snapshots: tokio::sync::Mutex::new(widget_snapshots),
                 program_runs: std::sync::Mutex::new(HashMap::new()),
+                program_cursors: std::sync::Mutex::new(HashMap::new()),
                 next_conn_id: AtomicU64::new(1),
                 conn_views: std::sync::Mutex::new(HashMap::new()),
             },
@@ -911,6 +914,72 @@ impl SessionManager {
         if let Ok(mut m) = self.conn_views.lock() {
             m.remove(&conn_id);
         }
+        if let Ok(mut cursors) = self.program_cursors.lock() {
+            if let Some(mut cursor) = cursors.remove(&conn_id) {
+                cursor.active = false;
+                cursor.updated_at_ms = chrono::Utc::now().timestamp_millis();
+                let _ = self.broadcast.send(BroadcastMsg::ProgramCursor(
+                    agentd_protocol::ProgramCursorNotificationPayload { cursor },
+                ));
+            }
+        }
+    }
+
+    pub fn program_collaborators(&self, session_id: &str) -> Vec<agentd_protocol::ProgramCursor> {
+        self.program_cursors
+            .lock()
+            .map(|cursors| {
+                cursors
+                    .values()
+                    .filter(|cursor| cursor.active && cursor.session_id == session_id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub async fn program_cursor(
+        &self,
+        conn_id: u64,
+        kind: &str,
+        params: agentd_protocol::ProgramCursorParams,
+    ) -> Result<agentd_protocol::ProgramCursorResult> {
+        self.get_entry(&params.session_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
+        let label = params.label.unwrap_or_else(|| match kind {
+            "web" => "Web".to_string(),
+            "tui" => "TUI".to_string(),
+            other => other.to_string(),
+        });
+        let mut cursor = agentd_protocol::ProgramCursor {
+            session_id: params.session_id,
+            client_id: format!("c{conn_id}"),
+            label,
+            kind: kind.to_string(),
+            cursor: params.cursor,
+            selection_anchor: params.selection_anchor,
+            selection_head: params.selection_head,
+            version: params.version,
+            color_index: (conn_id % 8) as u8,
+            updated_at_ms: chrono::Utc::now().timestamp_millis(),
+            active: !params.clear,
+        };
+        if let Ok(mut cursors) = self.program_cursors.lock() {
+            if cursor.active {
+                cursors.insert(conn_id, cursor.clone());
+            } else if let Some(existing) = cursors.remove(&conn_id) {
+                cursor = existing;
+                cursor.active = false;
+                cursor.updated_at_ms = chrono::Utc::now().timestamp_millis();
+            }
+        }
+        let _ = self.broadcast.send(BroadcastMsg::ProgramCursor(
+            agentd_protocol::ProgramCursorNotificationPayload {
+                cursor: cursor.clone(),
+            },
+        ));
+        Ok(agentd_protocol::ProgramCursorResult { cursor })
     }
 
     /// Whether any live connection is currently watching `session_id` in the
@@ -1317,11 +1386,13 @@ impl SessionManager {
         let revisions = self.storage.read_program_revisions(session_id)?;
         let active_run = self.program_run_snapshot(session_id);
         let blocks = self.program_blocks_projection(session_id, &program.markdown);
+        let collaborators = self.program_collaborators(session_id);
         Ok(ProgramGetResult {
             program,
             revisions,
             active_run,
             blocks,
+            collaborators,
         })
     }
 
@@ -1470,6 +1541,7 @@ impl SessionManager {
             revisions: self.storage.read_program_revisions(&params.session_id)?,
             active_run: self.program_run_snapshot(&params.session_id),
             blocks: Vec::new(),
+            collaborators: Vec::new(),
         };
         if let Some(base) = params.base_version {
             if base != result.program.version {
@@ -4803,6 +4875,58 @@ mod tests {
             )
             .expect("seed program");
         (mgr, storage, id)
+    }
+
+    #[tokio::test]
+    async fn program_cursor_presence_snapshots_broadcasts_and_clears() {
+        let (mgr, _storage, id) = program_test_mgr("- one\n").await;
+        let mut rx = mgr.subscribe();
+
+        let result = mgr
+            .program_cursor(
+                7,
+                "tui",
+                agentd_protocol::ProgramCursorParams {
+                    session_id: id.clone(),
+                    cursor: 3,
+                    selection_anchor: Some(1),
+                    selection_head: Some(3),
+                    version: Some(1),
+                    label: Some("Desk".to_string()),
+                    clear: false,
+                },
+            )
+            .await
+            .expect("cursor");
+
+        assert_eq!(result.cursor.client_id, "c7");
+        assert_eq!(result.cursor.label, "Desk");
+        assert_eq!(result.cursor.kind, "tui");
+        assert!(result.cursor.active);
+        assert_eq!(mgr.program_collaborators(&id).len(), 1);
+        let get = mgr.program_get(&id).await.expect("program get");
+        assert_eq!(get.collaborators.len(), 1);
+        assert_eq!(get.collaborators[0].client_id, "c7");
+
+        let broadcast = rx.recv().await.expect("broadcast");
+        match broadcast {
+            BroadcastMsg::ProgramCursor(payload) => {
+                assert_eq!(payload.cursor.client_id, "c7");
+                assert!(payload.cursor.active);
+            }
+            other => panic!("unexpected broadcast: {other:?}"),
+        }
+
+        mgr.clear_conn(7);
+        assert!(mgr.program_collaborators(&id).is_empty());
+        let broadcast = rx.recv().await.expect("clear broadcast");
+        match broadcast {
+            BroadcastMsg::ProgramCursor(payload) => {
+                assert_eq!(payload.cursor.client_id, "c7");
+                assert!(!payload.cursor.active);
+            }
+            other => panic!("unexpected broadcast: {other:?}"),
+        }
     }
 
     // The bug that motivated spec 0053: a planning pass must clear shimmer on
