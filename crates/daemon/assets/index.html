@@ -1534,6 +1534,21 @@
     cursor: pointer;
   }
   .program-bar button:hover { border-color: var(--accent); }
+  #programRunBtn[data-running="true"] {
+    border-color: var(--accent);
+    color: var(--accent);
+    animation: program-run-button-pulse 1.15s ease-in-out infinite;
+  }
+  @keyframes program-run-button-pulse {
+    0%, 100% {
+      background: var(--bg-elev-2);
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent);
+    }
+    50% {
+      background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev-2));
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+  }
   #programSaveBtn[data-dirty="true"] {
     border-color: var(--accent);
     color: var(--accent);
@@ -2241,6 +2256,11 @@ const state = {
     // In-flight run shimmer per session id:
     // { pendingIds:Set, tooltips:Map, startPerf, deadlinePerf }.
     runById: new Map(),
+    // Client-local title Run button pulse per session id. This is intentionally
+    // separate from block shimmer: a re-Run can happen while an older shimmer is
+    // already narrowed and has already seen output.
+    runButtonById: new Map(),
+    runButtonTimer: 0,
     // Cached templates from program.list_templates (fetched lazily once).
     templates: null,
     // Session id whose program is currently mounted in the editor, or null.
@@ -3577,6 +3597,7 @@ function programRunFromProgress(progress) {
     tooltips: new Map(Object.entries(progress.pending_block_tooltips || {})),
     startPerf,
     deadlinePerf: perf + (progress.expires_at_ms - nowMs),
+    firstOutputSeen: !!progress.first_output_seen,
   };
 }
 
@@ -3749,6 +3770,58 @@ function programApplyShimmer() {
   lineEls.forEach((el, i) => { el.classList.toggle("is-running", !!(active && active[i])); });
 }
 
+function programRunButtonActive(id) {
+  const run = id && state.program.runButtonById.get(id);
+  if (!run) return false;
+  if (performance.now() >= run.deadlinePerf) {
+    state.program.runButtonById.delete(id);
+    return false;
+  }
+  return true;
+}
+
+function programRefreshRunButton() {
+  const id = state.program.mountedId;
+  const active = !!(id && programRunButtonActive(id));
+  programRunBtn.dataset.running = active ? "true" : "false";
+  if (state.program.runButtonTimer) {
+    clearTimeout(state.program.runButtonTimer);
+    state.program.runButtonTimer = 0;
+  }
+  if (!active || !id) return;
+  const run = state.program.runButtonById.get(id);
+  const ms = Math.max(0, run.deadlinePerf - performance.now());
+  state.program.runButtonTimer = setTimeout(() => {
+    state.program.runButtonTimer = 0;
+    state.program.runButtonById.delete(id);
+    if (state.program.mountedId === id) programRefreshRunButton();
+  }, ms);
+}
+
+function programStartRunButton(id) {
+  const perf = performance.now();
+  state.program.runButtonById.set(id, {
+    startPerf: perf,
+    deadlinePerf: perf + PROGRAM_RUN_MAX_MS,
+  });
+  if (state.program.mountedId === id) programRefreshRunButton();
+}
+
+function programClearRunButton(id) {
+  state.program.runButtonById.delete(id);
+  if (state.program.mountedId === id) programRefreshRunButton();
+}
+
+function programEventClearsRunButton(event) {
+  if (!event || !event.type) return false;
+  if (event.type === "tool_use" || event.type === "task_start" || event.type === "tool_approval_request") {
+    return true;
+  }
+  if (event.type === "reasoning") return !!String(event.text || "").trim();
+  if (event.type === "message") return (event.role || "assistant") === "assistant" && !!String(event.text || "").trim();
+  return false;
+}
+
 function programStartShimmer(id) {
   programStopShimmer();
   programApplyShimmer();
@@ -3773,6 +3846,8 @@ function programStopShimmer() {
 // shimmer loop, autocomplete, and find bar don't linger behind the other views.
 function leaveProgramView() {
   programStopShimmer();
+  if (state.program.runButtonTimer) { clearTimeout(state.program.runButtonTimer); state.program.runButtonTimer = 0; }
+  programRunBtn.dataset.running = "false";
   programCloseClipMenu();
   programCloseFind();
   programWrapEl.hidden = true;
@@ -3817,6 +3892,8 @@ async function programMountSession(id) {
   });
   const run = programRunFromProgress(result.active_run);
   if (run) state.program.runById.set(id, run); else state.program.runById.delete(id);
+  if (run && run.firstOutputSeen) programClearRunButton(id);
+  programRefreshRunButton();
   programRenderDoc(p.markdown);
   programVersionEl.textContent = "v" + p.version;
   programRefreshEmptyState();
@@ -3846,6 +3923,7 @@ function handleProgramState(params) {
   const id = program.session_id;
   const run = programRunFromProgress(params.active_run);
   if (run) state.program.runById.set(id, run); else state.program.runById.delete(id);
+  if (!run || run.firstOutputSeen) programClearRunButton(id);
   const isMounted = state.program.mountedId === id && state.mode === "program";
   const doc = state.program.docById.get(id);
   const refreshShimmer = () => {
@@ -3943,28 +4021,33 @@ async function programSave() {
 
 // --- run (whole program, or the current selection) ---
 
-function programStartOptimisticRun(id, body, isSelection, selectedBlockIds) {
-  // A run optimistically shimmers its whole executed region — the selected
-  // blocks for a selection run, or every block of the program otherwise. This
-  // covers ALL un-settled blocks even when an active run already has the agent's
-  // shimmer on a subset: hitting Run re-runs the whole region, so every block
-  // should light up, not just the ones still pending. The daemon's authoritative
-  // active_run (returned by program.execute) narrows it immediately after.
-  //
-  // (Previously a whole-program re-run mid-flight diffed the body against the
-  // prior saved snapshot and the old pending set, so blocks the agent had
-  // already settled stayed dark — an inconsistent partial shimmer.)
-  const pending = (isSelection && selectedBlockIds && selectedBlockIds.size)
-    ? selectedBlockIds
-    : new Set(programBlockSpans(body).map((b) => b.id));
+function programStartOptimisticRun(id, body, isSelection, selectedBlockIds, prevSaved) {
+  const spans = programBlockSpans(body);
+  const bodyIds = new Set(spans.map((b) => b.id));
+  let pending;
+  if (isSelection && selectedBlockIds && selectedBlockIds.size) {
+    pending = new Set(selectedBlockIds);
+  } else if (!isSelection && state.program.runById.has(id)) {
+    // Re-Run mid-flight: preserve the agent's prior narrowing, and add only
+    // blocks the user changed since the last daemon-synced document.
+    const old = state.program.runById.get(id);
+    const prevIds = new Set(programBlockSpans(prevSaved || "").map((b) => b.id));
+    pending = new Set();
+    for (const blockId of bodyIds) {
+      if (!prevIds.has(blockId) || old.pendingIds.has(blockId)) pending.add(blockId);
+    }
+  } else {
+    pending = bodyIds;
+  }
   if (!pending.size) {
     state.program.runById.delete(id);
     if (state.program.mountedId === id) { programStopShimmer(); programApplyShimmer(); }
-    return;
+    return { pendingIds: pending, shimmer: spans.map(() => false) };
   }
   const perf = performance.now();
   state.program.runById.set(id, { pendingIds: pending, tooltips: new Map(), startPerf: perf, deadlinePerf: perf + PROGRAM_RUN_MAX_MS });
   if (state.program.mountedId === id) programStartShimmer(id);
+  return { pendingIds: pending, shimmer: spans.map((b) => pending.has(b.id)) };
 }
 
 async function programRun() {
@@ -3974,6 +4057,7 @@ async function programRun() {
   if (!doc) return;
   const selMarkdown = programSelectionMarkdown();
   const hasSel = selMarkdown != null && selMarkdown.trim() !== "";
+  const prevSaved = doc.saved || "";
   if (programNormalizeClipIds(programSerialize()) !== doc.saved) {
     await programSave();
     doc = state.program.docById.get(id);
@@ -3985,18 +4069,26 @@ async function programRun() {
     selectedBlockIds = new Set(programBlockSpans(selection).map((b) => b.id));
   }
   const runBody = hasSel ? selection : programSerialize();
-  programStartOptimisticRun(id, runBody, hasSel, selectedBlockIds);
+  const optimistic = programStartOptimisticRun(id, runBody, hasSel, selectedBlockIds, prevSaved);
+  programStartRunButton(id);
   programSetMsg(hasSel ? "running selection…" : "running program…");
   try {
     const params = { session_id: id, base_version: doc.version };
     if (selection != null) params.selection = selection;
+    if (optimistic && optimistic.shimmer && optimistic.shimmer.length) params.shimmer = optimistic.shimmer;
     const result = await rpc("program.execute", params);
     const runP = programRunFromProgress(result.active_run);
     if (runP) { state.program.runById.set(id, runP); if (state.program.mountedId === id) programStartShimmer(id); }
-    else { state.program.runById.delete(id); if (state.program.mountedId === id) { programStopShimmer(); programApplyShimmer(); } }
+    else {
+      state.program.runById.delete(id);
+      programClearRunButton(id);
+      if (state.program.mountedId === id) { programStopShimmer(); programApplyShimmer(); }
+    }
+    if (runP && runP.firstOutputSeen) programClearRunButton(id);
     programSetMsg(`run sent (${hasSel ? "selection" : "program"}, v${result.program.version})`);
   } catch (e) {
     state.program.runById.delete(id);
+    programClearRunButton(id);
     if (state.program.mountedId === id) { programStopShimmer(); programApplyShimmer(); }
     programSetMsg("run failed: " + e.message, true);
   }
@@ -6184,6 +6276,9 @@ function handleNotification(method, params) {
         state.agentStatusById.delete(session_id);
         state.chatWorkingById.delete(session_id);
       }
+    }
+    if (programEventClearsRunButton(event)) {
+      programClearRunButton(session_id);
     }
     if (eventInvalidatesCachedTranscript(event) && !(session_id === state.currentId && state.mode === "chat")) {
       markTranscriptStale(session_id);

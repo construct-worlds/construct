@@ -252,6 +252,69 @@ async fn web_program_view_full_parity() {
     assert_eq!(run["shimmerActive"], true, "running lines should get the shimmer class: {run:?}");
     assert!(run["msg"].as_str().unwrap_or_default().contains("run sent (program"), "{run:?}");
 
+    // --- 6b. Mid-flight re-Run preserves narrowed shimmer and pulses Run. ----
+    let rerun: serde_json::Value = page
+        .evaluate(
+            r###"
+            withMockProgram({
+              "program.list_templates": () => ({ templates: [] }),
+            }, async () => {
+              const oldMd = "# Heading\n- settled\n- pending\n";
+              const newMd = "# Heading\n- changed settled\n- pending\n";
+              const pendingId = programBlockSpans(oldMd).find((b) => oldMd.split("\n").slice(b.start_line, b.end_line).join("\n").includes("pending")).id;
+              const now = Date.now();
+              const priorRun = { run_id: "r-old", started_at_ms: now - 2000, expires_at_ms: now + 60000, pending_block_ids: [pendingId], pending_block_tooltips: {}, seen_running: true, first_output_seen: true, agent_managed: true };
+              window.__execs = [];
+              window.__updates = [];
+              window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-rerun", markdown: oldMd, version: 2, template_id: null }, active_run: priorRun, blocks: [], revisions: [] });
+              window.__mockProgramHandlers["program.update"] = (p) => {
+                window.__updates.push(p);
+                return { program: { session_id: "s-rerun", markdown: p.markdown, version: 3, template_id: null }, blocks: [], active_run: priorRun };
+              };
+              window.__mockProgramHandlers["program.execute"] = (p) => {
+                window.__execs.push(p);
+                const ids = programBlockSpans(newMd).map((b) => b.id).filter((_, i) => p.shimmer && p.shimmer[i]);
+                const t = Date.now();
+                return { program: { session_id: "s-rerun", markdown: newMd, version: 3, template_id: null }, blocks: [], active_run: { run_id: "r-new", started_at_ms: t, expires_at_ms: t + 60000, pending_block_ids: ids, pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } };
+              };
+              setSession("s-rerun", "shell");
+              await switchCurrentViewMode("program");
+              programTestClearSel();
+              programTestSet(newMd);
+              await programRun();
+              const run = state.program.runById.get("s-rerun");
+              const pendingTexts = programBlockSpans(newMd)
+                .filter((b) => run && run.pendingIds.has(b.id))
+                .map((b) => newMd.split("\n").slice(b.start_line, b.end_line).join("\n"));
+              const beforeTool = programRunBtn.dataset.running;
+              handleNotification("session/event", { session_id: "s-rerun", event: { type: "tool_use", tool: "shell", args: {} } });
+              return {
+                updates: window.__updates,
+                execs: window.__execs,
+                pendingTexts,
+                beforeTool,
+                afterTool: programRunBtn.dataset.running,
+              };
+            })
+            "###,
+        )
+        .await
+        .expect("evaluate rerun")
+        .into_value()
+        .expect("json");
+    assert_eq!(
+        rerun["execs"][0]["shimmer"],
+        serde_json::json!([false, true, true]),
+        "re-run should shimmer only changed + still-pending blocks: {rerun:?}"
+    );
+    assert_eq!(
+        rerun["pendingTexts"],
+        serde_json::json!(["- changed settled", "- pending"]),
+        "optimistic run should keep old pending and add the user edit: {rerun:?}"
+    );
+    assert_eq!(rerun["beforeTool"], "true", "Run button should pulse until tool output: {rerun:?}");
+    assert_eq!(rerun["afterTool"], "false", "tool_use should clear Run button pulse: {rerun:?}");
+
     // --- 7. Run with a selection scopes execute to the selected text. --------
     let run_sel: serde_json::Value = page
         .evaluate(
@@ -507,10 +570,12 @@ const SETUP_JS: &str = r###"
         ws: state.ws, sessions: state.sessions, currentId: state.currentId,
         mode: state.mode, harnesses: state.harnesses,
         docById: state.program.docById, runById: state.program.runById,
+        runButtonById: state.program.runButtonById,
         templates: state.program.templates, mountedId: state.program.mountedId,
       };
       state.program.docById = new Map();
       state.program.runById = new Map();
+      state.program.runButtonById = new Map();
       state.program.templates = null;
       window.__mockProgramHandlers = handlers;
       state.ws = {
@@ -532,6 +597,7 @@ const SETUP_JS: &str = r###"
         state.ws = saved.ws; state.sessions = saved.sessions; state.currentId = saved.currentId;
         state.mode = saved.mode; state.harnesses = saved.harnesses;
         state.program.docById = saved.docById; state.program.runById = saved.runById;
+        state.program.runButtonById = saved.runButtonById;
         state.program.templates = saved.templates; state.program.mountedId = saved.mountedId;
       }
     };
