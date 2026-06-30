@@ -315,6 +315,58 @@ impl App {
         }
     }
 
+    /// Left-arrow "go back": close the `@`→session dialog and return to the
+    /// inline `@` context menu it was opened from, re-highlighting the "session"
+    /// category so Left/Right are reversible (mirrors
+    /// [`Self::program_smart_clip_collapse`] for the inline submenus). Unlike
+    /// [`Self::cancel_session_picker`], the underlying smart-clip search is left
+    /// alive so the inline menu re-renders in the same anchored position. A no-op
+    /// for the `C-x b` switcher, which has no parent menu to return to.
+    fn session_picker_back_to_menu(&mut self) {
+        if !matches!(
+            self.session_picker.as_ref().map(|d| &d.purpose),
+            Some(SessionPickerPurpose::InsertProgramClip)
+        ) {
+            return;
+        }
+        // Find the "session" category among the menu's selectable rows so we can
+        // re-highlight it. The dialog only ever opens from the root view (the
+        // category lives there), so the current rows are the root rows. `None`
+        // means there is no live `@` menu underneath (it should be there, but
+        // guard rather than assume).
+        let selected = self.program_popup.as_ref().and_then(|popup| {
+            popup.smart_clip.as_ref()?;
+            Some(
+                self.program_smart_clip_rows(popup)
+                    .iter()
+                    .filter(|r| r.is_selectable())
+                    .position(|r| {
+                        matches!(
+                            r,
+                            ProgramSmartClipRow::Category {
+                                group: ProgramSmartClipGroup::Session,
+                                ..
+                            }
+                        )
+                    })
+                    .unwrap_or(0),
+            )
+        });
+        // Close the dialog but keep the smart-clip search live so the inline `@`
+        // menu re-appears where the dialog (and the menu before it) sat.
+        self.session_picker = None;
+        if let Some(selected) = selected {
+            if let Some(search) = self
+                .program_popup
+                .as_mut()
+                .and_then(|popup| popup.smart_clip.as_mut())
+            {
+                search.view = ProgramSmartClipView::Root;
+                search.selected = selected;
+            }
+        }
+    }
+
     /// Act on the highlighted session: switch focus to it, or insert its clip.
     fn confirm_session_picker(&mut self) {
         let Some(purpose) = self.session_picker.as_ref().map(|d| d.purpose.clone()) else {
@@ -376,6 +428,10 @@ impl App {
             KeyCode::Esc => self.cancel_session_picker(),
             KeyCode::Char('g') if ctrl => self.cancel_session_picker(),
             KeyCode::Enter => self.confirm_session_picker(),
+            // Left backs out of the `@`→session dialog to the inline `@` menu it
+            // was opened from (a no-op for the `C-x b` switcher, which has no
+            // parent menu). Mirrors the inline submenu's Left/Right reversibility.
+            KeyCode::Left => self.session_picker_back_to_menu(),
             KeyCode::Up => self.move_session_picker_selection(-1),
             KeyCode::Down => self.move_session_picker_selection(1),
             KeyCode::Char('p') if ctrl => self.move_session_picker_selection(-1),

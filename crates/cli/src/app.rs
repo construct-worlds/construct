@@ -11988,6 +11988,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_picker_left_returns_to_program_menu() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut alpha = summary_with_kind(agentd_protocol::SessionKind::User);
+        alpha.id = "a".into();
+        alpha.title = Some("alpha".into());
+        alpha.position = 0;
+        let mut beta = summary_with_kind(agentd_protocol::SessionKind::User);
+        beta.id = "b".into();
+        beta.title = Some("beta".into());
+        beta.position = 1;
+        app.sessions = vec![alpha, beta];
+        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.insert_program_text("@");
+
+        // Open the `@`→session dialog from the session category (root position 2).
+        app.program_popup
+            .as_mut()
+            .unwrap()
+            .smart_clip
+            .as_mut()
+            .unwrap()
+            .selected = 2;
+        app.accept_program_smart_clip();
+        assert!(app.session_picker_active());
+
+        // Left backs out of the dialog to the inline `@` menu it was opened from
+        // — the inverse of the Right/Enter that drilled into it.
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+
+        // The dialog is gone, but the `@` smart-clip menu is live again, the
+        // buffer is untouched, and the "session" category is re-highlighted.
+        assert!(!app.session_picker_active(), "Left closes the dialog");
+        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "@");
+        let popup = app.program_popup.as_ref().unwrap();
+        let search = popup
+            .smart_clip
+            .as_ref()
+            .expect("the inline `@` menu is live again");
+        assert!(matches!(search.view, ProgramSmartClipView::Root));
+        let rows = app.program_smart_clip_rows(popup);
+        let selectable: Vec<&ProgramSmartClipRow> =
+            rows.iter().filter(|r| r.is_selectable()).collect();
+        assert!(matches!(
+            selectable[search.selected],
+            ProgramSmartClipRow::Category {
+                group: ProgramSmartClipGroup::Session,
+                ..
+            }
+        ));
+
+        // Right re-opens the dialog: the back-navigation is fully reversible.
+        app.program_smart_clip_expand();
+        assert!(app.session_picker_active(), "Right re-opens the dialog");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn session_picker_clip_variant_filters_from_buffer_typeahead() {
         let (mut app, _dir, server) = empty_app().await;
         let mut alpha = summary_with_kind(agentd_protocol::SessionKind::User);
@@ -14043,6 +14100,20 @@ mod tests {
         app.open_session_picker(SessionPickerPurpose::Switch);
         app.handle_session_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.session_picker_active());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_picker_switch_left_is_noop() {
+        let (mut app, _dir, server) = session_picker_app().await;
+        app.open_session_picker(SessionPickerPurpose::Switch);
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let before = app.session_picker.as_ref().unwrap().selected;
+        // The `C-x b` switcher has no parent menu to return to, so Left does
+        // nothing — neither closing the dialog nor moving the selection.
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(app.session_picker_active(), "Left is a no-op for the switcher");
+        assert_eq!(app.session_picker.as_ref().unwrap().selected, before);
         server.abort();
     }
 
