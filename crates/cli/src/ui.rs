@@ -34,6 +34,7 @@ const PROGRAM_REVEAL_SECS: f32 = PROGRAM_REVEAL_MS as f32 / 1000.0;
 const PROGRAM_RUN_BUTTON: &str = " ▶ ";
 const PROGRAM_CLIP_HOVER_PREVIEW_COLS: u16 = 102;
 const PROGRAM_CLIP_HOVER_PREVIEW_ROWS: u16 = 12;
+const PROGRAM_COLLAB_CURSOR_LABEL_MAX_WIDTH: usize = 12;
 /// How long the program shimmer-text preview lingers after the pointer stops
 /// moving before it self-dismisses. The clip-chip preview, by contrast, stays
 /// up for as long as the chip is hovered.
@@ -8006,17 +8007,20 @@ fn render_program_collab_cursors(
             let max_w = inner
                 .right()
                 .saturating_sub(pos.x.saturating_add(1))
-                .min(12) as usize;
+                .min(PROGRAM_COLLAB_CURSOR_LABEL_MAX_WIDTH as u16) as usize;
             if max_w > 0 {
-                let label: String = label.chars().take(max_w).collect();
-                let rect = Rect::new(pos.x.saturating_add(1), pos.y - 1, max_w as u16, 1);
-                f.render_widget(
-                    Paragraph::new(label).style(program_collab_cursor_label_style(
-                        &app.theme,
-                        cursor.color_index,
-                    )),
-                    rect,
-                );
+                let label = truncate_to_width(label, max_w);
+                let label_w = UnicodeWidthStr::width(label.as_str()) as u16;
+                if label_w > 0 {
+                    let rect = Rect::new(pos.x.saturating_add(1), pos.y - 1, label_w, 1);
+                    f.render_widget(
+                        Paragraph::new(label).style(program_collab_cursor_label_style(
+                            &app.theme,
+                            cursor.color_index,
+                        )),
+                        rect,
+                    );
+                }
             }
         }
     }
