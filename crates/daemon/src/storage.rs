@@ -30,22 +30,15 @@ const PROJECT_MEMORY_TEMPLATE: &str =
 const PROGRAM_REVISION_LIMIT: usize = 50;
 const BLANK_PROGRAM: &str = "";
 const TASKS_PROGRAM: &str = concat!(
-    "# Tasks\n",
+    "# Rule\n",
     "\n",
-    "Press Run (or select a section, then Run) to put the agent to work: it ",
-    "reads this board top to bottom, starts the unblocked Todo items, hands ",
-    "heavy or parallel work to subagents, moves cards into Progress, and records ",
-    "results under Done. Run again to keep it going.\n",
-    "\n",
-    "Aim a task at a worker with a smart clip — type @ to pick one. For example, ",
-    "@{harness:codex} runs a task with Codex, or embed an existing session to ",
-    "track and continue its work.\n",
+    "Todo -> In progress (dispatched) -> Done (merged). I'm pre-approving all ",
+    "tasks pr to be merged, so you don't need to ask me. Each item, create ",
+    "claude subagent session to resolve. archive subagent sessions after done.\n",
     "\n",
     "## Todo\n",
     "\n",
-    "- \n",
-    "\n",
-    "## Progress\n",
+    "## In Progress\n",
     "\n",
     "## Done\n",
 );
