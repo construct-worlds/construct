@@ -1595,10 +1595,18 @@ pub struct ProgramRun {
     pub deadline: Instant,
     /// Whether the first output has been observed.
     pub first_output_seen: bool,
+    /// Compact run-pipeline stage derived by the daemon, or Pressed for this
+    /// client's optimistic pre-response state.
+    pub stage: agentd_protocol::ProgramRunStage,
+    /// Blocks settled from the run's initial pending set.
+    pub settled_block_count: usize,
+    /// Blocks in the run's initial pending set.
+    pub total_block_count: usize,
 }
 
 impl ProgramRun {
-    fn from_progress(progress: agentd_protocol::ProgramRunProgress) -> Option<Self> {
+    fn from_progress(mut progress: agentd_protocol::ProgramRunProgress) -> Option<Self> {
+        progress.refresh_stage();
         let now = Instant::now();
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1623,6 +1631,9 @@ impl ProgramRun {
             pending_tooltips: progress.pending_block_tooltips,
             deadline,
             first_output_seen: progress.first_output_seen,
+            stage: progress.stage,
+            settled_block_count: progress.settled_block_count,
+            total_block_count: progress.total_block_count,
         })
     }
 }
@@ -9474,6 +9485,9 @@ mod tests {
                 pending_tooltips: HashMap::new(),
                 deadline: Instant::now() + Duration::from_secs(30),
                 first_output_seen: false,
+                stage: agentd_protocol::ProgramRunStage::Delivered,
+                settled_block_count: 0,
+                total_block_count: 1,
             },
         );
         app.program_view_memory.insert(
@@ -11665,6 +11679,9 @@ mod tests {
                 pending_tooltips: HashMap::new(),
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
+                stage: agentd_protocol::ProgramRunStage::FirstOutput,
+                settled_block_count: 0,
+                total_block_count: 0,
             },
         );
 
@@ -11838,6 +11855,9 @@ mod tests {
                 pending_tooltips: HashMap::from([(block_id, "Still running".into())]),
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
+                stage: agentd_protocol::ProgramRunStage::FirstOutput,
+                settled_block_count: 0,
+                total_block_count: 1,
             },
         );
 
@@ -11925,6 +11945,9 @@ mod tests {
                 pending_tooltips: HashMap::from([(block_id, "Building PR".into())]),
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
+                stage: agentd_protocol::ProgramRunStage::FirstOutput,
+                settled_block_count: 0,
+                total_block_count: 1,
             },
         );
 
@@ -11997,6 +12020,9 @@ mod tests {
                 pending_tooltips: HashMap::from([(block_id, "Building PR".into())]),
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
+                stage: agentd_protocol::ProgramRunStage::FirstOutput,
+                settled_block_count: 0,
+                total_block_count: 1,
             },
         );
 
