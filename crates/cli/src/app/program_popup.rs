@@ -452,11 +452,24 @@ impl App {
             // them and they stop re-shimmering.
             Some(old) if !is_selection => {
                 let prev_ids = program_run_pending_ids(prev_saved);
-                body_ids
+                let narrowed: HashSet<String> = body_ids
                     .difference(&prev_ids)
                     .chain(body_ids.intersection(&old.pending))
                     .cloned()
-                    .collect()
+                    .collect();
+                // A run can already exist over this session with nothing left
+                // that overlaps the fresh press — e.g. the prior run was
+                // scoped to a selection, or its pending set had transiently
+                // emptied mid-turn (spec 0042) without being cleared yet.
+                // Pressing Run again must still give immediate feedback for
+                // this new request rather than silently going dark, so an
+                // empty narrowing falls back to the whole executed body —
+                // mirroring the daemon's own mid-flight fallback.
+                if narrowed.is_empty() {
+                    body_ids
+                } else {
+                    narrowed
+                }
             }
             // Fresh run, or a selection run scoped by the user: shimmer it all.
             _ => body_ids,

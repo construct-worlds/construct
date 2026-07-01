@@ -10989,6 +10989,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn program_run_button_spins_on_rerun_when_shimmer_already_exists() {
+        // Pressing Run while a shimmer block already exists for this session
+        // (an older run whose first output has already been seen, so the
+        // button had stopped pulsing) must still restart the pulse for the
+        // fresh press rather than staying dark.
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_runs.insert(
+            "s1".to_string(),
+            ProgramRun {
+                started_at: Instant::now() - Duration::from_secs(5),
+                pending: HashSet::new(),
+                pending_tooltips: HashMap::new(),
+                deadline: Instant::now() + Duration::from_secs(60),
+                first_output_seen: true,
+            },
+        );
+
+        app.start_program_run("s1", "alpha beta", false, "alpha beta");
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let run = app
+            .layout
+            .program_title_run_hit
+            .expect("run hit registered");
+        let run_glyph = term
+            .backend()
+            .buffer()
+            .cell((run.0.saturating_add(1), run.2))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(run_glyph, app.spinner_frame().to_string());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn program_session_hover_card_shows_session_output() {
         use crate::pty_render::ItemHistory;
 
@@ -12246,6 +12293,39 @@ mod tests {
         assert!(pending.contains(&id("- pending")));
         assert!(!pending.contains(&id("- settled")));
         assert!(!pending.contains(&id("- also settled")));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_optimistic_rerun_falls_back_to_full_body_when_prior_pending_shares_nothing() {
+        // "Shimmer block already exists" but shares no blocks with the fresh
+        // press — e.g. its pending set transiently emptied mid-turn (spec
+        // 0042) without the run record being reaped yet, or it was scoped to
+        // a selection that no longer overlaps. Re-Run must still give
+        // immediate optimistic feedback for the new request instead of
+        // silently going dark.
+        let (mut app, _dir, server) = empty_app().await;
+        let id = agentd_protocol::program_block_id;
+        let body = "# Todo\n\n- alpha\n\n- beta\n";
+
+        app.start_program_run("s1", body, false, "");
+        app.program_runs.get_mut("s1").expect("run").pending = HashSet::new();
+
+        app.start_program_run("s1", body, false, body);
+
+        assert!(
+            app.program_runs.contains_key("s1"),
+            "re-Run must not clear the optimistic shimmer just because the \
+             prior run's pending set had nothing in common with the fresh body"
+        );
+        let run = &app.program_runs["s1"];
+        assert!(run.pending.contains(&id("# Todo")));
+        assert!(run.pending.contains(&id("- alpha")));
+        assert!(run.pending.contains(&id("- beta")));
+        assert!(
+            !run.first_output_seen,
+            "the fresh press must restart the Run button pulse"
+        );
         server.abort();
     }
 
