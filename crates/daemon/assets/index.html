@@ -1689,20 +1689,31 @@
     line-height: 1.6;
   }
   .program-empty .pe-desc { color: var(--fg-dim); margin-bottom: 14px; max-width: 70ch; }
-  .program-empty .pe-templates { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
-  .program-empty .pe-tmpl {
-    background: var(--bg-elev-2);
-    color: var(--fg);
+  .program-empty .pe-templates {
+    display: flex;
+    flex-direction: column;
+    max-width: 46ch;
     border: 1px solid var(--border);
-    border-left: 2px solid var(--accent);
     border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 18px;
+  }
+  .program-empty .pe-tmpl {
+    display: block;
+    width: 100%;
+    background: transparent;
+    color: var(--fg);
+    border: none;
+    border-bottom: 1px solid var(--border-faint);
+    border-left: 2px solid transparent;
     padding: 8px 14px;
     font: inherit;
     font-weight: 600;
     cursor: pointer;
     text-align: left;
   }
-  .program-empty .pe-tmpl:hover { border-color: var(--accent); }
+  .program-empty .pe-templates .pe-tmpl:last-child { border-bottom: none; }
+  .program-empty .pe-tmpl:hover { background: var(--bg-elev-2); border-left-color: var(--accent); }
   .program-empty .pe-tmpl .pe-tmpl-desc { display: block; font-weight: 400;
     color: var(--fg-faint); font-size: 12px; margin-top: 3px; }
   .program-empty .pe-divider { border-top: 1px solid var(--border-faint); margin: 14px 0; }
