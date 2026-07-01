@@ -14,7 +14,7 @@ Hovering a `@{session:…}` smart-clip chip is a distinct affordance and keeps p
 - The preview shows the target session's recent terminal tail in a compact floating card, anchored near the pointer and kept inside the program surface.
 - The card's caption is the block's status tooltip, or its fallback label when none is stored, so the `0057` status text is never lost by upgrading to the richer preview.
 - It degrades to the bare text tooltip (`0057`) whenever a preview cannot be shown: the target session is unknown, or has produced no captured output yet.
-- Like the other transient program hover affordances, it appears only while the pointer is actively moving and self-dismisses after the pointer has been still briefly.
+- It persists for as long as the pointer remains over the shimmering block, exactly like the clip-chip hover — it does not self-dismiss just because the pointer has been briefly still. It disappears only when the pointer leaves the block (or the block stops shimmering).
 
 ## Reason
 
