@@ -5596,6 +5596,25 @@ impl App {
         self.ui_panels.remove(id);
         self.pty_activity.remove(id);
         self.matrix_rain.forget_session(id);
+        // Program state is keyed by session id and otherwise never expires —
+        // left uncleaned, a long-running TUI that opens/closes Program views
+        // across many short-lived sessions accumulates stale entries forever.
+        // `open_program_session_ids()` sorts every entry in `program_popups`
+        // and runs once per visible split pane per frame, so this leak turns
+        // into an ever-growing per-frame cost that gets paid once per split —
+        // exactly the "lag after deleting a session, then splitting" reports.
+        if self
+            .program_popup
+            .as_ref()
+            .is_some_and(|popup| popup.program.session_id == id)
+        {
+            self.program_popup = None;
+        }
+        self.program_popups.remove(id);
+        self.program_runs.remove(id);
+        self.program_view_memory.remove(id);
+        self.program_collaborators
+            .retain(|_, cursor| cursor.session_id != id);
         // Orchestrator session went away → palette fallback after the
         // re-derive below. The orchestrator's PTY parser in
         // `terminals[id]` was already removed by the generic cleanup
@@ -9174,6 +9193,91 @@ mod tests {
             closing: false,
             scroll_offset: 0,
         }
+    }
+
+    // Regression: deleting a session must drop its Program-related state, not
+    // just its terminal/history state. `program_popups` in particular is
+    // scanned in full (sorted, cloned ids) by `open_program_session_ids()`
+    // once per visible split pane on every frame — left uncleaned, opening
+    // and deleting sessions with a Program view over a long-running TUI
+    // session grows that map without bound, and the per-frame cost grows
+    // with it, multiplied by however many split panes are open. That matches
+    // reports of the TUI getting laggy after "delete a session from a split,
+    // then create a new split": more splits pay the growing cost more times
+    // per frame.
+    #[tokio::test]
+    async fn deleting_a_session_clears_its_program_state() {
+        let (mut app, _dir, _server) = two_session_app().await;
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        // s1's program is the active popup; s2's is stashed (not focused).
+        app.program_popup = Some(program_popup_for_test("s1", "# Rule\n\nbody\n", 0));
+        app.program_popups
+            .insert("s2".into(), program_popup_for_test("s2", "# Rule\n\nother\n", 0));
+        app.program_runs.insert(
+            "s1".into(),
+            ProgramRun {
+                started_at: Instant::now(),
+                pending: ["s1-block".to_string()].into_iter().collect(),
+                pending_tooltips: HashMap::new(),
+                deadline: Instant::now() + Duration::from_secs(30),
+                first_output_seen: false,
+            },
+        );
+        app.program_view_memory.insert(
+            "s1".into(),
+            ProgramViewMemory {
+                cursor: 3,
+                preferred_col: None,
+                scroll_offset: 0,
+            },
+        );
+        app.program_collaborators.insert(
+            "client-1".into(),
+            agentd_protocol::ProgramCursor {
+                client_id: "client-1".into(),
+                session_id: "s1".into(),
+                label: "Web".into(),
+                kind: "web".into(),
+                cursor: 0,
+                selection_anchor: None,
+                selection_head: None,
+                version: None,
+                color_index: 0,
+                updated_at_ms: 0,
+                active: true,
+            },
+        );
+
+        app.on_session_deleted("s1").await;
+
+        assert!(
+            app.program_popup.is_none(),
+            "the active popup for the deleted session must not linger"
+        );
+        assert!(!app.program_popups.contains_key("s1"));
+        assert!(!app.program_runs.contains_key("s1"));
+        assert!(!app.program_view_memory.contains_key("s1"));
+        assert!(
+            !app.program_collaborators
+                .values()
+                .any(|c| c.session_id == "s1"),
+            "collaborator cursors for the deleted session must be dropped"
+        );
+        // s2's program state is untouched — only s1's is gone.
+        assert!(app.program_popups.contains_key("s2"));
     }
 
     #[tokio::test]
