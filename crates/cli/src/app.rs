@@ -815,6 +815,23 @@ pub struct App {
     /// gymnastics. Non-smith sessions degrade to a single
     /// `PtyChunk` and render identically to the old pipeline.
     pub histories: HashMap<String, crate::pty_render::ItemHistory>,
+    /// Session ids whose `ItemHistory` has already been replayed once this
+    /// frame, populated by `render_terminal_for_window` and cleared at the
+    /// top of every frame. A session normally appears in exactly one split
+    /// pane, but a stale window-selection reassignment (e.g. the neighbor a
+    /// deleted/archived session's pane falls back to) can leave two panes
+    /// showing the same session at two different widths. `ItemHistory`
+    /// caches a single parser sized to the *last* width it was asked to
+    /// replay at, so alternating between two widths for the same session
+    /// within one frame rebuilds that parser from scratch on every single
+    /// call — cheap for a nearly-empty session, catastrophic for one with
+    /// substantial scrollback (same failure mode as the pin-strip/split-pane
+    /// thrash `pin_tile_reuses_cached_size_to_avoid_split_thrash` guards
+    /// against). The second (and later) pane showing an already-rendered
+    /// session this frame reuses the first pane's cached size instead of its
+    /// own, trading a slightly-off-size duplicate render for avoiding the
+    /// rebuild.
+    pub terminal_replayed_sessions_this_frame: HashSet<String>,
     /// Per-session cached block hit-test ranges (call_id, row range
     /// within the rendered pane). Refreshed by the render functions
     /// after each `replay`. Mouse clicks in the PTY pane consult
@@ -2360,6 +2377,7 @@ async fn run_with_socket_initial_selection(
         remote_clients: 0,
         view: ViewMode::Chat,
         histories: HashMap::new(),
+        terminal_replayed_sessions_this_frame: HashSet::new(),
         block_hits: HashMap::new(),
         matrix_reveal_hits: Vec::new(),
         orchestrator_desired_size: None,
@@ -9070,6 +9088,7 @@ mod tests {
             remote_clients: 0,
             view: ViewMode::Terminal,
             histories: HashMap::new(),
+            terminal_replayed_sessions_this_frame: HashSet::new(),
             block_hits: HashMap::new(),
             matrix_reveal_hits: Vec::new(),
             orchestrator_desired_size: None,
@@ -9222,6 +9241,188 @@ mod tests {
         }
     }
 
+    /// Mock daemon for tests exercising Program open/edit/save end to end:
+    /// replies to `program.get` / `program.update` with the session id
+    /// echoed from params, and to `session.transcript` with an empty
+    /// transcript. Everything else gets a `null` result (fine for
+    /// fire-and-forget calls whose errors are swallowed by the caller).
+    async fn program_flow_mock_daemon(
+    ) -> (Arc<Client>, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut reader = BufReader::new(reader);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        let Ok(n) = reader.read_line(&mut line).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        let req: Value = serde_json::from_str(&line).expect("json request");
+                        let id = req.get("id").cloned().unwrap_or(Value::Null);
+                        let method = req
+                            .get("method")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let params = req.get("params").cloned().unwrap_or(Value::Null);
+                        let session_id = params
+                            .get("session_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("s1")
+                            .to_string();
+                        let result = match method.as_str() {
+                            ipc_method::PROGRAM_GET => {
+                                let markdown = params
+                                    .get("markdown")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                serde_json::json!({ "program": {
+                                    "session_id": session_id,
+                                    "markdown": markdown,
+                                    "version": 1,
+                                    "updated_at_ms": 0,
+                                    "template_id": null,
+                                }})
+                            }
+                            ipc_method::PROGRAM_UPDATE => {
+                                let markdown = params
+                                    .get("markdown")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                serde_json::json!({ "program": {
+                                    "session_id": session_id,
+                                    "markdown": markdown,
+                                    "version": 2,
+                                    "updated_at_ms": 0,
+                                    "template_id": null,
+                                }})
+                            }
+                            ipc_method::SESSION_TRANSCRIPT => {
+                                serde_json::json!({ "events": [], "total": 0 })
+                            }
+                            _ => Value::Null,
+                        };
+                        let resp =
+                            serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                        if writer
+                            .write_all((resp.to_string() + "\n").as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        (client, dir, server)
+    }
+
+    // End-to-end reproduction of the reported repro: open Program on a
+    // session, edit and save; split the window onto a second session listed
+    // just above it; delete that second session so `focus_neighbor_of`
+    // reassigns its pane to the neighbor — both panes now show the *first*
+    // session, which still has a Program open. Drives the real
+    // `open_program_popup` / `select_session` / `split_active_window` /
+    // `on_session_deleted` methods (not hand-built App state) and checks
+    // Program-popup bookkeeping stays consistent through the convergence:
+    // no duplicate stashed entry, and the popup is restored to the session
+    // both panes now share. Render-cost characteristics of this exact
+    // shape are covered by
+    // `two_split_panes_same_session_reuses_cached_size_instead_of_thrashing`.
+    #[tokio::test]
+    async fn two_windows_converging_on_one_session_with_program_open() {
+        let (client, _dir, _server) = program_flow_mock_daemon().await;
+        let mut s1 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s1.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let mut app = test_app(client, vec![s1]);
+        app.selection = Selection::Session("s1".into());
+        app.active_window_id = 1;
+        app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
+
+        // 1. Open Program on s1, edit, and save.
+        app.open_program_popup().await;
+        assert!(app.program_popup.is_some(), "program should have opened");
+        app.program_popup.as_mut().unwrap().buffer = "# Notes\n\nedited body\n".to_string();
+        assert!(app.save_program_popup().await, "save should succeed");
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().buffer,
+            app.program_popup.as_ref().unwrap().saved_markdown,
+            "buffer should be clean (not dirty) after save"
+        );
+
+        // 2. Create session s2, positioned above s1 in the list (newer
+        // created_at, matching the reported repro's list ordering), then
+        // split and switch the new window to show it.
+        let mut s2 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s2.id = "s2".into();
+        s2.created_at = chrono::Utc::now();
+        app.sessions.push(s2);
+        assert_eq!(
+            app.list_items()
+                .iter()
+                .filter_map(|it| match it {
+                    ListItem::Session { summary, .. } => Some(summary.id.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["s2".to_string(), "s1".to_string()],
+            "s2 must sort above s1 in the list for this repro"
+        );
+        app.split_active_window(WindowSplitDirection::Right);
+        app.select_session("s2".into());
+        app.sync_active_window_selection();
+        assert_eq!(app.main_windows.visible_session_ids(), vec!["s1", "s2"]);
+        // s1's program is now stashed (focus moved to s2's window).
+        assert!(app.program_popup.is_none());
+        assert!(app.program_popups.contains_key("s1"));
+
+        // 3. Delete s2. Its window's selection is reassigned to its list
+        // neighbor (s1) — both windows now show s1.
+        app.on_session_deleted("s2").await;
+        assert_eq!(
+            app.main_windows.visible_session_ids(),
+            vec!["s1", "s1"],
+            "both windows should now show s1"
+        );
+
+        // Render a few frames to drive the post-convergence bookkeeping
+        // (`sync_program_popup_with_selection`) to steady state.
+        let backend = ratatui::backend::TestBackend::new(160, 45);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        for _ in 0..3 {
+            term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        }
+        assert!(
+            app.program_popup.is_some(),
+            "program_popup should have been restored to s1 after convergence"
+        );
+        assert!(
+            app.program_popups.is_empty(),
+            "program_popups should not retain a duplicate stashed entry for s1"
+        );
+    }
+
     // Regression: deleting a session must drop its Program-related state, not
     // just its terminal/history state. `program_popups` in particular is
     // scanned in full (sorted, cloned ids) by `open_program_session_ids()`
@@ -9251,8 +9452,10 @@ mod tests {
         app.selection = Selection::Session("s1".into());
         // s1's program is the active popup; s2's is stashed (not focused).
         app.program_popup = Some(program_popup_for_test("s1", "# Rule\n\nbody\n", 0));
-        app.program_popups
-            .insert("s2".into(), program_popup_for_test("s2", "# Rule\n\nother\n", 0));
+        app.program_popups.insert(
+            "s2".into(),
+            program_popup_for_test("s2", "# Rule\n\nother\n", 0),
+        );
         app.program_runs.insert(
             "s1".into(),
             ProgramRun {
@@ -9306,6 +9509,84 @@ mod tests {
         );
         // s2's program state is untouched — only s1's is gone.
         assert!(app.program_popups.contains_key("s2"));
+    }
+
+    // Concrete reproduction reported after the above fix shipped: a session
+    // reassignment (the neighbor a deleted/archived session's window falls
+    // back to — see `focus_neighbor_of`) can leave TWO split panes showing
+    // the SAME session. `ItemHistory` caches one parser sized to whichever
+    // width it was last replayed at; two panes at two different widths
+    // alternate that width every single frame. For a plain PTY session
+    // that's a bounded-tail rebuild (cheap); for a tool-block session
+    // (smith/claude/codex — anything with a `ToolBlock` item) `replay_full`
+    // takes the `rebuild_from = Some(0)` path on any cols change, replaying
+    // every item from scratch — measured non-linear, multiple *seconds* for
+    // just a couple thousand accumulated lines when cols alternate every
+    // call, vs. instant when cols stay stable. Same failure family as
+    // `pin_tile_reuses_cached_size_to_avoid_split_thrash`
+    // (crates/cli/src/pty_render.rs), which already guards the
+    // split+pin-strip case — just never guarded two ordinary split panes.
+    // Regression for the fix: `render_terminal_for_window` now reuses the
+    // first pane's cached size for any later pane rendering an
+    // already-replayed-this-frame session, so cols never actually alternate.
+    #[tokio::test]
+    async fn two_split_panes_same_session_reuses_cached_size_instead_of_thrashing() {
+        let mut history = crate::pty_render::ItemHistory::new();
+        // A tool block forces the `replay_full` path (see `needs_synth` in
+        // `ItemHistory::replay`) — the one that fully rebuilds on any cols
+        // change, not just the bounded-tail `replay_cached` path plain PTY
+        // sessions use.
+        history.feed_tool_use("shell".into(), "ls".into());
+        history.feed_pty(b"\x1b]7700;open;call=cX\x07x\x1b]7700;close;call=cX\x07");
+        history.feed_tool_result("cX", true, "done".into());
+        for i in 0..2_000u32 {
+            history
+                .feed_pty(format!("\x1b[33mline {i} of accumulated chat \x1b[0m\r\n").as_bytes());
+        }
+        let (mut app, _dir, _server) = empty_app().await;
+        let mut s1 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s1.has_pty = true;
+        app.sessions = vec![s1];
+        app.histories.insert("s1".into(), history);
+        // Deliberately unequal split so the two panes compute different
+        // widths — the thrash trigger. `render_main_windows` renders `first`
+        // (window 1) then `second` (window 2) every frame, so window 1 is
+        // always the "first replay this frame" and window 2 the repeat.
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 30,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s1".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+
+        let backend = ratatui::backend::TestBackend::new(160, 45);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        // Warm up: first frame legitimately pays for at least one parser
+        // build per distinct width.
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let start = Instant::now();
+        for _ in 0..30 {
+            term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 1_000,
+            "30 frames of two split panes on one tool-block session took \
+             {elapsed:?} — thrash reintroduced? (should reuse the first \
+             pane's cached parser size instead of rebuilding per pane). \
+             Without the fix this took multiple seconds even for a couple \
+             thousand accumulated lines."
+        );
     }
 
     #[tokio::test]
