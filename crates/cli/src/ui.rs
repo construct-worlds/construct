@@ -7566,17 +7566,19 @@ fn apply_program_shimmer(lines: &mut [Line], shimmer: &ProgramShimmer, theme: &T
 }
 
 /// Build the empty-program onboarding placeholder: a one-line description of what
-/// the program is, every non-blank template as a clickable button wrapped across
-/// as many rows as fit, a divider, and a smart-clip syntax reference.
-/// Returns the lines to render plus the button hitboxes. Coordinates are absolute
-/// screen cells — safe because an empty program never scrolls (offset is always 0)
-/// and every line is kept within `inner.width`, so no wrapping shifts the rows.
-/// Templates that don't fit the available height collapse into a "+N more"
-/// indicator. Falls back to a plain description+syntax when the program is too
-/// small for any button or no templates are available.
+/// the program is, every non-blank template as a row in a single grouped list
+/// (hovering a row highlights it so it reads as clickable), a divider, and a
+/// smart-clip syntax reference. Returns the lines to render plus the row
+/// hitboxes. Coordinates are absolute screen cells — safe because an empty
+/// program never scrolls (offset is always 0) and every line is kept within
+/// `inner.width`, so no wrapping shifts the rows. Templates that don't fit the
+/// available height collapse into a trailing "+N more" row. Falls back to a
+/// plain description+syntax when the program is too narrow/short for any row
+/// or no templates are available.
 fn program_empty_placeholder(
     theme: &crate::theme::Theme,
     templates: &[agentd_protocol::ProgramTemplate],
+    mouse_pos: Option<(u16, u16)>,
     inner: Rect,
 ) -> (Vec<Line<'static>>, Vec<crate::app::ProgramTemplateHit>) {
     let dim = Style::default().fg(theme.dim);
@@ -7604,132 +7606,124 @@ fn program_empty_placeholder(
         (lines, Vec::new())
     };
 
-    const INDENT: usize = 2;
-    const GAP: usize = 3;
-    const MAX_LABEL: usize = 20;
+    const INDENT: u16 = 2;
+    const MAX_LABEL: usize = 40;
 
-    // Every non-blank template becomes a button — "blank" *is* the empty state, so
-    // offering it would be a no-op. Order by name (case-insensitive).
+    // Every non-blank template becomes a list row — "blank" *is* the empty state,
+    // so offering it would be a no-op. Order by name (case-insensitive).
     let mut ordered: Vec<&agentd_protocol::ProgramTemplate> =
         templates.iter().filter(|t| t.id != "blank").collect();
     ordered.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     let total = ordered.len();
-
-    // Greedily pack the buttons into rows no wider than the pane. A button too wide
-    // to fit even alone on a row is dropped (it counts toward the overflow tally).
-    struct Btn<'a> {
-        label: String,
-        inner_w: usize,
-        t: &'a agentd_protocol::ProgramTemplate,
-    }
-    let mut rows: Vec<Vec<Btn>> = Vec::new();
-    let mut cur: Vec<Btn> = Vec::new();
-    let mut used = INDENT;
-    for t in &ordered {
-        let label = format!(" {} ", truncate_to_width(&t.name, MAX_LABEL));
-        let inner_w = UnicodeWidthStr::width(label.as_str());
-        let box_w = inner_w + 2; // side borders
-        if INDENT + box_w > width {
-            continue; // never fits — dropped, surfaced via "+N more"
-        }
-        let needed = if cur.is_empty() { box_w } else { GAP + box_w };
-        if used + needed > width && !cur.is_empty() {
-            rows.push(std::mem::take(&mut cur));
-            used = INDENT + box_w;
-        } else {
-            used += needed;
-        }
-        cur.push(Btn { label, inner_w, t });
-    }
-    if !cur.is_empty() {
-        rows.push(cur);
-    }
-    if rows.is_empty() {
+    if total == 0 {
         return plain();
     }
-    let packed: usize = rows.iter().map(|r| r.len()).sum();
+
+    // The list box is one column wide, sized to the longest visible name (padded
+    // one cell either side) and capped so it always fits inside the pane. Too
+    // narrow for even a single-character row falls back to plain prose.
+    let label_budget = width
+        .saturating_sub(INDENT as usize + 4) // 2 side borders + 2 cells of padding
+        .min(MAX_LABEL);
+    if label_budget == 0 {
+        return plain();
+    }
+    let names: Vec<String> = ordered
+        .iter()
+        .map(|t| truncate_to_width(&t.name, label_budget))
+        .collect();
+    let max_name_w = names
+        .iter()
+        .map(|n| UnicodeWidthStr::width(n.as_str()))
+        .max()
+        .unwrap_or(0);
 
     // Height budget. Header = desc + blank (2). Footer = blank + divider + blank +
-    // syntax (4). Each button row spans 3 lines. Reserve one line for the "+N more"
-    // indicator whenever some template can't be shown — whether dropped for width or
-    // trimmed for height.
+    // syntax (4). The box spends 2 rows on its own top/bottom border; every
+    // remaining row holds one template, or a trailing "+N more" indicator.
     let header = 2usize;
     let footer = 4usize;
     let avail = (inner.height as usize).saturating_sub(header + footer);
     if avail < 3 {
         return plain();
     }
-    let max_rows = avail / 3;
-    let fits_all = rows.len() <= max_rows && packed == total;
-    let (shown_rows, reserve_overflow) = if fits_all {
-        (rows.len(), false)
+    let max_item_rows = avail - 2;
+    let fits_all = total <= max_item_rows;
+    let (shown, reserve_overflow) = if fits_all {
+        (total, false)
     } else {
-        let with_overflow_rows = avail.saturating_sub(1) / 3;
-        if with_overflow_rows == 0 {
-            return plain();
-        }
-        (rows.len().min(with_overflow_rows), true)
+        (max_item_rows.saturating_sub(1), true)
     };
 
+    // Widen the box to fit the overflow indicator too (truncated to
+    // `label_budget` like any other row if the pane is too narrow for it), so
+    // "+N more" doesn't get clipped down to unreadable ellipsis.
+    let overflow_text = reserve_overflow
+        .then(|| truncate_to_width(&format!("+{} more", total - shown), label_budget));
+    let content_w = overflow_text.as_ref().map_or(max_name_w, |t| {
+        max_name_w.max(UnicodeWidthStr::width(t.as_str()))
+    });
+    let inner_w = content_w + 2; // 1 cell of padding either side
+    let box_w = inner_w as u16 + 2; // + left/right border
+
     let border = Style::default().fg(theme.accent);
-    let label_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
-    let indent = || Span::styled(" ".repeat(INDENT), Style::default());
-    let gap = || Span::styled(" ".repeat(GAP), Style::default());
+    let indent = || Span::styled(" ".repeat(INDENT as usize), Style::default());
+    let pad_to_width = |s: &str, w: usize| {
+        let w = w.saturating_sub(UnicodeWidthStr::width(s));
+        format!("{s}{}", " ".repeat(w))
+    };
 
-    let mut button_lines: Vec<Line<'static>> = Vec::new();
-    let mut hits = Vec::new();
-    let mut shown_buttons = 0usize;
-    // Button rows begin at line index 2 (after the description + blank). Each row
-    // occupies 3 contiguous lines, so row `r`'s box spans absolute rows
-    // `inner.y + 2 + r*3 ..= +2`.
-    for (r, row) in rows.iter().take(shown_rows).enumerate() {
-        let mut top = vec![indent()];
-        let mut mid = vec![indent()];
-        let mut bot = vec![indent()];
-        let row_start = inner.y + 2 + (r as u16) * 3;
-        let row_end = row_start + 2;
-        let mut col = inner.x as usize + INDENT;
-        for (i, btn) in row.iter().enumerate() {
-            if i > 0 {
-                top.push(gap());
-                mid.push(gap());
-                bot.push(gap());
-                col += GAP;
-            }
-            let bar = "─".repeat(btn.inner_w);
-            top.push(Span::styled(format!("┌{bar}┐"), border));
-            mid.push(Span::styled("│".to_string(), border));
-            mid.push(Span::styled(btn.label.clone(), label_style));
-            mid.push(Span::styled("│".to_string(), border));
-            bot.push(Span::styled(format!("└{bar}┘"), border));
-            let box_w = btn.inner_w + 2;
-            hits.push(crate::app::ProgramTemplateHit {
-                col_start: col as u16,
-                col_end: (col + box_w) as u16,
-                row_start,
-                row_end,
-                template_id: btn.t.id.clone(),
-                markdown: btn.t.markdown.clone(),
-            });
-            col += box_w;
-            shown_buttons += 1;
-        }
-        button_lines.push(Line::from(top));
-        button_lines.push(Line::from(mid));
-        button_lines.push(Line::from(bot));
-    }
-
+    let box_left = inner.x + INDENT;
+    let box_top = inner.y + 2;
     let mut lines = vec![desc_line, Line::from("")];
-    lines.append(&mut button_lines);
-    if reserve_overflow {
-        let remaining = total.saturating_sub(shown_buttons);
-        if remaining > 0 {
-            lines.push(Line::from(Span::styled(
-                truncate_to_width(&format!("  +{remaining} more"), width),
-                dim,
-            )));
-        }
+    lines.push(Line::from(vec![
+        indent(),
+        Span::styled(format!("┌{}┐", "─".repeat(inner_w)), border),
+    ]));
+
+    let mut hits = Vec::new();
+    for (i, (t, name)) in ordered.iter().zip(names.iter()).take(shown).enumerate() {
+        let row = box_top + 1 + i as u16;
+        let hovered =
+            mouse_pos.is_some_and(|(mx, my)| my == row && mx >= box_left && mx < box_left + box_w);
+        let label_style = if hovered {
+            Style::default()
+                .fg(theme.text)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text)
+        };
+        let label = pad_to_width(&format!(" {name} "), inner_w);
+        lines.push(Line::from(vec![
+            indent(),
+            Span::styled("│".to_string(), border),
+            Span::styled(label, label_style),
+            Span::styled("│".to_string(), border),
+        ]));
+        hits.push(crate::app::ProgramTemplateHit {
+            col_start: box_left,
+            col_end: box_left + box_w,
+            row_start: row,
+            row_end: row,
+            template_id: t.id.clone(),
+            markdown: t.markdown.clone(),
+        });
     }
+    if let Some(overflow_text) = &overflow_text {
+        let label = pad_to_width(&format!(" {overflow_text} "), inner_w);
+        lines.push(Line::from(vec![
+            indent(),
+            Span::styled("│".to_string(), border),
+            Span::styled(label, dim),
+            Span::styled("│".to_string(), border),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        indent(),
+        Span::styled(format!("└{}┘", "─".repeat(inner_w)), border),
+    ]));
+
     lines.push(Line::from(""));
     lines.push(divider);
     lines.push(Line::from(""));
@@ -7862,12 +7856,12 @@ fn render_program_popup_at(
         apply_program_shimmer(&mut lines, &shimmer, &app.theme);
     }
     // Empty program: replace the bare body with a richer onboarding placeholder —
-    // a one-line description, clickable template buttons, a divider, and a tip.
-    // The button hitboxes are returned so the active program can publish them for
-    // the mouse handler. Non-empty programes get no hits.
+    // a one-line description, a grouped list of clickable templates, a divider,
+    // and a tip. The row hitboxes are returned so the active program can publish
+    // them for the mouse handler. Non-empty programes get no hits.
     let placeholder_hits = if lines.is_empty() {
         let (placeholder_lines, hits) =
-            program_empty_placeholder(&app.theme, &app.program_templates, inner);
+            program_empty_placeholder(&app.theme, &app.program_templates, app.mouse_pos, inner);
         lines = placeholder_lines;
         hits
     } else {
@@ -10711,7 +10705,7 @@ mod tests {
     }
 
     #[test]
-    fn program_empty_placeholder_offers_clickable_template_buttons() {
+    fn program_empty_placeholder_offers_clickable_template_rows() {
         let theme = crate::theme::Theme::default();
         let templates = vec![
             placeholder_template("blank", "Blank"),
@@ -10720,24 +10714,25 @@ mod tests {
         ];
         // Inner rect offset from origin to confirm hits use absolute coordinates.
         let inner = Rect::new(2, 1, 76, 20);
-        let (lines, hits) = program_empty_placeholder(&theme, &templates, inner);
+        let (lines, hits) = program_empty_placeholder(&theme, &templates, None, inner);
 
-        // Two buttons — "blank" is the empty state itself, so it's filtered out.
+        // Two rows — "blank" is the empty state itself, so it's filtered out.
         // Ordered by name (case-insensitive): Investigation before Tasks.
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].template_id, "investigation");
         assert_eq!(hits[1].template_id, "tasks");
         assert_eq!(hits[0].markdown, "# Investigation\n");
 
-        // Buttons occupy the three rows after the description + blank line, in the
-        // inner rect's coordinate space (rows 1+2 ..= 1+4).
-        assert_eq!(hits[0].row_start, inner.y + 2);
-        assert_eq!(hits[0].row_end, inner.y + 4);
+        // Rows stack vertically inside a single grouped list box that starts
+        // right after the description + blank line (inner rect row 1+2).
+        assert_eq!(hits[0].row_start, inner.y + 3);
+        assert_eq!(hits[0].row_end, hits[0].row_start);
+        assert_eq!(hits[1].row_start, hits[0].row_start + 1);
         assert!(hits[0].col_start >= inner.x);
-        // The button box label-row click lands inside the first button.
-        assert!(hits[0].contains(hits[0].col_start, hits[0].row_start + 1));
-        // The two buttons never overlap.
-        assert!(hits[0].col_end <= hits[1].col_start);
+        // Both rows share the same column span — one column, stacked rows.
+        assert_eq!(hits[0].col_start, hits[1].col_start);
+        assert_eq!(hits[0].col_end, hits[1].col_end);
+        assert!(hits[0].contains(hits[0].col_start, hits[0].row_start));
         // No placeholder line exceeds the inner width, so nothing wraps and the
         // absolute hit rows stay correct.
         for line in &lines {
@@ -10746,7 +10741,7 @@ mod tests {
     }
 
     #[test]
-    fn program_empty_placeholder_orders_buttons_by_name() {
+    fn program_empty_placeholder_orders_rows_by_name() {
         let theme = crate::theme::Theme::default();
         // Deliberately out of order, mixed case, with "blank" mixed in.
         let templates = vec![
@@ -10755,16 +10750,50 @@ mod tests {
             placeholder_template("alpha", "Alpha"),
             placeholder_template("mid", "mid"),
         ];
-        let (_, hits) = program_empty_placeholder(&theme, &templates, Rect::new(0, 0, 80, 30));
+        let (_, hits) =
+            program_empty_placeholder(&theme, &templates, None, Rect::new(0, 0, 80, 30));
         let ids: Vec<&str> = hits.iter().map(|h| h.template_id.as_str()).collect();
         // Case-insensitive name order; "blank" excluded.
         assert_eq!(ids, vec!["alpha", "mid", "zeta"]);
     }
 
     #[test]
-    fn program_empty_placeholder_wraps_many_buttons_across_rows() {
+    fn program_empty_placeholder_hovered_row_highlights() {
         let theme = crate::theme::Theme::default();
-        // Five short-named templates in a narrow-ish pane force wrapping.
+        let templates = vec![
+            placeholder_template("tasks", "Tasks"),
+            placeholder_template("investigation", "Investigation"),
+        ];
+        let inner = Rect::new(2, 1, 76, 20);
+        let (_, hits) = program_empty_placeholder(&theme, &templates, None, inner);
+        let second = &hits[1];
+        let hovered_pos = Some((second.col_start, second.row_start));
+        let (lines, _) = program_empty_placeholder(&theme, &templates, hovered_pos, inner);
+
+        // The hovered row's label span carries the accent background; the other
+        // rows and the border characters do not.
+        let hovered_line = &lines[(second.row_start - inner.y) as usize];
+        let highlighted = hovered_line
+            .spans
+            .iter()
+            .any(|s| s.style.bg == Some(theme.accent));
+        assert!(highlighted, "hovered row should highlight: {lines:?}");
+
+        let first = &hits[0];
+        let idle_line = &lines[(first.row_start - inner.y) as usize];
+        let idle_highlighted = idle_line
+            .spans
+            .iter()
+            .any(|s| s.style.bg == Some(theme.accent));
+        assert!(
+            !idle_highlighted,
+            "idle row should not highlight: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn program_empty_placeholder_lists_many_rows_vertically() {
+        let theme = crate::theme::Theme::default();
         let templates = vec![
             placeholder_template("aaa", "Aaa"),
             placeholder_template("bbb", "Bbb"),
@@ -10773,26 +10802,20 @@ mod tests {
             placeholder_template("eee", "Eee"),
         ];
         let inner = Rect::new(2, 1, 20, 30);
-        let (lines, hits) = program_empty_placeholder(&theme, &templates, inner);
+        let (lines, hits) = program_empty_placeholder(&theme, &templates, None, inner);
 
-        // All five buttons rendered and clickable.
+        // All five rows rendered and clickable, one per line.
         assert_eq!(hits.len(), 5);
-        // They span more than one row.
         let rows: std::collections::BTreeSet<u16> = hits.iter().map(|h| h.row_start).collect();
-        assert!(rows.len() >= 2, "expected buttons across multiple rows");
-        // Every rendered button is hittable at its own label row, and no two
-        // overlap within a row.
-        for h in &hits {
-            assert!(h.contains(h.col_start, h.row_start + 1));
+        assert_eq!(rows.len(), 5, "expected one row per template");
+        for (i, h) in hits.iter().enumerate() {
+            assert_eq!(h.row_start, inner.y + 3 + i as u16);
+            assert_eq!(h.row_end, h.row_start);
+            assert!(h.contains(h.col_start, h.row_start));
         }
         // No line exceeds inner width, so absolute hit rows can't desync.
         for line in &lines {
             assert!(line.width() <= inner.width as usize);
-        }
-        // Button rows are 3 lines tall, stacked contiguously from row +2.
-        for h in &hits {
-            assert!((h.row_start - inner.y - 2) % 3 == 0);
-            assert_eq!(h.row_end, h.row_start + 2);
         }
     }
 
@@ -10807,12 +10830,11 @@ mod tests {
             placeholder_template("eee", "Eee"),
             placeholder_template("fff", "Fff"),
         ];
-        // width 20 packs ~2 buttons/row; height 10 leaves room for a single
-        // button row plus an overflow indicator.
+        // height 10 leaves room for only a few list rows plus an overflow row.
         let inner = Rect::new(0, 0, 20, 10);
-        let (lines, hits) = program_empty_placeholder(&theme, &templates, inner);
+        let (lines, hits) = program_empty_placeholder(&theme, &templates, None, inner);
 
-        assert!(hits.len() < 6, "some buttons should be hidden");
+        assert!(hits.len() < 6, "some rows should be hidden");
         assert!(!hits.is_empty(), "at least one row should render");
         let hidden = 6 - hits.len();
         let overflow = format!("+{hidden} more");
@@ -10839,15 +10861,15 @@ mod tests {
     fn program_empty_placeholder_falls_back_when_narrow() {
         let theme = crate::theme::Theme::default();
         let templates = vec![placeholder_template("tasks", "Tasks")];
-        // Too narrow for an indented bordered button: plain description + syntax only.
-        let (_, hits) = program_empty_placeholder(&theme, &templates, Rect::new(0, 0, 6, 20));
+        // Too narrow for an indented bordered list row: plain description + syntax only.
+        let (_, hits) = program_empty_placeholder(&theme, &templates, None, Rect::new(0, 0, 6, 20));
         assert!(hits.is_empty());
     }
 
     #[test]
-    fn program_empty_placeholder_has_no_buttons_without_templates() {
+    fn program_empty_placeholder_has_no_rows_without_templates() {
         let theme = crate::theme::Theme::default();
-        let (lines, hits) = program_empty_placeholder(&theme, &[], Rect::new(0, 0, 80, 20));
+        let (lines, hits) = program_empty_placeholder(&theme, &[], None, Rect::new(0, 0, 80, 20));
         assert!(hits.is_empty());
         // Still shows the description and syntax prose.
         assert!(!lines.is_empty());
