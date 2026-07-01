@@ -12085,6 +12085,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn program_selection_run_click_preserves_other_pending_shimmer() {
+        // Regression: clicking "Run" on a fresh selection while other blocks
+        // are already shimmering from an earlier run must keep that shimmer
+        // and optimistically add the newly-run block, not replace the whole
+        // pending set with just the new selection.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        // No accept loop: the click handler awaits the program/execute round
+        // trip, which we deliberately never let complete so a single poll
+        // observes only the synchronous optimistic shimmer update.
+        let _listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let client = Client::connect(&sock).await.expect("client connects");
+
+        let mut app = test_app(client, Vec::new());
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha\n\nbeta\n", 0));
+        app.program_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+
+        // "beta" is already shimmering from an earlier, separate run.
+        app.start_program_run("s1", "alpha\n\nbeta\n", false, "");
+        app.program_runs.get_mut("s1").expect("run").pending =
+            HashSet::from([agentd_protocol::program_block_id("beta")]);
+
+        app.begin_program_selection();
+        app.move_program_cursor(5); // selects "alpha"
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let run = app
+            .layout
+            .program_selection_run_hit
+            .expect("selection run hit registered");
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: run.0,
+            row: run.2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        let fut = app.handle_program_mouse(&click);
+        assert!(
+            fut.now_or_never().is_none(),
+            "click handling should still be awaiting the daemon response"
+        );
+
+        let pending = &app.program_runs["s1"].pending;
+        assert!(
+            pending.contains(&agentd_protocol::program_block_id("beta")),
+            "clicking Run on a new selection must not clear another block's existing shimmer"
+        );
+        assert!(
+            pending.contains(&agentd_protocol::program_block_id("alpha")),
+            "the freshly-run selection should be optimistically shimmered too"
+        );
+    }
+
+    #[tokio::test]
     async fn program_run_for_orchestrator_does_not_panic_and_submit_does_not_clear_other_shimmers()
     {
         // TDD for the reported panic (screenshot 2026-06-27 9.43.19),
@@ -12706,7 +12772,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_optimistic_selection_run_replaces_existing_shimmer_scope() {
+    async fn program_optimistic_selection_run_adds_to_existing_shimmer_scope() {
+        // A selection run must not clear shimmer another in-flight run
+        // already declared elsewhere in the program — it optimistically adds
+        // its own scope on top of whatever is already pending.
         let (mut app, _dir, server) = empty_app().await;
         let id = agentd_protocol::program_block_id;
         let body = "# Todo\n\n- alpha\n\n- beta\n\n- gamma\n";
@@ -12717,10 +12786,10 @@ mod tests {
         app.start_program_run("s1", "- beta\n\n- gamma\n", true, body);
 
         let pending = &app.program_runs["s1"].pending;
-        assert_eq!(pending.len(), 2);
+        assert_eq!(pending.len(), 3);
+        assert!(pending.contains(&id("- alpha")), "prior shimmer preserved");
         assert!(pending.contains(&id("- beta")));
         assert!(pending.contains(&id("- gamma")));
-        assert!(!pending.contains(&id("- alpha")));
         server.abort();
     }
 
