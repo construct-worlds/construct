@@ -385,6 +385,7 @@ impl App {
         });
         match selected_block_ids {
             Some(pending) if is_selection => {
+                let pending = self.program_run_pending_with_existing(&session_id, pending);
                 self.start_program_run_with_pending(&session_id, pending)
             }
             _ => self.start_program_run(&session_id, &run_body, is_selection, &prev_saved),
@@ -430,8 +431,11 @@ impl App {
     /// A re-Run while a run is still active preserves the narrowing the agent
     /// established: it re-shimmers only the blocks the user changed since the
     /// last daemon sync (`prev_saved`) plus blocks that were still pending —
-    /// blocks the agent already settled stay calm. A fresh run, or any
-    /// selection run the user explicitly scoped, shimmers its whole region.
+    /// blocks the agent already settled stay calm. A selection run adds its
+    /// own scope to any shimmer already in flight rather than replacing it —
+    /// running one snippet must not dim blocks another in-flight run is still
+    /// working on; a fresh run with nothing in flight shimmers just the
+    /// selected region.
     pub(super) fn start_program_run(
         &mut self,
         session_id: &str,
@@ -472,10 +476,28 @@ impl App {
                     narrowed
                 }
             }
-            // Fresh run, or a selection run scoped by the user: shimmer it all.
-            _ => body_ids,
+            // A selection run keeps any shimmer already in flight and adds
+            // its own scope on top of it (see `program_run_pending_with_existing`).
+            Some(old) => old.pending.union(&body_ids).cloned().collect(),
+            // Fresh run, nothing in flight: shimmer just the executed body.
+            None => body_ids,
         };
         self.start_program_run_with_pending(session_id, pending);
+    }
+
+    /// Union `ids` with the pending set of any Run already in flight for
+    /// `session_id`. Used by selection runs so that optimistically shimmering
+    /// the freshly-run block never clears shimmer another in-flight run
+    /// already declared elsewhere in the program (see spec 0042).
+    fn program_run_pending_with_existing(
+        &self,
+        session_id: &str,
+        ids: HashSet<String>,
+    ) -> HashSet<String> {
+        match self.program_runs.get(session_id) {
+            Some(old) => old.pending.union(&ids).cloned().collect(),
+            None => ids,
+        }
     }
 
     fn start_program_run_with_pending(&mut self, session_id: &str, pending: HashSet<String>) {
