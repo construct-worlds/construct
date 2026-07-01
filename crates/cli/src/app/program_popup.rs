@@ -512,6 +512,7 @@ impl App {
                 started_at: now,
                 pending,
                 pending_tooltips: HashMap::new(),
+                system_status: None,
                 deadline: now + Duration::from_millis(PROGRAM_RUN_MAX_MS),
                 first_output_seen: false,
             },

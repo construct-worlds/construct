@@ -1591,6 +1591,9 @@ pub struct ProgramRun {
     /// Per-block run-status tooltips keyed by stable block ref (spec 0057). Missing
     /// entries render the hardcoded fallback label on hover.
     pub pending_tooltips: HashMap<String, String>,
+    /// Daemon-derived run-level fallback for pending blocks with no
+    /// agent-authored tooltip.
+    pub system_status: Option<String>,
     /// Absolute backstop: clear no later than this regardless of signals.
     pub deadline: Instant,
     /// Whether the first output has been observed.
@@ -1621,6 +1624,7 @@ impl ProgramRun {
             started_at,
             pending,
             pending_tooltips: progress.pending_block_tooltips,
+            system_status: progress.system_status,
             deadline,
             first_output_seen: progress.first_output_seen,
         })
@@ -9472,6 +9476,7 @@ mod tests {
                 started_at: Instant::now(),
                 pending: ["s1-block".to_string()].into_iter().collect(),
                 pending_tooltips: HashMap::new(),
+                system_status: None,
                 deadline: Instant::now() + Duration::from_secs(30),
                 first_output_seen: false,
             },
@@ -11663,6 +11668,7 @@ mod tests {
                 started_at: Instant::now() - Duration::from_secs(5),
                 pending: HashSet::new(),
                 pending_tooltips: HashMap::new(),
+                system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
             },
@@ -11836,6 +11842,7 @@ mod tests {
                 started_at: Instant::now(),
                 pending: HashSet::from([block_id.clone()]),
                 pending_tooltips: HashMap::from([(block_id, "Still running".into())]),
+                system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
             },
@@ -11923,6 +11930,7 @@ mod tests {
                 started_at: Instant::now(),
                 pending: HashSet::from([block_id.clone()]),
                 pending_tooltips: HashMap::from([(block_id, "Building PR".into())]),
+                system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
             },
@@ -11995,6 +12003,7 @@ mod tests {
                 started_at: Instant::now(),
                 pending: HashSet::from([block_id.clone()]),
                 pending_tooltips: HashMap::from([(block_id, "Building PR".into())]),
+                system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
             },
