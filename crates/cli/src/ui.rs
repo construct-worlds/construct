@@ -36,10 +36,6 @@ const PROGRAM_RUN_BUTTON: &str = " ▶ ";
 const PROGRAM_CLIP_HOVER_PREVIEW_COLS: u16 = 102;
 const PROGRAM_CLIP_HOVER_PREVIEW_ROWS: u16 = 12;
 const PROGRAM_COLLAB_CURSOR_LABEL_MAX_WIDTH: usize = 12;
-/// How long the program shimmer-text preview lingers after the pointer stops
-/// moving before it self-dismisses. The clip-chip preview, by contrast, stays
-/// up for as long as the chip is hovered.
-const PROGRAM_SHIMMER_HOVER_IDLE: Duration = Duration::from_secs(1);
 const PROGRAM_SELECTION_RUN_MENU_W: u16 = 9;
 const PROGRAM_SELECTION_RUN_MENU_H: u16 = 3;
 
@@ -8186,8 +8182,8 @@ fn render_session_hover_card(
 /// `@{session:…}` clip chip itself is the distinct affordance for previewing a
 /// referenced worker (see `render_program_clip_hover`). When the dispatching
 /// session has produced no output yet, this degrades to the bare text tooltip.
-/// Unlike the clip-chip hover, it self-dismisses once the pointer has been still
-/// for [`PROGRAM_SHIMMER_HOVER_IDLE`].
+/// Like the clip-chip hover, it persists for as long as the pointer stays over
+/// the shimmering block.
 fn render_program_shimmer_hover(
     f: &mut Frame,
     app: &mut App,
@@ -8200,14 +8196,6 @@ fn render_program_shimmer_hover(
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
-    // Transient preview: only while the pointer is actively moving. Once it has
-    // been still for the idle window, hide it.
-    let moved_recently = app
-        .last_mouse_move
-        .is_some_and(|t| now.saturating_duration_since(t) < PROGRAM_SHIMMER_HOVER_IDLE);
-    if !moved_recently {
-        return;
-    }
     // A clip chip under the cursor is owned by `render_program_clip_hover`; don't
     // double-render the card on top of it.
     if app

@@ -928,10 +928,6 @@ pub struct App {
     /// Terminal.app, which ignores `\x1b[?1003h` even though crossterm
     /// requests it).
     pub mouse_pos: Option<(u16, u16)>,
-    /// When the pointer last changed cells. Drives self-dismissing hovers (e.g.
-    /// the program shimmer-text preview, which disappears once the cursor has
-    /// been still for ~1s). `None` until the first motion event arrives.
-    pub last_mouse_move: Option<Instant>,
     /// Whether terminal mouse capture is enabled. When false, agentd
     /// stops receiving mouse events so the user's terminal can perform
     /// native drag selection/copy.
@@ -2382,7 +2378,6 @@ async fn run_with_socket_initial_selection(
         layout: LayoutSnapshot::default(),
         session_title_menu: None,
         mouse_pos: None,
-        last_mouse_move: None,
         mouse_capture_enabled: true,
         orchestrator_id: initial_orch_id,
         list_panel_w: persisted.list_panel_w.unwrap_or(LIST_PANEL_W_DEFAULT),
@@ -5675,13 +5670,9 @@ impl App {
         const LIST_STEP: i32 = 3;
         let scrollback_step = self.mouse_scrollback_step();
         // Track every event's cell so hover-aware rendering (diamond
-        // tooltip, etc.) has a current position to render against. Record the
-        // wall-clock of an actual cell change so self-dismissing hovers (the
-        // program shimmer-text preview) can hide once the pointer is still.
+        // tooltip, program shimmer preview, etc.) has a current position to
+        // render against.
         let next_pos = (ev.column, ev.row);
-        if self.mouse_pos != Some(next_pos) {
-            self.last_mouse_move = Some(Instant::now());
-        }
         self.mouse_pos = Some(next_pos);
         // If the cursor is over a pane whose child has grabbed the mouse
         // (e.g. Claude Code in fullscreen), forward the event into that PTY and
@@ -9061,7 +9052,6 @@ mod tests {
             layout: LayoutSnapshot::default(),
             session_title_menu: None,
             mouse_pos: None,
-            last_mouse_move: None,
             mouse_capture_enabled: true,
             orchestrator_id: None,
             list_panel_w: LIST_PANEL_W_DEFAULT,
@@ -11205,7 +11195,6 @@ mod tests {
             vertical: 1 + PROGRAM_CONTENT_PADDING_Y,
         });
         app.mouse_pos = Some((inner.x, inner.y));
-        app.last_mouse_move = Some(Instant::now());
 
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("inactive program hover tooltip should render");
@@ -11298,7 +11287,6 @@ mod tests {
         // Hover the block's leading text cell — away from the trailing clip chip —
         // so the shimmer hover (not the clip hover) owns the preview.
         app.mouse_pos = Some((inner.x, inner.y));
-        app.last_mouse_move = Some(Instant::now());
 
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("shimmer hover preview should render");
@@ -11314,6 +11302,80 @@ mod tests {
         assert!(
             text.contains("Building PR"),
             "the cropped preview should keep the status tooltip as its caption"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_shimmer_hover_persists_while_pointer_stays_still() {
+        use crate::pty_render::ItemHistory;
+
+        // The shimmer-text hover must persist for as long as the pointer stays
+        // over the shimmering block — matching the clip-chip hover — rather than
+        // self-dismissing once the pointer has been briefly still.
+        let (mut app, _dir, server) = empty_app().await;
+        let mut s1 = summary_with_kind(agentd_protocol::SessionKind::User);
+        let mut s3 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s3.id = "s3".into();
+        app.sessions = vec![s1, s3];
+        app.selection = Selection::Session("s1".into());
+
+        let markdown = "Building the PR @{session:s3}";
+        let mut program = program_popup_for_test("s1", markdown, 0);
+        program.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.program_popup = Some(program);
+
+        let mut history = ItemHistory::new();
+        history.feed_pty(b"STILL_HOVERED_PREVIEW\nsecond line");
+        app.histories.insert("s1".into(), history);
+
+        let block_id = agentd_protocol::program_block_spans(markdown)
+            .into_iter()
+            .next()
+            .expect("one block")
+            .id;
+        app.program_runs.insert(
+            "s1".into(),
+            ProgramRun {
+                started_at: Instant::now(),
+                pending: HashSet::from([block_id.clone()]),
+                pending_tooltips: HashMap::from([(block_id, "Building PR".into())]),
+                deadline: Instant::now() + Duration::from_secs(60),
+                first_output_seen: true,
+            },
+        );
+
+        let backend = ratatui::backend::TestBackend::new(160, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let modal = app.layout.modal_area.expect("modal area");
+        let inner = modal.inner(ratatui::layout::Margin {
+            horizontal: 1 + PROGRAM_CONTENT_PADDING_X,
+            vertical: 1 + PROGRAM_CONTENT_PADDING_Y,
+        });
+        app.mouse_pos = Some((inner.x, inner.y));
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("shimmer hover preview should render");
+        assert!(
+            rendered_text(term.backend().buffer()).contains("STILL_HOVERED_PREVIEW"),
+            "hovering a shimmering block should show its dispatcher preview"
+        );
+
+        // The pointer hasn't moved since the last render, but it also hasn't
+        // left the block — real wall-clock time passing alone must not hide
+        // the preview.
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("shimmer hover preview should still render");
+        assert!(
+            rendered_text(term.backend().buffer()).contains("STILL_HOVERED_PREVIEW"),
+            "the preview must persist for as long as the pointer stays over the block, \
+             not self-dismiss once it has been briefly still"
         );
         server.abort();
     }
