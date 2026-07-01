@@ -640,39 +640,63 @@ impl Storage {
         id
     }
 
+    /// Reconcile stable block identities (spec 0053) against the current
+    /// Markdown in two passes so an edit anywhere in the document cannot
+    /// misattribute — and thereby drop the shimmer of — a sibling block whose
+    /// content did not change.
+    ///
+    /// Pass 1 matches by content, order-independent: any span whose content
+    /// exactly matches a not-yet-used prior block keeps that block's id and
+    /// epoch, no matter where either sits in the document. This alone handles
+    /// inserts, deletes, and reorders/moves of untouched blocks.
+    ///
+    /// Pass 2 handles genuine semantic edits. Only the spans and prior records
+    /// left over from pass 1 are considered, and they are paired by their
+    /// relative order *within that leftover subsequence* (not by raw document
+    /// index) — so an insertion or deletion elsewhere no longer shifts which
+    /// prior record an edited block's continuity is attributed to. A leftover
+    /// span beyond the leftover records' count is a brand-new block.
     fn reconcile_program_block_identities(&self, meta: &mut ProgramMeta, markdown: &str) -> bool {
         let spans = agentd_protocol::program_block_spans(markdown);
         let old = meta.blocks.clone();
         let mut used = vec![false; old.len()];
-        let mut next: Vec<ProgramBlockIdentity> = Vec::with_capacity(spans.len());
+        let mut next: Vec<Option<ProgramBlockIdentity>> = vec![None; spans.len()];
         let mut changed = old.len() != spans.len();
 
         for (i, span) in spans.iter().enumerate() {
-            let exact = old
+            if let Some(j) = old
                 .iter()
                 .enumerate()
                 .find(|(j, rec)| !used[*j] && rec.content_id == span.id)
-                .map(|(j, _)| j);
-            let idx = exact.or_else(|| old.get(i).filter(|_| !used[i]).map(|_| i));
-            let rec = if let Some(j) = idx {
+                .map(|(j, _)| j)
+            {
                 used[j] = true;
+                next[i] = Some(old[j].clone());
+            }
+        }
+
+        let leftover_old: Vec<usize> = (0..old.len()).filter(|&j| !used[j]).collect();
+        let leftover_new: Vec<usize> = (0..spans.len()).filter(|&i| next[i].is_none()).collect();
+        for (k, &i) in leftover_new.iter().enumerate() {
+            changed = true;
+            let rec = if let Some(&j) = leftover_old.get(k) {
                 let mut rec = old[j].clone();
-                if rec.content_id != span.id {
-                    rec.content_epoch = rec.content_epoch.saturating_add(1);
-                    rec.content_id = span.id.clone();
-                    changed = true;
-                }
+                rec.content_epoch = rec.content_epoch.saturating_add(1);
+                rec.content_id = spans[i].id.clone();
                 rec
             } else {
-                changed = true;
                 ProgramBlockIdentity {
                     block_id: Self::next_program_block_id(meta),
                     content_epoch: 0,
-                    content_id: span.id.clone(),
+                    content_id: spans[i].id.clone(),
                 }
             };
-            next.push(rec);
+            next[i] = Some(rec);
         }
+
+        // Every span was filled by an exact match (pass 1) or a leftover
+        // pairing (pass 2), so this never panics.
+        let next: Vec<ProgramBlockIdentity> = next.into_iter().map(Option::unwrap).collect();
         if meta.blocks != next {
             changed = true;
             meta.blocks = next;

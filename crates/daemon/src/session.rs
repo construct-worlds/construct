@@ -6169,6 +6169,141 @@ mod tests {
         assert_eq!(after.start_line, 4);
     }
 
+    // Regression: a human co-edit save (program_update with no shimmer decl)
+    // that merely *inserts* a brand-new block ahead of untouched siblings must
+    // not disturb those siblings' identity. Block-identity reconciliation used
+    // to fall back to raw positional-index alignment for any block it could
+    // not match by exact content, which meant one insertion cascaded into
+    // every later block being treated as "semantically edited" — silently
+    // dropping their shimmer even though their text never changed.
+    #[tokio::test]
+    async fn program_human_insert_before_siblings_preserves_their_shimmer() {
+        let md = "* alpha\n* beta\n* gamma\n";
+        let (mgr, _storage, id) = program_test_mgr(md).await;
+        mgr.start_program_run(&id, md, false, None).expect("start");
+        let g = mgr.program_get(&id).await.expect("get");
+        let id_of = |blocks: &[agentd_protocol::ProgramBlockView], n: &str| {
+            blocks.iter().find(|b| b.text.contains(n)).unwrap().clone()
+        };
+        // Settle "alpha" (as a planning pass / prior turn would) so only beta
+        // and gamma are still pending — mirroring a mid-run document where
+        // some work already settled before the human edits the document.
+        mgr.program_edit(ProgramEditParams {
+            session_id: id.clone(),
+            edits: vec![agentd_protocol::ProgramEdit {
+                old_string: "* alpha".into(),
+                new_string: "* alpha".into(),
+                replace_all: false,
+                keep_pending: false,
+            }],
+            actor: agentd_protocol::ProgramUpdateActor::Agent,
+            note: None,
+            shimmer: vec![agentd_protocol::ProgramShimmerDecl {
+                id: id_of(&g.blocks, "alpha").id,
+                shimmer: false,
+                tooltip: None,
+            }],
+        })
+        .await
+        .expect("settle alpha");
+        let before_beta = id_of(&g.blocks, "beta");
+        let before_gamma = id_of(&g.blocks, "gamma");
+
+        // Human inserts a brand-new item at the very top and saves — no text
+        // of alpha/beta/gamma changes.
+        let edited = "* zero\n* alpha\n* beta\n* gamma\n";
+        let res = mgr
+            .program_update(ProgramUpdateParams {
+                session_id: id.clone(),
+                markdown: edited.to_string(),
+                base_version: None,
+                actor: agentd_protocol::ProgramUpdateActor::Human,
+                template_id: None,
+                note: None,
+                shimmer: None,
+                shimmer_tooltips: None,
+            })
+            .await
+            .expect("human insert");
+
+        let after_beta = id_of(&res.blocks, "beta");
+        let after_gamma = id_of(&res.blocks, "gamma");
+        assert_eq!(
+            after_beta.id, before_beta.id,
+            "untouched sibling keeps its stable ref across an unrelated insert"
+        );
+        assert_eq!(after_beta.content_epoch, before_beta.content_epoch);
+        assert!(
+            after_beta.shimmer,
+            "an unrelated insert must not clear a still-pending sibling's shimmer"
+        );
+        assert_eq!(after_gamma.id, before_gamma.id);
+        assert_eq!(after_gamma.content_epoch, before_gamma.content_epoch);
+        assert!(
+            after_gamma.shimmer,
+            "an unrelated insert must not clear a still-pending sibling's shimmer"
+        );
+        assert!(
+            !id_of(&res.blocks, "alpha").shimmer,
+            "a settled sibling must not be re-lit by an unrelated insert"
+        );
+    }
+
+    // Regression companion: inserting a new block *and* editing a later block
+    // in the same human save must scope the epoch bump to only the genuinely
+    // edited block — an untouched block sitting between the insert and the
+    // edit must keep its ref and shimmer.
+    #[tokio::test]
+    async fn program_human_insert_and_edit_scopes_epoch_bump_to_edited_block() {
+        let md = "* alpha\n* beta\n* gamma\n";
+        let (mgr, _storage, id) = program_test_mgr(md).await;
+        mgr.start_program_run(&id, md, false, None).expect("start");
+        let g = mgr.program_get(&id).await.expect("get");
+        let before_beta = g
+            .blocks
+            .iter()
+            .find(|b| b.text.contains("beta"))
+            .unwrap()
+            .clone();
+
+        // Insert a new item before everything, and edit "gamma" -> "gamma2".
+        // "beta" sits untouched between the insert and the edit.
+        let edited = "* zero\n* alpha\n* beta\n* gamma2\n";
+        let res = mgr
+            .program_update(ProgramUpdateParams {
+                session_id: id.clone(),
+                markdown: edited.to_string(),
+                base_version: None,
+                actor: agentd_protocol::ProgramUpdateActor::Human,
+                template_id: None,
+                note: None,
+                shimmer: None,
+                shimmer_tooltips: None,
+            })
+            .await
+            .expect("human insert + edit");
+
+        let after_beta = res.blocks.iter().find(|b| b.text.contains("beta")).unwrap();
+        assert_eq!(
+            after_beta.id, before_beta.id,
+            "a block between an insert and an unrelated edit keeps its ref"
+        );
+        assert_eq!(after_beta.content_epoch, before_beta.content_epoch);
+        assert!(
+            after_beta.shimmer,
+            "a block between an insert and an unrelated edit keeps its shimmer"
+        );
+        let gamma2 = res
+            .blocks
+            .iter()
+            .find(|b| b.text.contains("gamma2"))
+            .unwrap();
+        assert!(
+            !gamma2.shimmer,
+            "the genuinely edited block drops stale shimmer (fails closed)"
+        );
+    }
+
     // Finer block granularity: a section of consecutive list items (no blank
     // lines between them) is many blocks, so one item can settle while its
     // siblings keep shimmering — and the heading is its own block too.
