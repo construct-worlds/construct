@@ -268,6 +268,28 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let super_mod = key.modifiers.contains(KeyModifiers::SUPER);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if shift
+            && matches!(
+                key.code,
+                KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Home
+                    | KeyCode::End
+            )
+            && self
+                .program_popup
+                .as_ref()
+                .is_some_and(|popup| {
+                    popup.selection.is_none()
+                        && popup.smart_clip.is_none()
+                        && popup.search.is_none()
+                })
+        {
+            self.begin_program_selection();
+        }
         if self.program_search_active() {
             match key.code {
                 KeyCode::Esc => self.cancel_program_search(),
@@ -304,7 +326,7 @@ impl App {
             // Right drills into the highlighted category's submenu; Left backs out.
             KeyCode::Right if self.program_smart_clip_active() => self.program_smart_clip_expand(),
             KeyCode::Left if self.program_smart_clip_active() => self.program_smart_clip_collapse(),
-            KeyCode::Char(' ') if ctrl => self.begin_program_selection(),
+            KeyCode::Char(' ' | '@' | '\0') if ctrl => self.begin_program_selection(),
             KeyCode::Char('g') if ctrl => {
                 // C-g cancels: dismiss the transient smart-clip picker and
                 // clear any active C-Space selection mark. No-op when neither
