@@ -10351,6 +10351,82 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn program_remote_cursor_does_not_replace_underlying_character_and_labels_are_tagged() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        let cursor = "\n".chars().count() + "alp".chars().count();
+        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_collaborators.insert(
+            "peer-1".to_string(),
+            agentd_protocol::ProgramCursor {
+                session_id: "s1".to_string(),
+                client_id: "peer-1".to_string(),
+                label: "Peer".to_string(),
+                kind: "tui".to_string(),
+                cursor,
+                selection_anchor: None,
+                selection_head: None,
+                version: Some(1),
+                color_index: 2,
+                updated_at_ms: 0,
+                active: true,
+            },
+        );
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let inner = app.layout.program_inner_area.expect("program inner area");
+        let popup = app.program_popup.as_ref().expect("program popup");
+        let (visual_row, col) = crate::ui::program_cursor_visual_pos(
+            Some(&app),
+            &popup.buffer,
+            cursor,
+            inner.width as usize,
+        );
+        let x = inner.x + col as u16;
+        let y = inner.y + visual_row as u16;
+        let buffer = term.backend().buffer();
+        let cursor_cell = buffer.cell((x, y)).expect("remote cursor cell");
+        assert_eq!(
+            cursor_cell.symbol(),
+            "h",
+            "remote cursor must style the target cell without replacing its glyph"
+        );
+        assert!(
+            cursor_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED),
+            "remote cursor should underline the target cell"
+        );
+        assert!(
+            cursor_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "remote cursor should emphasize the target cell"
+        );
+
+        let label_cell = buffer
+            .cell((x.saturating_add(1), y - 1))
+            .expect("remote cursor label cell");
+        assert_eq!(label_cell.symbol(), "P");
+        assert_eq!(label_cell.style().bg, Some(ratatui::style::Color::Yellow));
+        assert_eq!(label_cell.style().fg, Some(app.theme.highlight_fg));
+        server.abort();
+    }
+
     #[test]
     fn program_selection_block_ids_include_touched_full_blocks() {
         let mut popup = program_popup_for_test("s1", "- alpha beta\n\n- gamma", 0);

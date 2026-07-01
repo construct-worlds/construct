@@ -5559,14 +5559,21 @@ fn render_editor_cursor(f: &mut Frame, pos: Position, theme: &Theme) {
     );
 }
 
-fn program_collab_cursor_style(theme: &Theme, color_index: u8) -> Style {
+fn program_collab_cursor_label_style(theme: &Theme, color_index: u8) -> Style {
+    Style::default()
+        .fg(theme.highlight_fg)
+        .bg(program_collab_cursor_color(theme, color_index))
+        .add_modifier(Modifier::BOLD)
+}
+
+fn program_collab_cursor_color(theme: &Theme, color_index: u8) -> Color {
     let fg = match color_index % 4 {
         1 => theme.accent,
         2 => Color::Yellow,
         3 => Color::Magenta,
         _ => theme.accent_alt,
     };
-    Style::default().fg(fg).add_modifier(Modifier::BOLD)
+    fg
 }
 
 fn editor_pane_rows(
@@ -7986,8 +7993,14 @@ fn render_program_collab_cursors(
         let Some(cell) = f.buffer_mut().cell_mut(pos) else {
             continue;
         };
-        cell.set_symbol("│");
-        cell.set_style(program_collab_cursor_style(&app.theme, cursor.color_index));
+        if cell.symbol().is_empty() {
+            cell.set_symbol(" ");
+        }
+        cell.set_style(
+            cell.style()
+                .fg(program_collab_cursor_color(&app.theme, cursor.color_index))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        );
         let label = cursor.label.trim();
         if !label.is_empty() && pos.y > inner.y {
             let max_w = inner
@@ -7998,8 +8011,10 @@ fn render_program_collab_cursors(
                 let label: String = label.chars().take(max_w).collect();
                 let rect = Rect::new(pos.x.saturating_add(1), pos.y - 1, max_w as u16, 1);
                 f.render_widget(
-                    Paragraph::new(label)
-                        .style(program_collab_cursor_style(&app.theme, cursor.color_index)),
+                    Paragraph::new(label).style(program_collab_cursor_label_style(
+                        &app.theme,
+                        cursor.color_index,
+                    )),
                     rect,
                 );
             }

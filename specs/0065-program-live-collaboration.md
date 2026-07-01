@@ -13,6 +13,8 @@ Cursor presence is not persisted and must clear when a client disconnects or lea
 
 The daemon assigns each active Program cursor a distinct short label. Clients may suggest a system or surface name, but the daemon must suffix duplicates and generic surface names so simultaneous TUI/web clients are distinguishable.
 
+Remote cursor rendering must not hide Program text. Surfaces that can draw between characters may render a caret between glyphs; terminal surfaces must instead style the target character cell non-destructively and render cursor labels as visually distinct tags.
+
 When the daemon accepts a Program edit, it must rebase active cursor offsets through that accepted edit before broadcasting cursor updates. The edit's source connection is excluded because its local caret is already in post-edit coordinates; agent-authored edits and other source-less edits rebase every active cursor.
 
 ## Reason
