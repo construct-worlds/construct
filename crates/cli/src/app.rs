@@ -9539,6 +9539,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn program_shift_arrow_starts_keyboard_selection() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))
+            .await;
+
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 3);
+        assert_eq!(App::program_selection_range(popup), Some((2, 3)));
+        assert_eq!(App::selected_program_text(popup).as_deref(), Some("c"));
+
+        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
+        app.handle_program_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT))
+            .await;
+
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 1);
+        assert_eq!(App::program_selection_range(popup), Some((1, 2)));
+        assert_eq!(App::selected_program_text(popup).as_deref(), Some("b"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_ctrl_space_extends_selection_with_emacs_motion() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.program_popup = Some(program_popup_for_test("s1", "abc\ndef", 1));
+        app.layout.program_inner_area = Some(Rect::new(0, 0, 20, 5));
+
+        app.handle_program_key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        app.handle_program_key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 2);
+        assert_eq!(App::program_selection_range(popup), Some((1, 2)));
+        assert_eq!(App::selected_program_text(popup).as_deref(), Some("b"));
+
+        app.handle_program_key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 1);
+        assert!(popup.selection.is_some());
+        assert_eq!(App::program_selection_range(popup), None);
+
+        app.handle_program_key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 5);
+        assert_eq!(App::program_selection_range(popup), Some((1, 5)));
+        assert_eq!(App::selected_program_text(popup).as_deref(), Some("bc\nd"));
+
+        app.handle_program_key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 1);
+        assert!(popup.selection.is_some());
+        assert_eq!(App::program_selection_range(popup), None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_ctrl_space_accepts_terminal_aliases() {
+        for mark_char in ['@', '\0'] {
+            let (mut app, _dir, server) = empty_app().await;
+            app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
+
+            app.handle_program_key(KeyEvent::new(
+                KeyCode::Char(mark_char),
+                KeyModifiers::CONTROL,
+            ))
+            .await;
+
+            let popup = app.program_popup.as_ref().unwrap();
+            let selection = popup.selection.as_ref().expect("selection mark");
+            assert_eq!(selection.anchor, 2);
+            assert_eq!(selection.head, 2);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn program_shift_arrow_selection_wins_over_split_focus_shortcut() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
+        app.layout.main_window_areas = vec![
+            WindowPaneHit {
+                id: 1,
+                area: Rect::new(0, 0, 40, 10),
+                inner_area: Rect::new(1, 1, 38, 8),
+            },
+            WindowPaneHit {
+                id: 2,
+                area: Rect::new(40, 0, 40, 10),
+                inner_area: Rect::new(41, 1, 38, 8),
+            },
+        ];
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s1".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.focus = PaneFocus::View;
+        app.zoom = ZoomMode::None;
+
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))
+            .await;
+
+        assert_eq!(
+            app.active_window_id, 1,
+            "Program should consume Shift+Right before split focus navigation"
+        );
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 3);
+        assert_eq!(App::program_selection_range(popup), Some((2, 3)));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn program_ctrl_g_dismisses_smart_clip_picker() {
         let (mut app, _dir, server) = empty_app().await;
         app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
