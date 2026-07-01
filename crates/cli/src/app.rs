@@ -66,6 +66,9 @@ pub(crate) const PROGRAM_CONTENT_PADDING_Y: u16 = 1;
 /// output signal. A missed first-output transition must never strand the
 /// animation; a timeout backstop is mandatory (spec 0042).
 pub(crate) const PROGRAM_RUN_MAX_MS: u64 = 10 * 60 * 1000;
+/// One-shot flourish shown when an authoritative program Run pending block
+/// settles. Presentation-only and client-local.
+pub(crate) const PROGRAM_SETTLE_FLASH_MS: u64 = 300;
 /// Remote Program collaborator cursors are presence hints. Hide them when the
 /// peer has not published activity recently.
 pub(crate) const PROGRAM_COLLAB_CURSOR_TTL_MS: i64 = 60 * 1000;
@@ -1026,6 +1029,10 @@ pub struct App {
     /// entry means a program Run is believed to still be executing for that
     /// session; it drives the shimmer over the executed Markdown.
     pub program_runs: HashMap<String, ProgramRun>,
+    /// Recently-settled program block refs, keyed by session id then block ref.
+    /// Renderers turn these into a short one-shot flourish and prune them after
+    /// `PROGRAM_SETTLE_FLASH_MS`.
+    pub program_settle_flourishes: HashMap<String, HashMap<String, Instant>>,
     /// Ephemeral Program collaboration cursors, keyed by daemon client id.
     pub program_collaborators: HashMap<String, agentd_protocol::ProgramCursor>,
     pub own_program_client_id: Option<String>,
@@ -1688,6 +1695,14 @@ pub(crate) fn program_run_pending_ids(body: &str) -> HashSet<String> {
         .into_iter()
         .map(|span| span.id)
         .collect()
+}
+
+fn program_run_progress_pending_ids(
+    progress: &agentd_protocol::ProgramRunProgress,
+) -> HashSet<String> {
+    let mut pending: HashSet<String> = progress.pending_block_refs.iter().cloned().collect();
+    pending.extend(progress.pending_block_ids.iter().cloned());
+    pending
 }
 
 /// Result of flushing a program popup's buffer to the daemon.
@@ -2387,6 +2402,7 @@ async fn run_with_socket_initial_selection(
         program_popups: HashMap::new(),
         program_view_memory: HashMap::new(),
         program_runs: HashMap::new(),
+        program_settle_flourishes: HashMap::new(),
         program_collaborators: HashMap::new(),
         own_program_client_id: None,
         program_clipboard: None,
@@ -5418,6 +5434,21 @@ impl App {
         active_run: Option<agentd_protocol::ProgramRunProgress>,
         blocks: Vec<agentd_protocol::ProgramBlockView>,
     ) {
+        let previous_pending = self
+            .program_runs
+            .get(&program.session_id)
+            .map(|run| run.pending.clone());
+        let next_pending = active_run.as_ref().map(program_run_progress_pending_ids);
+        if let (Some(previous_pending), Some(next_pending)) =
+            (previous_pending.as_ref(), next_pending.as_ref())
+        {
+            self.record_program_settle_flourishes(
+                &program.session_id,
+                previous_pending,
+                next_pending,
+                Instant::now(),
+            );
+        }
         match active_run.and_then(ProgramRun::from_progress) {
             Some(run) => {
                 self.program_runs.insert(program.session_id.clone(), run);
@@ -5646,6 +5677,7 @@ impl App {
         }
         self.program_popups.remove(id);
         self.program_runs.remove(id);
+        self.program_settle_flourishes.remove(id);
         self.program_view_memory.remove(id);
         self.program_collaborators
             .retain(|_, cursor| cursor.session_id != id);
@@ -9142,6 +9174,7 @@ mod tests {
             program_popups: HashMap::new(),
             program_view_memory: HashMap::new(),
             program_runs: HashMap::new(),
+            program_settle_flourishes: HashMap::new(),
             program_collaborators: HashMap::new(),
             own_program_client_id: None,
             program_clipboard: None,
@@ -13311,6 +13344,85 @@ mod tests {
             Instant::now() - Duration::from_millis(1);
         app.expire_program_runs(Instant::now());
         assert!(!app.program_runs.contains_key("s1"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_settle_flourish_tracks_pending_diff_and_expires() {
+        let (mut app, _dir, server) = empty_app().await;
+        let now = Instant::now();
+        let previous = HashSet::from([
+            "block-a:1".to_string(),
+            "block-b:1".to_string(),
+            "block-c:1".to_string(),
+        ]);
+        let next = HashSet::from(["block-b:1".to_string()]);
+
+        app.record_program_settle_flourishes("s1", &previous, &next, now);
+
+        let flourishes = app.program_settle_flourishes.get("s1").unwrap();
+        assert_eq!(flourishes.len(), 2);
+        assert_eq!(flourishes.get("block-a:1"), Some(&now));
+        assert_eq!(flourishes.get("block-c:1"), Some(&now));
+        assert!(!flourishes.contains_key("block-b:1"));
+
+        app.expire_program_runs(
+            now + Duration::from_millis(crate::app::PROGRAM_SETTLE_FLASH_MS - 1),
+        );
+        assert!(app
+            .program_settle_flourishes
+            .get("s1")
+            .is_some_and(|flourishes| flourishes.contains_key("block-a:1")));
+
+        app.expire_program_runs(now + Duration::from_millis(crate::app::PROGRAM_SETTLE_FLASH_MS));
+        assert!(!app.program_settle_flourishes.contains_key("s1"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_state_empty_pending_progress_flashes_final_settled_refs() {
+        let (mut app, _dir, server) = empty_app().await;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        app.program_runs.insert(
+            "s1".into(),
+            ProgramRun {
+                started_at: Instant::now(),
+                pending: HashSet::from(["block-a:1".into(), "block-b:1".into()]),
+                pending_tooltips: HashMap::new(),
+                deadline: Instant::now() + Duration::from_secs(60),
+                first_output_seen: true,
+            },
+        );
+
+        app.on_program_state(
+            agentd_protocol::ProgramDocument {
+                session_id: "s1".into(),
+                markdown: "- a\n- b\n".into(),
+                version: 2,
+                updated_at_ms: 0,
+                template_id: None,
+            },
+            Some(agentd_protocol::ProgramRunProgress {
+                run_id: "run-1".into(),
+                started_at_ms: now_ms - 1000,
+                expires_at_ms: now_ms + 60_000,
+                pending_block_ids: Vec::new(),
+                pending_block_refs: Vec::new(),
+                pending_block_tooltips: HashMap::new(),
+                seen_running: true,
+                first_output_seen: true,
+                agent_managed: true,
+            }),
+            Vec::new(),
+        );
+
+        assert!(!app.program_runs.contains_key("s1"));
+        let flourishes = app.program_settle_flourishes.get("s1").unwrap();
+        assert!(flourishes.contains_key("block-a:1"));
+        assert!(flourishes.contains_key("block-b:1"));
         server.abort();
     }
 
