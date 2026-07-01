@@ -121,6 +121,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.main_window_areas.clear();
     app.layout.main_window_dividers.clear();
     app.window_pane_sizes.clear();
+    app.terminal_replayed_sessions_this_frame.clear();
     app.layout.dynamic_ui_popover_area = None;
     app.layout.dynamic_ui_scroll_metrics = None;
     let area = f.area();
@@ -3310,6 +3311,17 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
     } else {
         (base_area, None)
     };
+    // A session normally has one on-screen pane, but a stale window-selection
+    // reassignment (e.g. the neighbor a deleted/archived session's pane falls
+    // back to) can leave two panes showing the same session. `ItemHistory`'s
+    // cache is sized to whichever width it was *last* replayed at; alternating
+    // between two widths for the same session within one frame rebuilds it
+    // from scratch on every call — fine for a nearly-empty session, ruinous
+    // for one with real scrollback (see `terminal_replayed_sessions_this_frame`
+    // and `pin_tile_reuses_cached_size_to_avoid_split_thrash`). The second
+    // (and later) pane to render an already-replayed session this frame reuses
+    // the first pane's cached size instead of forcing its own.
+    let already_replayed_this_frame = !app.terminal_replayed_sessions_this_frame.insert(id.clone());
     let history = match app.histories.get_mut(&id) {
         Some(h) => h,
         None => {
@@ -3347,7 +3359,12 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
     app.layout.browser_preview_close = None;
     app.layout.terminal_scrollbar = None;
     let row_offset = area.height.saturating_sub(chat_area.height);
-    let out = history.replay(area.width, area.height, scroll);
+    let (replay_cols, replay_rows) = if already_replayed_this_frame {
+        history.cached_dims().unwrap_or((area.width, area.height))
+    } else {
+        (area.width, area.height)
+    };
+    let out = history.replay(replay_cols, replay_rows, scroll);
     let clamped_scrollback = out.screen.scrollback();
     // Hide the chat pane's cursor block if we have our own editor pane
     // — otherwise the chat's vt100 cursor would render as a stray
