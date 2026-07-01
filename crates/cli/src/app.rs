@@ -9695,6 +9695,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn program_shift_click_extends_selection_to_clicked_point() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = empty_app().await;
+        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 1));
+        // inner content origin = (modal.x + 1 + pad, modal.y + 1 + pad) = (2, 2);
+        // inner width = 9 - 2 border - 2 pad = 5, so "abcdef" paints on one row.
+        let modal = Rect::new(0, 0, 9, 20);
+        app.layout.modal_area = Some(modal);
+
+        // Shift-click past the cursor (no prior selection): extends from the
+        // pre-click cursor (1) to the clicked offset (4), like Shift+Arrow.
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 6,
+            row: 2,
+            modifiers: KeyModifiers::SHIFT,
+        })
+        .await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 4);
+        assert_eq!(App::program_selection_range(popup), Some((1, 4)));
+        assert_eq!(App::selected_program_text(popup).as_deref(), Some("bcd"));
+
+        // A second shift-click keeps the original anchor (1) and moves only
+        // the head, rather than restarting the selection at the new click.
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::SHIFT,
+        })
+        .await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 0);
+        assert_eq!(App::program_selection_range(popup), Some((0, 1)));
+        assert_eq!(App::selected_program_text(popup).as_deref(), Some("a"));
+
+        // Releasing the mouse after a shift-click commits the selection (like
+        // a drag) instead of clearing it the way a plain click-release would.
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(App::program_selection_range(popup), Some((0, 1)));
+        assert_eq!(app.program_clipboard.as_deref(), Some("a"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn program_ctrl_space_extends_selection_with_emacs_motion() {
         let (mut app, _dir, server) = empty_app().await;
         app.program_popup = Some(program_popup_for_test("s1", "abc\ndef", 1));
@@ -9730,6 +9784,22 @@ mod tests {
         assert_eq!(popup.cursor, 1);
         assert!(popup.selection.is_some());
         assert_eq!(App::program_selection_range(popup), None);
+
+        // C-e / C-a (end-of-line / beginning-of-line) must extend the mark
+        // too, not just the char/line motions above.
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+            .await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 3);
+        assert_eq!(App::program_selection_range(popup), Some((1, 3)));
+        assert_eq!(App::selected_program_text(popup).as_deref(), Some("bc"));
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.cursor, 0);
+        assert_eq!(App::program_selection_range(popup), Some((0, 1)));
+        assert_eq!(App::selected_program_text(popup).as_deref(), Some("a"));
         server.abort();
     }
 

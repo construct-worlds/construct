@@ -226,6 +226,28 @@ impl App {
                 let Some(popup) = self.program_popup.as_mut() else {
                     return true;
                 };
+                // Shift-click extends the existing mark/cursor to the clicked
+                // point instead of starting a fresh selection there, mirroring
+                // Shift+Arrow's "extend, don't restart" behavior. Marked
+                // `dragged` so mouse-up commits it like a drag-selection
+                // (stays highlighted and copies) rather than being cleared
+                // like a plain click.
+                if ev.modifiers.contains(KeyModifiers::SHIFT) {
+                    let anchor = popup
+                        .selection
+                        .as_ref()
+                        .map(|selection| selection.anchor)
+                        .unwrap_or(popup.cursor);
+                    popup.cursor = cursor;
+                    popup.preferred_col = None;
+                    popup.selection = Some(ProgramSelection {
+                        anchor,
+                        head: cursor,
+                        dragged: true,
+                    });
+                    popup.smart_clip = None;
+                    return true;
+                }
                 popup.cursor = cursor;
                 popup.preferred_col = None;
                 popup.selection = Some(ProgramSelection {
