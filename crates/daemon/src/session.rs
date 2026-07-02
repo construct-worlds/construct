@@ -709,6 +709,41 @@ fn program_rebase_offset(offset: usize, replacements: &[ProgramCursorReplacement
     pos
 }
 
+/// The minimal char-offset span (in `after`'s coordinates) where `before`
+/// and `after` actually differ, via the same common-prefix/suffix trim
+/// `program_cursor_replacements` uses for one edit — applied here to the
+/// whole before/after document instead. Used for the agent-presence
+/// cursor's span (spec 0065 agent presence): unlike picking the last
+/// individual edit's own replacement, this is correct even when a batch's
+/// edits partially or fully cancel each other out (e.g. an edit followed by
+/// one that reverts it) — it reports where the document actually ended up
+/// different, not where an individual edit nominally touched. Returns
+/// `None` when the two are identical.
+fn program_edit_overall_span(before: &str, after: &str) -> Option<(usize, usize)> {
+    if before == after {
+        return None;
+    }
+    let before_chars: Vec<char> = before.chars().collect();
+    let after_chars: Vec<char> = after.chars().collect();
+    let mut prefix = 0usize;
+    while prefix < before_chars.len()
+        && prefix < after_chars.len()
+        && before_chars[prefix] == after_chars[prefix]
+    {
+        prefix += 1;
+    }
+    let mut before_suffix = before_chars.len();
+    let mut after_suffix = after_chars.len();
+    while before_suffix > prefix
+        && after_suffix > prefix
+        && before_chars[before_suffix - 1] == after_chars[after_suffix - 1]
+    {
+        before_suffix -= 1;
+        after_suffix -= 1;
+    }
+    Some((prefix, after_suffix))
+}
+
 impl SessionEntry {
     pub fn is_deleted(&self) -> bool {
         self.deleted.load(Ordering::SeqCst)
@@ -1689,7 +1724,7 @@ impl SessionManager {
         let agent_conn_id = source_conn_id
             .is_none()
             .then(|| self.agent_program_cursor_conn_id(&params.session_id));
-        let (cursor_updates, last_edit_span) = before_program
+        let cursor_updates = before_program
             .as_ref()
             .map(|before| {
                 self.rebase_program_cursors_after_edit(
@@ -1702,6 +1737,17 @@ impl SessionManager {
                 )
             })
             .unwrap_or_default();
+        // The span of the agent-presence cursor is the true difference
+        // between the pre- and post-edit documents, not any individual
+        // edit's own replacement — a multi-edit batch can contain edits that
+        // partially or fully cancel each other out (e.g. a corrective
+        // second edit reverting part of the first), and only a whole-
+        // document diff reliably reports where the document actually ended
+        // up different. `None` here also means "nothing changed" (a
+        // genuine no-op batch), which doubles as the publish gate below.
+        let last_edit_span = before_program
+            .as_ref()
+            .and_then(|before| program_edit_overall_span(&before.markdown, &program.markdown));
         // Apply the partial shimmer declaration against the post-edit document
         // (spec 0053): changed blocks drop their prior shimmer; declared ids set
         // pending/settled; ids that no longer exist are ignored (fail closed).
@@ -1738,23 +1784,17 @@ impl SessionManager {
                 agentd_protocol::ProgramCursorNotificationPayload { cursor },
             ));
         }
-        // Publish the agent's presence cursor at the end of the last applied
-        // edit so connected clients see where the agent just wrote (spec
-        // 0065 agent presence). This reuses the same `program_cursors` map,
-        // broadcast, and one-minute TTL as human cursors. Skipped when the
-        // edit was a genuine no-op (`storage.edit_program` short-circuits a
-        // batch whose net result matches the current markdown and leaves the
-        // version unchanged) — nothing was actually written, so there is no
-        // location to present as "the agent just wrote here".
-        let edit_changed_document = before_program
-            .as_ref()
-            .map_or(true, |before| before.version != program.version);
-        if edit_changed_document {
-            if let (Some(conn_id), Some(span)) = (agent_conn_id, last_edit_span) {
-                let harness = entry.summary().await.harness;
-                self.publish_agent_program_cursor(conn_id, &params.session_id, &harness, span, program.version)
-                    .await;
-            }
+        // Publish the agent's presence cursor over the edit's real span so
+        // connected clients see where the agent just wrote (spec 0065 agent
+        // presence). This reuses the same `program_cursors` map, broadcast,
+        // and one-minute TTL as human cursors. `last_edit_span` is `None`
+        // for a genuine no-op batch, which skips the publish here too —
+        // nothing was actually written, so there is no location to present
+        // as "the agent just wrote here".
+        if let (Some(conn_id), Some(span)) = (agent_conn_id, last_edit_span) {
+            let harness = entry.summary().await.harness;
+            self.publish_agent_program_cursor(conn_id, &params.session_id, &harness, span, program.version)
+                .await;
         }
         Ok(ProgramUpdateResult {
             program,
@@ -1857,14 +1897,13 @@ impl SessionManager {
     }
 
     /// Rebases every peer's Program cursor through a just-applied batch of
-    /// edits and, alongside the updates to broadcast, returns the last
-    /// applied edit's own span in final-document char offsets (used to place
-    /// the agent-presence cursor; see [`Self::publish_agent_program_cursor`]).
-    /// `exclude_conn_id` additionally skips one more cursor besides the
-    /// source connection — the agent's own reserved pseudo-cursor from a
-    /// prior edit, whose stale span is about to be superseded by the fresh
-    /// one this edit produces, so rebasing (and broadcasting) it here would
-    /// be a spurious update immediately followed by the correct one.
+    /// edits, returning the updates to broadcast. `exclude_conn_id`
+    /// additionally skips one more cursor besides the source connection —
+    /// the agent's own reserved pseudo-cursor from a prior edit, whose stale
+    /// span is about to be superseded by the fresh one this edit produces
+    /// (see [`Self::publish_agent_program_cursor`]), so rebasing (and
+    /// broadcasting) it here would be a spurious update immediately followed
+    /// by the correct one.
     fn rebase_program_cursors_after_edit(
         &self,
         session_id: &str,
@@ -1873,28 +1912,13 @@ impl SessionManager {
         version: u64,
         source_conn_id: Option<u64>,
         exclude_conn_id: Option<u64>,
-    ) -> (Vec<agentd_protocol::ProgramCursor>, Option<(usize, usize)>) {
+    ) -> Vec<agentd_protocol::ProgramCursor> {
         let Ok(replacements) = program_cursor_replacements(before_markdown, edits) else {
-            return (Vec::new(), None);
+            return Vec::new();
         };
         if replacements.is_empty() {
-            return (Vec::new(), None);
+            return Vec::new();
         }
-        // The last *non-degenerate* replacement's `start` already reflects
-        // every earlier replacement in this batch (the sequential
-        // coordinate frame `program_rebase_offset` walks), so `start +
-        // new_len` is already a final-document offset — as long as nothing
-        // after it actually shifts the document. A trailing no-op edit
-        // (`old_string == new_string`, common when an agent restates an
-        // unchanged anchor alongside a real change elsewhere in the same
-        // batch) produces a `(old_len: 0, new_len: 0)` entry that shifts
-        // nothing, so skipping trailing degenerate entries here is safe:
-        // it doesn't change any span computed for a real entry before it.
-        let last_edit_span = replacements
-            .iter()
-            .rev()
-            .find(|r| r.old_len != 0 || r.new_len != 0)
-            .map(|r| (r.start, r.start + r.new_len));
         let now = chrono::Utc::now().timestamp_millis();
         let mut updates = Vec::new();
         if let Ok(mut cursors) = self.program_cursors.lock() {
@@ -1936,7 +1960,7 @@ impl SessionManager {
                 }
             }
         }
-        (updates, last_edit_span)
+        updates
     }
 
     /// Reserve (or reuse) a synthetic connection id for `session_id`'s
@@ -5904,6 +5928,59 @@ mod tests {
         );
         assert_eq!(cursor.selection_head, Some(6));
         assert_eq!(cursor.cursor, 6);
+    }
+
+    #[tokio::test]
+    async fn program_edit_agent_presence_cursor_ignores_edits_that_cancel_out() {
+        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+
+        // Each individual edit is non-degenerate (real old_len/new_len), but
+        // the second and third cancel each other out — the batch's real
+        // effect is only the first edit. The presence cursor must land on
+        // the real change ("123" -> "abc"), not on the untouched "789"
+        // that the last individual replacement happens to reference.
+        let result = mgr
+            .program_edit_from_conn(
+                agentd_protocol::ProgramEditParams {
+                    session_id: id.clone(),
+                    edits: vec![
+                        agentd_protocol::ProgramEdit {
+                            old_string: "123".to_string(),
+                            new_string: "abc".to_string(),
+                            replace_all: false,
+                            keep_pending: false,
+                        },
+                        agentd_protocol::ProgramEdit {
+                            old_string: "789".to_string(),
+                            new_string: "XYZ".to_string(),
+                            replace_all: false,
+                            keep_pending: false,
+                        },
+                        agentd_protocol::ProgramEdit {
+                            old_string: "XYZ".to_string(),
+                            new_string: "789".to_string(),
+                            replace_all: false,
+                            keep_pending: false,
+                        },
+                    ],
+                    actor: agentd_protocol::ProgramUpdateActor::Agent,
+                    note: None,
+                    shimmer: Vec::new(),
+                },
+                None,
+            )
+            .await
+            .expect("agent edit batch");
+
+        assert_eq!(result.program.markdown, "abc456789\n");
+        let cursor = agent_collaborator(&mgr, &id);
+        assert_eq!(
+            cursor.selection_anchor,
+            Some(0),
+            "the real change's span, not the cancelled-out edit's untouched text"
+        );
+        assert_eq!(cursor.selection_head, Some(3));
+        assert_eq!(cursor.cursor, 3);
     }
 
     #[tokio::test]
