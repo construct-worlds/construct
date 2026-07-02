@@ -17103,6 +17103,127 @@ mod tests {
         server.abort();
     }
 
+    fn picker_program_block_texts(rows: &[SessionPickerRow]) -> Vec<&str> {
+        rows.iter()
+            .filter_map(|r| match r {
+                SessionPickerRow::ProgramBlock { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn session_picker_lists_program_blocks_for_switch_purpose() {
+        let (mut app, _dir, server) = session_picker_app().await;
+        let markdown = "# Heading\n\nblock two\n\nblock three\n";
+        app.program_popup = Some(program_popup_for_test("s1", markdown, 0));
+
+        app.open_session_picker(SessionPickerPurpose::Switch);
+        let rows = app.session_picker_rows();
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, SessionPickerRow::ProgramHeader)),
+            "a Program separator row is shown"
+        );
+        assert_eq!(
+            picker_program_block_texts(&rows),
+            vec!["# Heading", "block two", "block three"]
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.is_selectable() && matches!(r, SessionPickerRow::ProgramBlock { .. })),
+            "blocks are navigable alongside sessions"
+        );
+
+        // A query narrows blocks to first-line matches, same as sessions.
+        let filtered = app.session_picker_rows_for_query("two");
+        assert_eq!(picker_program_block_texts(&filtered), vec!["block two"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_picker_clip_variant_excludes_program_blocks() {
+        let (mut app, _dir, server) = session_picker_app().await;
+        let markdown = "# Heading\n\nblock two\n";
+        app.program_popup = Some(program_popup_for_test("s1", markdown, 0));
+
+        app.open_session_picker(SessionPickerPurpose::InsertProgramClip);
+        let rows = app.session_picker_rows_for_query("");
+        assert!(
+            !rows.iter().any(|r| matches!(
+                r,
+                SessionPickerRow::ProgramHeader | SessionPickerRow::ProgramBlock { .. }
+            )),
+            "the `@`→session clip picker only lists sessions"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_picker_hides_blocks_for_a_closing_program() {
+        let (mut app, _dir, server) = session_picker_app().await;
+        let markdown = "# Heading\n\nblock two\n";
+        let mut popup = program_popup_for_test("s1", markdown, 0);
+        popup.closing = true;
+        app.program_popup = Some(popup);
+
+        app.open_session_picker(SessionPickerPurpose::Switch);
+        let rows = app.session_picker_rows();
+        assert!(
+            !rows.iter().any(|r| matches!(
+                r,
+                SessionPickerRow::ProgramHeader | SessionPickerRow::ProgramBlock { .. }
+            )),
+            "a program mid-close animation shouldn't offer stale blocks"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_picker_caps_program_blocks_at_ten() {
+        let (mut app, _dir, server) = session_picker_app().await;
+        let markdown = (0..15)
+            .map(|i| format!("block {i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        app.program_popup = Some(program_popup_for_test("s1", &markdown, 0));
+
+        app.open_session_picker(SessionPickerPurpose::Switch);
+        let rows = app.session_picker_rows();
+        assert_eq!(picker_program_block_texts(&rows).len(), 10);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_picker_confirm_program_block_scrolls_to_it() {
+        let (mut app, _dir, server) = session_picker_app().await;
+        let markdown = "# Heading\n\nblock two\n\nblock three\n";
+        app.program_popup = Some(program_popup_for_test("s1", markdown, 0));
+        app.program_popup.as_mut().unwrap().terminal_focus = true; // slid aside
+        app.layout.program_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 5));
+
+        app.open_session_picker(SessionPickerPurpose::Switch);
+        // Selectable rows: alpha, beta, gamma, then the three program blocks —
+        // five Downs from the initial `alpha` selection lands on "block three".
+        for _ in 0..5 {
+            app.handle_session_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.session_picker.is_none(), "confirm closes the dialog");
+        assert_eq!(app.focus, PaneFocus::View);
+        let popup = app.program_popup.as_ref().expect("program stays open");
+        assert!(
+            !popup.terminal_focus,
+            "confirm undoes a terminal-focus slide so the buffer is visible"
+        );
+        assert_eq!(
+            popup.scroll_offset, 4,
+            "scrolls so block three's line (a non-wrapping buffer, so line == visual row) is in view"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn approval_prompt_opens_for_selected_session() {
         let (mut app, _dir, server) = captured_app().await;
