@@ -1537,11 +1537,19 @@ pub struct ProgramCursor {
     pub client_id: String,
     /// Short human-readable source label such as "TUI" or "Web".
     pub label: String,
-    /// Client surface/kind, e.g. "tui" or "web".
+    /// Client surface/kind, e.g. "tui" or "web", or "agent" for the owning
+    /// agent's own presence cursor (spec 0065 agent presence).
     pub kind: String,
     /// Caret offset in Unicode scalar values within the current Program
     /// markdown. This matches the TUI's existing Program cursor units.
     pub cursor: usize,
+    /// For a human cursor (`kind` "tui"/"web"), the bounds of that client's
+    /// real text selection. For the agent's own presence cursor
+    /// (`kind == "agent"`), these instead bound the span its last edit just
+    /// wrote — there is no real selection to report — so renderers use them
+    /// to briefly reveal-highlight where the edit landed rather than to draw
+    /// a selection. A future selection-rendering feature must branch on
+    /// `kind` before treating these as a genuine selection range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_anchor: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

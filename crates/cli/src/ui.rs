@@ -36,6 +36,9 @@ const PROGRAM_RUN_BUTTON: &str = " ▶ ";
 const PROGRAM_CLIP_HOVER_PREVIEW_COLS: u16 = 102;
 const PROGRAM_CLIP_HOVER_PREVIEW_ROWS: u16 = 12;
 const PROGRAM_COLLAB_CURSOR_LABEL_MAX_WIDTH: usize = 12;
+/// How long a just-landed agent-authored Program edit keeps its brief reveal
+/// highlight (spec 0065 agent presence) before fading back to plain text.
+pub(crate) const PROGRAM_AGENT_REVEAL_MS: i64 = 300;
 const PROGRAM_SELECTION_RUN_MENU_W: u16 = 9;
 const PROGRAM_SELECTION_RUN_MENU_H: u16 = 3;
 
@@ -8241,14 +8244,44 @@ fn render_program_collab_cursors(
         if app.own_program_client_id.as_deref() == Some(cursor.client_id.as_str()) {
             continue;
         }
-        let Some(pos) = program_cursor_position(
-            Some(app),
-            &popup.buffer,
-            cursor.cursor.min(max_cursor),
-            scroll_offset,
-            inner,
-        ) else {
-            continue;
+        // Agent presence (spec 0065 agent presence): the daemon carries the
+        // just-applied edit's span in `selection_anchor`/`selection_head` for
+        // its own pseudo-cursor (`kind == "agent"`), not a real text
+        // selection. Reveal it with a brief tint instead of an instant
+        // repaint, while it's still fresh. The span's end is always
+        // `cursor.cursor` (see `publish_agent_program_cursor`), so the
+        // position the reveal already computed for it is reused below
+        // instead of walking the wrapped document a second time for the
+        // same offset.
+        let is_agent = cursor.kind == "agent";
+        let mut agent_reveal_end_pos = None;
+        if is_agent && now_ms.saturating_sub(cursor.updated_at_ms) <= PROGRAM_AGENT_REVEAL_MS {
+            if let (Some(anchor), Some(head)) = (cursor.selection_anchor, cursor.selection_head) {
+                agent_reveal_end_pos = render_program_agent_reveal(
+                    f,
+                    app,
+                    popup,
+                    scroll_offset,
+                    inner,
+                    anchor.min(head).min(max_cursor),
+                    anchor.max(head).min(max_cursor),
+                );
+            }
+        }
+        let pos = match agent_reveal_end_pos {
+            Some(pos) => pos,
+            None => {
+                let Some(pos) = program_cursor_position(
+                    Some(app),
+                    &popup.buffer,
+                    cursor.cursor.min(max_cursor),
+                    scroll_offset,
+                    inner,
+                ) else {
+                    continue;
+                };
+                pos
+            }
         };
         let Some(cell) = f.buffer_mut().cell_mut(pos) else {
             continue;
@@ -8259,7 +8292,11 @@ fn render_program_collab_cursors(
         cell.set_style(
             cell.style()
                 .fg(program_collab_cursor_color(&app.theme, cursor.color_index))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                .add_modifier(if is_agent {
+                    Modifier::BOLD | Modifier::ITALIC
+                } else {
+                    Modifier::BOLD | Modifier::UNDERLINED
+                }),
         );
         let label = cursor.label.trim();
         if !label.is_empty() && pos.y > inner.y {
@@ -8272,17 +8309,93 @@ fn render_program_collab_cursors(
                 let label_w = UnicodeWidthStr::width(label.as_str()) as u16;
                 if label_w > 0 {
                     let rect = Rect::new(pos.x.saturating_add(1), pos.y - 1, label_w, 1);
-                    f.render_widget(
-                        Paragraph::new(label).style(program_collab_cursor_label_style(
-                            &app.theme,
-                            cursor.color_index,
-                        )),
-                        rect,
-                    );
+                    let mut label_style =
+                        program_collab_cursor_label_style(&app.theme, cursor.color_index);
+                    if is_agent {
+                        label_style = label_style.add_modifier(Modifier::ITALIC);
+                    }
+                    f.render_widget(Paragraph::new(label).style(label_style), rect);
                 }
             }
         }
     }
+}
+
+/// Briefly tint the cells spanning `[start, end)` when a live agent edit just
+/// landed there (spec 0065 agent presence), so the adopted change reads as
+/// revealed rather than an instant repaint. Only tints cells with no
+/// background yet, so it never fights the selection/search/shimmer
+/// overlays already baked into the rendered buffer (mirroring how
+/// `apply_program_shimmer` leaves backed spans alone).
+///
+/// This deliberately doesn't share `render_selection_rect`'s row/column loop
+/// despite the visual similarity: that function takes pre-computed
+/// viewport-relative `ScreenPoint`s and paints an *inclusive* `[start, end]`
+/// span with a fixed style, while this one converts document char offsets
+/// (subtracting `scroll_offset` itself) and paints a *half-open* `[start,
+/// end)` span — `end` is one past the edit's last character, not part of it
+/// — with a conditional "only if unstyled" predicate. Forcing a shared loop
+/// would need to reconcile the inclusive/exclusive endpoint conventions,
+/// which risks an off-by-one more than it saves.
+///
+/// Paints the reveal tint and returns `end`'s on-screen position (in the
+/// same coordinate space `program_cursor_position` would produce), so a
+/// caller painting the point cursor at that same offset — which, for an
+/// agent's presence cursor, is always exactly `end` — can reuse it instead
+/// of walking the document a second time to relocate the identical offset.
+fn render_program_agent_reveal(
+    f: &mut Frame,
+    app: &App,
+    popup: &crate::app::ProgramPopup,
+    scroll_offset: usize,
+    inner: Rect,
+    start: usize,
+    end: usize,
+) -> Option<Position> {
+    if inner.width == 0 || inner.height == 0 || start >= end {
+        return None;
+    }
+    let width = inner.width as usize;
+    let (start_row, start_col) = program_cursor_visual_pos(Some(app), &popup.buffer, start, width);
+    let (end_row, end_col) = program_cursor_visual_pos(Some(app), &popup.buffer, end, width);
+    let end_pos = end_row.checked_sub(scroll_offset).and_then(|view_row| {
+        (view_row < inner.height as usize).then_some(Position {
+            x: inner.x.saturating_add(end_col as u16),
+            y: inner.y.saturating_add(view_row as u16),
+        })
+    });
+    for row in start_row..=end_row {
+        let Some(view_row) = row.checked_sub(scroll_offset) else {
+            continue;
+        };
+        if view_row >= inner.height as usize {
+            continue;
+        }
+        let col_start = if row == start_row { start_col } else { 0 };
+        let col_end = (if row == end_row { end_col } else { width }).min(width);
+        if col_start >= col_end {
+            continue;
+        }
+        let y = inner.y.saturating_add(view_row as u16);
+        for x in col_start..col_end {
+            let pos = Position {
+                x: inner.x.saturating_add(x as u16),
+                y,
+            };
+            let Some(cell) = f.buffer_mut().cell_mut(pos) else {
+                continue;
+            };
+            // `Color::Reset` is what an unhighlighted cell carries after the
+            // popup's `Clear` + a plain (no-bg) span render onto it — it is
+            // not a real selection/search/shimmer background, so it must not
+            // be treated as "already styled" here.
+            if !matches!(cell.style().bg, None | Some(Color::Reset)) {
+                continue;
+            }
+            cell.set_style(cell.style().bg(app.theme.inactive_highlight_bg));
+        }
+    }
+    end_pos
 }
 
 /// Mini session-preview popover shown while the mouse hovers a `@{session:id}`

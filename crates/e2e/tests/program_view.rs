@@ -783,6 +783,47 @@ async fn web_program_view_full_parity() {
         "{badges:?}"
     );
 
+    // --- 14. Live collaboration: agent presence cursor + reveal highlight
+    //     (spec 0065 agent presence). An agent-authored edit publishes a
+    //     `kind: "agent"` cursor carrying the edited span in
+    //     `selection_anchor`/`selection_head`; the web client renders it
+    //     styled distinctly and briefly tints that span.
+    let agent_presence: serde_json::Value = page
+        .evaluate(
+            r###"
+            withMockProgram({
+              "program.get": () => ({ program: { session_id: "s-agent-presence", markdown: "123456789\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [], collaborators: [] }),
+              "program.list_templates": () => ({ templates: [] }),
+              "program.cursor": (p) => {
+                return { cursor: { session_id: p.session_id, client_id: "web-self", label: "Web", kind: "web", cursor: p.cursor, color_index: 1, updated_at_ms: Date.now(), active: !p.clear } };
+              },
+            }, async () => {
+              setSession("s-agent-presence", "shell");
+              await switchCurrentViewMode("program");
+              handleProgramCursor({ cursor: { session_id: "s-agent-presence", client_id: "agent-1", label: "claude", kind: "agent", cursor: 6, selection_anchor: 3, selection_head: 6, color_index: 2, updated_at_ms: Date.now(), active: true } });
+              const agentEl = programCursorLayerEl.querySelector('.program-remote-cursor[data-kind="agent"]');
+              return {
+                agentCursorCount: programCursorLayerEl.querySelectorAll('.program-remote-cursor[data-kind="agent"]').length,
+                agentLabel: agentEl ? agentEl.dataset.label : "",
+                revealCount: programCursorLayerEl.querySelectorAll(".program-agent-reveal").length,
+              };
+            })
+            "###,
+        )
+        .await
+        .expect("evaluate agent presence")
+        .into_value()
+        .expect("json");
+    assert_eq!(
+        agent_presence["agentCursorCount"], 1,
+        "agent-authored cursor should render as a distinctly-kinded remote cursor: {agent_presence:?}"
+    );
+    assert_eq!(agent_presence["agentLabel"], "claude", "{agent_presence:?}");
+    assert!(
+        agent_presence["revealCount"].as_i64().unwrap_or_default() >= 1,
+        "the edited span should get a brief reveal highlight: {agent_presence:?}"
+    );
+
     // --- Visual artifacts: drive the REAL session's program (it has a smart
     //     clip from step 1) and leave it mounted so the screenshots show the
     //     genuine rendered surface, chip, and run shimmer. ------------------
