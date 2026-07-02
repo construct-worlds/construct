@@ -872,6 +872,48 @@ async fn web_program_view_full_parity() {
         "the edited span should get a brief reveal highlight: {agent_presence:?}"
     );
 
+    // --- 14b. Same reveal, but for a cursor arriving in the `program.get`
+    //     mount snapshot rather than a live push. There is no local receipt
+    //     for a cursor this client never watched arrive, so this path must
+    //     keep gating on the daemon's own `updated_at_ms`: a cursor from
+    //     seconds ago (within the daemon's one-minute presence TTL, so it's
+    //     still in the snapshot) must NOT flash a reveal on open, while one
+    //     from just now must.
+    let agent_presence_snapshot: serde_json::Value = page
+        .evaluate(
+            r###"
+            withMockProgram({
+              "program.get": () => ({
+                program: { session_id: "s-agent-presence-snapshot", markdown: "123456789\n", version: 1, template_id: null },
+                active_run: null, blocks: [], revisions: [],
+                collaborators: [
+                  { session_id: "s-agent-presence-snapshot", client_id: "agent-fresh", label: "claude", kind: "agent", cursor: 6, selection_anchor: 3, selection_head: 6, color_index: 2, updated_at_ms: Date.now(), active: true },
+                  { session_id: "s-agent-presence-snapshot", client_id: "agent-stale", label: "claude", kind: "agent", cursor: 6, selection_anchor: 3, selection_head: 6, color_index: 3, updated_at_ms: Date.now() - 30000, active: true },
+                ],
+              }),
+              "program.list_templates": () => ({ templates: [] }),
+              "program.cursor": (p) => {
+                return { cursor: { session_id: p.session_id, client_id: "web-self", label: "Web", kind: "web", cursor: p.cursor, color_index: 1, updated_at_ms: Date.now(), active: !p.clear } };
+              },
+            }, async () => {
+              setSession("s-agent-presence-snapshot", "shell");
+              await switchCurrentViewMode("program");
+              return {
+                revealCount: programCursorLayerEl.querySelectorAll(".program-agent-reveal").length,
+              };
+            })
+            "###,
+        )
+        .await
+        .expect("evaluate agent presence snapshot")
+        .into_value()
+        .expect("json");
+    assert_eq!(
+        agent_presence_snapshot["revealCount"], 1,
+        "only the fresh snapshot cursor should flash a reveal on mount, not the 30s-old one: \
+         {agent_presence_snapshot:?}"
+    );
+
     // --- Visual artifacts: drive the REAL session's program (it has a smart
     //     clip from step 1) and leave it mounted so the screenshots show the
     //     genuine rendered surface, chip, and run shimmer. ------------------

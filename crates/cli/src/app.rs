@@ -1031,6 +1031,16 @@ pub struct App {
     pub program_settle_flourishes: HashMap<String, HashMap<String, Instant>>,
     /// Ephemeral Program collaboration cursors, keyed by daemon client id.
     pub program_collaborators: HashMap<String, agentd_protocol::ProgramCursor>,
+    /// Local receipt clock for agent-cursor freshness (spec 0065 agent
+    /// presence), keyed by daemon client id: the agent cursor's
+    /// `updated_at_ms` last observed for that client, alongside the local
+    /// `Instant` it first arrived at. The reveal/edge-indicator gates key off
+    /// this instead of the daemon's `updated_at_ms` directly — broadcast
+    /// transit plus the render tick can eat most of a short reveal window
+    /// before the first paint, so the daemon stamp alone makes the reveal
+    /// invisible. Only bumped when the daemon stamp itself advances, so a
+    /// rebase (position change, unchanged `updated_at_ms`) does not renew it.
+    pub program_agent_reveal_receipts: HashMap<String, (i64, Instant)>,
     pub own_program_client_id: Option<String>,
     pub program_clipboard: Option<String>,
     /// Live `/remote-control` modal — URL + QR for the active
@@ -1763,6 +1773,28 @@ fn program_run_progress_pending_ids(
     pending
 }
 
+/// Next `program_agent_reveal_receipts` entry for an agent cursor carrying
+/// `updated_at_ms`, given the entry currently on file (if any) and the local
+/// time `now` this cursor was received at (spec 0065 agent presence).
+///
+/// Renews the receipt (bumps the local `Instant` to `now`) only when
+/// `updated_at_ms` itself has advanced past what's on file — a genuine new
+/// agent write. When the incoming stamp matches what's already recorded, the
+/// cursor was rebased through someone else's edit without the daemon
+/// advancing its own timestamp, so the existing receipt (and thus the
+/// reveal's remaining freshness) carries over unchanged. Pure so the
+/// bump-vs-hold decision is unit-testable without an `App` or live clock.
+fn program_agent_reveal_receipt_update(
+    existing: Option<&(i64, Instant)>,
+    updated_at_ms: i64,
+    now: Instant,
+) -> (i64, Instant) {
+    match existing {
+        Some((seen_ms, receipt_at)) if *seen_ms == updated_at_ms => (*seen_ms, *receipt_at),
+        _ => (updated_at_ms, now),
+    }
+}
+
 /// Result of flushing a program popup's buffer to the daemon.
 struct ProgramSaveOutcome {
     /// The document as it now lives on the daemon (our content, possibly
@@ -2462,6 +2494,7 @@ async fn run_with_socket_initial_selection(
         program_runs: HashMap::new(),
         program_settle_flourishes: HashMap::new(),
         program_collaborators: HashMap::new(),
+        program_agent_reveal_receipts: HashMap::new(),
         own_program_client_id: None,
         program_clipboard: None,
         remote_control_popup: None,
@@ -5434,6 +5467,16 @@ impl App {
     fn on_program_cursor(&mut self, cursor: agentd_protocol::ProgramCursor) {
         let is_own = self.own_program_client_id.as_deref() == Some(cursor.client_id.as_str());
         if cursor.active {
+            if cursor.kind == "agent" {
+                let existing = self.program_agent_reveal_receipts.get(&cursor.client_id);
+                let receipt = program_agent_reveal_receipt_update(
+                    existing,
+                    cursor.updated_at_ms,
+                    Instant::now(),
+                );
+                self.program_agent_reveal_receipts
+                    .insert(cursor.client_id.clone(), receipt);
+            }
             self.program_collaborators
                 .insert(cursor.client_id.clone(), cursor.clone());
             if is_own {
@@ -5441,7 +5484,24 @@ impl App {
             }
         } else {
             self.program_collaborators.remove(&cursor.client_id);
+            self.program_agent_reveal_receipts.remove(&cursor.client_id);
         }
+    }
+
+    /// Elapsed time since this agent cursor's `updated_at_ms` last genuinely
+    /// advanced, per the local receipt clock `on_program_cursor` maintains.
+    /// `None` when no receipt has been recorded for `client_id` (not an
+    /// agent-kind cursor, or never observed live) — callers should treat that
+    /// as "not fresh" rather than falling back to the daemon's timestamp,
+    /// which is what made the reveal invisible in the first place.
+    pub(crate) fn program_agent_reveal_elapsed(
+        &self,
+        client_id: &str,
+        now: Instant,
+    ) -> Option<Duration> {
+        self.program_agent_reveal_receipts
+            .get(client_id)
+            .map(|(_, receipt_at)| now.saturating_duration_since(*receipt_at))
     }
 
     fn apply_own_program_cursor(&mut self, cursor: &agentd_protocol::ProgramCursor) {
@@ -8967,6 +9027,36 @@ mod tests {
     use super::*;
     use ratatui::layout::Rect;
 
+    /// Spec 0065 agent presence: the local receipt clock must renew only when
+    /// the daemon's `updated_at_ms` genuinely advances, never on a rebase
+    /// that leaves it unchanged (GAP D — a rebase must not re-trigger the
+    /// reveal).
+    #[test]
+    fn program_agent_reveal_receipt_update_bumps_on_new_stamp_holds_on_rebase() {
+        let t0 = Instant::now();
+        let first = program_agent_reveal_receipt_update(None, 1_000, t0);
+        assert_eq!(
+            first,
+            (1_000, t0),
+            "first sighting always records a receipt"
+        );
+
+        let t1 = t0 + Duration::from_millis(50);
+        let rebased = program_agent_reveal_receipt_update(Some(&first), 1_000, t1);
+        assert_eq!(
+            rebased, first,
+            "unchanged updated_at_ms (a rebase) must not renew the receipt"
+        );
+
+        let t2 = t1 + Duration::from_millis(50);
+        let renewed = program_agent_reveal_receipt_update(Some(&rebased), 1_200, t2);
+        assert_eq!(
+            renewed,
+            (1_200, t2),
+            "an advanced updated_at_ms (a genuine new write) must renew the receipt"
+        );
+    }
+
     #[test]
     fn osc52_sequence_wraps_base64_in_clipboard_escape() {
         // ESC ] 52 ; c ; <base64> with both legal OSC terminators:
@@ -9323,6 +9413,7 @@ mod tests {
             program_runs: HashMap::new(),
             program_settle_flourishes: HashMap::new(),
             program_collaborators: HashMap::new(),
+            program_agent_reveal_receipts: HashMap::new(),
             own_program_client_id: None,
             program_clipboard: None,
             remote_control_popup: None,
@@ -11670,23 +11761,34 @@ mod tests {
             popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
         }
         // "alpha" spans char offsets [1, 6); the point cursor sits at the end
-        // of that span (offset 6, the following space).
-        app.program_collaborators.insert(
-            "agent-1".to_string(),
-            agentd_protocol::ProgramCursor {
-                session_id: "s1".to_string(),
-                client_id: "agent-1".to_string(),
-                label: "claude".to_string(),
-                kind: "agent".to_string(),
-                cursor: 6,
-                selection_anchor: Some(1),
-                selection_head: Some(6),
-                version: Some(1),
-                color_index: 2,
-                updated_at_ms: chrono::Utc::now().timestamp_millis(),
-                active: true,
-            },
-        );
+        // of that span (offset 6, the following space). Routed through
+        // `on_program_cursor` (rather than a raw `program_collaborators`
+        // insert) so it also records the client-receipt freshness the reveal
+        // gate now keys off (GAP D) — the daemon's `updated_at_ms` alone no
+        // longer drives it.
+        app.on_program_cursor(agentd_protocol::ProgramCursor {
+            session_id: "s1".to_string(),
+            client_id: "agent-1".to_string(),
+            label: "claude".to_string(),
+            kind: "agent".to_string(),
+            cursor: 6,
+            selection_anchor: Some(1),
+            selection_head: Some(6),
+            version: Some(1),
+            color_index: 2,
+            updated_at_ms: chrono::Utc::now().timestamp_millis(),
+            active: true,
+        });
+        // The reveal now sweeps in over `PROGRAM_AGENT_REVEAL_MS` (GAP D
+        // typewriter effect) rather than tinting the whole span the instant
+        // it's received, so observe it partway through the window — the
+        // leading part of "alpha" should already be tinted, but the sweep
+        // shouldn't have caught up to its tail yet. Half the window leaves
+        // generous margin on both sides against test-execution jitter.
+        if let Some(entry) = app.program_agent_reveal_receipts.get_mut("agent-1") {
+            entry.1 = Instant::now()
+                - Duration::from_millis((crate::ui::PROGRAM_AGENT_REVEAL_MS / 2) as u64);
+        }
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -11703,16 +11805,227 @@ mod tests {
         );
         let y = inner.y + visual_row as u16;
         let buffer = term.backend().buffer();
-        for col in start_col..start_col + "alpha".chars().count() {
-            let cell = buffer
-                .cell((inner.x + col as u16, y))
-                .expect("revealed cell");
-            assert_eq!(
-                cell.style().bg,
-                Some(app.theme.inactive_highlight_bg),
-                "fresh agent edit should briefly tint the cell at column {col}"
-            );
+        let leading_cell = buffer
+            .cell((inner.x + start_col as u16, y))
+            .expect("revealed cell");
+        assert_eq!(
+            leading_cell.style().bg,
+            Some(app.theme.inactive_highlight_bg),
+            "fresh agent edit should briefly tint the leading edge of its span"
+        );
+        let trailing_col = start_col + "alpha".chars().count() - 1;
+        let trailing_cell = buffer
+            .cell((inner.x + trailing_col as u16, y))
+            .expect("unswept trailing cell");
+        assert_ne!(
+            trailing_cell.style().bg,
+            Some(app.theme.inactive_highlight_bg),
+            "the sweep should not yet have reached the tail of the span at the window's midpoint"
+        );
+        server.abort();
+    }
+
+    /// Spec 0065 agent presence (GAP D typewriter sweep): right when an agent
+    /// edit's cursor is received, none of its span should be tinted yet —
+    /// the reveal sweeps in over `PROGRAM_AGENT_REVEAL_MS` rather than
+    /// painting the whole span instantly.
+    #[tokio::test]
+    async fn program_remote_agent_cursor_reveal_starts_unswept() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
         }
+        app.on_program_cursor(agentd_protocol::ProgramCursor {
+            session_id: "s1".to_string(),
+            client_id: "agent-1".to_string(),
+            label: "claude".to_string(),
+            kind: "agent".to_string(),
+            cursor: 6,
+            selection_anchor: Some(1),
+            selection_head: Some(6),
+            version: Some(1),
+            color_index: 2,
+            updated_at_ms: chrono::Utc::now().timestamp_millis(),
+            active: true,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let inner = app.layout.program_inner_area.expect("program inner area");
+        let popup = app.program_popup.as_ref().expect("program popup");
+        let (visual_row, start_col) = crate::ui::program_cursor_visual_pos(
+            Some(&app),
+            &popup.buffer,
+            1,
+            inner.width as usize,
+        );
+        let y = inner.y + visual_row as u16;
+        let buffer = term.backend().buffer();
+        let cell = buffer
+            .cell((inner.x + start_col as u16, y))
+            .expect("unswept cell");
+        assert_ne!(
+            cell.style().bg,
+            Some(app.theme.inactive_highlight_bg),
+            "the sweep should not have tinted anything at (essentially) zero elapsed time"
+        );
+        server.abort();
+    }
+
+    /// Spec 0065 agent presence (GAP D): the reveal must key off the local
+    /// receipt clock, not the daemon's `updated_at_ms` — broadcast transit
+    /// and the render tick can eat most or all of a short reveal window
+    /// before the first paint, so a cursor whose daemon stamp already reads
+    /// as stale must still reveal if this is the first time it's been seen.
+    #[tokio::test]
+    async fn program_remote_agent_cursor_reveal_is_receipt_not_daemon_stamp_gated() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        // Daemon stamp is already well past the reveal window — under the old
+        // daemon-stamp gate this would never reveal. Received live just now,
+        // it must reveal anyway.
+        app.on_program_cursor(agentd_protocol::ProgramCursor {
+            session_id: "s1".to_string(),
+            client_id: "agent-1".to_string(),
+            label: "claude".to_string(),
+            kind: "agent".to_string(),
+            cursor: 6,
+            selection_anchor: Some(1),
+            selection_head: Some(6),
+            version: Some(1),
+            color_index: 2,
+            updated_at_ms: chrono::Utc::now()
+                .timestamp_millis()
+                .saturating_sub(crate::ui::PROGRAM_AGENT_REVEAL_MS * 10),
+            active: true,
+        });
+        // As above: observe partway through the reveal window (still driven
+        // by the fresh local receipt `on_program_cursor` just recorded, not
+        // by the ancient `updated_at_ms` above) rather than the unswept
+        // instant right after the notification arrives.
+        if let Some(entry) = app.program_agent_reveal_receipts.get_mut("agent-1") {
+            entry.1 = Instant::now()
+                - Duration::from_millis((crate::ui::PROGRAM_AGENT_REVEAL_MS / 2) as u64);
+        }
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let inner = app.layout.program_inner_area.expect("program inner area");
+        let popup = app.program_popup.as_ref().expect("program popup");
+        let (visual_row, start_col) = crate::ui::program_cursor_visual_pos(
+            Some(&app),
+            &popup.buffer,
+            1,
+            inner.width as usize,
+        );
+        let y = inner.y + visual_row as u16;
+        let buffer = term.backend().buffer();
+        let cell = buffer
+            .cell((inner.x + start_col as u16, y))
+            .expect("revealed cell");
+        assert_eq!(
+            cell.style().bg,
+            Some(app.theme.inactive_highlight_bg),
+            "a cursor received live just now must reveal even with a stale daemon stamp"
+        );
+        server.abort();
+    }
+
+    /// Spec 0065 agent presence (GAP D): rebasing an agent cursor through an
+    /// edit it did not author must not renew its reveal freshness — the
+    /// daemon leaves `updated_at_ms` unchanged on a rebase, and the local
+    /// receipt clock must honor that rather than treating every notification
+    /// as a fresh write.
+    #[tokio::test]
+    async fn program_remote_agent_cursor_rebase_does_not_retrigger_reveal() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        let updated_at_ms = chrono::Utc::now().timestamp_millis();
+        app.on_program_cursor(agentd_protocol::ProgramCursor {
+            session_id: "s1".to_string(),
+            client_id: "agent-1".to_string(),
+            label: "claude".to_string(),
+            kind: "agent".to_string(),
+            cursor: 6,
+            selection_anchor: Some(1),
+            selection_head: Some(6),
+            version: Some(1),
+            color_index: 2,
+            updated_at_ms,
+            active: true,
+        });
+        // Age the receipt out past the reveal window, then rebase (same
+        // `updated_at_ms`, shifted offsets) — mirroring what the daemon sends
+        // when someone else's edit lands after the agent's own.
+        if let Some(entry) = app.program_agent_reveal_receipts.get_mut("agent-1") {
+            entry.1 = Instant::now()
+                - Duration::from_millis((crate::ui::PROGRAM_AGENT_REVEAL_MS + 1) as u64);
+        }
+        app.on_program_cursor(agentd_protocol::ProgramCursor {
+            session_id: "s1".to_string(),
+            client_id: "agent-1".to_string(),
+            label: "claude".to_string(),
+            kind: "agent".to_string(),
+            cursor: 7,
+            selection_anchor: Some(2),
+            selection_head: Some(7),
+            version: Some(1),
+            color_index: 2,
+            updated_at_ms,
+            active: true,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let inner = app.layout.program_inner_area.expect("program inner area");
+        let popup = app.program_popup.as_ref().expect("program popup");
+        let (visual_row, start_col) = crate::ui::program_cursor_visual_pos(
+            Some(&app),
+            &popup.buffer,
+            2,
+            inner.width as usize,
+        );
+        let y = inner.y + visual_row as u16;
+        let buffer = term.backend().buffer();
+        let cell = buffer
+            .cell((inner.x + start_col as u16, y))
+            .expect("rebased cell");
+        assert_ne!(
+            cell.style().bg,
+            Some(app.theme.inactive_highlight_bg),
+            "a rebase carrying the same updated_at_ms must not re-trigger the reveal"
+        );
         server.abort();
     }
 
@@ -11732,24 +12045,27 @@ mod tests {
             let popup = app.program_popup.as_mut().unwrap();
             popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
         }
-        app.program_collaborators.insert(
-            "agent-1".to_string(),
-            agentd_protocol::ProgramCursor {
-                session_id: "s1".to_string(),
-                client_id: "agent-1".to_string(),
-                label: "claude".to_string(),
-                kind: "agent".to_string(),
-                cursor: 6,
-                selection_anchor: Some(1),
-                selection_head: Some(6),
-                version: Some(1),
-                color_index: 2,
-                updated_at_ms: chrono::Utc::now()
-                    .timestamp_millis()
-                    .saturating_sub(crate::ui::PROGRAM_AGENT_REVEAL_MS + 1),
-                active: true,
-            },
-        );
+        // Establish the cursor + its (fresh) local receipt via the real
+        // notification path, then backdate the receipt directly — the reveal
+        // now fades on the client's own receipt clock, not the daemon's
+        // `updated_at_ms`, so that's what must age out here.
+        app.on_program_cursor(agentd_protocol::ProgramCursor {
+            session_id: "s1".to_string(),
+            client_id: "agent-1".to_string(),
+            label: "claude".to_string(),
+            kind: "agent".to_string(),
+            cursor: 6,
+            selection_anchor: Some(1),
+            selection_head: Some(6),
+            version: Some(1),
+            color_index: 2,
+            updated_at_ms: chrono::Utc::now().timestamp_millis(),
+            active: true,
+        });
+        if let Some(entry) = app.program_agent_reveal_receipts.get_mut("agent-1") {
+            entry.1 = Instant::now()
+                - Duration::from_millis((crate::ui::PROGRAM_AGENT_REVEAL_MS + 1) as u64);
+        }
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -11776,6 +12092,134 @@ mod tests {
                 "reveal highlight should no longer tint column {col} once past its window"
             );
         }
+        server.abort();
+    }
+
+    /// GAP E (spec 0065 agent presence): an agent edit landing below the
+    /// current viewport is invisible by construction — the cursor and reveal
+    /// both paint at the edit's own location — so the bottom border should
+    /// grow a plain-language "agent editing ↓" indicator pointing at it.
+    #[tokio::test]
+    async fn program_agent_edge_indicator_points_down_for_activity_below_viewport() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        let markdown = (1..=200)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let end_cursor = markdown.chars().count();
+        app.program_popup = Some(program_popup_for_test("s1", &markdown, end_cursor));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            popup.scroll_offset = 0;
+        }
+        // The agent's own edit landed at the very end of a long document; the
+        // popup is still scrolled to the top, so it's off the bottom.
+        app.on_program_cursor(agentd_protocol::ProgramCursor {
+            session_id: "s1".to_string(),
+            client_id: "agent-1".to_string(),
+            label: "claude".to_string(),
+            kind: "agent".to_string(),
+            cursor: end_cursor,
+            selection_anchor: Some(end_cursor.saturating_sub(4)),
+            selection_head: Some(end_cursor),
+            version: Some(1),
+            color_index: 2,
+            updated_at_ms: chrono::Utc::now().timestamp_millis(),
+            active: true,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let rect = app.layout.modal_area.expect("program modal area");
+        let buffer = term.backend().buffer();
+        let bottom_y = rect.y + rect.height - 1;
+        let text: String = (rect.x..rect.x + rect.width)
+            .filter_map(|x| buffer.cell((x, bottom_y)).map(|c| c.symbol().to_string()))
+            .collect();
+        assert!(
+            text.contains("agent editing") && text.contains('\u{2193}'),
+            "bottom border should show a down-pointing edge indicator, got: {text:?}"
+        );
+        server.abort();
+    }
+
+    /// GAP E (spec 0065 agent presence): the mirror case — activity above a
+    /// scrolled-down viewport points "up" on the top border instead, and
+    /// must do so without displacing the close button's fixed hit-test
+    /// position (`view_close_button_range` assumes it's always the pane's
+    /// very corner).
+    #[tokio::test]
+    async fn program_agent_edge_indicator_points_up_for_activity_above_viewport() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        let markdown = (1..=200)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.program_popup = Some(program_popup_for_test("s1", &markdown, 5));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            // Scrolled far down; clamped to the real max inside the renderer.
+            popup.scroll_offset = 500;
+        }
+        // The agent's edit landed near the very top of the document, off the
+        // top of the scrolled-down viewport.
+        app.on_program_cursor(agentd_protocol::ProgramCursor {
+            session_id: "s1".to_string(),
+            client_id: "agent-1".to_string(),
+            label: "claude".to_string(),
+            kind: "agent".to_string(),
+            cursor: 5,
+            selection_anchor: Some(0),
+            selection_head: Some(5),
+            version: Some(1),
+            color_index: 2,
+            updated_at_ms: chrono::Utc::now().timestamp_millis(),
+            active: true,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let rect = app.layout.modal_area.expect("program modal area");
+        let buffer = term.backend().buffer();
+        let top_y = rect.y;
+        let text: String = (rect.x..rect.x + rect.width)
+            .filter_map(|x| buffer.cell((x, top_y)).map(|c| c.symbol().to_string()))
+            .collect();
+        assert!(
+            text.contains("agent editing") && text.contains('\u{2191}'),
+            "top border should show an up-pointing edge indicator, got: {text:?}"
+        );
+
+        let (close_x_start, close_x_end, close_y) = crate::ui::view_close_button_range(rect);
+        assert_eq!(
+            close_y, rect.y,
+            "the close button's hit-test row must still be the top border"
+        );
+        let close_cell = buffer
+            .cell((close_x_start, close_y))
+            .expect("close button cell");
+        assert!(
+            "☰x".contains(close_cell.symbol()),
+            "the close/session-actions glyph must still paint inside its fixed hit-test range \
+             ({close_x_start}, {close_x_end}), unmoved by the new edge-indicator title; got {:?}",
+            close_cell.symbol()
+        );
         server.abort();
     }
 

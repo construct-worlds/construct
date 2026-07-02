@@ -1752,15 +1752,16 @@
     font-style: italic;
   }
   /* Brief reveal highlight where a live-adopted agent edit lands (spec 0065
-     agent presence): a subtle tint that fades out over ~300ms instead of an
-     instant repaint. */
+     agent presence): a typewriter-style sweep that grows the tint left to
+     right over the reveal window (width transition set inline in JS, since
+     its duration depends on how much of the window is left when the client
+     saw it), then fades out over ~220ms instead of an instant repaint. */
   .program-agent-reveal {
     position: absolute;
     background: var(--accent-alt);
     opacity: 0.3;
     border-radius: 2px;
     pointer-events: none;
-    transition: opacity 260ms ease-out;
   }
   .program-agent-reveal.is-fading {
     opacity: 0;
@@ -2408,6 +2409,10 @@ const state = {
     runButtonTimer: 0,
     // Ephemeral Program collaboration cursors keyed by daemon client id.
     collaboratorById: new Map(),
+    // Local receipt clock for agent-cursor reveal freshness (spec 0065 agent
+    // presence), keyed by client id: { updatedAtMs, receiptAt }. Mirrors the
+    // TUI's `program_agent_reveal_receipts` — see `programNoteAgentRevealReceipt`.
+    agentRevealReceipts: new Map(),
     ownClientId: null,
     cursorPublishTimer: 0,
     applyingRemote: false,
@@ -4288,24 +4293,60 @@ function programRenderCursors() {
 // How long a just-landed agent-authored Program edit keeps its brief reveal
 // highlight (spec 0065 agent presence) — mirrors the TUI's
 // `PROGRAM_AGENT_REVEAL_MS`.
-const PROGRAM_AGENT_REVEAL_MS = 300;
+const PROGRAM_AGENT_REVEAL_MS = 800;
+
+// Local receipt clock for agent-cursor reveal freshness (spec 0065 agent
+// presence), mirroring the TUI's `program_agent_reveal_receipts`: keyed by
+// client id, recording the last-seen `updated_at_ms` alongside the local
+// wall-clock time it first arrived at. `cursor.updated_at_ms` alone can't
+// gate the reveal — WebSocket transit plus this tick's own dispatch already
+// eat into a short window before this code ever runs, the same problem the
+// TUI had with the daemon's broadcast stamp — and a rebase through an
+// unrelated edit (position change, unchanged `updated_at_ms`) must not renew
+// it either, or the reveal would replay over text the agent never touched.
+function programNoteAgentRevealReceipt(cursor) {
+  if (cursor.kind !== "agent") return;
+  const existing = state.program.agentRevealReceipts.get(cursor.client_id);
+  if (existing && existing.updatedAtMs === cursor.updated_at_ms) return;
+  state.program.agentRevealReceipts.set(cursor.client_id, {
+    updatedAtMs: cursor.updated_at_ms,
+    receiptAt: Date.now(),
+  });
+}
 
 // Brief reveal highlight where a live agent-authored edit just landed (spec
 // 0065 agent presence): the agent's pseudo-cursor carries the edited span in
 // `selection_anchor`/`selection_head` (not a real text selection). Painted as
 // its own short-lived elements — not cleared by `programRenderCursors`, which
 // only touches `.program-remote-cursor` — so a cursor update racing in during
-// the ~300ms fade can't cut it short.
+// the fade can't cut it short.
 //
-// Only paints while the cursor is still within its brief window: a rebase
-// caused by an *unrelated* edit elsewhere still moves and rebroadcasts an
-// agent cursor (so its position stays correct), but must not re-flash the
-// reveal — the daemon leaves `updated_at_ms` untouched in that case, so
-// checking recency here is what tells "the agent just wrote here" apart
-// from "this cursor merely moved".
-function programRevealAgentEdit(cursor) {
+// Grows left-to-right over whatever's left of the reveal window (a CSS width
+// transition — the typewriter sweep), then fades.
+//
+// `remainingMsOverride`, when given, is used verbatim instead of consulting
+// the receipt clock — the `program.get` mount path (below) passes one
+// computed from the daemon's `updated_at_ms`, because a cursor arriving in
+// that snapshot may describe an edit from anywhere in the last minute (the
+// daemon's own presence TTL), not something this client just watched happen.
+// Gating that case on "first local observation" would flash a reveal for a
+// stale edit every time a Program with recent-but-not-fresh agent activity is
+// opened. A live push through `handleProgramCursor` has no such ambiguity —
+// it always describes something that (from this client's perspective) just
+// happened — so it omits the override and uses the receipt clock, which is
+// what actually fixes the WS-transit-latency version of the same problem the
+// TUI had with trusting the daemon stamp directly.
+function programRevealAgentEdit(cursor, remainingMsOverride) {
   if (cursor.kind !== "agent") return;
-  if (Date.now() - (cursor.updated_at_ms || 0) > PROGRAM_AGENT_REVEAL_MS) return;
+  let remainingMs;
+  if (typeof remainingMsOverride === "number") {
+    remainingMs = remainingMsOverride;
+  } else {
+    const receipt = state.program.agentRevealReceipts.get(cursor.client_id);
+    if (!receipt) return;
+    remainingMs = PROGRAM_AGENT_REVEAL_MS - (Date.now() - receipt.receiptAt);
+  }
+  if (remainingMs <= 0) return;
   const id = state.program.mountedId;
   if (!id || state.mode !== "program" || cursor.session_id !== id) return;
   const anchor = cursor.selection_anchor;
@@ -4330,11 +4371,19 @@ function programRevealAgentEdit(cursor) {
     el.dataset.sessionId = id;
     el.style.left = Math.round(rect.left - editor.left) + "px";
     el.style.top = Math.round(rect.top - editor.top) + "px";
-    el.style.width = Math.round(rect.width) + "px";
     el.style.height = Math.round(rect.height) + "px";
+    const fullWidth = Math.round(rect.width);
+    el.style.width = "0px";
     programCursorLayerEl.appendChild(el);
-    requestAnimationFrame(() => el.classList.add("is-fading"));
-    setTimeout(() => el.remove(), 320);
+    requestAnimationFrame(() => {
+      el.style.transition = `width ${remainingMs}ms linear`;
+      el.style.width = fullWidth + "px";
+    });
+    setTimeout(() => {
+      el.style.transition = "opacity 220ms ease-out";
+      el.classList.add("is-fading");
+    }, remainingMs);
+    setTimeout(() => el.remove(), remainingMs + 240);
   }
 }
 
@@ -4548,9 +4597,15 @@ async function programMountSession(id) {
   // A client that opens (or switches into) this Program within an agent
   // edit's brief reveal window must see the same reveal a client already
   // watching live would have — checked only now, after `programRenderDoc`
-  // has populated the editor DOM the reveal's Range lookups walk.
+  // has populated the editor DOM the reveal's Range lookups walk. There is no
+  // local receipt for a snapshot-adopted cursor (this client never watched
+  // it arrive live), so the remaining time is computed from the daemon's own
+  // `updated_at_ms` here — the one place that stamp is still the right
+  // source of truth, since "how long ago did this actually happen" is
+  // exactly what it answers for an edit this client didn't watch land.
   for (const cursor of result.collaborators || []) {
-    programRevealAgentEdit(cursor);
+    const remainingMs = PROGRAM_AGENT_REVEAL_MS - (Date.now() - (cursor.updated_at_ms || 0));
+    programRevealAgentEdit(cursor, remainingMs);
   }
   programVersionEl.textContent = "v" + p.version;
   programRefreshEmptyState();
@@ -4726,8 +4781,10 @@ function handleProgramCursor(params) {
   if (!cursor || !cursor.client_id) return;
   if (cursor.active === false) {
     state.program.collaboratorById.delete(cursor.client_id);
+    state.program.agentRevealReceipts.delete(cursor.client_id);
   } else {
     state.program.collaboratorById.set(cursor.client_id, cursor);
+    programNoteAgentRevealReceipt(cursor);
     programRevealAgentEdit(cursor);
   }
   programApplyOwnCursor(cursor);
