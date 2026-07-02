@@ -1,4 +1,4 @@
-# 0066-program-smart-clip-status-badge
+# 0067-program-smart-clip-status-badge
 
 Status: accepted
 Date: 2026-07-02
