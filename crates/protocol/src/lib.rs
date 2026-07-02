@@ -1106,29 +1106,90 @@ fn program_smart_clip_body_without_instance_id(raw_clip: &str) -> String {
         .join(" ")
 }
 
+/// One inline `@{type:target ...}` smart-clip occurrence found while scanning
+/// program text, with the byte span (`start` is the index of `@`, `end` is
+/// one past the closing `}`) so a caller can remove or replace it in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramSmartClipOccurrence {
+    pub type_name: String,
+    pub target: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Scan `text` for every inline `@{type:target ...}` smart-clip occurrence, in
+/// source order. A clip body with no `:` is reported with `type_name` `"clip"`
+/// and `target` set to the whole body. Does not descend into fenced
+/// `:::clip ... :::` blocks. Used by the daemon's instant-dispatch fast path
+/// (spec 0066) to find and strip a list item's harness clip without a full
+/// Markdown parser.
+pub fn program_scan_smart_clips(text: &str) -> Vec<ProgramSmartClipOccurrence> {
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    while let Some(rel_start) = text[idx..].find("@{") {
+        let start = idx + rel_start;
+        let after = start + 2;
+        let Some(rel_end) = text[after..].find('}') else {
+            break;
+        };
+        let end = after + rel_end + 1;
+        let body = &text[after..after + rel_end];
+        let first = body.split_whitespace().next().unwrap_or(body);
+        let (type_name, target) = first.split_once(':').unwrap_or(("clip", first));
+        out.push(ProgramSmartClipOccurrence {
+            type_name: type_name.to_string(),
+            target: target.to_string(),
+            start,
+            end,
+        });
+        idx = end;
+    }
+    out
+}
+
 /// True if a trimmed line is a Markdown ATX heading (`#`..`######` then a space).
 fn program_is_heading(trimmed: &str) -> bool {
     let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
     (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ')
 }
 
-/// True if a trimmed line begins a Markdown list item: a `-`/`*`/`+` bullet
-/// (with content or as a bare empty bullet) or an ordered `N.`/`N)` marker.
-fn program_is_list_item(trimmed: &str) -> bool {
-    if trimmed == "-" || trimmed == "*" || trimmed == "+" {
-        return true;
-    }
+/// Byte length of the list-item marker at the start of `trimmed` — the bullet
+/// or ordered prefix plus its single separating space (e.g. 2 for `"- "`, 4
+/// for `"12. "`). `None` for a bare/empty bullet (`"-"` alone) or a line that
+/// is not a list item.
+fn program_list_item_marker_len(trimmed: &str) -> Option<usize> {
     if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
-        return true;
+        return Some(2);
     }
     let digits = trimmed.bytes().take_while(|b| b.is_ascii_digit()).count();
     if digits > 0 {
         let rest = &trimmed[digits..];
-        if rest.starts_with(". ") || rest.starts_with(") ") || rest == "." || rest == ")" {
-            return true;
+        if rest.starts_with(". ") || rest.starts_with(") ") {
+            return Some(digits + 2);
         }
     }
-    false
+    None
+}
+
+/// True if a trimmed line begins a Markdown list item: a `-`/`*`/`+` bullet
+/// (with content or as a bare empty bullet) or an ordered `N.`/`N)` marker.
+pub fn program_is_list_item(trimmed: &str) -> bool {
+    if trimmed == "-" || trimmed == "*" || trimmed == "+" {
+        return true;
+    }
+    if program_list_item_marker_len(trimmed).is_some() {
+        return true;
+    }
+    let digits = trimmed.bytes().take_while(|b| b.is_ascii_digit()).count();
+    digits > 0 && matches!(&trimmed[digits..], "." | ")")
+}
+
+/// The text following a list item's marker — e.g. `"task"` for both `"- task"`
+/// and `"12. task"` — or `None` if `trimmed` is not a list item with content
+/// (including a bare empty bullet). Used by the daemon's instant-dispatch
+/// fast path (spec 0066) to derive a subagent prompt from a program list item.
+pub fn program_list_item_text(trimmed: &str) -> Option<&str> {
+    program_list_item_marker_len(trimmed).map(|len| &trimmed[len..])
 }
 
 /// Split Markdown into ordered blocks, finer than paragraphs: a run of non-blank
@@ -2410,6 +2471,39 @@ mod program_block_tests {
         assert_eq!(spans[0].signature, "intro paragraph\nsecond line");
         assert_eq!(spans[1].signature, "1. first step\nwrapped detail");
         assert_eq!(spans[2].signature, "2. second step");
+    }
+
+    #[test]
+    fn scan_smart_clips_finds_type_target_and_span() {
+        let text = "- do X @{harness:codex} and @{session:s1 clip_id=clip_2}";
+        let clips = program_scan_smart_clips(text);
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].type_name, "harness");
+        assert_eq!(clips[0].target, "codex");
+        assert_eq!(&text[clips[0].start..clips[0].end], "@{harness:codex}");
+        assert_eq!(clips[1].type_name, "session");
+        assert_eq!(clips[1].target, "s1");
+        assert_eq!(
+            &text[clips[1].start..clips[1].end],
+            "@{session:s1 clip_id=clip_2}"
+        );
+    }
+
+    #[test]
+    fn scan_smart_clips_empty_for_no_clips() {
+        assert!(program_scan_smart_clips("- plain item, no clips here").is_empty());
+    }
+
+    #[test]
+    fn list_item_text_strips_bullet_and_ordered_markers() {
+        assert_eq!(program_list_item_text("- task"), Some("task"));
+        assert_eq!(program_list_item_text("* task"), Some("task"));
+        assert_eq!(program_list_item_text("+ task"), Some("task"));
+        assert_eq!(program_list_item_text("12. task"), Some("task"));
+        assert_eq!(program_list_item_text("3) task"), Some("task"));
+        // Bare/empty bullets and non-list-item lines have no item text.
+        assert_eq!(program_list_item_text("-"), None);
+        assert_eq!(program_list_item_text("plain paragraph"), None);
     }
 
     #[test]
