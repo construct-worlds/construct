@@ -3453,7 +3453,17 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
     );
     app.set_scrollback_for_window(window_id, clamped_scrollback);
     app.layout.terminal_scrollbar = terminal_scrollbar;
-    render_visible_dynamic_ui_panels(f, area, app, &id, &sticky_panels);
+    // If this session has an open Program view, the Program renderer owns the
+    // sticky-widget body at the top layer. Rendering it here too paints the
+    // same widget underneath the Program over the terminal, so skip the
+    // session-view copy and let the Program draw the single visible instance.
+    let program_open_for_session = app
+        .open_program_session_ids()
+        .iter()
+        .any(|open_id| open_id == &id);
+    if !program_open_for_session {
+        render_visible_dynamic_ui_panels(f, area, app, &id, &sticky_panels);
+    }
     if app.dynamic_ui_popover_open.as_deref() == Some(id.as_str()) && !sticky_panels.is_empty() {
         render_dynamic_ui_dropdown(f, area, app, &sticky_panels);
     }
