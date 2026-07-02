@@ -1792,7 +1792,7 @@ impl SessionManager {
         // nothing was actually written, so there is no location to present
         // as "the agent just wrote here".
         if let (Some(conn_id), Some(span)) = (agent_conn_id, last_edit_span) {
-            let harness = entry.summary().await.harness;
+            let harness = entry.summary.read().await.harness.clone();
             self.publish_agent_program_cursor(conn_id, &params.session_id, &harness, span, program.version)
                 .await;
         }
@@ -1996,8 +1996,12 @@ impl SessionManager {
         span: (usize, usize),
         version: u64,
     ) {
+        // An empty/unknown harness name defers to `program_cursor`'s own
+        // `program_default_cursor_label("agent")` fallback rather than
+        // hardcoding "agent" here too, so the two stay in sync if that
+        // fallback is ever given a nicer label (as "web"/"tui" already have).
         let trimmed = harness.trim();
-        let label = if trimmed.is_empty() { "agent" } else { trimmed }.to_string();
+        let label = (!trimmed.is_empty()).then(|| trimmed.to_string());
         let _ = self
             .program_cursor(
                 conn_id,
@@ -2008,7 +2012,7 @@ impl SessionManager {
                     selection_anchor: Some(span.0),
                     selection_head: Some(span.1),
                     version: Some(version),
-                    label: Some(label),
+                    label,
                     clear: false,
                 },
             )
