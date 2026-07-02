@@ -11264,6 +11264,215 @@ mod tests {
         server.abort();
     }
 
+    /// Spec 0065 agent presence: an agent cursor (`kind == "agent"`) must be
+    /// styled distinctly from a human TUI/web peer's cursor (italic instead
+    /// of underline) without hiding the target glyph.
+    #[tokio::test]
+    async fn program_remote_agent_cursor_uses_italic_instead_of_underline() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        let cursor = "\n".chars().count() + "alp".chars().count();
+        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_collaborators.insert(
+            "agent-1".to_string(),
+            agentd_protocol::ProgramCursor {
+                session_id: "s1".to_string(),
+                client_id: "agent-1".to_string(),
+                label: "claude".to_string(),
+                kind: "agent".to_string(),
+                cursor,
+                selection_anchor: None,
+                selection_head: None,
+                version: Some(1),
+                color_index: 2,
+                updated_at_ms: chrono::Utc::now().timestamp_millis(),
+                active: true,
+            },
+        );
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let inner = app.layout.program_inner_area.expect("program inner area");
+        let popup = app.program_popup.as_ref().expect("program popup");
+        let (visual_row, col) = crate::ui::program_cursor_visual_pos(
+            Some(&app),
+            &popup.buffer,
+            cursor,
+            inner.width as usize,
+        );
+        let x = inner.x + col as u16;
+        let y = inner.y + visual_row as u16;
+        let buffer = term.backend().buffer();
+        let cursor_cell = buffer.cell((x, y)).expect("agent cursor cell");
+        assert_eq!(
+            cursor_cell.symbol(),
+            "h",
+            "agent cursor must style the target cell without replacing its glyph"
+        );
+        assert!(
+            cursor_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::ITALIC),
+            "agent cursor should italicize the target cell"
+        );
+        assert!(
+            !cursor_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED),
+            "agent cursor should not use the human-peer underline"
+        );
+
+        let label_cell = buffer
+            .cell((x.saturating_add(1), y - 1))
+            .expect("agent cursor label cell");
+        assert_eq!(label_cell.symbol(), "c", "labeled with the agent's harness");
+        assert!(
+            label_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::ITALIC),
+            "agent cursor label should also be italicized"
+        );
+        server.abort();
+    }
+
+    /// Spec 0065 agent presence: a fresh agent edit's span (carried in
+    /// `selection_anchor`/`selection_head`) briefly tints the program body
+    /// instead of repainting it instantly.
+    #[tokio::test]
+    async fn program_remote_agent_cursor_reveals_edited_span_briefly() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        // "alpha" spans char offsets [1, 6); the point cursor sits at the end
+        // of that span (offset 6, the following space).
+        app.program_collaborators.insert(
+            "agent-1".to_string(),
+            agentd_protocol::ProgramCursor {
+                session_id: "s1".to_string(),
+                client_id: "agent-1".to_string(),
+                label: "claude".to_string(),
+                kind: "agent".to_string(),
+                cursor: 6,
+                selection_anchor: Some(1),
+                selection_head: Some(6),
+                version: Some(1),
+                color_index: 2,
+                updated_at_ms: chrono::Utc::now().timestamp_millis(),
+                active: true,
+            },
+        );
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let inner = app.layout.program_inner_area.expect("program inner area");
+        let popup = app.program_popup.as_ref().expect("program popup");
+        let (visual_row, start_col) = crate::ui::program_cursor_visual_pos(
+            Some(&app),
+            &popup.buffer,
+            1,
+            inner.width as usize,
+        );
+        let y = inner.y + visual_row as u16;
+        let buffer = term.backend().buffer();
+        for col in start_col..start_col + "alpha".chars().count() {
+            let cell = buffer
+                .cell((inner.x + col as u16, y))
+                .expect("revealed cell");
+            assert_eq!(
+                cell.style().bg,
+                Some(app.theme.inactive_highlight_bg),
+                "fresh agent edit should briefly tint the cell at column {col}"
+            );
+        }
+        server.abort();
+    }
+
+    /// Spec 0065 agent presence: the reveal highlight is brief — once it has
+    /// aged past its short window it must not still be tinting the buffer,
+    /// even though the point cursor + label remain until the normal
+    /// one-minute presence TTL.
+    #[tokio::test]
+    async fn program_remote_agent_cursor_reveal_fades_after_its_window() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_collaborators.insert(
+            "agent-1".to_string(),
+            agentd_protocol::ProgramCursor {
+                session_id: "s1".to_string(),
+                client_id: "agent-1".to_string(),
+                label: "claude".to_string(),
+                kind: "agent".to_string(),
+                cursor: 6,
+                selection_anchor: Some(1),
+                selection_head: Some(6),
+                version: Some(1),
+                color_index: 2,
+                updated_at_ms: chrono::Utc::now()
+                    .timestamp_millis()
+                    .saturating_sub(crate::ui::PROGRAM_AGENT_REVEAL_MS + 1),
+                active: true,
+            },
+        );
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+
+        let inner = app.layout.program_inner_area.expect("program inner area");
+        let popup = app.program_popup.as_ref().expect("program popup");
+        let (visual_row, start_col) = crate::ui::program_cursor_visual_pos(
+            Some(&app),
+            &popup.buffer,
+            1,
+            inner.width as usize,
+        );
+        let y = inner.y + visual_row as u16;
+        let buffer = term.backend().buffer();
+        for col in start_col..start_col + "alpha".chars().count() {
+            let cell = buffer
+                .cell((inner.x + col as u16, y))
+                .expect("no-longer-revealed cell");
+            assert_ne!(
+                cell.style().bg,
+                Some(app.theme.inactive_highlight_bg),
+                "reveal highlight should no longer tint column {col} once past its window"
+            );
+        }
+        server.abort();
+    }
+
     #[test]
     fn program_selection_block_ids_include_touched_full_blocks() {
         let mut popup = program_popup_for_test("s1", "- alpha beta\n\n- gamma", 0);

@@ -811,6 +811,13 @@ pub struct SessionManager {
     widget_snapshots: tokio::sync::Mutex<HashMap<String, WidgetSnapshot>>,
     program_runs: std::sync::Mutex<HashMap<String, ProgramRunProgress>>,
     program_cursors: std::sync::Mutex<HashMap<u64, agentd_protocol::ProgramCursor>>,
+    /// Reserved pseudo-connection id for each session's agent-authored
+    /// Program cursor (spec 0065 agent presence), keyed by session id and
+    /// lazily allocated from the same `next_conn_id` counter as real client
+    /// connections so it can never collide with one. Not cleared on session
+    /// delete, matching `program_runs`/`program_cursors` which likewise
+    /// outlive it — the cursor itself still ages out via the one-minute TTL.
+    agent_program_cursor_conn_ids: std::sync::Mutex<HashMap<String, u64>>,
     /// Monotonic id handed to each client connection so its current
     /// view can be tracked and cleared on disconnect.
     next_conn_id: AtomicU64,
@@ -1052,6 +1059,7 @@ impl SessionManager {
                 widget_snapshots: tokio::sync::Mutex::new(widget_snapshots),
                 program_runs: std::sync::Mutex::new(HashMap::new()),
                 program_cursors: std::sync::Mutex::new(HashMap::new()),
+                agent_program_cursor_conn_ids: std::sync::Mutex::new(HashMap::new()),
                 next_conn_id: AtomicU64::new(1),
                 conn_views: std::sync::Mutex::new(HashMap::new()),
             },
@@ -1652,7 +1660,8 @@ impl SessionManager {
         params: ProgramEditParams,
         source_conn_id: Option<u64>,
     ) -> Result<ProgramUpdateResult> {
-        self.get_entry(&params.session_id)
+        let entry = self
+            .get_entry(&params.session_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
         // Block ids of the pre-edit document, to tell which keep_pending blocks
@@ -1670,7 +1679,17 @@ impl SessionManager {
             params.actor,
             params.note,
         )?;
-        let cursor_updates = before_program
+        // A source-less edit is agent-authored (server.rs only omits
+        // `source_conn_id` when `actor == ProgramUpdateActor::Agent`).
+        // Reserve/find that agent's own pseudo-cursor slot *before* rebasing
+        // so it can be excluded from the rebase-and-broadcast pass below: its
+        // position is about to be superseded by the fresh one this edit just
+        // produced, so rebasing it first would broadcast a stale span for
+        // one message before the correct publish immediately follows it.
+        let agent_conn_id = source_conn_id
+            .is_none()
+            .then(|| self.agent_program_cursor_conn_id(&params.session_id));
+        let (cursor_updates, last_edit_span) = before_program
             .as_ref()
             .map(|before| {
                 self.rebase_program_cursors_after_edit(
@@ -1679,6 +1698,7 @@ impl SessionManager {
                     &params.edits,
                     program.version,
                     source_conn_id,
+                    agent_conn_id,
                 )
             })
             .unwrap_or_default();
@@ -1717,6 +1737,24 @@ impl SessionManager {
             let _ = self.broadcast.send(BroadcastMsg::ProgramCursor(
                 agentd_protocol::ProgramCursorNotificationPayload { cursor },
             ));
+        }
+        // Publish the agent's presence cursor at the end of the last applied
+        // edit so connected clients see where the agent just wrote (spec
+        // 0065 agent presence). This reuses the same `program_cursors` map,
+        // broadcast, and one-minute TTL as human cursors. Skipped when the
+        // edit was a genuine no-op (`storage.edit_program` short-circuits a
+        // batch whose net result matches the current markdown and leaves the
+        // version unchanged) — nothing was actually written, so there is no
+        // location to present as "the agent just wrote here".
+        let edit_changed_document = before_program
+            .as_ref()
+            .map_or(true, |before| before.version != program.version);
+        if edit_changed_document {
+            if let (Some(conn_id), Some(span)) = (agent_conn_id, last_edit_span) {
+                let harness = entry.summary().await.harness;
+                self.publish_agent_program_cursor(conn_id, &params.session_id, &harness, span, program.version)
+                    .await;
+            }
         }
         Ok(ProgramUpdateResult {
             program,
@@ -1818,6 +1856,15 @@ impl SessionManager {
         ));
     }
 
+    /// Rebases every peer's Program cursor through a just-applied batch of
+    /// edits and, alongside the updates to broadcast, returns the last
+    /// applied edit's own span in final-document char offsets (used to place
+    /// the agent-presence cursor; see [`Self::publish_agent_program_cursor`]).
+    /// `exclude_conn_id` additionally skips one more cursor besides the
+    /// source connection — the agent's own reserved pseudo-cursor from a
+    /// prior edit, whose stale span is about to be superseded by the fresh
+    /// one this edit produces, so rebasing (and broadcasting) it here would
+    /// be a spurious update immediately followed by the correct one.
     fn rebase_program_cursors_after_edit(
         &self,
         session_id: &str,
@@ -1825,18 +1872,25 @@ impl SessionManager {
         edits: &[agentd_protocol::ProgramEdit],
         version: u64,
         source_conn_id: Option<u64>,
-    ) -> Vec<agentd_protocol::ProgramCursor> {
+        exclude_conn_id: Option<u64>,
+    ) -> (Vec<agentd_protocol::ProgramCursor>, Option<(usize, usize)>) {
         let Ok(replacements) = program_cursor_replacements(before_markdown, edits) else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         if replacements.is_empty() {
-            return Vec::new();
+            return (Vec::new(), None);
         }
+        // The last replacement's `start` already reflects every earlier
+        // replacement in this batch (the sequential coordinate frame
+        // `program_rebase_offset` walks), and nothing follows it, so
+        // `start + new_len` is already a final-document offset.
+        let last_edit_span = replacements.last().map(|r| (r.start, r.start + r.new_len));
         let now = chrono::Utc::now().timestamp_millis();
         let mut updates = Vec::new();
         if let Ok(mut cursors) = self.program_cursors.lock() {
             for (conn_id, cursor) in cursors.iter_mut() {
                 if Some(*conn_id) == source_conn_id
+                    || Some(*conn_id) == exclude_conn_id
                     || !cursor.active
                     || cursor.session_id != session_id
                 {
@@ -1862,7 +1916,59 @@ impl SessionManager {
                 }
             }
         }
-        updates
+        (updates, last_edit_span)
+    }
+
+    /// Reserve (or reuse) a synthetic connection id for `session_id`'s
+    /// agent-authored Program cursor. Allocated from the same counter as real
+    /// client connections so it can never collide with one.
+    fn agent_program_cursor_conn_id(&self, session_id: &str) -> u64 {
+        if let Ok(mut ids) = self.agent_program_cursor_conn_ids.lock() {
+            if let Some(id) = ids.get(session_id) {
+                return *id;
+            }
+            let id = self.alloc_conn_id();
+            ids.insert(session_id.to_string(), id);
+            return id;
+        }
+        self.alloc_conn_id()
+    }
+
+    /// Publish an ephemeral Program cursor for an agent-authored edit (spec
+    /// 0065 agent presence): a labeled point cursor at the end of the last
+    /// applied edit (`span.1`), with `selection_anchor`/`selection_head` set
+    /// to `span` so clients can briefly reveal-highlight where it landed.
+    /// Delegates to the same [`Self::program_cursor`] human cursors go
+    /// through, so label-uniqueness, storage, and broadcast stay in one
+    /// place; `kind: "agent"` is what lets renderers style it distinctly and
+    /// interpret the selection fields as a reveal span rather than a real
+    /// text selection. The caller (`conn_id`) is the session's reserved
+    /// pseudo-connection id from [`Self::agent_program_cursor_conn_id`].
+    async fn publish_agent_program_cursor(
+        &self,
+        conn_id: u64,
+        session_id: &str,
+        harness: &str,
+        span: (usize, usize),
+        version: u64,
+    ) {
+        let trimmed = harness.trim();
+        let label = if trimmed.is_empty() { "agent" } else { trimmed }.to_string();
+        let _ = self
+            .program_cursor(
+                conn_id,
+                "agent",
+                agentd_protocol::ProgramCursorParams {
+                    session_id: session_id.to_string(),
+                    cursor: span.1,
+                    selection_anchor: Some(span.0),
+                    selection_head: Some(span.1),
+                    version: Some(version),
+                    label: Some(label),
+                    clear: false,
+                },
+            )
+            .await;
     }
 
     fn program_run_context_path(&self, session_id: &str) -> PathBuf {
@@ -5245,6 +5351,18 @@ mod tests {
             .expect("collaborator")
     }
 
+    /// Find the (assumed single) agent-presence cursor for a session, without
+    /// depending on its allocated `client_id` value.
+    fn agent_collaborator(
+        mgr: &SessionManager,
+        session_id: &str,
+    ) -> agentd_protocol::ProgramCursor {
+        mgr.program_collaborators(session_id)
+            .into_iter()
+            .find(|cursor| cursor.kind == "agent")
+            .expect("agent collaborator")
+    }
+
     #[tokio::test]
     async fn program_cursor_labels_are_unique_per_connected_client() {
         let (mgr, _storage, id) = program_test_mgr("abc\n").await;
@@ -5424,6 +5542,355 @@ mod tests {
         assert_eq!(collaborator(&mgr, &id, "c2").cursor, 3);
         assert_eq!(collaborator(&mgr, &id, "c3").cursor, 4);
         assert_eq!(collaborator(&mgr, &id, "c4").cursor, 7);
+    }
+
+    #[tokio::test]
+    async fn program_edit_agent_publishes_presence_cursor_at_end_of_last_edit() {
+        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+
+        let result = mgr
+            .program_edit_from_conn(
+                agentd_protocol::ProgramEditParams {
+                    session_id: id.clone(),
+                    edits: vec![agentd_protocol::ProgramEdit {
+                        old_string: "456".to_string(),
+                        new_string: "XYZ".to_string(),
+                        replace_all: false,
+                        keep_pending: false,
+                    }],
+                    actor: agentd_protocol::ProgramUpdateActor::Agent,
+                    note: None,
+                    shimmer: Vec::new(),
+                },
+                None,
+            )
+            .await
+            .expect("agent edit");
+
+        assert_eq!(result.program.markdown, "123XYZ789\n");
+        let cursor = agent_collaborator(&mgr, &id);
+        assert_eq!(cursor.kind, "agent");
+        assert_eq!(
+            cursor.label, "shell",
+            "labeled with the owning session's harness"
+        );
+        assert!(cursor.active);
+        assert_eq!(
+            cursor.cursor, 6,
+            "positioned at the end of the last applied edit"
+        );
+        assert_eq!(cursor.selection_anchor, Some(3), "start of the edited span");
+        assert_eq!(cursor.selection_head, Some(6), "end of the edited span");
+        assert_eq!(cursor.version, Some(result.program.version));
+    }
+
+    #[tokio::test]
+    async fn program_edit_agent_presence_cursor_falls_back_to_generic_label() {
+        let (mgr, _storage, id) = program_test_mgr("hello\n").await;
+        {
+            let entry = mgr.get_entry(&id).await.expect("entry");
+            entry.summary.write().await.harness = String::new();
+        }
+
+        mgr.program_edit_from_conn(
+            agentd_protocol::ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "hello".to_string(),
+                    new_string: "hello world".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                note: None,
+                shimmer: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .expect("agent edit");
+
+        assert_eq!(
+            agent_collaborator(&mgr, &id).label,
+            "agent",
+            "an unknown/empty harness name falls back to a generic label"
+        );
+    }
+
+    #[tokio::test]
+    async fn program_edit_agent_presence_cursor_reuses_same_client_across_edits() {
+        let (mgr, _storage, id) = program_test_mgr("abc def\n").await;
+
+        mgr.program_edit_from_conn(
+            agentd_protocol::ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "abc".to_string(),
+                    new_string: "abcd".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                note: None,
+                shimmer: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .expect("first agent edit");
+        let first_client_id = agent_collaborator(&mgr, &id).client_id.clone();
+
+        mgr.program_edit_from_conn(
+            agentd_protocol::ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "def".to_string(),
+                    new_string: "defg".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                note: None,
+                shimmer: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .expect("second agent edit");
+
+        let collaborators = mgr.program_collaborators(&id);
+        let agent_cursors: Vec<_> = collaborators.iter().filter(|c| c.kind == "agent").collect();
+        assert_eq!(
+            agent_cursors.len(),
+            1,
+            "the agent's presence cursor updates in place, it does not append a new one per edit"
+        );
+        assert_eq!(agent_cursors[0].client_id, first_client_id);
+    }
+
+    #[tokio::test]
+    async fn program_edit_human_edit_does_not_publish_agent_presence_cursor() {
+        let (mgr, _storage, id) = program_test_mgr("abc\n").await;
+        put_program_cursor(&mgr, &id, 1, "tui", 0).await;
+
+        mgr.program_edit_from_conn(
+            agentd_protocol::ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "abc".to_string(),
+                    new_string: "abcd".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Human,
+                note: None,
+                shimmer: Vec::new(),
+            },
+            Some(1),
+        )
+        .await
+        .expect("human edit");
+
+        assert!(
+            mgr.program_collaborators(&id)
+                .iter()
+                .all(|c| c.kind != "agent"),
+            "a human-sourced edit must not publish an agent presence cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn program_edit_agent_edit_rebases_peer_cursor_and_publishes_agent_cursor() {
+        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+        // conn_id 5: distinct from the agent's own reserved pseudo-conn-id,
+        // which `put_program_cursor`'s hardcoded conn_id bypasses allocating
+        // from the same counter (unlike a real connection).
+        put_program_cursor(&mgr, &id, 5, "tui", 8).await; // sits after the edit region
+
+        let result = mgr
+            .program_edit_from_conn(
+                agentd_protocol::ProgramEditParams {
+                    session_id: id.clone(),
+                    edits: vec![agentd_protocol::ProgramEdit {
+                        old_string: "456".to_string(),
+                        new_string: "XY".to_string(),
+                        replace_all: false,
+                        keep_pending: false,
+                    }],
+                    actor: agentd_protocol::ProgramUpdateActor::Agent,
+                    note: None,
+                    shimmer: Vec::new(),
+                },
+                None,
+            )
+            .await
+            .expect("agent edit");
+
+        assert_eq!(result.program.markdown, "123XY789\n");
+        // Spec 0065: a source-less (agent-authored) edit rebases every active
+        // cursor, not just the ones excluding a source connection.
+        assert_eq!(collaborator(&mgr, &id, "c5").cursor, 7);
+        let agent = agent_collaborator(&mgr, &id);
+        assert_eq!(agent.selection_anchor, Some(3));
+        assert_eq!(agent.selection_head, Some(5));
+        assert_eq!(agent.cursor, 5);
+    }
+
+    #[tokio::test]
+    async fn program_edit_second_agent_edit_does_not_rebroadcast_stale_own_cursor() {
+        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+        let mut rx = mgr.subscribe();
+
+        // Edit 1 lands near the end and grows the document, so the agent's
+        // stored presence cursor sits at (6, 10) afterward.
+        mgr.program_edit_from_conn(
+            agentd_protocol::ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "789".to_string(),
+                    new_string: "XYZW".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                note: None,
+                shimmer: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .expect("first agent edit");
+
+        // Edit 2 lands earlier and shrinks the document — an edit that, if
+        // the agent's own stale cursor from edit 1 were rebased through it
+        // (rather than excluded), would shift that stale (6, 10) span to a
+        // different, still-wrong (4, 8) and get broadcast before the correct
+        // publish overwrites it.
+        mgr.program_edit_from_conn(
+            agentd_protocol::ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "123".to_string(),
+                    new_string: "Q".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                note: None,
+                shimmer: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .expect("second agent edit");
+
+        // Collect every ProgramCursor notification for the agent's own
+        // client_id across both edits.
+        let agent_client_id = agent_collaborator(&mgr, &id).client_id.clone();
+        let mut agent_cursor_broadcasts = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let BroadcastMsg::ProgramCursor(payload) = msg {
+                if payload.cursor.client_id == agent_client_id {
+                    agent_cursor_broadcasts.push(payload.cursor);
+                }
+            }
+        }
+        assert_eq!(
+            agent_cursor_broadcasts.len(),
+            2,
+            "exactly one ProgramCursor broadcast per edit for the agent's own \
+             cursor, not a stale rebase-broadcast followed by the fresh publish: {agent_cursor_broadcasts:?}"
+        );
+        // The second edit's broadcast (the one that matters here) must carry
+        // the *second* edit's own span, not the first edit's stale span
+        // rebased forward through the second edit.
+        let second = &agent_cursor_broadcasts[1];
+        assert_eq!(second.selection_anchor, Some(0));
+        assert_eq!(second.selection_head, Some(1));
+    }
+
+    #[tokio::test]
+    async fn program_edit_noop_agent_edit_does_not_publish_presence_cursor() {
+        let (mgr, _storage, id) = program_test_mgr("abc\n").await;
+
+        mgr.program_edit_from_conn(
+            agentd_protocol::ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "abc".to_string(),
+                    new_string: "abc".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                note: None,
+                shimmer: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .expect("no-op agent edit");
+
+        assert!(
+            mgr.program_collaborators(&id)
+                .iter()
+                .all(|c| c.kind != "agent"),
+            "a no-op edit (old_string == new_string) writes nothing, so it must not \
+             publish a presence cursor claiming the agent just wrote somewhere"
+        );
+    }
+
+    #[tokio::test]
+    async fn program_edit_agent_presence_cursor_expires_after_inactivity() {
+        let (mgr, _storage, id) = program_test_mgr("abc\n").await;
+
+        mgr.program_edit_from_conn(
+            agentd_protocol::ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "abc".to_string(),
+                    new_string: "abcd".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                note: None,
+                shimmer: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .expect("agent edit");
+        assert!(
+            mgr.program_collaborators(&id)
+                .iter()
+                .any(|c| c.kind == "agent")
+        );
+
+        let agent_conn_id = *mgr
+            .agent_program_cursor_conn_ids
+            .lock()
+            .expect("lock")
+            .get(&id)
+            .expect("reserved agent conn id");
+        if let Ok(mut cursors) = mgr.program_cursors.lock() {
+            let cursor = cursors
+                .get_mut(&agent_conn_id)
+                .expect("stored agent cursor");
+            cursor.updated_at_ms = chrono::Utc::now()
+                .timestamp_millis()
+                .saturating_sub(PROGRAM_CURSOR_TTL_MS + 1);
+        }
+
+        assert!(
+            mgr.program_collaborators(&id)
+                .iter()
+                .all(|c| c.kind != "agent"),
+            "an idle agent cursor must age out via the standard one-minute TTL, \
+             the same as a human cursor whose connection never disconnects cleanly"
+        );
+        let get = mgr.program_get(&id).await.expect("program get");
+        assert!(get.collaborators.iter().all(|c| c.kind != "agent"));
     }
 
     // The bug that motivated spec 0053: a planning pass must clear shimmer on

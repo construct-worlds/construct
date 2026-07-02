@@ -1676,6 +1676,30 @@
   .program-remote-cursor[data-color="2"]::after { background: var(--warn); }
   .program-remote-cursor[data-color="3"] { background: var(--err); }
   .program-remote-cursor[data-color="3"]::after { background: var(--err); color: var(--fg); }
+  /* Agent presence cursor (spec 0065 agent presence): same non-destructive
+     bar + label as a human peer, styled distinctly (wider, teardrop-shaped,
+     italic label) rather than with a new color, so it stays theme-aware. */
+  .program-remote-cursor[data-kind="agent"] {
+    width: 3px;
+    border-radius: 2px 2px 5px 5px;
+  }
+  .program-remote-cursor[data-kind="agent"]::after {
+    font-style: italic;
+  }
+  /* Brief reveal highlight where a live-adopted agent edit lands (spec 0065
+     agent presence): a subtle tint that fades out over ~300ms instead of an
+     instant repaint. */
+  .program-agent-reveal {
+    position: absolute;
+    background: var(--accent-alt);
+    opacity: 0.3;
+    border-radius: 2px;
+    pointer-events: none;
+    transition: opacity 260ms ease-out;
+  }
+  .program-agent-reveal.is-fading {
+    opacity: 0;
+  }
   /* Empty-state template picker. */
   .program-empty {
     position: absolute;
@@ -3919,8 +3943,15 @@ function programCursorRectForOffset(rawOffset) {
 }
 
 function programRenderCursors() {
-  while (programCursorLayerEl.firstChild) programCursorLayerEl.removeChild(programCursorLayerEl.firstChild);
+  programCursorLayerEl.querySelectorAll(".program-remote-cursor").forEach((el) => el.remove());
   const id = state.program.mountedId;
+  // A reveal element outlives one render pass (it fades on its own timer),
+  // but it must not linger once its session is no longer the mounted one —
+  // leaving Program view, or switching to a different session's program,
+  // would otherwise leave a stale tint floating over whatever is shown next.
+  programCursorLayerEl.querySelectorAll(".program-agent-reveal").forEach((el) => {
+    if (el.dataset.sessionId !== id) el.remove();
+  });
   if (!id || state.mode !== "program") return;
   const now = Date.now();
   for (const cursor of state.program.collaboratorById.values()) {
@@ -3933,10 +3964,50 @@ function programRenderCursors() {
     el.className = "program-remote-cursor";
     el.dataset.label = cursor.label || cursor.kind || "peer";
     el.dataset.color = String((cursor.color_index || 0) % 4);
+    if (cursor.kind) el.dataset.kind = cursor.kind;
     el.style.left = Math.round(rect.left) + "px";
     el.style.top = Math.round(rect.top) + "px";
     el.style.height = Math.max(18, Math.round(rect.height)) + "px";
     programCursorLayerEl.appendChild(el);
+  }
+}
+
+// Brief reveal highlight where a live agent-authored edit just landed (spec
+// 0065 agent presence): the agent's pseudo-cursor carries the edited span in
+// `selection_anchor`/`selection_head` (not a real text selection). Painted as
+// its own short-lived elements — not cleared by `programRenderCursors`, which
+// only touches `.program-remote-cursor` — so a cursor update racing in during
+// the ~300ms fade can't cut it short.
+function programRevealAgentEdit(cursor) {
+  const id = state.program.mountedId;
+  if (!id || state.mode !== "program" || cursor.session_id !== id) return;
+  const anchor = cursor.selection_anchor;
+  const head = cursor.selection_head;
+  if (typeof anchor !== "number" || typeof head !== "number") return;
+  // Trust the daemon-computed span rather than clamping against a full
+  // programSerialize() (an O(document size) rebuild) — the same convention
+  // programCursorRectForOffset already follows for the point cursor itself.
+  const start = Math.min(anchor, head);
+  const end = Math.max(anchor, head);
+  if (end <= start) return;
+  const range = document.createRange();
+  const startPoint = programRangeForOffset(start);
+  const endPoint = programRangeForOffset(end);
+  range.setStart(startPoint.startContainer, startPoint.startOffset);
+  range.setEnd(endPoint.startContainer, endPoint.startOffset);
+  const editor = programEditorEl.getBoundingClientRect();
+  for (const rect of range.getClientRects()) {
+    if (rect.width === 0 && rect.height === 0) continue;
+    const el = document.createElement("div");
+    el.className = "program-agent-reveal";
+    el.dataset.sessionId = id;
+    el.style.left = Math.round(rect.left - editor.left) + "px";
+    el.style.top = Math.round(rect.top - editor.top) + "px";
+    el.style.width = Math.round(rect.width) + "px";
+    el.style.height = Math.round(rect.height) + "px";
+    programCursorLayerEl.appendChild(el);
+    requestAnimationFrame(() => el.classList.add("is-fading"));
+    setTimeout(() => el.remove(), 320);
   }
 }
 
@@ -4285,8 +4356,12 @@ function handleProgramState(params) {
 function handleProgramCursor(params) {
   const cursor = params && params.cursor;
   if (!cursor || !cursor.client_id) return;
-  if (cursor.active === false) state.program.collaboratorById.delete(cursor.client_id);
-  else state.program.collaboratorById.set(cursor.client_id, cursor);
+  if (cursor.active === false) {
+    state.program.collaboratorById.delete(cursor.client_id);
+  } else {
+    state.program.collaboratorById.set(cursor.client_id, cursor);
+    if (cursor.kind === "agent") programRevealAgentEdit(cursor);
+  }
   programApplyOwnCursor(cursor);
   programRenderCursors();
 }
