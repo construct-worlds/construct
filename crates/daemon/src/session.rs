@@ -1911,7 +1911,17 @@ impl SessionManager {
                     || cursor.selection_anchor != old_anchor
                     || cursor.selection_head != old_head
                 {
-                    cursor.updated_at_ms = now;
+                    // Agent presence (spec 0065 agent presence): don't renew
+                    // this cursor's freshness stamp just because a
+                    // *different* edit shifted its position underneath it —
+                    // only the agent's own writes
+                    // (`publish_agent_program_cursor`) should renew "the
+                    // agent just wrote here" for clients gating the reveal
+                    // highlight off `updated_at_ms`. The position is still
+                    // corrected and broadcast either way.
+                    if cursor.kind != "agent" {
+                        cursor.updated_at_ms = now;
+                    }
                     updates.push(cursor.clone());
                 }
             }
@@ -5837,6 +5847,75 @@ mod tests {
                 .all(|c| c.kind != "agent"),
             "a no-op edit (old_string == new_string) writes nothing, so it must not \
              publish a presence cursor claiming the agent just wrote somewhere"
+        );
+    }
+
+    #[tokio::test]
+    async fn program_edit_rebasing_agent_cursor_for_unrelated_edit_does_not_renew_its_freshness() {
+        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+
+        // The agent writes near the end; its presence cursor is now fresh.
+        mgr.program_edit_from_conn(
+            agentd_protocol::ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "789".to_string(),
+                    new_string: "XYZ".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Agent,
+                note: None,
+                shimmer: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .expect("agent edit");
+        let stamped_at = agent_collaborator(&mgr, &id).updated_at_ms;
+
+        // Backdate it well past the reveal window (but still inside the
+        // one-minute presence TTL) so a renewed stamp would be obviously
+        // wrong, then let a *human* edit elsewhere shift its position.
+        if let Ok(mut cursors) = mgr.program_cursors.lock() {
+            let agent_conn_id = *mgr
+                .agent_program_cursor_conn_ids
+                .lock()
+                .expect("lock")
+                .get(&id)
+                .expect("reserved agent conn id");
+            cursors.get_mut(&agent_conn_id).expect("stored cursor").updated_at_ms = stamped_at - 5_000;
+        }
+        let backdated_at = stamped_at - 5_000;
+
+        mgr.program_edit_from_conn(
+            agentd_protocol::ProgramEditParams {
+                session_id: id.clone(),
+                edits: vec![agentd_protocol::ProgramEdit {
+                    old_string: "123".to_string(),
+                    new_string: "Q".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: agentd_protocol::ProgramUpdateActor::Human,
+                note: None,
+                shimmer: Vec::new(),
+            },
+            Some(999),
+        )
+        .await
+        .expect("human edit");
+
+        let agent = agent_collaborator(&mgr, &id);
+        // Position corrected for the human edit's shrink (3 chars -> 1).
+        assert_eq!(agent.selection_anchor, Some(4));
+        assert_eq!(agent.selection_head, Some(7));
+        assert_eq!(
+            agent.updated_at_ms, backdated_at,
+            "an unrelated edit rebasing the agent's cursor must not renew its \
+             freshness stamp — only the agent's own writes should, or a client \
+             gating the reveal highlight off recency would flash it for text \
+             the agent never touched"
         );
     }
 

@@ -3972,6 +3972,11 @@ function programRenderCursors() {
   }
 }
 
+// How long a just-landed agent-authored Program edit keeps its brief reveal
+// highlight (spec 0065 agent presence) — mirrors the TUI's
+// `PROGRAM_AGENT_REVEAL_MS`.
+const PROGRAM_AGENT_REVEAL_MS = 300;
+
 // Brief reveal highlight where a live agent-authored edit just landed (spec
 // 0065 agent presence): the agent's pseudo-cursor carries the edited span in
 // `selection_anchor`/`selection_head` (not a real text selection). Painted as
@@ -4194,6 +4199,13 @@ async function programMountSession(id) {
   if (run && run.firstOutputSeen) programClearRunButton(id);
   programRefreshRunButton();
   programRenderDoc(p.markdown);
+  // A client that opens (or switches into) this Program within an agent
+  // edit's brief reveal window must see the same reveal a client already
+  // watching live would have — checked only now, after `programRenderDoc`
+  // has populated the editor DOM the reveal's Range lookups walk.
+  for (const cursor of result.collaborators || []) {
+    programRevealAgentEditIfFresh(cursor);
+  }
   programVersionEl.textContent = "v" + p.version;
   programRefreshEmptyState();
   programUpdateDirty();
@@ -4360,10 +4372,22 @@ function handleProgramCursor(params) {
     state.program.collaboratorById.delete(cursor.client_id);
   } else {
     state.program.collaboratorById.set(cursor.client_id, cursor);
-    if (cursor.kind === "agent") programRevealAgentEdit(cursor);
+    programRevealAgentEditIfFresh(cursor);
   }
   programApplyOwnCursor(cursor);
   programRenderCursors();
+}
+
+// Only paint the reveal highlight while the cursor is still within its brief
+// window (spec 0065 agent presence): a rebase caused by an *unrelated* edit
+// elsewhere still moves and rebroadcasts an agent cursor (so its position
+// stays correct), but must not re-flash the reveal — the daemon leaves
+// `updated_at_ms` untouched in that case, so checking recency here is what
+// tells "the agent just wrote here" apart from "this cursor merely moved".
+function programRevealAgentEditIfFresh(cursor) {
+  if (cursor.kind !== "agent") return;
+  if (Date.now() - (cursor.updated_at_ms || 0) > PROGRAM_AGENT_REVEAL_MS) return;
+  programRevealAgentEdit(cursor);
 }
 
 function programApplyOwnCursor(cursor) {

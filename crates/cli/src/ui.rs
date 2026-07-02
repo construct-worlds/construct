@@ -8116,29 +8116,40 @@ fn render_program_collab_cursors(
         // just-applied edit's span in `selection_anchor`/`selection_head` for
         // its own pseudo-cursor (`kind == "agent"`), not a real text
         // selection. Reveal it with a brief tint instead of an instant
-        // repaint, while it's still fresh.
+        // repaint, while it's still fresh. The span's end is always
+        // `cursor.cursor` (see `publish_agent_program_cursor`), so the
+        // position the reveal already computed for it is reused below
+        // instead of walking the wrapped document a second time for the
+        // same offset.
         let is_agent = cursor.kind == "agent";
+        let mut agent_reveal_end_pos = None;
         if is_agent && now_ms.saturating_sub(cursor.updated_at_ms) <= PROGRAM_AGENT_REVEAL_MS {
             if let (Some(anchor), Some(head)) = (cursor.selection_anchor, cursor.selection_head) {
-                render_program_agent_reveal(
+                agent_reveal_end_pos = render_program_agent_reveal(
                     f,
                     app,
                     popup,
                     scroll_offset,
                     inner,
-                    anchor.min(head),
+                    anchor.min(head).min(max_cursor),
                     anchor.max(head).min(max_cursor),
                 );
             }
         }
-        let Some(pos) = program_cursor_position(
-            Some(app),
-            &popup.buffer,
-            cursor.cursor.min(max_cursor),
-            scroll_offset,
-            inner,
-        ) else {
-            continue;
+        let pos = match agent_reveal_end_pos {
+            Some(pos) => pos,
+            None => {
+                let Some(pos) = program_cursor_position(
+                    Some(app),
+                    &popup.buffer,
+                    cursor.cursor.min(max_cursor),
+                    scroll_offset,
+                    inner,
+                ) else {
+                    continue;
+                };
+                pos
+            }
         };
         let Some(cell) = f.buffer_mut().cell_mut(pos) else {
             continue;
@@ -8184,6 +8195,22 @@ fn render_program_collab_cursors(
 /// background yet, so it never fights the selection/search/shimmer
 /// overlays already baked into the rendered buffer (mirroring how
 /// `apply_program_shimmer` leaves backed spans alone).
+///
+/// This deliberately doesn't share `render_selection_rect`'s row/column loop
+/// despite the visual similarity: that function takes pre-computed
+/// viewport-relative `ScreenPoint`s and paints an *inclusive* `[start, end]`
+/// span with a fixed style, while this one converts document char offsets
+/// (subtracting `scroll_offset` itself) and paints a *half-open* `[start,
+/// end)` span — `end` is one past the edit's last character, not part of it
+/// — with a conditional "only if unstyled" predicate. Forcing a shared loop
+/// would need to reconcile the inclusive/exclusive endpoint conventions,
+/// which risks an off-by-one more than it saves.
+///
+/// Paints the reveal tint and returns `end`'s on-screen position (in the
+/// same coordinate space `program_cursor_position` would produce), so a
+/// caller painting the point cursor at that same offset — which, for an
+/// agent's presence cursor, is always exactly `end` — can reuse it instead
+/// of walking the document a second time to relocate the identical offset.
 fn render_program_agent_reveal(
     f: &mut Frame,
     app: &App,
@@ -8192,13 +8219,19 @@ fn render_program_agent_reveal(
     inner: Rect,
     start: usize,
     end: usize,
-) {
+) -> Option<Position> {
     if inner.width == 0 || inner.height == 0 || start >= end {
-        return;
+        return None;
     }
     let width = inner.width as usize;
     let (start_row, start_col) = program_cursor_visual_pos(Some(app), &popup.buffer, start, width);
     let (end_row, end_col) = program_cursor_visual_pos(Some(app), &popup.buffer, end, width);
+    let end_pos = end_row.checked_sub(scroll_offset).and_then(|view_row| {
+        (view_row < inner.height as usize).then_some(Position {
+            x: inner.x.saturating_add(end_col as u16),
+            y: inner.y.saturating_add(view_row as u16),
+        })
+    });
     for row in start_row..=end_row {
         let Some(view_row) = row.checked_sub(scroll_offset) else {
             continue;
@@ -8230,6 +8263,7 @@ fn render_program_agent_reveal(
             cell.set_style(cell.style().bg(app.theme.inactive_highlight_bg));
         }
     }
+    end_pos
 }
 
 /// Mini session-preview popover shown while the mouse hovers a `@{session:id}`
