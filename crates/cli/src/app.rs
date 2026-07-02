@@ -13873,8 +13873,12 @@ mod tests {
                 started_at: Instant::now(),
                 pending: HashSet::from(["block-a:1".into(), "block-b:1".into()]),
                 pending_tooltips: HashMap::new(),
+                system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
+                stage: agentd_protocol::ProgramRunStage::default(),
+                settled_block_count: 0,
+                total_block_count: 2,
             },
         );
 
@@ -13893,9 +13897,14 @@ mod tests {
                 pending_block_ids: Vec::new(),
                 pending_block_refs: Vec::new(),
                 pending_block_tooltips: HashMap::new(),
+                system_status: None,
                 seen_running: true,
                 first_output_seen: true,
+                queued_behind_current_turn: false,
                 agent_managed: true,
+                stage: agentd_protocol::ProgramRunStage::default(),
+                settled_block_count: 2,
+                total_block_count: 2,
             }),
             Vec::new(),
         );
