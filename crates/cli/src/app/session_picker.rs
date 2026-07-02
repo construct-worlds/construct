@@ -35,6 +35,11 @@ pub struct SessionPickerDialog {
     pub purpose: SessionPickerPurpose,
     /// Live typeahead query. Dims non-matching sessions and drives auto-expand.
     pub query: String,
+    /// Char index into `query` where typing/backspace/Emacs motion acts. Only
+    /// meaningful for [`SessionPickerPurpose::Switch`], which owns its own
+    /// search line — the `@`→session variant's "query" is the program
+    /// buffer's live token, tracked by the buffer's own cursor instead.
+    pub cursor: usize,
     /// Logical index into the *selectable* (visible, non-dimmed) session rows.
     pub selected: usize,
     /// First visible raw-row index, clamped at render time to keep `selected`
@@ -153,6 +158,7 @@ impl App {
         self.session_picker = Some(SessionPickerDialog {
             purpose,
             query: String::new(),
+            cursor: 0,
             selected: 0,
             scroll: 0,
         });
@@ -331,7 +337,9 @@ impl App {
 
     fn session_picker_push_char(&mut self, c: char) {
         if let Some(dialog) = self.session_picker.as_mut() {
-            dialog.query.push(c);
+            let pos = byte_pos(&dialog.query, dialog.cursor);
+            dialog.query.insert(pos, c);
+            dialog.cursor += 1;
             // The match set just changed; snap back to the top match.
             dialog.selected = 0;
             dialog.scroll = 0;
@@ -340,9 +348,36 @@ impl App {
 
     fn session_picker_backspace(&mut self) {
         if let Some(dialog) = self.session_picker.as_mut() {
-            dialog.query.pop();
+            if dialog.cursor > 0 {
+                let prev = dialog.cursor - 1;
+                let pos = byte_pos(&dialog.query, prev);
+                dialog.query.remove(pos);
+                dialog.cursor = prev;
+            }
             dialog.selected = 0;
             dialog.scroll = 0;
+        }
+    }
+
+    /// `C-f` / `C-b`: move the search-line cursor by one char, clamped to the
+    /// query's bounds. Only meaningful for the `C-x b` switcher's own search
+    /// line (see [`SessionPickerDialog::cursor`]).
+    fn session_picker_move_cursor(&mut self, delta: isize) {
+        if let Some(dialog) = self.session_picker.as_mut() {
+            let len = dialog.query.chars().count();
+            dialog.cursor = if delta < 0 {
+                dialog.cursor.saturating_sub(delta.unsigned_abs())
+            } else {
+                dialog.cursor.saturating_add(delta as usize).min(len)
+            };
+        }
+    }
+
+    /// `C-a` / `C-e`: jump the search-line cursor to the start or end of the
+    /// query.
+    fn session_picker_cursor_to_edge(&mut self, end: bool) {
+        if let Some(dialog) = self.session_picker.as_mut() {
+            dialog.cursor = if end { dialog.query.chars().count() } else { 0 };
         }
     }
 
@@ -551,6 +586,13 @@ impl App {
             KeyCode::Down => self.move_session_picker_selection(1),
             KeyCode::Char('p') if ctrl => self.move_session_picker_selection(-1),
             KeyCode::Char('n') if ctrl => self.move_session_picker_selection(1),
+            // Emacs cursor motion on the switcher's own search line. Not
+            // wired up for the `@`→session variant, whose "query" is the
+            // program buffer's live token with its own cursor semantics.
+            KeyCode::Char('f') if ctrl && !to_program => self.session_picker_move_cursor(1),
+            KeyCode::Char('b') if ctrl && !to_program => self.session_picker_move_cursor(-1),
+            KeyCode::Char('a') if ctrl && !to_program => self.session_picker_cursor_to_edge(false),
+            KeyCode::Char('e') if ctrl && !to_program => self.session_picker_cursor_to_edge(true),
             KeyCode::Backspace if to_program => self.session_picker_program_backspace(),
             KeyCode::Backspace => self.session_picker_backspace(),
             KeyCode::Char(c) if !ctrl && !alt && !super_mod && to_program => {

@@ -9731,6 +9731,7 @@ fn render_session_picker(f: &mut Frame, app: &mut App) {
     let title = dialog.title().to_string();
     let query = app.session_picker_effective_query();
     let selected = dialog.selected;
+    let cursor = dialog.cursor.min(query.chars().count());
     let rows = app.session_picker_rows();
 
     let area = f.area();
@@ -9876,13 +9877,20 @@ fn render_session_picker(f: &mut Frame, app: &mut App) {
         let (search_area, sep_area, body_area, footer_area) =
             (chunks[0], chunks[1], chunks[2], chunks[3]);
 
-        // Search line with a block caret.
+        // Search line: text with a native terminal cursor at the query's
+        // Emacs-cursor position (`C-f`/`C-b`/`C-a`/`C-e`; see
+        // `SessionPickerDialog::cursor`), same convention as the minibuffer.
+        let prefix = "Search: ";
         let search_line = Line::from(vec![
-            Span::styled("Search: ", Style::default().fg(app.theme.muted)),
+            Span::styled(prefix, Style::default().fg(app.theme.muted)),
             Span::styled(query.clone(), Style::default().fg(app.theme.text)),
-            Span::styled("▏", Style::default().fg(app.theme.accent)),
         ]);
         f.render_widget(Paragraph::new(search_line), search_area);
+        let cursor_col = query.chars().take(cursor).collect::<String>().width() as u16;
+        f.set_cursor_position(Position {
+            x: search_area.x + prefix.width() as u16 + cursor_col,
+            y: search_area.y,
+        });
 
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(

@@ -17667,6 +17667,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_picker_emacs_cursor_motion_edits_at_point() {
+        let (mut app, _dir, server) = session_picker_app().await;
+        app.open_session_picker(SessionPickerPurpose::Switch);
+        picker_type(&mut app, "ac"); // cursor at 2, query "ac"
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert_eq!(app.session_picker.as_ref().unwrap().cursor, 1);
+        // Insert between the two chars: "ac" -> "abc".
+        picker_type(&mut app, "b");
+        assert_eq!(app.session_picker.as_ref().unwrap().query, "abc");
+        assert_eq!(app.session_picker.as_ref().unwrap().cursor, 2);
+        // C-a jumps to the start; C-f steps one char forward.
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(app.session_picker.as_ref().unwrap().cursor, 0);
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(app.session_picker.as_ref().unwrap().cursor, 1);
+        // C-e jumps to the end; backspace there deletes the last char, "abc" -> "ab".
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(app.session_picker.as_ref().unwrap().cursor, 3);
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.session_picker.as_ref().unwrap().query, "ab");
+        assert_eq!(app.session_picker.as_ref().unwrap().cursor, 2);
+        // Motion clamps at both ends instead of wrapping or going negative.
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(app.session_picker.as_ref().unwrap().cursor, 2);
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert_eq!(app.session_picker.as_ref().unwrap().cursor, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn session_picker_open_with_no_sessions_is_noop() {
         let (mut app, _dir, server) = empty_app().await;
         app.open_session_picker(SessionPickerPurpose::Switch);
