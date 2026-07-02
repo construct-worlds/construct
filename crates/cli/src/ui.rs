@@ -43,7 +43,15 @@ const PROGRAM_CLIP_HOVER_PREVIEW_ROWS: u16 = 22;
 const PROGRAM_COLLAB_CURSOR_LABEL_MAX_WIDTH: usize = 12;
 /// How long a just-landed agent-authored Program edit keeps its brief reveal
 /// highlight (spec 0065 agent presence) before fading back to plain text.
-pub(crate) const PROGRAM_AGENT_REVEAL_MS: i64 = 300;
+/// Measured from the local receipt clock (`App::program_agent_reveal_elapsed`),
+/// not the daemon's `updated_at_ms` — broadcast transit plus the render tick
+/// can eat most of a shorter window before the first paint ever happens.
+pub(crate) const PROGRAM_AGENT_REVEAL_MS: i64 = 800;
+/// How long a fresh agent cursor keeps pointing at itself with the GAP E
+/// off-viewport edge indicator, once its edit has scrolled out of view. Looser
+/// than `PROGRAM_AGENT_REVEAL_MS` on purpose: an edit that lands off-screen is
+/// still worth pointing at for a bit after its own reveal tint has faded.
+pub(crate) const PROGRAM_AGENT_RECENT_ACTIVITY_MS: i64 = 3000;
 const PROGRAM_SELECTION_RUN_MENU_W: u16 = 9;
 const PROGRAM_SELECTION_RUN_MENU_H: u16 = 3;
 
@@ -8217,6 +8225,53 @@ fn render_program_popup_at(
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(title);
+    // Geometry is fixed by `Borders::ALL` regardless of which titles are
+    // present (`Block::inner` only checks the border flags, since they
+    // already force the top/bottom row reservation `has_title_at_position`
+    // would otherwise add), so it's safe to compute it here — before the
+    // right-cluster titles are added — and reuse it for the rest of the
+    // function instead of recomputing it after the cluster call below.
+    let block_inner = block.inner(rect);
+    let inner = block_inner.inner(Margin {
+        horizontal: PROGRAM_CONTENT_PADDING_X,
+        vertical: PROGRAM_CONTENT_PADDING_Y,
+    });
+    // `block_inner`/`inner` carry the popup's full, un-clipped width (see the
+    // clipped-frame-edge handling below) so content lays out without
+    // reflowing — but a few popovers (sticky widgets, smart-clip picker,
+    // selection context menu) clamp their own paint rect to whatever
+    // `program_area` they're handed instead of to the real buffer, the same
+    // way `Clear` does. Handing them the full width would let their `Clear`
+    // land past the frame edge and panic — exactly what clipping to
+    // `paint_rect` used to prevent. Pass this frame-bounded rect to those
+    // instead.
+    let safe_inner = inner.intersection(buffer_area);
+    let safe_block_inner = block_inner.intersection(buffer_area);
+    // Vertical scroll geometry: the body can exceed `inner.height` wrapped
+    // rows. Clamp the popup's stored offset to the current geometry (content
+    // edits or a resize may have shrunk the scrollable range).
+    let viewport_rows = inner.height as usize;
+    let total_rows = program_total_visual_rows(Some(app), &popup.buffer, inner.width as usize);
+    let max_scroll = total_rows.saturating_sub(viewport_rows);
+    let scroll_offset = popup.scroll_offset.min(max_scroll);
+    // GAP E: a fresh agent edit can land scrolled off-screen (e.g. a `Done`
+    // section below the fold), where the cursor + reveal painted at the edit
+    // location are invisible by construction. Point at it from whichever
+    // border edge is nearest, before the close/harness/widget cluster is
+    // added below — ratatui lays right-aligned titles out from the right
+    // border leftward in reverse insertion order, so inserting ours first
+    // keeps it strictly left of that cluster, and the fixed-geometry
+    // hit-test formulas the cluster relies on (`view_close_button_range`,
+    // `dynamic_ui_trigger_range`) never have to account for it.
+    let block = match program_agent_activity_edge(app, popup, scroll_offset, inner, now) {
+        Some(direction @ ProgramAgentEdgeDirection::Above) => {
+            block.title_top(program_agent_edge_indicator_line(&app.theme, direction))
+        }
+        Some(direction @ ProgramAgentEdgeDirection::Below) => {
+            block.title_bottom(program_agent_edge_indicator_line(&app.theme, direction))
+        }
+        None => block,
+    };
     let cluster_hits_start = app.layout.dynamic_ui_widget_hits.len();
     let block = apply_pane_title_right_cluster(
         app,
@@ -8270,26 +8325,13 @@ fn render_program_popup_at(
             pane_right,
         );
     }
-    // Area inside the program's border (title bar excluded), mirroring the
-    // session view's `block.inner(area)`. The content body adds extra padding on
-    // top of this, but the sticky-widget popover must use the un-padded border
-    // inner so its top sits exactly one row below the title bar — the same
-    // y-position as the normal session view (see the widget reveal below).
-    let block_inner = block.inner(rect);
-    let inner = block_inner.inner(Margin {
-        horizontal: PROGRAM_CONTENT_PADDING_X,
-        vertical: PROGRAM_CONTENT_PADDING_Y,
-    });
-    // `block_inner`/`inner` now carry the popup's full, un-clipped width (see
-    // above) so content lays out without reflowing — but a few popovers
-    // (sticky widgets, smart-clip picker, selection context menu) clamp their
-    // own paint rect to whatever `program_area` they're handed instead of to
-    // the real buffer, the same way `Clear` does. Handing them the full
-    // width would let their `Clear` land past the frame edge and panic —
-    // exactly what clipping to `paint_rect` used to prevent. Pass this
-    // frame-bounded rect to those instead.
-    let safe_inner = inner.intersection(buffer_area);
-    let safe_block_inner = block_inner.intersection(buffer_area);
+    // `block_inner`/`inner`/`safe_inner`/`safe_block_inner` were computed
+    // above, before the right-cluster titles were added — the border-only
+    // geometry they carry (title bar excluded, content body's own padding
+    // still to come) doesn't depend on title content, only on `Borders::ALL`.
+    // The sticky-widget popover below uses the un-padded `safe_block_inner`
+    // so its top sits exactly one row below the title bar, matching the
+    // normal session view.
 
     let selection = program_selection_range(popup);
     let search = popup
@@ -8325,15 +8367,10 @@ fn render_program_popup_at(
     } else {
         Vec::new()
     };
-    // Vertical scroll: the body can exceed `inner.height` wrapped rows. Clamp
-    // the popup's stored offset to the current geometry (content edits or a
-    // resize may have shrunk the scrollable range) and skip that many wrapped
-    // rows when rendering. `Paragraph::scroll` with `Wrap` skips *wrapped* rows,
-    // matching the wrapped-row coordinate space the cursor math uses.
-    let viewport_rows = inner.height as usize;
-    let total_rows = program_total_visual_rows(Some(app), &popup.buffer, inner.width as usize);
-    let max_scroll = total_rows.saturating_sub(viewport_rows);
-    let scroll_offset = popup.scroll_offset.min(max_scroll);
+    // `viewport_rows`/`total_rows`/`scroll_offset` were computed above,
+    // before the agent-edge check needed them. `Paragraph::scroll` with
+    // `Wrap` skips *wrapped* rows, matching the wrapped-row coordinate space
+    // the cursor math uses.
     if active {
         // Remember the live viewport so cursor-move handlers can keep the caret
         // visible on the next keystroke, and persist the clamped offset.
@@ -8431,7 +8468,7 @@ fn render_program_popup_at(
             // they get `safe_inner`, not the popup's full-width `inner`.
             render_program_smart_clip_picker(f, app, popup, pos, safe_inner);
         }
-        render_program_collab_cursors(f, app, popup, scroll_offset, inner);
+        render_program_collab_cursors(f, app, popup, scroll_offset, inner, now);
     }
     if active && !popup.closing {
         render_program_selection_context_menu(f, app, popup, scroll_offset, safe_inner);
@@ -8457,6 +8494,7 @@ fn render_program_collab_cursors(
     popup: &crate::app::ProgramPopup,
     scroll_offset: usize,
     inner: Rect,
+    now: Instant,
 ) {
     let max_cursor = popup.buffer.chars().count();
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -8479,19 +8517,36 @@ fn render_program_collab_cursors(
         // position the reveal already computed for it is reused below
         // instead of walking the wrapped document a second time for the
         // same offset.
+        //
+        // Freshness is measured from the local receipt clock
+        // (`App::program_agent_reveal_elapsed`), not `cursor.updated_at_ms` —
+        // that daemon stamp doesn't renew on a rebase (by design, so a rebase
+        // can't replay the reveal over text the agent never touched), and
+        // even for a genuine new write it's already stale by the time
+        // broadcast transit and the render tick let this frame paint.
         let is_agent = cursor.kind == "agent";
         let mut agent_reveal_end_pos = None;
-        if is_agent && now_ms.saturating_sub(cursor.updated_at_ms) <= PROGRAM_AGENT_REVEAL_MS {
-            if let (Some(anchor), Some(head)) = (cursor.selection_anchor, cursor.selection_head) {
-                agent_reveal_end_pos = render_program_agent_reveal(
-                    f,
-                    app,
-                    popup,
-                    scroll_offset,
-                    inner,
-                    anchor.min(head).min(max_cursor),
-                    anchor.max(head).min(max_cursor),
-                );
+        if is_agent {
+            if let Some(elapsed) = app.program_agent_reveal_elapsed(&cursor.client_id, now) {
+                let elapsed_ms = elapsed.as_millis() as i64;
+                if elapsed_ms <= PROGRAM_AGENT_REVEAL_MS {
+                    if let (Some(anchor), Some(head)) =
+                        (cursor.selection_anchor, cursor.selection_head)
+                    {
+                        let progress =
+                            program_agent_reveal_progress(elapsed, PROGRAM_AGENT_REVEAL_MS);
+                        agent_reveal_end_pos = render_program_agent_reveal(
+                            f,
+                            app,
+                            popup,
+                            scroll_offset,
+                            inner,
+                            anchor.min(head).min(max_cursor),
+                            anchor.max(head).min(max_cursor),
+                            progress,
+                        );
+                    }
+                }
             }
         }
         let pos = match agent_reveal_end_pos {
@@ -8569,6 +8624,15 @@ fn render_program_collab_cursors(
 /// caller painting the point cursor at that same offset — which, for an
 /// agent's presence cursor, is always exactly `end` — can reuse it instead
 /// of walking the document a second time to relocate the identical offset.
+///
+/// `progress` (0.0..=1.0, from `program_agent_reveal_progress`) gives the
+/// reveal a typewriter feel: only the leading `progress` fraction of
+/// `[start, end)` is tinted, sweeping left-to-right across the span as the
+/// caller re-renders on each tick of the same 120ms loop that already drives
+/// the spinner. The point cursor this function's return value ultimately
+/// positions always sits at the edit's true `end`, regardless of how much of
+/// the sweep has painted — the agent's presence is already there; the sweep
+/// is the reader catching up, not the agent moving.
 fn render_program_agent_reveal(
     f: &mut Frame,
     app: &App,
@@ -8577,6 +8641,7 @@ fn render_program_agent_reveal(
     inner: Rect,
     start: usize,
     end: usize,
+    progress: f32,
 ) -> Option<Position> {
     if inner.width == 0 || inner.height == 0 || start >= end {
         return None;
@@ -8590,7 +8655,11 @@ fn render_program_agent_reveal(
             y: inner.y.saturating_add(view_row as u16),
         })
     });
-    for row in start_row..=end_row {
+    let revealed_len = (((end - start) as f32) * progress.clamp(0.0, 1.0)).floor() as usize;
+    let revealed_end = start + revealed_len.min(end - start);
+    let (reveal_row, reveal_col) =
+        program_cursor_visual_pos(Some(app), &popup.buffer, revealed_end, width);
+    for row in start_row..=reveal_row {
         let Some(view_row) = row.checked_sub(scroll_offset) else {
             continue;
         };
@@ -8598,7 +8667,7 @@ fn render_program_agent_reveal(
             continue;
         }
         let col_start = if row == start_row { start_col } else { 0 };
-        let col_end = (if row == end_row { end_col } else { width }).min(width);
+        let col_end = (if row == reveal_row { reveal_col } else { width }).min(width);
         if col_start >= col_end {
             continue;
         }
@@ -8622,6 +8691,109 @@ fn render_program_agent_reveal(
         }
     }
     end_pos
+}
+
+/// Fraction (0.0..=1.0) of an agent reveal span to tint, given elapsed time
+/// since the local receipt and the reveal window (GAP D typewriter sweep):
+/// `0.0` the instant the edit is received (nothing revealed yet), growing
+/// linearly to `1.0` once `elapsed` reaches `window_ms` (the whole span
+/// revealed), and clamped at `1.0` beyond it. Pure so the sweep math is
+/// unit-testable without a terminal.
+fn program_agent_reveal_progress(elapsed: Duration, window_ms: i64) -> f32 {
+    if window_ms <= 0 {
+        return 1.0;
+    }
+    (elapsed.as_secs_f32() / (window_ms as f32 / 1000.0)).clamp(0.0, 1.0)
+}
+
+/// Direction from the visible Program viewport toward a fresh off-screen
+/// agent edit (GAP E, spec 0065 agent presence): the cursor and reveal both
+/// paint at the edit's own location, so an edit landing in a scrolled-off
+/// part of the document (e.g. a `Done` section below the fold) is otherwise
+/// invisible. Pure so the above/below/inside boundary cases are
+/// unit-testable without a terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProgramAgentEdgeDirection {
+    Above,
+    Below,
+}
+
+fn program_agent_edge_direction(
+    agent_row: usize,
+    scroll_offset: usize,
+    viewport_rows: usize,
+) -> Option<ProgramAgentEdgeDirection> {
+    if viewport_rows == 0 {
+        return None;
+    }
+    if agent_row < scroll_offset {
+        Some(ProgramAgentEdgeDirection::Above)
+    } else if agent_row >= scroll_offset + viewport_rows {
+        Some(ProgramAgentEdgeDirection::Below)
+    } else {
+        None
+    }
+}
+
+/// Freshest off-viewport agent cursor for `popup`'s session, if any is within
+/// `PROGRAM_AGENT_RECENT_ACTIVITY_MS` of its local receipt (looser than the
+/// reveal window: an edit that scrolled off-screen is still worth pointing at
+/// after its own reveal tint has faded). Keyed off the same receipt clock as
+/// the reveal (`App::program_agent_reveal_elapsed`), not the daemon's
+/// `updated_at_ms`, for the same reason GAP D needed it: broadcast transit
+/// and the render tick already eat into any daemon-stamped window.
+fn program_agent_activity_edge(
+    app: &App,
+    popup: &crate::app::ProgramPopup,
+    scroll_offset: usize,
+    inner: Rect,
+    now: Instant,
+) -> Option<ProgramAgentEdgeDirection> {
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let width = inner.width as usize;
+    let viewport_rows = inner.height as usize;
+    let max_cursor = popup.buffer.chars().count();
+    app.program_collaborators.values().find_map(|cursor| {
+        if !cursor.active || cursor.kind != "agent" || cursor.session_id != popup.program.session_id
+        {
+            return None;
+        }
+        let elapsed = app.program_agent_reveal_elapsed(&cursor.client_id, now)?;
+        if elapsed.as_millis() as i64 > PROGRAM_AGENT_RECENT_ACTIVITY_MS {
+            return None;
+        }
+        let agent_row = program_cursor_visual_row(
+            Some(app),
+            &popup.buffer,
+            cursor.cursor.min(max_cursor),
+            width,
+        );
+        program_agent_edge_direction(agent_row, scroll_offset, viewport_rows)
+    })
+}
+
+/// Right-aligned, plain-language edge-indicator title (GAP E) for whichever
+/// border the off-viewport agent activity sits behind. Subtle by design —
+/// dim + italic, matching the agent cursor's own italic styling — and
+/// presentation-only: it never shifts document rows, since it lives on the
+/// border row Ratatui's title layout already reserves.
+fn program_agent_edge_indicator_line(
+    theme: &Theme,
+    direction: ProgramAgentEdgeDirection,
+) -> Line<'static> {
+    let text = match direction {
+        ProgramAgentEdgeDirection::Above => " agent editing \u{2191} ",
+        ProgramAgentEdgeDirection::Below => " agent editing \u{2193} ",
+    };
+    Line::from(Span::styled(
+        text,
+        Style::default()
+            .fg(theme.dim)
+            .add_modifier(Modifier::ITALIC),
+    ))
+    .alignment(ratatui::layout::Alignment::Right)
 }
 
 /// Mini session-preview popover shown while the mouse hovers a `@{session:id}`
@@ -11182,6 +11354,64 @@ fn render_remote_err<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GAP D: `program_agent_reveal_progress` must sweep linearly from `0.0`
+    /// right when the edit is received to `1.0` once the reveal window has
+    /// fully elapsed, and stay clamped at `1.0` beyond it.
+    #[test]
+    fn program_agent_reveal_progress_interpolates_zero_to_full() {
+        assert_eq!(program_agent_reveal_progress(Duration::ZERO, 800), 0.0);
+        assert_eq!(
+            program_agent_reveal_progress(Duration::from_millis(400), 800),
+            0.5
+        );
+        assert_eq!(
+            program_agent_reveal_progress(Duration::from_millis(800), 800),
+            1.0
+        );
+        assert_eq!(
+            program_agent_reveal_progress(Duration::from_millis(5_000), 800),
+            1.0,
+            "past the window, progress must clamp rather than exceed 1.0"
+        );
+    }
+
+    /// GAP E: an agent cursor's wrapped row above the viewport points "up",
+    /// below points "down", and inside the viewport yields no indicator at
+    /// all (the cursor + reveal at the edit's own location already cover it).
+    #[test]
+    fn program_agent_edge_direction_matches_viewport_position() {
+        assert_eq!(
+            program_agent_edge_direction(2, 10, 20),
+            Some(ProgramAgentEdgeDirection::Above),
+            "a row before the scroll offset is above the viewport"
+        );
+        assert_eq!(
+            program_agent_edge_direction(35, 10, 20),
+            Some(ProgramAgentEdgeDirection::Below),
+            "a row past scroll_offset + viewport_rows is below the viewport"
+        );
+        assert_eq!(
+            program_agent_edge_direction(15, 10, 20),
+            None,
+            "a row inside [scroll_offset, scroll_offset + viewport_rows) is already visible"
+        );
+        assert_eq!(
+            program_agent_edge_direction(10, 10, 20),
+            None,
+            "the viewport's first row is visible, not \"above\""
+        );
+        assert_eq!(
+            program_agent_edge_direction(29, 10, 20),
+            None,
+            "the viewport's last row is visible, not \"below\""
+        );
+        assert_eq!(
+            program_agent_edge_direction(5, 10, 0),
+            None,
+            "a zero-height viewport has no direction to report"
+        );
+    }
 
     // A cell is "painted" by the quadrant renderer iff it has an explicit
     // Rgb foreground (solid regions render as a space with fg==bg color).
