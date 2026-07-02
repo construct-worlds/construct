@@ -1523,6 +1523,14 @@
   .program-msg { color: var(--fg-dim); font-size: 12px; max-width: 42ch;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .program-msg.is-error { color: var(--err); }
+  .program-run-stage {
+    color: var(--fg-dim);
+    font-size: 12px;
+    max-width: 18ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .program-bar button {
     background: var(--bg-elev-2);
     color: var(--fg);
@@ -1623,6 +1631,39 @@
     user-select: all;
     cursor: default;
   }
+  /* Session smart-clip status badge: subtle status-tinted color, driven by
+     `data-status` (kept live by programUpdateChipStatuses). "done" has no
+     rule — it keeps the chip's default accent-alt look, unchanged from
+     before this badge existed. A missing/deleted target reads as
+     struck-through so it's unmistakable at a glance, not just recolored. */
+  .program-clip[data-status="pending"] {
+    background: color-mix(in srgb, var(--fg-faint) 20%, transparent);
+    color: var(--fg-faint);
+    border-color: color-mix(in srgb, var(--fg-faint) 40%, transparent);
+  }
+  .program-clip[data-status="running"],
+  .program-clip[data-status="awaiting_input"] {
+    background: color-mix(in srgb, var(--ok) 20%, transparent);
+    color: var(--ok);
+    border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  }
+  .program-clip[data-status="paused"] {
+    background: color-mix(in srgb, var(--warn) 20%, transparent);
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  }
+  .program-clip[data-status="errored"] {
+    background: color-mix(in srgb, var(--err) 22%, transparent);
+    color: var(--err);
+    border-color: color-mix(in srgb, var(--err) 45%, transparent);
+  }
+  .program-clip[data-status="missing"] {
+    background: color-mix(in srgb, var(--fg-faint) 14%, transparent);
+    color: var(--fg-faint);
+    border-color: color-mix(in srgb, var(--fg-faint) 30%, transparent);
+    text-decoration: line-through;
+    opacity: 0.78;
+  }
   /* Run shimmer: a travelling highlight band sweeps the running lines. Pure CSS
      (no per-char DOM rebuild) so it never disturbs the caret while editing. */
   .program-line.is-running {
@@ -1636,9 +1677,25 @@
     border-radius: 3px;
     animation: program-shimmer 1.6s linear infinite;
   }
+  .program-line.is-settling:not(.is-running) {
+    background-image: linear-gradient(100deg,
+      transparent 28%,
+      color-mix(in srgb, var(--accent) 38%, transparent) 46%,
+      color-mix(in srgb, var(--fg) 18%, transparent) 52%,
+      transparent 70%);
+    background-size: 240% 100%;
+    background-repeat: no-repeat;
+    border-radius: 3px;
+    animation: program-settle 300ms ease-out 1 both;
+  }
   @keyframes program-shimmer {
     from { background-position: 140% 0; }
     to { background-position: -40% 0; }
+  }
+  @keyframes program-settle {
+    0% { background-position: 145% 0; }
+    88% { background-position: -35% 0; }
+    100% { background-position: -45% 0; background-image: none; }
   }
   .program-cursor-layer {
     position: absolute;
@@ -1912,6 +1969,7 @@
           <span class="program-msg" id="programMsg" aria-live="polite"></span>
           <button type="button" id="programFindBtn" title="Find (Ctrl+F)">Find</button>
           <button type="button" id="programRunBtn" title="Run program (Ctrl+Enter) — runs the selection if text is selected">Run</button>
+          <span class="program-run-stage" id="programRunStage" aria-live="polite"></span>
           <button type="button" id="programSaveBtn" title="Save (Ctrl+S)">Save</button>
         </div>
         <div class="program-find" id="programFind" hidden>
@@ -2136,6 +2194,7 @@ const programVersionEl = $("programVersion");
 const programMsgEl = $("programMsg");
 const programSaveBtn = $("programSaveBtn");
 const programRunBtn = $("programRunBtn");
+const programRunStageEl = $("programRunStage");
 const programFindBtn = $("programFindBtn");
 const programFindEl = $("programFind");
 const programFindInputEl = $("programFindInput");
@@ -2330,6 +2389,9 @@ const state = {
     // In-flight run shimmer per session id:
     // { pendingIds:Set, tooltips:Map, startPerf, deadlinePerf }.
     runById: new Map(),
+    // Recently-settled block refs per session id: Map<id, Map<ref,startPerf>>.
+    settleById: new Map(),
+    settleTimer: 0,
     // Client-local title Run button pulse per session id. This is intentionally
     // separate from block shimmer: a re-Run can happen while an older shimmer is
     // already narrowed and has already seen output.
@@ -3449,6 +3511,8 @@ async function selectSession(id, { replaceUrl = false } = {}) {
 // the SAME shared rules as the daemon/TUI so block ids agree across clients.
 
 const PROGRAM_RUN_MAX_MS = 10 * 60 * 1000;
+const PROGRAM_SHIMMER_FALLBACK_TOOLTIP = "Working…";
+const PROGRAM_SETTLE_FLASH_MS = 300;
 const PROGRAM_TEXT_ENCODER = new TextEncoder();
 
 // --- shared block-identity rules (ports of agentd_protocol) ---
@@ -3664,36 +3728,154 @@ function programDiff3(ours, base, theirs) {
 
 // --- run shimmer ---
 
+function programPendingIdsFromProgress(progress) {
+  if (!progress) return null;
+  return new Set([
+    ...(progress.pending_block_refs || []),
+    ...(progress.pending_block_ids || []),
+  ]);
+}
+
 function programRunFromProgress(progress) {
   if (!progress) return null;
   const nowMs = Date.now();
-  const ids = [
-    ...(progress.pending_block_refs || []),
-    ...(progress.pending_block_ids || []),
-  ];
-  if (progress.expires_at_ms <= nowMs || ids.length === 0) return null;
+  const ids = programPendingIdsFromProgress(progress);
+  if (progress.expires_at_ms <= nowMs || !ids || ids.size === 0) return null;
   const perf = performance.now();
   const startPerf = progress.started_at_ms <= nowMs ? perf - (nowMs - progress.started_at_ms) : perf;
+  const pendingCount = (progress.pending_block_refs && progress.pending_block_refs.length)
+    ? progress.pending_block_refs.length
+    : (progress.pending_block_ids || []).length;
+  const total = Math.max(progress.total_block_count || 0, pendingCount);
+  const settled = Math.max(0, total - pendingCount);
+  let stage = progress.stage || null;
+  if (!stage) {
+    if (progress.agent_managed) stage = settled > 0 ? "settling" : "planning_pass_done";
+    else if (progress.first_output_seen) stage = "first_output";
+    else stage = "delivered";
+  }
   return {
-    pendingIds: new Set(ids),
+    pendingIds: ids,
     tooltips: new Map(Object.entries(progress.pending_block_tooltips || {})),
+    systemStatus: String(progress.system_status || "").trim(),
     startPerf,
     deadlinePerf: perf + (progress.expires_at_ms - nowMs),
     firstOutputSeen: !!progress.first_output_seen,
+    stage,
+    settledBlockCount: progress.settled_block_count != null ? progress.settled_block_count : settled,
+    totalBlockCount: total,
   };
 }
 
-function programActiveLines(buffer, pendingSet, blocks) {
+function programRunElapsedLabel(run) {
+  const elapsed = Math.max(0, Math.floor((performance.now() - run.startPerf) / 1000));
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  return mins > 0 ? `${mins}m ${String(secs).padStart(2, "0")}s` : `${secs}s`;
+}
+
+function programRunSystemTooltip(run) {
+  const status = String(run && run.systemStatus || "").trim();
+  if (!status) return "";
+  return `${status} — ${programRunElapsedLabel(run)}`;
+}
+
+
+function programRunStageLabel(run) {
+  if (!run || performance.now() >= run.deadlinePerf) return "";
+  switch (run.stage) {
+    case "pressed": return "pressed";
+    case "delivered": return "delivered";
+    case "first_output": return "first output";
+    case "planning_pass_done": return "planning pass done";
+    case "settling": return `${run.settledBlockCount}/${run.totalBlockCount} settled`;
+    default: return "";
+  }
+}
+
+function programRecordSettleFlourishes(id, previousPending, nextPending) {
+  if (!id || !previousPending || !nextPending) return;
+  const settled = [];
+  for (const ref of previousPending) if (!nextPending.has(ref)) settled.push(ref);
+  if (!settled.length) return;
+  const now = performance.now();
+  let byRef = state.program.settleById.get(id);
+  if (!byRef) { byRef = new Map(); state.program.settleById.set(id, byRef); }
+  for (const ref of settled) byRef.set(ref, now);
+  programScheduleSettlePrune();
+}
+
+function programPruneSettleFlourishes() {
+  const now = performance.now();
+  for (const [id, byRef] of state.program.settleById) {
+    for (const [ref, started] of byRef) {
+      if (now - started >= PROGRAM_SETTLE_FLASH_MS) byRef.delete(ref);
+    }
+    if (!byRef.size) state.program.settleById.delete(id);
+  }
+}
+
+function programScheduleSettlePrune() {
+  if (state.program.settleTimer) clearTimeout(state.program.settleTimer);
+  programPruneSettleFlourishes();
+  let nextMs = Infinity;
+  const now = performance.now();
+  for (const byRef of state.program.settleById.values()) {
+    for (const started of byRef.values()) {
+      nextMs = Math.min(nextMs, PROGRAM_SETTLE_FLASH_MS - (now - started));
+    }
+  }
+  if (!Number.isFinite(nextMs)) { state.program.settleTimer = 0; return; }
+  state.program.settleTimer = setTimeout(() => {
+    state.program.settleTimer = 0;
+    programPruneSettleFlourishes();
+    if (state.mode === "program") programApplyShimmer();
+    programScheduleSettlePrune();
+  }, Math.max(0, nextMs));
+}
+
+
+function programActiveLines(buffer, run, blocks) {
   const n = programLines(buffer).length;
   const active = new Array(n).fill(false);
+  const tooltips = new Array(n).fill("");
   let any = false;
   const spans = blocks && blocks.length ? blocks : programBlockSpans(buffer);
+  const pendingSet = run.pendingIds;
   const hasStableMatch = !!(blocks && blocks.length && spans.some((b) => pendingSet.has(b.id) || pendingSet.has(b.block_ref)));
+  const systemTooltip = programRunSystemTooltip(run);
   for (const b of spans) {
     const pending = hasStableMatch
       ? (pendingSet.has(b.id) || pendingSet.has(b.block_ref))
       : (pendingSet.has(b.id) || pendingSet.has(b.block_ref) || pendingSet.has(b.content_id));
     if (pending) {
+      const tooltip =
+        run.tooltips.get(b.id) ||
+        run.tooltips.get(b.block_ref) ||
+        run.tooltips.get(b.content_id) ||
+        systemTooltip ||
+        PROGRAM_SHIMMER_FALLBACK_TOOLTIP;
+      for (let i = b.start_line; i < b.end_line && i < n; i++) {
+        active[i] = true;
+        tooltips[i] = tooltip;
+        any = true;
+      }
+    }
+  }
+  return any ? { active, tooltips } : null;
+}
+
+function programSettleLines(buffer, settledSet, blocks) {
+  if (!settledSet || !settledSet.size || !blocks || !blocks.length) return null;
+  const n = programLines(buffer).length;
+  const active = new Array(n).fill(false);
+  let any = false;
+  const hasStableMatch = blocks.some((b) => settledSet.has(b.id) || settledSet.has(b.block_ref));
+  for (const b of blocks) {
+    const settling = hasStableMatch
+      ? (settledSet.has(b.id) || settledSet.has(b.block_ref))
+      : (settledSet.has(b.id) || settledSet.has(b.block_ref) || settledSet.has(b.content_id));
+    if (settling) {
       for (let i = b.start_line; i < b.end_line && i < n; i++) { active[i] = true; any = true; }
     }
   }
@@ -3714,21 +3896,29 @@ function programLineClipRanges(line) {
   return ranges;
 }
 
-// The friendly chip label the overlay paints in place of a raw `@{…}` clip
-// body — mirrors the TUI: `<glyph> <title> · <harness>` for a session, `✓ name`
-// for a harness, dropping the `clip_id=…` noise (spec 0059).
-function programClipLabel(body) {
+// Split a clip body (`session:abc`, `harness:codex`, or `session:abc
+// clip_id=3`) into its `(kind, id)`, mirroring the TUI's
+// `program_smart_clip_target`.
+function programClipTarget(body) {
   const first = (body.trim().split(/\s+/)[0]) || body;
   const colon = first.indexOf(":");
   const kind = colon === -1 ? "clip" : first.slice(0, colon);
   const id = colon === -1 ? first : first.slice(colon + 1);
+  return [kind, id];
+}
+
+// The friendly chip label the overlay paints in place of a raw `@{…}` clip
+// body — mirrors the TUI: `<glyph> <title> · <harness>` for a session, `✓ name`
+// for a harness, dropping the `clip_id=…` noise (spec 0059).
+function programClipLabel(body) {
+  const [kind, id] = programClipTarget(body);
   if (kind === "session") {
     const s = state.sessions.find((x) => x.id === id);
     if (s) {
       const title = (s.title && s.title.trim()) ? s.title : id.slice(0, 6);
       return `${sessionStatusGlyph(s)} ${title} · ${s.harness || "session"}`;
     }
-    return `session ${id}`;
+    return `⊘ ${id.slice(0, 6)} · missing`;
   }
   if (kind === "harness") {
     const h = state.harnesses.find((x) => x.name === id);
@@ -3739,16 +3929,69 @@ function programClipLabel(body) {
   return `${kind} ${id}`;
 }
 
+// Live session status backing a session smart-clip's badge, mirroring the
+// TUI: the session's own `state` word, or "missing" when the target id no
+// longer resolves against the fleet (deleted, archived, or never existed).
+function programSessionChipStatus(id) {
+  const s = state.sessions.find((x) => x.id === id);
+  return s ? sessionStatusLabel(s) : "missing";
+}
+
+// Plain-language hover tooltip for a session smart-clip's live status
+// (spec: program smart-clip status badges). Distinct wording from the raw
+// status word for the two cases a viewer actually reads on hover.
+function programSessionChipStatusTooltip(status) {
+  switch (status) {
+    case "pending": return "pending";
+    case "running": return "running";
+    case "awaiting_input": return "awaiting input";
+    case "paused": return "paused";
+    case "done": return "done";
+    case "errored": return "exited with error";
+    case "missing": return "session deleted";
+    default: return "";
+  }
+}
+
 // Build an atomic, content-fit chip widget for a raw `@{…}` clip. It is
 // contenteditable=false, so the browser treats it as one character: a single
 // cursor stop, and Backspace deletes the whole clip (the TUI's model, spec 0059).
+// A session-kind clip also carries a live status badge (`data-status` +
+// hover tooltip) driven by `state.sessions`, kept fresh by
+// `programUpdateChipStatuses` on every `session/state` push.
 function programChipEl(rawClip) {
   const span = document.createElement("span");
   span.className = "program-clip";
   span.setAttribute("contenteditable", "false");
   span.dataset.raw = rawClip;
-  span.textContent = programClipLabel(rawClip.slice(2, -1));
+  const body = rawClip.slice(2, -1);
+  span.textContent = programClipLabel(body);
+  const [kind, id] = programClipTarget(body);
+  if (kind === "session") {
+    const status = programSessionChipStatus(id);
+    span.dataset.status = status;
+    span.title = programSessionChipStatusTooltip(status);
+  }
   return span;
+}
+
+// Repaint every mounted session smart-clip chip referencing `sessionId` with
+// its current label/status/tooltip. Called on live `session/state` and
+// `session/deleted` pushes so a worker dying (or getting deleted) turns its
+// chip red — or struck-through — instantly without a full document
+// re-render (which would clobber the caret/selection mid-edit).
+function programUpdateChipStatuses(sessionId) {
+  if (!programInputEl) return;
+  const chips = programInputEl.querySelectorAll(".program-clip[data-raw]");
+  for (const chip of chips) {
+    const body = chip.dataset.raw.slice(2, -1);
+    const [kind, id] = programClipTarget(body);
+    if (kind !== "session" || id !== sessionId) continue;
+    const status = programSessionChipStatus(id);
+    chip.textContent = programClipLabel(body);
+    chip.dataset.status = status;
+    chip.title = programSessionChipStatusTooltip(status);
+  }
 }
 
 // Fill a line element with text nodes + atomic chip widgets for one source line.
@@ -4066,13 +4309,33 @@ function programApplyShimmer() {
   const id = state.program.mountedId;
   const lineEls = programInputEl.querySelectorAll(":scope > div");
   const run = id && state.program.runById.get(id);
-  let active = null;
+  let shimmer = null;
+  let settling = null;
   if (run && performance.now() < run.deadlinePerf) {
     const doc = state.program.docById.get(id);
     const cleanBlocks = doc && programNormalizeClipIds(programSerialize()) === doc.saved ? (doc.blocks || []) : null;
-    active = programActiveLines(programSerialize(), run.pendingIds, cleanBlocks);
+    shimmer = programActiveLines(programSerialize(), run, cleanBlocks);
   }
-  lineEls.forEach((el, i) => { el.classList.toggle("is-running", !!(active && active[i])); });
+  const settledRefs = id && state.program.settleById.get(id);
+  if (settledRefs && settledRefs.size) {
+    programPruneSettleFlourishes();
+    const doc = state.program.docById.get(id);
+    const cleanBlocks = doc && programNormalizeClipIds(programSerialize()) === doc.saved ? (doc.blocks || []) : null;
+    settling = cleanBlocks ? programSettleLines(programSerialize(), settledRefs, cleanBlocks) : null;
+  }
+  lineEls.forEach((el, i) => {
+    const running = !!(shimmer && shimmer.active[i]);
+    el.classList.toggle("is-running", running);
+    el.classList.toggle("is-settling", !running && !!(settling && settling[i]));
+    if (running) {
+      const label = shimmer.tooltips[i] || PROGRAM_SHIMMER_FALLBACK_TOOLTIP;
+      el.setAttribute("title", label);
+      el.setAttribute("aria-label", label);
+    } else {
+      el.removeAttribute("title");
+      el.removeAttribute("aria-label");
+    }
+  });
 }
 
 function programRunButtonActive(id) {
@@ -4089,13 +4352,15 @@ function programRefreshRunButton() {
   const id = state.program.mountedId;
   const active = !!(id && programRunButtonActive(id));
   programRunBtn.dataset.running = active ? "true" : "false";
+  const run = id && state.program.runById.get(id);
+  programRunStageEl.textContent = run ? programRunStageLabel(run) : "";
   if (state.program.runButtonTimer) {
     clearTimeout(state.program.runButtonTimer);
     state.program.runButtonTimer = 0;
   }
   if (!active || !id) return;
-  const run = state.program.runButtonById.get(id);
-  const ms = Math.max(0, run.deadlinePerf - performance.now());
+  const buttonRun = state.program.runButtonById.get(id);
+  const ms = Math.max(0, buttonRun.deadlinePerf - performance.now());
   state.program.runButtonTimer = setTimeout(() => {
     state.program.runButtonTimer = 0;
     state.program.runButtonById.delete(id);
@@ -4130,6 +4395,7 @@ function programEventClearsRunButton(event) {
 function programStartShimmer(id) {
   programStopShimmer();
   programApplyShimmer();
+  if (state.program.mountedId === id) programRefreshRunButton();
   const run = state.program.runById.get(id);
   if (!run) return;
   // Clear the highlight when the run's backstop deadline passes.
@@ -4137,7 +4403,7 @@ function programStartShimmer(id) {
   state.program.raf = setTimeout(() => {
     state.program.raf = 0;
     state.program.runById.delete(id);
-    if (state.program.mountedId === id) programApplyShimmer();
+    if (state.program.mountedId === id) { programApplyShimmer(); programRefreshRunButton(); }
   }, ms);
 }
 
@@ -4154,6 +4420,7 @@ function leaveProgramView() {
   programStopShimmer();
   if (state.program.runButtonTimer) { clearTimeout(state.program.runButtonTimer); state.program.runButtonTimer = 0; }
   programRunBtn.dataset.running = "false";
+  programRunStageEl.textContent = "";
   programCloseClipMenu();
   programCloseFind();
   programWrapEl.hidden = true;
@@ -4330,6 +4597,9 @@ function handleProgramState(params) {
   const program = params.program;
   if (!program) return;
   const id = program.session_id;
+  const previousRun = state.program.runById.get(id);
+  const nextPending = params.active_run ? programPendingIdsFromProgress(params.active_run) : null;
+  if (previousRun && nextPending) programRecordSettleFlourishes(id, previousRun.pendingIds, nextPending);
   const run = programRunFromProgress(params.active_run);
   if (run) state.program.runById.set(id, run); else state.program.runById.delete(id);
   if (!run || run.firstOutputSeen) programClearRunButton(id);
@@ -4494,11 +4764,21 @@ function programStartOptimisticRun(id, body, isSelection, selectedBlockIds, prev
   }
   if (!pending.size) {
     state.program.runById.delete(id);
-    if (state.program.mountedId === id) { programStopShimmer(); programApplyShimmer(); }
+    if (state.program.mountedId === id) { programStopShimmer(); programApplyShimmer(); programRefreshRunButton(); }
     return { pendingIds: pending, shimmer: spans.map(() => false) };
   }
   const perf = performance.now();
-  state.program.runById.set(id, { pendingIds: pending, tooltips: new Map(), startPerf: perf, deadlinePerf: perf + PROGRAM_RUN_MAX_MS });
+  state.program.runById.set(id, {
+    pendingIds: pending,
+    tooltips: new Map(),
+    systemStatus: "",
+    startPerf: perf,
+    deadlinePerf: perf + PROGRAM_RUN_MAX_MS,
+    firstOutputSeen: false,
+    stage: "pressed",
+    settledBlockCount: 0,
+    totalBlockCount: pending.size,
+  });
   if (state.program.mountedId === id) programStartShimmer(id);
   return { pendingIds: pending, shimmer: spans.map((b) => pending.has(b.id)) };
 }
@@ -6788,6 +7068,10 @@ function handleNotification(method, params) {
     const i = state.sessions.findIndex((s) => s.id === session.id);
     if (i >= 0) state.sessions[i] = session;
     else state.sessions.push(session);
+    // Repaint any mounted Program smart-clip chips referencing this session
+    // in place — a worker dying should turn its chip red instantly, without
+    // waiting for (or forcing) a full document re-render.
+    programUpdateChipStatuses(session.id);
     const status = sessionStatusLabel(session);
     if (status !== "running" && status !== "pending") {
       state.chatWorkingById.delete(session.id);
@@ -6814,6 +7098,8 @@ function handleNotification(method, params) {
       }
     }
     state.sessions = state.sessions.filter((s) => s.id !== params.session_id);
+    // Any chip referencing the now-gone session flips to "missing".
+    programUpdateChipStatuses(params.session_id);
     scheduleRenderSessions();
     state.editorById.delete(params.session_id);
     state.agentStatusById.delete(params.session_id);
@@ -6822,6 +7108,7 @@ function handleNotification(method, params) {
     state.widgetsById.delete(params.session_id);
     state.program.docById.delete(params.session_id);
     state.program.runById.delete(params.session_id);
+    state.program.settleById.delete(params.session_id);
     if (state.viewModeById.delete(params.session_id)) saveViewModePrefs();
     clearBrowserPreview(params.session_id);
     if (params.session_id === state.currentId) {
