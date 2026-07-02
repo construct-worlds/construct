@@ -7646,6 +7646,11 @@ fn program_popup_crop_region(base_rect: Rect, popup_rect: Rect, buffer_area: Rec
     (region.width > 0 && region.height > 0).then_some(region)
 }
 
+fn program_popup_paint_rect(popup_rect: Rect, buffer_area: Rect) -> Option<Rect> {
+    let rect = popup_rect.intersection(buffer_area);
+    (rect.width > 0 && rect.height > 0).then_some(rect)
+}
+
 /// Snapshot the cells of `region` so painting over them can be undone.
 fn snapshot_buffer_region(buf: &Buffer, region: Rect) -> Vec<ratatui::buffer::Cell> {
     let mut cells = Vec::with_capacity(region.width as usize * region.height as usize);
@@ -8140,11 +8145,16 @@ fn render_program_popup_at(
         0.0
     };
     let rect = program_popup_visible_rect(base_rect, visible_h, slide);
+    let buffer_area = f.buffer_mut().area;
+    let Some(paint_rect) = program_popup_paint_rect(rect, buffer_area) else {
+        return None;
+    };
     // Crop the slide overhang: snapshot the strip right of the owning pane
     // before painting anything, and restore it once the popup (border, title
     // bar, contents, tooltips) has been drawn — the popup must never bleed
-    // into a neighboring pane.
-    let crop = program_popup_crop_region(base_rect, rect, f.buffer_mut().area);
+    // into a neighboring pane. If the overhang is beyond the terminal's right
+    // edge, `paint_rect` below clips drawing to the frame buffer instead.
+    let crop = program_popup_crop_region(base_rect, rect, buffer_area);
     let crop_snapshot = crop.map(|region| snapshot_buffer_region(f.buffer_mut(), region));
 
     let summary = app
@@ -8247,13 +8257,15 @@ fn render_program_popup_at(
     // top of this, but the sticky-widget popover must use the un-padded border
     // inner so its top sits exactly one row below the title bar — the same
     // y-position as the normal session view (see the widget reveal below).
-    let block_inner = block.inner(rect);
-    let inner = block_inner.inner(Margin {
-        horizontal: PROGRAM_CONTENT_PADDING_X,
-        vertical: PROGRAM_CONTENT_PADDING_Y,
-    });
-    f.render_widget(Clear, rect);
-    f.render_widget(block, rect);
+    let block_inner = block.inner(paint_rect);
+    let inner = block_inner
+        .inner(Margin {
+            horizontal: PROGRAM_CONTENT_PADDING_X,
+            vertical: PROGRAM_CONTENT_PADDING_Y,
+        })
+        .intersection(buffer_area);
+    f.render_widget(Clear, paint_rect);
+    f.render_widget(block, paint_rect);
 
     let selection = program_selection_range(popup);
     let search = popup
@@ -8371,7 +8383,7 @@ fn render_program_popup_at(
     if active && !popup.closing {
         render_program_selection_context_menu(f, app, popup, scroll_offset, inner);
     }
-    render_program_title_tooltip(f, app, popup, summary_ref, rect);
+    render_program_title_tooltip(f, app, popup, summary_ref, paint_rect);
     // Undo everything painted right of the owning pane: this is what crops the
     // slid popup's border/title/contents at the pane edge.
     if let (Some(region), Some(saved)) = (crop, crop_snapshot) {
@@ -12078,6 +12090,25 @@ mod tests {
         // ratatui already clips it, so there is nothing to restore.
         let narrow_buffer = Rect::new(0, 0, 110, 50);
         assert_eq!(program_popup_crop_region(base, slid, narrow_buffer), None);
+    }
+
+    #[test]
+    fn program_popup_paint_rect_clips_terminal_right_edge() {
+        let buffer_area = Rect::new(0, 0, 110, 50);
+        let base = Rect::new(10, 4, 100, 30);
+        let slid = program_popup_visible_rect(base, 20, 1.0);
+
+        assert_eq!(slid.right(), 130, "setup should overhang the terminal");
+        assert_eq!(
+            program_popup_crop_region(base, slid, buffer_area),
+            None,
+            "off-screen overhang has no neighboring-pane strip to restore"
+        );
+        assert_eq!(
+            program_popup_paint_rect(slid, buffer_area),
+            Some(Rect::new(30, 4, 80, 20)),
+            "painting must be clipped to the frame buffer before widgets render"
+        );
     }
 
     #[test]
