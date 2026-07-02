@@ -10853,17 +10853,18 @@ fn program_session_clip_status(app: &App, raw_clip: &str) -> Option<SessionState
 
 /// Chip background for a session smart-clip, driven by the target session's
 /// live `SessionState` (spec 0027 theme slots, so it stays readable in both
-/// palettes). `Done` intentionally matches the old fixed `accent_alt` chip
-/// color (the two slots are the same color in both palettes) so a settled
-/// reference looks the same as before this badge existed; every other status
-/// gets its own color so a state change — especially a worker dying — is
-/// visible at a glance without reading the label text.
+/// palettes). `Running`/`AwaitingInput` and `Done` intentionally share the
+/// same fixed `accent_alt` chip color (the two slots are the same color in
+/// both palettes) so a clip's color doesn't change as its target session
+/// finishes — only genuinely divergent states (queued, paused, errored, or
+/// unresolved) get their own color.
 fn program_session_chip_bg(theme: &Theme, status: Option<SessionState>) -> ratatui::style::Color {
     match status {
         Some(SessionState::Pending) => theme.muted,
-        Some(SessionState::Running) | Some(SessionState::AwaitingInput) => theme.success,
+        Some(SessionState::Running)
+        | Some(SessionState::AwaitingInput)
+        | Some(SessionState::Done) => theme.info,
         Some(SessionState::Paused) => theme.warning,
-        Some(SessionState::Done) => theme.info,
         Some(SessionState::Errored) => theme.danger,
         None => theme.muted,
     }
@@ -11434,11 +11435,11 @@ mod tests {
         );
         assert_eq!(
             program_session_chip_bg(&theme, Some(SessionState::Running)),
-            theme.success
+            theme.info
         );
         assert_eq!(
             program_session_chip_bg(&theme, Some(SessionState::AwaitingInput)),
-            theme.success
+            theme.info
         );
         assert_eq!(
             program_session_chip_bg(&theme, Some(SessionState::Paused)),
