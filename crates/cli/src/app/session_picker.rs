@@ -52,7 +52,8 @@ impl SessionPickerDialog {
 }
 
 /// A materialized row in the dialog body. Only [`SessionPickerRow::Session`]
-/// rows with `dimmed == false` are selectable; headers are decoration.
+/// rows with `dimmed == false` and [`SessionPickerRow::ProgramBlock`] rows are
+/// selectable; headers are decoration.
 #[derive(Debug, Clone)]
 pub enum SessionPickerRow {
     /// A project/group header. `expanded` controls whether its members follow;
@@ -74,13 +75,20 @@ pub enum SessionPickerRow {
         indented: bool,
         dimmed: bool,
     },
+    /// Separator row introducing the currently open program's blocks (see
+    /// [`SessionPickerRow::ProgramBlock`]). Only present for the `C-x b`
+    /// switcher, and only when a program is open.
+    ProgramHeader,
+    /// A block from the currently open program. Selecting it closes the
+    /// picker, brings the program view into focus, and scrolls to the block.
+    ProgramBlock { text: String, start_line: usize },
 }
 
 impl SessionPickerRow {
     pub fn is_selectable(&self) -> bool {
         matches!(
             self,
-            SessionPickerRow::Session { dimmed: false, .. }
+            SessionPickerRow::Session { dimmed: false, .. } | SessionPickerRow::ProgramBlock { .. }
         )
     }
 }
@@ -260,6 +268,37 @@ impl App {
                 push_archive_section(&mut out, &archived, has_query, true, &matched);
             }
         }
+
+        // The currently open program's blocks, so `C-x b` can also jump
+        // straight to a block. Only for the plain switcher — the `@`→session
+        // clip variant expects only `Session` rows among the selectable set.
+        if matches!(
+            self.session_picker.as_ref().map(|d| &d.purpose),
+            Some(SessionPickerPurpose::Switch)
+        ) {
+            if let Some(popup) = self.program_popup.as_ref().filter(|p| !p.closing) {
+                let query_lower = query.to_ascii_lowercase();
+                let block_rows: Vec<SessionPickerRow> = program_blocks(&popup.buffer)
+                    .into_iter()
+                    .filter_map(|b| {
+                        let text = popup.buffer.lines().nth(b.start_line)?.trim();
+                        (!text.is_empty()).then_some((text, b.start_line))
+                    })
+                    .filter(|(text, _)| {
+                        !has_query || text.to_ascii_lowercase().contains(&query_lower)
+                    })
+                    .take(10)
+                    .map(|(text, start_line)| SessionPickerRow::ProgramBlock {
+                        text: truncate_block_text(text),
+                        start_line,
+                    })
+                    .collect();
+                if !block_rows.is_empty() {
+                    out.push(SessionPickerRow::ProgramHeader);
+                    out.extend(block_rows);
+                }
+            }
+        }
         out
     }
 
@@ -409,7 +448,8 @@ impl App {
         }
     }
 
-    /// Act on the highlighted session: switch focus to it, or insert its clip.
+    /// Act on the highlighted row: switch focus to a session, insert its
+    /// clip, or jump the program view to a picked block.
     fn confirm_session_picker(&mut self) {
         let Some(purpose) = self.session_picker.as_ref().map(|d| d.purpose.clone()) else {
             return;
@@ -419,37 +459,70 @@ impl App {
             .as_ref()
             .map(|d| d.selected)
             .unwrap_or(0);
-        let chosen: Vec<SessionSummary> = self
+        let chosen: Vec<SessionPickerRow> = self
             .session_picker_rows()
             .into_iter()
-            .filter_map(|r| match r {
-                SessionPickerRow::Session {
-                    summary,
-                    dimmed: false,
-                    ..
-                } => Some(summary),
-                _ => None,
-            })
+            .filter(SessionPickerRow::is_selectable)
             .collect();
         if chosen.is_empty() {
             self.cancel_session_picker();
             self.set_status("no session matches".to_string());
             return;
         }
-        let summary = chosen[selected.min(chosen.len() - 1)].clone();
+        let row = chosen[selected.min(chosen.len() - 1)].clone();
         self.session_picker = None;
-        match purpose {
-            SessionPickerPurpose::Switch => {
-                let label = session_switch_label(&summary);
-                self.select_session(summary.id.clone());
-                self.sync_active_window_selection();
-                self.focus = PaneFocus::View;
-                self.set_status(format!("window → {label}"));
+        match row {
+            SessionPickerRow::Session { summary, .. } => match purpose {
+                SessionPickerPurpose::Switch => {
+                    let label = session_switch_label(&summary);
+                    self.select_session(summary.id.clone());
+                    self.sync_active_window_selection();
+                    self.focus = PaneFocus::View;
+                    self.set_status(format!("window → {label}"));
+                }
+                SessionPickerPurpose::InsertProgramClip => {
+                    let candidate = Self::session_smart_clip_candidate(&summary);
+                    self.insert_program_smart_clip_candidate(&candidate);
+                }
+            },
+            SessionPickerRow::ProgramBlock { text, start_line } => {
+                self.jump_to_program_block(start_line);
+                self.set_status(format!("program → {text}"));
             }
-            SessionPickerPurpose::InsertProgramClip => {
-                let candidate = Self::session_smart_clip_candidate(&summary);
-                self.insert_program_smart_clip_candidate(&candidate);
-            }
+            SessionPickerRow::GroupHeader { .. }
+            | SessionPickerRow::ArchiveHeader { .. }
+            | SessionPickerRow::ProgramHeader => {}
+        }
+    }
+
+    /// Scroll the currently open program view to `start_line` (a source-line
+    /// index into its markdown), e.g. after picking a block from the `C-x b`
+    /// picker. The program is already open — its blocks are only listed in
+    /// the picker while it is — so this just brings it into keyboard focus
+    /// (undoing a terminal-focus slide) and moves the scroll to the block.
+    fn jump_to_program_block(&mut self, start_line: usize) {
+        let Some(inner) = self.layout.program_inner_area else {
+            return;
+        };
+        let width = inner.width as usize;
+        if width == 0 {
+            return;
+        }
+        let Some(popup) = self.program_popup.as_ref() else {
+            return;
+        };
+        let offset: usize = popup
+            .buffer
+            .lines()
+            .take(start_line)
+            .map(|line| line.chars().count() + 1)
+            .sum();
+        let visual_row =
+            crate::ui::program_cursor_visual_row(Some(self), &popup.buffer, offset, width);
+        self.focus = PaneFocus::View;
+        self.set_program_terminal_focus(false);
+        if let Some(popup) = self.program_popup.as_mut() {
+            popup.scroll_offset = visual_row;
         }
     }
 
@@ -487,6 +560,24 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// Max display characters for a [`SessionPickerRow::ProgramBlock`] label, so a
+/// long block's first line can't blow out the dialog's fixed row width.
+const PROGRAM_BLOCK_TEXT_MAX_CHARS: usize = 60;
+
+/// Clip a program block's first line to [`PROGRAM_BLOCK_TEXT_MAX_CHARS`],
+/// appending `…` when it didn't fit.
+fn truncate_block_text(text: &str) -> String {
+    if text.chars().count() <= PROGRAM_BLOCK_TEXT_MAX_CHARS {
+        return text.to_string();
+    }
+    let mut out: String = text
+        .chars()
+        .take(PROGRAM_BLOCK_TEXT_MAX_CHARS.saturating_sub(1))
+        .collect();
+    out.push('…');
+    out
 }
 
 /// Append an "N archived" disclosure row (and, when it should be open, its

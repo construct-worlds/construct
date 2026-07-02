@@ -9838,6 +9838,24 @@ fn render_session_picker_row(
                 Span::styled(harness, harness_style),
             ])
         }
+        SessionPickerRow::ProgramHeader => Line::from(Span::styled(
+            "▾ Program",
+            Style::default()
+                .fg(app.theme.group)
+                .add_modifier(Modifier::BOLD),
+        )),
+        SessionPickerRow::ProgramBlock { text, .. } => {
+            let prefix = if selected { ">" } else { " " };
+            let style = if selected {
+                Style::default()
+                    .fg(app.theme.highlight_fg)
+                    .bg(app.theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.dim)
+            };
+            Line::from(Span::styled(format!("{prefix}   {text}"), style))
+        }
     }
 }
 
