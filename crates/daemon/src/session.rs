@@ -1959,7 +1959,13 @@ impl SessionManager {
         // Seed the run's pending set over every dispatched item now that every
         // subagent exists, so the response/active_run projection reflects the
         // started run (spec 0042) even before the edit below lands.
-        self.start_program_run(session_id, body, true, Some(&vec![true; items.len()]));
+        self.start_program_run_with_dispatch_state(
+            session_id,
+            body,
+            true,
+            Some(&vec![true; items.len()]),
+            false,
+        );
 
         let edit_result = self
             .program_edit_from_conn(
