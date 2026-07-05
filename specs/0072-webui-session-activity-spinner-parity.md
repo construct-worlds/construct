@@ -1,4 +1,4 @@
-# 0070-webui-session-activity-spinner-parity
+# 0072-webui-session-activity-spinner-parity
 
 Status: accepted
 Date: 2026-07-06
