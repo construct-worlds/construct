@@ -73,6 +73,8 @@ pub(crate) const PROGRAM_RUN_MAX_MS: u64 = 10 * 60 * 1000;
 /// *after* the first has already finished its save/execute round trip, but
 /// short enough that a deliberate re-Run a moment later still goes through.
 pub(crate) const PROGRAM_RUN_DEDUP_WINDOW_MS: u64 = 1500;
+pub(crate) const DAEMON_BUILD_MISMATCH_NOTICE: &str =
+    "daemon build differs - restart daemon";
 /// One-shot flourish shown when an authoritative program Run pending block
 /// settles. Presentation-only and client-local.
 pub(crate) const PROGRAM_SETTLE_FLASH_MS: u64 = 300;
@@ -200,6 +202,16 @@ fn pane_sizes_diverged(
     visible
         .iter()
         .any(|(id, size)| last_sent.get(id) != Some(size))
+}
+
+pub(crate) fn daemon_build_mismatch_notice(
+    client_build_id: &str,
+    daemon_build_id: Option<&str>,
+) -> Option<&'static str> {
+    match daemon_build_id {
+        Some(daemon_build_id) if daemon_build_id == client_build_id => None,
+        _ => Some(DAEMON_BUILD_MISMATCH_NOTICE),
+    }
 }
 
 pub(crate) fn list_session_indent_cells(
@@ -806,6 +818,10 @@ pub struct App {
     /// None). Rendered right-aligned at the far edge of the modeline, so it
     /// coexists with a transient `status` message shown inline on the left.
     pub update_notice: Option<String>,
+    /// Persistent advisory that the connected daemon is not the same build as
+    /// this client. Missing daemon build ids count as a mismatch because that
+    /// is how a new TUI recognizes an older stale daemon.
+    pub daemon_build_mismatch: bool,
     pub last_diff: Option<String>,
     pub should_quit: bool,
     pub connected: bool,
@@ -2520,6 +2536,7 @@ async fn run_with_socket_initial_selection(
         chord_label: String::new(),
         status: None,
         update_notice: None,
+        daemon_build_mismatch: false,
         last_diff: None,
         should_quit: false,
         connected: true,
@@ -2623,6 +2640,7 @@ async fn run_with_socket_initial_selection(
     if let Some(warning) = theme_warning {
         app.status = Some((warning, Instant::now()));
     }
+    app.refresh_daemon_build_mismatch().await;
     // Default to Terminal view when the currently-selected session has a PTY.
     if app.selected_session().map(|s| s.has_pty).unwrap_or(false) {
         app.set_active_view(ViewMode::Terminal);
@@ -3244,6 +3262,7 @@ impl App {
         // histories so the visible/pinned sessions re-hydrate from the
         // daemon's (now clean) pty.log, mirroring the daemon-side truncate.
         self.histories.clear();
+        self.refresh_daemon_build_mismatch().await;
         self.connected = true;
         self.ensure_selection_valid();
         self.orchestrator_id = self
@@ -3262,6 +3281,13 @@ impl App {
 
     pub fn set_status(&mut self, msg: String) {
         self.status = Some((msg, Instant::now()));
+    }
+
+    pub(crate) async fn refresh_daemon_build_mismatch(&mut self) {
+        if let Ok(ping) = self.client.ping().await {
+            self.daemon_build_mismatch =
+                daemon_build_mismatch_notice(crate::BUILD_ID, ping.build_id.as_deref()).is_some();
+        }
     }
 
     fn insert_browser_preview(
@@ -9448,6 +9474,7 @@ mod tests {
             chord_label: String::new(),
             status: None,
             update_notice: None,
+            daemon_build_mismatch: false,
             last_diff: None,
             should_quit: false,
             connected: true,
@@ -9539,6 +9566,120 @@ mod tests {
             pty_input_tx,
             pty_input_errors,
         }
+    }
+
+    #[test]
+    fn daemon_build_compare_equal_has_no_warning() {
+        assert_eq!(
+            daemon_build_mismatch_notice("0.1.0+abc123", Some("0.1.0+abc123")),
+            None
+        );
+    }
+
+    #[test]
+    fn daemon_build_compare_different_warns() {
+        assert_eq!(
+            daemon_build_mismatch_notice("0.1.0+abc123", Some("0.1.0+def456")),
+            Some(DAEMON_BUILD_MISMATCH_NOTICE)
+        );
+    }
+
+    #[test]
+    fn daemon_build_compare_absent_warns() {
+        assert_eq!(
+            daemon_build_mismatch_notice("0.1.0+abc123", None),
+            Some(DAEMON_BUILD_MISMATCH_NOTICE)
+        );
+    }
+
+    async fn app_with_ping_build_response(
+        result: serde_json::Value,
+    ) -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        use agentd_client::Client;
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use tempfile::tempdir;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let result = result.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut reader = BufReader::new(reader);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        let Ok(n) = reader.read_line(&mut line).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+                            continue;
+                        };
+                        let id = req.get("id").cloned().unwrap_or(Value::Null);
+                        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                        let result = if method == ipc_method::PING {
+                            result.clone()
+                        } else {
+                            Value::Null
+                        };
+                        let resp = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": result,
+                        });
+                        if writer
+                            .write_all((resp.to_string() + "\n").as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        let client = Client::connect(&sock).await.expect("client connects");
+        let app = test_app(client, Vec::new());
+        (app, dir, server)
+    }
+
+    #[tokio::test]
+    async fn mock_daemon_ping_without_build_id_enters_mismatch_state() {
+        let (mut app, _dir, server) =
+            app_with_ping_build_response(serde_json::json!({"pong": true, "version": "test"}))
+                .await;
+
+        app.refresh_daemon_build_mismatch().await;
+
+        assert!(app.daemon_build_mismatch);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mock_daemon_ping_with_matching_build_id_has_no_mismatch() {
+        let (mut app, _dir, server) = app_with_ping_build_response(serde_json::json!({
+            "pong": true,
+            "version": "test",
+            "build_id": crate::BUILD_ID
+        }))
+        .await;
+
+        app.refresh_daemon_build_mismatch().await;
+
+        assert!(!app.daemon_build_mismatch);
+        server.abort();
     }
 
     #[test]

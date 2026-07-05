@@ -13,6 +13,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 mod adapter;
 mod availability;
@@ -27,6 +28,16 @@ mod tunnel;
 mod worktree;
 
 use agentd_protocol::paths::Paths;
+
+static BUILD_ID: OnceLock<&'static str> = OnceLock::new();
+
+pub fn set_build_id(build_id: &'static str) {
+    let _ = BUILD_ID.set(build_id);
+}
+
+pub(crate) fn build_id() -> &'static str {
+    BUILD_ID.get().copied().unwrap_or("unknown")
+}
 
 /// The embedded default config TOML, surfaced by the `default-config`
 /// subcommand on both daemon entry points.

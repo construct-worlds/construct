@@ -19,6 +19,8 @@ mod upgrade;
 use agentd_client::Client;
 use agentd_protocol::paths::Paths;
 
+pub(crate) const BUILD_ID: &str = env!("CONSTRUCT_BUILD_ID");
+
 #[derive(Debug, Parser)]
 #[command(
     name = "construct",
@@ -289,6 +291,7 @@ async fn main() -> Result<()> {
     } = command
     {
         agentd::init_tracing();
+        agentd::set_build_id(BUILD_ID);
         return match daemon_cmd.unwrap_or(DaemonCommand::Run) {
             DaemonCommand::Run => agentd::run(cli.socket).await,
             DaemonCommand::Start => daemon_start(cli.socket).await,
@@ -331,7 +334,13 @@ async fn main() -> Result<()> {
         Command::Ping => {
             let c = connect(&socket).await?;
             let r = c.ping().await?;
+            let daemon_build = r.build_id.as_deref().unwrap_or("unknown");
+            let build_mismatch =
+                app::daemon_build_mismatch_notice(BUILD_ID, r.build_id.as_deref()).is_some();
             println!("pong: {}, version: {}", r.pong, r.version);
+            println!("client_build: {}", BUILD_ID);
+            println!("daemon_build: {}", daemon_build);
+            println!("build_mismatch: {}", build_mismatch);
             Ok(())
         }
         Command::Harnesses => {

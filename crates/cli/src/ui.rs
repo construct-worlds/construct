@@ -5957,12 +5957,18 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     );
     f.render_widget(para, area);
 
-    // Persistent "update available" notice, right-aligned at the far edge of
-    // the status bar so it stays visible until upgrade without crowding the
-    // left-aligned modeline (transient `status` messages still render inline).
+    // Persistent notices, right-aligned at the far edge of the status bar so
+    // they stay visible without crowding transient inline status messages.
+    let mut persistent_notices = Vec::new();
+    if app.daemon_build_mismatch {
+        persistent_notices.push(crate::app::DAEMON_BUILD_MISMATCH_NOTICE);
+    }
     if let Some(notice) = app.update_notice.as_deref() {
+        persistent_notices.push(notice);
+    }
+    if !persistent_notices.is_empty() {
         use unicode_width::UnicodeWidthStr;
-        let text = format!(" {notice} ");
+        let text = format!(" {} ", persistent_notices.join(" | "));
         let w = UnicodeWidthStr::width(text.as_str()) as u16;
         if w > 0 && w < area.width {
             let nrect = Rect {

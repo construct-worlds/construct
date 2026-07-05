@@ -1078,6 +1078,7 @@ async fn dispatch(
             &PingResult {
                 pong: true,
                 version: IPC_VERSION.to_string(),
+                build_id: Some(crate::build_id().to_string()),
             }
         )
     });
