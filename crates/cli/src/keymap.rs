@@ -386,10 +386,6 @@ fn vim() -> Keymap {
         (Chord(vec![ctrl('x'), ch(']')]), ScrollPageDown),
         (Chord(vec![key(KeyCode::PageUp)]), ScrollPageUp),
         (Chord(vec![key(KeyCode::PageDown)]), ScrollPageDown),
-        (Chord(vec![ctrl('x'), ch('{')]), ScrollTop),
-        (Chord(vec![ctrl('x'), shift('{')]), ScrollTop),
-        (Chord(vec![ctrl('x'), ch('}')]), ScrollBottom),
-        (Chord(vec![ctrl('x'), shift('}')]), ScrollBottom),
         (Chord(vec![ctrl('f')]), ScrollPageDown),
         (Chord(vec![ctrl('b')]), ScrollPageUp),
         (Chord(vec![ch('g'), ch('g')]), ScrollTop),
@@ -473,6 +469,10 @@ mod tests {
         ));
     }
 
+    /// `C-x {` / `C-x }` mean horizontal resize in both profiles. The vim
+    /// table used to also bind them to ScrollTop/ScrollBottom; last-match-wins
+    /// dispatch made the resize bindings silently dead there (`gg`/`G` already
+    /// cover scroll top/bottom in vim).
     #[test]
     fn c_x_bracket_scroll_chords_work_in_vim_profile() {
         let km = default_for(Profile::Vim);
@@ -486,20 +486,44 @@ mod tests {
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), ch('{')]),
-            KeymapResult::Action(KeyAction::ScrollTop)
+            KeymapResult::Action(KeyAction::ShrinkWindowHorizontally)
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), shift('{')]),
-            KeymapResult::Action(KeyAction::ScrollTop)
+            KeymapResult::Action(KeyAction::ShrinkWindowHorizontally)
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), ch('}')]),
-            KeymapResult::Action(KeyAction::ScrollBottom)
+            KeymapResult::Action(KeyAction::EnlargeWindowHorizontally)
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), shift('}')]),
-            KeymapResult::Action(KeyAction::ScrollBottom)
+            KeymapResult::Action(KeyAction::EnlargeWindowHorizontally)
         ));
+    }
+
+    /// Chord dispatch is last-match-wins, so a chord bound twice silently
+    /// disables the earlier binding. Keep every profile's table free of
+    /// duplicates.
+    #[test]
+    fn no_duplicate_chords_in_any_profile() {
+        for profile in [Profile::Emacs, Profile::Vim] {
+            let km = default_for(profile);
+            for (i, (chord_a, action_a)) in km.bindings.iter().enumerate() {
+                for (chord_b, action_b) in km.bindings.iter().skip(i + 1) {
+                    assert!(
+                        chord_a != chord_b,
+                        "{profile:?}: chord {} bound to both {action_a:?} and {action_b:?}",
+                        chord_a
+                            .0
+                            .iter()
+                            .map(format_key)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
+            }
+        }
     }
 
     #[test]

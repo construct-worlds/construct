@@ -7206,7 +7206,13 @@ impl App {
         if self.program_popup.is_some() {
             return false;
         }
-        should_autofocus_view_from_list(self.focus, self.zoom, self.chord_state.is_empty(), key)
+        should_autofocus_view_from_list(
+            self.profile,
+            self.focus,
+            self.zoom,
+            self.chord_state.is_empty(),
+            key,
+        )
     }
 
     /// True when keystrokes should be forwarded to the session's PTY by
@@ -22619,11 +22625,18 @@ fn encode_key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
 }
 
 fn should_autofocus_view_from_list(
+    profile: Profile,
     focus: PaneFocus,
     zoom: ZoomMode,
     chord_is_empty: bool,
     key: KeyEvent,
 ) -> bool {
+    // The vim profile binds bare letters as commands (j/k navigation, gg, …),
+    // so typing in the list must reach the keymap — never auto-focus the view,
+    // where a live PTY would swallow the letter as terminal input.
+    if profile == Profile::Vim {
+        return false;
+    }
     if focus != PaneFocus::List || !matches!(zoom, ZoomMode::None) {
         return false;
     }
@@ -22662,7 +22675,7 @@ fn drainable_mouse_burst_kind(kind: &MouseEventKind) -> bool {
 mod drain_gate_tests {
     use super::{
         should_autofocus_view_from_list, should_drain_after, url_range_at_col, url_ranges,
-        PaneFocus, ZoomMode,
+        PaneFocus, Profile, ZoomMode,
     };
     use crossterm::event::{
         Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
@@ -22724,12 +22737,14 @@ mod drain_gate_tests {
     #[test]
     fn list_focus_plain_letters_autofocus_view_only_when_unzoomed() {
         assert!(should_autofocus_view_from_list(
+            Profile::Emacs,
             PaneFocus::List,
             ZoomMode::None,
             true,
             autofocus_key(KeyCode::Char('a')),
         ));
         assert!(should_autofocus_view_from_list(
+            Profile::Emacs,
             PaneFocus::List,
             ZoomMode::None,
             true,
@@ -22737,12 +22752,14 @@ mod drain_gate_tests {
         ));
 
         assert!(!should_autofocus_view_from_list(
+            Profile::Emacs,
             PaneFocus::List,
             ZoomMode::List,
             true,
             autofocus_key(KeyCode::Char('a')),
         ));
         assert!(!should_autofocus_view_from_list(
+            Profile::Emacs,
             PaneFocus::List,
             ZoomMode::View,
             true,
@@ -22750,39 +22767,62 @@ mod drain_gate_tests {
         ));
     }
 
+    /// The vim profile binds bare letters as commands (`j`/`k` navigation,
+    /// `gg`, …). Autofocus-on-typing must never fire there: it would flip
+    /// focus to the view and, with a live PTY selected, forward the letter
+    /// into the child session instead of the keymap.
+    #[test]
+    fn vim_profile_never_autofocuses_view_on_typing() {
+        for c in ['a', 'j', 'k', 'Z'] {
+            assert!(!should_autofocus_view_from_list(
+                Profile::Vim,
+                PaneFocus::List,
+                ZoomMode::None,
+                true,
+                autofocus_key(KeyCode::Char(c)),
+            ));
+        }
+    }
+
     #[test]
     fn list_focus_autofocus_ignores_shortcuts_chords_and_non_letters() {
         assert!(!should_autofocus_view_from_list(
+            Profile::Emacs,
             PaneFocus::View,
             ZoomMode::None,
             true,
             autofocus_key(KeyCode::Char('a')),
         ));
         assert!(!should_autofocus_view_from_list(
+            Profile::Emacs,
             PaneFocus::List,
             ZoomMode::None,
             false,
             autofocus_key(KeyCode::Char('a')),
         ));
         assert!(!should_autofocus_view_from_list(
+            Profile::Emacs,
             PaneFocus::List,
             ZoomMode::None,
             true,
             autofocus_key_with_modifiers(KeyCode::Char('a'), KeyModifiers::CONTROL),
         ));
         assert!(!should_autofocus_view_from_list(
+            Profile::Emacs,
             PaneFocus::List,
             ZoomMode::None,
             true,
             autofocus_key_with_modifiers(KeyCode::Char('a'), KeyModifiers::ALT),
         ));
         assert!(!should_autofocus_view_from_list(
+            Profile::Emacs,
             PaneFocus::List,
             ZoomMode::None,
             true,
             autofocus_key(KeyCode::Char('1')),
         ));
         assert!(!should_autofocus_view_from_list(
+            Profile::Emacs,
             PaneFocus::List,
             ZoomMode::None,
             true,

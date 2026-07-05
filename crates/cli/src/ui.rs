@@ -6579,7 +6579,6 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     C-x [ / C-x ]   scroll page up/down
     C-f / C-b       scroll page down/up
     g g / G         scroll top / bottom
-    C-x { / C-x }   scroll top / bottom
 
   pinning (live tile in the pin strip below the main view)
     Space / p       toggle pin on selected session
