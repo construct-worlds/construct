@@ -142,10 +142,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_popover_area = None;
     app.layout.dynamic_ui_scroll_metrics = None;
     let area = f.area();
-    if let Some(background) = app.theme.background {
-        f.buffer_mut()
-            .set_style(area, Style::default().bg(background));
-    }
     match app.zoom {
         ZoomMode::View => {
             render_zoomed_view(f, area, app);
@@ -302,6 +298,24 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     capture_frame_text(f, app);
     render_hovered_url(f, app);
     render_text_selection(f, app);
+    paint_default_backgrounds(f, app.theme.background);
+}
+
+fn paint_default_backgrounds(f: &mut Frame, background: Option<Color>) {
+    let Some(background) = background else {
+        return;
+    };
+    let area = *f.buffer_mut().area();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let Some(cell) = f.buffer_mut().cell_mut(Position { x, y }) else {
+                continue;
+            };
+            if cell.bg == Color::Reset {
+                cell.bg = background;
+            }
+        }
+    }
 }
 
 fn capture_frame_text(f: &mut Frame, app: &mut App) {
@@ -13812,6 +13826,33 @@ mod tests {
 
         assert_eq!(glyph_cell.style().fg, Some(theme.accent));
         assert_eq!(text_cell.style().fg, Some(theme.text));
+    }
+
+    #[test]
+    fn default_background_pass_paints_reset_cells_only() {
+        let background = Color::Rgb(12, 18, 27);
+        let explicit_bg = Color::Rgb(121, 184, 255);
+        let backend = ratatui::backend::TestBackend::new(3, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| {
+                f.buffer_mut()
+                    .cell_mut((0, 0))
+                    .expect("fg-only cell")
+                    .set_style(Style::default().fg(Color::Red));
+                f.buffer_mut()
+                    .cell_mut((1, 0))
+                    .expect("explicit bg cell")
+                    .set_style(Style::default().fg(Color::White).bg(explicit_bg));
+                paint_default_backgrounds(f, Some(background));
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((0, 0)).expect("cell").bg, background);
+        assert_eq!(buffer.cell((1, 0)).expect("cell").bg, explicit_bg);
+        assert_eq!(buffer.cell((2, 0)).expect("cell").bg, background);
     }
 
     #[test]
