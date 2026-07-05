@@ -2360,6 +2360,8 @@ pub struct ProjectDeletedNotificationPayload {
 pub struct PingResult {
     pub pong: bool,
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
 }
 
 #[cfg(test)]
