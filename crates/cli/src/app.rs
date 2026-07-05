@@ -9955,6 +9955,81 @@ mod tests {
         assert!(popup.note.is_none());
     }
 
+    /// Regression: `on_key`'s configure-popup gate used to swallow every key
+    /// with a bare `_ => {}`, which silently ate the global quit chord too —
+    /// a real first-run bug since this dialog can auto-open with no prior
+    /// user action and the welcome card advertises `C-x C-c` right
+    /// underneath it. Drives the full `on_key` gate chain (not just
+    /// `handle_configure_key` directly) so it also covers the `connected`/
+    /// `session_picker`/`configure_popup` ordering actually deciding who
+    /// owns the keystroke.
+    #[tokio::test]
+    async fn configure_dialog_open_keeps_global_quit_chord_working() {
+        let (client, _dir, _server) = configure_mock_daemon(
+            vec![harness_json("shell", true)],
+            vec![smith_method_json("auto", "Auto-detect", true)],
+            Some("auto"),
+        )
+        .await;
+        let mut app = test_app(client, Vec::new());
+        app.open_configure_popup().await;
+        assert!(app.configure_popup.is_some(), "dialog should be open");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        assert!(
+            !app.should_quit,
+            "first half of the C-x C-c chord must not quit yet"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .await;
+        assert!(
+            app.should_quit,
+            "C-x C-c must still quit the TUI while the configure dialog owns input"
+        );
+    }
+
+    /// Serializes tests that mutate `CONSTRUCT_STATE_DIR`.
+    static CONFIGURE_SEEN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Regression: the first-run marker used to be written only on Esc/close,
+    /// so a user who quit the TUI (`C-x C-c`) while the dialog was still open
+    /// got re-nagged on the very next launch despite having already seen it.
+    /// Marking on open instead means quitting mid-dialog still counts.
+    #[tokio::test]
+    async fn open_configure_popup_marks_seen_immediately_not_only_on_close() {
+        let _lock = CONFIGURE_SEEN_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let saved_state_dir = std::env::var("CONSTRUCT_STATE_DIR").ok();
+        std::env::set_var("CONSTRUCT_STATE_DIR", tmp.path());
+
+        assert!(
+            !crate::tui_state::configure_dialog_seen(),
+            "fresh state dir starts unseen"
+        );
+
+        let (client, _dir, _server) = configure_mock_daemon(
+            vec![harness_json("shell", true)],
+            vec![smith_method_json("auto", "Auto-detect", true)],
+            Some("auto"),
+        )
+        .await;
+        let mut app = test_app(client, Vec::new());
+        app.open_configure_popup().await;
+
+        let seen_after_open = crate::tui_state::configure_dialog_seen();
+
+        match saved_state_dir {
+            Some(v) => std::env::set_var("CONSTRUCT_STATE_DIR", v),
+            None => std::env::remove_var("CONSTRUCT_STATE_DIR"),
+        }
+
+        assert!(
+            seen_after_open,
+            "opening the dialog must mark it seen even before Esc/close"
+        );
+    }
+
     #[tokio::test]
     async fn configure_click_tab_switches_and_reports_hit() {
         let (client, _dir, _server) = configure_mock_daemon(Vec::new(), Vec::new(), None).await;

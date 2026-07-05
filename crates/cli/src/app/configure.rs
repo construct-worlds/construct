@@ -134,11 +134,17 @@ pub fn no_agent_harness_available(harnesses: &[HarnessInfo]) -> bool {
 
 impl App {
     /// Open the dialog, fetching fresh harness + smith-auth data. Always
-    /// starts on tab 1. Marks the first-run marker so the dialog stops
-    /// auto-opening after this dismissal.
+    /// starts on tab 1. Marks the first-run marker immediately (on open, not
+    /// on close) — a user who quits the TUI while the dialog is still open
+    /// (e.g. with `C-x C-c`) must not get re-nagged on the next launch just
+    /// because they never got around to dismissing it. Condition (b) of
+    /// [`Self::maybe_auto_open_configure_popup`] (no agent harness available)
+    /// ignores this marker entirely, so a genuinely broken setup still
+    /// reopens the dialog regardless.
     pub async fn open_configure_popup(&mut self) {
         self.chord_state = ChordState::default();
         self.chord_label.clear();
+        crate::tui_state::mark_configure_dialog_seen();
         self.harnesses = self.client.harnesses().await.unwrap_or_default();
         let (smith_methods, smith_current) = self.fetch_smith_auth_status().await;
         let harness_selected = self
@@ -193,7 +199,6 @@ impl App {
 
     fn close_configure_popup(&mut self) {
         self.configure_popup = None;
-        crate::tui_state::mark_configure_dialog_seen();
     }
 
     fn configure_switch_tab_relative(&mut self, delta: isize) {
@@ -260,7 +265,9 @@ impl App {
 
     /// Route a key while the dialog owns input. Esc closes; Left/Right (and
     /// Tab/BackTab) switch tabs; Up/Down move the selection; Enter confirms
-    /// a smith-auth pick.
+    /// a smith-auth pick. Anything else falls through to
+    /// [`Self::handle_configure_fallback_key`], which keeps the global quit
+    /// chord alive.
     pub(super) async fn handle_configure_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.close_configure_popup(),
@@ -269,7 +276,33 @@ impl App {
             KeyCode::Up => self.configure_move_selection(-1),
             KeyCode::Down => self.configure_move_selection(1),
             KeyCode::Enter => self.confirm_configure_selection().await,
-            _ => {}
+            _ => self.handle_configure_fallback_key(key),
+        }
+    }
+
+    /// Everything the dialog doesn't claim for its own navigation still
+    /// needs to reach the ordinary chord state machine — otherwise `C-x
+    /// C-c` (quit) is silently swallowed the instant this dialog owns
+    /// input. That's a real regression, not just a test artifact: this
+    /// dialog can auto-open on a user's very first launch (spec 0069), and
+    /// the welcome card advertises "`C-x C-c` exit TUI" right underneath
+    /// it — a first-run user who tries to quit would find the app
+    /// unresponsive to the one shortcut it just told them to use.
+    ///
+    /// `Quit` is the only action actually executed here. Every other
+    /// resolved action (e.g. `C-x C-f` for a new session) is deliberately
+    /// left a no-op while this dialog is the topmost modal — running it
+    /// would open a second overlay (minibuffer, popup, …) underneath a
+    /// dialog that still believes it owns every keystroke, since `on_key`
+    /// checks `configure_popup` before anything else. The chord state is
+    /// still fed and `chord_label` still updates, so a partial `C-x` press
+    /// shows the usual pending-chord hint in the modeline instead of
+    /// looking stuck.
+    fn handle_configure_fallback_key(&mut self, key: KeyEvent) {
+        let res = self.chord_state.handle(key, &self.keymap);
+        self.chord_label = self.chord_state.label();
+        if matches!(res, KeymapResult::Action(KeyAction::Quit)) {
+            self.should_quit = true;
         }
     }
 
