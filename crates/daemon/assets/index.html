@@ -378,13 +378,6 @@
   .session-list .item.active .state.state-awaiting_input { color: #005320; }
   .session-list .item.active .state.state-paused { color: #5a3600; }
   .session-list .item.active .state.state-errored { color: #6d0000; }
-  .session-list .item .state.is-active {
-    animation: statusPulse 900ms ease-in-out infinite;
-  }
-  @keyframes statusPulse {
-    0%, 100% { opacity: 0.62; transform: scale(0.92); }
-    50% { opacity: 1; transform: scale(1); }
-  }
   /* Group header (matches TUI's `▾ name` line above each group).
      Tappable — flips the group's collapsed bit. */
   .session-list .group-header {
@@ -1654,6 +1647,38 @@
   .program-input ::selection { background: rgba(57, 255, 136, 0.28); }
   /* One source line. Empty lines keep height via a <br>. */
   .program-line { min-height: 1.6em; }
+  .program-selection-menu {
+    position: absolute;
+    z-index: 8;
+    display: flex;
+    align-items: center;
+    padding: 4px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.36);
+  }
+  .program-selection-menu[hidden] { display: none; }
+  .program-selection-menu button {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 68px;
+    padding: 4px 9px;
+    background: transparent;
+    color: var(--accent);
+    border: 0;
+    border-radius: 4px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .program-selection-menu button:hover,
+  .program-selection-menu button:focus-visible {
+    background: var(--accent);
+    color: var(--bg);
+    outline: none;
+  }
   /* Smart-clip chip: an atomic, content-fit widget (contenteditable=false). The
      TUI's ` label ` padding is the .35em insets; the whole chip is one cursor
      stop and Backspace deletes it whole. */
@@ -1708,14 +1733,9 @@
     text-decoration: line-through;
     opacity: 0.78;
   }
-  /* Mirrors the session list's own running-activity indicator: `.is-active`
-     is set (programChipEl / programUpdateChipStatuses) with the same gate
-     the list uses (state "running" + recent PTY bytes, `sessionPtyActive`),
-     and reuses the list's own `statusPulse` keyframe so a chip whose target
-     session is actively working breathes exactly like the list's status dot. */
-  .program-clip[data-status="running"].is-active {
-    animation: statusPulse 900ms ease-in-out infinite;
-  }
+  /* Program session clips animate by swapping their leading glyph in JS on
+     the same 120ms cadence as the TUI. Keep the chip body still: no bounce,
+     pulse, or transform while a referenced session is active. */
   /* Run shimmer: a travelling highlight band sweeps the running lines. Pure CSS
      (no per-char DOM rebuild) so it never disturbs the caret while editing. */
   .program-line.is-running {
@@ -2089,6 +2109,11 @@
                aria-label="program markdown"></div>
           <div class="program-cursor-layer" id="programCursorLayer"></div>
           <div class="program-empty" id="programEmpty" hidden></div>
+          <div class="program-selection-menu" id="programSelectionMenu" hidden>
+            <button type="button" id="programSelectionRunBtn" title="Run selected program text">
+              <span aria-hidden="true">▶</span><span>Run</span>
+            </button>
+          </div>
           <div class="program-clip-menu" id="programClipMenu" hidden role="listbox"
                aria-label="smart-clip suggestions"></div>
           <div class="program-hover-card" id="programHoverCard" hidden role="tooltip">
@@ -2294,6 +2319,8 @@ const programEditorEl = $("programEditor");
 const programInputEl = $("programInput");
 const programCursorLayerEl = $("programCursorLayer");
 const programEmptyEl = $("programEmpty");
+const programSelectionMenuEl = $("programSelectionMenu");
+const programSelectionRunBtn = $("programSelectionRunBtn");
 const programClipMenuEl = $("programClipMenu");
 const programHoverCardEl = $("programHoverCard");
 const programHoverTerminalEl = $("programHoverTerminal");
@@ -2831,6 +2858,7 @@ function updateMiniMatrixIntensity(ts) {
 function observeSessionPtyActivity(sessionId, atMs = Date.now()) {
   if (!sessionId) return;
   state.ptyActivityById.set(sessionId, Number(atMs) || Date.now());
+  refreshSessionActivityGlyphs();
 }
 
 function initMiniMatrix() {
@@ -3144,9 +3172,9 @@ setInterval(() => {
 function refreshCurrentSessionAfterReconnect() {
   if (!state.currentId) return;
   const s = state.sessions.find((x) => x.id === state.currentId);
-  hydrateWidgets(state.currentId, { force: true });
   renderViewModeToggle(s);
   if (state.mode === "terminal") {
+    hydrateWidgets(state.currentId, { force: true });
     // Keep the live xterm buffer exactly where the user left it. Replaying
     // transcript or PTY history on reconnect appends old output into xterm,
     // which looks like terminal history replaying from the beginning. Mobile
@@ -3155,6 +3183,11 @@ function refreshCurrentSessionAfterReconnect() {
     refitTerminal();
     return;
   }
+  if (state.mode === "program") {
+    enterProgramMode(state.currentId, { focus: false });
+    return;
+  }
+  hydrateWidgets(state.currentId, { force: true });
   loadTranscript(state.currentId);
 }
 
@@ -3337,17 +3370,26 @@ const MATRIX_RAIN_RAMP_UP_SECS = 5;
 const MATRIX_RAIN_DECAY_SECS = 20;
 
 function sessionPtyActive(s, now = Date.now()) {
-  if (!s || !s.last_pty_at_ms) return false;
-  return now - Number(s.last_pty_at_ms) < SESSION_PTY_QUIESCENCE_MS;
+  if (!s) return false;
+  const ptyAt = state.ptyActivityById.get(s.id) || Number(s.last_pty_at_ms || 0);
+  return ptyAt > 0 && now - ptyAt < SESSION_PTY_QUIESCENCE_MS;
 }
 
 function sessionStatusLabel(s) {
   return String((s && s.state) || "pending").toLowerCase();
 }
 
+function sessionShouldAnimateStatus(s, now = Date.now()) {
+  if (sessionStatusLabel(s) !== "running") return false;
+  const activeAgent = state.agentStatusById.get(s.id);
+  if (isStructuredToolSession(s)) return !!(activeAgent && activeAgent.active);
+  if (isHeadlessSession(s)) return true;
+  return sessionPtyActive(s, now);
+}
+
 function sessionStatusGlyph(s, now = Date.now()) {
   const status = sessionStatusLabel(s);
-  if (status === "running" && sessionPtyActive(s, now)) {
+  if (sessionShouldAnimateStatus(s, now)) {
     const idx = Math.floor(now / SESSION_STATUS_FRAME_MS) % SESSION_STATUS_SPINNER.length;
     return SESSION_STATUS_SPINNER[idx];
   }
@@ -3364,9 +3406,39 @@ function sessionStatusGlyph(s, now = Date.now()) {
 
 function sessionStatusHtml(s) {
   const status = sessionStatusLabel(s);
-  const active = status === "running" && sessionPtyActive(s);
+  const active = sessionShouldAnimateStatus(s);
   const classes = `state state-${status}${active ? " is-active" : ""}`;
-  return `<div class="${attr(classes)}" title="${attr(status)}" aria-label="${attr(status)}">${escape(sessionStatusGlyph(s))}</div>`;
+  return `<div class="${attr(classes)}" data-session-id="${attr(s.id)}" title="${attr(status)}" aria-label="${attr(status)}">${escape(sessionStatusGlyph(s))}</div>`;
+}
+
+function refreshSessionStatusEl(el, s, now = Date.now()) {
+  if (!el || !s) return;
+  const status = sessionStatusLabel(s);
+  const active = sessionShouldAnimateStatus(s, now);
+  const classes = `state state-${status}${active ? " is-active" : ""}`;
+  if (el.className !== classes) el.className = classes;
+  if (el.title !== status) el.title = status;
+  if (el.getAttribute("aria-label") !== status) el.setAttribute("aria-label", status);
+  const glyph = sessionStatusGlyph(s, now);
+  if (el.textContent !== glyph) el.textContent = glyph;
+}
+
+function refreshSessionListActivityGlyphs(now = Date.now()) {
+  if (!sessionListEl) return;
+  const byId = new Map(state.sessions.map((s) => [s.id, s]));
+  for (const el of sessionListEl.querySelectorAll(".state[data-session-id]")) {
+    refreshSessionStatusEl(el, byId.get(el.dataset.sessionId), now);
+  }
+}
+
+function refreshSessionActivityGlyphs(now = Date.now()) {
+  refreshSessionListActivityGlyphs(now);
+  refreshProgramSessionClipGlyphs(now);
+}
+
+function initSessionActivitySpinner() {
+  refreshSessionActivityGlyphs();
+  setInterval(refreshSessionActivityGlyphs, SESSION_STATUS_FRAME_MS);
 }
 
 let renderSessionsScheduled = false;
@@ -3412,8 +3484,7 @@ function bindSessionListClicks() {
 
 /** Build a row descriptor: a stable key plus the outer class and inner
  *  HTML. renderSessions() diffs class and inner separately so a pure
- *  selection change (class only) never rebuilds a row's status element
- *  (which would restart its statusPulse animation). */
+ *  selection change (class only) never rebuilds a row's status element. */
 function sessionRowDescriptor(item) {
   if (item.kind === "archived-row") {
     const glyph = item.expanded ? "▾" : "▸";
@@ -3497,8 +3568,8 @@ function renderSessions() {
   }
   // Keyed in-place reconcile. Only rows whose output actually changed are
   // touched, so unchanged rows keep their scroll position, hover/focus,
-  // and CSS animation (statusPulse) state — no more innerHTML blast that
-  // reset scrollTop and restarted every row's animation on each event.
+  // and status-glyph DOM state — no more innerHTML blast that reset
+  // scrollTop and restarted every row's activity indicator on each event.
   const existing = new Map();
   for (const node of Array.from(sessionListEl.children)) {
     if (node.__key) existing.set(node.__key, node);
@@ -3823,7 +3894,6 @@ async function selectSession(id, { replaceUrl = false } = {}) {
   if (isNarrowLayout()) {
     setSessionListVisible(false, false);
   }
-  hydrateWidgets(id);
   // Restore the view the *incoming* session last used, not the outgoing
   // session's global state.mode. Program is a per-session surface like
   // terminal/chat, so each session reopens in whatever view it last showed.
@@ -4285,11 +4355,11 @@ function programSessionChipStatus(id) {
   return s ? sessionStatusLabel(s) : "missing";
 }
 
-// Whether a session smart-clip's chip should pulse, mirroring the session
-// list's own `.state.is-active` gate exactly: "running" and recent PTY bytes.
+// Whether a session smart-clip's chip should animate, mirroring the session
+// list's own `.state.is-active` gate exactly.
 function programSessionChipActive(id) {
   const s = state.sessions.find((x) => x.id === id);
-  return !!s && sessionStatusLabel(s) === "running" && sessionPtyActive(s);
+  return !!s && sessionShouldAnimateStatus(s);
 }
 
 // Plain-language hover tooltip for a session smart-clip's live status
@@ -4332,6 +4402,7 @@ function programChipEl(rawClip) {
   const [kind, id] = programClipTarget(body);
   if (kind === "session") {
     const status = programSessionChipStatus(id);
+    span.dataset.sessionId = id;
     span.dataset.status = status;
     span.title = programSessionChipStatusTooltip(status);
     span.setAttribute("aria-label", programSessionClipPreviewCaption(id));
@@ -4353,11 +4424,28 @@ function programUpdateChipStatuses(sessionId) {
     const [kind, id] = programClipTarget(body);
     if (kind !== "session" || id !== sessionId) continue;
     const status = programSessionChipStatus(id);
+    chip.dataset.sessionId = id;
     chip.textContent = programClipLabel(body);
     chip.dataset.status = status;
     chip.title = programSessionChipStatusTooltip(status);
     chip.setAttribute("aria-label", programSessionClipPreviewCaption(id));
     chip.classList.toggle("is-active", programSessionChipActive(id));
+  }
+}
+
+function refreshProgramSessionClipGlyphs(now = Date.now()) {
+  if (!programInputEl) return;
+  const chips = programInputEl.querySelectorAll('.program-clip[data-session-id]');
+  for (const chip of chips) {
+    const id = chip.dataset.sessionId;
+    const s = state.sessions.find((x) => x.id === id);
+    if (!s) continue;
+    const active = sessionShouldAnimateStatus(s, now);
+    chip.classList.toggle("is-active", active);
+    if (!active && sessionStatusLabel(s) !== "running") continue;
+    const body = chip.dataset.raw.slice(2, -1);
+    const label = programClipLabel(body);
+    if (chip.textContent !== label) chip.textContent = label;
   }
 }
 
@@ -4596,6 +4684,7 @@ function programRenderDoc(markdown) {
   for (const line of markdown.split("\n")) programInputEl.appendChild(programLineDiv(line));
   programApplyShimmer();
   programRenderCursors();
+  programHideSelectionMenu();
 }
 
 // Serialize a container's line elements back to Markdown: each top-level line
@@ -4927,6 +5016,69 @@ function programSelectionMarkdown() {
   return programSerializeContainer(tmp);
 }
 
+function programRunnableSelectionRange() {
+  if (!state.program.mountedId || state.mode !== "program") return null;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+  const range = sel.getRangeAt(0);
+  if (!programInputEl.contains(range.commonAncestorContainer)) return null;
+  const text = programSelectionMarkdown();
+  if (!text || text.trim() === "") return null;
+  return { sel, range };
+}
+
+function programSelectionFocusRect(sel, fallbackRange) {
+  if (sel && sel.focusNode && programInputEl.contains(sel.focusNode)) {
+    const focusRange = document.createRange();
+    try {
+      focusRange.setStart(sel.focusNode, sel.focusOffset);
+      focusRange.collapse(true);
+      let rect = focusRange.getBoundingClientRect();
+      if (rect && (rect.width || rect.height)) return rect;
+      const rects = focusRange.getClientRects();
+      if (rects && rects.length) return rects[0];
+    } catch (_) {}
+  }
+  const rects = fallbackRange.getClientRects();
+  if (rects && rects.length) return rects[rects.length - 1];
+  return fallbackRange.getBoundingClientRect();
+}
+
+function programHideSelectionMenu() {
+  programSelectionMenuEl.hidden = true;
+}
+
+function programUpdateSelectionMenu() {
+  const runnable = programRunnableSelectionRange();
+  if (!runnable) { programHideSelectionMenu(); return; }
+  const rect = programSelectionFocusRect(runnable.sel, runnable.range);
+  if (!rect || (!rect.width && !rect.height)) { programHideSelectionMenu(); return; }
+  const editor = programEditorEl.getBoundingClientRect();
+  if (rect.bottom < editor.top || rect.top > editor.bottom || rect.right < editor.left || rect.left > editor.right) {
+    programHideSelectionMenu();
+    return;
+  }
+  programSelectionMenuEl.hidden = false;
+  const menuW = programSelectionMenuEl.offsetWidth || 82;
+  const menuH = programSelectionMenuEl.offsetHeight || 32;
+  const pad = 8;
+  let left = rect.left - editor.left + 8;
+  let top = rect.bottom - editor.top + 6;
+  if (top + menuH > editor.height - pad) top = rect.top - editor.top - menuH - 6;
+  left = Math.max(pad, Math.min(left, Math.max(pad, editor.width - menuW - pad)));
+  top = Math.max(pad, Math.min(top, Math.max(pad, editor.height - menuH - pad)));
+  programSelectionMenuEl.style.left = Math.round(left) + "px";
+  programSelectionMenuEl.style.top = Math.round(top) + "px";
+}
+
+function programClearSelection() {
+  const sel = window.getSelection();
+  if (sel) sel.removeAllRanges();
+  programHideSelectionMenu();
+  programPublishCursor();
+  programRenderCursors();
+}
+
 // Keep the editor's direct children as .program-line divs so serialize stays
 // line-accurate after native editing. Best-effort; a no-op when already clean
 // (so it doesn't disturb the caret during normal typing).
@@ -5072,6 +5224,7 @@ function leaveProgramView() {
   programRunBtn.dataset.running = "false";
   programRunStageEl.textContent = "";
   programCloseClipMenu();
+  programHideSelectionMenu();
   programHideHover();
   programCloseFind();
   programWrapEl.hidden = true;
@@ -5085,6 +5238,10 @@ async function enterProgramMode(id, opts = {}) {
   composerEl.hidden = true;
   terminalWrapEl.hidden = true;
   terminalScrollOverlayEl.hidden = true;
+  widgetsTriggerBtn.hidden = true;
+  terminalWidgetsProxyBtn.hidden = true;
+  terminalWidgetControlsEl.hidden = true;
+  sessionWidgetsEl.hidden = true;
   if (typeof vkbdEl !== "undefined" && vkbdEl) vkbdEl.hidden = true;
   programWrapEl.hidden = false;
   programSetMsg("");
@@ -5096,6 +5253,7 @@ async function programMountSession(id) {
   state.program.mountedId = id;
   programStopShimmer();
   programCloseClipMenu();
+  programHideSelectionMenu();
   programCloseFind();
   programVersionEl.textContent = "";
   programRenderDoc("");
@@ -5992,6 +6150,7 @@ function programOnInput() {
   programApplyShimmer();
   programRenderCursors();
   programUpdateClipMenu();
+  programUpdateSelectionMenu();
   if (state.program.find) programRecomputeFind();
   programOnLocalEdit();
 }
@@ -6044,17 +6203,22 @@ function programWireEvents() {
     // reset the view and highlight.
     if (state.program.clip && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) programUpdateClipMenu();
+    programUpdateSelectionMenu();
     programPublishCursor();
     programRenderCursors();
   });
-  programInputEl.addEventListener("click", () => { programUpdateClipMenu(); programPublishCursor(); programRenderCursors(); });
+  programInputEl.addEventListener("click", () => { programUpdateClipMenu(); programUpdateSelectionMenu(); programPublishCursor(); programRenderCursors(); });
+  programInputEl.addEventListener("pointerup", () => programUpdateSelectionMenu());
   programInputEl.addEventListener("pointermove", programHandleHoverPointerMove);
   programInputEl.addEventListener("pointerleave", programHideHover);
-  programInputEl.addEventListener("scroll", () => { programRenderCursors(); programHideHover(); });
+  programInputEl.addEventListener("scroll", () => { programRenderCursors(); programHideHover(); programHideSelectionMenu(); });
   document.addEventListener("selectionchange", () => {
     if (document.activeElement === programInputEl && state.program.mountedId) {
+      programUpdateSelectionMenu();
       programPublishCursor();
       programRenderCursors();
+    } else {
+      programHideSelectionMenu();
     }
   });
   programInputEl.addEventListener("blur", () => { setTimeout(programCloseClipMenu, 120); });
@@ -6066,6 +6230,13 @@ function programWireEvents() {
   });
   programSaveBtn.addEventListener("click", () => programSave());
   programRunBtn.addEventListener("click", () => programRun());
+  programSelectionRunBtn.addEventListener("mousedown", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await programRun();
+    programClearSelection();
+    try { programInputEl.focus(); } catch (_) {}
+  });
   programFindBtn.addEventListener("click", () => {
     if (state.program.find) { programCloseFind(); programInputEl.focus(); } else programOpenFind();
   });
@@ -6137,6 +6308,7 @@ function enterChatMode() {
   terminalEl.classList.remove("hide-xterm-cursor");
   terminalScrollOverlayEl.hidden = true;
   renderWidgets();
+  hydrateWidgets(state.currentId);
   // Show minimal agent-status in chat mode so user sees "Working.. <elapsed>"
   // after send when a turn is active. We reuse renderEditorState with the
   // current session's agent status; queued/buffer lines are empty in chat mode.
@@ -6207,6 +6379,7 @@ async function enterTerminalMode(id, options = {}) {
   terminalWrapEl.hidden = false;
   terminalScrollOverlayEl.hidden = false;
   renderWidgets();
+  hydrateWidgets(id);
   vkbdEl.hidden = !showMobileControls;
   const session = state.sessions.find((x) => x.id === id);
   terminalEl.classList.toggle("hide-xterm-cursor", isStructuredToolSession(session));
@@ -7740,6 +7913,7 @@ function handleNotification(method, params) {
         state.agentStatusById.delete(session_id);
         state.chatWorkingById.delete(session_id);
       }
+      refreshSessionActivityGlyphs();
     }
     if (programEventClearsRunButton(event)) {
       programClearRunButton(session_id);
@@ -7789,7 +7963,7 @@ function handleNotification(method, params) {
     } else if (session.id === state.currentId) {
       sessionTitleEl.textContent = sessionViewTitle(session);
       renderViewModeToggle(session);
-      hydrateWidgets(session.id);
+      if (state.mode !== "program") hydrateWidgets(session.id);
     }
   } else if (method === "session/deleted") {
     // Pick neighbor before removing from the list so position is still valid.
@@ -8623,6 +8797,15 @@ function isWidgetPopoverPinned() {
 }
 
 function renderWidgets() {
+  if (state.mode === "program") {
+    widgetsTriggerBtn.hidden = true;
+    terminalWidgetsProxyBtn.hidden = true;
+    terminalWidgetControlsEl.hidden = true;
+    inlineWidgetBackdropEl.hidden = true;
+    sessionWidgetsEl.hidden = true;
+    sessionWidgetsEl.classList.remove("inline-open");
+    return;
+  }
   const sessionId = state.currentId;
   const panels = sessionId ? (state.widgetsById.get(sessionId) || []) : [];
   const inlinePanel = sessionId ? currentInlineWidget(sessionId) : null;
@@ -9876,6 +10059,7 @@ window.addEventListener("popstate", () => {
 });
 
 initMiniMatrix();
+initSessionActivitySpinner();
 initPullToRefresh();
 connect();
 </script>

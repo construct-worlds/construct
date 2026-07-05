@@ -88,6 +88,8 @@ pub enum KeyAction {
     ScrollDown,
     ScrollPageUp,
     ScrollPageDown,
+    ScrollHalfPageUp,
+    ScrollHalfPageDown,
     ScrollTop,
     ScrollBottom,
     ToggleHelp,
@@ -324,9 +326,12 @@ fn vim() -> Keymap {
         (Chord(vec![key(KeyCode::Down)]), NextSession),
         (Chord(vec![key(KeyCode::Up)]), PrevSession),
         (Chord(vec![ch('i')]), OpenSendInput),
+        (Chord(vec![shift('I')]), OpenSendInput),
+        (Chord(vec![ch('o')]), OpenNewSession),
         (Chord(vec![ch('n')]), OpenNewSession),
+        (Chord(vec![ch('/')]), OpenSwitchSession),
         (Chord(vec![ctrl('x'), ch('b')]), OpenSwitchSession),
-        (Chord(vec![shift('K')]), OpenDeleteConfirm),
+        (Chord(vec![ch('d'), ch('d')]), OpenDeleteConfirm),
         (Chord(vec![ctrl('x'), ch(' ')]), OpenProgram),
         (Chord(vec![ctrl('x'), ctrl('s')]), SaveProgram),
         (Chord(vec![ctrl('x'), ch('u')]), UndoProgram),
@@ -335,23 +340,26 @@ fn vim() -> Keymap {
             Chord(vec![ctrl('x'), ctrl('o')]),
             ToggleProgramTerminalFocus,
         ),
-        (Chord(vec![ch('d')]), OpenDiff),
+        (Chord(vec![ch('g'), ch('d')]), OpenDiff),
         (Chord(vec![ctrl('c')]), Interrupt),
         // `r` opens the rename minibuffer; refresh moved to M-x refresh.
         (Chord(vec![ch('r')]), OpenRename),
+        (Chord(vec![shift('O')]), OpenFork),
         (Chord(vec![ch('f')]), OpenFork),
         (Chord(vec![ch('v')]), ToggleView),
         (Chord(vec![ch('z')]), ToggleZoom),
+        (Chord(vec![shift('Z'), shift('Z')]), Quit),
         (Chord(vec![ch(' ')]), TogglePin),
         (Chord(vec![ch('p')]), TogglePin),
         (Chord(vec![key(KeyCode::Right)]), ExpandGroup),
         (Chord(vec![key(KeyCode::Left)]), CollapseGroup),
-        // Reorder selected session in the list. Shift-K/J already taken
-        // (Shift-K = delete confirm), so we use Shift+arrows in vim too,
-        // with C-x-prefixed Meta-free fallback for terminals that strip
-        // the Shift modifier from arrow keys (macOS Terminal.app default).
+        // Reorder selected session in the list. Shift+J/K match vim's
+        // "move line" mnemonics; the C-x-prefixed fallback still works in
+        // terminals that strip the Shift modifier from arrow keys.
         (Chord(vec![ctrl('x'), ctrl('p')]), MoveSelectedUp),
         (Chord(vec![ctrl('x'), ctrl('n')]), MoveSelectedDown),
+        (Chord(vec![shift('K')]), MoveSelectedUp),
+        (Chord(vec![shift('J')]), MoveSelectedDown),
         (Chord(vec![shift_key(KeyCode::Up)]), MoveSelectedUp),
         (Chord(vec![shift_key(KeyCode::Down)]), MoveSelectedDown),
         (Chord(vec![ch(':')]), OpenCommandPalette),
@@ -380,18 +388,37 @@ fn vim() -> Keymap {
         ),
         (Chord(vec![ctrl('x'), ch('{')]), ShrinkWindowHorizontally),
         (Chord(vec![ctrl('x'), shift('{')]), ShrinkWindowHorizontally),
+        (Chord(vec![ctrl('w'), ch('s')]), SplitWindowBelow),
+        (Chord(vec![ctrl('w'), ch('v')]), SplitWindowRight),
+        (Chord(vec![ctrl('w'), ch('h')]), FocusWindowLeft),
+        (Chord(vec![ctrl('w'), ch('j')]), FocusWindowDown),
+        (Chord(vec![ctrl('w'), ch('k')]), FocusWindowUp),
+        (Chord(vec![ctrl('w'), ch('l')]), FocusWindowRight),
+        (Chord(vec![ctrl('w'), ch('w')]), SwitchFocus),
+        (Chord(vec![ctrl('w'), ch('c')]), DeleteWindow),
+        (Chord(vec![ctrl('w'), ch('o')]), DeleteOtherWindows),
+        (Chord(vec![ctrl('w'), ch('+')]), EnlargeWindow),
+        (Chord(vec![ctrl('w'), shift('+')]), EnlargeWindow),
+        (Chord(vec![ctrl('w'), ch('>')]), EnlargeWindowHorizontally),
+        (
+            Chord(vec![ctrl('w'), shift('>')]),
+            EnlargeWindowHorizontally,
+        ),
+        (Chord(vec![ctrl('w'), ch('<')]), ShrinkWindowHorizontally),
+        (Chord(vec![ctrl('w'), shift('<')]), ShrinkWindowHorizontally),
+        (Chord(vec![ctrl('w'), ch('z')]), ToggleZoom),
         (Chord(vec![ctrl('x'), ctrl('c')]), Quit),
         (Chord(vec![ctrl('x'), ch('t')]), ToggleView),
         (Chord(vec![ctrl('x'), ch('[')]), ScrollPageUp),
         (Chord(vec![ctrl('x'), ch(']')]), ScrollPageDown),
         (Chord(vec![key(KeyCode::PageUp)]), ScrollPageUp),
         (Chord(vec![key(KeyCode::PageDown)]), ScrollPageDown),
-        (Chord(vec![ctrl('x'), ch('{')]), ScrollTop),
-        (Chord(vec![ctrl('x'), shift('{')]), ScrollTop),
-        (Chord(vec![ctrl('x'), ch('}')]), ScrollBottom),
-        (Chord(vec![ctrl('x'), shift('}')]), ScrollBottom),
         (Chord(vec![ctrl('f')]), ScrollPageDown),
         (Chord(vec![ctrl('b')]), ScrollPageUp),
+        (Chord(vec![ctrl('d')]), ScrollHalfPageDown),
+        (Chord(vec![ctrl('u')]), ScrollHalfPageUp),
+        (Chord(vec![ctrl('e')]), ScrollDown),
+        (Chord(vec![ctrl('y')]), ScrollUp),
         (Chord(vec![ch('g'), ch('g')]), ScrollTop),
         (Chord(vec![shift('G')]), ScrollBottom),
         (Chord(vec![shift('A')]), ToggleAutomode),
@@ -444,6 +471,13 @@ mod tests {
         result
     }
 
+    fn assert_action(km: &Keymap, keys: Vec<KeyEvent>, action: KeyAction) {
+        assert!(
+            matches!(resolve(km, keys), KeymapResult::Action(a) if a == action),
+            "expected {action:?}"
+        );
+    }
+
     #[test]
     fn c_x_bracket_scroll_chords_work_in_emacs_profile() {
         let km = default_for(Profile::Emacs);
@@ -473,6 +507,10 @@ mod tests {
         ));
     }
 
+    /// `C-x {` / `C-x }` mean horizontal resize in both profiles. The vim
+    /// table used to also bind them to ScrollTop/ScrollBottom; last-match-wins
+    /// dispatch made the resize bindings silently dead there (`gg`/`G` already
+    /// cover scroll top/bottom in vim).
     #[test]
     fn c_x_bracket_scroll_chords_work_in_vim_profile() {
         let km = default_for(Profile::Vim);
@@ -486,20 +524,44 @@ mod tests {
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), ch('{')]),
-            KeymapResult::Action(KeyAction::ScrollTop)
+            KeymapResult::Action(KeyAction::ShrinkWindowHorizontally)
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), shift('{')]),
-            KeymapResult::Action(KeyAction::ScrollTop)
+            KeymapResult::Action(KeyAction::ShrinkWindowHorizontally)
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), ch('}')]),
-            KeymapResult::Action(KeyAction::ScrollBottom)
+            KeymapResult::Action(KeyAction::EnlargeWindowHorizontally)
         ));
         assert!(matches!(
             resolve(&km, vec![ctrl('x'), shift('}')]),
-            KeymapResult::Action(KeyAction::ScrollBottom)
+            KeymapResult::Action(KeyAction::EnlargeWindowHorizontally)
         ));
+    }
+
+    /// Chord dispatch is last-match-wins, so a chord bound twice silently
+    /// disables the earlier binding. Keep every profile's table free of
+    /// duplicates.
+    #[test]
+    fn no_duplicate_chords_in_any_profile() {
+        for profile in [Profile::Emacs, Profile::Vim] {
+            let km = default_for(profile);
+            for (i, (chord_a, action_a)) in km.bindings.iter().enumerate() {
+                for (chord_b, action_b) in km.bindings.iter().skip(i + 1) {
+                    assert!(
+                        chord_a != chord_b,
+                        "{profile:?}: chord {} bound to both {action_a:?} and {action_b:?}",
+                        chord_a
+                            .0
+                            .iter()
+                            .map(format_key)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -637,5 +699,66 @@ mod tests {
                 "C-x C-o should toggle Program/session focus in {profile:?}"
             );
         }
+    }
+
+    #[test]
+    fn vim_phase2_chords_resolve_to_expected_actions() {
+        let km = default_for(Profile::Vim);
+
+        assert_action(&km, vec![ch('d'), ch('d')], KeyAction::OpenDeleteConfirm);
+        assert_action(&km, vec![ch('g'), ch('d')], KeyAction::OpenDiff);
+        assert_action(&km, vec![ch('o')], KeyAction::OpenNewSession);
+        assert_action(&km, vec![ch('n')], KeyAction::OpenNewSession);
+        assert_action(&km, vec![shift('O')], KeyAction::OpenFork);
+        assert_action(&km, vec![ch('f')], KeyAction::OpenFork);
+        assert_action(&km, vec![shift('J')], KeyAction::MoveSelectedDown);
+        assert_action(&km, vec![shift('K')], KeyAction::MoveSelectedUp);
+        assert_action(&km, vec![ch('/')], KeyAction::OpenSwitchSession);
+        assert_action(&km, vec![ctrl('x'), ch('b')], KeyAction::OpenSwitchSession);
+        assert_action(&km, vec![shift('I')], KeyAction::OpenSendInput);
+        assert_action(&km, vec![ch('i')], KeyAction::OpenSendInput);
+        assert_action(&km, vec![shift('Z'), shift('Z')], KeyAction::Quit);
+        assert_action(&km, vec![ctrl('d')], KeyAction::ScrollHalfPageDown);
+        assert_action(&km, vec![ctrl('u')], KeyAction::ScrollHalfPageUp);
+        assert_action(&km, vec![ctrl('e')], KeyAction::ScrollDown);
+        assert_action(&km, vec![ctrl('y')], KeyAction::ScrollUp);
+    }
+
+    #[test]
+    fn vim_c_w_window_chords_resolve_to_expected_actions() {
+        let km = default_for(Profile::Vim);
+
+        assert_action(&km, vec![ctrl('w'), ch('s')], KeyAction::SplitWindowBelow);
+        assert_action(&km, vec![ctrl('w'), ch('v')], KeyAction::SplitWindowRight);
+        assert_action(&km, vec![ctrl('w'), ch('h')], KeyAction::FocusWindowLeft);
+        assert_action(&km, vec![ctrl('w'), ch('j')], KeyAction::FocusWindowDown);
+        assert_action(&km, vec![ctrl('w'), ch('k')], KeyAction::FocusWindowUp);
+        assert_action(&km, vec![ctrl('w'), ch('l')], KeyAction::FocusWindowRight);
+        assert_action(&km, vec![ctrl('w'), ch('w')], KeyAction::SwitchFocus);
+        assert_action(&km, vec![ctrl('w'), ch('c')], KeyAction::DeleteWindow);
+        assert_action(&km, vec![ctrl('w'), ch('o')], KeyAction::DeleteOtherWindows);
+        assert_action(&km, vec![ctrl('w'), ch('+')], KeyAction::EnlargeWindow);
+        assert_action(&km, vec![ctrl('w'), shift('+')], KeyAction::EnlargeWindow);
+        assert_action(
+            &km,
+            vec![ctrl('w'), ch('>')],
+            KeyAction::EnlargeWindowHorizontally,
+        );
+        assert_action(
+            &km,
+            vec![ctrl('w'), shift('>')],
+            KeyAction::EnlargeWindowHorizontally,
+        );
+        assert_action(
+            &km,
+            vec![ctrl('w'), ch('<')],
+            KeyAction::ShrinkWindowHorizontally,
+        );
+        assert_action(
+            &km,
+            vec![ctrl('w'), shift('<')],
+            KeyAction::ShrinkWindowHorizontally,
+        );
+        assert_action(&km, vec![ctrl('w'), ch('z')], KeyAction::ToggleZoom);
     }
 }
