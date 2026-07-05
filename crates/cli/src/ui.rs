@@ -6542,42 +6542,42 @@ const VIM_HELP_TEXT: &str = "
 vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
 
   getting started
-    A session is one live task or terminal that construct keeps in the list.
-    A harness is the runtime for a session: smith, codex, claude, or shell.
+    Sessions are live tasks; harnesses run them: smith/codex/claude/shell.
     The left pane selects sessions; the right pane shows the selected session.
-    Use n to create a session, then choose a harness.
+    Use o to create a session, then choose a harness (n also works).
     Use : for the command palette when you forget a shortcut.
 
   focus + view
-    C-x o           other window (list → windows → list)
+    C-x o / C-w w   other window (list → windows → list)
     C-2 .. C-5      focus split window 1..4 directly (C-2 = first window)
-    Shift+arrow     focus the adjacent split window (in a split layout)
-    C-x arrow       same — reliable alias where the terminal eats Shift+up/down
+    Shift+arrow     focus adjacent split (C-x arrow is reliable alias)
+    C-w h/j/k/l     focus split window left/down/up/right
     RET (on list)   focus the selected session's view
-    C-x 2 / C-x 3   split current main window below / right
-    C-x 0 / C-x 1   delete current window / delete other windows
-    C-x ^           make current window taller
-    C-x } / C-x {   make current window wider / narrower
+    C-x 2/3 C-w s/v split current main window below / right
+    C-x 0/1 C-w c/o delete current window / delete other windows
+    C-x ^ / C-w +   make current window taller
+    C-x }/{ C-w>/<  make current window wider / narrower
     v / C-x t       toggle chat ↔ terminal view
-    z               zoom: fill the screen with the session view
-    j / down        next session
-    k / up          prev session
+    z / C-w z       zoom: fill the screen with the session view
+    j/k/down/up     next/prev session
 
   session actions
-    n               new session
-    C-x b           switch session (picker dialog: type to filter, ↑↓ move)
-    i               send input to selected session
-    K               delete selected session (confirms; kills if running)
+    o / n           new session
+    / / C-x b       switch session (picker dialog: type to filter, ↑↓ move)
+    i / I           send input to selected session
+    d d             delete selected session (confirms; kills if running)
     C-x Space       open selected session's program
     C-x C-o         focus session terminal / refocus Program
-    d               show diff
+    g d             show diff
     r               rename selected session (clears title on empty submit)
-    f               fork selected session into a new harness (seeded w/ history)
+    O / f           fork selected session into a new harness (seeded w/ history)
     C-c             interrupt
 
   scrollback
     C-x [ / C-x ]   scroll page up/down
     C-f / C-b       scroll page down/up
+    C-d / C-u       scroll half page down/up
+    C-e / C-y       scroll line down/up
     g g / G         scroll top / bottom
 
   pinning (live tile in the pin strip below the main view)
@@ -6586,10 +6586,8 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
   reorder list
     C-x C-p         move selected session up   (Meta-free, works everywhere)
     C-x C-n         move selected session down
-    Shift-up/down   same, when the list is focused, in terminals that pass
-                    Shift to arrows (iTerm2/WezTerm/Alacritty yes; macOS
-                    Terminal.app no). In a focused split, Shift+arrow moves
-                    focus between panes instead (see focus + view).
+    K / J           move selected session up/down
+    Shift-up/down   same when the list is focused and terminal passes Shift
 
   mouse
     drag text       select visible TUI text and copy to terminal clipboard
@@ -6602,11 +6600,13 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     A               cycle approval mode
     ?               toggle this help
     C-x C-c         quit
+    Z Z             quit
 
 When the right pane is showing a PTY-backed session (shell / interactive
 claude / interactive codex) and focus is on the view, keystrokes go to the
 child. `C-x` is the escape prefix — start any `C-x …` chord above to run
-an construct command without changing focus.
+an construct command without changing focus. Other vim chords, including
+`C-w …`, apply when the PTY is not capturing input.
 ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -7654,6 +7654,22 @@ impl App {
                     self.adjust_chat_scroll(-10);
                 }
             }
+            ScrollHalfPageUp => {
+                let rows = (self.active_pane_size().1.max(1) as i32 / 2).max(1);
+                if self.can_scroll_pty_history() {
+                    self.adjust_scrollback(rows);
+                } else if self.view == ViewMode::Chat {
+                    self.adjust_chat_scroll(rows);
+                }
+            }
+            ScrollHalfPageDown => {
+                let rows = (self.active_pane_size().1.max(1) as i32 / 2).max(1);
+                if self.can_scroll_pty_history() {
+                    self.adjust_scrollback(-rows);
+                } else if self.view == ViewMode::Chat {
+                    self.adjust_chat_scroll(-rows);
+                }
+            }
             ScrollTop => {
                 if self.can_scroll_pty_history() {
                     if self.is_orchestrator_panel_open() {
@@ -19745,12 +19761,20 @@ mod tests {
             "vim help should show vim profile:\n{screen}"
         );
         assert!(
-            screen.contains("Use n to create a session"),
+            screen.contains("Use o to create a session"),
             "vim help should show vim create shortcut:\n{screen}"
         );
         assert!(
             screen.contains(":               command palette"),
             "vim help should show vim command palette shortcut:\n{screen}"
+        );
+        assert!(
+            screen.contains("d d             delete selected session"),
+            "vim help should show vim delete chord:\n{screen}"
+        );
+        assert!(
+            screen.contains("C-w h/j/k/l     focus split window left/down/up/right"),
+            "vim help should show vim window chords:\n{screen}"
         );
         assert!(
             !screen.contains("Use C-x C-f to create a session"),
