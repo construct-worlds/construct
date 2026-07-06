@@ -614,6 +614,7 @@ impl App {
                 first_output_seen: false,
                 stage: agentd_protocol::ProgramRunStage::Pressed,
                 daemon_confirmed: false,
+                daemon_adopted_at: None,
                 settled_block_count: 0,
             },
         );

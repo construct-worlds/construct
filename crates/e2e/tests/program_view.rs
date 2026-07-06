@@ -787,10 +787,16 @@ async fn web_program_view_full_parity() {
               });
               const confirmed = state.program.runById.get("s-run-state");
               handleProgramState({ program: { session_id: "s-run-state", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [] });
+              const survivedStaleClear = state.program.runById.has("s-run-state");
+              const grace = typeof PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS === "number" ? PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS : 1500;
+              const adopted = state.program.runById.get("s-run-state");
+              if (adopted) adopted.daemonAdoptedPerf = performance.now() - grace - 1;
+              handleProgramState({ program: { session_id: "s-run-state", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [] });
               return {
                 keptPending: kept ? kept.pendingIds.size : 0,
                 settleAfterKept,
                 confirmedPending: confirmed ? confirmed.pendingIds.size : 0,
+                survivedStaleClear,
                 cleared: !state.program.runById.has("s-run-state"),
               };
             })
@@ -811,6 +817,10 @@ async fn web_program_view_full_parity() {
     assert_eq!(
         run_state["confirmedPending"], 1,
         "daemon progress should be adopted before later clear: {run_state:?}"
+    );
+    assert_eq!(
+        run_state["survivedStaleClear"], true,
+        "stale empty state inside the adopt grace window must not clear daemon-confirmed web runs: {run_state:?}"
     );
     assert_eq!(
         run_state["cleared"], true,

@@ -2079,6 +2079,7 @@ impl SessionManager {
             params.shimmer.as_deref(),
             queued_behind_current_turn,
         );
+        self.broadcast_program_state(result.program.clone());
         let blocks = self.program_blocks_projection(&params.session_id, &result.program.markdown);
         Ok(ProgramExecuteResult {
             program: result.program,
@@ -2160,6 +2161,8 @@ impl SessionManager {
             false,
         );
 
+        // The edit below broadcasts `program/state` after applying the
+        // dispatch annotations, and that snapshot includes the seeded run.
         let edit_result = self
             .program_edit_from_conn(
                 ProgramEditParams {
@@ -6630,6 +6633,98 @@ mod tests {
         };
         assert_eq!(tooltip("# B").as_deref(), Some("Building B"));
         assert_eq!(tooltip("# A"), None);
+    }
+
+    #[tokio::test]
+    async fn program_update_then_execute_broadcasts_started_run() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mgr, _storage, id) = program_test_mgr("# Old\n").await;
+        let mgr = Arc::new(mgr);
+        let adapter_dir = tempfile::tempdir().expect("adapter tempdir");
+        let adapter_path = adapter_dir.path().join("mock-adapter.sh");
+        std::fs::write(
+            &adapter_path,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  if [ -z "$id" ]; then id=null; fi
+  case "$line" in
+    *'"method":"initialize"'*|*'"method": "initialize"'*)
+      result='{"name":"test","version":"0.0.0","capabilities":{"supports_pty":true}}'
+      ;;
+    *)
+      result='null'
+      ;;
+  esac
+  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+done
+"#,
+        )
+        .expect("write mock adapter");
+        let mut perms = std::fs::metadata(&adapter_path)
+            .expect("mock adapter metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&adapter_path, perms).expect("chmod mock adapter");
+        let (adapter_tx, _adapter_rx) = mpsc::channel(8);
+        let (adapter, _init) = Adapter::spawn(
+            "test".to_string(),
+            adapter_path,
+            Vec::new(),
+            HashMap::new(),
+            adapter_tx,
+        )
+        .await
+        .expect("spawn mock adapter");
+        let entry = mgr.get_entry(&id).await.expect("entry");
+        *entry.adapter.lock().await = Some(adapter);
+
+        let mut rx = mgr.subscribe();
+        let update = mgr
+            .program_update(ProgramUpdateParams {
+                session_id: id.clone(),
+                markdown: "# New\n".to_string(),
+                base_version: None,
+                actor: agentd_protocol::ProgramUpdateActor::Human,
+                template_id: None,
+                note: None,
+                shimmer: None,
+                shimmer_tooltips: None,
+            })
+            .await
+            .expect("dirty save update");
+        assert!(update.active_run.is_none());
+
+        let execute = mgr
+            .program_execute(ProgramExecuteParams {
+                session_id: id.clone(),
+                selection: None,
+                base_version: Some(update.program.version),
+                shimmer: None,
+            })
+            .await
+            .expect("execute");
+        assert!(
+            execute.active_run.is_some(),
+            "execute response should contain the started run"
+        );
+
+        let mut state_runs = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let BroadcastMsg::ProgramState(payload) = msg {
+                state_runs.push(payload.active_run.is_some());
+            }
+        }
+        assert!(
+            state_runs.len() >= 2,
+            "dirty save and execute should each broadcast program/state, got {state_runs:?}"
+        );
+        assert_eq!(
+            state_runs.last().copied(),
+            Some(true),
+            "execute must broadcast a corrective run-present state after the save's stale clear: {state_runs:?}"
+        );
     }
 
     // Spec 0042: starting a selection run while another run is still in flight

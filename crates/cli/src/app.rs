@@ -78,6 +78,9 @@ pub(crate) const PROGRAM_RUN_MAX_MS: u64 = 10 * 60 * 1000;
 /// *after* the first has already finished its save/execute round trip, but
 /// short enough that a deliberate re-Run a moment later still goes through.
 pub(crate) const PROGRAM_RUN_DEDUP_WINDOW_MS: u64 = 1500;
+/// Grace window for ignoring a stale `program/state` clear that was queued
+/// before a just-adopted `program.execute` response run became visible.
+pub(crate) const PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS: u64 = 1500;
 pub(crate) const DAEMON_BUILD_MISMATCH_NOTICE: &str =
     "daemon build differs - restart daemon";
 /// One-shot flourish shown when an authoritative program Run pending block
@@ -1760,6 +1763,9 @@ pub struct ProgramRun {
     /// optimistic starts stay false until program.execute or program/state
     /// confirms them.
     pub daemon_confirmed: bool,
+    /// Local instant when the daemon-confirmed run was adopted by this client.
+    /// Used only to suppress a stale queued clear immediately after execute.
+    pub daemon_adopted_at: Option<Instant>,
     /// Blocks settled from the run's initial pending set.
     pub settled_block_count: usize,
     /// Blocks in the run's initial pending set.
@@ -1802,6 +1808,7 @@ impl ProgramRun {
             first_output_seen: progress.first_output_seen,
             stage: progress.stage,
             daemon_confirmed: true,
+            daemon_adopted_at: Some(now),
             settled_block_count: progress.settled_block_count,
             total_block_count: progress.total_block_count,
         })
@@ -5749,19 +5756,37 @@ impl App {
         session_id: &str,
         active_run: Option<agentd_protocol::ProgramRunProgress>,
     ) {
-        match active_run.and_then(ProgramRun::from_progress) {
-            Some(mut run) => {
-                if let Some(old) = self.program_runs.get(session_id) {
-                    run.pending_since = old.merged_pending_since(&run.pending, Instant::now());
+        match active_run {
+            Some(progress) => match ProgramRun::from_progress(progress) {
+                Some(mut run) => {
+                    if let Some(old) = self.program_runs.get(session_id) {
+                        run.pending_since =
+                            old.merged_pending_since(&run.pending, Instant::now());
+                    }
+                    self.program_runs.insert(session_id.to_string(), run);
                 }
-                self.program_runs.insert(session_id.to_string(), run);
-            }
+                None => {
+                    if self
+                        .program_runs
+                        .get(session_id)
+                        .is_some_and(|run| run.daemon_confirmed)
+                    {
+                        self.program_runs.remove(session_id);
+                    }
+                }
+            },
             None => {
-                if self
-                    .program_runs
-                    .get(session_id)
-                    .is_some_and(|run| run.daemon_confirmed)
-                {
+                let should_clear = self.program_runs.get(session_id).is_some_and(|run| {
+                    run.daemon_confirmed
+                        && !run.daemon_adopted_at.is_some_and(|adopted_at| {
+                            Instant::now()
+                                .checked_duration_since(adopted_at)
+                                .is_some_and(|age| {
+                                    age < Duration::from_millis(PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS)
+                                })
+                        })
+                });
+                if should_clear {
                     self.program_runs.remove(session_id);
                 }
             }
@@ -10663,6 +10688,7 @@ mod tests {
                 first_output_seen: false,
                 stage: agentd_protocol::ProgramRunStage::Delivered,
                 daemon_confirmed: true,
+                daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
                 total_block_count: 1,
             },
@@ -13804,6 +13830,7 @@ mod tests {
                 first_output_seen: true,
                 stage: agentd_protocol::ProgramRunStage::FirstOutput,
                 daemon_confirmed: true,
+                daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
                 total_block_count: 0,
             },
@@ -14088,6 +14115,7 @@ mod tests {
                 first_output_seen: true,
                 stage: agentd_protocol::ProgramRunStage::FirstOutput,
                 daemon_confirmed: true,
+                daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
                 total_block_count: 1,
             },
@@ -14181,6 +14209,7 @@ mod tests {
                 first_output_seen: true,
                 stage: agentd_protocol::ProgramRunStage::FirstOutput,
                 daemon_confirmed: true,
+                daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
                 total_block_count: 1,
             },
@@ -14259,6 +14288,7 @@ mod tests {
                 first_output_seen: true,
                 stage: agentd_protocol::ProgramRunStage::FirstOutput,
                 daemon_confirmed: true,
+                daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
                 total_block_count: 1,
             },
@@ -16073,10 +16103,51 @@ mod tests {
             .expect("daemon progress should be adopted");
         assert!(run.pending.contains(&id("- alpha")));
 
+        app.program_runs
+            .get_mut("s1")
+            .expect("confirmed run")
+            .daemon_adopted_at =
+            Some(Instant::now() - Duration::from_millis(PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS + 1));
         app.on_program_state(program_doc_for_test("s1", body, 2), None, Vec::new());
         assert!(
             !app.program_runs.contains_key("s1"),
             "empty daemon state must still clear a daemon-confirmed run"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_state_stale_empty_run_respects_confirmed_adopt_grace() {
+        let (mut app, _dir, server) = empty_app().await;
+        let id = agentd_protocol::program_block_id;
+        let body = "# Todo\n\n- alpha\n";
+
+        app.adopt_daemon_program_run(
+            "s1",
+            Some(program_progress_for_test("run-1", vec![id("- alpha")])),
+        );
+        assert!(
+            app.program_runs
+                .get("s1")
+                .is_some_and(|run| run.daemon_confirmed && run.pending.contains(&id("- alpha"))),
+            "execute response should adopt a confirmed run"
+        );
+
+        app.on_program_state(program_doc_for_test("s1", body, 2), None, Vec::new());
+        assert!(
+            app.program_runs.contains_key("s1"),
+            "a stale empty save broadcast inside the adopt grace window must not clear the run"
+        );
+
+        app.program_runs
+            .get_mut("s1")
+            .expect("confirmed run")
+            .daemon_adopted_at =
+            Some(Instant::now() - Duration::from_millis(PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS + 1));
+        app.on_program_state(program_doc_for_test("s1", body, 2), None, Vec::new());
+        assert!(
+            !app.program_runs.contains_key("s1"),
+            "a later empty daemon state still clears the confirmed run"
         );
         server.abort();
     }
@@ -16634,6 +16705,7 @@ mod tests {
                 first_output_seen: true,
                 stage: agentd_protocol::ProgramRunStage::default(),
                 daemon_confirmed: true,
+                daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
                 total_block_count: 2,
             },
