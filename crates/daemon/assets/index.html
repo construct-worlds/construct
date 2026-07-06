@@ -3930,6 +3930,7 @@ async function selectSession(id, { replaceUrl = false } = {}) {
 const PROGRAM_RUN_MAX_MS = 10 * 60 * 1000;
 const PROGRAM_SHIMMER_FALLBACK_TOOLTIP = "Working…";
 const PROGRAM_SETTLE_FLASH_MS = 300;
+const PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS = 1500;
 const PROGRAM_TEXT_ENCODER = new TextEncoder();
 
 // --- shared block-identity rules (ports of agentd_protocol) ---
@@ -4180,6 +4181,7 @@ function programRunFromProgress(progress) {
     firstOutputSeen: !!progress.first_output_seen,
     stage,
     daemonConfirmed: true,
+    daemonAdoptedPerf: perf,
     settledBlockCount: progress.settled_block_count != null ? progress.settled_block_count : settled,
     totalBlockCount: total,
   };
@@ -5417,9 +5419,14 @@ function handleProgramState(params) {
   if (previousRun && nextPending) programRecordSettleFlourishes(id, previousRun.pendingIds, nextPending);
   const run = programRunFromProgress(params.active_run);
   let effectiveRun = run || null;
+  const staleClearInAdoptGrace = !params.active_run
+    && previousRun
+    && previousRun.daemonConfirmed
+    && typeof previousRun.daemonAdoptedPerf === "number"
+    && performance.now() - previousRun.daemonAdoptedPerf < PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS;
   if (run) {
     state.program.runById.set(id, run);
-  } else if (!params.active_run && previousRun && !previousRun.daemonConfirmed) {
+  } else if (!params.active_run && previousRun && (!previousRun.daemonConfirmed || staleClearInAdoptGrace)) {
     effectiveRun = previousRun;
   } else {
     state.program.runById.delete(id);
@@ -5608,6 +5615,7 @@ function programStartOptimisticRun(id, body, isSelection, selectedBlockIds, prev
     firstOutputSeen: false,
     stage: "pressed",
     daemonConfirmed: false,
+    daemonAdoptedPerf: null,
     settledBlockCount: 0,
     totalBlockCount: pending.size,
   });
