@@ -135,6 +135,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_triggers.clear();
     app.layout.shortcut_hints.clear();
     app.layout.modeline_approval_mode_hit = None;
+    app.layout.modeline_theme_hit = None;
     app.layout.main_window_areas.clear();
     app.layout.main_window_dividers.clear();
     app.window_pane_sizes.clear();
@@ -280,6 +281,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
     render_modeline_version_notice_tooltip(f, app);
+    render_modeline_theme_tooltip(f, app);
     app.sync_program_popup_with_selection();
     render_program_popup(f, app);
     render_tasks_popup(f, app);
@@ -6079,6 +6081,13 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
                             y: nrect.y,
                             action: *action,
                         });
+                        if action == &KeyAction::CycleTheme {
+                            app.layout.modeline_theme_hit = Some(crate::app::ModelineThemeHit {
+                                row: nrect.y,
+                                start_col: col,
+                                end_col: col.saturating_add(label_w),
+                            });
+                        }
                     }
                     col = col.saturating_add(label_w);
                 }
@@ -6172,6 +6181,25 @@ fn render_modeline_version_notice_tooltip(f: &mut Frame, app: &App) {
         _ => " Newer version available — click to upgrade ",
     };
     render_button_tooltip(f, &app.theme, label, hit.x_start, hit.y.saturating_sub(2));
+}
+
+fn render_modeline_theme_tooltip(f: &mut Frame, app: &App) {
+    let Some(hit) = app.layout.modeline_theme_hit else {
+        return;
+    };
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    if !hit.contains(mx, my) {
+        return;
+    }
+    render_button_tooltip(
+        f,
+        &app.theme,
+        &format!(" Theme: {}. Click to cycle theme ", app.theme_name.label()),
+        hit.start_col,
+        hit.row.saturating_sub(2),
+    );
 }
 
 /// Compute how many rows the minibuffer footer occupies this frame.
