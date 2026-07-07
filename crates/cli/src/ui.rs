@@ -279,6 +279,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_view_uncollapse_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
+    render_modeline_version_notice_tooltip(f, app);
     app.sync_program_popup_with_selection();
     render_program_popup(f, app);
     render_tasks_popup(f, app);
@@ -6145,6 +6146,32 @@ fn render_modeline_approval_mode_tooltip(f: &mut Frame, app: &App) {
         hit.start_col,
         hit.row.saturating_sub(2),
     );
+}
+
+/// Hover tooltip for the two clickable status-bar version-notice segments
+/// (see `version_notice_segments` and the "<version> available" notice in
+/// `render_modeline`). Both already register a `HintZone` in
+/// `app.layout.shortcut_hints`, so this reuses that geometry instead of
+/// tracking a dedicated hit like `modeline_approval_mode_hit` does.
+fn render_modeline_version_notice_tooltip(f: &mut Frame, app: &App) {
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    let Some(hit) = app.layout.shortcut_hints.iter().find(|h| {
+        matches!(
+            h.action,
+            KeyAction::OpenRestartDaemonConfirm | KeyAction::OpenUpgradeConfirm
+        ) && my == h.y
+            && mx >= h.x_start
+            && mx < h.x_end
+    }) else {
+        return;
+    };
+    let label = match hit.action {
+        KeyAction::OpenRestartDaemonConfirm => " Daemon build differs — click to restart ",
+        _ => " Newer version available — click to upgrade ",
+    };
+    render_button_tooltip(f, &app.theme, label, hit.x_start, hit.y.saturating_sub(2));
 }
 
 /// Compute how many rows the minibuffer footer occupies this frame.

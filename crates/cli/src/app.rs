@@ -20542,6 +20542,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hovering_daemon_segment_shows_restart_tooltip() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.daemon_build_id = Some("0.1.0+deadbee".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let hint = app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenRestartDaemonConfirm)
+            .expect("daemon segment should be clickable")
+            .clone();
+
+        app.mouse_pos = Some((hint.x_start, hint.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw with hover");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(
+            screen.contains("Daemon build differs — click to restart"),
+            "hovering the daemon segment should show a restart tooltip:\n{screen}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn hovering_upgrade_segment_shows_upgrade_tooltip() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.daemon_build_id = Some(crate::BUILD_ID.to_string());
+        app.latest_version = Some("9.9.9".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let hint = app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenUpgradeConfirm)
+            .expect("update-available segment should be clickable")
+            .clone();
+
+        app.mouse_pos = Some((hint.x_start, hint.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw with hover");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(
+            screen.contains("Newer version available — click to upgrade"),
+            "hovering the update-available segment should show an upgrade tooltip:\n{screen}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn theme_indicator_renders_in_minibuffer_status_bar_not_body() {
         let (mut app, _dir, server) = empty_app().await;
         let backend = ratatui::backend::TestBackend::new(120, 36);
