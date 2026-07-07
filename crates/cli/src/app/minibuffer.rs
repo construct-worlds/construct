@@ -80,6 +80,59 @@ impl App {
             return;
         }
 
+        // Restart-daemon confirmation (clicked from the status-bar version
+        // notice): same single-key dispatch as the per-session restart above.
+        let restart_daemon_intent = matches!(
+            self.minibuffer.as_ref().map(|m| &m.intent),
+            Some(MinibufferIntent::RestartDaemonConfirm)
+        );
+        if restart_daemon_intent {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    self.minibuffer = None;
+                    let result = self.client.daemon_restart(None, false).await;
+                    self.set_status(daemon_restart_status_message(result, "daemon restart"));
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.minibuffer = None;
+                    self.set_status("daemon restart cancelled".to_string());
+                }
+                KeyCode::Char('g') if ctrl => {
+                    self.minibuffer = None;
+                    self.set_status("daemon restart cancelled".to_string());
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Upgrade confirmation (clicked from the status-bar "<version>
+        // available" notice): same single-key dispatch pattern.
+        let upgrade_intent = match self.minibuffer.as_ref().map(|m| &m.intent) {
+            Some(MinibufferIntent::UpgradeConfirm { version }) => Some(version.clone()),
+            _ => None,
+        };
+        if let Some(version) = upgrade_intent {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    self.minibuffer = None;
+                    self.start_upgrade(version);
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.minibuffer = None;
+                    self.set_status("upgrade cancelled".to_string());
+                }
+                KeyCode::Char('g') if ctrl => {
+                    self.minibuffer = None;
+                    self.set_status("upgrade cancelled".to_string());
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Approval prompt has single-key shortcuts; bypass the normal
         // editing path so the user can hit y/n/a without typing + Enter.
         let approve_intent = matches!(
@@ -531,6 +584,27 @@ impl App {
                     }
                     Err(e) => self.set_status(format!("restart failed: {e}")),
                 }
+            }
+            MinibufferIntent::RestartDaemonConfirm => {
+                // Reached only if the single-key fast path in
+                // `handle_minibuffer_key` fell through (defensive — should
+                // not happen in practice).
+                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                if !yes {
+                    self.set_status("daemon restart cancelled".to_string());
+                    return;
+                }
+                let result = self.client.daemon_restart(None, false).await;
+                self.set_status(daemon_restart_status_message(result, "daemon restart"));
+            }
+            MinibufferIntent::UpgradeConfirm { version } => {
+                // Defensive fallback, same as `RestartDaemonConfirm` above.
+                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                if !yes {
+                    self.set_status("upgrade cancelled".to_string());
+                    return;
+                }
+                self.start_upgrade(version);
             }
             MinibufferIntent::CommandPalette => {
                 let cmd = input.trim();

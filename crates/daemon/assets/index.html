@@ -2030,6 +2030,7 @@
     <label class="theme-picker" aria-label="theme">
       <select id="themePicker" title="Theme">
         <option value="matrix">Matrix</option>
+        <option value="basic">Basic</option>
         <option value="dark">Dark</option>
         <option value="light">Light</option>
       </select>
@@ -2475,6 +2476,61 @@ const WEB_THEMES = {
       brightMagenta: "#ffa6e4",
       brightCyan: "#8aeaff",
       brightWhite: "#e1ffe6",
+    },
+  },
+  basic: {
+    css: {
+      "--bg": "#101010",
+      "--bg-elev": "#181818",
+      "--bg-elev-2": "#242424",
+      "--border": "#5f6368",
+      "--border-faint": "rgba(154, 160, 166, 0.42)",
+      "--fg": "#e5e5e5",
+      "--fg-dim": "#a3a3a3",
+      "--fg-faint": "#737373",
+      "--accent": "#3b82f6",
+      "--accent-alt": "#a855f7",
+      "--modeline-bg": "#2b2b2b",
+      "--ok": "#22c55e",
+      "--warn": "#eab308",
+      "--err": "#ef4444",
+      "--bubble-user": "rgba(39, 39, 42, 0.90)",
+      "--bubble-assistant": "rgba(24, 24, 27, 0.92)",
+      "--bubble-system": "rgba(16, 16, 16, 0.94)",
+      "--session-scrollbar-track": "rgba(229, 229, 229, 0.22)",
+      "--session-scrollbar-thumb": "rgba(229, 229, 229, 0.70)",
+      "--overlay-line-a": "rgba(229, 229, 229, 0.018)",
+      "--overlay-line-b": "rgba(0, 0, 0, 0.08)",
+      "--overlay-accent": "rgba(59, 130, 246, 0.08)",
+      "--overlay-alt": "rgba(168, 85, 247, 0.06)",
+      "--overlay-opacity": "0.38",
+      "--header-tail": "#181818",
+      "--button-pressed-fg": "#101010",
+      "--glow-soft": "0 0 18px rgba(59, 130, 246, 0.10)",
+      "--glow-hard": "0 0 14px rgba(59, 130, 246, 0.24)",
+    },
+    terminal: {
+      background: "#101010",
+      foreground: "#e5e5e5",
+      cursor: "#3b82f6",
+      cursorAccent: "#101010",
+      selectionBackground: "#374151",
+      black: "#101010",
+      red: "#ef4444",
+      green: "#22c55e",
+      yellow: "#eab308",
+      blue: "#3b82f6",
+      magenta: "#a855f7",
+      cyan: "#06b6d4",
+      white: "#e5e5e5",
+      brightBlack: "#737373",
+      brightRed: "#f87171",
+      brightGreen: "#4ade80",
+      brightYellow: "#facc15",
+      brightBlue: "#60a5fa",
+      brightMagenta: "#c084fc",
+      brightCyan: "#22d3ee",
+      brightWhite: "#fafafa",
     },
   },
   dark: {
@@ -5740,6 +5796,35 @@ async function programSave() {
 
 // --- run (whole program, or the current selection) ---
 
+// The real block ids a selection overlaps, computed against the FULL
+// document (mirrors the TUI's App::selected_program_block_ids): a block's id
+// is included when the selection's whole-document character range [selStart,
+// selEnd) overlaps that block's line range, not by re-hashing the selected
+// substring's own text. That distinction matters for a selection that is a
+// strict substring of a single block (e.g. "long text" out of "Some long
+// text here") — the substring's own content hash never equals the real
+// block's (computed over the full line), so hashing the substring alone
+// fabricates a ghost id that matches nothing in the document and never
+// shimmers. Returns null for a collapsed/empty range.
+function programOverlapSelectedBlockIds(markdown, selStart, selEnd) {
+  if (selEnd <= selStart) return null;
+  const lineRanges = [];
+  let lineStart = 0;
+  for (const line of programLines(markdown)) {
+    const lineEnd = lineStart + programCharCount(line);
+    lineRanges.push([lineStart, lineEnd]);
+    lineStart = lineEnd + 1;
+  }
+  const ids = new Set();
+  for (const block of programBlockSpans(markdown)) {
+    const startRange = lineRanges[block.start_line];
+    const endRange = lineRanges[block.end_line - 1];
+    if (!startRange || !endRange) continue;
+    if (selStart < endRange[1] && selEnd > startRange[0]) ids.add(block.id);
+  }
+  return ids;
+}
+
 function programStartOptimisticRun(id, body, isSelection, selectedBlockIds, prevSaved) {
   const spans = programBlockSpans(body);
   const bodyIds = new Set(spans.map((b) => b.id));
@@ -5807,6 +5892,12 @@ async function programRun() {
   const selMarkdown = programSelectionMarkdown();
   const hasSel = selMarkdown != null && selMarkdown.trim() !== "";
   const prevSaved = doc.saved || "";
+  // Captured now (pre-save, same snapshot `selMarkdown` itself is pinned to)
+  // because `programSave()` below can rebuild the editor DOM and collapse the
+  // live browser selection — there's no reliable post-save equivalent to
+  // recompute this from, unlike the TUI's in-memory selection model.
+  const selOffsetsPreSave = hasSel ? programSelectionOffsets() : null;
+  const fullMarkdownPreSave = programSerialize();
 
   // Run overlap/idempotency guard (spec 0042 consequence). The Run button
   // and the Ctrl+Enter keybinding can both fire for one physical gesture,
@@ -5834,7 +5925,19 @@ async function programRun() {
   let selection = null, selectedBlockIds = null;
   if (hasSel) {
     selection = programNormalizeClipIds(selMarkdown);
-    selectedBlockIds = new Set(programBlockSpans(selection).map((b) => b.id));
+    if (selOffsetsPreSave) {
+      selectedBlockIds = programOverlapSelectedBlockIds(
+        fullMarkdownPreSave,
+        Math.min(selOffsetsPreSave.anchor, selOffsetsPreSave.head),
+        Math.max(selOffsetsPreSave.anchor, selOffsetsPreSave.head),
+      );
+    }
+    // Fallback (known limitation, matches the daemon's own legacy path):
+    // hashing the substring alone only identifies a real block when the
+    // selection happens to span one or more whole blocks exactly.
+    if (!selectedBlockIds || !selectedBlockIds.size) {
+      selectedBlockIds = new Set(programBlockSpans(selection).map((b) => b.id));
+    }
   }
   const runBody = hasSel ? selection : programSerialize();
   const optimistic = programStartOptimisticRun(id, runBody, hasSel, selectedBlockIds, prevSaved);
@@ -5843,6 +5946,7 @@ async function programRun() {
   try {
     const params = { session_id: id, base_version: doc.version };
     if (selection != null) params.selection = selection;
+    if (selectedBlockIds && selectedBlockIds.size) params.selection_block_ids = Array.from(selectedBlockIds);
     if (optimistic && optimistic.shimmer && optimistic.shimmer.length) params.shimmer = optimistic.shimmer;
     const result = await rpc("program.execute", params);
     // Dispatch landed: start the debounce window rather than clearing the

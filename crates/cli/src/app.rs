@@ -38,6 +38,7 @@ mod mouse;
 mod program_popup;
 mod session_picker;
 mod session_title_menu;
+mod session_title_rename;
 pub use configure::{
     harness_guidance, no_agent_harness_available, smith_method_guidance, ConfigurePopup,
     ConfigureTab, CONFIGURE_TABS,
@@ -81,8 +82,6 @@ pub(crate) const PROGRAM_RUN_DEDUP_WINDOW_MS: u64 = 1500;
 /// Grace window for ignoring a stale `program/state` clear that was queued
 /// before a just-adopted `program.execute` response run became visible.
 pub(crate) const PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS: u64 = 1500;
-pub(crate) const DAEMON_BUILD_MISMATCH_NOTICE: &str =
-    "daemon build differs - restart daemon";
 /// One-shot flourish shown when an authoritative program Run pending block
 /// settles. Presentation-only and client-local.
 pub(crate) const PROGRAM_SETTLE_FLASH_MS: u64 = 300;
@@ -93,6 +92,8 @@ pub(crate) const PROGRAM_COLLAB_CURSOR_TTL_MS: i64 = 60 * 1000;
 pub(crate) const PROGRAM_WHEEL_SCROLL_ROWS: usize = 3;
 const PROGRAM_UNDO_STACK_LIMIT: usize = 100;
 const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
+const OSC11_BACKGROUND_QUERY_BEL: &[u8] = b"\x1b]11;?\x07";
+const OSC11_BACKGROUND_QUERY_ST: &[u8] = b"\x1b]11;?\x1b\\";
 
 /// A row in the rendered list view. Sessions and group headers share the
 /// list; key dispatch and selection are typed.
@@ -212,13 +213,40 @@ fn pane_sizes_diverged(
         .any(|(id, size)| last_sent.get(id) != Some(size))
 }
 
-pub(crate) fn daemon_build_mismatch_notice(
-    client_build_id: &str,
-    daemon_build_id: Option<&str>,
-) -> Option<&'static str> {
-    match daemon_build_id {
-        Some(daemon_build_id) if daemon_build_id == client_build_id => None,
-        _ => Some(DAEMON_BUILD_MISMATCH_NOTICE),
+/// Whether the connected daemon is running a different build than this
+/// client. A missing daemon build id counts as a mismatch — that is how a
+/// new TUI recognizes an older, stale daemon that predates build-id
+/// reporting.
+pub(crate) fn daemon_build_ids_differ(client_build_id: &str, daemon_build_id: Option<&str>) -> bool {
+    daemon_build_id != Some(client_build_id)
+}
+
+/// Classify a `daemon_restart` RPC outcome into a status-bar message shared
+/// by `/construct restart` and the "restart daemon?" confirm click. The
+/// daemon execs before it finishes writing the reply on some platforms, so a
+/// broken-pipe / connection-reset / EOF / closed error is the *expected*
+/// success path there, not a failure — only some other error is a real one.
+pub(crate) fn daemon_restart_status_message(
+    result: Result<agentd_protocol::DaemonRestartResult>,
+    verb: &str,
+) -> String {
+    match result {
+        Ok(r) => format!(
+            "{verb} requested (exe={}, pid={}) — reconnect when ready",
+            r.exe, r.pid
+        ),
+        Err(e) => {
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("broken pipe")
+                || msg.contains("connection reset")
+                || msg.contains("eof")
+                || msg.contains("closed")
+            {
+                format!("{verb} in flight (socket closed) — reconnect when ready")
+            } else {
+                format!("{verb} failed: {e}")
+            }
+        }
     }
 }
 
@@ -554,6 +582,19 @@ pub enum MinibufferIntent {
     RestartConfirm {
         session_id: String,
     },
+    /// Confirmation prompt for restarting the daemon, opened by clicking the
+    /// `<daemon build> (daemon)` segment of the status-bar version notice
+    /// (shown when the connected daemon's build differs from this client's).
+    /// Single-key dispatch, same as `RestartConfirm`: `y`/Enter restarts,
+    /// anything else cancels.
+    RestartDaemonConfirm,
+    /// Confirmation prompt for installing `version` and restarting the
+    /// daemon, opened by clicking the `<version> available` segment of the
+    /// status-bar version notice. Single-key dispatch: `y`/Enter installs,
+    /// anything else cancels.
+    UpgradeConfirm {
+        version: String,
+    },
     Rename {
         session_id: String,
     },
@@ -766,6 +807,19 @@ pub struct SessionTitleMenu {
     pub area: ratatui::layout::Rect,
 }
 
+/// In-progress inline rename of a session's title, edited directly in its
+/// pane's title bar (or the program popup's) instead of the bottom
+/// minibuffer prompt. `App::session_title_rename == None` means no rename
+/// is active; only one can be in progress at a time.
+#[derive(Debug, Clone)]
+pub struct SessionTitleRename {
+    pub session_id: String,
+    /// Live edit buffer, pre-filled with the session's current title.
+    pub buffer: String,
+    /// Char index into `buffer` (not byte index) — see `byte_pos`.
+    pub cursor: usize,
+}
+
 impl SessionTitleMenu {
     pub fn item_at(&self, col: u16, row: u16) -> Option<SessionTitleMenuAction> {
         if col <= self.area.x
@@ -866,6 +920,7 @@ pub struct App {
     pub program_projection_tx: mpsc::UnboundedSender<(String, String)>,
     pub theme: crate::theme::Theme,
     pub theme_name: crate::theme::ThemeName,
+    terminal_background_is_light: Option<bool>,
     pub help_visible: bool,
     pub profile: Profile,
     pub keymap: Keymap,
@@ -874,16 +929,25 @@ pub struct App {
     pub chord_state: ChordState,
     pub chord_label: String,
     pub status: Option<(String, Instant)>,
-    /// Persistent "update available" advisory, sourced from the upgrade cache.
-    /// Unlike `status`, it is never auto-cleared on tick — it stays in the
-    /// modeline until you upgrade (after which `cached_update_notice` returns
-    /// None). Rendered right-aligned at the far edge of the modeline, so it
-    /// coexists with a transient `status` message shown inline on the left.
-    pub update_notice: Option<String>,
-    /// Persistent advisory that the connected daemon is not the same build as
-    /// this client. Missing daemon build ids count as a mismatch because that
-    /// is how a new TUI recognizes an older stale daemon.
-    pub daemon_build_mismatch: bool,
+    /// Latest released version, if newer than this build, sourced from the
+    /// upgrade cache. Unlike `status`, it is never auto-cleared on tick — it
+    /// stays in the modeline until you upgrade (after which
+    /// `cached_latest_version` returns None). Rendered right-aligned at the
+    /// far edge of the modeline as a clickable "<version> available" segment,
+    /// so it coexists with a transient `status` message shown inline on the
+    /// left.
+    pub latest_version: Option<String>,
+    /// Build id last reported by the connected daemon's `ping`, or `None`
+    /// before the first successful ping (or if the daemon predates build-id
+    /// reporting). Compared against `crate::BUILD_ID` to render the
+    /// status-bar version segment: matching ids show a plain version string,
+    /// a difference (including a missing daemon id) shows both builds with a
+    /// clickable "restart daemon" segment.
+    pub daemon_build_id: Option<String>,
+    /// Sender for background upgrade-install status messages (see
+    /// `spawn_detached_upgrade`); the event loop drains the paired receiver
+    /// and surfaces each message via `set_status`.
+    pub upgrade_status_tx: mpsc::UnboundedSender<String>,
     pub last_diff: Option<String>,
     pub should_quit: bool,
     pub connected: bool,
@@ -1027,6 +1091,9 @@ pub struct App {
     pub layout: LayoutSnapshot,
     /// Session-view title hamburger dropdown.
     pub session_title_menu: Option<SessionTitleMenu>,
+    /// In-progress inline rename of a session's title, edited directly in a
+    /// pane's title bar. `None` when no rename is active.
+    pub session_title_rename: Option<SessionTitleRename>,
     /// Most-recently observed mouse cursor position (terminal cell).
     /// `None` until the first `MouseEventKind::Moved` arrives — and stays
     /// `None` on terminals that don't forward motion events (e.g. macOS
@@ -1246,6 +1313,9 @@ pub struct App {
     pub selected_text: Option<String>,
     pub selected_text_bounds: Option<ratatui::layout::Rect>,
     pub selected_text_range: Option<TextSelectionRange>,
+    /// Per-session tail used to recognize OSC 11 background probes split
+    /// across PTY chunks. Only stores a few bytes per active session.
+    pty_osc11_query_tails: HashMap<String, Vec<u8>>,
     pty_input_tx: mpsc::UnboundedSender<PtyInputJob>,
     pty_input_errors: mpsc::UnboundedReceiver<String>,
 }
@@ -1636,6 +1706,41 @@ fn coalesce_pty_input(
         }
     }
     (session_id, bytes, label, carried)
+}
+
+fn osc11_background_query_count(tail: &mut Vec<u8>, bytes: &[u8]) -> usize {
+    let mut combined = Vec::with_capacity(tail.len() + bytes.len());
+    combined.extend_from_slice(tail);
+    combined.extend_from_slice(bytes);
+    let count = combined
+        .windows(OSC11_BACKGROUND_QUERY_BEL.len())
+        .filter(|w| *w == OSC11_BACKGROUND_QUERY_BEL)
+        .count()
+        + combined
+            .windows(OSC11_BACKGROUND_QUERY_ST.len())
+            .filter(|w| *w == OSC11_BACKGROUND_QUERY_ST)
+            .count();
+    *tail = longest_osc11_query_prefix_suffix(&combined).to_vec();
+    count
+}
+
+fn longest_osc11_query_prefix_suffix(bytes: &[u8]) -> &[u8] {
+    let max = OSC11_BACKGROUND_QUERY_ST
+        .len()
+        .max(OSC11_BACKGROUND_QUERY_BEL.len())
+        .saturating_sub(1)
+        .min(bytes.len());
+    for len in (1..=max).rev() {
+        let suffix = &bytes[bytes.len() - len..];
+        if (suffix.len() < OSC11_BACKGROUND_QUERY_BEL.len()
+            && OSC11_BACKGROUND_QUERY_BEL.starts_with(suffix))
+            || (suffix.len() < OSC11_BACKGROUND_QUERY_ST.len()
+                && OSC11_BACKGROUND_QUERY_ST.starts_with(suffix))
+        {
+            return suffix;
+        }
+    }
+    &[]
 }
 
 /// State for the `/tasks` modal popup. v1 is read-only at the UI
@@ -2274,6 +2379,20 @@ impl ModelineApprovalModeHit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelineThemeHit {
+    pub row: u16,
+    pub start_col: u16,
+    /// Exclusive end column.
+    pub end_col: u16,
+}
+
+impl ModelineThemeHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowPaneHit {
     pub id: u64,
     pub area: ratatui::layout::Rect,
@@ -2287,6 +2406,24 @@ pub struct WindowDividerHit {
     pub area: ratatui::layout::Rect,
     pub parent_area: ratatui::layout::Rect,
     pub ratio_percent: u16,
+}
+
+/// A pane's clickable session-name text in its title bar. One entry per
+/// rendered pane (splits can each show a different session); populated by
+/// `render_detail` every frame. Clicking it starts an inline rename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTitleNameHit {
+    pub session_id: String,
+    pub row: u16,
+    pub start_col: u16,
+    /// Exclusive end column.
+    pub end_col: u16,
+}
+
+impl SessionTitleNameHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
 }
 
 /// Last-frame geometry for hit-testing mouse clicks.
@@ -2304,6 +2441,8 @@ pub struct LayoutSnapshot {
     pub last_chat_areas: std::collections::HashMap<String, ratatui::layout::Rect>,
     /// Clickable approval-mode badge in the modeline for the selected session.
     pub modeline_approval_mode_hit: Option<ModelineApprovalModeHit>,
+    /// Clickable theme label in the modeline status bar.
+    pub modeline_theme_hit: Option<ModelineThemeHit>,
     /// Number of rows of the list pane currently in use (so a click
     /// past the last row is a no-op rather than selecting an
     /// out-of-range item). Mirrors `app.list_items().len()`.
@@ -2332,12 +2471,20 @@ pub struct LayoutSnapshot {
     /// Mouse clicks outside this rect dismiss the modal instead of
     /// falling through to panes underneath it.
     pub modal_area: Option<ratatui::layout::Rect>,
+    /// Clickable session-name text in each rendered pane's title bar (one
+    /// entry per pane) — click starts an inline rename in place. Refreshed
+    /// every frame by `render_detail`.
+    pub session_title_name_hits: Vec<SessionTitleNameHit>,
     /// Program title-bar Run button bounds: `(x_start, x_end, y)`.
     pub program_title_run_hit: Option<(u16, u16, u16)>,
     /// Program title-bar mode toggle bounds: `(x_start, x_end, y)`.
     pub program_title_toggle_hit: Option<(u16, u16, u16)>,
     /// Program title-bar close button bounds: `(x_start, x_end, y)`.
     pub program_title_close_hit: Option<(u16, u16, u16)>,
+    /// Program title-bar session-name bounds: `(x_start, x_end, y)`. Click
+    /// starts an inline rename of the active popup's session — the program
+    /// popup's counterpart to `session_title_name_hits`.
+    pub program_title_name_hit: Option<(u16, u16, u16)>,
     /// Program selected-text context Run button bounds: `(x_start, x_end, y)`.
     pub program_selection_run_hit: Option<(u16, u16, u16)>,
     /// Inner content rect of the active program popup from the last frame.
@@ -2632,6 +2779,7 @@ async fn run_with_socket_initial_selection(
     // Placeholder senders; `run_loop` installs the live channels it actually drains.
     let program_templates_tx = mpsc::unbounded_channel().0;
     let program_projection_tx = mpsc::unbounded_channel().0;
+    let upgrade_status_tx = mpsc::unbounded_channel().0;
     let mut app = App {
         client: client.clone(),
         last_reported_view: None,
@@ -2658,6 +2806,7 @@ async fn run_with_socket_initial_selection(
         program_projection_tx,
         theme,
         theme_name: theme_config.active_name(None),
+        terminal_background_is_light: None,
         help_visible: false,
         profile,
         keymap,
@@ -2666,8 +2815,9 @@ async fn run_with_socket_initial_selection(
         chord_state: ChordState::default(),
         chord_label: String::new(),
         status: None,
-        update_notice: None,
-        daemon_build_mismatch: false,
+        latest_version: None,
+        daemon_build_id: None,
+        upgrade_status_tx,
         last_diff: None,
         should_quit: false,
         connected: true,
@@ -2714,6 +2864,7 @@ async fn run_with_socket_initial_selection(
         start_instant: now,
         layout: LayoutSnapshot::default(),
         session_title_menu: None,
+        session_title_rename: None,
         mouse_pos: None,
         mouse_moved_at: None,
         mouse_capture_enabled: true,
@@ -2767,13 +2918,14 @@ async fn run_with_socket_initial_selection(
         selected_text: None,
         selected_text_bounds: None,
         selected_text_range: None,
+        pty_osc11_query_tails: HashMap::new(),
         pty_input_tx,
         pty_input_errors,
     };
     if let Some(warning) = theme_warning {
         app.status = Some((warning, Instant::now()));
     }
-    app.refresh_daemon_build_mismatch().await;
+    app.refresh_daemon_build_id().await;
     // Default to Terminal view when the currently-selected session has a PTY.
     if app.selected_session().map(|s| s.has_pty).unwrap_or(false) {
         app.set_active_view(ViewMode::Terminal);
@@ -2790,12 +2942,12 @@ async fn run_with_socket_initial_selection(
     // the first frame immediately, then starts background hydration and renders
     // loading placeholders until each history is ready.
 
-    // One-line "update available" notice, sourced from an on-disk cache so it
-    // never blocks startup (a stale cache refreshes in the background for the
-    // next launch). Held in a dedicated field so it persists in the modeline
+    // Latest released version, sourced from an on-disk cache so it never
+    // blocks startup (a stale cache refreshes in the background for the next
+    // launch). Held in a dedicated field so it persists in the modeline
     // until the user upgrades, rather than expiring after a few seconds like a
     // transient status. Opt out with CONSTRUCT_NO_UPDATE_CHECK=1.
-    app.update_notice = crate::upgrade::cached_update_notice();
+    app.latest_version = crate::upgrade::cached_latest_version();
 
     if app.selected_needs_hydration() {
         if let Some(id) = app.selection.session_id() {
@@ -2816,16 +2968,20 @@ async fn run_with_socket_initial_selection(
     // Terminal setup.
     enable_raw_mode().context("enable raw mode")?;
     // Now that the terminal is in raw mode (and before the event loop starts
-    // consuming stdin), resolve the palette against the terminal background for
-    // `mode = "auto"`. Forced light/dark skip the query; a non-answering
-    // terminal falls back to dark.
-    let detected_light = if theme_config.mode == crate::theme::ThemeMode::Auto {
+    // consuming stdin), resolve background-aware palettes against the terminal
+    // background. A non-answering terminal falls back to the dark variant.
+    let should_detect_background = theme_config
+        .name
+        .map(crate::theme::ThemeName::is_background_aware)
+        .unwrap_or(theme_config.mode == crate::theme::ThemeMode::Auto);
+    let detected_light = if should_detect_background {
         crate::theme::detect_terminal_is_light(std::time::Duration::from_millis(120))
     } else {
         None
     };
     app.theme = theme_config.resolve(detected_light);
     app.theme_name = theme_config.active_name(detected_light);
+    app.terminal_background_is_light = detected_light;
     tracing::info!(mode = ?theme_config.mode, theme = ?app.theme_name, ?detected_light, "tui theme resolved");
     let mut stdout = std::io::stdout();
     execute!(
@@ -2907,6 +3063,13 @@ async fn run_loop(
     let (program_projection_tx, mut program_projection_rx) =
         mpsc::unbounded_channel::<(String, String)>();
     app.program_projection_tx = program_projection_tx;
+    // Status messages from a background `spawn_detached_upgrade` (see
+    // `MinibufferIntent::UpgradeConfirm`). The sender lives on `app` so the
+    // minibuffer handler can kick off the install without blocking the event
+    // loop on the download/install; this loop drains the result and surfaces
+    // it via `set_status`.
+    let (upgrade_status_tx, mut upgrade_status_rx) = mpsc::unbounded_channel::<String>();
+    app.upgrade_status_tx = upgrade_status_tx;
     let mut reconnect: Option<ReconnectState> = None;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
@@ -3361,6 +3524,11 @@ async fn run_loop(
                     }
                 }
             }
+            msg = upgrade_status_rx.recv() => {
+                if let Some(msg) = msg {
+                    app.set_status(msg);
+                }
+            }
             _ = tick.tick() => {
                 if let Some((_, at)) = &app.status {
                     if at.elapsed() > Duration::from_secs(5) {
@@ -3423,7 +3591,7 @@ impl App {
         // histories so the visible/pinned sessions re-hydrate from the
         // daemon's (now clean) pty.log, mirroring the daemon-side truncate.
         self.histories.clear();
-        self.refresh_daemon_build_mismatch().await;
+        self.refresh_daemon_build_id().await;
         self.connected = true;
         self.ensure_selection_valid();
         self.orchestrator_id = self
@@ -3444,11 +3612,27 @@ impl App {
         self.status = Some((msg, Instant::now()));
     }
 
-    pub(crate) async fn refresh_daemon_build_mismatch(&mut self) {
+    pub(crate) async fn refresh_daemon_build_id(&mut self) {
         if let Ok(ping) = self.client.ping().await {
-            self.daemon_build_mismatch =
-                daemon_build_mismatch_notice(crate::BUILD_ID, ping.build_id.as_deref()).is_some();
+            self.daemon_build_id = ping.build_id;
         }
+    }
+
+    /// Kick off an out-of-process install of `version` (see
+    /// `upgrade::spawn_detached_upgrade`) without blocking the event loop on
+    /// the download/install. Reports progress and the eventual outcome via
+    /// `set_status`, delivered through `upgrade_status_tx`.
+    pub(crate) fn start_upgrade(&mut self, version: String) {
+        self.set_status(format!("upgrading to {version}…"));
+        let socket = self.client.socket_path().to_path_buf();
+        let tx = self.upgrade_status_tx.clone();
+        tokio::spawn(async move {
+            let msg = match crate::upgrade::spawn_detached_upgrade(&version, &socket).await {
+                Ok(msg) => msg,
+                Err(e) => format!("upgrade to {version} failed: {e}"),
+            };
+            let _ = tx.send(msg);
+        });
     }
 
     fn insert_browser_preview(
@@ -3516,6 +3700,31 @@ impl App {
         {
             self.set_status(format!("{label} failed: input pump stopped"));
         }
+    }
+
+    fn answer_theme_background_query(&mut self, session_id: &str, bytes: &[u8]) {
+        let count = {
+            let tail = self
+                .pty_osc11_query_tails
+                .entry(session_id.to_string())
+                .or_default();
+            osc11_background_query_count(tail, bytes)
+        };
+        if count == 0 {
+            return;
+        }
+        let Some(response) = self.theme.osc11_background_response() else {
+            return;
+        };
+        let mut responses = Vec::with_capacity(response.len() * count);
+        for _ in 0..count {
+            responses.extend_from_slice(&response);
+        }
+        self.queue_pty_input(
+            session_id.to_string(),
+            responses,
+            "theme background response",
+        );
     }
 
     async fn on_paste(&mut self, text: String) {
@@ -5292,6 +5501,7 @@ impl App {
                                 if !agentd_protocol::is_pty_active_payload(b) {
                                     is_active = false;
                                 }
+                                self.answer_theme_background_query(&payload.session_id, b);
                                 let history = self
                                     .histories
                                     .entry(payload.session_id.clone())
@@ -6319,6 +6529,28 @@ impl App {
                     }
                     return;
                 }
+                // Session-name text on a pane's title bar: click starts an
+                // inline rename in place, rather than the bottom-minibuffer
+                // prompt the session-title menu's "rename" row opens.
+                if let Some(hit) = self
+                    .layout
+                    .session_title_name_hits
+                    .iter()
+                    .find(|hit| hit.contains(ev.column, ev.row))
+                    .cloned()
+                {
+                    if let Some(pane) = self
+                        .layout
+                        .main_window_areas
+                        .iter()
+                        .find(|pane| Self::rect_contains(pane.area, ev.column, ev.row))
+                        .copied()
+                    {
+                        self.focus_main_window(pane.id);
+                    }
+                    self.start_session_title_rename(hit.session_id);
+                    return;
+                }
                 // List ↔ view divider: clicking the list pane's
                 // right border (col = list_width - 1), the view's
                 // left border (col = list_width), or the first pin
@@ -7157,6 +7389,14 @@ impl App {
             }
             return;
         }
+        // An in-progress inline title rename owns every keystroke, same
+        // precedence class as the minibuffer/session-picker below — it must
+        // come first so a rename started by clicking a pane's name doesn't
+        // leak keystrokes into that pane's PTY or the program buffer.
+        if self.session_title_rename.is_some() {
+            self.handle_session_title_rename_key(key).await;
+            return;
+        }
         // The session-picker dialog is the topmost modal: while open it owns
         // every keystroke. This must sit above the program-popup gate below so
         // that a dialog opened from the program view's `@`→session path
@@ -7669,11 +7909,22 @@ impl App {
                 // selection ▶ Run button: run just the highlighted selection
                 // when one is active, otherwise run the whole program. No-op
                 // (with a status hint) when no program surface is open.
-                let selection = self
-                    .program_popup
-                    .as_ref()
-                    .and_then(Self::selected_program_text);
-                self.execute_program_popup(selection, None).await;
+                let selected = self.program_popup.as_ref().and_then(|popup| {
+                    Some((
+                        Self::selected_program_text(popup)?,
+                        Self::selected_program_block_ids(popup)?,
+                    ))
+                });
+                let (selection, selected_block_ids) =
+                    selected.map_or((None, None), |(text, ids)| (Some(text), Some(ids)));
+                if selection.is_some() {
+                    if let Some(popup) = self.program_popup.as_mut() {
+                        popup.selection = None;
+                    }
+                    self.layout.program_selection_run_hit = None;
+                }
+                self.execute_program_popup(selection, selected_block_ids)
+                    .await;
             }
             ToggleProgramTerminalFocus => {
                 self.toggle_program_terminal_focus();
@@ -7975,6 +8226,26 @@ impl App {
             CycleTheme => {
                 self.apply_named_theme(self.theme_name.next());
             }
+            OpenRestartDaemonConfirm => {
+                self.minibuffer = Some(Minibuffer {
+                    prompt: "Restart daemon? (y/N): ".to_string(),
+                    input: String::new(),
+                    cursor: 0,
+                    intent: MinibufferIntent::RestartDaemonConfirm,
+                    error: None,
+                });
+            }
+            OpenUpgradeConfirm => {
+                if let Some(version) = self.latest_version.clone() {
+                    self.minibuffer = Some(Minibuffer {
+                        prompt: format!("Upgrade to {version} and restart the daemon? (y/N): "),
+                        input: String::new(),
+                        cursor: 0,
+                        intent: MinibufferIntent::UpgradeConfirm { version },
+                        error: None,
+                    });
+                }
+            }
         }
     }
 
@@ -8045,10 +8316,19 @@ impl App {
             self.queue_pty_input(orch_id, bytes, "orchestrator pty_input");
         }
     }
-
     pub(super) fn apply_named_theme(&mut self, name: crate::theme::ThemeName) {
         let mut cfg = crate::theme::ThemeConfig::load();
-        match cfg.select_named(name) {
+        let detected_light = if name.is_background_aware()
+            && self.terminal_background_is_light.is_none()
+        {
+            crate::theme::detect_terminal_is_light(std::time::Duration::from_millis(120))
+        } else {
+            self.terminal_background_is_light
+        };
+        if name.is_background_aware() {
+            self.terminal_background_is_light = detected_light;
+        }
+        match cfg.select_named_for_terminal(name, detected_light) {
             Ok(theme) => {
                 self.theme = theme;
                 self.theme_name = name;
@@ -8118,7 +8398,12 @@ impl App {
                 } else if let Some(name) = crate::theme::ThemeName::parse(arg) {
                     self.apply_named_theme(name);
                 } else {
-                    self.set_status(format!("theme: unknown '{arg}'; use matrix, dark, or light"));
+                    let names = crate::theme::ThemeName::ALL
+                        .iter()
+                        .map(|name| name.label())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.set_status(format!("theme: unknown '{arg}'; use {names}"));
                 }
             }
             "archived" | "archive" | "archives" => {
@@ -8213,30 +8498,8 @@ impl App {
                 match sub {
                     "restart" => {
                         let exe = (!rest.is_empty()).then(|| rest.to_string());
-                        match self.client.daemon_restart(exe, false).await {
-                            Ok(r) => self.set_status(format!(
-                                "construct: restart requested (exe={}, pid={}) — reconnect when ready",
-                                r.exe, r.pid
-                            )),
-                            // BrokenPipe / connection closed is the
-                            // expected outcome — the daemon execs
-                            // before fully writing the reply on
-                            // some platforms. Treat it as success.
-                            Err(e) => {
-                                let msg = e.to_string().to_lowercase();
-                                if msg.contains("broken pipe")
-                                    || msg.contains("connection reset")
-                                    || msg.contains("eof")
-                                    || msg.contains("closed")
-                                {
-                                    self.set_status(
-                                        "construct: restart in flight (socket closed) — reconnect when ready".to_string(),
-                                    );
-                                } else {
-                                    self.set_status(format!("construct restart failed: {e}"));
-                                }
-                            }
-                        }
+                        let result = self.client.daemon_restart(exe, false).await;
+                        self.set_status(daemon_restart_status_message(result, "construct: restart"));
                     }
                     "" => self.set_status("construct: subcommand required (e.g. `restart`)".into()),
                     other => self.set_status(format!(
@@ -9785,15 +10048,18 @@ mod tests {
             minibuffer_area: Some(Rect::new(0, 29, 100, 4)),
             last_chat_areas: std::collections::HashMap::new(),
             modeline_approval_mode_hit: None,
+            modeline_theme_hit: None,
             list_row_count: 0,
             list_items_area: None,
             list_scroll_offset: 0,
             shortcut_hints: Vec::new(),
             minibuffer_harness_hits: Vec::new(),
             modal_area: None,
+            session_title_name_hits: Vec::new(),
             program_title_run_hit: None,
             program_title_toggle_hit: None,
             program_title_close_hit: None,
+            program_title_name_hit: None,
             program_selection_run_hit: None,
             program_inner_area: None,
             program_base_area: None,
@@ -9849,6 +10115,7 @@ mod tests {
             program_projection_tx: mpsc::unbounded_channel().0,
             theme: crate::theme::Theme::default(),
             theme_name: crate::theme::ThemeName::Matrix,
+            terminal_background_is_light: None,
             help_visible: false,
             profile: Profile::Emacs,
             keymap: keymap::default_for(Profile::Emacs),
@@ -9857,8 +10124,13 @@ mod tests {
             chord_state: ChordState::default(),
             chord_label: String::new(),
             status: None,
-            update_notice: None,
-            daemon_build_mismatch: false,
+            latest_version: None,
+            // Matching build by default — the common case, and it keeps the
+            // status-bar version segment short for tests that don't care
+            // about it. Tests exercising the mismatch/upgrade UI override
+            // this explicitly.
+            daemon_build_id: Some(crate::BUILD_ID.to_string()),
+            upgrade_status_tx: mpsc::unbounded_channel().0,
             last_diff: None,
             should_quit: false,
             connected: true,
@@ -9890,6 +10162,7 @@ mod tests {
             start_instant: now,
             layout: LayoutSnapshot::default(),
             session_title_menu: None,
+            session_title_rename: None,
             mouse_pos: None,
             mouse_moved_at: None,
             mouse_capture_enabled: true,
@@ -9949,6 +10222,7 @@ mod tests {
             selected_text: None,
             selected_text_bounds: None,
             selected_text_range: None,
+            pty_osc11_query_tails: HashMap::new(),
             pty_input_tx,
             pty_input_errors,
         }
@@ -9956,26 +10230,23 @@ mod tests {
 
     #[test]
     fn daemon_build_compare_equal_has_no_warning() {
-        assert_eq!(
-            daemon_build_mismatch_notice("0.1.0+abc123", Some("0.1.0+abc123")),
-            None
-        );
+        assert!(!daemon_build_ids_differ(
+            "0.1.0+abc123",
+            Some("0.1.0+abc123")
+        ));
     }
 
     #[test]
     fn daemon_build_compare_different_warns() {
-        assert_eq!(
-            daemon_build_mismatch_notice("0.1.0+abc123", Some("0.1.0+def456")),
-            Some(DAEMON_BUILD_MISMATCH_NOTICE)
-        );
+        assert!(daemon_build_ids_differ(
+            "0.1.0+abc123",
+            Some("0.1.0+def456")
+        ));
     }
 
     #[test]
     fn daemon_build_compare_absent_warns() {
-        assert_eq!(
-            daemon_build_mismatch_notice("0.1.0+abc123", None),
-            Some(DAEMON_BUILD_MISMATCH_NOTICE)
-        );
+        assert!(daemon_build_ids_differ("0.1.0+abc123", None));
     }
 
     async fn app_with_ping_build_response(
@@ -10047,9 +10318,13 @@ mod tests {
             app_with_ping_build_response(serde_json::json!({"pong": true, "version": "test"}))
                 .await;
 
-        app.refresh_daemon_build_mismatch().await;
+        app.refresh_daemon_build_id().await;
 
-        assert!(app.daemon_build_mismatch);
+        assert!(app.daemon_build_id.is_none());
+        assert!(daemon_build_ids_differ(
+            crate::BUILD_ID,
+            app.daemon_build_id.as_deref()
+        ));
         server.abort();
     }
 
@@ -10062,9 +10337,13 @@ mod tests {
         }))
         .await;
 
-        app.refresh_daemon_build_mismatch().await;
+        app.refresh_daemon_build_id().await;
 
-        assert!(!app.daemon_build_mismatch);
+        assert_eq!(app.daemon_build_id.as_deref(), Some(crate::BUILD_ID));
+        assert!(!daemon_build_ids_differ(
+            crate::BUILD_ID,
+            app.daemon_build_id.as_deref()
+        ));
         server.abort();
     }
 
@@ -14829,6 +15108,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn program_selection_run_ctrl_x_ctrl_r_clears_menu_and_runs_selection() {
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let params = req.get("params").cloned().unwrap_or(Value::Null);
+                let _ = seen_tx.send((method.clone(), params.clone()));
+                let program = serde_json::json!({
+                    "session_id": "s1",
+                    "markdown": "alpha beta",
+                    "version": 1,
+                    "updated_at_ms": 0,
+                    "template_id": null,
+                });
+                let result = match method.as_str() {
+                    ipc_method::PROGRAM_EXECUTE => {
+                        serde_json::json!({ "program": program, "prompt": "sent", "active_run": null })
+                    }
+                    _ => Value::Null,
+                };
+                let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(client, Vec::new());
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.program_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        app.layout
+            .program_selection_run_hit
+            .expect("selection run hit registered");
+
+        app.run_action(KeyAction::RunProgram).await;
+
+        assert!(
+            app.program_popup
+                .as_ref()
+                .is_some_and(|popup| popup.selection.is_none()),
+            "C-x C-r on a selection should clear selection so the context menu disappears"
+        );
+        assert!(
+            app.layout.program_selection_run_hit.is_none(),
+            "selection Run hitbox should clear with the context menu"
+        );
+        let (method, params) = seen_rx.recv().await.expect("program execute request");
+        assert_eq!(method, ipc_method::PROGRAM_EXECUTE);
+        assert_eq!(
+            params.get("selection").and_then(Value::as_str),
+            Some("alpha")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_selection_run_ctrl_x_ctrl_r_preserves_other_pending_shimmer() {
+        // Regression: C-x C-r on a fresh selection while other blocks are
+        // already shimmering from an earlier run must keep that shimmer and
+        // optimistically add the newly-run block, not replace the whole
+        // pending set with just the new selection (mirrors the mouse-click
+        // regression above — both gestures funnel into the same
+        // `execute_program_popup` call and must behave identically).
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        // No accept loop: the action handler awaits the program/execute
+        // round trip, which we deliberately never let complete so a single
+        // poll observes only the synchronous optimistic shimmer update.
+        let _listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let client = Client::connect(&sock).await.expect("client connects");
+
+        let mut app = test_app(client, Vec::new());
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha\n\nbeta\n", 0));
+        app.program_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+
+        // "beta" is already shimmering from an earlier, separate run.
+        app.start_program_run("s1", "alpha\n\nbeta\n", false, "");
+        app.program_runs.get_mut("s1").expect("run").pending =
+            HashSet::from([agentd_protocol::program_block_id("beta")]);
+
+        app.begin_program_selection();
+        app.move_program_cursor(5); // selects "alpha"
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        app.layout
+            .program_selection_run_hit
+            .expect("selection run hit registered");
+
+        let fut = app.run_action(KeyAction::RunProgram);
+        assert!(
+            fut.now_or_never().is_none(),
+            "action handling should still be awaiting the daemon response"
+        );
+
+        let pending = &app.program_runs["s1"].pending;
+        assert!(
+            pending.contains(&agentd_protocol::program_block_id("beta")),
+            "C-x C-r on a new selection must not clear another block's existing shimmer"
+        );
+        assert!(
+            pending.contains(&agentd_protocol::program_block_id("alpha")),
+            "the freshly-run selection should be optimistically shimmered too"
+        );
+    }
+
+    #[tokio::test]
     async fn program_selection_run_click_preserves_other_pending_shimmer() {
         // Regression: clicking "Run" on a fresh selection while other blocks
         // are already shimmering from an earlier run must keep that shimmer
@@ -15499,6 +15937,154 @@ mod tests {
         assert_eq!(
             second_params.get("base_version").and_then(Value::as_u64),
             Some(2)
+        );
+        server.abort();
+    }
+
+    // The bug this fix addresses: selecting a strict SUBSTRING of a
+    // single-line block (not the whole line) and pressing Run. The TUI
+    // already computes the real enclosing block's id via
+    // `App::selected_program_block_ids` (overlap of the selection's char
+    // range with each block's line range, not by re-hashing the selected
+    // substring's own text) for its own optimistic shimmer — this asserts
+    // that same id is also threaded into the outgoing `program.execute`
+    // request as `selection_block_ids`, and that adopting a daemon response
+    // whose `active_run.pending_block_refs` echoes that real id lights the
+    // block's shimmer (the fixed daemon's authoritative response no longer
+    // overwrites the correct optimistic state with a phantom).
+    #[tokio::test]
+    async fn program_execute_partial_line_selection_sends_and_adopts_real_block_id() {
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let markdown = "Some long text here";
+        let real_block_id = agentd_protocol::program_block_spans(markdown)
+            .into_iter()
+            .next()
+            .expect("one block")
+            .id;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let (seen_tx, mut seen_rx) = mpsc::unbounded_channel::<(String, Value)>();
+        let response_block_id = real_block_id.clone();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let params = req.get("params").cloned().unwrap_or(Value::Null);
+                let _ = seen_tx.send((method.clone(), params.clone()));
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("time")
+                    .as_millis() as i64;
+                let program = serde_json::json!({
+                    "session_id": "s1",
+                    "markdown": markdown,
+                    "version": 1,
+                    "updated_at_ms": 0,
+                    "template_id": null,
+                });
+                let result = match method.as_str() {
+                    ipc_method::PROGRAM_EXECUTE => serde_json::json!({
+                        "program": program,
+                        "prompt": "run",
+                        // Simulates the FIXED daemon: it trusted the
+                        // request's `selection_block_ids` and resolved the
+                        // real block instead of fabricating a phantom
+                        // hash-of-substring id.
+                        "active_run": {
+                            "run_id": "s1:1",
+                            "started_at_ms": now_ms,
+                            "expires_at_ms": now_ms + 60_000,
+                            "pending_block_refs": [response_block_id],
+                        },
+                    }),
+                    _ => Value::Null,
+                };
+                let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(client, Vec::new());
+        app.program_popup = Some(program_popup_for_test("s1", markdown, 0));
+        // "long text" out of "Some long text here" — a strict substring of
+        // the single line/block, not the whole line.
+        app.program_popup.as_mut().unwrap().selection = Some(ProgramSelection {
+            anchor: 5,
+            head: 14,
+            dragged: false,
+        });
+
+        assert!(
+            app.execute_program_popup(Some("long text".to_string()), None)
+                .await,
+            "run should dispatch"
+        );
+
+        let (method, params) = seen_rx.recv().await.expect("program execute request");
+        assert_eq!(method, ipc_method::PROGRAM_EXECUTE);
+        assert_eq!(
+            params.get("selection").and_then(Value::as_str),
+            Some("long text")
+        );
+        let sent_ids: Vec<String> = params
+            .get("selection_block_ids")
+            .and_then(Value::as_array)
+            .expect("selection_block_ids present")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            sent_ids,
+            vec![real_block_id.clone()],
+            "the real enclosing block's id, not a phantom hash of the substring"
+        );
+
+        // Adopting the response lights the block's shimmer: replicate the
+        // exact check `ui::program_run_shimmer` performs for a popup whose
+        // `blocks` projection is empty (dirty/never-synced fallback) — match
+        // by recomputing the same content-hash id from the buffer.
+        let run = app
+            .program_runs
+            .get("s1")
+            .expect("run adopted from daemon response");
+        let popup = app.program_popup.as_ref().expect("popup");
+        let shimmers = crate::app::program_blocks(&popup.buffer)
+            .iter()
+            .any(|block| run.pending.contains(&block.id));
+        assert!(
+            shimmers,
+            "the real block should shimmer; run.pending = {:?}",
+            run.pending
         );
         server.abort();
     }
@@ -16609,6 +17195,7 @@ mod tests {
                 selection: None,
                 base_version: Some(2),
                 shimmer: None,
+                selection_block_ids: None,
             })
             .await
             .expect("execute response");
@@ -18205,6 +18792,258 @@ mod tests {
             "menu split action must fire even over a mouse-grabbing child"
         );
         assert_eq!(app.leaf_window_ids().len(), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn clicking_session_name_starts_inline_rename_prefilled_at_end() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].title = Some("old-name".into());
+        app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
+        app.active_window_id = 1;
+        app.next_window_id = 2;
+        app.selection = Selection::Session("s1".into());
+        app.focus = PaneFocus::View;
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render");
+
+        let hit = app
+            .layout
+            .session_title_name_hits
+            .first()
+            .cloned()
+            .expect("session name hit registered");
+        let click = |kind, col, row| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.on_mouse(click(
+            MouseEventKind::Down(MouseButton::Left),
+            hit.start_col,
+            hit.row,
+        ))
+        .await;
+        app.on_mouse(click(
+            MouseEventKind::Up(MouseButton::Left),
+            hit.start_col,
+            hit.row,
+        ))
+        .await;
+
+        let rename = app
+            .session_title_rename
+            .clone()
+            .expect("clicking the name starts an inline rename");
+        assert_eq!(rename.session_id, "s1");
+        assert_eq!(rename.buffer, "old-name");
+        assert_eq!(rename.cursor, "old-name".chars().count());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_title_rename_emacs_editing_mirrors_session_picker() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].title = Some("ac".into());
+        app.start_session_title_rename("s1".into());
+        assert_eq!(app.session_title_rename.as_ref().unwrap().cursor, 2);
+
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.session_title_rename.as_ref().unwrap().cursor, 1);
+        // Insert between the two chars: "ac" -> "abc".
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.session_title_rename.as_ref().unwrap().buffer, "abc");
+        assert_eq!(app.session_title_rename.as_ref().unwrap().cursor, 2);
+        // C-a jumps to the start; C-f steps one char forward.
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.session_title_rename.as_ref().unwrap().cursor, 0);
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.session_title_rename.as_ref().unwrap().cursor, 1);
+        // C-e jumps to the end; backspace there deletes the last char, "abc" -> "ab".
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.session_title_rename.as_ref().unwrap().cursor, 3);
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.session_title_rename.as_ref().unwrap().buffer, "ab");
+        assert_eq!(app.session_title_rename.as_ref().unwrap().cursor, 2);
+        // C-k kills from the cursor to the end.
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .await;
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+            .await;
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.session_title_rename.as_ref().unwrap().buffer, "a");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_title_rename_enter_commits_via_set_title() {
+        let (client, _dir, server) = program_flow_mock_daemon().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.title = Some("old-name".into());
+        let mut app = test_app(client, vec![session]);
+        app.selection = Selection::Session("s1".into());
+
+        app.start_session_title_rename("s1".into());
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        assert!(
+            app.session_title_rename.is_none(),
+            "commit clears the rename state"
+        );
+        assert_eq!(
+            app.sessions[0].title.as_deref(),
+            Some("old-name!"),
+            "commit optimistically updates the local session title"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_title_rename_enter_with_empty_buffer_clears_title() {
+        let (client, _dir, server) = program_flow_mock_daemon().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.title = Some("old-name".into());
+        let mut app = test_app(client, vec![session]);
+        app.selection = Selection::Session("s1".into());
+
+        app.start_session_title_rename("s1".into());
+        for _ in 0..("old-name".chars().count()) {
+            app.handle_session_title_rename_key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            ))
+            .await;
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        assert!(app.session_title_rename.is_none());
+        assert_eq!(app.sessions[0].title, None, "empty buffer clears the title");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_title_rename_esc_cancels_without_mutating_title() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].title = Some("old-name".into());
+        app.selection = Selection::Session("s1".into());
+
+        app.start_session_title_rename("s1".into());
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+
+        assert!(app.session_title_rename.is_none(), "Esc clears the rename state");
+        assert_eq!(
+            app.sessions[0].title.as_deref(),
+            Some("old-name"),
+            "Esc must not mutate the session title"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_title_rename_captures_keys_before_normal_dispatch() {
+        // While a rename is in progress, an ordinary keystroke must edit the
+        // rename buffer instead of falling through to the keymap (here, `?`
+        // would otherwise toggle help) — the same precedence class as an
+        // open minibuffer or session-picker dialog.
+        let (mut app, _dir, server) = captured_app().await;
+        app.selection = Selection::Session("s1".into());
+        app.start_session_title_rename("s1".into());
+
+        app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .await;
+
+        assert_eq!(app.session_title_rename.as_ref().unwrap().buffer, "?");
+        assert!(
+            !app.help_visible,
+            "the keystroke must not leak through to the ordinary keymap"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn render_detail_shows_live_rename_buffer_and_cursor_not_static_name() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].title = Some("old-name".into());
+        app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        app.start_session_title_rename("s1".into());
+        app.handle_session_title_rename_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
+            .await;
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render");
+        let text = rendered_text(term.backend().buffer());
+
+        assert!(
+            text.contains("old-name!"),
+            "title bar should render the live edit buffer: {text:?}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_popup_title_name_click_starts_inline_rename() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        session.title = Some("old-name".into());
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render");
+
+        let (xs, _xe, y) = app
+            .layout
+            .program_title_name_hit
+            .expect("program title name hit registered");
+        let click = |kind, col, row| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.on_mouse(click(MouseEventKind::Down(MouseButton::Left), xs, y))
+            .await;
+        app.on_mouse(click(MouseEventKind::Up(MouseButton::Left), xs, y))
+            .await;
+
+        let rename = app
+            .session_title_rename
+            .clone()
+            .expect("clicking the program title name starts an inline rename");
+        assert_eq!(rename.session_id, "s1");
+        assert_eq!(rename.buffer, "old-name");
         server.abort();
     }
 
@@ -20548,9 +21387,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_notice_renders_right_aligned_in_modeline() {
+    async fn matching_build_renders_plain_version_in_modeline() {
         let (mut app, _dir, server) = empty_app().await;
-        app.update_notice = Some("↑ construct 9.9.9 · construct upgrade".to_string());
+        app.daemon_build_id = Some(crate::BUILD_ID.to_string());
         let backend = ratatui::backend::TestBackend::new(120, 36);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
 
@@ -20561,25 +21400,173 @@ mod tests {
         let screen = rendered_text(terminal.backend().buffer());
         let modeline = screen
             .lines()
-            .find(|l| l.contains("↑ construct 9.9.9 · construct upgrade"))
-            .expect("update notice should be on screen");
-
+            .find(|l| l.contains(crate::BUILD_ID))
+            .expect("version should be on screen");
         // Right-aligned: only padding follows it to the right edge.
         assert!(
-            modeline.trim_end().ends_with("construct upgrade"),
-            "notice should sit at the right edge:\n{modeline}"
+            modeline.trim_end().ends_with(crate::BUILD_ID),
+            "version should sit at the right edge:\n{modeline}"
         );
-        // ...and it lives in the right half, not inline on the left.
-        let col = modeline.find('↑').expect("arrow present");
         assert!(
-            col > 60,
-            "notice should start in the right half (byte col {col}):\n{modeline}"
+            !app
+                .layout
+                .shortcut_hints
+                .iter()
+                .any(|h| h.action == KeyAction::OpenRestartDaemonConfirm),
+            "matching version should not be clickable:\n{:?}",
+            app.layout.shortcut_hints
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn theme_indicator_renders_in_minibuffer_not_matrix_header() {
+    async fn mismatched_build_renders_both_versions_and_daemon_segment_click_opens_restart_confirm(
+    ) {
+        let (mut app, _dir, server) = empty_app().await;
+        app.daemon_build_id = Some("0.1.0+deadbee".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        let expected = format!("0.1.0+deadbee (daemon) - {} (tui)", crate::BUILD_ID);
+        let modeline = screen
+            .lines()
+            .find(|l| l.contains(&expected))
+            .unwrap_or_else(|| panic!("version mismatch notice should be on screen:\n{screen}"));
+        assert!(
+            modeline
+                .trim_end()
+                .ends_with(&format!("{} (tui)", crate::BUILD_ID)),
+            "notice should sit at the right edge:\n{modeline}"
+        );
+
+        let hint = app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenRestartDaemonConfirm)
+            .expect("daemon segment should be clickable")
+            .clone();
+        app.handle_left_click(hint.x_start, hint.y).await;
+        assert!(
+            matches!(
+                app.minibuffer.as_ref().map(|m| &m.intent),
+                Some(MinibufferIntent::RestartDaemonConfirm)
+            ),
+            "clicking the daemon segment should open the restart-daemon confirm"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn update_available_renders_and_click_opens_upgrade_confirm() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.daemon_build_id = Some(crate::BUILD_ID.to_string());
+        app.latest_version = Some("9.9.9".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        let modeline = screen
+            .lines()
+            .find(|l| l.contains("9.9.9 available"))
+            .expect("update-available notice should be on screen");
+        assert!(
+            modeline.trim_end().ends_with("9.9.9 available"),
+            "notice should sit at the right edge:\n{modeline}"
+        );
+
+        let hint = app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenUpgradeConfirm)
+            .expect("update-available segment should be clickable")
+            .clone();
+        app.handle_left_click(hint.x_start, hint.y).await;
+        assert!(
+            matches!(
+                app.minibuffer.as_ref().map(|m| &m.intent),
+                Some(MinibufferIntent::UpgradeConfirm { version }) if version == "9.9.9"
+            ),
+            "clicking the update-available segment should open the upgrade confirm"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn hovering_daemon_segment_shows_restart_tooltip() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.daemon_build_id = Some("0.1.0+deadbee".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let hint = app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenRestartDaemonConfirm)
+            .expect("daemon segment should be clickable")
+            .clone();
+
+        app.mouse_pos = Some((hint.x_start, hint.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw with hover");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(
+            screen.contains("Daemon build differs — click to restart"),
+            "hovering the daemon segment should show a restart tooltip:\n{screen}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn hovering_upgrade_segment_shows_upgrade_tooltip() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.daemon_build_id = Some(crate::BUILD_ID.to_string());
+        app.latest_version = Some("9.9.9".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let hint = app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenUpgradeConfirm)
+            .expect("update-available segment should be clickable")
+            .clone();
+
+        app.mouse_pos = Some((hint.x_start, hint.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw with hover");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(
+            screen.contains("Newer version available — click to upgrade"),
+            "hovering the update-available segment should show an upgrade tooltip:\n{screen}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn theme_indicator_renders_in_minibuffer_status_bar_not_body() {
         let (mut app, _dir, server) = empty_app().await;
         let backend = ratatui::backend::TestBackend::new(120, 36);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
@@ -20589,19 +21576,55 @@ mod tests {
             .expect("draw");
 
         let screen = rendered_text(terminal.backend().buffer());
+        let modeline = screen
+            .lines()
+            .find(|line| line.contains("construct") && line.contains("theme:matrix"))
+            .expect("theme label should live in the modeline/status bar");
+        let minibuffer_line = screen
+            .lines()
+            .last()
+            .expect("screen should have a minibuffer row");
+        // The status-bar version segment (client/daemon build) always
+        // renders after the theme label, so "right-aligned" now means
+        // "immediately followed by the version notice" rather than
+        // literally the last characters on the line.
         assert!(
-            screen.contains("theme:matrix"),
-            "missing minibuffer theme label:\n{screen}"
+            modeline
+                .trim_end()
+                .ends_with(&format!("theme:matrix | {}", crate::BUILD_ID)),
+            "theme label should be right-aligned in status bar:\n{modeline}"
+        );
+        assert!(
+            !minibuffer_line.contains("theme:matrix"),
+            "theme label should not render in minibuffer body:\n{minibuffer_line}"
         );
         assert!(
             app.layout.matrix_theme_hit.is_none(),
             "matrix rain header should not own theme click target"
         );
+        let minibuffer_y = app
+            .layout
+            .minibuffer_area
+            .expect("minibuffer area")
+            .y;
         assert!(app
             .layout
             .shortcut_hints
             .iter()
-            .any(|h| h.action == KeyAction::CycleTheme));
+            .any(|h| h.action == KeyAction::CycleTheme && h.y < minibuffer_y));
+        let theme_hit = app
+            .layout
+            .modeline_theme_hit
+            .expect("theme label should be a modeline tooltip hit target");
+        app.mouse_pos = Some((theme_hit.start_col, theme_hit.row));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw with theme hover");
+        let hovered_modeline = rendered_text(terminal.backend().buffer());
+        assert!(
+            hovered_modeline.contains("Theme: matrix. Click to cycle theme"),
+            "theme tooltip should appear when hovering the label"
+        );
         server.abort();
     }
 
@@ -21022,6 +22045,56 @@ mod tests {
             app.view_scrollback, 0,
             "modeline scrollback value should be the effective rendered scrollback"
         );
+    }
+
+    #[test]
+    fn osc11_background_query_count_handles_split_and_st_terminated_queries() {
+        let mut tail = Vec::new();
+        assert_eq!(osc11_background_query_count(&mut tail, b"\x1b]11;?"), 0);
+        assert_eq!(tail, b"\x1b]11;?");
+        assert_eq!(osc11_background_query_count(&mut tail, b"\x07"), 1);
+        assert!(tail.is_empty());
+
+        assert_eq!(
+            osc11_background_query_count(
+                &mut tail,
+                b"noise\x1b]11;?\x1b\\more\x1b]11;?\x07"
+            ),
+            2
+        );
+        assert!(tail.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dark_theme_answers_child_osc11_background_query() {
+        let (mut app, _dir, server) = captured_app().await;
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+        app.theme = crate::theme::Theme::dark_ui();
+
+        app.answer_theme_background_query("s1", b"\x1b]11;?");
+        assert!(rx.try_recv().is_err(), "split query is incomplete");
+
+        app.answer_theme_background_query("s1", b"\x07");
+        let job = rx.try_recv().expect("dark theme should answer OSC 11");
+        assert_eq!(job.session_id, "s1");
+        assert_eq!(job.bytes, b"\x1b]11;rgb:0c0c/1212/1b1b\x07");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn matrix_theme_does_not_answer_child_osc11_background_query() {
+        let (mut app, _dir, server) = captured_app().await;
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+        app.theme = crate::theme::Theme::dark();
+
+        app.answer_theme_background_query("s1", b"\x1b]11;?\x07");
+        assert!(
+            rx.try_recv().is_err(),
+            "matrix stays background-aware instead of faking the terminal"
+        );
+        server.abort();
     }
 
     /// Starting a `C-x` chord is not a passthrough — it must redraw

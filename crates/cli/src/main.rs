@@ -335,8 +335,7 @@ async fn main() -> Result<()> {
             let c = connect(&socket).await?;
             let r = c.ping().await?;
             let daemon_build = r.build_id.as_deref().unwrap_or("unknown");
-            let build_mismatch =
-                app::daemon_build_mismatch_notice(BUILD_ID, r.build_id.as_deref()).is_some();
+            let build_mismatch = app::daemon_build_ids_differ(BUILD_ID, r.build_id.as_deref());
             println!("pong: {}, version: {}", r.pong, r.version);
             println!("client_build: {}", BUILD_ID);
             println!("daemon_build: {}", daemon_build);
@@ -721,6 +720,7 @@ async fn run_program_command(client: &Client, command: ProgramCommand) -> Result
                     selection,
                     base_version,
                     shimmer: None,
+                    selection_block_ids: None,
                 })
                 .await?;
             println!(
