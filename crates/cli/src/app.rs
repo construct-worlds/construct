@@ -2326,6 +2326,20 @@ impl ModelineApprovalModeHit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelineThemeHit {
+    pub row: u16,
+    pub start_col: u16,
+    /// Exclusive end column.
+    pub end_col: u16,
+}
+
+impl ModelineThemeHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowPaneHit {
     pub id: u64,
     pub area: ratatui::layout::Rect,
@@ -2356,6 +2370,8 @@ pub struct LayoutSnapshot {
     pub last_chat_areas: std::collections::HashMap<String, ratatui::layout::Rect>,
     /// Clickable approval-mode badge in the modeline for the selected session.
     pub modeline_approval_mode_hit: Option<ModelineApprovalModeHit>,
+    /// Clickable theme label in the modeline status bar.
+    pub modeline_theme_hit: Option<ModelineThemeHit>,
     /// Number of rows of the list pane currently in use (so a click
     /// past the last row is a no-op rather than selecting an
     /// out-of-range item). Mirrors `app.list_items().len()`.
@@ -9869,6 +9885,7 @@ mod tests {
             minibuffer_area: Some(Rect::new(0, 29, 100, 4)),
             last_chat_areas: std::collections::HashMap::new(),
             modeline_approval_mode_hit: None,
+            modeline_theme_hit: None,
             list_row_count: 0,
             list_items_area: None,
             list_scroll_offset: 0,
@@ -20651,6 +20668,19 @@ mod tests {
             .shortcut_hints
             .iter()
             .any(|h| h.action == KeyAction::CycleTheme && h.y < minibuffer_y));
+        let theme_hit = app
+            .layout
+            .modeline_theme_hit
+            .expect("theme label should be a modeline tooltip hit target");
+        app.mouse_pos = Some((theme_hit.start_col, theme_hit.row));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw with theme hover");
+        let hovered_modeline = rendered_text(terminal.backend().buffer());
+        assert!(
+            hovered_modeline.contains("Theme: matrix. Click to cycle theme"),
+            "theme tooltip should appear when hovering the label"
+        );
         server.abort();
     }
 
