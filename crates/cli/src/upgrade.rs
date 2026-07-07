@@ -10,6 +10,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use agentd_client::Client;
@@ -130,13 +131,14 @@ async fn refresh_cache() {
     });
 }
 
-/// A one-line "newer version available" notice for the TUI to surface, or
-/// `None`. Reads only the on-disk cache (instant, never blocks startup); if
-/// the cache is stale it kicks off a background refresh for the next launch.
-/// Opt out entirely with `CONSTRUCT_NO_UPDATE_CHECK=1`.
+/// The latest released version, if it is strictly newer than the version
+/// this binary was built from, or `None`. Reads only the on-disk cache
+/// (instant, never blocks startup); if the cache is stale it kicks off a
+/// background refresh for the next launch. Opt out entirely with
+/// `CONSTRUCT_NO_UPDATE_CHECK=1`.
 ///
 /// Must be called from within a Tokio runtime (it may spawn the refresh).
-pub fn cached_update_notice() -> Option<String> {
+pub fn cached_latest_version() -> Option<String> {
     if update_check_disabled() {
         return None;
     }
@@ -144,13 +146,59 @@ pub fn cached_update_notice() -> Option<String> {
     if now_ms().saturating_sub(cache.checked_at_ms) > CACHE_TTL_MS {
         tokio::spawn(refresh_cache());
     }
-    notice_for(cache.latest.as_deref()?, current_version())
+    let latest = cache.latest?;
+    is_newer(&latest, current_version()).then_some(latest)
 }
 
-/// The notice string for `latest` vs `current`, or `None` when `latest` is
-/// not strictly newer (or unparseable).
-fn notice_for(latest: &str, current: &str) -> Option<String> {
-    is_newer(latest, current).then(|| format!("↑ construct {latest} · construct upgrade"))
+/// Where a background upgrade spawned via [`spawn_detached_upgrade`]
+/// redirects its stdout/stderr. The caller is typically a live TUI whose own
+/// stdout is the alternate screen, so the child must never inherit it.
+pub fn log_path() -> PathBuf {
+    Paths::discover().state_dir.join("upgrade.log")
+}
+
+/// Install `version` and restart the daemon at `socket`, out-of-process: this
+/// spawns `construct --socket <socket> upgrade --version <version> --restart`
+/// as a detached child (stdin null, stdout/stderr redirected to
+/// [`log_path`]) and waits for it to exit. Meant to be called from inside a
+/// live TUI, where running the installer in-process would print over the
+/// alternate screen. Returns a one-line status message describing the
+/// outcome; only I/O failures setting up the child (not the child's own exit
+/// status) surface as `Err`.
+pub async fn spawn_detached_upgrade(version: &str, socket: &Path) -> Result<String> {
+    let exe = std::env::current_exe().context("resolve current executable")?;
+    let log_out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path())
+        .context("open upgrade log")?;
+    let log_err = log_out.try_clone().context("clone upgrade log handle")?;
+    let mut child = tokio::process::Command::new(&exe)
+        .arg("--socket")
+        .arg(socket)
+        .arg("upgrade")
+        .arg("--version")
+        .arg(version)
+        .arg("--restart")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_out))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .context("spawn construct upgrade")?;
+    let status = child
+        .wait()
+        .await
+        .context("wait for construct upgrade to exit")?;
+    if status.success() {
+        Ok(format!(
+            "upgraded to {version} — daemon restart requested, reconnect when ready"
+        ))
+    } else {
+        Ok(format!(
+            "upgrade to {version} failed ({status}) — see {}",
+            log_path().display()
+        ))
+    }
 }
 
 // --- interactive startup check -----------------------------------------------
@@ -349,16 +397,6 @@ mod tests {
         // Unparseable inputs never nag.
         assert!(!is_newer("garbage", "0.1.0"));
         assert!(!is_newer("0.2.0", "garbage"));
-    }
-
-    #[test]
-    fn notice_only_when_a_newer_version_exists() {
-        assert_eq!(
-            notice_for("0.2.0", "0.1.0").as_deref(),
-            Some("↑ construct 0.2.0 · construct upgrade")
-        );
-        assert_eq!(notice_for("0.1.0", "0.1.0"), None);
-        assert_eq!(notice_for("0.1.0", "0.2.0"), None);
     }
 
     #[test]

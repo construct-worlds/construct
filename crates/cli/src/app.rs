@@ -81,8 +81,6 @@ pub(crate) const PROGRAM_RUN_DEDUP_WINDOW_MS: u64 = 1500;
 /// Grace window for ignoring a stale `program/state` clear that was queued
 /// before a just-adopted `program.execute` response run became visible.
 pub(crate) const PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS: u64 = 1500;
-pub(crate) const DAEMON_BUILD_MISMATCH_NOTICE: &str =
-    "daemon build differs - restart daemon";
 /// One-shot flourish shown when an authoritative program Run pending block
 /// settles. Presentation-only and client-local.
 pub(crate) const PROGRAM_SETTLE_FLASH_MS: u64 = 300;
@@ -214,13 +212,40 @@ fn pane_sizes_diverged(
         .any(|(id, size)| last_sent.get(id) != Some(size))
 }
 
-pub(crate) fn daemon_build_mismatch_notice(
-    client_build_id: &str,
-    daemon_build_id: Option<&str>,
-) -> Option<&'static str> {
-    match daemon_build_id {
-        Some(daemon_build_id) if daemon_build_id == client_build_id => None,
-        _ => Some(DAEMON_BUILD_MISMATCH_NOTICE),
+/// Whether the connected daemon is running a different build than this
+/// client. A missing daemon build id counts as a mismatch — that is how a
+/// new TUI recognizes an older, stale daemon that predates build-id
+/// reporting.
+pub(crate) fn daemon_build_ids_differ(client_build_id: &str, daemon_build_id: Option<&str>) -> bool {
+    daemon_build_id != Some(client_build_id)
+}
+
+/// Classify a `daemon_restart` RPC outcome into a status-bar message shared
+/// by `/construct restart` and the "restart daemon?" confirm click. The
+/// daemon execs before it finishes writing the reply on some platforms, so a
+/// broken-pipe / connection-reset / EOF / closed error is the *expected*
+/// success path there, not a failure — only some other error is a real one.
+pub(crate) fn daemon_restart_status_message(
+    result: Result<agentd_protocol::DaemonRestartResult>,
+    verb: &str,
+) -> String {
+    match result {
+        Ok(r) => format!(
+            "{verb} requested (exe={}, pid={}) — reconnect when ready",
+            r.exe, r.pid
+        ),
+        Err(e) => {
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("broken pipe")
+                || msg.contains("connection reset")
+                || msg.contains("eof")
+                || msg.contains("closed")
+            {
+                format!("{verb} in flight (socket closed) — reconnect when ready")
+            } else {
+                format!("{verb} failed: {e}")
+            }
+        }
     }
 }
 
@@ -556,6 +581,19 @@ pub enum MinibufferIntent {
     RestartConfirm {
         session_id: String,
     },
+    /// Confirmation prompt for restarting the daemon, opened by clicking the
+    /// `<daemon build> (daemon)` segment of the status-bar version notice
+    /// (shown when the connected daemon's build differs from this client's).
+    /// Single-key dispatch, same as `RestartConfirm`: `y`/Enter restarts,
+    /// anything else cancels.
+    RestartDaemonConfirm,
+    /// Confirmation prompt for installing `version` and restarting the
+    /// daemon, opened by clicking the `<version> available` segment of the
+    /// status-bar version notice. Single-key dispatch: `y`/Enter installs,
+    /// anything else cancels.
+    UpgradeConfirm {
+        version: String,
+    },
     Rename {
         session_id: String,
     },
@@ -841,16 +879,25 @@ pub struct App {
     pub chord_state: ChordState,
     pub chord_label: String,
     pub status: Option<(String, Instant)>,
-    /// Persistent "update available" advisory, sourced from the upgrade cache.
-    /// Unlike `status`, it is never auto-cleared on tick — it stays in the
-    /// modeline until you upgrade (after which `cached_update_notice` returns
-    /// None). Rendered right-aligned at the far edge of the modeline, so it
-    /// coexists with a transient `status` message shown inline on the left.
-    pub update_notice: Option<String>,
-    /// Persistent advisory that the connected daemon is not the same build as
-    /// this client. Missing daemon build ids count as a mismatch because that
-    /// is how a new TUI recognizes an older stale daemon.
-    pub daemon_build_mismatch: bool,
+    /// Latest released version, if newer than this build, sourced from the
+    /// upgrade cache. Unlike `status`, it is never auto-cleared on tick — it
+    /// stays in the modeline until you upgrade (after which
+    /// `cached_latest_version` returns None). Rendered right-aligned at the
+    /// far edge of the modeline as a clickable "<version> available" segment,
+    /// so it coexists with a transient `status` message shown inline on the
+    /// left.
+    pub latest_version: Option<String>,
+    /// Build id last reported by the connected daemon's `ping`, or `None`
+    /// before the first successful ping (or if the daemon predates build-id
+    /// reporting). Compared against `crate::BUILD_ID` to render the
+    /// status-bar version segment: matching ids show a plain version string,
+    /// a difference (including a missing daemon id) shows both builds with a
+    /// clickable "restart daemon" segment.
+    pub daemon_build_id: Option<String>,
+    /// Sender for background upgrade-install status messages (see
+    /// `spawn_detached_upgrade`); the event loop drains the paired receiver
+    /// and surfaces each message via `set_status`.
+    pub upgrade_status_tx: mpsc::UnboundedSender<String>,
     pub last_diff: Option<String>,
     pub should_quit: bool,
     pub connected: bool,
@@ -2628,8 +2675,9 @@ async fn run_with_socket_initial_selection(
     let now = Instant::now();
     let socket = client.socket_path().to_path_buf();
     let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
-    // Placeholder sender; `run_loop` installs the live channel it actually drains.
+    // Placeholder senders; `run_loop` installs the live channels it actually drains.
     let program_templates_tx = mpsc::unbounded_channel().0;
+    let upgrade_status_tx = mpsc::unbounded_channel().0;
     let mut app = App {
         client: client.clone(),
         last_reported_view: None,
@@ -2662,8 +2710,9 @@ async fn run_with_socket_initial_selection(
         chord_state: ChordState::default(),
         chord_label: String::new(),
         status: None,
-        update_notice: None,
-        daemon_build_mismatch: false,
+        latest_version: None,
+        daemon_build_id: None,
+        upgrade_status_tx,
         last_diff: None,
         should_quit: false,
         connected: true,
@@ -2770,7 +2819,7 @@ async fn run_with_socket_initial_selection(
     if let Some(warning) = theme_warning {
         app.status = Some((warning, Instant::now()));
     }
-    app.refresh_daemon_build_mismatch().await;
+    app.refresh_daemon_build_id().await;
     // Default to Terminal view when the currently-selected session has a PTY.
     if app.selected_session().map(|s| s.has_pty).unwrap_or(false) {
         app.set_active_view(ViewMode::Terminal);
@@ -2787,12 +2836,12 @@ async fn run_with_socket_initial_selection(
     // the first frame immediately, then starts background hydration and renders
     // loading placeholders until each history is ready.
 
-    // One-line "update available" notice, sourced from an on-disk cache so it
-    // never blocks startup (a stale cache refreshes in the background for the
-    // next launch). Held in a dedicated field so it persists in the modeline
+    // Latest released version, sourced from an on-disk cache so it never
+    // blocks startup (a stale cache refreshes in the background for the next
+    // launch). Held in a dedicated field so it persists in the modeline
     // until the user upgrades, rather than expiring after a few seconds like a
     // transient status. Opt out with CONSTRUCT_NO_UPDATE_CHECK=1.
-    app.update_notice = crate::upgrade::cached_update_notice();
+    app.latest_version = crate::upgrade::cached_latest_version();
 
     if app.selected_needs_hydration() {
         if let Some(id) = app.selection.session_id() {
@@ -2901,6 +2950,13 @@ async fn run_loop(
     let (program_templates_tx, mut program_templates_rx) =
         mpsc::unbounded_channel::<Vec<agentd_protocol::ProgramTemplate>>();
     app.program_templates_tx = program_templates_tx;
+    // Status messages from a background `spawn_detached_upgrade` (see
+    // `MinibufferIntent::UpgradeConfirm`). The sender lives on `app` so the
+    // minibuffer handler can kick off the install without blocking the event
+    // loop on the download/install; this loop drains the result and surfaces
+    // it via `set_status`.
+    let (upgrade_status_tx, mut upgrade_status_rx) = mpsc::unbounded_channel::<String>();
+    app.upgrade_status_tx = upgrade_status_tx;
     let mut reconnect: Option<ReconnectState> = None;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
@@ -3340,6 +3396,11 @@ async fn run_loop(
                     }
                 }
             }
+            msg = upgrade_status_rx.recv() => {
+                if let Some(msg) = msg {
+                    app.set_status(msg);
+                }
+            }
             _ = tick.tick() => {
                 if let Some((_, at)) = &app.status {
                     if at.elapsed() > Duration::from_secs(5) {
@@ -3402,7 +3463,7 @@ impl App {
         // histories so the visible/pinned sessions re-hydrate from the
         // daemon's (now clean) pty.log, mirroring the daemon-side truncate.
         self.histories.clear();
-        self.refresh_daemon_build_mismatch().await;
+        self.refresh_daemon_build_id().await;
         self.connected = true;
         self.ensure_selection_valid();
         self.orchestrator_id = self
@@ -3423,11 +3484,27 @@ impl App {
         self.status = Some((msg, Instant::now()));
     }
 
-    pub(crate) async fn refresh_daemon_build_mismatch(&mut self) {
+    pub(crate) async fn refresh_daemon_build_id(&mut self) {
         if let Ok(ping) = self.client.ping().await {
-            self.daemon_build_mismatch =
-                daemon_build_mismatch_notice(crate::BUILD_ID, ping.build_id.as_deref()).is_some();
+            self.daemon_build_id = ping.build_id;
         }
+    }
+
+    /// Kick off an out-of-process install of `version` (see
+    /// `upgrade::spawn_detached_upgrade`) without blocking the event loop on
+    /// the download/install. Reports progress and the eventual outcome via
+    /// `set_status`, delivered through `upgrade_status_tx`.
+    pub(crate) fn start_upgrade(&mut self, version: String) {
+        self.set_status(format!("upgrading to {version}…"));
+        let socket = self.client.socket_path().to_path_buf();
+        let tx = self.upgrade_status_tx.clone();
+        tokio::spawn(async move {
+            let msg = match crate::upgrade::spawn_detached_upgrade(&version, &socket).await {
+                Ok(msg) => msg,
+                Err(e) => format!("upgrade to {version} failed: {e}"),
+            };
+            let _ = tx.send(msg);
+        });
     }
 
     fn insert_browser_preview(
@@ -7970,6 +8047,26 @@ impl App {
             CycleTheme => {
                 self.apply_named_theme(self.theme_name.next());
             }
+            OpenRestartDaemonConfirm => {
+                self.minibuffer = Some(Minibuffer {
+                    prompt: "Restart daemon? (y/N): ".to_string(),
+                    input: String::new(),
+                    cursor: 0,
+                    intent: MinibufferIntent::RestartDaemonConfirm,
+                    error: None,
+                });
+            }
+            OpenUpgradeConfirm => {
+                if let Some(version) = self.latest_version.clone() {
+                    self.minibuffer = Some(Minibuffer {
+                        prompt: format!("Upgrade to {version} and restart the daemon? (y/N): "),
+                        input: String::new(),
+                        cursor: 0,
+                        intent: MinibufferIntent::UpgradeConfirm { version },
+                        error: None,
+                    });
+                }
+            }
         }
     }
 
@@ -8222,30 +8319,8 @@ impl App {
                 match sub {
                     "restart" => {
                         let exe = (!rest.is_empty()).then(|| rest.to_string());
-                        match self.client.daemon_restart(exe, false).await {
-                            Ok(r) => self.set_status(format!(
-                                "construct: restart requested (exe={}, pid={}) — reconnect when ready",
-                                r.exe, r.pid
-                            )),
-                            // BrokenPipe / connection closed is the
-                            // expected outcome — the daemon execs
-                            // before fully writing the reply on
-                            // some platforms. Treat it as success.
-                            Err(e) => {
-                                let msg = e.to_string().to_lowercase();
-                                if msg.contains("broken pipe")
-                                    || msg.contains("connection reset")
-                                    || msg.contains("eof")
-                                    || msg.contains("closed")
-                                {
-                                    self.set_status(
-                                        "construct: restart in flight (socket closed) — reconnect when ready".to_string(),
-                                    );
-                                } else {
-                                    self.set_status(format!("construct restart failed: {e}"));
-                                }
-                            }
-                        }
+                        let result = self.client.daemon_restart(exe, false).await;
+                        self.set_status(daemon_restart_status_message(result, "construct: restart"));
                     }
                     "" => self.set_status("construct: subcommand required (e.g. `restart`)".into()),
                     other => self.set_status(format!(
@@ -9863,8 +9938,13 @@ mod tests {
             chord_state: ChordState::default(),
             chord_label: String::new(),
             status: None,
-            update_notice: None,
-            daemon_build_mismatch: false,
+            latest_version: None,
+            // Matching build by default — the common case, and it keeps the
+            // status-bar version segment short for tests that don't care
+            // about it. Tests exercising the mismatch/upgrade UI override
+            // this explicitly.
+            daemon_build_id: Some(crate::BUILD_ID.to_string()),
+            upgrade_status_tx: mpsc::unbounded_channel().0,
             last_diff: None,
             should_quit: false,
             connected: true,
@@ -9963,26 +10043,23 @@ mod tests {
 
     #[test]
     fn daemon_build_compare_equal_has_no_warning() {
-        assert_eq!(
-            daemon_build_mismatch_notice("0.1.0+abc123", Some("0.1.0+abc123")),
-            None
-        );
+        assert!(!daemon_build_ids_differ(
+            "0.1.0+abc123",
+            Some("0.1.0+abc123")
+        ));
     }
 
     #[test]
     fn daemon_build_compare_different_warns() {
-        assert_eq!(
-            daemon_build_mismatch_notice("0.1.0+abc123", Some("0.1.0+def456")),
-            Some(DAEMON_BUILD_MISMATCH_NOTICE)
-        );
+        assert!(daemon_build_ids_differ(
+            "0.1.0+abc123",
+            Some("0.1.0+def456")
+        ));
     }
 
     #[test]
     fn daemon_build_compare_absent_warns() {
-        assert_eq!(
-            daemon_build_mismatch_notice("0.1.0+abc123", None),
-            Some(DAEMON_BUILD_MISMATCH_NOTICE)
-        );
+        assert!(daemon_build_ids_differ("0.1.0+abc123", None));
     }
 
     async fn app_with_ping_build_response(
@@ -10054,9 +10131,13 @@ mod tests {
             app_with_ping_build_response(serde_json::json!({"pong": true, "version": "test"}))
                 .await;
 
-        app.refresh_daemon_build_mismatch().await;
+        app.refresh_daemon_build_id().await;
 
-        assert!(app.daemon_build_mismatch);
+        assert!(app.daemon_build_id.is_none());
+        assert!(daemon_build_ids_differ(
+            crate::BUILD_ID,
+            app.daemon_build_id.as_deref()
+        ));
         server.abort();
     }
 
@@ -10069,9 +10150,13 @@ mod tests {
         }))
         .await;
 
-        app.refresh_daemon_build_mismatch().await;
+        app.refresh_daemon_build_id().await;
 
-        assert!(!app.daemon_build_mismatch);
+        assert_eq!(app.daemon_build_id.as_deref(), Some(crate::BUILD_ID));
+        assert!(!daemon_build_ids_differ(
+            crate::BUILD_ID,
+            app.daemon_build_id.as_deref()
+        ));
         server.abort();
     }
 
@@ -20341,9 +20426,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_notice_renders_right_aligned_in_modeline() {
+    async fn matching_build_renders_plain_version_in_modeline() {
         let (mut app, _dir, server) = empty_app().await;
-        app.update_notice = Some("↑ construct 9.9.9 · construct upgrade".to_string());
+        app.daemon_build_id = Some(crate::BUILD_ID.to_string());
         let backend = ratatui::backend::TestBackend::new(120, 36);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
 
@@ -20354,19 +20439,104 @@ mod tests {
         let screen = rendered_text(terminal.backend().buffer());
         let modeline = screen
             .lines()
-            .find(|l| l.contains("↑ construct 9.9.9 · construct upgrade"))
-            .expect("update notice should be on screen");
-
+            .find(|l| l.contains(crate::BUILD_ID))
+            .expect("version should be on screen");
         // Right-aligned: only padding follows it to the right edge.
         assert!(
-            modeline.trim_end().ends_with("construct upgrade"),
+            modeline.trim_end().ends_with(crate::BUILD_ID),
+            "version should sit at the right edge:\n{modeline}"
+        );
+        assert!(
+            !app
+                .layout
+                .shortcut_hints
+                .iter()
+                .any(|h| h.action == KeyAction::OpenRestartDaemonConfirm),
+            "matching version should not be clickable:\n{:?}",
+            app.layout.shortcut_hints
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mismatched_build_renders_both_versions_and_daemon_segment_click_opens_restart_confirm(
+    ) {
+        let (mut app, _dir, server) = empty_app().await;
+        app.daemon_build_id = Some("0.1.0+deadbee".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        let expected = format!("0.1.0+deadbee (daemon) - {} (tui)", crate::BUILD_ID);
+        let modeline = screen
+            .lines()
+            .find(|l| l.contains(&expected))
+            .unwrap_or_else(|| panic!("version mismatch notice should be on screen:\n{screen}"));
+        assert!(
+            modeline
+                .trim_end()
+                .ends_with(&format!("{} (tui)", crate::BUILD_ID)),
             "notice should sit at the right edge:\n{modeline}"
         );
-        // ...and it lives in the right half, not inline on the left.
-        let col = modeline.find('↑').expect("arrow present");
+
+        let hint = app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenRestartDaemonConfirm)
+            .expect("daemon segment should be clickable")
+            .clone();
+        app.handle_left_click(hint.x_start, hint.y).await;
         assert!(
-            col > 60,
-            "notice should start in the right half (byte col {col}):\n{modeline}"
+            matches!(
+                app.minibuffer.as_ref().map(|m| &m.intent),
+                Some(MinibufferIntent::RestartDaemonConfirm)
+            ),
+            "clicking the daemon segment should open the restart-daemon confirm"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn update_available_renders_and_click_opens_upgrade_confirm() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.daemon_build_id = Some(crate::BUILD_ID.to_string());
+        app.latest_version = Some("9.9.9".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        let modeline = screen
+            .lines()
+            .find(|l| l.contains("9.9.9 available"))
+            .expect("update-available notice should be on screen");
+        assert!(
+            modeline.trim_end().ends_with("9.9.9 available"),
+            "notice should sit at the right edge:\n{modeline}"
+        );
+
+        let hint = app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenUpgradeConfirm)
+            .expect("update-available segment should be clickable")
+            .clone();
+        app.handle_left_click(hint.x_start, hint.y).await;
+        assert!(
+            matches!(
+                app.minibuffer.as_ref().map(|m| &m.intent),
+                Some(MinibufferIntent::UpgradeConfirm { version }) if version == "9.9.9"
+            ),
+            "clicking the update-available segment should open the upgrade confirm"
         );
         server.abort();
     }
@@ -20390,8 +20560,14 @@ mod tests {
             .lines()
             .last()
             .expect("screen should have a minibuffer row");
+        // The status-bar version segment (client/daemon build) always
+        // renders after the theme label, so "right-aligned" now means
+        // "immediately followed by the version notice" rather than
+        // literally the last characters on the line.
         assert!(
-            modeline.trim_end().ends_with("theme:matrix"),
+            modeline
+                .trim_end()
+                .ends_with(&format!("theme:matrix | {}", crate::BUILD_ID)),
             "theme label should be right-aligned in status bar:\n{modeline}"
         );
         assert!(

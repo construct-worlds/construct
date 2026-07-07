@@ -103,6 +103,13 @@ pub enum KeyAction {
     /// Cycle the active UI color theme. Click-only for the minibuffer theme
     /// affordance; `/theme` remains the keyboard-facing command.
     CycleTheme,
+    /// Open the "restart daemon?" confirmation. Click-only, bound to the
+    /// `<daemon build> (daemon)` segment of the status-bar version notice
+    /// shown when the connected daemon's build differs from this client's.
+    OpenRestartDaemonConfirm,
+    /// Open the "upgrade to <version>?" confirmation. Click-only, bound to
+    /// the `<version> available` segment of the status-bar version notice.
+    OpenUpgradeConfirm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
