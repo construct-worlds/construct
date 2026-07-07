@@ -138,6 +138,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.modeline_theme_hit = None;
     app.layout.main_window_areas.clear();
     app.layout.main_window_dividers.clear();
+    app.layout.session_title_name_hits.clear();
     app.window_pane_sizes.clear();
     app.terminal_replayed_sessions_this_frame.clear();
     app.layout.dynamic_ui_popover_area = None;
@@ -3119,16 +3120,42 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
     // the list holds focus; every other unfocused pane's title inherits the
     // dimmed border style (a default span patches nothing over border cells).
     let name_style = pane_title_name_style(&app.theme, last_focused);
+    let active_rename = summary.as_ref().and_then(|s| {
+        app.session_title_rename
+            .as_ref()
+            .filter(|r| r.session_id == s.id)
+    });
     let title: Line<'static> = match (summary.as_ref(), group.as_ref()) {
         (Some(s), _) => {
             let glyph_style = session_title_glyph_style(&app.theme, program_open, focused);
+            let (rendered_label, cursor_col) = match active_rename {
+                Some(rename) => visible_edit_window(&rename.buffer, rename.cursor, label_budget),
+                None => (truncate_to_width(&primary_label(s), label_budget), 0),
+            };
+            // Name hit-rect: right after ` <glyph> ` (border + leading space +
+            // glyph + the label span's own leading space) — mirrors
+            // `program_title_left_layout`'s identical offset for the program
+            // popup's title bar.
+            let name_x_start = area.x.saturating_add(3).saturating_add(glyph_w as u16);
+            let label_w = UnicodeWidthStr::width(rendered_label.as_str()) as u16;
+            app.layout
+                .session_title_name_hits
+                .push(crate::app::SessionTitleNameHit {
+                    session_id: s.id.clone(),
+                    row: area.y,
+                    start_col: name_x_start,
+                    end_col: name_x_start.saturating_add(label_w),
+                });
+            if active_rename.is_some() {
+                f.set_cursor_position(Position {
+                    x: name_x_start.saturating_add(cursor_col),
+                    y: area.y,
+                });
+            }
             Line::from(vec![
                 Span::raw(" "),
                 Span::styled(mode_glyph.unwrap_or(""), glyph_style),
-                Span::styled(
-                    format!(" {} ", truncate_to_width(&primary_label(s), label_budget)),
-                    name_style,
-                ),
+                Span::styled(format!(" {} ", rendered_label), name_style),
             ])
         }
         (None, Some(g)) => Line::from(Span::styled(format!(" project: {} ", g.name), name_style)),
@@ -7207,6 +7234,56 @@ fn truncate_to_width(s: &str, max: usize) -> String {
     out
 }
 
+/// Clip `text` to at most `budget` display columns while keeping `cursor`
+/// (a char index) visible — used to render an inline-rename edit buffer
+/// into a title-bar slot too narrow to show it in full. Returns the visible
+/// slice and the cursor's display column within it. Unlike
+/// `truncate_to_width`, this never appends `…`: the window just slides to
+/// follow the cursor, like a single-line text field.
+fn visible_edit_window(text: &str, cursor: usize, budget: usize) -> (String, u16) {
+    use unicode_width::UnicodeWidthChar;
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    if budget == 0 {
+        return (String::new(), 0);
+    }
+    let width_of = |cs: &[char]| -> usize {
+        cs.iter()
+            .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0))
+            .sum()
+    };
+    if width_of(&chars) <= budget {
+        return (
+            chars.iter().collect(),
+            width_of(&chars[..cursor]) as u16,
+        );
+    }
+    // Grow the window left from the cursor first, then fill any remaining
+    // budget to the right, so the cursor always ends up inside the slice.
+    let mut start = cursor;
+    let mut w = 0usize;
+    while start > 0 {
+        let cw = UnicodeWidthChar::width(chars[start - 1]).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        start -= 1;
+        w += cw;
+    }
+    let mut end = cursor;
+    while end < chars.len() {
+        let cw = UnicodeWidthChar::width(chars[end]).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        end += 1;
+        w += cw;
+    }
+    let visible: String = chars[start..end].iter().collect();
+    let cursor_col = width_of(&chars[start..cursor]) as u16;
+    (visible, cursor_col)
+}
+
 fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[String]) {
     if pinned_ids.is_empty() || area.height < 3 || area.width < 6 {
         return;
@@ -8055,6 +8132,7 @@ fn render_program_popup(f: &mut Frame, app: &mut App) {
     app.layout.program_title_run_hit = None;
     app.layout.program_title_toggle_hit = None;
     app.layout.program_title_close_hit = None;
+    app.layout.program_title_name_hit = None;
     app.layout.program_selection_run_hit = None;
     app.layout.program_inner_area = None;
     app.layout.program_base_area = None;
@@ -8774,6 +8852,11 @@ fn render_program_popup_at(
     let show_close = true;
     let dirty = popup.buffer != popup.saved_markdown;
     let stage_label = program_run_stage_label(app, popup, now);
+    let rename = app
+        .session_title_rename
+        .as_ref()
+        .filter(|r| r.session_id == popup.program.session_id)
+        .map(|r| (r.buffer.as_str(), r.cursor));
     let left = program_title_left_layout(
         summary_ref,
         short_id(&popup.program.session_id),
@@ -8781,6 +8864,7 @@ fn render_program_popup_at(
         dirty,
         show_close,
         stage_label.as_deref(),
+        rename,
     );
     let title = program_title_line(app, popup, active, focused, now, &left);
     let title_toggle_hit = program_title_toggle_button_range(summary_ref, rect);
@@ -8900,6 +8984,14 @@ fn render_program_popup_at(
             show_close.then(|| view_close_button_range(rect)),
             pane_right,
         );
+        app.layout.program_title_name_hit =
+            clamp_title_hit_to_pane(Some((left.name.0, left.name.1, rect.y)), pane_right);
+        if let Some(cursor_col) = left.cursor_col {
+            f.set_cursor_position(Position {
+                x: left.name.0.saturating_add(cursor_col),
+                y: rect.y,
+            });
+        }
     }
     // `block_inner`/`inner`/`safe_inner`/`safe_block_inner` were computed
     // above, before the right-cluster titles were added — the border-only
@@ -9859,7 +9951,8 @@ fn program_border_style(theme: &Theme, active: bool) -> Style {
 /// marker), and the `modified` marker. Both the title renderer and the tooltip
 /// hit-tester derive positions from this so they can't drift.
 struct ProgramTitleLeft {
-    /// Truncated session label (or short id when the session isn't summarized).
+    /// Truncated session label (or short id when the session isn't summarized) —
+    /// or, mid-rename, the live edit-buffer window.
     label: String,
     /// Run-button hit range `(x_start, x_end_exclusive, y)`, or `None` when the
     /// pane is too narrow to fit it.
@@ -9869,6 +9962,10 @@ struct ProgramTitleLeft {
     /// `modified` word hit range `(x_start, x_end_exclusive)` on row `rect.y`,
     /// or `None` when the program is not dirty.
     modified: Option<(u16, u16)>,
+    /// `label`'s own on-screen column range `(x_start, x_end_exclusive)`.
+    name: (u16, u16),
+    /// Cursor's display column within `label`, when `rename` was `Some`.
+    cursor_col: Option<u16>,
 }
 
 fn program_title_left_layout(
@@ -9878,6 +9975,7 @@ fn program_title_left_layout(
     dirty: bool,
     show_close: bool,
     stage_label: Option<&str>,
+    rename: Option<(&str, usize)>,
 ) -> ProgramTitleLeft {
     let glyph_w = UnicodeWidthStr::width(program_mode_glyph());
     let run_w = UnicodeWidthStr::width(PROGRAM_RUN_BUTTON);
@@ -9921,20 +10019,30 @@ fn program_title_left_layout(
         .saturating_sub(run_w)
         .saturating_sub(stage_w)
         .saturating_sub(marker_w);
-    let label = match summary {
-        Some(s) => truncate_to_width(&primary_label(s), label_budget),
-        None => truncate_to_width(fallback_label, label_budget),
+    let (label, cursor_col) = match rename {
+        Some((buffer, cursor)) => {
+            let (visible, col) = visible_edit_window(buffer, cursor, label_budget);
+            (visible, Some(col))
+        }
+        None => {
+            let label = match summary {
+                Some(s) => truncate_to_width(&primary_label(s), label_budget),
+                None => truncate_to_width(fallback_label, label_budget),
+            };
+            (label, None)
+        }
     };
     let label_w = UnicodeWidthStr::width(label.as_str());
-    // The Run button starts right after ` <glyph> <label>`; the title is inset
-    // one cell from the left border corner.
-    let run_x_start = rect
+    // The label starts right after ` <glyph> `; the title is inset one cell
+    // from the left border corner. The Run button picks up right where the
+    // label ends.
+    let name_x_start = rect
         .x
         .saturating_add(1) // left border corner
         .saturating_add(1) // leading space
         .saturating_add(glyph_w as u16)
-        .saturating_add(1) // space after glyph
-        .saturating_add(label_w as u16);
+        .saturating_add(1); // space after glyph
+    let run_x_start = name_x_start.saturating_add(label_w as u16);
     let run_x_end = run_x_start.saturating_add(run_w as u16);
     let pane_right = rect.x.saturating_add(rect.width);
     let run = (run_x_end < pane_right).then_some((run_x_start, run_x_end, rect.y));
@@ -9957,6 +10065,8 @@ fn program_title_left_layout(
         run,
         stage_label,
         modified,
+        name: (name_x_start, run_x_start),
+        cursor_col,
     }
 }
 
@@ -10166,6 +10276,19 @@ fn render_program_title_tooltip(
             return;
         }
     }
+    if let Some((xs, xe, y)) = app.layout.program_title_name_hit {
+        if my == y
+            && mx >= xs
+            && mx < xe
+            && !app
+                .session_title_rename
+                .as_ref()
+                .is_some_and(|r| r.session_id == popup.program.session_id)
+        {
+            render_button_tooltip(f, &app.theme, " Click to rename ", mx, my);
+            return;
+        }
+    }
     let dirty = popup.buffer != popup.saved_markdown;
     let left = program_title_left_layout(
         summary,
@@ -10174,6 +10297,7 @@ fn render_program_title_tooltip(
         dirty,
         true,
         program_run_stage_label(app, popup, Instant::now()).as_deref(),
+        None,
     );
     if let Some((start, end)) = left.modified {
         if mx >= start && mx < end {
@@ -13534,7 +13658,7 @@ mod tests {
         let summary = summary_with_mode("smith", Some("interactive"));
         let summary_ref = Some(&summary);
 
-        let layout = program_title_left_layout(summary_ref, "sess", rect, true, true, None);
+        let layout = program_title_left_layout(summary_ref, "sess", rect, true, true, None, None);
         let run = layout.run.expect("run button fits at this width");
         let modified = layout.modified.expect("dirty marker present");
 
@@ -13581,6 +13705,7 @@ mod tests {
             true,
             true,
             Some("planning pass done"),
+            None,
         );
         let run = layout.run.expect("run fits");
         let modified = layout.modified.expect("dirty marker present");
