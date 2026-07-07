@@ -6009,21 +6009,29 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Persistent notices, right-aligned at the far edge of the status bar so
     // they stay visible without crowding transient inline status messages.
+    // Each notice is a run of one or more (label, action) segments rendered
+    // back-to-back with no separator (e.g. the version notice's clickable
+    // "<daemon> (daemon)" segment followed by a plain " - <tui> (tui)"
+    // segment); separate notices are joined by " | ".
     let theme_label = format!("theme:{}", app.theme_name.label());
-    let mut persistent_notices: Vec<(String, Option<KeyAction>)> =
-        vec![(theme_label, Some(KeyAction::CycleTheme))];
-    if app.daemon_build_mismatch {
-        persistent_notices.push((crate::app::DAEMON_BUILD_MISMATCH_NOTICE.to_string(), None));
-    }
-    if let Some(notice) = app.update_notice.as_deref() {
-        persistent_notices.push((notice.to_string(), None));
+    let mut persistent_notices: Vec<Vec<(String, Option<KeyAction>)>> =
+        vec![vec![(theme_label, Some(KeyAction::CycleTheme))]];
+    persistent_notices.push(version_notice_segments(app));
+    if let Some(latest) = app.latest_version.as_deref() {
+        persistent_notices.push(vec![(
+            format!("{latest} available"),
+            Some(KeyAction::OpenUpgradeConfirm),
+        )]);
     }
     if !persistent_notices.is_empty() {
         use unicode_width::UnicodeWidthStr;
-        let labels_width: usize = persistent_notices
-            .iter()
-            .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
-            .sum();
+        let group_width = |group: &[(String, Option<KeyAction>)]| -> usize {
+            group
+                .iter()
+                .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
+                .sum()
+        };
+        let labels_width: usize = persistent_notices.iter().map(|g| group_width(g)).sum();
         let separators_width = persistent_notices.len().saturating_sub(1) * 3;
         let w = labels_width
             .saturating_add(separators_width)
@@ -6039,38 +6047,40 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             let mut col = nrect.x;
             spans.push(Span::raw(" "));
             col = col.saturating_add(1);
-            for (i, (label, action)) in persistent_notices.iter().enumerate() {
+            for (i, group) in persistent_notices.iter().enumerate() {
                 if i > 0 {
                     spans.push(Span::raw(" | "));
                     col = col.saturating_add(3);
                 }
-                let label_w = UnicodeWidthStr::width(label.as_str()) as u16;
-                let hovered = action.is_some()
-                    && app.mouse_pos.is_some_and(|(mx, my)| {
-                        my == nrect.y && mx >= col && mx < col.saturating_add(label_w)
-                    });
-                let style = Style::default()
-                    .bg(app.theme.modeline_bg)
-                    .fg(if hovered {
-                        app.theme.text
-                    } else {
-                        app.theme.modeline_fg
-                    })
-                    .add_modifier(if hovered {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    });
-                spans.push(Span::styled(label.clone(), style));
-                if let Some(action) = action {
-                    app.layout.shortcut_hints.push(HintZone {
-                        x_start: col,
-                        x_end: col.saturating_add(label_w),
-                        y: nrect.y,
-                        action: *action,
-                    });
+                for (label, action) in group {
+                    let label_w = UnicodeWidthStr::width(label.as_str()) as u16;
+                    let hovered = action.is_some()
+                        && app.mouse_pos.is_some_and(|(mx, my)| {
+                            my == nrect.y && mx >= col && mx < col.saturating_add(label_w)
+                        });
+                    let style = Style::default()
+                        .bg(app.theme.modeline_bg)
+                        .fg(if hovered {
+                            app.theme.text
+                        } else {
+                            app.theme.modeline_fg
+                        })
+                        .add_modifier(if hovered {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        });
+                    spans.push(Span::styled(label.clone(), style));
+                    if let Some(action) = action {
+                        app.layout.shortcut_hints.push(HintZone {
+                            x_start: col,
+                            x_end: col.saturating_add(label_w),
+                            y: nrect.y,
+                            action: *action,
+                        });
+                    }
+                    col = col.saturating_add(label_w);
                 }
-                col = col.saturating_add(label_w);
             }
             spans.push(Span::raw(" "));
             let np = Paragraph::new(Line::from(spans)).style(
@@ -6081,6 +6091,25 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             f.render_widget(np, nrect);
         }
     }
+}
+
+/// Status-bar segments for the client/daemon version notice: a plain
+/// `<version>` when the connected daemon's build matches this client's, or
+/// `<daemon> (daemon)` (clickable — opens the restart-daemon confirm) plus a
+/// plain ` - <tui> (tui)` when they differ. A missing daemon build id counts
+/// as a mismatch (see `daemon_build_ids_differ`) and renders as "unknown".
+fn version_notice_segments(app: &App) -> Vec<(String, Option<KeyAction>)> {
+    if !crate::app::daemon_build_ids_differ(crate::BUILD_ID, app.daemon_build_id.as_deref()) {
+        return vec![(crate::BUILD_ID.to_string(), None)];
+    }
+    let daemon_label = app.daemon_build_id.as_deref().unwrap_or("unknown");
+    vec![
+        (
+            format!("{daemon_label} (daemon)"),
+            Some(KeyAction::OpenRestartDaemonConfirm),
+        ),
+        (format!(" - {} (tui)", crate::BUILD_ID), None),
+    ]
 }
 
 fn approval_mode_modeline_label(s: &SessionSummary) -> Option<&'static str> {
