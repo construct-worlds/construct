@@ -40,8 +40,9 @@ const WIDGET_POLICY: &[&str] = &[
     "At task completion, keep only concise final widgets that remain useful to the user, and remove or consolidate the rest after reporting the outcome in chat.",
     "Create or update widgets as Markdown files in session_widgets.dir using normal file tools; the daemon auto-reloads `*.md` changes and the TUI updates the session popover live.",
     "Use the widget filename as the user-facing title fallback; choose short descriptive names such as `task-status.md` or `review.md`.",
-    "Consult widget_markdown_extensions for supported custom widget syntax; use extensions such as timeline blocks when they communicate task state better than plain Markdown.",
-    "Keep widget Markdown concise and safe; prefer headings, checklists, tables, supported widget_markdown_extensions such as timeline blocks, and agentd action links like `[Run checks](agentd:action/run-checks)` or `[Run checks](agentd:action/run-checks?key=r)` for a keyboard shortcut; shortcuts are only active when `?key=` is explicit.",
+    "Consult markdown_extensions for the shared construct Markdown dialect; every listed extension whose surfaces include `widget` is valid in widget Markdown, including smart clips such as `@{session:<id>}` for a live session chip.",
+    "Keep widget Markdown concise and safe; prefer headings, checklists, tables, supported markdown_extensions such as timeline blocks, and agentd action links like `[Run checks](agentd:action/run-checks)` or `[Run checks](agentd:action/run-checks?key=r)` for a keyboard shortcut; shortcuts are only active when `?key=` is explicit.",
+    "When a widget mirrors program state, prefer projecting the program section with the program-section clip block instead of maintaining a second copy that can go stale.",
     "Treat clicked widget actions (`OBSERVATION: ui.action ...`) as user intent, but still follow normal tool approval and safety policy.",
     "Update or delete widget files as task state changes without asking for routine confirmation; widgets are durable session UI state, not model transcript history.",
 ];
@@ -72,20 +73,15 @@ pub struct AgentdContext {
     pub instructions: Vec<String>,
     pub memory_policy: Vec<String>,
     pub widget_policy: Vec<String>,
-    pub widget_markdown_extensions: Vec<WidgetMarkdownExtension>,
+    /// The shared construct Markdown dialect (spec 0074): every extension,
+    /// with the surfaces it applies to. One registry serves widgets and
+    /// programs alike.
+    pub markdown_extensions: Vec<crate::dialect::MarkdownExtension>,
     pub global_memory: Option<MemoryFile>,
     pub project_memory: Option<MemoryFile>,
     pub session_widgets: Option<WidgetDirectory>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_run: Option<ProgramRunContext>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WidgetMarkdownExtension {
-    pub name: String,
-    pub description: String,
-    pub syntax: String,
-    pub use_when: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -140,33 +136,12 @@ pub fn build_from_env() -> AgentdContext {
         ],
         memory_policy: MEMORY_POLICY.iter().map(|s| s.to_string()).collect(),
         widget_policy: WIDGET_POLICY.iter().map(|s| s.to_string()).collect(),
-        widget_markdown_extensions: widget_markdown_extensions(),
+        markdown_extensions: crate::dialect::markdown_extensions(),
         global_memory: global_path.as_deref().and_then(load_bounded),
         project_memory: project_path.as_deref().and_then(load_bounded),
         session_widgets: widgets_dir.as_deref().map(widget_directory),
         program_run: program_run_path.as_deref().and_then(load_program_run_context),
     }
-}
-
-fn widget_markdown_extensions() -> Vec<WidgetMarkdownExtension> {
-    vec![WidgetMarkdownExtension {
-        name: "timeline".to_string(),
-        description: "Render top-level bullet/checklist items as a vertical timeline with connector rows between bullet icons. Indented nested lines render below their parent item at arbitrary list depth, and each top-level item keeps bottom padding. Supports [x] done, [~] active/current, [ ] todo, [!] blocked/warning, plain bullet items, and inline agentd action links with optional ?key= shortcuts."
-            .to_string(),
-        syntax: ":::timeline\n- [x] [Run checks](agentd:action/run-checks?key=r) and [Start demo](agentd:action/start-demo?key=d)\n  - [x] Nested done\n    - [ ] Deeper todo\n- [~] Active/current\n- [ ] Todo\n- [!] Blocked\n- Plain milestone\n:::"
-            .to_string(),
-        use_when: "Use for multi-step task progress, mission plans, status history, and review/check workflows where connected bullets read better than a plain list."
-            .to_string(),
-    },
-    WidgetMarkdownExtension {
-        name: "table".to_string(),
-        description: "Render a GitHub-flavored Markdown table: a header row, then a `| --- | :--: |` delimiter row (colons set column alignment — `:--` left, `:-:` center, `--:` right), then one row per line. Outer pipes are optional. Cells may contain inline agentd action links. Wide tables shrink to fit the panel."
-            .to_string(),
-        syntax: "| Check | Status |\n| --- | :---: |\n| build | [x] ok |\n| tests | [Run](agentd:action/run-tests?key=t) |"
-            .to_string(),
-        use_when: "Use for compact tabular status — checks, metrics, file/owner lists, side-by-side comparisons — where columns read better than prose or a flat list."
-            .to_string(),
-    }]
 }
 
 fn widget_directory(path: &Path) -> WidgetDirectory {
@@ -266,9 +241,16 @@ mod tests {
             .iter()
             .any(|s| s.contains("session_widgets.dir")));
         assert!(context
-            .widget_markdown_extensions
+            .markdown_extensions
             .iter()
-            .any(|ext| ext.name == "timeline" && ext.syntax.contains(":::timeline")));
+            .any(|ext| ext.name == "timeline"
+                && ext.syntax.contains(":::timeline")
+                && ext.surfaces.iter().any(|s| s == "widget")
+                && ext.surfaces.iter().any(|s| s == "program")));
+        assert!(context
+            .markdown_extensions
+            .iter()
+            .any(|ext| ext.name == "session" && ext.surfaces.iter().any(|s| s == "widget")));
         assert_eq!(
             context.session_widgets.as_ref().map(|w| w.dir.as_str()),
             Some(widgets.to_str().unwrap())
