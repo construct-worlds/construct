@@ -122,7 +122,12 @@ impl App {
             .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
         let hit_selection_run = selection_run_hit
             .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
-        if hit_title_toggle || hit_title_run || hit_title_close || hit_title_name || hit_selection_run {
+        if hit_title_toggle
+            || hit_title_run
+            || hit_title_close
+            || hit_title_name
+            || hit_selection_run
+        {
             if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if hit_title_toggle {
                     self.close_program_popup().await;
@@ -147,8 +152,7 @@ impl App {
                             .unwrap_or(0);
                         let editing_this_field =
                             self.session_title_rename.as_ref().is_some_and(|r| {
-                                r.session_id == session_id
-                                    && r.origin == TitleRenameOrigin::Program
+                                r.session_id == session_id && r.origin == TitleRenameOrigin::Program
                             });
                         if editing_this_field {
                             self.session_title_rename_click_cursor(
@@ -163,6 +167,13 @@ impl App {
                             );
                         }
                     }
+                } else if hit_selection_run {
+                    let comment = self
+                        .program_popup
+                        .as_ref()
+                        .and_then(|popup| popup.selection_menu.as_ref())
+                        .map(|menu| menu.comment.clone());
+                    self.execute_program_selected_text(comment).await;
                 } else {
                     let selected = hit_selection_run.then(|| {
                         self.program_popup.as_ref().and_then(|popup| {
@@ -175,13 +186,7 @@ impl App {
                     let (selection, selected_block_ids) = selected
                         .flatten()
                         .map_or((None, None), |(text, ids)| (Some(text), Some(ids)));
-                    if hit_selection_run {
-                        if let Some(popup) = self.program_popup.as_mut() {
-                            popup.selection = None;
-                        }
-                        self.layout.program_selection_run_hit = None;
-                    }
-                    self.execute_program_popup(selection, selected_block_ids)
+                    self.execute_program_popup(selection, selected_block_ids, None)
                         .await;
                 }
             }
@@ -295,6 +300,7 @@ impl App {
                         head: cursor,
                         dragged: true,
                     });
+                    popup.selection_menu = Some(ProgramSelectionMenu::default());
                     popup.smart_clip = None;
                     return true;
                 }
@@ -305,6 +311,7 @@ impl App {
                     head: cursor,
                     dragged: false,
                 });
+                popup.selection_menu = Some(ProgramSelectionMenu::default());
                 popup.smart_clip = None;
                 true
             }
@@ -345,6 +352,7 @@ impl App {
                     self.copy_program_selection();
                 } else if let Some(popup) = self.program_popup.as_mut() {
                     popup.selection = None;
+                    popup.selection_menu = None;
                 }
                 true
             }
@@ -394,6 +402,9 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let super_mod = key.modifiers.contains(KeyModifiers::SUPER);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if self.handle_program_selection_menu_key(key).await {
+            return;
+        }
         if shift
             && matches!(
                 key.code,
@@ -455,6 +466,7 @@ impl App {
                 self.cancel_program_smart_clip();
                 if let Some(popup) = self.program_popup.as_mut() {
                     popup.selection = None;
+                    popup.selection_menu = None;
                 }
                 self.set_status("program selection canceled".to_string());
             }
@@ -552,6 +564,272 @@ impl App {
         if let Some(before) = before {
             self.flush_program_live_edit(before).await;
         }
+    }
+
+    async fn handle_program_selection_menu_key(&mut self, key: KeyEvent) -> bool {
+        let selection_active = self
+            .program_popup
+            .as_ref()
+            .and_then(Self::program_selection_range)
+            .is_some();
+        if !selection_active {
+            if let Some(popup) = self.program_popup.as_mut() {
+                popup.selection_menu = None;
+            }
+            return false;
+        }
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let super_mod = key.modifiers.contains(KeyModifiers::SUPER);
+        let ctrl_char = Self::normalized_ctrl_char(key);
+        let menu_focused = self
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .is_some_and(|menu| menu.focused);
+        if !menu_focused {
+            if matches!(key.code, KeyCode::Tab) && !ctrl && !alt && !super_mod {
+                let Some(popup) = self.program_popup.as_mut() else {
+                    return true;
+                };
+                let menu = popup.selection_menu.get_or_insert_with(Default::default);
+                menu.focused = true;
+                return true;
+            }
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.focused = false;
+                }
+            }
+            _ if ctrl_char == Some('g') => {
+                if let Some(popup) = self.program_popup.as_mut() {
+                    popup.selection = None;
+                    popup.selection_menu = None;
+                }
+                self.layout.program_selection_run_hit = None;
+                self.set_status("program selection canceled".to_string());
+            }
+            KeyCode::Up => self.move_program_selection_comment_cursor_vertical(-1),
+            KeyCode::Down => self.move_program_selection_comment_cursor_vertical(1),
+            KeyCode::Tab | KeyCode::BackTab => {}
+            KeyCode::Enter => {
+                let comment = self.program_popup.as_ref().and_then(|popup| {
+                    let menu = popup.selection_menu.as_ref()?;
+                    Some(menu.comment.clone())
+                });
+                self.execute_program_selected_text(comment).await;
+            }
+            KeyCode::Left => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.cursor = menu.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Right => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.cursor = (menu.cursor + 1).min(menu.comment.chars().count());
+                }
+            }
+            KeyCode::Home => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.cursor = 0;
+                }
+            }
+            KeyCode::End => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.cursor = menu.comment.chars().count();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    if menu.cursor > 0 {
+                        let idx = byte_pos(&menu.comment, menu.cursor - 1);
+                        let next = byte_pos(&menu.comment, menu.cursor);
+                        menu.comment.replace_range(idx..next, "");
+                        menu.cursor -= 1;
+                    }
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    let len = menu.comment.chars().count();
+                    if menu.cursor < len {
+                        let idx = byte_pos(&menu.comment, menu.cursor);
+                        let next = byte_pos(&menu.comment, menu.cursor + 1);
+                        menu.comment.replace_range(idx..next, "");
+                    }
+                }
+            }
+            _ if ctrl_char == Some('a') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.cursor = 0;
+                }
+            }
+            _ if ctrl_char == Some('e') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.cursor = menu.comment.chars().count();
+                }
+            }
+            _ if ctrl_char == Some('b') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.cursor = menu.cursor.saturating_sub(1);
+                }
+            }
+            _ if ctrl_char == Some('f') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.cursor = (menu.cursor + 1).min(menu.comment.chars().count());
+                }
+            }
+            _ if ctrl_char == Some('d') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    let len = menu.comment.chars().count();
+                    if menu.cursor < len {
+                        let idx = byte_pos(&menu.comment, menu.cursor);
+                        let next = byte_pos(&menu.comment, menu.cursor + 1);
+                        menu.comment.replace_range(idx..next, "");
+                    }
+                }
+            }
+            _ if ctrl_char == Some('k') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    let len = menu.comment.chars().count();
+                    if menu.cursor < len {
+                        let idx = byte_pos(&menu.comment, menu.cursor);
+                        let end = byte_pos(&menu.comment, len);
+                        menu.comment.replace_range(idx..end, "");
+                    }
+                }
+            }
+            KeyCode::Char(c) if ctrl_char.is_none() && !ctrl && !alt && !super_mod => {
+                if c != '\n' && c != '\r' {
+                    if let Some(menu) = self
+                        .program_popup
+                        .as_mut()
+                        .and_then(|popup| popup.selection_menu.as_mut())
+                    {
+                        let idx = byte_pos(&menu.comment, menu.cursor);
+                        menu.comment.insert(idx, c);
+                        menu.cursor += 1;
+                    }
+                }
+            }
+            _ if ctrl_char == Some('p') => self.move_program_selection_comment_cursor_vertical(-1),
+            _ if ctrl_char == Some('n') => self.move_program_selection_comment_cursor_vertical(1),
+            _ => {}
+        }
+        true
+    }
+
+    fn move_program_selection_comment_cursor_vertical(&mut self, delta: isize) {
+        let width =
+            crate::ui::program_selection_comment_width(crate::ui::PROGRAM_SELECTION_RUN_MENU_W);
+        let Some(menu) = self
+            .program_popup
+            .as_mut()
+            .and_then(|popup| popup.selection_menu.as_mut())
+        else {
+            return;
+        };
+        let prefix: String = menu.comment.chars().take(menu.cursor).collect();
+        let prefix_lines = crate::text_util::wrap_to_width(&prefix, width);
+        let current_row = prefix_lines.len().saturating_sub(1);
+        let current_col = prefix_lines
+            .last()
+            .map(|line| unicode_width::UnicodeWidthStr::width(line.as_str()))
+            .unwrap_or(0);
+        let lines = crate::text_util::wrap_to_width(&menu.comment, width);
+        let target_row = if delta < 0 {
+            current_row.saturating_sub(delta.unsigned_abs())
+        } else {
+            current_row
+                .saturating_add(delta as usize)
+                .min(lines.len().saturating_sub(1))
+        };
+        let chars_before_target: usize = lines
+            .iter()
+            .take(target_row)
+            .map(|line| line.chars().count())
+            .sum();
+        let target_line = lines.get(target_row).map(String::as_str).unwrap_or("");
+        let line_cursor = char_index_for_display_col(target_line, current_col);
+        menu.cursor = chars_before_target
+            .saturating_add(line_cursor)
+            .min(menu.comment.chars().count());
+    }
+
+    pub(super) async fn execute_program_selected_text(&mut self, comment: Option<String>) -> bool {
+        let selected = self.program_popup.as_ref().and_then(|popup| {
+            Some((
+                Self::selected_program_text(popup)?,
+                Self::selected_program_block_ids(popup)?,
+            ))
+        });
+        let Some((selection, selected_block_ids)) = selected else {
+            return self.execute_program_popup(None, None, comment).await;
+        };
+        if let Some(popup) = self.program_popup.as_mut() {
+            popup.selection = None;
+            popup.selection_menu = None;
+        }
+        self.layout.program_selection_run_hit = None;
+        self.execute_program_popup(Some(selection), Some(selected_block_ids), comment)
+            .await
     }
 
     fn normalized_ctrl_char(key: KeyEvent) -> Option<char> {
@@ -746,6 +1024,7 @@ impl App {
             head: popup.cursor,
             dragged: false,
         });
+        popup.selection_menu = Some(ProgramSelectionMenu::default());
         self.set_status("program selection started".to_string());
     }
 
@@ -1957,4 +2236,18 @@ fn program_anchored_live_edit(before: &str, after: &str) -> Option<agentd_protoc
         replace_all: false,
         keep_pending: false,
     })
+}
+
+fn char_index_for_display_col(line: &str, target_col: usize) -> usize {
+    let mut col = 0usize;
+    for (idx, ch) in line.chars().enumerate() {
+        if col >= target_col {
+            return idx;
+        }
+        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col > target_col {
+            return idx;
+        }
+    }
+    line.chars().count()
 }

@@ -9,8 +9,8 @@ mod app;
 mod keymap;
 mod matrix_rain;
 mod mouse_forward;
-mod text_util;
 mod pty_render;
+mod text_util;
 mod theme;
 mod tui_state;
 mod ui;
@@ -719,6 +719,7 @@ async fn run_program_command(client: &Client, command: ProgramCommand) -> Result
                     session_id,
                     selection,
                     base_version,
+                    comment: None,
                     shimmer: None,
                     selection_block_ids: None,
                 })
