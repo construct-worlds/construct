@@ -137,6 +137,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_trigger = None;
     app.layout.dynamic_ui_triggers.clear();
     app.layout.shortcut_hints.clear();
+    app.layout.tutorial_card_area = None;
     app.layout.modeline_approval_mode_hit = None;
     app.layout.modeline_theme_hit = None;
     app.layout.main_window_areas.clear();
@@ -3627,6 +3628,12 @@ fn render_tutorial_card(f: &mut Frame, app: &mut App) {
         width,
         height,
     };
+    // Claim this rect for the mouse: the card floats over whatever pane is
+    // underneath, and if that pane's child has grabbed the mouse (e.g.
+    // Claude Code fullscreen), `on_mouse` must not let the child swallow
+    // clicks meant for the card's own shortcut zones. See the tutorial_card_area
+    // doc comment for the non-modal rationale.
+    app.layout.tutorial_card_area = Some(rect);
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)

@@ -2622,6 +2622,14 @@ pub struct LayoutSnapshot {
     /// (palette / send-input / etc.) is open for minibuffer hints, but may
     /// still contain main-view shortcut affordances.
     pub shortcut_hints: Vec<HintZone>,
+    /// Bounds of the floating tutorial coach-mark card rendered this frame
+    /// (`render_tutorial_card`), or `None` when the tour isn't active. The
+    /// card is deliberately non-modal — it never sets `modal_area`, whose
+    /// outside-click-dismisses semantics don't apply here — but it still
+    /// must claim the mouse over its own footprint: clicks inside must not
+    /// forward into the session pane it floats over (spec-gap fix, #735)
+    /// and must not fall through to that pane's click handling either.
+    pub tutorial_card_area: Option<ratatui::layout::Rect>,
     /// Clickable harness names in the new-session picker prompt
     /// (`MinibufferIntent::NewSessionHarness`). Click → submit the
     /// matching name as if the user typed it and hit Enter.
@@ -6680,6 +6688,12 @@ impl App {
                 return;
             }
         }
+        // Same rationale as the URL-click intercept above: the tutorial card
+        // (spec 0077) is a non-modal overlay that floats on top of whatever
+        // pane is underneath it, painted opaque via `Clear`. Its hover
+        // underline responds every frame, so a click inside it must reach
+        // the card's own handling — never the pane's mouse-grabbing child —
+        // regardless of whose PTY happens to sit underneath.
         if self.session_title_menu.is_none()
             && self.resizing_list.is_none()
             && self.resizing_pin_strip.is_none()
@@ -6688,6 +6702,7 @@ impl App {
             && self.resizing_main_window.is_none()
             && self.dragging_terminal_scrollbar.is_none()
             && self.text_selection.is_none()
+            && !self.mouse_over_tutorial_card(ev.column, ev.row)
             && self.forward_mouse_to_child(&ev)
         {
             return;
@@ -7132,6 +7147,15 @@ impl App {
                 self.run_action(action).await;
                 return;
             }
+        }
+        // The tutorial card is painted opaque (`Clear`) over whatever pane is
+        // underneath it, so a click that lands inside its rect but misses
+        // every hint zone (card body, borders, title) must stop here rather
+        // than fall through to that pane's own click handling — otherwise a
+        // click "on" the card would focus/place-cursor-in/select the session
+        // behind it, which the user never sees.
+        if self.mouse_over_tutorial_card(col, row) {
+            return;
         }
         if let Some(mb_area) = self.layout.minibuffer_area {
             if contains(mb_area, col, row) {
@@ -10288,6 +10312,7 @@ mod tests {
             list_items_area: None,
             list_scroll_offset: 0,
             shortcut_hints: Vec::new(),
+            tutorial_card_area: None,
             minibuffer_harness_hits: Vec::new(),
             minibuffer_choice_hits: Vec::new(),
             modal_area: None,
@@ -23629,6 +23654,137 @@ mod tests {
             !marker_written,
             "ending early must not write the done marker"
         );
+        server.abort();
+    }
+
+    // Regression for #735: hovering the tour card's [skip step] / [end tour]
+    // labels underlined them (hover is computed render-side from
+    // `app.mouse_pos`), but clicking did nothing once the practice session's
+    // child grabbed the mouse (e.g. Claude Code enabling DECSET mouse
+    // tracking). The sibling test above,
+    // `end_tour_click_closes_without_writing_marker`, calls
+    // `handle_left_click` directly, which skips the real dispatch path:
+    // `on_mouse` → `forward_mouse_to_child` used to hand every mouse event
+    // over a mouse-tracking pane to its child's PTY and return *before* the
+    // click pipeline (and the card's own hint zones) ever ran. This drives
+    // the real `on_mouse` Down+Up path with a mouse-tracking child behind the
+    // card to catch that regression.
+    #[tokio::test]
+    async fn tutorial_card_click_reaches_card_through_on_mouse_over_grabbing_child() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.view = ViewMode::Terminal;
+
+        // s1's child enables mouse tracking (DECSET ?1000h), same setup as
+        // `click_in_mouse_grabbing_pane_still_focuses_it`.
+        let mut history = crate::pty_render::ItemHistory::new();
+        history.feed_pty(b"\x1b[?1000h");
+        let _ = history.replay(120, 36, 0);
+        app.histories.insert("s1".into(), history);
+        assert_ne!(
+            app.histories.get("s1").unwrap().mouse_protocol_mode(),
+            vt100::MouseProtocolMode::None,
+            "test setup must put the pane's child in a mouse-tracking mode"
+        );
+
+        app.tutorial_start(); // step 1 — footer has [skip step] / [end tour].
+
+        // Swap in a test PTY-input channel so we can assert the click never
+        // leaked into the child as a forwarded mouse report.
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        assert!(
+            app.layout.tutorial_card_area.is_some(),
+            "the card must register its rect while the tour is active"
+        );
+        let hit = app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::TutorialEndTour)
+            .expect("end tour hint")
+            .clone();
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x_start,
+            row: hit.y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: hit.x_start,
+            row: hit.y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+
+        assert!(
+            app.tutorial.is_none(),
+            "clicking [end tour] through on_mouse should close the card even \
+             though the pane underneath grabbed the mouse"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the click must not also leak into the mouse-grabbing child's PTY \
+             as a forwarded mouse report"
+        );
+        server.abort();
+    }
+
+    // Inverse guard for the fix above: with no tour active, a click at the
+    // same kind of coordinates over a mouse-tracking child must still
+    // forward to the child as normal PTY mouse pass-through (#480/#728
+    // behavior) — the tutorial-card guard must only claim the mouse while
+    // there's an actual card rect to protect.
+    #[tokio::test]
+    async fn mouse_still_forwards_to_child_when_no_tutorial_card() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.view = ViewMode::Terminal;
+
+        let mut history = crate::pty_render::ItemHistory::new();
+        history.feed_pty(b"\x1b[?1000h");
+        let _ = history.replay(120, 36, 0);
+        app.histories.insert("s1".into(), history);
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        assert!(
+            app.layout.tutorial_card_area.is_none(),
+            "no tour running means no card rect to protect"
+        );
+        let inner = app
+            .layout
+            .main_window_areas
+            .first()
+            .expect("rendered session pane")
+            .inner_area;
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: inner.x + inner.width / 2,
+            row: inner.y + inner.height / 2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+
+        let job = rx.try_recv().expect(
+            "without an active tour, a click over a mouse-tracking child must \
+             still forward as a normal PTY mouse report",
+        );
+        assert_eq!(job.session_id, "s1");
         server.abort();
     }
 
