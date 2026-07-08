@@ -55,6 +55,7 @@ pub(crate) const PROGRAM_AGENT_REVEAL_MS: i64 = 800;
 pub(crate) const PROGRAM_AGENT_RECENT_ACTIVITY_MS: i64 = 3000;
 pub(crate) const PROGRAM_SELECTION_RUN_MENU_W: u16 = 36;
 const PROGRAM_SELECTION_RUN_BUTTON: &str = "▸ Run";
+const PROGRAM_SELECTION_RUN_MENU_PAD_X: u16 = 1;
 
 /// Row-fraction range `[start, end)` of a preview image to paint this
 /// frame. On appear the image fills from the top over `PREVIEW_REVEAL_SECS`
@@ -10975,14 +10976,17 @@ fn render_program_selection_context_menu(
         app.layout.program_selection_run_hit = None;
         return;
     }
-    let inner_x = rect.x.saturating_add(1);
+    let inner_x = rect.x.saturating_add(1 + PROGRAM_SELECTION_RUN_MENU_PAD_X);
     let inner_y = rect.y.saturating_add(1);
-    let inner_width = rect.width.saturating_sub(2) as usize;
+    let inner_width = rect
+        .width
+        .saturating_sub(2 + PROGRAM_SELECTION_RUN_MENU_PAD_X.saturating_mul(2))
+        as usize;
     let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_BUTTON);
     let button_x = inner_x.saturating_add(inner_width.saturating_sub(run_button_width) as u16);
     let hit = (
         button_x,
-        rect.x.saturating_add(rect.width.saturating_sub(1)),
+        inner_x.saturating_add(inner_width as u16),
         inner_y,
     );
     app.layout.program_selection_run_hit = Some(hit);
@@ -11048,7 +11052,7 @@ fn render_program_selection_context_menu(
                 Rect {
                     x: inner_x,
                     y,
-                    width: rect.width.saturating_sub(2),
+                    width: inner_width as u16,
                     height: 1,
                 },
             );
@@ -11071,7 +11075,9 @@ fn render_program_selection_context_menu(
 }
 
 pub(crate) fn program_selection_comment_width(menu_width: u16) -> usize {
-    let inner_width = menu_width.saturating_sub(2) as usize;
+    let inner_width = menu_width
+        .saturating_sub(2 + PROGRAM_SELECTION_RUN_MENU_PAD_X.saturating_mul(2))
+        as usize;
     let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_BUTTON);
     let comment_gap = usize::from(inner_width > run_button_width);
     inner_width

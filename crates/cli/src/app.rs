@@ -13161,6 +13161,16 @@ mod tests {
             .program_selection_run_hit
             .expect("selection menu hit registered");
         let y = hit.2;
+        let focus_x = (0..hit.0)
+            .find(|x| {
+                x.saturating_add(4) < hit.0
+                    && buf.cell((*x, y)).map(|c| c.symbol()) == Some("f")
+                    && buf.cell((x.saturating_add(1), y)).map(|c| c.symbol()) == Some("o")
+                    && buf.cell((x.saturating_add(2), y)).map(|c| c.symbol()) == Some("c")
+                    && buf.cell((x.saturating_add(3), y)).map(|c| c.symbol()) == Some("u")
+                    && buf.cell((x.saturating_add(4), y)).map(|c| c.symbol()) == Some("s")
+            })
+            .expect("comment text rendered");
         let run_x = (hit.0..hit.1)
             .find(|x| {
                 x.saturating_add(2) < hit.1
@@ -13174,6 +13184,17 @@ mod tests {
             run_x,
             hit.1.saturating_sub(3),
             "comment Run button should be aligned to the menu's right edge"
+        );
+        assert_eq!(
+            buf.cell((focus_x.saturating_sub(1), y))
+                .map(|c| c.symbol()),
+            Some(" "),
+            "comment text should have one-column left padding inside the menu"
+        );
+        assert_eq!(
+            buf.cell((hit.1, y)).map(|c| c.symbol()),
+            Some(" "),
+            "Run button should have one-column right padding inside the menu"
         );
         let run_cell = buf.cell((run_x, y)).expect("Run button cell");
         assert_eq!(
