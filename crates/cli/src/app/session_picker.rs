@@ -57,8 +57,10 @@ pub struct SessionPickerDialog {
     pub scroll: usize,
     /// Tier-2 async content search (spec 0076): hits from the last completed
     /// `session.search` call over program + transcript content. Name matches
-    /// are tier 1 (instant, in-memory dimming) and never appear here. Only
-    /// meaningful for [`SessionPickerPurpose::Switch`].
+    /// are tier 1 (instant, in-memory dimming) and never appear here. Both
+    /// purposes participate; the query searched is the dialog's *effective*
+    /// query (the switcher's own line, or the program buffer's live
+    /// `@<typeahead>` token for the clip variant).
     pub content_matches: Vec<agentd_protocol::SearchHit>,
     /// Bumped on every query edit. The async search task echoes the
     /// generation it was fired for back with its result, so a response for
@@ -117,12 +119,13 @@ pub enum SessionPickerRow {
     ProgramBlock { text: String, start_line: usize },
     /// Separator introducing the tier-2 async content-search section (spec
     /// 0076), shown below the session/group/program-block rows once the
-    /// switcher's query is long enough to have kicked one off.
+    /// dialog's effective query is long enough to have kicked one off.
     ContentMatchHeader { searching: bool, truncated: bool },
     /// One tier-2 content-search hit (program or transcript scope).
-    /// Selecting it switches to `hit.session_id` — the same action as
-    /// selecting that session's own row. Jump-to-match positioning within
-    /// the transcript/program view is out of scope.
+    /// Selecting it performs the same purpose-aware action as selecting
+    /// `hit.session_id`'s own session row: switch to it (`Switch`) or
+    /// insert its clip (`InsertProgramClip`). Jump-to-match positioning
+    /// within the transcript/program view is out of scope.
     ContentMatch { hit: agentd_protocol::SearchHit },
 }
 
@@ -206,6 +209,11 @@ impl App {
             content_search_in_flight: false,
             content_search_truncated: false,
         });
+        // The `@`→session clip variant can open over an already-typed
+        // `@<typeahead>` token (its effective query), so arm the tier-2
+        // content search immediately. For the switcher this is a no-op
+        // beyond a generation bump — its own search line starts empty.
+        self.schedule_content_search();
     }
 
     /// Open the dialog from the program view's `@`→session category. The
@@ -352,15 +360,12 @@ impl App {
 
         // Tier-2 async content-search section (spec 0076): program +
         // transcript hits from the debounced background `session.search`
-        // call. Only for the plain switcher, and only once the query is
-        // long enough to have actually kicked one off — mirrors the gate in
+        // call. Both purposes participate — the `C-x b` switcher and the
+        // `@`→session clip picker — but only once the query is long enough
+        // to have actually kicked one off; the length gate mirrors
         // `schedule_content_search` so this section only appears when a
         // search for the *current* query is in flight or has landed.
-        if let Some(dialog) = self
-            .session_picker
-            .as_ref()
-            .filter(|d| d.purpose == SessionPickerPurpose::Switch)
-        {
+        if let Some(dialog) = self.session_picker.as_ref() {
             if query.trim().chars().count() >= CONTENT_SEARCH_MIN_QUERY_CHARS
                 && (dialog.content_search_in_flight || !dialog.content_matches.is_empty())
             {
@@ -433,25 +438,27 @@ impl App {
         self.schedule_content_search();
     }
 
-    /// (Re)arm the tier-2 async content search debounce after the
-    /// switcher's query changed (spec 0076). Bumps the generation so any
-    /// in-flight or about-to-fire search for the old query is superseded,
-    /// clears stale results immediately (so the picker never shows content
-    /// matches for a query the user has since edited away from), and arms
-    /// a fresh debounce deadline when the query is long enough to be worth
-    /// a round trip. A no-op outside the `C-x b` switcher.
+    /// (Re)arm the tier-2 async content search debounce after the dialog's
+    /// effective query changed (spec 0076) — the switcher's own search
+    /// line, or the program buffer's live `@<typeahead>` token for the
+    /// `@`→session clip variant. Bumps the generation so any in-flight or
+    /// about-to-fire search for the old query is superseded, clears stale
+    /// results immediately (so the picker never shows content matches for
+    /// a query the user has since edited away from), and arms a fresh
+    /// debounce deadline when the query is long enough to be worth a
+    /// round trip.
     pub(crate) fn schedule_content_search(&mut self) {
+        // Resolve through the shared effective-query path *before* taking
+        // the mutable dialog borrow: the clip variant's query lives in the
+        // program buffer, not `dialog.query`.
+        let query_chars = self.session_picker_effective_query().trim().chars().count();
         let Some(dialog) = self.session_picker.as_mut() else {
             return;
         };
-        if dialog.purpose != SessionPickerPurpose::Switch {
-            return;
-        }
         dialog.content_search_generation += 1;
         dialog.content_matches.clear();
         dialog.content_search_truncated = false;
         dialog.content_search_in_flight = false;
-        let query_chars = dialog.query.trim().chars().count();
         dialog.content_search_deadline = (query_chars >= CONTENT_SEARCH_MIN_QUERY_CHARS)
             .then(|| Instant::now() + CONTENT_SEARCH_DEBOUNCE);
     }
@@ -508,6 +515,10 @@ impl App {
         self.insert_program_text(&c.to_string());
         if self.program_smart_clip_active() {
             self.session_picker_reset_selection();
+            // The buffer's `@<typeahead>` token *is* this dialog's query,
+            // so a token edit re-arms the tier-2 content search exactly
+            // like typing in the switcher's search line does.
+            self.schedule_content_search();
         } else {
             self.cancel_session_picker();
         }
@@ -519,6 +530,7 @@ impl App {
     fn session_picker_program_backspace(&mut self) {
         if self.program_smart_clip_backspace() {
             self.session_picker_reset_selection();
+            self.schedule_content_search();
         } else {
             // The `@` trigger is gone (or there is no live search); nothing left
             // to pick against, so dismiss the dialog too.
@@ -616,35 +628,25 @@ impl App {
         let row = chosen[selected.min(chosen.len() - 1)].clone();
         self.session_picker = None;
         match row {
-            SessionPickerRow::Session { summary, .. } => match purpose {
-                SessionPickerPurpose::Switch => {
-                    let label = session_switch_label(&summary);
-                    self.select_session(summary.id.clone());
-                    self.sync_active_window_selection();
-                    self.focus = PaneFocus::View;
-                    self.set_status(format!("window → {label}"));
-                }
-                SessionPickerPurpose::InsertProgramClip => {
-                    let candidate = Self::session_smart_clip_candidate(&summary);
-                    self.insert_program_smart_clip_candidate(&candidate);
-                }
-            },
+            SessionPickerRow::Session { summary, .. } => {
+                self.accept_session_pick(&purpose, &summary)
+            }
             SessionPickerRow::ProgramBlock { text, start_line } => {
                 self.jump_to_program_block(start_line);
                 self.set_status(format!("program → {text}"));
             }
-            // Same action as picking the session's own row — jump-to-seq
-            // positioning within the transcript/program view is explicitly
-            // out of scope (spec 0076).
+            // Same action as picking the session's own row for this purpose
+            // (switch to it / insert its clip) — jump-to-seq positioning
+            // within the transcript/program view is explicitly out of scope
+            // (spec 0076).
             SessionPickerRow::ContentMatch { hit } => {
-                match self.sessions.iter().find(|s| s.id == hit.session_id) {
-                    Some(summary) => {
-                        let label = session_switch_label(summary);
-                        self.select_session(summary.id.clone());
-                        self.sync_active_window_selection();
-                        self.focus = PaneFocus::View;
-                        self.set_status(format!("window → {label}"));
-                    }
+                match self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == hit.session_id)
+                    .cloned()
+                {
+                    Some(summary) => self.accept_session_pick(&purpose, &summary),
                     None => self.set_status(format!("session {} no longer exists", hit.session_id)),
                 }
             }
@@ -652,6 +654,26 @@ impl App {
             | SessionPickerRow::ArchiveHeader { .. }
             | SessionPickerRow::ProgramHeader
             | SessionPickerRow::ContentMatchHeader { .. } => {}
+        }
+    }
+
+    /// Purpose-aware accept of a chosen session: switch the active window to
+    /// it (`Switch`) or insert its `@{session:…}` clip (`InsertProgramClip`).
+    /// Shared by the session rows and the tier-2 content-match rows so a
+    /// content hit acts exactly like picking that session's own row.
+    fn accept_session_pick(&mut self, purpose: &SessionPickerPurpose, summary: &SessionSummary) {
+        match purpose {
+            SessionPickerPurpose::Switch => {
+                let label = session_switch_label(summary);
+                self.select_session(summary.id.clone());
+                self.sync_active_window_selection();
+                self.focus = PaneFocus::View;
+                self.set_status(format!("window → {label}"));
+            }
+            SessionPickerPurpose::InsertProgramClip => {
+                let candidate = Self::session_smart_clip_candidate(summary);
+                self.insert_program_smart_clip_candidate(&candidate);
+            }
         }
     }
 
@@ -927,6 +949,11 @@ mod tests {
     async fn short_query_does_not_arm_content_search_debounce() {
         let (mut app, _dir, _server) = test_app_with_sessions(vec![summary()]).await;
         app.open_session_picker(SessionPickerPurpose::Switch);
+        let open_generation = app
+            .session_picker
+            .as_ref()
+            .expect("dialog open")
+            .content_search_generation;
 
         app.session_picker_push_char('a');
         app.session_picker_push_char('b');
@@ -935,13 +962,18 @@ mod tests {
         assert!(dialog.content_search_deadline.is_none());
         // The generation still advances on every edit, even below the
         // threshold — it's what invalidates any earlier in-flight search.
-        assert_eq!(dialog.content_search_generation, 2);
+        assert_eq!(dialog.content_search_generation, open_generation + 2);
     }
 
     #[tokio::test]
     async fn query_past_min_chars_arms_content_search_debounce() {
         let (mut app, _dir, _server) = test_app_with_sessions(vec![summary()]).await;
         app.open_session_picker(SessionPickerPurpose::Switch);
+        let open_generation = app
+            .session_picker
+            .as_ref()
+            .expect("dialog open")
+            .content_search_generation;
 
         for c in "abc".chars() {
             app.session_picker_push_char(c);
@@ -949,7 +981,7 @@ mod tests {
 
         let dialog = app.session_picker.as_ref().expect("dialog open");
         assert!(dialog.content_search_deadline.is_some());
-        assert_eq!(dialog.content_search_generation, 3);
+        assert_eq!(dialog.content_search_generation, open_generation + 3);
     }
 
     #[tokio::test]

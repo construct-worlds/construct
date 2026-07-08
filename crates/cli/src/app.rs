@@ -3457,8 +3457,12 @@ async fn run_loop(
                 .and_then(|d| d.content_search_deadline)
             {
                 if Instant::now() >= deadline {
+                    // Resolve the *effective* query before borrowing the
+                    // dialog mutably — the `@`→session clip variant's query
+                    // is the program buffer's live `@<typeahead>` token,
+                    // not `dialog.query`.
+                    let query = app.session_picker_effective_query().trim().to_string();
                     if let Some(dialog) = app.session_picker.as_mut() {
-                        let query = dialog.query.trim().to_string();
                         let generation = dialog.content_search_generation;
                         dialog.content_search_in_flight = true;
                         dialog.content_search_deadline = None;
@@ -3951,6 +3955,12 @@ impl App {
             && self.focus == PaneFocus::View
         {
             self.insert_program_text(&text);
+            // Pasted text can extend (or tear down) the live `@<typeahead>`
+            // token backing the `@`→session picker's effective query; keep
+            // the tier-2 content search in step with it (spec 0076).
+            if self.session_picker_active() {
+                self.schedule_content_search();
+            }
             return;
         }
 
@@ -18217,6 +18227,146 @@ mod tests {
         assert!(!app.session_picker_active());
         assert_eq!(app.program_popup.as_ref().unwrap().buffer, "");
         assert!(app.program_popup.as_ref().unwrap().smart_clip.is_none());
+        server.abort();
+    }
+
+    /// The `@`→session clip picker participates in the tier-2 content
+    /// search (spec 0076): its effective query is the buffer's live
+    /// `@<typeahead>` token, so token edits arm the debounce and a landed
+    /// search renders the content-match section in the clip dialog too.
+    #[tokio::test]
+    async fn session_picker_clip_variant_schedules_content_search_from_typeahead() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut alpha = summary_with_kind(agentd_protocol::SessionKind::User);
+        alpha.id = "a".into();
+        alpha.title = Some("alpha".into());
+        app.sessions = vec![alpha];
+        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.insert_program_text("@");
+        app.program_popup
+            .as_mut()
+            .unwrap()
+            .smart_clip
+            .as_mut()
+            .unwrap()
+            .selected = 2;
+        app.accept_program_smart_clip();
+        assert_eq!(
+            app.session_picker.as_ref().unwrap().purpose,
+            SessionPickerPurpose::InsertProgramClip
+        );
+
+        // Below the min-chars threshold nothing is armed…
+        picker_type(&mut app, "al");
+        assert!(app
+            .session_picker
+            .as_ref()
+            .unwrap()
+            .content_search_deadline
+            .is_none());
+
+        // …and the third typeahead char arms the debounce off the *buffer*
+        // token — the dialog's own (unused) search line stays empty.
+        picker_type(&mut app, "p");
+        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "@alp");
+        let dialog = app.session_picker.as_ref().unwrap();
+        assert!(dialog.query.is_empty());
+        assert!(dialog.content_search_deadline.is_some());
+
+        // A landed search renders the content-match section in the clip
+        // variant's rows too.
+        if let Some(dialog) = app.session_picker.as_mut() {
+            dialog.content_search_deadline = None;
+            dialog.content_search_in_flight = false;
+            dialog.content_matches = vec![agentd_protocol::SearchHit {
+                session_id: "a".into(),
+                title: "alpha".into(),
+                harness: "shell".into(),
+                scope: agentd_protocol::SearchScope::Transcript,
+                seq: Some(4),
+                at: None,
+                snippet: "alpine detour".into(),
+                match_start: 0,
+                match_end: 3,
+            }];
+        }
+        let rows = app.session_picker_rows();
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r, SessionPickerRow::ContentMatchHeader { .. })));
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r, SessionPickerRow::ContentMatch { .. })));
+        server.abort();
+    }
+
+    /// Enter on a tier-2 content-match row in the clip picker inserts the
+    /// hit session's `@{session:…}` clip — the same purpose-aware accept
+    /// as picking that session's own row, not a window switch.
+    #[tokio::test]
+    async fn session_picker_clip_variant_confirms_content_match_as_clip_insert() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut alpha = summary_with_kind(agentd_protocol::SessionKind::User);
+        alpha.id = "a".into();
+        alpha.title = Some("alpha".into());
+        alpha.position = 0;
+        let mut target = summary_with_kind(agentd_protocol::SessionKind::User);
+        target.id = "target".into();
+        target.title = Some("needle notes".into());
+        target.position = 1;
+        app.sessions = vec![alpha, target];
+        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.insert_program_text("@");
+        app.program_popup
+            .as_mut()
+            .unwrap()
+            .smart_clip
+            .as_mut()
+            .unwrap()
+            .selected = 2;
+        app.accept_program_smart_clip();
+        picker_type(&mut app, "needle");
+        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "@needle");
+
+        // A landed tier-2 search matched `target`'s transcript.
+        if let Some(dialog) = app.session_picker.as_mut() {
+            dialog.content_search_deadline = None;
+            dialog.content_search_in_flight = false;
+            dialog.content_matches = vec![agentd_protocol::SearchHit {
+                session_id: "target".into(),
+                title: "needle notes".into(),
+                harness: "shell".into(),
+                scope: agentd_protocol::SearchScope::Transcript,
+                seq: Some(9),
+                at: None,
+                snippet: "found the needle here".into(),
+                match_start: 10,
+                match_end: 16,
+            }];
+        }
+        // Highlight the content-match row (the last selectable row, after
+        // the bright `needle notes` session row).
+        let last = app
+            .session_picker_rows()
+            .iter()
+            .filter(|r| r.is_selectable())
+            .count()
+            - 1;
+        app.session_picker.as_mut().unwrap().selected = last;
+
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.session_picker.is_none(), "confirm closes the dialog");
+        let popup = app.program_popup.as_ref().expect("program stays open");
+        assert!(
+            popup.buffer.starts_with("@{session:target"),
+            "the `@<typeahead>` token is replaced by the hit session's clip, got {:?}",
+            popup.buffer
+        );
+        assert!(
+            popup.smart_clip.is_none(),
+            "the smart-clip search ends with the insertion"
+        );
         server.abort();
     }
 
