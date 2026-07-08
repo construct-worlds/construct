@@ -1898,6 +1898,7 @@ pub struct ProgramPopup {
     pub cursor: usize,
     pub preferred_col: Option<usize>,
     pub selection: Option<ProgramSelection>,
+    pub selection_menu: Option<ProgramSelectionMenu>,
     pub smart_clip: Option<ProgramSmartClipSearch>,
     pub search: Option<ProgramSearch>,
     pub revealed_at: Instant,
@@ -2218,6 +2219,23 @@ pub struct ProgramSelection {
     pub anchor: usize,
     pub head: usize,
     pub dragged: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgramSelectionMenu {
+    pub focused: bool,
+    pub comment: String,
+    pub cursor: usize,
+}
+
+impl Default for ProgramSelectionMenu {
+    fn default() -> Self {
+        Self {
+            focused: false,
+            comment: String::new(),
+            cursor: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -8130,10 +8148,11 @@ impl App {
                 if selection.is_some() {
                     if let Some(popup) = self.program_popup.as_mut() {
                         popup.selection = None;
+                        popup.selection_menu = None;
                     }
                     self.layout.program_selection_run_hit = None;
                 }
-                self.execute_program_popup(selection, selected_block_ids)
+                self.execute_program_popup(selection, selected_block_ids, None)
                     .await;
             }
             ToggleProgramTerminalFocus => {
@@ -9919,6 +9938,7 @@ fn program_popup_from_document(
         cursor: 0,
         preferred_col: None,
         selection: None,
+        selection_menu: None,
         smart_clip: None,
         search: None,
         revealed_at: now,
@@ -10623,6 +10643,7 @@ mod tests {
             cursor,
             preferred_col: None,
             selection: None,
+            selection_menu: None,
             smart_clip: None,
             search: None,
             revealed_at: now,
@@ -12999,7 +13020,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_tab_indents_multi_line_selection() {
+    async fn program_tab_focuses_selection_menu_for_multi_line_selection() {
         let (mut app, _dir, server) = empty_app().await;
         app.program_popup = Some(program_popup_for_test("s1", "- one\n- two", 0));
         // Select from the start of the buffer through the end of the second
@@ -13012,9 +13033,14 @@ mod tests {
 
         let popup = app.program_popup.as_ref().unwrap();
         assert_eq!(
-            popup.buffer, "  - one\n  - two",
-            "Tab indents every selected list line"
+            popup.buffer, "- one\n- two",
+            "Tab focuses the selected-text run menu instead of editing the selection"
         );
+        let menu = popup
+            .selection_menu
+            .as_ref()
+            .expect("selection run menu should be present");
+        assert!(menu.focused, "Tab should focus the selection run menu");
         server.abort();
     }
 
@@ -13087,9 +13113,269 @@ mod tests {
             text.contains("Run"),
             "selection run menu should render: {text:?}"
         );
+        assert!(
+            text.contains("type additional") && text.contains("instruction"),
+            "selection run menu should render the comment placeholder even when wrapped: {text:?}"
+        );
         assert!(app.layout.program_title_run_hit.is_some());
         assert!(app.layout.program_title_toggle_hit.is_some());
         assert!(app.layout.program_selection_run_hit.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_selection_comment_text_is_underlined_not_highlighted() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: true,
+            comment: "focus".into(),
+            cursor: 5,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let buf = term.backend().buffer();
+        let mut focus_pos = None;
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                .collect();
+            if let Some(x) = row.find("focus") {
+                focus_pos = Some((x as u16, y));
+                break;
+            }
+        }
+        let (x, y) = focus_pos.expect("comment row rendered");
+        let comment_cell = buf.cell((x, y)).expect("comment cell");
+        assert!(
+            comment_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED),
+            "typed comment text should be underlined"
+        );
+        assert_ne!(
+            comment_cell.style().bg,
+            Some(app.theme.accent),
+            "typed comment text should not use the button highlight background"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_selection_comment_run_button_is_right_aligned_and_contrasting() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: true,
+            comment: "focus".into(),
+            cursor: 5,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let buf = term.backend().buffer();
+        let hit = app
+            .layout
+            .program_selection_run_hit
+            .expect("selection menu hit registered");
+        let y = hit.2;
+        let focus_x = (0..hit.0)
+            .find(|x| {
+                x.saturating_add(4) < hit.0
+                    && buf.cell((*x, y)).map(|c| c.symbol()) == Some("f")
+                    && buf.cell((x.saturating_add(1), y)).map(|c| c.symbol()) == Some("o")
+                    && buf.cell((x.saturating_add(2), y)).map(|c| c.symbol()) == Some("c")
+                    && buf.cell((x.saturating_add(3), y)).map(|c| c.symbol()) == Some("u")
+                    && buf.cell((x.saturating_add(4), y)).map(|c| c.symbol()) == Some("s")
+            })
+            .expect("comment text rendered");
+        let run_x = (hit.0..hit.1)
+            .find(|x| {
+                x.saturating_add(2) < hit.1
+                    && buf.cell((*x, y)).map(|c| c.symbol()) == Some("R")
+                    && buf.cell((x.saturating_add(1), y)).map(|c| c.symbol()) == Some("u")
+                    && buf.cell((x.saturating_add(2), y)).map(|c| c.symbol()) == Some("n")
+            })
+            .expect("comment Run button rendered");
+
+        assert_eq!(
+            run_x,
+            hit.1.saturating_sub(3),
+            "comment Run button should be aligned to the menu's right edge"
+        );
+        assert_eq!(
+            buf.cell((focus_x.saturating_sub(1), y))
+                .map(|c| c.symbol()),
+            Some(" "),
+            "comment text should have one-column left padding inside the menu"
+        );
+        assert_eq!(
+            buf.cell((hit.1, y)).map(|c| c.symbol()),
+            Some(" "),
+            "Run button should have one-column right padding inside the menu"
+        );
+        let run_cell = buf.cell((run_x, y)).expect("Run button cell");
+        assert_eq!(
+            run_cell.style().fg,
+            Some(app.theme.highlight_fg),
+            "selected Run button should use the high-contrast foreground"
+        );
+        assert_eq!(
+            run_cell.style().bg,
+            Some(app.theme.accent),
+            "selected Run button should keep the accent background"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_selection_run_button_is_plain_until_menu_focus() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let buf = term.backend().buffer();
+        let hit = app
+            .layout
+            .program_selection_run_hit
+            .expect("selection menu hit registered");
+        let run_cell = buf
+            .cell((hit.1.saturating_sub(3), hit.2))
+            .expect("Run text cell");
+        assert_ne!(
+            run_cell.style().bg,
+            Some(app.theme.accent),
+            "Run button should not be highlighted before Tab focuses the menu"
+        );
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render after focus");
+        let buf = term.backend().buffer();
+        let hit = app
+            .layout
+            .program_selection_run_hit
+            .expect("selection menu hit registered");
+        let focused_run_cell = buf
+            .cell((hit.1.saturating_sub(3), hit.2))
+            .expect("focused Run text cell");
+        assert_eq!(
+            focused_run_cell.style().bg,
+            Some(app.theme.accent),
+            "Run button should highlight once Tab focuses the menu"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_selection_comment_text_wraps_before_right_button() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: true,
+            comment: "alpha beta gamma delta epsilon zeta eta theta".into(),
+            cursor: 45,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let buf = term.backend().buffer();
+        let hit = app
+            .layout
+            .program_selection_run_hit
+            .expect("selection menu hit registered");
+        let first_comment_y = hit.2;
+        let first_row: String = (0..buf.area.width)
+            .map(|x| {
+                buf.cell((x, first_comment_y))
+                    .map(|c| c.symbol())
+                    .unwrap_or(" ")
+            })
+            .collect();
+        let second_row: String = (0..buf.area.width)
+            .map(|x| {
+                buf.cell((x, first_comment_y.saturating_add(1)))
+                    .map(|c| c.symbol())
+                    .unwrap_or(" ")
+            })
+            .collect();
+
+        assert!(
+            first_row.contains("alpha beta"),
+            "first wrapped row should contain the start of the comment: {first_row:?}"
+        );
+        assert!(
+            second_row.contains("epsilon"),
+            "long comment should wrap onto a second row: {second_row:?}"
+        );
+        assert_eq!(
+            (hit.0..hit.1).find(|x| {
+                x.saturating_add(2) < hit.1
+                    && buf.cell((*x, first_comment_y)).map(|c| c.symbol()) == Some("R")
+                    && buf
+                        .cell((x.saturating_add(1), first_comment_y))
+                        .map(|c| c.symbol())
+                        == Some("u")
+                    && buf
+                        .cell((x.saturating_add(2), first_comment_y))
+                        .map(|c| c.symbol())
+                        == Some("n")
+            }),
+            Some(hit.1.saturating_sub(3)),
+            "Run button should stay pinned to the right while text wraps"
+        );
         server.abort();
     }
 
@@ -15355,6 +15641,11 @@ mod tests {
             Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
         app.begin_program_selection();
         app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: false,
+            comment: "focus tests".to_string(),
+            cursor: "focus tests".chars().count(),
+        });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -15388,6 +15679,11 @@ mod tests {
         assert_eq!(
             params.get("selection").and_then(Value::as_str),
             Some("alpha")
+        );
+        assert_eq!(
+            params.get("comment").and_then(Value::as_str),
+            Some("focus tests"),
+            "clicking the unified Run button should include any typed instruction"
         );
         server.abort();
     }
@@ -15487,6 +15783,221 @@ mod tests {
         assert_eq!(
             params.get("selection").and_then(Value::as_str),
             Some("alpha")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_selection_run_menu_comment_runs_selection_with_comment() {
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let params = req.get("params").cloned().unwrap_or(Value::Null);
+                let _ = seen_tx.send((method.clone(), params.clone()));
+                let program = serde_json::json!({
+                    "session_id": "s1",
+                    "markdown": "alpha beta",
+                    "version": 1,
+                    "updated_at_ms": 0,
+                    "template_id": null,
+                });
+                let result = match method.as_str() {
+                    ipc_method::PROGRAM_EXECUTE => {
+                        serde_json::json!({ "program": program, "prompt": "sent", "active_run": null })
+                    }
+                    _ => Value::Null,
+                };
+                let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(client, Vec::new());
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        for ch in "focus tests".chars() {
+            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+        app.handle_program_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        assert!(
+            app.program_popup
+                .as_ref()
+                .is_some_and(|popup| popup.selection.is_none() && popup.selection_menu.is_none()),
+            "comment Run should clear selection/menu after dispatch"
+        );
+        let (method, params) = seen_rx.recv().await.expect("program execute request");
+        assert_eq!(method, ipc_method::PROGRAM_EXECUTE);
+        assert_eq!(
+            params.get("selection").and_then(Value::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            params.get("comment").and_then(Value::as_str),
+            Some("focus tests")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_selection_comment_editor_supports_emacs_keys() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        for ch in "abcd".chars() {
+            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .await;
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+            .await;
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .await;
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+            .await;
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+            .await;
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
+            .await;
+
+        let menu = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open");
+        assert_eq!(menu.comment, "ac");
+        assert_eq!(menu.cursor, 2);
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .await;
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
+            .await;
+        let menu = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open");
+        assert_eq!(menu.comment, "");
+        assert_eq!(menu.cursor, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_selection_comment_editor_supports_wrapped_vertical_motion() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        for ch in "abcdefghijklmnopqrstuvwxyzabcdefghi".chars() {
+            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+        let start_cursor = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open")
+            .cursor;
+        assert_eq!(start_cursor, 35);
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .await;
+        let menu = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open");
+        assert!(
+            menu.cursor < start_cursor,
+            "Up should move the cursor to the previous wrapped row"
+        );
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        let menu = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open");
+        assert_eq!(
+            menu.cursor, start_cursor,
+            "C-n should return to the next wrapped row at the same visual column"
+        );
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        let after_cp = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open")
+            .cursor;
+        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        let menu = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open");
+        assert_eq!(
+            menu.cursor, start_cursor,
+            "Down should mirror C-n on wrapped comment text"
+        );
+        assert!(
+            after_cp < start_cursor,
+            "C-p should move the cursor to the previous wrapped row"
         );
         server.abort();
     }
@@ -16203,7 +16714,7 @@ mod tests {
         app.program_popup.as_mut().unwrap().buffer = "alpha beta changed".to_string();
 
         assert!(
-            app.execute_program_popup(Some("beta".to_string()), None)
+            app.execute_program_popup(Some("beta".to_string()), None, None)
                 .await
         );
 
@@ -16330,7 +16841,7 @@ mod tests {
         });
 
         assert!(
-            app.execute_program_popup(Some("long text".to_string()), None)
+            app.execute_program_popup(Some("long text".to_string()), None, None)
                 .await,
             "run should dispatch"
         );
@@ -16485,12 +16996,12 @@ mod tests {
         app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
 
         assert!(
-            app.execute_program_popup(None, None).await,
+            app.execute_program_popup(None, None, None).await,
             "first run dispatches"
         );
         assert!(
             !app
-                .execute_program_popup(None, None)
+                .execute_program_popup(None, None, None)
                 .await,
             "identical immediate re-Run must be suppressed"
         );
@@ -16521,10 +17032,10 @@ mod tests {
         let mut app = test_app(client, Vec::new());
         app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
 
-        assert!(app.execute_program_popup(None, None).await);
+        assert!(app.execute_program_popup(None, None, None).await);
         app.program_popup.as_mut().unwrap().buffer = "alpha beta changed".to_string();
         assert!(
-            app.execute_program_popup(None, None).await,
+            app.execute_program_popup(None, None, None).await,
             "a re-Run with a changed body must dispatch again"
         );
 
@@ -16548,7 +17059,7 @@ mod tests {
         let mut app = test_app(client, Vec::new());
         app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
 
-        assert!(app.execute_program_popup(None, None).await);
+        assert!(app.execute_program_popup(None, None, None).await);
         // Simulate the debounce window having already elapsed by backdating
         // its recorded instant, matching this file's existing convention for
         // testing time-based expiry without sleeping (see e.g. `revealed_at`
@@ -16559,7 +17070,7 @@ mod tests {
             }
         }
         assert!(
-            app.execute_program_popup(None, None).await,
+            app.execute_program_popup(None, None, None).await,
             "an identical re-Run after the debounce window must dispatch"
         );
 
@@ -16584,11 +17095,11 @@ mod tests {
         app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
 
         assert!(
-            app.execute_program_popup(None, None).await,
+            app.execute_program_popup(None, None, None).await,
             "full run dispatches"
         );
         assert!(
-            app.execute_program_popup(Some("beta".to_string()), None)
+            app.execute_program_popup(Some("beta".to_string()), None, None)
                 .await,
             "a selection run must not be suppressed by a just-dispatched full run"
         );
@@ -17333,7 +17844,7 @@ mod tests {
         app.start_program_run("s1", saved, false, "");
         app.program_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- pending")]);
 
-        assert!(app.execute_program_popup(None, None).await);
+        assert!(app.execute_program_popup(None, None, None).await);
 
         let mut execute_params = None;
         while let Some((method, params)) = rx.recv().await {
@@ -17479,6 +17990,7 @@ mod tests {
                 session_id: "s1".into(),
                 selection: None,
                 base_version: Some(2),
+                comment: None,
                 shimmer: None,
                 selection_block_ids: None,
             })

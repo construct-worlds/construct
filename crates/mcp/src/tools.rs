@@ -584,6 +584,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 session_id: sid,
                 selection: arg_str(&args, "selection").ok(),
                 base_version: args.get("base_version").and_then(|v| v.as_u64()),
+                comment: None,
                 shimmer,
                 selection_block_ids: None,
             };

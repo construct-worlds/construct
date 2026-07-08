@@ -4,6 +4,7 @@ use crate::adapter::{locate_binary, Adapter, AdapterMessage};
 use crate::config::Config;
 use crate::storage::Storage;
 use crate::worktree;
+use agentd_protocol::dialect;
 use agentd_protocol::{
     agent_context, ahp_method, ClientView, CreateSessionParams, DeletedNotificationPayload,
     EventNotificationPayload, GroupDeletedNotificationPayload, GroupStateNotificationPayload,
@@ -15,7 +16,6 @@ use agentd_protocol::{
     SessionSummary, SmithAuthMethodInfo, SmithAuthStatusResult, SmithSetAuthMethodResult,
     StateNotificationPayload, TimestampedEvent, TranscriptResult,
 };
-use agentd_protocol::dialect;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use chrono::Utc;
@@ -524,6 +524,18 @@ fn program_run_instructions() -> Vec<String> {
 fn program_execution_prompt() -> String {
     "Run the current construct program autonomously. Before doing work, call agentd_context (or construct_context if you are using MCP) and read the program_run field for the latest program content, smart clip reference, and run instructions. If program_run is unavailable, read the current program with the program get tool before acting. Then, before starting or delegating any task, your first program action must be a single planning-pass construct_program_edit whose shimmer list declares every still-pending block's stable id shimmer: true and every settled block's stable id shimmer: false (read the block ids from the program get tool), so settled blocks stop shimmering immediately."
         .to_string()
+}
+
+fn program_execution_prompt_with_comment(comment: Option<&str>) -> String {
+    let mut prompt = program_execution_prompt();
+    if let Some(comment) = comment {
+        let one_line = comment.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !one_line.is_empty() {
+            prompt.push_str("\n\nAdditional user instruction for this Run: ");
+            prompt.push_str(&one_line);
+        }
+    }
+    prompt
 }
 
 fn program_run_context(
@@ -1982,8 +1994,14 @@ impl SessionManager {
         // as "the agent just wrote here".
         if let (Some(conn_id), Some(span)) = (agent_conn_id, last_edit_span) {
             let harness = entry.summary.read().await.harness.clone();
-            self.publish_agent_program_cursor(conn_id, &params.session_id, &harness, span, program.version)
-                .await;
+            self.publish_agent_program_cursor(
+                conn_id,
+                &params.session_id,
+                &harness,
+                span,
+                program.version,
+            )
+            .await;
         }
         Ok(ProgramUpdateResult {
             program,
@@ -2027,6 +2045,11 @@ impl SessionManager {
         }
         let run_body = body.to_string();
         let is_selection = params.selection.is_some();
+        let run_comment = params
+            .comment
+            .as_deref()
+            .map(str::trim)
+            .filter(|comment| !comment.is_empty());
 
         // Instant-dispatch fast path (spec 0066): before the normal
         // prompt-delivery path below, check whether this is a selection run
@@ -2042,19 +2065,22 @@ impl SessionManager {
         // into the anchored edit's `old_string` below — trimming the whole
         // selection would strip that indentation from the first line only,
         // making the anchor fail to match the stored document verbatim.
-        if let Some(raw_selection) = params.selection.as_deref().filter(|s| !s.trim().is_empty())
-        {
-            let selection_blocks = agentd_protocol::program_block_spans(raw_selection);
-            if let Some(items) = program_dispatch_plan(&selection_blocks) {
-                let owner_cwd = entry.summary.read().await.cwd.clone();
-                return self
-                    .program_dispatch_execute(
-                        &params.session_id,
-                        &owner_cwd,
-                        raw_selection,
-                        items,
-                    )
-                    .await;
+        if run_comment.is_none() {
+            if let Some(raw_selection) =
+                params.selection.as_deref().filter(|s| !s.trim().is_empty())
+            {
+                let selection_blocks = agentd_protocol::program_block_spans(raw_selection);
+                if let Some(items) = program_dispatch_plan(&selection_blocks) {
+                    let owner_cwd = entry.summary.read().await.cwd.clone();
+                    return self
+                        .program_dispatch_execute(
+                            &params.session_id,
+                            &owner_cwd,
+                            raw_selection,
+                            items,
+                        )
+                        .await;
+                }
             }
         }
 
@@ -2065,7 +2091,7 @@ impl SessionManager {
         };
         let run_context = program_run_context(&result.program, scope, body);
         self.write_program_run_context(&params.session_id, &run_context)?;
-        let prompt = program_execution_prompt();
+        let prompt = program_execution_prompt_with_comment(run_comment);
         let (delivery, queued_behind_current_turn) = {
             let summary = entry.summary.read().await;
             (
@@ -3682,6 +3708,18 @@ mod tests {
         assert!(prompt.contains("program_run"));
         assert!(prompt.contains("latest program content"));
         assert!(!prompt.contains("Compare options and summarize findings."));
+    }
+
+    #[test]
+    fn program_execution_prompt_appends_run_comment_as_one_line() {
+        let prompt =
+            program_execution_prompt_with_comment(Some("  focus tests\nand keep output short  "));
+
+        assert!(prompt.contains("autonomously"));
+        assert!(prompt.contains(
+            "Additional user instruction for this Run: focus tests and keep output short"
+        ));
+        assert!(!prompt.contains("focus tests\nand keep output short"));
     }
 
     #[test]
@@ -6537,11 +6575,10 @@ mod tests {
         )
         .await
         .expect("agent edit");
-        assert!(
-            mgr.program_collaborators(&id)
-                .iter()
-                .any(|c| c.kind == "agent")
-        );
+        assert!(mgr
+            .program_collaborators(&id)
+            .iter()
+            .any(|c| c.kind == "agent"));
 
         let agent_conn_id = *mgr
             .agent_program_cursor_conn_ids
@@ -6793,6 +6830,7 @@ done
                 session_id: id.clone(),
                 selection: None,
                 base_version: Some(update.program.version),
+                comment: None,
                 shimmer: None,
                 selection_block_ids: None,
             })
@@ -7106,7 +7144,14 @@ done
             .clone();
 
         let run = mgr
-            .start_program_run_with_dispatch_state(&id, edited, false, Some(&[true, true]), true, None)
+            .start_program_run_with_dispatch_state(
+                &id,
+                edited,
+                false,
+                Some(&[true, true]),
+                true,
+                None,
+            )
             .expect("explicit full re-run");
 
         assert!(

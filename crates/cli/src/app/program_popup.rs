@@ -373,6 +373,7 @@ impl App {
         &mut self,
         selection: Option<String>,
         selected_block_ids: Option<HashSet<String>>,
+        comment: Option<String>,
     ) -> bool {
         let Some(session_id) = self
             .program_popup
@@ -394,6 +395,9 @@ impl App {
 
         let selection =
             selection.map(|selection| program_normalize_smart_clip_instance_ids(&selection));
+        let comment = comment
+            .map(|comment| comment.trim().to_string())
+            .filter(|comment| !comment.is_empty());
         let is_selection = selection.is_some();
         let pre_save_run_body = match selection.as_deref() {
             Some(sel) => sel.to_string(),
@@ -416,8 +420,15 @@ impl App {
         // different selection, and a full re-Run whose body changed all
         // still dispatch (see spec 0042's re-Run and selection-adds-to-
         // in-flight semantics).
-        let dispatch_key: ProgramRunDispatchKey =
-            (session_id.clone(), is_selection, hash_program_run_body(&pre_save_run_body));
+        let dispatch_fingerprint = match comment.as_deref() {
+            Some(comment) => format!("{pre_save_run_body}\n\nrun comment:\n{comment}"),
+            None => pre_save_run_body.clone(),
+        };
+        let dispatch_key: ProgramRunDispatchKey = (
+            session_id.clone(),
+            is_selection,
+            hash_program_run_body(&dispatch_fingerprint),
+        );
         if let Some(state) = self.program_run_dispatch.get(&dispatch_key) {
             let suppress = match state {
                 ProgramRunDispatchState::InFlight => true,
@@ -496,12 +507,9 @@ impl App {
             .map(|ids| ids.iter().cloned().collect());
         let pending = match selected_block_ids {
             Some(ids) if is_selection => self.program_run_pending_with_existing(&session_id, ids),
-            _ => self.program_run_pending_for_body(
-                &session_id,
-                &run_body,
-                is_selection,
-                &prev_saved,
-            ),
+            _ => {
+                self.program_run_pending_for_body(&session_id, &run_body, is_selection, &prev_saved)
+            }
         };
         self.start_program_run_with_pending(&session_id, pending.clone());
         let shimmer = if is_selection {
@@ -513,6 +521,7 @@ impl App {
             session_id: session_id.clone(),
             selection,
             base_version,
+            comment,
             // Echo the TUI's optimistic pending set so a mid-flight full re-Run
             // cannot be narrowed back to old pending refs before the planning
             // pass sees user-edited blocks.
@@ -530,8 +539,10 @@ impl App {
                 // Dispatch landed: start the debounce window rather than
                 // clearing the guard outright, so an identical repeat
                 // gesture arriving right behind it is still coalesced.
-                self.program_run_dispatch
-                    .insert(dispatch_key, ProgramRunDispatchState::Dispatched(Instant::now()));
+                self.program_run_dispatch.insert(
+                    dispatch_key,
+                    ProgramRunDispatchState::Dispatched(Instant::now()),
+                );
                 true
             }
             Err(e) => {
