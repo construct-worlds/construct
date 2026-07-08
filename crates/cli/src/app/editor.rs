@@ -728,6 +728,56 @@ impl App {
                     menu.cursor = menu.comment.chars().count();
                 }
             }
+            _ if ctrl_char == Some('b') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    menu.cursor = menu.cursor.saturating_sub(1);
+                }
+            }
+            _ if ctrl_char == Some('f') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    menu.cursor = (menu.cursor + 1).min(menu.comment.chars().count());
+                }
+            }
+            _ if ctrl_char == Some('d') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    let len = menu.comment.chars().count();
+                    if menu.cursor < len {
+                        let idx = byte_pos(&menu.comment, menu.cursor);
+                        let next = byte_pos(&menu.comment, menu.cursor + 1);
+                        menu.comment.replace_range(idx..next, "");
+                    }
+                }
+            }
+            _ if ctrl_char == Some('k') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    let len = menu.comment.chars().count();
+                    if menu.cursor < len {
+                        let idx = byte_pos(&menu.comment, menu.cursor);
+                        let end = byte_pos(&menu.comment, len);
+                        menu.comment.replace_range(idx..end, "");
+                    }
+                }
+            }
             KeyCode::Char(c) if ctrl_char.is_none() && !ctrl && !alt && !super_mod => {
                 if c != '\n' && c != '\r' {
                     if let Some(menu) = self
