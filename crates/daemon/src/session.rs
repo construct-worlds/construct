@@ -71,6 +71,7 @@ const RESPAWN_REDRAW_MAX_WAIT: Duration = Duration::from_secs(6);
 /// a clean submit keypress rather than being coalesced into the paste.
 const PROGRAM_EXTERNAL_PTY_SUBMIT_DELAY: Duration = Duration::from_millis(120);
 const PROGRAM_CURSOR_TTL_MS: i64 = 60 * 1000;
+const PROGRAM_AGENT_CURSOR_TTL_MS: i64 = 2 * 1000;
 /// How long an interactive full-screen TUI harness's PTY may be silent before
 /// the daemon treats it as awaiting input. Line-oriented shells use
 /// foreground-process-group detection in the adapter and are exempt.
@@ -3348,9 +3349,14 @@ fn program_cursor_is_visible(
     session_id: &str,
     now_ms: i64,
 ) -> bool {
+    let ttl_ms = if cursor.kind == "agent" {
+        PROGRAM_AGENT_CURSOR_TTL_MS
+    } else {
+        PROGRAM_CURSOR_TTL_MS
+    };
     cursor.active
         && cursor.session_id == session_id
-        && now_ms.saturating_sub(cursor.updated_at_ms) <= PROGRAM_CURSOR_TTL_MS
+        && now_ms.saturating_sub(cursor.updated_at_ms) <= ttl_ms
 }
 
 /// True if `text` is a slash command (`/model gpt-5.5`, `/compact`, ...)
@@ -6464,9 +6470,9 @@ mod tests {
         .expect("agent edit");
         let stamped_at = agent_collaborator(&mgr, &id).updated_at_ms;
 
-        // Backdate it well past the reveal window (but still inside the
-        // one-minute presence TTL) so a renewed stamp would be obviously
-        // wrong, then let a *human* edit elsewhere shift its position.
+        // Backdate it inside the short agent presence TTL so a renewed stamp
+        // would be obvious, then let a *human* edit elsewhere shift its
+        // position.
         if let Ok(mut cursors) = mgr.program_cursors.lock() {
             let agent_conn_id = *mgr
                 .agent_program_cursor_conn_ids
@@ -6474,9 +6480,10 @@ mod tests {
                 .expect("lock")
                 .get(&id)
                 .expect("reserved agent conn id");
-            cursors.get_mut(&agent_conn_id).expect("stored cursor").updated_at_ms = stamped_at - 5_000;
+            cursors.get_mut(&agent_conn_id).expect("stored cursor").updated_at_ms =
+                stamped_at - 500;
         }
-        let backdated_at = stamped_at - 5_000;
+        let backdated_at = stamped_at - 500;
 
         mgr.program_edit_from_conn(
             agentd_protocol::ProgramEditParams {
@@ -6548,15 +6555,14 @@ mod tests {
                 .expect("stored agent cursor");
             cursor.updated_at_ms = chrono::Utc::now()
                 .timestamp_millis()
-                .saturating_sub(PROGRAM_CURSOR_TTL_MS + 1);
+                .saturating_sub(PROGRAM_AGENT_CURSOR_TTL_MS + 1);
         }
 
         assert!(
             mgr.program_collaborators(&id)
                 .iter()
                 .all(|c| c.kind != "agent"),
-            "an idle agent cursor must age out via the standard one-minute TTL, \
-             the same as a human cursor whose connection never disconnects cleanly"
+            "an idle agent cursor must age out via the shorter agent-specific TTL"
         );
         let get = mgr.program_get(&id).await.expect("program get");
         assert!(get.collaborators.iter().all(|c| c.kind != "agent"));
