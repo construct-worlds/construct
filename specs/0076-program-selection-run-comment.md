@@ -3,13 +3,13 @@
 Status: accepted
 Date: 2026-07-08
 Area: tui
-Scope: Keyboard behavior and prompt delivery for running a selected Program region with an extra one-line instruction.
+Scope: Keyboard behavior and prompt delivery for running a selected Program region with an optional one-line instruction.
 
 ## Decision
 
-When Program text is selected, the TUI selection context menu offers a plain Run action and a Run-with-comment action. Pressing Tab while a non-empty Program selection is active moves keyboard focus from the editor into this context menu. Up and Down switch between the plain Run row and the comment Run row. Typing while the menu is focused edits the comment row as a single logical-line instruction. The instruction may wrap visually in the menu, but newline insertion is not part of the affordance. Enter runs the selection; if the comment row is selected, the typed instruction is passed with the Program Run prompt.
+When Program text is selected, the TUI selection context menu offers one Run button and an optional instruction field. Pressing Tab while a non-empty Program selection is active moves keyboard focus from the editor into this context menu. Typing while the menu is focused edits the instruction as a single logical line. The instruction may wrap visually in the menu, but newline insertion is not part of the affordance. Enter, or clicking the Run button, runs the selection; when the instruction is non-empty, it is passed with the Program Run prompt.
 
-The focused comment editor supports the same basic single-line movement and deletion keys users expect elsewhere in the TUI: C-a, C-e, C-b, C-f, C-d, and C-k. Its Run button remains visually distinct from typed text and is aligned to the right edge so it does not read as part of the instruction.
+The focused instruction editor supports the same basic single-line movement and deletion keys users expect elsewhere in the TUI: C-a, C-e, C-b, C-f, C-d, and C-k. Because the field can wrap visually, C-p, C-n, Up, and Down move between wrapped visual rows. Its Run button remains visually distinct from typed text, is aligned to the right edge, and is highlighted only while the context menu is focused or hovered.
 
 The extra instruction is run metadata, not Program content. It must not alter the selected markdown, selection block identity, or optimistic shimmer scope. The daemon appends the instruction to the generated Program Run prompt and disables mechanical fast paths that cannot interpret it.
 

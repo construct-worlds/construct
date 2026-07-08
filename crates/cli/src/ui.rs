@@ -53,8 +53,8 @@ pub(crate) const PROGRAM_AGENT_REVEAL_MS: i64 = 800;
 /// than `PROGRAM_AGENT_REVEAL_MS` on purpose: an edit that lands off-screen is
 /// still worth pointing at for a bit after its own reveal tint has faded.
 pub(crate) const PROGRAM_AGENT_RECENT_ACTIVITY_MS: i64 = 3000;
-const PROGRAM_SELECTION_RUN_MENU_W: u16 = 36;
-const PROGRAM_SELECTION_RUN_BUTTON: &str = " Run ";
+pub(crate) const PROGRAM_SELECTION_RUN_MENU_W: u16 = 36;
+const PROGRAM_SELECTION_RUN_BUTTON: &str = "▸ Run";
 
 /// Row-fraction range `[start, end)` of a preview image to paint this
 /// frame. On appear the image fills from the top over `PREVIEW_REVEAL_SECS`
@@ -10975,10 +10975,15 @@ fn render_program_selection_context_menu(
         app.layout.program_selection_run_hit = None;
         return;
     }
+    let inner_x = rect.x.saturating_add(1);
+    let inner_y = rect.y.saturating_add(1);
+    let inner_width = rect.width.saturating_sub(2) as usize;
+    let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_BUTTON);
+    let button_x = inner_x.saturating_add(inner_width.saturating_sub(run_button_width) as u16);
     let hit = (
-        rect.x.saturating_add(1),
+        button_x,
         rect.x.saturating_add(rect.width.saturating_sub(1)),
-        rect.y.saturating_add(1),
+        inner_y,
     );
     app.layout.program_selection_run_hit = Some(hit);
     let hovered = app
@@ -10994,12 +10999,7 @@ fn render_program_selection_context_menu(
             Style::default().fg(app.theme.accent)
         }
     };
-    let run_selected =
-        hovered || (menu.focused && menu.selected == crate::app::ProgramSelectionMenuItem::Run);
-    let comment_selected =
-        menu.focused && menu.selected == crate::app::ProgramSelectionMenuItem::CommentRun;
-    let inner_width = hit.1.saturating_sub(hit.0) as usize;
-    let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_BUTTON);
+    let run_selected = hovered || menu.focused;
     let comment_gap = usize::from(inner_width > run_button_width);
     let comment_width = inner_width
         .saturating_sub(run_button_width)
@@ -11011,42 +11011,26 @@ fn render_program_selection_context_menu(
         menu.comment.clone()
     };
     let mut comment_lines = wrap_to_width(&comment_text, comment_width);
-    let visible_comment_rows = rect.height.saturating_sub(3) as usize;
+    let visible_comment_rows = rect.height.saturating_sub(2) as usize;
     comment_lines.truncate(visible_comment_rows);
     let comment_style = if menu.comment.is_empty() {
         Style::default().fg(app.theme.muted)
-    } else if comment_selected {
+    } else if menu.focused {
         Style::default()
             .fg(app.theme.text)
             .add_modifier(Modifier::UNDERLINED)
     } else {
         Style::default().fg(app.theme.accent)
     };
-    let comment_suffix_style = row_style(comment_selected);
-    let right_aligned_button_line = |style: Style| {
-        let pad = inner_width.saturating_sub(run_button_width);
-        Line::from(vec![
-            Span::raw(" ".repeat(pad)),
-            Span::styled(PROGRAM_SELECTION_RUN_BUTTON, style),
-        ])
-    };
+    let run_style = row_style(run_selected);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border));
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
-    f.render_widget(
-        Paragraph::new(right_aligned_button_line(row_style(run_selected))),
-        Rect {
-            x: hit.0,
-            y: hit.2,
-            width: hit.1.saturating_sub(hit.0),
-            height: 1,
-        },
-    );
-    if rect.height >= 4 {
+    if rect.height >= 3 {
         for (idx, line) in comment_lines.iter().enumerate() {
-            let y = hit.2.saturating_add(1 + idx as u16);
+            let y = inner_y.saturating_add(idx as u16);
             let truncated = truncate_to_width(line, comment_width);
             let text_width = UnicodeWidthStr::width(truncated.as_str());
             let pad = comment_width
@@ -11057,22 +11041,19 @@ fn render_program_selection_context_menu(
                 Span::raw(" ".repeat(pad)),
             ];
             if idx == 0 {
-                spans.push(Span::styled(
-                    PROGRAM_SELECTION_RUN_BUTTON,
-                    comment_suffix_style,
-                ));
+                spans.push(Span::styled(PROGRAM_SELECTION_RUN_BUTTON, run_style));
             }
             f.render_widget(
                 Paragraph::new(Line::from(spans)),
                 Rect {
-                    x: hit.0,
+                    x: inner_x,
                     y,
-                    width: hit.1.saturating_sub(hit.0),
+                    width: rect.width.saturating_sub(2),
                     height: 1,
                 },
             );
         }
-        if comment_selected {
+        if menu.focused {
             let prefix: String = menu.comment.chars().take(menu.cursor).collect();
             let cursor_lines = wrap_to_width(&prefix, comment_width);
             let cursor_row = cursor_lines.len().saturating_sub(1);
@@ -11081,13 +11062,22 @@ fn render_program_selection_context_menu(
                 .map(|line| UnicodeWidthStr::width(line.as_str()))
                 .unwrap_or(0);
             let visible_row = cursor_row.min(visible_comment_rows.saturating_sub(1));
-            let y = hit.2.saturating_add(1 + visible_row as u16);
-            let x = hit
-                .0
+            let y = inner_y.saturating_add(visible_row as u16);
+            let x = inner_x
                 .saturating_add((cursor_col.min(comment_width.saturating_sub(1))) as u16);
             f.set_cursor_position(Position { x, y });
         }
     }
+}
+
+pub(crate) fn program_selection_comment_width(menu_width: u16) -> usize {
+    let inner_width = menu_width.saturating_sub(2) as usize;
+    let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_BUTTON);
+    let comment_gap = usize::from(inner_width > run_button_width);
+    inner_width
+        .saturating_sub(run_button_width)
+        .saturating_sub(comment_gap)
+        .max(1)
 }
 
 fn program_selection_comment_line_count(
@@ -11095,13 +11085,7 @@ fn program_selection_comment_line_count(
     menu_width: u16,
     max_rows: usize,
 ) -> usize {
-    let inner_width = menu_width.saturating_sub(2) as usize;
-    let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_BUTTON);
-    let comment_gap = usize::from(inner_width > run_button_width);
-    let comment_width = inner_width
-        .saturating_sub(run_button_width)
-        .saturating_sub(comment_gap)
-        .max(1);
+    let comment_width = program_selection_comment_width(menu_width);
     let text = if menu.comment.is_empty() {
         "type additional instruction"
     } else {
@@ -11119,9 +11103,9 @@ fn program_selection_context_menu_rect(
     menu: &crate::app::ProgramSelectionMenu,
 ) -> Rect {
     let width = PROGRAM_SELECTION_RUN_MENU_W.min(total.width);
-    let max_comment_rows = total.height.saturating_sub(3) as usize;
+    let max_comment_rows = total.height.saturating_sub(2) as usize;
     let comment_rows = program_selection_comment_line_count(menu, width, max_comment_rows);
-    let height = (3 + comment_rows as u16).min(total.height).max(1);
+    let height = (2 + comment_rows as u16).min(total.height).max(1);
     let max_x = total.x.saturating_add(total.width).saturating_sub(width);
     let max_y = total.y.saturating_add(total.height).saturating_sub(height);
     Rect {
@@ -12329,7 +12313,6 @@ fn program_line_col(markdown: &str, cursor: usize) -> (usize, usize) {
 
 fn program_visual_col_for_line(app: Option<&App>, raw: &str, raw_col: usize) -> usize {
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
-    let trimmed = raw.trim();
     let col = raw_col.saturating_sub(leading);
     if let Some((_, content)) = program_heading_content(raw) {
         // `content` keeps any trailing space (sliced from the raw line, leading

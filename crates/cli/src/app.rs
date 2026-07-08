@@ -2215,16 +2215,9 @@ pub struct ProgramSelection {
     pub dragged: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProgramSelectionMenuItem {
-    Run,
-    CommentRun,
-}
-
 #[derive(Debug, Clone)]
 pub struct ProgramSelectionMenu {
     pub focused: bool,
-    pub selected: ProgramSelectionMenuItem,
     pub comment: String,
     pub cursor: usize,
 }
@@ -2233,7 +2226,6 @@ impl Default for ProgramSelectionMenu {
     fn default() -> Self {
         Self {
             focused: false,
-            selected: ProgramSelectionMenuItem::Run,
             comment: String::new(),
             cursor: 0,
         }
@@ -13103,7 +13095,6 @@ mod tests {
         app.move_program_cursor(5);
         app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
             focused: true,
-            selected: ProgramSelectionMenuItem::CommentRun,
             comment: "focus".into(),
             cursor: 5,
         });
@@ -13156,7 +13147,6 @@ mod tests {
         app.move_program_cursor(5);
         app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
             focused: true,
-            selected: ProgramSelectionMenuItem::CommentRun,
             comment: "focus".into(),
             cursor: 5,
         });
@@ -13170,7 +13160,7 @@ mod tests {
             .layout
             .program_selection_run_hit
             .expect("selection menu hit registered");
-        let y = hit.2.saturating_add(1);
+        let y = hit.2;
         let run_x = (hit.0..hit.1)
             .find(|x| {
                 x.saturating_add(2) < hit.1
@@ -13182,7 +13172,7 @@ mod tests {
 
         assert_eq!(
             run_x,
-            hit.1.saturating_sub(4),
+            hit.1.saturating_sub(3),
             "comment Run button should be aligned to the menu's right edge"
         );
         let run_cell = buf.cell((run_x, y)).expect("Run button cell");
@@ -13195,6 +13185,59 @@ mod tests {
             run_cell.style().bg,
             Some(app.theme.accent),
             "selected Run button should keep the accent background"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_selection_run_button_is_plain_until_menu_focus() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let buf = term.backend().buffer();
+        let hit = app
+            .layout
+            .program_selection_run_hit
+            .expect("selection menu hit registered");
+        let run_cell = buf
+            .cell((hit.1.saturating_sub(3), hit.2))
+            .expect("Run text cell");
+        assert_ne!(
+            run_cell.style().bg,
+            Some(app.theme.accent),
+            "Run button should not be highlighted before Tab focuses the menu"
+        );
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render after focus");
+        let buf = term.backend().buffer();
+        let hit = app
+            .layout
+            .program_selection_run_hit
+            .expect("selection menu hit registered");
+        let focused_run_cell = buf
+            .cell((hit.1.saturating_sub(3), hit.2))
+            .expect("focused Run text cell");
+        assert_eq!(
+            focused_run_cell.style().bg,
+            Some(app.theme.accent),
+            "Run button should highlight once Tab focuses the menu"
         );
         server.abort();
     }
@@ -13215,7 +13258,6 @@ mod tests {
         app.move_program_cursor(5);
         app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
             focused: true,
-            selected: ProgramSelectionMenuItem::CommentRun,
             comment: "alpha beta gamma delta epsilon zeta eta theta".into(),
             cursor: 45,
         });
@@ -13229,7 +13271,7 @@ mod tests {
             .layout
             .program_selection_run_hit
             .expect("selection menu hit registered");
-        let first_comment_y = hit.2.saturating_add(1);
+        let first_comment_y = hit.2;
         let first_row: String = (0..buf.area.width)
             .map(|x| {
                 buf.cell((x, first_comment_y))
@@ -13266,7 +13308,7 @@ mod tests {
                         .map(|c| c.symbol())
                         == Some("n")
             }),
-            Some(hit.1.saturating_sub(4)),
+            Some(hit.1.saturating_sub(3)),
             "Run button should stay pinned to the right while text wraps"
         );
         server.abort();
@@ -15467,6 +15509,11 @@ mod tests {
             Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
         app.begin_program_selection();
         app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: false,
+            comment: "focus tests".to_string(),
+            cursor: "focus tests".chars().count(),
+        });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -15500,6 +15547,11 @@ mod tests {
         assert_eq!(
             params.get("selection").and_then(Value::as_str),
             Some("alpha")
+        );
+        assert_eq!(
+            params.get("comment").and_then(Value::as_str),
+            Some("focus tests"),
+            "clicking the unified Run button should include any typed instruction"
         );
         server.abort();
     }
@@ -15732,7 +15784,6 @@ mod tests {
             .expect("selection menu remains open");
         assert_eq!(menu.comment, "ac");
         assert_eq!(menu.cursor, 2);
-        assert_eq!(menu.selected, ProgramSelectionMenuItem::CommentRun);
 
         app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .await;
@@ -15745,6 +15796,77 @@ mod tests {
             .expect("selection menu remains open");
         assert_eq!(menu.comment, "");
         assert_eq!(menu.cursor, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_selection_comment_editor_supports_wrapped_vertical_motion() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        for ch in "abcdefghijklmnopqrstuvwxyzabcdefghi".chars() {
+            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+        let start_cursor = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open")
+            .cursor;
+        assert_eq!(start_cursor, 35);
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .await;
+        let menu = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open");
+        assert!(
+            menu.cursor < start_cursor,
+            "Up should move the cursor to the previous wrapped row"
+        );
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        let menu = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open");
+        assert_eq!(
+            menu.cursor, start_cursor,
+            "C-n should return to the next wrapped row at the same visual column"
+        );
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        let after_cp = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open")
+            .cursor;
+        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        let menu = app
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .expect("selection menu remains open");
+        assert_eq!(
+            menu.cursor, start_cursor,
+            "Down should mirror C-n on wrapped comment text"
+        );
+        assert!(
+            after_cp < start_cursor,
+            "C-p should move the cursor to the previous wrapped row"
+        );
         server.abort();
     }
 

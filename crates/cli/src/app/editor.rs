@@ -167,6 +167,13 @@ impl App {
                             );
                         }
                     }
+                } else if hit_selection_run {
+                    let comment = self
+                        .program_popup
+                        .as_ref()
+                        .and_then(|popup| popup.selection_menu.as_ref())
+                        .map(|menu| menu.comment.clone());
+                    self.execute_program_selected_text(comment).await;
                 } else {
                     let selected = hit_selection_run.then(|| {
                         self.program_popup.as_ref().and_then(|popup| {
@@ -179,13 +186,6 @@ impl App {
                     let (selection, selected_block_ids) = selected
                         .flatten()
                         .map_or((None, None), |(text, ids)| (Some(text), Some(ids)));
-                    if hit_selection_run {
-                        if let Some(popup) = self.program_popup.as_mut() {
-                            popup.selection = None;
-                            popup.selection_menu = None;
-                        }
-                        self.layout.program_selection_run_hit = None;
-                    }
                     self.execute_program_popup(selection, selected_block_ids, None)
                         .await;
                 }
@@ -618,23 +618,13 @@ impl App {
                 self.layout.program_selection_run_hit = None;
                 self.set_status("program selection canceled".to_string());
             }
-            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
-                if let Some(menu) = self
-                    .program_popup
-                    .as_mut()
-                    .and_then(|popup| popup.selection_menu.as_mut())
-                {
-                    menu.selected = match menu.selected {
-                        ProgramSelectionMenuItem::Run => ProgramSelectionMenuItem::CommentRun,
-                        ProgramSelectionMenuItem::CommentRun => ProgramSelectionMenuItem::Run,
-                    };
-                }
-            }
+            KeyCode::Up => self.move_program_selection_comment_cursor_vertical(-1),
+            KeyCode::Down => self.move_program_selection_comment_cursor_vertical(1),
+            KeyCode::Tab | KeyCode::BackTab => {}
             KeyCode::Enter => {
                 let comment = self.program_popup.as_ref().and_then(|popup| {
                     let menu = popup.selection_menu.as_ref()?;
-                    (menu.selected == ProgramSelectionMenuItem::CommentRun)
-                        .then(|| menu.comment.clone())
+                    Some(menu.comment.clone())
                 });
                 self.execute_program_selected_text(comment).await;
             }
@@ -644,7 +634,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     menu.cursor = menu.cursor.saturating_sub(1);
                 }
             }
@@ -654,7 +643,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     menu.cursor = (menu.cursor + 1).min(menu.comment.chars().count());
                 }
             }
@@ -664,7 +652,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     menu.cursor = 0;
                 }
             }
@@ -674,7 +661,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     menu.cursor = menu.comment.chars().count();
                 }
             }
@@ -684,7 +670,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     if menu.cursor > 0 {
                         let idx = byte_pos(&menu.comment, menu.cursor - 1);
                         let next = byte_pos(&menu.comment, menu.cursor);
@@ -699,7 +684,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     let len = menu.comment.chars().count();
                     if menu.cursor < len {
                         let idx = byte_pos(&menu.comment, menu.cursor);
@@ -714,7 +698,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     menu.cursor = 0;
                 }
             }
@@ -724,7 +707,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     menu.cursor = menu.comment.chars().count();
                 }
             }
@@ -734,7 +716,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     menu.cursor = menu.cursor.saturating_sub(1);
                 }
             }
@@ -744,7 +725,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     menu.cursor = (menu.cursor + 1).min(menu.comment.chars().count());
                 }
             }
@@ -754,7 +734,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     let len = menu.comment.chars().count();
                     if menu.cursor < len {
                         let idx = byte_pos(&menu.comment, menu.cursor);
@@ -769,7 +748,6 @@ impl App {
                     .as_mut()
                     .and_then(|popup| popup.selection_menu.as_mut())
                 {
-                    menu.selected = ProgramSelectionMenuItem::CommentRun;
                     let len = menu.comment.chars().count();
                     if menu.cursor < len {
                         let idx = byte_pos(&menu.comment, menu.cursor);
@@ -785,16 +763,54 @@ impl App {
                         .as_mut()
                         .and_then(|popup| popup.selection_menu.as_mut())
                     {
-                        menu.selected = ProgramSelectionMenuItem::CommentRun;
                         let idx = byte_pos(&menu.comment, menu.cursor);
                         menu.comment.insert(idx, c);
                         menu.cursor += 1;
                     }
                 }
             }
+            _ if ctrl_char == Some('p') => self.move_program_selection_comment_cursor_vertical(-1),
+            _ if ctrl_char == Some('n') => self.move_program_selection_comment_cursor_vertical(1),
             _ => {}
         }
         true
+    }
+
+    fn move_program_selection_comment_cursor_vertical(&mut self, delta: isize) {
+        let width =
+            crate::ui::program_selection_comment_width(crate::ui::PROGRAM_SELECTION_RUN_MENU_W);
+        let Some(menu) = self
+            .program_popup
+            .as_mut()
+            .and_then(|popup| popup.selection_menu.as_mut())
+        else {
+            return;
+        };
+        let prefix: String = menu.comment.chars().take(menu.cursor).collect();
+        let prefix_lines = crate::text_util::wrap_to_width(&prefix, width);
+        let current_row = prefix_lines.len().saturating_sub(1);
+        let current_col = prefix_lines
+            .last()
+            .map(|line| unicode_width::UnicodeWidthStr::width(line.as_str()))
+            .unwrap_or(0);
+        let lines = crate::text_util::wrap_to_width(&menu.comment, width);
+        let target_row = if delta < 0 {
+            current_row.saturating_sub(delta.unsigned_abs())
+        } else {
+            current_row
+                .saturating_add(delta as usize)
+                .min(lines.len().saturating_sub(1))
+        };
+        let chars_before_target: usize = lines
+            .iter()
+            .take(target_row)
+            .map(|line| line.chars().count())
+            .sum();
+        let target_line = lines.get(target_row).map(String::as_str).unwrap_or("");
+        let line_cursor = char_index_for_display_col(target_line, current_col);
+        menu.cursor = chars_before_target
+            .saturating_add(line_cursor)
+            .min(menu.comment.chars().count());
     }
 
     pub(super) async fn execute_program_selected_text(&mut self, comment: Option<String>) -> bool {
@@ -2220,4 +2236,18 @@ fn program_anchored_live_edit(before: &str, after: &str) -> Option<agentd_protoc
         replace_all: false,
         keep_pending: false,
     })
+}
+
+fn char_index_for_display_col(line: &str, target_col: usize) -> usize {
+    let mut col = 0usize;
+    for (idx, ch) in line.chars().enumerate() {
+        if col >= target_col {
+            return idx;
+        }
+        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col > target_col {
+            return idx;
+        }
+    }
+    line.chars().count()
 }
