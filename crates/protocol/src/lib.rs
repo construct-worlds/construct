@@ -1576,6 +1576,11 @@ pub struct ProgramExecuteParams {
     pub selection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_version: Option<u64>,
+    /// Optional one-line instruction supplied with a Run gesture. The daemon
+    /// appends it to the generated program-run prompt; the program body and
+    /// shimmer scope remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
     /// Optional initial pending set over the executed body's blocks, in order
     /// (spec 0053). `None` keeps the optimistic default: the whole executed
     /// region shimmers.

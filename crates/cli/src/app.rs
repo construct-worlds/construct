@@ -1892,6 +1892,7 @@ pub struct ProgramPopup {
     pub cursor: usize,
     pub preferred_col: Option<usize>,
     pub selection: Option<ProgramSelection>,
+    pub selection_menu: Option<ProgramSelectionMenu>,
     pub smart_clip: Option<ProgramSmartClipSearch>,
     pub search: Option<ProgramSearch>,
     pub revealed_at: Instant,
@@ -2212,6 +2213,31 @@ pub struct ProgramSelection {
     pub anchor: usize,
     pub head: usize,
     pub dragged: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramSelectionMenuItem {
+    Run,
+    CommentRun,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgramSelectionMenu {
+    pub focused: bool,
+    pub selected: ProgramSelectionMenuItem,
+    pub comment: String,
+    pub cursor: usize,
+}
+
+impl Default for ProgramSelectionMenu {
+    fn default() -> Self {
+        Self {
+            focused: false,
+            selected: ProgramSelectionMenuItem::Run,
+            comment: String::new(),
+            cursor: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -8097,10 +8123,11 @@ impl App {
                 if selection.is_some() {
                     if let Some(popup) = self.program_popup.as_mut() {
                         popup.selection = None;
+                        popup.selection_menu = None;
                     }
                     self.layout.program_selection_run_hit = None;
                 }
-                self.execute_program_popup(selection, selected_block_ids)
+                self.execute_program_popup(selection, selected_block_ids, None)
                     .await;
             }
             ToggleProgramTerminalFocus => {
@@ -9881,6 +9908,7 @@ fn program_popup_from_document(
         cursor: 0,
         preferred_col: None,
         selection: None,
+        selection_menu: None,
         smart_clip: None,
         search: None,
         revealed_at: now,
@@ -10584,6 +10612,7 @@ mod tests {
             cursor,
             preferred_col: None,
             selection: None,
+            selection_menu: None,
             smart_clip: None,
             search: None,
             revealed_at: now,
@@ -13048,6 +13077,10 @@ mod tests {
             text.contains("Run"),
             "selection run menu should render: {text:?}"
         );
+        assert!(
+            text.contains("type additional instruction"),
+            "selection run menu should render the comment placeholder: {text:?}"
+        );
         assert!(app.layout.program_title_run_hit.is_some());
         assert!(app.layout.program_title_toggle_hit.is_some());
         assert!(app.layout.program_selection_run_hit.is_some());
@@ -15386,6 +15419,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn program_selection_run_menu_comment_runs_selection_with_comment() {
+        use agentd_protocol::ipc_method;
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let params = req.get("params").cloned().unwrap_or(Value::Null);
+                let _ = seen_tx.send((method.clone(), params.clone()));
+                let program = serde_json::json!({
+                    "session_id": "s1",
+                    "markdown": "alpha beta",
+                    "version": 1,
+                    "updated_at_ms": 0,
+                    "template_id": null,
+                });
+                let result = match method.as_str() {
+                    ipc_method::PROGRAM_EXECUTE => {
+                        serde_json::json!({ "program": program, "prompt": "sent", "active_run": null })
+                    }
+                    _ => Value::Null,
+                };
+                let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(client, Vec::new());
+        let mut session = summary_with_kind(agentd_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        for ch in "focus tests".chars() {
+            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+        app.handle_program_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        assert!(
+            app.program_popup
+                .as_ref()
+                .is_some_and(|popup| popup.selection.is_none() && popup.selection_menu.is_none()),
+            "comment Run should clear selection/menu after dispatch"
+        );
+        let (method, params) = seen_rx.recv().await.expect("program execute request");
+        assert_eq!(method, ipc_method::PROGRAM_EXECUTE);
+        assert_eq!(
+            params.get("selection").and_then(Value::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            params.get("comment").and_then(Value::as_str),
+            Some("focus tests")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn program_selection_run_ctrl_x_ctrl_r_preserves_other_pending_shimmer() {
         // Regression: C-x C-r on a fresh selection while other blocks are
         // already shimmering from an earlier run must keep that shimmer and
@@ -16097,7 +16226,7 @@ mod tests {
         app.program_popup.as_mut().unwrap().buffer = "alpha beta changed".to_string();
 
         assert!(
-            app.execute_program_popup(Some("beta".to_string()), None)
+            app.execute_program_popup(Some("beta".to_string()), None, None)
                 .await
         );
 
@@ -16224,7 +16353,7 @@ mod tests {
         });
 
         assert!(
-            app.execute_program_popup(Some("long text".to_string()), None)
+            app.execute_program_popup(Some("long text".to_string()), None, None)
                 .await,
             "run should dispatch"
         );
@@ -16379,12 +16508,12 @@ mod tests {
         app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
 
         assert!(
-            app.execute_program_popup(None, None).await,
+            app.execute_program_popup(None, None, None).await,
             "first run dispatches"
         );
         assert!(
             !app
-                .execute_program_popup(None, None)
+                .execute_program_popup(None, None, None)
                 .await,
             "identical immediate re-Run must be suppressed"
         );
@@ -16415,10 +16544,10 @@ mod tests {
         let mut app = test_app(client, Vec::new());
         app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
 
-        assert!(app.execute_program_popup(None, None).await);
+        assert!(app.execute_program_popup(None, None, None).await);
         app.program_popup.as_mut().unwrap().buffer = "alpha beta changed".to_string();
         assert!(
-            app.execute_program_popup(None, None).await,
+            app.execute_program_popup(None, None, None).await,
             "a re-Run with a changed body must dispatch again"
         );
 
@@ -16442,7 +16571,7 @@ mod tests {
         let mut app = test_app(client, Vec::new());
         app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
 
-        assert!(app.execute_program_popup(None, None).await);
+        assert!(app.execute_program_popup(None, None, None).await);
         // Simulate the debounce window having already elapsed by backdating
         // its recorded instant, matching this file's existing convention for
         // testing time-based expiry without sleeping (see e.g. `revealed_at`
@@ -16453,7 +16582,7 @@ mod tests {
             }
         }
         assert!(
-            app.execute_program_popup(None, None).await,
+            app.execute_program_popup(None, None, None).await,
             "an identical re-Run after the debounce window must dispatch"
         );
 
@@ -16478,11 +16607,11 @@ mod tests {
         app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
 
         assert!(
-            app.execute_program_popup(None, None).await,
+            app.execute_program_popup(None, None, None).await,
             "full run dispatches"
         );
         assert!(
-            app.execute_program_popup(Some("beta".to_string()), None)
+            app.execute_program_popup(Some("beta".to_string()), None, None)
                 .await,
             "a selection run must not be suppressed by a just-dispatched full run"
         );
@@ -17227,7 +17356,7 @@ mod tests {
         app.start_program_run("s1", saved, false, "");
         app.program_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- pending")]);
 
-        assert!(app.execute_program_popup(None, None).await);
+        assert!(app.execute_program_popup(None, None, None).await);
 
         let mut execute_params = None;
         while let Some((method, params)) = rx.recv().await {
@@ -17373,6 +17502,7 @@ mod tests {
                 session_id: "s1".into(),
                 selection: None,
                 base_version: Some(2),
+                comment: None,
                 shimmer: None,
                 selection_block_ids: None,
             })

@@ -122,7 +122,12 @@ impl App {
             .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
         let hit_selection_run = selection_run_hit
             .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
-        if hit_title_toggle || hit_title_run || hit_title_close || hit_title_name || hit_selection_run {
+        if hit_title_toggle
+            || hit_title_run
+            || hit_title_close
+            || hit_title_name
+            || hit_selection_run
+        {
             if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if hit_title_toggle {
                     self.close_program_popup().await;
@@ -147,8 +152,7 @@ impl App {
                             .unwrap_or(0);
                         let editing_this_field =
                             self.session_title_rename.as_ref().is_some_and(|r| {
-                                r.session_id == session_id
-                                    && r.origin == TitleRenameOrigin::Program
+                                r.session_id == session_id && r.origin == TitleRenameOrigin::Program
                             });
                         if editing_this_field {
                             self.session_title_rename_click_cursor(
@@ -178,10 +182,11 @@ impl App {
                     if hit_selection_run {
                         if let Some(popup) = self.program_popup.as_mut() {
                             popup.selection = None;
+                            popup.selection_menu = None;
                         }
                         self.layout.program_selection_run_hit = None;
                     }
-                    self.execute_program_popup(selection, selected_block_ids)
+                    self.execute_program_popup(selection, selected_block_ids, None)
                         .await;
                 }
             }
@@ -295,6 +300,7 @@ impl App {
                         head: cursor,
                         dragged: true,
                     });
+                    popup.selection_menu = Some(ProgramSelectionMenu::default());
                     popup.smart_clip = None;
                     return true;
                 }
@@ -305,6 +311,7 @@ impl App {
                     head: cursor,
                     dragged: false,
                 });
+                popup.selection_menu = Some(ProgramSelectionMenu::default());
                 popup.smart_clip = None;
                 true
             }
@@ -345,6 +352,7 @@ impl App {
                     self.copy_program_selection();
                 } else if let Some(popup) = self.program_popup.as_mut() {
                     popup.selection = None;
+                    popup.selection_menu = None;
                 }
                 true
             }
@@ -394,6 +402,9 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let super_mod = key.modifiers.contains(KeyModifiers::SUPER);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if self.handle_program_selection_menu_key(key).await {
+            return;
+        }
         if shift
             && matches!(
                 key.code,
@@ -455,6 +466,7 @@ impl App {
                 self.cancel_program_smart_clip();
                 if let Some(popup) = self.program_popup.as_mut() {
                     popup.selection = None;
+                    popup.selection_menu = None;
                 }
                 self.set_status("program selection canceled".to_string());
             }
@@ -552,6 +564,206 @@ impl App {
         if let Some(before) = before {
             self.flush_program_live_edit(before).await;
         }
+    }
+
+    async fn handle_program_selection_menu_key(&mut self, key: KeyEvent) -> bool {
+        let selection_active = self
+            .program_popup
+            .as_ref()
+            .and_then(Self::program_selection_range)
+            .is_some();
+        if !selection_active {
+            if let Some(popup) = self.program_popup.as_mut() {
+                popup.selection_menu = None;
+            }
+            return false;
+        }
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let super_mod = key.modifiers.contains(KeyModifiers::SUPER);
+        let ctrl_char = Self::normalized_ctrl_char(key);
+        let menu_focused = self
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .is_some_and(|menu| menu.focused);
+        if !menu_focused {
+            if matches!(key.code, KeyCode::Tab) && !ctrl && !alt && !super_mod {
+                let Some(popup) = self.program_popup.as_mut() else {
+                    return true;
+                };
+                let menu = popup.selection_menu.get_or_insert_with(Default::default);
+                menu.focused = true;
+                return true;
+            }
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.focused = false;
+                }
+            }
+            _ if ctrl_char == Some('g') => {
+                if let Some(popup) = self.program_popup.as_mut() {
+                    popup.selection = None;
+                    popup.selection_menu = None;
+                }
+                self.layout.program_selection_run_hit = None;
+                self.set_status("program selection canceled".to_string());
+            }
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = match menu.selected {
+                        ProgramSelectionMenuItem::Run => ProgramSelectionMenuItem::CommentRun,
+                        ProgramSelectionMenuItem::CommentRun => ProgramSelectionMenuItem::Run,
+                    };
+                }
+            }
+            KeyCode::Enter => {
+                let comment = self.program_popup.as_ref().and_then(|popup| {
+                    let menu = popup.selection_menu.as_ref()?;
+                    (menu.selected == ProgramSelectionMenuItem::CommentRun)
+                        .then(|| menu.comment.clone())
+                });
+                self.execute_program_selected_text(comment).await;
+            }
+            KeyCode::Left => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    menu.cursor = menu.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Right => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    menu.cursor = (menu.cursor + 1).min(menu.comment.chars().count());
+                }
+            }
+            KeyCode::Home => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    menu.cursor = 0;
+                }
+            }
+            KeyCode::End => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    menu.cursor = menu.comment.chars().count();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    if menu.cursor > 0 {
+                        let idx = byte_pos(&menu.comment, menu.cursor - 1);
+                        let next = byte_pos(&menu.comment, menu.cursor);
+                        menu.comment.replace_range(idx..next, "");
+                        menu.cursor -= 1;
+                    }
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    let len = menu.comment.chars().count();
+                    if menu.cursor < len {
+                        let idx = byte_pos(&menu.comment, menu.cursor);
+                        let next = byte_pos(&menu.comment, menu.cursor + 1);
+                        menu.comment.replace_range(idx..next, "");
+                    }
+                }
+            }
+            _ if ctrl_char == Some('a') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    menu.cursor = 0;
+                }
+            }
+            _ if ctrl_char == Some('e') => {
+                if let Some(menu) = self
+                    .program_popup
+                    .as_mut()
+                    .and_then(|popup| popup.selection_menu.as_mut())
+                {
+                    menu.selected = ProgramSelectionMenuItem::CommentRun;
+                    menu.cursor = menu.comment.chars().count();
+                }
+            }
+            KeyCode::Char(c) if ctrl_char.is_none() && !ctrl && !alt && !super_mod => {
+                if c != '\n' && c != '\r' {
+                    if let Some(menu) = self
+                        .program_popup
+                        .as_mut()
+                        .and_then(|popup| popup.selection_menu.as_mut())
+                    {
+                        menu.selected = ProgramSelectionMenuItem::CommentRun;
+                        let idx = byte_pos(&menu.comment, menu.cursor);
+                        menu.comment.insert(idx, c);
+                        menu.cursor += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    pub(super) async fn execute_program_selected_text(&mut self, comment: Option<String>) -> bool {
+        let selected = self.program_popup.as_ref().and_then(|popup| {
+            Some((
+                Self::selected_program_text(popup)?,
+                Self::selected_program_block_ids(popup)?,
+            ))
+        });
+        let Some((selection, selected_block_ids)) = selected else {
+            return self.execute_program_popup(None, None, comment).await;
+        };
+        if let Some(popup) = self.program_popup.as_mut() {
+            popup.selection = None;
+            popup.selection_menu = None;
+        }
+        self.layout.program_selection_run_hit = None;
+        self.execute_program_popup(Some(selection), Some(selected_block_ids), comment)
+            .await
     }
 
     fn normalized_ctrl_char(key: KeyEvent) -> Option<char> {
@@ -746,6 +958,7 @@ impl App {
             head: popup.cursor,
             dragged: false,
         });
+        popup.selection_menu = Some(ProgramSelectionMenu::default());
         self.set_status("program selection started".to_string());
     }
 

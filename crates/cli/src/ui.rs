@@ -53,8 +53,8 @@ pub(crate) const PROGRAM_AGENT_REVEAL_MS: i64 = 800;
 /// than `PROGRAM_AGENT_REVEAL_MS` on purpose: an edit that lands off-screen is
 /// still worth pointing at for a bit after its own reveal tint has faded.
 pub(crate) const PROGRAM_AGENT_RECENT_ACTIVITY_MS: i64 = 3000;
-const PROGRAM_SELECTION_RUN_MENU_W: u16 = 9;
-const PROGRAM_SELECTION_RUN_MENU_H: u16 = 3;
+const PROGRAM_SELECTION_RUN_MENU_W: u16 = 36;
+const PROGRAM_SELECTION_RUN_MENU_H: u16 = 4;
 
 /// Row-fraction range `[start, end)` of a preview image to paint this
 /// frame. On appear the image fills from the top over `PREVIEW_REVEAL_SECS`
@@ -3521,11 +3521,10 @@ fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
             .max()
             .unwrap_or(0);
         for h in &app.harnesses {
-            let status = h.detail.as_deref().unwrap_or(if h.available {
-                "ready"
-            } else {
-                "unavailable"
-            });
+            let status =
+                h.detail
+                    .as_deref()
+                    .unwrap_or(if h.available { "ready" } else { "unavailable" });
             let status_style = Style::default().fg(if h.available {
                 app.theme.text
             } else {
@@ -4610,9 +4609,10 @@ fn render_agentd_markdown_lines_at_depth(
                                 let consumed_rows = rendered_rows
                                     + visual_line_count(block_lines.iter(), panel_area.width);
                                 let sub_area = Rect {
-                                    y: panel_area.y.saturating_add(
-                                        consumed_rows.min(u16::MAX as usize) as u16,
-                                    ),
+                                    y:
+                                        panel_area.y.saturating_add(
+                                            consumed_rows.min(u16::MAX as usize) as u16,
+                                        ),
                                     ..panel_area
                                 };
                                 block_lines.extend(render_agentd_markdown_lines_at_depth(
@@ -5672,8 +5672,7 @@ fn scan_agentd_action_links(line: &str) -> Vec<AgentdActionLink> {
             break;
         };
         let (id, key, close) = parse_action_target(&after_paren[..target_len]);
-        let end =
-            label_start + 1 + label_len + 1 + "(agentd:action/".len() + target_len + 1;
+        let end = label_start + 1 + label_len + 1 + "(agentd:action/".len() + target_len + 1;
         if !label.is_empty() && !id.is_empty() {
             out.push(AgentdActionLink {
                 start: label_start,
@@ -7871,11 +7870,7 @@ fn visible_edit_window(text: &str, cursor: usize, budget: usize) -> (String, u16
             .sum()
     };
     if width_of(&chars) <= budget {
-        return (
-            chars.iter().collect(),
-            width_of(&chars[..cursor]) as u16,
-            0,
-        );
+        return (chars.iter().collect(), width_of(&chars[..cursor]) as u16, 0);
     }
     // Grow the window left from the cursor first, then fill any remaining
     // budget to the right, so the cursor always ends up inside the slice.
@@ -10408,14 +10403,21 @@ fn program_shimmer_hover_anchor_row(
     } else {
         block_first_row.saturating_sub(box_height)
     };
-    row.clamp(bounds.y, bounds_bottom.saturating_sub(box_height).max(bounds.y))
+    row.clamp(
+        bounds.y,
+        bounds_bottom.saturating_sub(box_height).max(bounds.y),
+    )
 }
 
 /// Map an absolute visual row to the on-screen row it paints at within `area`
 /// given `scroll_offset`, pinned to the viewport's near edge when the row
 /// itself is scrolled out of view. Lets the hover-box anchor use whichever
 /// part of a (possibly partially scrolled) block is actually visible.
-fn program_clamp_visual_row_to_viewport(area: Rect, scroll_offset: usize, visual_row: usize) -> u16 {
+fn program_clamp_visual_row_to_viewport(
+    area: Rect,
+    scroll_offset: usize,
+    visual_row: usize,
+) -> u16 {
     if area.height == 0 {
         return area.y;
     }
@@ -10977,22 +10979,42 @@ fn render_program_selection_context_menu(
     let hovered = app
         .mouse_pos
         .is_some_and(|(mx, my)| my == hit.2 && mx >= hit.0 && mx < hit.1);
-    let style = if hovered {
-        Style::default()
-            .fg(app.theme.text)
-            .bg(app.theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(app.theme.accent)
+    let menu = popup.selection_menu.as_ref().cloned().unwrap_or_default();
+    let row_style = |selected: bool| {
+        if selected {
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.accent)
+        }
     };
+    let run_selected =
+        hovered || (menu.focused && menu.selected == crate::app::ProgramSelectionMenuItem::Run);
+    let comment_selected =
+        menu.focused && menu.selected == crate::app::ProgramSelectionMenuItem::CommentRun;
+    let inner_width = hit.1.saturating_sub(hit.0) as usize;
+    let comment_text = if menu.comment.is_empty() {
+        "type additional instruction".to_string()
+    } else {
+        menu.comment.clone()
+    };
+    let comment_budget = inner_width.saturating_sub("  Run".len());
+    let comment_text = truncate_to_width(&comment_text, comment_budget);
+    let comment_style = if menu.comment.is_empty() {
+        Style::default().fg(app.theme.muted)
+    } else {
+        row_style(comment_selected)
+    };
+    let comment_suffix_style = row_style(comment_selected);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border));
-    let para = Paragraph::new(Line::from(Span::styled("▶ Run", style)));
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
     f.render_widget(
-        para,
+        Paragraph::new(Line::from(Span::styled("▶ Run", row_style(run_selected)))),
         Rect {
             x: hit.0,
             y: hit.2,
@@ -11000,6 +11022,34 @@ fn render_program_selection_context_menu(
             height: 1,
         },
     );
+    if rect.height >= 4 {
+        let y = hit.2.saturating_add(1);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(comment_text.clone(), comment_style),
+                Span::styled("  Run", comment_suffix_style),
+            ])),
+            Rect {
+                x: hit.0,
+                y,
+                width: hit.1.saturating_sub(hit.0),
+                height: 1,
+            },
+        );
+        if comment_selected {
+            let cursor_x = hit.0.saturating_add(UnicodeWidthStr::width(
+                menu.comment
+                    .chars()
+                    .take(menu.cursor)
+                    .collect::<String>()
+                    .as_str(),
+            ) as u16);
+            f.set_cursor_position(Position {
+                x: cursor_x.min(hit.1.saturating_sub(1)),
+                y,
+            });
+        }
+    }
 }
 
 fn program_selection_context_menu_rect(pos: Position, total: Rect) -> Rect {
@@ -15170,8 +15220,13 @@ mod tests {
     #[test]
     fn program_action_link_hits_map_click_geometry() {
         let area = Rect::new(0, 0, 80, 6);
-        let hits =
-            program_action_link_hits(None, "run [Go](agentd:action/go?key=g) now", "sess", 0, area);
+        let hits = program_action_link_hits(
+            None,
+            "run [Go](agentd:action/go?key=g) now",
+            "sess",
+            0,
+            area,
+        );
         assert_eq!(hits.len(), 1);
         let hit = &hits[0];
         assert_eq!(hit.session_id, "sess");
