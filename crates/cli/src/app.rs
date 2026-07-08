@@ -3244,6 +3244,12 @@ async fn run_loop(
     // it via `set_status`.
     let (upgrade_status_tx, mut upgrade_status_rx) = mpsc::unbounded_channel::<String>();
     app.upgrade_status_tx = upgrade_status_tx;
+    // Tier-2 session-picker content search (spec 0076): the debounced
+    // `session.search` call fired below is spawned entirely within this
+    // loop (no key handler needs to reach it directly), so unlike the
+    // channels above this one stays local instead of living on `App`.
+    let (content_search_tx, mut content_search_rx) =
+        mpsc::unbounded_channel::<(u64, anyhow::Result<agentd_protocol::SearchResult>)>();
     let mut reconnect: Option<ReconnectState> = None;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
@@ -3439,6 +3445,41 @@ async fn run_loop(
                     }
                     last_orch_sent = size;
                     pending_orch = None;
+                }
+            }
+            // Tier-2 session-picker content search (spec 0076): fire the
+            // debounced `session.search` call once its deadline elapses.
+            // The generation tag lets the drain arm below discard a
+            // response for a query the user has since edited away from.
+            if let Some(deadline) = app
+                .session_picker
+                .as_ref()
+                .and_then(|d| d.content_search_deadline)
+            {
+                if Instant::now() >= deadline {
+                    if let Some(dialog) = app.session_picker.as_mut() {
+                        let query = dialog.query.trim().to_string();
+                        let generation = dialog.content_search_generation;
+                        dialog.content_search_in_flight = true;
+                        dialog.content_search_deadline = None;
+                        let client = app.client.clone();
+                        let tx = content_search_tx.clone();
+                        tokio::spawn(async move {
+                            let result = client
+                                .search(agentd_protocol::SearchParams {
+                                    query,
+                                    scopes: Some(vec![
+                                        agentd_protocol::SearchScope::Program,
+                                        agentd_protocol::SearchScope::Transcript,
+                                    ]),
+                                    session_ids: None,
+                                    limit: Some(20),
+                                    per_session_limit: None,
+                                })
+                                .await;
+                            let _ = tx.send((generation, result));
+                        });
+                    }
                 }
             }
         }
@@ -3661,6 +3702,34 @@ async fn run_loop(
             msg = upgrade_status_rx.recv() => {
                 if let Some(msg) = msg {
                     app.set_status(msg);
+                }
+            }
+            searched = content_search_rx.recv() => {
+                // A tier-2 content search landed. Drop it silently if the
+                // dialog closed or the query has since moved on to a new
+                // generation — typing again must supersede, not queue.
+                if let Some((generation, result)) = searched {
+                    let current_generation = app
+                        .session_picker
+                        .as_ref()
+                        .map(|d| d.content_search_generation);
+                    if current_generation == Some(generation) {
+                        match result {
+                            Ok(r) => {
+                                if let Some(dialog) = app.session_picker.as_mut() {
+                                    dialog.content_search_in_flight = false;
+                                    dialog.content_matches = r.hits;
+                                    dialog.content_search_truncated = r.truncated;
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(dialog) = app.session_picker.as_mut() {
+                                    dialog.content_search_in_flight = false;
+                                }
+                                app.set_status(format!("content search failed: {e}"));
+                            }
+                        }
+                    }
                 }
             }
             _ = tick.tick() => {
@@ -10268,7 +10337,10 @@ mod tests {
         }
     }
 
-    fn test_app(client: Arc<Client>, sessions: Vec<SessionSummary>) -> App {
+    /// `pub(super)` (rather than private) so `app::session_picker`'s own
+    /// test module can build a real `App` for tests that exercise dialog
+    /// methods without needing a full mock-daemon round trip.
+    pub(super) fn test_app(client: Arc<Client>, sessions: Vec<SessionSummary>) -> App {
         let now = Instant::now();
         let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
         App {

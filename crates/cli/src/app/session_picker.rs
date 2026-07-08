@@ -29,6 +29,16 @@ pub enum SessionPickerPurpose {
     InsertProgramClip,
 }
 
+/// Minimum query length (chars) before the tier-2 async content search
+/// (spec 0076) is worth a round trip — shorter queries would mostly match
+/// noise and every keystroke would otherwise fire a new daemon call.
+const CONTENT_SEARCH_MIN_QUERY_CHARS: usize = 3;
+
+/// Debounce window between the switcher's query settling and the tier-2
+/// `session.search` call firing, so a burst of keystrokes collapses into
+/// one IPC round trip instead of one per character.
+const CONTENT_SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
+
 /// Modal session-picker state. `App::session_picker == None` means closed.
 #[derive(Debug, Clone)]
 pub struct SessionPickerDialog {
@@ -45,6 +55,24 @@ pub struct SessionPickerDialog {
     /// First visible raw-row index, clamped at render time to keep `selected`
     /// on screen.
     pub scroll: usize,
+    /// Tier-2 async content search (spec 0076): hits from the last completed
+    /// `session.search` call over program + transcript content. Name matches
+    /// are tier 1 (instant, in-memory dimming) and never appear here. Only
+    /// meaningful for [`SessionPickerPurpose::Switch`].
+    pub content_matches: Vec<agentd_protocol::SearchHit>,
+    /// Bumped on every query edit. The async search task echoes the
+    /// generation it was fired for back with its result, so a response for
+    /// a query the user has since edited away from is dropped instead of
+    /// clobbering a newer search's results.
+    pub content_search_generation: u64,
+    /// Debounce deadline for firing the next `session.search` call. `None`
+    /// when nothing is scheduled (query too short, or already fired for the
+    /// current generation).
+    pub content_search_deadline: Option<Instant>,
+    /// A `session.search` call for `content_search_generation` is in flight.
+    pub content_search_in_flight: bool,
+    /// Whether the last completed search reported `truncated: true`.
+    pub content_search_truncated: bool,
 }
 
 impl SessionPickerDialog {
@@ -87,13 +115,24 @@ pub enum SessionPickerRow {
     /// A block from the currently open program. Selecting it closes the
     /// picker, brings the program view into focus, and scrolls to the block.
     ProgramBlock { text: String, start_line: usize },
+    /// Separator introducing the tier-2 async content-search section (spec
+    /// 0076), shown below the session/group/program-block rows once the
+    /// switcher's query is long enough to have kicked one off.
+    ContentMatchHeader { searching: bool, truncated: bool },
+    /// One tier-2 content-search hit (program or transcript scope).
+    /// Selecting it switches to `hit.session_id` — the same action as
+    /// selecting that session's own row. Jump-to-match positioning within
+    /// the transcript/program view is out of scope.
+    ContentMatch { hit: agentd_protocol::SearchHit },
 }
 
 impl SessionPickerRow {
     pub fn is_selectable(&self) -> bool {
         matches!(
             self,
-            SessionPickerRow::Session { dimmed: false, .. } | SessionPickerRow::ProgramBlock { .. }
+            SessionPickerRow::Session { dimmed: false, .. }
+                | SessionPickerRow::ProgramBlock { .. }
+                | SessionPickerRow::ContentMatch { .. }
         )
     }
 }
@@ -161,6 +200,11 @@ impl App {
             cursor: 0,
             selected: 0,
             scroll: 0,
+            content_matches: Vec::new(),
+            content_search_generation: 0,
+            content_search_deadline: None,
+            content_search_in_flight: false,
+            content_search_truncated: false,
         });
     }
 
@@ -305,6 +349,34 @@ impl App {
                 }
             }
         }
+
+        // Tier-2 async content-search section (spec 0076): program +
+        // transcript hits from the debounced background `session.search`
+        // call. Only for the plain switcher, and only once the query is
+        // long enough to have actually kicked one off — mirrors the gate in
+        // `schedule_content_search` so this section only appears when a
+        // search for the *current* query is in flight or has landed.
+        if let Some(dialog) = self
+            .session_picker
+            .as_ref()
+            .filter(|d| d.purpose == SessionPickerPurpose::Switch)
+        {
+            if query.trim().chars().count() >= CONTENT_SEARCH_MIN_QUERY_CHARS
+                && (dialog.content_search_in_flight || !dialog.content_matches.is_empty())
+            {
+                out.push(SessionPickerRow::ContentMatchHeader {
+                    searching: dialog.content_search_in_flight,
+                    truncated: dialog.content_search_truncated,
+                });
+                out.extend(
+                    dialog
+                        .content_matches
+                        .iter()
+                        .cloned()
+                        .map(|hit| SessionPickerRow::ContentMatch { hit }),
+                );
+            }
+        }
         out
     }
 
@@ -344,6 +416,7 @@ impl App {
             dialog.selected = 0;
             dialog.scroll = 0;
         }
+        self.schedule_content_search();
     }
 
     fn session_picker_backspace(&mut self) {
@@ -357,6 +430,30 @@ impl App {
             dialog.selected = 0;
             dialog.scroll = 0;
         }
+        self.schedule_content_search();
+    }
+
+    /// (Re)arm the tier-2 async content search debounce after the
+    /// switcher's query changed (spec 0076). Bumps the generation so any
+    /// in-flight or about-to-fire search for the old query is superseded,
+    /// clears stale results immediately (so the picker never shows content
+    /// matches for a query the user has since edited away from), and arms
+    /// a fresh debounce deadline when the query is long enough to be worth
+    /// a round trip. A no-op outside the `C-x b` switcher.
+    pub(crate) fn schedule_content_search(&mut self) {
+        let Some(dialog) = self.session_picker.as_mut() else {
+            return;
+        };
+        if dialog.purpose != SessionPickerPurpose::Switch {
+            return;
+        }
+        dialog.content_search_generation += 1;
+        dialog.content_matches.clear();
+        dialog.content_search_truncated = false;
+        dialog.content_search_in_flight = false;
+        let query_chars = dialog.query.trim().chars().count();
+        dialog.content_search_deadline = (query_chars >= CONTENT_SEARCH_MIN_QUERY_CHARS)
+            .then(|| Instant::now() + CONTENT_SEARCH_DEBOUNCE);
     }
 
     /// `C-f` / `C-b`: move the search-line cursor by one char, clamped to the
@@ -390,6 +487,7 @@ impl App {
             dialog.cursor = dialog.cursor.min(dialog.query.chars().count());
         }
         self.session_picker_reset_selection();
+        self.schedule_content_search();
     }
 
     /// Snap the highlight back to the top match. Called after the effective
@@ -535,9 +633,25 @@ impl App {
                 self.jump_to_program_block(start_line);
                 self.set_status(format!("program → {text}"));
             }
+            // Same action as picking the session's own row — jump-to-seq
+            // positioning within the transcript/program view is explicitly
+            // out of scope (spec 0076).
+            SessionPickerRow::ContentMatch { hit } => {
+                match self.sessions.iter().find(|s| s.id == hit.session_id) {
+                    Some(summary) => {
+                        let label = session_switch_label(summary);
+                        self.select_session(summary.id.clone());
+                        self.sync_active_window_selection();
+                        self.focus = PaneFocus::View;
+                        self.set_status(format!("window → {label}"));
+                    }
+                    None => self.set_status(format!("session {} no longer exists", hit.session_id)),
+                }
+            }
             SessionPickerRow::GroupHeader { .. }
             | SessionPickerRow::ArchiveHeader { .. }
-            | SessionPickerRow::ProgramHeader => {}
+            | SessionPickerRow::ProgramHeader
+            | SessionPickerRow::ContentMatchHeader { .. } => {}
         }
     }
 
@@ -776,5 +890,176 @@ mod tests {
     #[test]
     fn empty_list_scrolls_to_zero() {
         assert_eq!(session_picker_scroll(&[], None, 7, 5), 0);
+    }
+
+    fn summary_with_id(id: &str) -> SessionSummary {
+        let mut s = summary();
+        s.id = id.to_string();
+        s
+    }
+
+    /// Real `App` with a client connected to a mock daemon that never
+    /// receives a request — the tier-2 dialog-state methods under test
+    /// (`schedule_content_search`, row building, key handling) never touch
+    /// `self.client` themselves; only `run_loop`'s background task does.
+    async fn test_app_with_sessions(
+        sessions: Vec<SessionSummary>,
+    ) -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        use tokio::net::UnixListener;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok(_conn) = listener.accept().await else {
+                    break;
+                };
+            }
+        });
+        let client = agentd_client::Client::connect(&sock)
+            .await
+            .expect("client connects");
+        let app = crate::app::tests::test_app(client, sessions);
+        (app, dir, server)
+    }
+
+    #[tokio::test]
+    async fn short_query_does_not_arm_content_search_debounce() {
+        let (mut app, _dir, _server) = test_app_with_sessions(vec![summary()]).await;
+        app.open_session_picker(SessionPickerPurpose::Switch);
+
+        app.session_picker_push_char('a');
+        app.session_picker_push_char('b');
+
+        let dialog = app.session_picker.as_ref().expect("dialog open");
+        assert!(dialog.content_search_deadline.is_none());
+        // The generation still advances on every edit, even below the
+        // threshold — it's what invalidates any earlier in-flight search.
+        assert_eq!(dialog.content_search_generation, 2);
+    }
+
+    #[tokio::test]
+    async fn query_past_min_chars_arms_content_search_debounce() {
+        let (mut app, _dir, _server) = test_app_with_sessions(vec![summary()]).await;
+        app.open_session_picker(SessionPickerPurpose::Switch);
+
+        for c in "abc".chars() {
+            app.session_picker_push_char(c);
+        }
+
+        let dialog = app.session_picker.as_ref().expect("dialog open");
+        assert!(dialog.content_search_deadline.is_some());
+        assert_eq!(dialog.content_search_generation, 3);
+    }
+
+    #[tokio::test]
+    async fn further_typing_supersedes_a_pending_search_and_clears_stale_matches() {
+        let (mut app, _dir, _server) = test_app_with_sessions(vec![summary()]).await;
+        app.open_session_picker(SessionPickerPurpose::Switch);
+        for c in "abc".chars() {
+            app.session_picker_push_char(c);
+        }
+        let generation_before = app
+            .session_picker
+            .as_ref()
+            .unwrap()
+            .content_search_generation;
+        // Simulate a completed search landing before the next keystroke.
+        if let Some(dialog) = app.session_picker.as_mut() {
+            dialog.content_matches = vec![agentd_protocol::SearchHit {
+                session_id: "s".into(),
+                title: "s".into(),
+                harness: "shell".into(),
+                scope: agentd_protocol::SearchScope::Program,
+                seq: None,
+                at: None,
+                snippet: "abc found".into(),
+                match_start: 0,
+                match_end: 3,
+            }];
+        }
+
+        app.session_picker_push_char('d');
+
+        let dialog = app.session_picker.as_ref().unwrap();
+        assert!(dialog.content_search_generation > generation_before);
+        assert!(
+            dialog.content_matches.is_empty(),
+            "stale results from the pre-edit query must not linger"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_match_rows_appear_below_session_rows_and_are_selectable() {
+        let (mut app, _dir, _server) = test_app_with_sessions(vec![summary()]).await;
+        app.open_session_picker(SessionPickerPurpose::Switch);
+        for c in "needle".chars() {
+            app.session_picker_push_char(c);
+        }
+        if let Some(dialog) = app.session_picker.as_mut() {
+            dialog.content_search_in_flight = false;
+            dialog.content_matches = vec![agentd_protocol::SearchHit {
+                session_id: "s".into(),
+                title: "s".into(),
+                harness: "shell".into(),
+                scope: agentd_protocol::SearchScope::Transcript,
+                seq: Some(7),
+                at: None,
+                snippet: "found the needle here".into(),
+                match_start: 10,
+                match_end: 16,
+            }];
+        }
+
+        let rows = app.session_picker_rows();
+
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r, SessionPickerRow::ContentMatchHeader { .. })));
+        let content_match = rows
+            .iter()
+            .find(|r| matches!(r, SessionPickerRow::ContentMatch { .. }))
+            .expect("content match row present");
+        assert!(content_match.is_selectable());
+    }
+
+    #[tokio::test]
+    async fn enter_on_a_content_match_switches_to_its_session() {
+        let (mut app, _dir, _server) =
+            test_app_with_sessions(vec![summary_with_id("target")]).await;
+        app.open_session_picker(SessionPickerPurpose::Switch);
+        for c in "needle".chars() {
+            app.session_picker_push_char(c);
+        }
+        if let Some(dialog) = app.session_picker.as_mut() {
+            dialog.content_search_in_flight = false;
+            dialog.content_matches = vec![agentd_protocol::SearchHit {
+                session_id: "target".into(),
+                title: "target".into(),
+                harness: "shell".into(),
+                scope: agentd_protocol::SearchScope::Program,
+                seq: None,
+                at: None,
+                snippet: "needle in a haystack".into(),
+                match_start: 0,
+                match_end: 6,
+            }];
+        }
+        // The content-match row is the last selectable row (session row,
+        // then the one content match).
+        let last = app
+            .session_picker_rows()
+            .into_iter()
+            .filter(|r| r.is_selectable())
+            .count()
+            - 1;
+        if let Some(dialog) = app.session_picker.as_mut() {
+            dialog.selected = last;
+        }
+
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.session_picker.is_none());
+        assert_eq!(app.selected_id().as_deref(), Some("target"));
     }
 }
