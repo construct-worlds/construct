@@ -23505,7 +23505,7 @@ mod tests {
         let screen = rendered_text(terminal.backend().buffer());
         assert!(screen.contains("tour 1/8"), "missing step title:\n{screen}");
         assert!(
-            screen.contains("A chord like C-x C-f means"),
+            screen.contains("A chord like C-x C-f"),
             "missing step1 body:\n{screen}"
         );
         server.abort();

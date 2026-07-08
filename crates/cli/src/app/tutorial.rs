@@ -260,10 +260,10 @@ impl TutorialState {
     pub fn lines(&self) -> Vec<TutorialLine> {
         if self.completed {
             return vec![
-                vec![t("Tour complete — nice work covering the core")],
+                vec![t("Tour complete! Nice work covering the core")],
                 vec![t("keybindings and the program board.")],
                 vec![],
-                vec![t("Replay anytime from the palette (tutorial).")],
+                vec![t("Replay anytime: palette -> tutorial.")],
             ];
         }
         match self.step {
@@ -328,16 +328,21 @@ impl TutorialState {
     }
 }
 
+// Body lines are authored to fit the card's inner width (44 cols, spec
+// 0077's "roughly 46 wide") on a single row each — they are intentionally
+// NOT wrapped at render time, so a HintZone's column math stays exact for
+// the labels embedded mid-line. Keep new/edited lines at 44 cols or under.
+
 fn step1_lines(phase: Step1Phase, profile: Profile) -> Vec<TutorialLine> {
     let mut lines = vec![
-        vec![t("A chord like C-x C-f means: hold Ctrl, tap X, let go,")],
-        vec![t("then (still holding Ctrl) tap F.")],
+        vec![t("A chord like C-x C-f: hold Ctrl, tap X,")],
+        vec![t("let go, then (still holding Ctrl) tap F.")],
         vec![],
     ];
     match phase {
         Step1Phase::AwaitCtrlX => {
             lines.push(vec![
-                t("Try it — press "),
+                t("Try it, press "),
                 k("Ctrl+X", KeyAction::TutorialNudge),
                 t(" now."),
             ]);
@@ -348,13 +353,16 @@ fn step1_lines(phase: Step1Phase, profile: Profile) -> Vec<TutorialLine> {
                 k("Ctrl+G", KeyAction::TutorialNudge),
                 t(" to cancel it."),
             ]);
-            lines.push(vec![t("C-g backs out of anything half-typed: chords,")]);
-            lines.push(vec![t("prompts, pickers.")]);
+            lines.push(vec![t("C-g backs out of anything half-typed:")]);
+            lines.push(vec![t("chords, prompts, pickers.")]);
         }
         Step1Phase::AwaitNewSession => {
             lines.push(vec![
-                t("Cancelled! For real this time: press "),
-                k(chord_label(KeyAction::OpenNewSession, profile), KeyAction::TutorialNudge),
+                t("Cancelled! For real: press "),
+                k(
+                    chord_label(KeyAction::OpenNewSession, profile),
+                    KeyAction::TutorialNudge,
+                ),
             ]);
             lines.push(vec![t("to create a session.")]);
         }
@@ -365,16 +373,17 @@ fn step1_lines(phase: Step1Phase, profile: Profile) -> Vec<TutorialLine> {
 fn step2_lines(degraded: bool) -> Vec<TutorialLine> {
     if degraded {
         vec![
-            vec![t("The picker is open. No agent harness is set up yet,")],
+            vec![t("The picker is open. No agent harness yet,")],
             vec![t("so pick shell for now.")],
             vec![],
-            vec![t("(Set one up in /configure to see delegation live later.)")],
+            vec![t("(Set one up in /configure to see")],
+            vec![t("delegation live later.)")],
         ]
     } else {
         vec![
-            vec![t("The picker is open. Type the name of an agent harness")],
-            vec![t("(not shell) and press Enter — step 5 needs an agent")],
-            vec![t("behind this session.")],
+            vec![t("The picker is open. Type an agent harness")],
+            vec![t("(not shell) and press Enter — step 5 needs")],
+            vec![t("an agent behind this session.")],
         ]
     }
 }
@@ -382,10 +391,11 @@ fn step2_lines(degraded: bool) -> Vec<TutorialLine> {
 fn step3_lines() -> Vec<TutorialLine> {
     vec![
         vec![
-            t("Focus the new session — click it, or press "),
+            t("Focus it — click it, or press "),
             k("Enter", KeyAction::FocusView),
         ],
-        vec![t("then type a short message and press Enter to send it.")],
+        vec![t("then type a short message and")],
+        vec![t("press Enter to send it.")],
     ]
 }
 
@@ -393,13 +403,13 @@ fn step4_lines(profile: Profile) -> Vec<TutorialLine> {
     vec![
         vec![
             k(chord_label(KeyAction::SwitchFocus, profile), KeyAction::SwitchFocus),
-            t(" toggles focus between the list and the view."),
+            t(" toggles focus (list <-> view)."),
         ],
         vec![
             k(chord_label(KeyAction::NextSession, profile), KeyAction::NextSession),
             t(" / "),
             k(chord_label(KeyAction::PrevSession, profile), KeyAction::PrevSession),
-            t(" (or the arrow keys) move the selection."),
+            t(" (or arrows) move the selection."),
         ],
     ]
 }
@@ -408,18 +418,18 @@ fn step5_lines(profile: Profile, degraded: bool) -> Vec<TutorialLine> {
     let mut lines = vec![
         vec![
             k(chord_label(KeyAction::OpenProgram, profile), KeyAction::OpenProgram),
-            t(" opens the program board on this session."),
+            t(" opens the program board."),
         ],
-        vec![t("Pick the built-in \"Tasks\" template, then type")],
-        vec![t("\"- Test task\" under ## Todo.")],
+        vec![t("Pick the built-in \"Tasks\" template, then")],
+        vec![t("type \"- Test task\" under ## Todo.")],
     ];
     if degraded {
-        lines.push(vec![t("No agent harness is set up, so this step is")]);
-        lines.push(vec![t("editing-only — nothing to run yet.")]);
+        lines.push(vec![t("No agent harness set up, so this step")]);
+        lines.push(vec![t("is editing-only — nothing to run yet.")]);
     } else {
         lines.push(vec![
             k(chord_label(KeyAction::RunProgram, profile), KeyAction::RunProgram),
-            t(" runs it — the board moves the task to In Progress"),
+            t(" runs it, moves task to In Progress,"),
         ]);
         lines.push(vec![t("and hands it to a subagent.")]);
     }
@@ -434,7 +444,7 @@ fn step6_lines(profile: Profile, degraded: bool) -> Vec<TutorialLine> {
                     chord_label(KeyAction::SplitWindowBelow, profile),
                     KeyAction::SplitWindowBelow,
                 ),
-                t(" splits the pane below ("),
+                t(" splits below ("),
                 k(
                     chord_label(KeyAction::SplitWindowRight, profile),
                     KeyAction::SplitWindowRight,
@@ -446,15 +456,16 @@ fn step6_lines(profile: Profile, degraded: bool) -> Vec<TutorialLine> {
     }
     vec![
         vec![
-            t("While the run is in flight, "),
+            t("While running, "),
             k(
                 chord_label(KeyAction::SplitWindowBelow, profile),
                 KeyAction::SplitWindowBelow,
             ),
             t(" splits below."),
         ],
-        vec![t("Select the subagent — it appears nested under this")],
-        vec![t("session — in the other pane. Hop panes with C-x <arrow>.")],
+        vec![t("Select the subagent, nested under this")],
+        vec![t("session, in the other pane.")],
+        vec![t("Hop panes with C-x <arrow>.")],
     ]
 }
 
@@ -465,10 +476,10 @@ fn step7_lines(profile: Profile) -> Vec<TutorialLine> {
             t(" opens help — any key closes it."),
         ],
         vec![t(format!(
-            "{} quits construct — don't press it now!",
+            "{} quits — don't press it now!",
             chord_label(KeyAction::Quit, profile)
         ))],
-        vec![t("(C-g still backs out of anything half-typed, as in step 1.)")],
+        vec![t("(C-g still backs out, as in step 1.)")],
         vec![],
         vec![k("[got it]", KeyAction::TutorialSkipStep)],
     ]
@@ -481,9 +492,10 @@ fn step8_lines(profile: Profile) -> Vec<TutorialLine> {
                 chord_label(KeyAction::OpenDeleteConfirm, profile),
                 KeyAction::OpenDeleteConfirm,
             ),
-            t(" opens delete-confirm for this practice session."),
+            t(" opens delete for this session."),
         ],
-        vec![t("The subagent was already archived by the board's rule.")],
+        vec![t("The subagent was already archived by")],
+        vec![t("the board's own rule.")],
         vec![t("Confirm the delete to finish the tour.")],
     ]
 }
