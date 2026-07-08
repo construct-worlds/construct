@@ -5,8 +5,9 @@ use crate::app::{
     ListItem as AppListItem, MainWindowTree, Minibuffer, MinibufferChoiceAction,
     MinibufferChoiceHit, MinibufferIntent, PaneFocus, ScreenPoint, Selection,
     SessionTitleMenuAction, TextSelectionRange, ViewMode, WindowDividerHit, WindowPaneHit,
-    WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PROGRAM_COLLAB_CURSOR_TTL_MS,
-    PROGRAM_CONTENT_PADDING_X, PROGRAM_CONTENT_PADDING_Y, PROGRAM_REVEAL_MS,
+    WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS,
+    PROGRAM_COLLAB_CURSOR_TTL_MS, PROGRAM_CONTENT_PADDING_X, PROGRAM_CONTENT_PADDING_Y,
+    PROGRAM_REVEAL_MS,
 };
 use crate::keymap::{KeyAction, Profile};
 use crate::text_util::wrap_to_width;
@@ -9802,7 +9803,13 @@ fn render_program_collab_cursors(
         if !cursor.active || cursor.session_id != popup.program.session_id {
             continue;
         }
-        if now_ms.saturating_sub(cursor.updated_at_ms) > PROGRAM_COLLAB_CURSOR_TTL_MS {
+        let is_agent = cursor.kind == "agent";
+        let ttl_ms = if is_agent {
+            PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS
+        } else {
+            PROGRAM_COLLAB_CURSOR_TTL_MS
+        };
+        if now_ms.saturating_sub(cursor.updated_at_ms) > ttl_ms {
             continue;
         }
         if app.own_program_client_id.as_deref() == Some(cursor.client_id.as_str()) {
@@ -9824,7 +9831,6 @@ fn render_program_collab_cursors(
         // can't replay the reveal over text the agent never touched), and
         // even for a genuine new write it's already stale by the time
         // broadcast transit and the render tick let this frame paint.
-        let is_agent = cursor.kind == "agent";
         let mut agent_reveal_end_pos = None;
         if is_agent {
             if let Some(elapsed) = app.program_agent_reveal_elapsed(&cursor.client_id, now) {

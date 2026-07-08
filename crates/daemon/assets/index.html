@@ -5092,6 +5092,9 @@ function programCursorRectForOffset(rawOffset) {
   };
 }
 
+const PROGRAM_COLLAB_CURSOR_TTL_MS = 60000;
+const PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS = 2000;
+
 function programRenderCursors() {
   programCursorLayerEl.querySelectorAll(".program-remote-cursor").forEach((el) => el.remove());
   const id = state.program.mountedId;
@@ -5107,7 +5110,10 @@ function programRenderCursors() {
   for (const cursor of state.program.collaboratorById.values()) {
     if (!cursor.active || cursor.session_id !== id) continue;
     if (cursor.client_id && cursor.client_id === state.program.ownClientId) continue;
-    if (now - (cursor.updated_at_ms || 0) > 60000) continue;
+    const cursorTtlMs = cursor.kind === "agent"
+      ? PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS
+      : PROGRAM_COLLAB_CURSOR_TTL_MS;
+    if (now - (cursor.updated_at_ms || 0) > cursorTtlMs) continue;
     const rect = programCursorRectForOffset(cursor.cursor || 0);
     if (!rect) continue;
     const el = document.createElement("div");
