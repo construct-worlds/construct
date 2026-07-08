@@ -3454,8 +3454,16 @@ fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
     let label_style = Style::default().fg(app.theme.accent);
     let hover_style = label_style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     // The tour line is highlighted (accent + bold) as an invitation — not an
-    // auto-start — whenever the tour hasn't been completed yet (spec 0077).
-    let tour_not_done = !crate::tui_state::tutorial_done();
+    // auto-start — once the configure dialog has been dismissed at least
+    // once AND the tour hasn't been completed yet (spec 0077). The configure
+    // condition avoids competing for attention with the (modal, drawn on
+    // top) first-run configure popup — in practice `configure_dialog_seen`
+    // is already true by the time this card is ever visibly on screen
+    // (`open_configure_popup` marks it immediately on open, before the
+    // first render), so this mostly guards a state a live launch never
+    // reaches.
+    let tour_not_done =
+        crate::tui_state::configure_dialog_seen() && !crate::tui_state::tutorial_done();
     let tour_invite_style = label_style.add_modifier(Modifier::BOLD);
     let mouse = app.mouse_pos;
     let shortcut_rows = [

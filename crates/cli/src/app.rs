@@ -23678,6 +23678,10 @@ mod tests {
         let saved = std::env::var("CONSTRUCT_STATE_DIR").ok();
         std::env::set_var("CONSTRUCT_STATE_DIR", tmp.path());
         assert!(!crate::tui_state::tutorial_done(), "fresh state dir starts unmarked");
+        // The invite also requires the configure dialog to have been seen
+        // at least once — true by the time a real launch ever shows this
+        // card (see the comment on `tour_not_done` in ui.rs).
+        crate::tui_state::mark_configure_dialog_seen();
 
         let (mut app, _dir, server) = empty_app().await;
         let backend = ratatui::backend::TestBackend::new(120, 36);
