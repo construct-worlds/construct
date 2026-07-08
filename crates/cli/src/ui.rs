@@ -3612,12 +3612,26 @@ fn render_tutorial_card(f: &mut Frame, app: &mut App) {
     let Some(state) = app.tutorial.clone() else {
         return;
     };
+    let ctx = app.tutorial_card_ctx();
+    let body_lines = state.lines(ctx);
+    let checklist = state.checklist();
     let anchor = app.layout.view_area.unwrap_or(f.area());
     if anchor.width < 8 || anchor.height < 4 {
         return;
     }
     let width = 46u16.min(anchor.width.saturating_sub(1)).max(8);
-    let height = 12u16.min(anchor.height.saturating_sub(1)).max(6);
+    // Content-driven height: body + the gap row + (optional) 2 feedback
+    // rows + checklist + footer, plus the 2 border rows. Steps vary a lot
+    // (step 6's state-aware copy plus its 4-row checklist vs. the tiny
+    // completed card), so a fixed height either clips or wastes space.
+    let content_rows = body_lines.len() as u16
+        + 1
+        + if state.feedback.is_some() { 2 } else { 0 }
+        + checklist.len() as u16
+        + 1;
+    let height = (content_rows + 2)
+        .min(anchor.height.saturating_sub(1))
+        .max(6);
     // Top-right corner of the view pane, inset by one cell so the card
     // floats clear of the pane's own border/title row.
     let x = anchor.x + anchor.width.saturating_sub(width + 1);
@@ -3691,11 +3705,11 @@ fn render_tutorial_card(f: &mut Frame, app: &mut App) {
         );
     };
 
-    for line in state.lines() {
+    for line in &body_lines {
         if row >= bottom {
             break;
         }
-        render_segments(f, app, row, &line);
+        render_segments(f, app, row, line);
         row += 1;
     }
     row += 1;
@@ -3718,7 +3732,6 @@ fn render_tutorial_card(f: &mut Frame, app: &mut App) {
         }
     }
 
-    let checklist = state.checklist();
     if !checklist.is_empty() {
         for (label, done) in &checklist {
             if row >= bottom {

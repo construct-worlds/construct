@@ -87,6 +87,10 @@ fn chord_label(action: KeyAction, profile: Profile) -> &'static str {
         (SplitWindowBelow, Vim) => "C-w s",
         (SplitWindowRight, Emacs) => "C-x 3",
         (SplitWindowRight, Vim) => "C-w v",
+        (DeleteWindow, Emacs) => "C-x 0",
+        (DeleteWindow, Vim) => "C-w c",
+        (DeleteOtherWindows, Emacs) => "C-x 1",
+        (DeleteOtherWindows, Vim) => "C-w o",
         (ToggleHelp, _) => "?",
         (Quit, _) => "C-x C-c",
         (OpenDeleteConfirm, Emacs) => "C-x k",
@@ -97,6 +101,25 @@ fn chord_label(action: KeyAction, profile: Profile) -> &'static str {
         (PrevSession, Vim) => "k",
         _ => "?",
     }
+}
+
+/// Facts about the live app the card's copy adapts to but the tour state
+/// doesn't own — computed fresh each render (and in tests) rather than
+/// cached on [`TutorialState`], so the card can never show stale context.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TutorialCardCtx {
+    /// At most one selectable session in the list. Step 4's
+    /// selection exercise has nothing to visibly move to, so the card says
+    /// so honestly instead of looking broken.
+    pub single_session: bool,
+    /// The step-6 subagent has been observed *and* is still visible in the
+    /// session list (not yet archived by the board's rule). Drives step 6's
+    /// waiting-line → select-instruction swap.
+    pub subagent_listed: bool,
+    /// Keyboard focus is on the session list. Step 7's bare-`?` instruction
+    /// only works from there; with focus in the view pane / program editor
+    /// the card shows an explicit "focus first" hint instead.
+    pub list_focused: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +155,11 @@ pub struct TutorialState {
     // Step 6 sub-checks.
     pub split_done: bool,
     pub task_done: bool,
+    /// Step 6's wrap-up: the user collapsed the split back to one pane,
+    /// via either `DeleteWindow` (close this pane) or `DeleteOtherWindows`
+    /// (keep only this one) — both end in a single-pane layout, so either
+    /// chord counts.
+    pub collapse_done: bool,
     /// Last time any sub-check advanced, driving the step 5/6 stall hint.
     pub last_progress_at: Instant,
     pub stalled: bool,
@@ -165,6 +193,7 @@ impl TutorialState {
             run_started: false,
             split_done: false,
             task_done: false,
+            collapse_done: false,
             last_progress_at: Instant::now(),
             stalled: false,
         }
@@ -220,10 +249,13 @@ impl TutorialState {
                 }
             }
             6 => {
+                // Both modes end on the collapse wrap-up (close the split
+                // with `C-x 0` / `C-x 1`); non-degraded additionally waits
+                // for the delegated task to land in ## Done first.
                 let ready = if self.degraded {
-                    self.split_done
+                    self.split_done && self.collapse_done
                 } else {
-                    self.task_done
+                    self.task_done && self.collapse_done
                 };
                 if ready {
                     self.advance(7);
@@ -231,6 +263,40 @@ impl TutorialState {
             }
             _ => {}
         }
+    }
+
+    /// Footer `[prev step]`: purely navigational. Decrements the step and
+    /// re-arms the target step's transient progress flags (checklist
+    /// booleans, the step-1 phase, feedback) so the step can be
+    /// demonstrated again. Never undoes real-world effects — sessions,
+    /// program contents, and remembered facts (the practice session, an
+    /// already-spawned subagent) stay as they are, so a re-entered step
+    /// whose real-world condition already holds simply completes again on
+    /// the next observation, or can be stepped past with `[next step]`.
+    pub fn step_back(&mut self) {
+        if self.completed || self.step <= 1 {
+            return;
+        }
+        let prev = self.step - 1;
+        match prev {
+            4 => {
+                self.focus_switched = false;
+                self.selection_moved = false;
+            }
+            5 => {
+                self.program_opened = false;
+                self.template_applied = false;
+                self.task_line_present = false;
+                self.run_started = false;
+            }
+            6 => {
+                self.split_done = false;
+                self.task_done = false;
+                self.collapse_done = false;
+            }
+            _ => {}
+        }
+        self.advance(prev);
     }
 
     pub fn tick(&mut self, now: Instant) {
@@ -256,8 +322,9 @@ impl TutorialState {
     /// Body content for the card. Step 1's key labels carry
     /// [`KeyAction::TutorialNudge`] instead of the real action — clicking
     /// them nudges rather than dispatches, since that step teaches real
-    /// keystrokes.
-    pub fn lines(&self) -> Vec<TutorialLine> {
+    /// keystrokes. `ctx` carries live-app facts (focus, list contents) the
+    /// copy adapts to; see [`TutorialCardCtx`].
+    pub fn lines(&self, ctx: TutorialCardCtx) -> Vec<TutorialLine> {
         if self.completed {
             return vec![
                 vec![t("Tour complete! Nice work covering the core")],
@@ -270,10 +337,10 @@ impl TutorialState {
             1 => step1_lines(self.step1_phase, self.profile),
             2 => step2_lines(self.degraded),
             3 => step3_lines(),
-            4 => step4_lines(self.profile),
+            4 => step4_lines(self.profile, ctx.single_session),
             5 => step5_lines(self.profile, self.degraded),
-            6 => step6_lines(self.profile, self.degraded),
-            7 => step7_lines(self.profile),
+            6 => step6_lines(self, ctx),
+            7 => step7_lines(self.profile, ctx.list_focused),
             8 => step8_lines(self.profile),
             _ => Vec::new(),
         }
@@ -298,8 +365,13 @@ impl TutorialState {
                 items
             }
             6 => {
+                // Ordered as the user experiences the step: split → hop /
+                // watch → the task lands in Done → collapse the split.
                 if self.degraded {
-                    vec![("split the pane".to_string(), self.split_done)]
+                    vec![
+                        ("split the pane".to_string(), self.split_done),
+                        ("close the split".to_string(), self.collapse_done),
+                    ]
                 } else {
                     vec![
                         ("split the pane".to_string(), self.split_done),
@@ -308,6 +380,7 @@ impl TutorialState {
                             self.subagent_session_id.is_some(),
                         ),
                         ("task moves to Done".to_string(), self.task_done),
+                        ("close the split".to_string(), self.collapse_done),
                     ]
                 }
             }
@@ -317,14 +390,20 @@ impl TutorialState {
 
     pub fn footer(&self) -> TutorialLine {
         if self.completed {
-            vec![k("[close]", KeyAction::TutorialEndTour)]
-        } else {
-            vec![
-                k("[skip step]", KeyAction::TutorialSkipStep),
-                t("  "),
-                k("[end tour]", KeyAction::TutorialEndTour),
-            ]
+            return vec![k("[close]", KeyAction::TutorialEndTour)];
         }
+        // `[prev step]  [next step]  [end tour]` = 36 cols incl. the two
+        // 2-space gaps — fits the card's 44-col inner width. `[prev step]`
+        // is hidden on step 1 (nothing to go back to).
+        let mut segs = Vec::with_capacity(5);
+        if self.step > 1 {
+            segs.push(k("[prev step]", KeyAction::TutorialPrevStep));
+            segs.push(t("  "));
+        }
+        segs.push(k("[next step]", KeyAction::TutorialNextStep));
+        segs.push(t("  "));
+        segs.push(k("[end tour]", KeyAction::TutorialEndTour));
+        segs
     }
 }
 
@@ -399,19 +478,34 @@ fn step3_lines() -> Vec<TutorialLine> {
     ]
 }
 
-fn step4_lines(profile: Profile) -> Vec<TutorialLine> {
-    vec![
+// Ordered on purpose: after step 3 the keyboard focus is in the view pane
+// (the user just typed into the practice session), where a bare `C-n` is
+// forwarded straight into the child's PTY and never resolves to
+// `NextSession`. The tour never steals keys from the PTY, so the card
+// teaches the working order instead: focus the list first, then move.
+fn step4_lines(profile: Profile, single_session: bool) -> Vec<TutorialLine> {
+    let mut lines = vec![
         vec![
+            t("1. "),
             k(chord_label(KeyAction::SwitchFocus, profile), KeyAction::SwitchFocus),
-            t(" toggles focus (list <-> view)."),
+            t(" — jump to the list."),
         ],
         vec![
+            t("2. "),
             k(chord_label(KeyAction::NextSession, profile), KeyAction::NextSession),
             t(" / "),
             k(chord_label(KeyAction::PrevSession, profile), KeyAction::PrevSession),
-            t(" (or arrows) move the selection."),
+            t(" — move the selection."),
         ],
-    ]
+    ];
+    if single_session {
+        // Honest note: the move still counts (the sub-check ticks on the
+        // action firing), but with a single session nothing visibly moves.
+        lines.push(vec![]);
+        lines.push(vec![t("(one session now, so it stays put —")]);
+        lines.push(vec![t("matters once you have a fleet)")]);
+    }
+    lines
 }
 
 fn step5_lines(profile: Profile, degraded: bool) -> Vec<TutorialLine> {
@@ -436,53 +530,121 @@ fn step5_lines(profile: Profile, degraded: bool) -> Vec<TutorialLine> {
     lines
 }
 
-fn step6_lines(profile: Profile, degraded: bool) -> Vec<TutorialLine> {
-    if degraded {
-        return vec![
-            vec![
-                k(
-                    chord_label(KeyAction::SplitWindowBelow, profile),
-                    KeyAction::SplitWindowBelow,
-                ),
-                t(" splits below ("),
-                k(
-                    chord_label(KeyAction::SplitWindowRight, profile),
-                    KeyAction::SplitWindowRight,
-                ),
-                t(" splits right)."),
-            ],
-            vec![t("Hop panes with C-x <arrow>.")],
-        ];
-    }
+/// The either-or split line both modes open with: `C-x 2` and `C-x 3` are
+/// equal choices, both clickable, and the split sub-check ticks on either
+/// action firing.
+fn step6_split_line(profile: Profile) -> TutorialLine {
     vec![
-        vec![
-            t("While running, "),
-            k(
-                chord_label(KeyAction::SplitWindowBelow, profile),
-                KeyAction::SplitWindowBelow,
-            ),
-            t(" splits below."),
-        ],
-        vec![t("Select the subagent, nested under this")],
-        vec![t("session, in the other pane.")],
-        vec![t("Hop panes with C-x <arrow>.")],
+        t("Split: "),
+        k(
+            chord_label(KeyAction::SplitWindowBelow, profile),
+            KeyAction::SplitWindowBelow,
+        ),
+        t(" (below) or "),
+        k(
+            chord_label(KeyAction::SplitWindowRight, profile),
+            KeyAction::SplitWindowRight,
+        ),
+        t(" (right)."),
     ]
 }
 
-fn step7_lines(profile: Profile) -> Vec<TutorialLine> {
-    vec![
-        vec![
-            k(chord_label(KeyAction::ToggleHelp, profile), KeyAction::ToggleHelp),
-            t(" opens help — any key closes it."),
-        ],
-        vec![t(format!(
-            "{} quits — don't press it now!",
-            chord_label(KeyAction::Quit, profile)
-        ))],
-        vec![t("(C-g still backs out, as in step 1.)")],
+/// Step 6's card separates what the USER does (split now, close the split
+/// at the end) from what the AGENT is doing, and adapts its middle lines to
+/// the live run state: a subagent can take a while to spawn (the card says
+/// so instead of pointing at a session that doesn't exist yet), and on a
+/// fast model the whole run may already have finished — possibly with the
+/// subagent archived by the board's rule — before the user even splits (the
+/// card acknowledges that instead of pointing at a vanished session).
+fn step6_lines(state: &TutorialState, ctx: TutorialCardCtx) -> Vec<TutorialLine> {
+    let profile = state.profile;
+    if state.degraded {
+        return vec![
+            step6_split_line(profile),
+            vec![t("Hop panes with C-x <arrow>, then close")],
+            vec![
+                t("the split: "),
+                k(
+                    chord_label(KeyAction::DeleteWindow, profile),
+                    KeyAction::DeleteWindow,
+                ),
+                t(" closes this pane,"),
+            ],
+            vec![
+                k(
+                    chord_label(KeyAction::DeleteOtherWindows, profile),
+                    KeyAction::DeleteOtherWindows,
+                ),
+                t(" keeps only this one."),
+            ],
+        ];
+    }
+    let mut lines = vec![
+        step6_split_line(profile),
+        vec![t("Hop panes with C-x <arrow>.")],
         vec![],
-        vec![k("[got it]", KeyAction::TutorialSkipStep)],
-    ]
+    ];
+    // `run_finished` covers both fast-model inverses: the task already sits
+    // under ## Done, and/or the spawned subagent has already been archived
+    // by the board's rule (observed once, no longer listed).
+    let run_finished = state.task_done
+        || (state.subagent_session_id.is_some() && !ctx.subagent_listed);
+    if run_finished {
+        lines.push(vec![t("The task is Done! Close the split:")]);
+        lines.push(vec![
+            k(
+                chord_label(KeyAction::DeleteWindow, profile),
+                KeyAction::DeleteWindow,
+            ),
+            t(" closes this pane; "),
+            k(
+                chord_label(KeyAction::DeleteOtherWindows, profile),
+                KeyAction::DeleteOtherWindows,
+            ),
+            t(" keeps"),
+        ]);
+        lines.push(vec![t("only this pane open.")]);
+    } else if ctx.subagent_listed {
+        lines.push(vec![t("Subagent's up! Select it in the other")]);
+        lines.push(vec![t("pane — it's nested under this session.")]);
+    } else {
+        lines.push(vec![t("⧗ the agent is spawning a subagent —")]);
+        lines.push(vec![t("can take a minute depending on model.")]);
+    }
+    lines
+}
+
+// Ordered like step 4, and for the same reason: a bare `?` only resolves
+// to `ToggleHelp` from list focus — with focus in the session terminal or
+// the program editor it is (correctly) just typed into that surface. The
+// tour never steals the key; the card teaches the order and, while focus
+// is elsewhere, says so explicitly. Clicking the `?` label works from any
+// focus (it dispatches the action directly).
+fn step7_lines(profile: Profile, list_focused: bool) -> Vec<TutorialLine> {
+    let mut lines = vec![
+        vec![
+            t("1. "),
+            k(chord_label(KeyAction::SwitchFocus, profile), KeyAction::SwitchFocus),
+            t(" — hop to the list, then"),
+        ],
+        vec![
+            t("2. "),
+            k(chord_label(KeyAction::ToggleHelp, profile), KeyAction::ToggleHelp),
+            t(" — open help (any key closes)."),
+        ],
+    ];
+    if !list_focused {
+        lines.push(vec![t("(focus is in the view now, so ? would")]);
+        lines.push(vec![t("just be typed there — C-x o first)")]);
+    }
+    lines.push(vec![t(format!(
+        "{} quits — don't press it now!",
+        chord_label(KeyAction::Quit, profile)
+    ))]);
+    lines.push(vec![t("(C-g still backs out, as in step 1.)")]);
+    lines.push(vec![]);
+    lines.push(vec![k("[got it]", KeyAction::TutorialNextStep)]);
+    lines
 }
 
 fn step8_lines(profile: Profile) -> Vec<TutorialLine> {
@@ -550,7 +712,9 @@ impl App {
         self.tutorial = Some(TutorialState::resume(step, degraded, self.profile));
     }
 
-    pub fn tutorial_skip_step(&mut self) {
+    /// Footer `[next step]` (and step 7's `[got it]`): advance without
+    /// completing the current step's condition.
+    pub fn tutorial_next_step(&mut self) {
         let Some(t) = self.tutorial.as_mut() else {
             return;
         };
@@ -565,6 +729,36 @@ impl App {
         }
         let next = t.step + 1;
         t.advance(next);
+    }
+
+    /// Footer `[prev step]`: see [`TutorialState::step_back`]. Hidden on
+    /// step 1 and on the completed card; a stray dispatch there is a no-op.
+    pub fn tutorial_prev_step(&mut self) {
+        if let Some(t) = self.tutorial.as_mut() {
+            t.step_back();
+        }
+    }
+
+    /// Live-app facts the card copy adapts to; computed at render time (and
+    /// directly in tests) so it can never go stale. See [`TutorialCardCtx`].
+    pub fn tutorial_card_ctx(&self) -> TutorialCardCtx {
+        let selectable = self
+            .sessions
+            .iter()
+            .filter(|s| {
+                s.kind != agentd_protocol::SessionKind::Orchestrator && !s.archived
+            })
+            .count();
+        let subagent_listed = self
+            .tutorial
+            .as_ref()
+            .and_then(|t| t.subagent_session_id.as_deref())
+            .is_some_and(|id| self.sessions.iter().any(|s| s.id == id && !s.archived));
+        TutorialCardCtx {
+            single_session: selectable <= 1,
+            subagent_listed,
+            list_focused: self.focus == PaneFocus::List,
+        }
     }
 
     /// Closes the tour. Writes the done marker only when invoked from the
@@ -611,7 +805,8 @@ impl App {
                     } else if !matches!(
                         action,
                         KeyAction::TutorialNudge
-                            | KeyAction::TutorialSkipStep
+                            | KeyAction::TutorialNextStep
+                            | KeyAction::TutorialPrevStep
                             | KeyAction::TutorialEndTour
                     ) {
                         let label = chord_label(KeyAction::OpenNewSession, t.profile);
@@ -643,15 +838,23 @@ impl App {
                 }
                 _ => {}
             },
-            6 => {
-                if matches!(
-                    action,
-                    KeyAction::SplitWindowBelow | KeyAction::SplitWindowRight
-                ) {
+            6 => match action {
+                // Either split direction counts — the card offers the two
+                // chords as an explicit either-or choice.
+                KeyAction::SplitWindowBelow | KeyAction::SplitWindowRight => {
                     t.split_done = true;
                     t.touch_progress();
                 }
-            }
+                // The wrap-up: either way of collapsing back to one pane
+                // counts (close this pane / keep only this one). Ticks on
+                // the action firing, layout-independent, so it can't wedge
+                // even if the user never actually split.
+                KeyAction::DeleteWindow | KeyAction::DeleteOtherWindows => {
+                    t.collapse_done = true;
+                    t.touch_progress();
+                }
+                _ => {}
+            },
             7 => {
                 if action == KeyAction::ToggleHelp {
                     t.advance(8);
@@ -767,7 +970,7 @@ impl App {
                 } else {
                     t.feedback = Some(
                         "that created a shell session — pick an agent harness so step 5 \
-                         can run for real ([skip step] to continue anyway)"
+                         can run for real ([next step] to continue anyway)"
                             .to_string(),
                     );
                 }
@@ -948,5 +1151,293 @@ mod tests {
             "C-w s"
         );
         assert_eq!(chord_label(KeyAction::OpenDeleteConfirm, Profile::Vim), "dd");
+        assert_eq!(chord_label(KeyAction::DeleteWindow, Profile::Vim), "C-w c");
+        assert_eq!(
+            chord_label(KeyAction::DeleteOtherWindows, Profile::Vim),
+            "C-w o"
+        );
+    }
+
+    fn footer_actions(state: &TutorialState) -> Vec<KeyAction> {
+        state
+            .footer()
+            .iter()
+            .filter_map(|(_, action)| *action)
+            .collect()
+    }
+
+    #[test]
+    fn footer_hides_prev_on_step1_and_orders_prev_next_end_after() {
+        let mut state = TutorialState::start(false, Profile::Emacs);
+        assert_eq!(
+            footer_actions(&state),
+            vec![KeyAction::TutorialNextStep, KeyAction::TutorialEndTour],
+            "step 1 has nothing to go back to"
+        );
+        let labels: Vec<String> = state
+            .footer()
+            .iter()
+            .filter(|(_, a)| a.is_some())
+            .map(|(s, _)| s.clone())
+            .collect();
+        assert_eq!(labels, vec!["[next step]", "[end tour]"]);
+
+        state.step = 2;
+        assert_eq!(
+            footer_actions(&state),
+            vec![
+                KeyAction::TutorialPrevStep,
+                KeyAction::TutorialNextStep,
+                KeyAction::TutorialEndTour
+            ]
+        );
+        // `[prev step]  [next step]  [end tour]` must fit the 44-col card.
+        let width: usize = state.footer().iter().map(|(s, _)| s.chars().count()).sum();
+        assert!(width <= 44, "footer overflows the card: {width} cols");
+
+        state.completed = true;
+        assert_eq!(
+            footer_actions(&state),
+            vec![KeyAction::TutorialEndTour],
+            "the completed card keeps its single [close]"
+        );
+    }
+
+    #[test]
+    fn step_back_rearms_transient_flags_but_keeps_remembered_facts() {
+        let mut state = TutorialState::start(false, Profile::Emacs);
+        state.step = 5;
+        state.practice_session_id = Some("practice".into());
+        state.focus_switched = true;
+        state.selection_moved = true;
+        state.feedback = Some("leftover".into());
+
+        state.step_back();
+        assert_eq!(state.step, 4);
+        assert!(!state.focus_switched, "step 4's sub-checks are re-armed");
+        assert!(!state.selection_moved);
+        assert!(state.feedback.is_none());
+        assert_eq!(
+            state.practice_session_id.as_deref(),
+            Some("practice"),
+            "remembered real-world facts are never reset"
+        );
+
+        // Prev from 7 re-arms all of step 6.
+        let mut state = TutorialState::start(false, Profile::Emacs);
+        state.step = 7;
+        state.split_done = true;
+        state.task_done = true;
+        state.collapse_done = true;
+        state.subagent_session_id = Some("sub".into());
+        state.step_back();
+        assert_eq!(state.step, 6);
+        assert!(!state.split_done && !state.task_done && !state.collapse_done);
+        assert_eq!(
+            state.subagent_session_id.as_deref(),
+            Some("sub"),
+            "the observed subagent stays acknowledged"
+        );
+
+        // No-ops: step 1 and the completed card.
+        let mut state = TutorialState::start(false, Profile::Emacs);
+        state.step_back();
+        assert_eq!(state.step, 1);
+        let mut state = TutorialState::start(false, Profile::Emacs);
+        state.step = 3;
+        state.completed = true;
+        state.step_back();
+        assert_eq!(state.step, 3);
+    }
+
+    fn joined_text(lines: &[TutorialLine]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|(s, _)| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn step4_note_shows_only_with_a_single_session() {
+        let mut state = TutorialState::start(false, Profile::Emacs);
+        state.step = 4;
+        let single = joined_text(&state.lines(TutorialCardCtx {
+            single_session: true,
+            ..Default::default()
+        }));
+        assert!(
+            single.contains("one session now, so it stays put"),
+            "single-session honesty note missing:\n{single}"
+        );
+        // Ordered: the focus hop is taught before the selection move.
+        let jump = single.find("jump to the list").expect("step order line 1");
+        let sel = single.find("move the selection").expect("step order line 2");
+        assert!(jump < sel, "C-x o must be taught before C-n/C-p");
+
+        let multi = joined_text(&state.lines(TutorialCardCtx::default()));
+        assert!(
+            !multi.contains("stays put"),
+            "note must disappear once a second session exists:\n{multi}"
+        );
+    }
+
+    #[test]
+    fn step6_lines_adapt_to_live_run_state() {
+        let mut state = TutorialState::start(false, Profile::Emacs);
+        state.step = 6;
+
+        // Split offered as an explicit either-or choice, both clickable.
+        let waiting_lines = state.lines(TutorialCardCtx::default());
+        let clickable: Vec<KeyAction> = waiting_lines
+            .iter()
+            .flatten()
+            .filter_map(|(_, a)| *a)
+            .collect();
+        assert!(clickable.contains(&KeyAction::SplitWindowBelow));
+        assert!(clickable.contains(&KeyAction::SplitWindowRight));
+
+        // No subagent yet: the card says the agent is still spawning it.
+        let waiting = joined_text(&waiting_lines);
+        assert!(
+            waiting.contains("spawning a subagent"),
+            "waiting copy missing:\n{waiting}"
+        );
+
+        // Subagent visible in the list: the card points at it.
+        state.subagent_session_id = Some("sub".into());
+        let listed = joined_text(&state.lines(TutorialCardCtx {
+            subagent_listed: true,
+            ..Default::default()
+        }));
+        assert!(
+            listed.contains("Subagent's up!"),
+            "select copy missing:\n{listed}"
+        );
+
+        // Subagent observed but already archived (fast model): acknowledge
+        // the finished run instead of pointing at a vanished session, and
+        // teach the collapse pair.
+        let archived_lines = state.lines(TutorialCardCtx::default());
+        let archived = joined_text(&archived_lines);
+        assert!(
+            archived.contains("The task is Done!"),
+            "finished copy missing:\n{archived}"
+        );
+        let collapse: Vec<KeyAction> = archived_lines
+            .iter()
+            .flatten()
+            .filter_map(|(_, a)| *a)
+            .collect();
+        assert!(collapse.contains(&KeyAction::DeleteWindow));
+        assert!(collapse.contains(&KeyAction::DeleteOtherWindows));
+
+        // task_done alone (subagent still listed) also reads as finished.
+        state.task_done = true;
+        let done = joined_text(&state.lines(TutorialCardCtx {
+            subagent_listed: true,
+            ..Default::default()
+        }));
+        assert!(done.contains("The task is Done!"));
+    }
+
+    #[test]
+    fn step6_completion_requires_collapse_in_both_modes() {
+        let mut degraded = TutorialState::start(true, Profile::Emacs);
+        degraded.step = 6;
+        degraded.split_done = true;
+        degraded.recompute_completion();
+        assert_eq!(degraded.step, 6, "split alone no longer completes step 6");
+        degraded.collapse_done = true;
+        degraded.recompute_completion();
+        assert_eq!(degraded.step, 7);
+
+        let mut normal = TutorialState::start(false, Profile::Emacs);
+        normal.step = 6;
+        normal.task_done = true;
+        normal.recompute_completion();
+        assert_eq!(normal.step, 6, "Done alone no longer completes step 6");
+        normal.collapse_done = true;
+        normal.recompute_completion();
+        assert_eq!(normal.step, 7);
+    }
+
+    #[test]
+    fn step7_shows_focus_hint_only_when_focus_is_off_the_list() {
+        let mut state = TutorialState::start(false, Profile::Emacs);
+        state.step = 7;
+        let off_list = joined_text(&state.lines(TutorialCardCtx::default()));
+        assert!(
+            off_list.contains("focus is in the view now"),
+            "focus hint missing while the view holds focus:\n{off_list}"
+        );
+        let on_list = joined_text(&state.lines(TutorialCardCtx {
+            list_focused: true,
+            ..Default::default()
+        }));
+        assert!(
+            !on_list.contains("focus is in the view now"),
+            "hint must disappear once the list has focus:\n{on_list}"
+        );
+        // The ordered copy teaches the hop before the ? key.
+        let hop = on_list.find("hop to the list").expect("order line 1");
+        let help = on_list.find("open help").expect("order line 2");
+        assert!(hop < help);
+    }
+
+    // Card body lines are authored to fit the 44-col inner width without
+    // render-time wrapping (see the comment above `step1_lines`). Sweep
+    // every step in every mode/profile/state combination so a future copy
+    // edit can't silently overflow.
+    #[test]
+    fn all_card_lines_fit_the_44_col_inner_width() {
+        use unicode_width::UnicodeWidthStr;
+        let ctxs = [
+            TutorialCardCtx::default(),
+            TutorialCardCtx {
+                single_session: true,
+                subagent_listed: true,
+                list_focused: true,
+            },
+        ];
+        for degraded in [false, true] {
+            for profile in [Profile::Emacs, Profile::Vim] {
+                for step in 1..=STEP_COUNT {
+                    for phase in [
+                        Step1Phase::AwaitCtrlX,
+                        Step1Phase::AwaitCtrlG,
+                        Step1Phase::AwaitNewSession,
+                    ] {
+                        for sub_seen in [false, true] {
+                            for task_done in [false, true] {
+                                for ctx in ctxs {
+                                    let mut state = TutorialState::start(degraded, profile);
+                                    state.step = step;
+                                    state.step1_phase = phase;
+                                    state.task_done = task_done;
+                                    state.subagent_session_id =
+                                        sub_seen.then(|| "sub".to_string());
+                                    for line in state.lines(ctx) {
+                                        let text: String =
+                                            line.iter().map(|(s, _)| s.as_str()).collect();
+                                        assert!(
+                                            UnicodeWidthStr::width(text.as_str()) <= 44,
+                                            "step {step} (degraded={degraded}, \
+                                             {profile:?}) line overflows 44 cols: \
+                                             {text:?}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -2625,10 +2625,13 @@ pub struct LayoutSnapshot {
     /// Bounds of the floating tutorial coach-mark card rendered this frame
     /// (`render_tutorial_card`), or `None` when the tour isn't active. The
     /// card is deliberately non-modal — it never sets `modal_area`, whose
-    /// outside-click-dismisses semantics don't apply here — but it still
-    /// must claim the mouse over its own footprint: clicks inside must not
-    /// forward into the session pane it floats over (spec-gap fix, #735)
-    /// and must not fall through to that pane's click handling either.
+    /// outside-click-dismisses semantics don't apply here — but while the
+    /// tour is active the card (painted last, on top, opaque) owns every
+    /// button event inside this rect regardless of what's underneath: not
+    /// the pane's mouse-grabbing child, not the program editor's cursor
+    /// placement, not pane focus/selection (#735). Scroll events fall
+    /// through (the card has nothing to scroll), in-flight drags keep
+    /// their owner, and an open help modal's close-on-interaction wins.
     pub tutorial_card_area: Option<ratatui::layout::Rect>,
     /// Clickable harness names in the new-session picker prompt
     /// (`MinibufferIntent::NewSessionHarness`). Click → submit the
@@ -6671,7 +6674,39 @@ impl App {
         // content, so its action rows must take mouse priority over the child
         // (otherwise a mouse-grabbing child swallows every menu click and the
         // split/close/rename actions silently do nothing).
-        if self.handle_program_mouse(&ev).await {
+        // While the tour is active, its card — always painted topmost, opaque
+        // (`Clear`) — owns every button/motion event inside its rect, no
+        // matter what surface lies underneath: a mouse-grabbing PTY child, the
+        // program editor, anything. Same principle as the URL-click intercept
+        // below: if the card shows its controls as clickable (hover underline
+        // every frame), they must respond to clicks. Three carve-outs:
+        //  - in-flight construct drag gestures keep their owner — a drag that
+        //    started outside the card must not be hijacked crossing it (the
+        //    program's own resize drag included);
+        //  - scroll wheels fall through — the card has nothing to scroll, so
+        //    the surface underneath keeps scrolling as if the card weren't
+        //    there (program scroll, PTY scroll forward, pane scrollback);
+        //  - while the help modal is open, help's any-key/any-click close
+        //    semantics win over the card (step 7 opens help on purpose).
+        let card_owns_event = !self.help_visible
+            && !matches!(
+                ev.kind,
+                MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
+            )
+            && self.session_title_menu.is_none()
+            && self.resizing_list.is_none()
+            && self.resizing_pin_strip.is_none()
+            && self.resizing_orchestrator_panel.is_none()
+            && self.resizing_matrix_rain.is_none()
+            && self.resizing_main_window.is_none()
+            && self.resizing_program_popup.is_none()
+            && self.dragging_terminal_scrollbar.is_none()
+            && self.text_selection.is_none()
+            && self.mouse_over_tutorial_card(ev.column, ev.row);
+        if !card_owns_event && self.handle_program_mouse(&ev).await {
             return;
         }
         // URL clicks must be intercepted before the child-mouse-forward path so
@@ -6679,6 +6714,8 @@ impl App {
         // Code in full-screen mode) actually opens the browser.  The hover
         // underline is rendered every frame — if we show the link as clickable it
         // must respond to clicks regardless of whether the child owns the mouse.
+        // (URL hits are read from the rendered frame text, and the card paints
+        // opaquely over it, so a URL can never hijack a card-rect click.)
         if matches!(ev.kind, MouseEventKind::Up(MouseButton::Left)) {
             if let Some(hit) = self.url_hit_at(ev.column, ev.row) {
                 match open_url(&hit.url) {
@@ -6688,12 +6725,6 @@ impl App {
                 return;
             }
         }
-        // Same rationale as the URL-click intercept above: the tutorial card
-        // (spec 0077) is a non-modal overlay that floats on top of whatever
-        // pane is underneath it, painted opaque via `Clear`. Its hover
-        // underline responds every frame, so a click inside it must reach
-        // the card's own handling — never the pane's mouse-grabbing child —
-        // regardless of whose PTY happens to sit underneath.
         if self.session_title_menu.is_none()
             && self.resizing_list.is_none()
             && self.resizing_pin_strip.is_none()
@@ -6702,7 +6733,7 @@ impl App {
             && self.resizing_main_window.is_none()
             && self.dragging_terminal_scrollbar.is_none()
             && self.text_selection.is_none()
-            && !self.mouse_over_tutorial_card(ev.column, ev.row)
+            && !card_owns_event
             && self.forward_mouse_to_child(&ev)
         {
             return;
@@ -6723,6 +6754,13 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // A press inside the tour card must not start any construct
+                // gesture on the surfaces underneath (text selection,
+                // divider/scrollbar drags, pane focus) — the card is opaque
+                // and its zones dispatch on mouse-up via handle_left_click.
+                if card_owns_event {
+                    return;
+                }
                 if let Some(hit) = self
                     .layout
                     .main_window_areas
@@ -7076,6 +7114,33 @@ impl App {
         if self.handle_dynamic_ui_overlay_click(col, row).await {
             return;
         }
+        // Tour card clicks — checked BEFORE the modal branch below, because
+        // an open program sets `modal_area` and would otherwise claim the
+        // click for cursor placement even though the card paints on top of
+        // it. Deliberately NOT a reordering of the shortcut_hints loop
+        // further down: only zones inside the card rect gain this pre-modal
+        // priority; every other zone keeps its place in the pipeline (and
+        // stays unclickable through modals). While the help modal is open,
+        // help's close-on-interaction semantics win instead (the card
+        // never swallows a click meant to dismiss help).
+        if !self.help_visible && self.mouse_over_tutorial_card(col, row) {
+            let zone = self
+                .layout
+                .shortcut_hints
+                .iter()
+                // Last-pushed zone wins: the card renders last (topmost), so
+                // its zones shadow any coincident zone of a covered surface.
+                .rev()
+                .find(|hint| row == hint.y && col >= hint.x_start && col < hint.x_end)
+                .map(|hint| hint.action);
+            if let Some(action) = zone {
+                self.run_action(action).await;
+            }
+            // Zone hit or not, the click stops here: the card is painted
+            // opaque, so falling through to program-cursor placement / pane
+            // focus / selection on the surface underneath is always wrong.
+            return;
+        }
         if let Some(modal) = self.layout.modal_area {
             if self.program_popup.is_some() {
                 if contains(modal, col, row) {
@@ -7147,15 +7212,6 @@ impl App {
                 self.run_action(action).await;
                 return;
             }
-        }
-        // The tutorial card is painted opaque (`Clear`) over whatever pane is
-        // underneath it, so a click that lands inside its rect but misses
-        // every hint zone (card body, borders, title) must stop here rather
-        // than fall through to that pane's own click handling — otherwise a
-        // click "on" the card would focus/place-cursor-in/select the session
-        // behind it, which the user never sees.
-        if self.mouse_over_tutorial_card(col, row) {
-            return;
         }
         if let Some(mb_area) = self.layout.minibuffer_area {
             if contains(mb_area, col, row) {
@@ -8500,7 +8556,8 @@ impl App {
                 }
             }
             StartTutorial => self.tutorial_start(),
-            TutorialSkipStep => self.tutorial_skip_step(),
+            TutorialNextStep => self.tutorial_next_step(),
+            TutorialPrevStep => self.tutorial_prev_step(),
             TutorialEndTour => self.tutorial_end_tour(),
             TutorialNudge => self.tutorial_nudge(),
         }
@@ -23657,8 +23714,9 @@ mod tests {
         server.abort();
     }
 
-    // Regression for #735: hovering the tour card's [skip step] / [end tour]
-    // labels underlined them (hover is computed render-side from
+    // Regression for #735: hovering the tour card's footer labels (then
+    // "[skip step]" / "[end tour]", since renamed to "[next step]" /
+    // "[end tour]") underlined them (hover is computed render-side from
     // `app.mouse_pos`), but clicking did nothing once the practice session's
     // child grabbed the mouse (e.g. Claude Code enabling DECSET mouse
     // tracking). The sibling test above,
@@ -23687,7 +23745,7 @@ mod tests {
             "test setup must put the pane's child in a mouse-tracking mode"
         );
 
-        app.tutorial_start(); // step 1 — footer has [skip step] / [end tour].
+        app.tutorial_start(); // step 1 — footer has [next step] / [end tour].
 
         // Swap in a test PTY-input channel so we can assert the click never
         // leaked into the child as a forwarded mouse report.
@@ -23785,6 +23843,269 @@ mod tests {
              still forward as a normal PTY mouse report",
         );
         assert_eq!(job.session_id, "s1");
+        server.abort();
+    }
+
+    // Step 4 with exactly ONE session, driven through the REAL `on_key`
+    // path (the user report: "C-n is not effective"). Confirms both halves
+    // of the diagnosis:
+    //  (a) from view focus the PTY captures a bare C-n — it's forwarded to
+    //      the child and never resolves to `NextSession`, so the sub-check
+    //      cannot tick until the user hops to the list first (which is why
+    //      the card now teaches `C-x o` as step 1 of an ordered list);
+    //  (b) from list focus the action fires and the sub-check ticks even
+    //      though the selection has nowhere visible to move.
+    #[tokio::test]
+    async fn step4_single_session_c_n_ticks_from_list_focus_via_on_key() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.view = ViewMode::Terminal;
+        assert_eq!(app.sessions.len(), 1, "fixture: exactly one session");
+        app.tutorial_start();
+        app.tutorial.as_mut().unwrap().step = 4;
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+
+        // (a) View focus: the PTY owns bare C-n. It must be forwarded (the
+        // tour never steals keys from the child) and must NOT tick.
+        app.focus = PaneFocus::View;
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        let job = rx
+            .try_recv()
+            .expect("C-n from view focus goes to the child's PTY");
+        assert_eq!(job.session_id, "s1");
+        assert!(
+            !app.tutorial.as_ref().unwrap().selection_moved,
+            "a PTY-swallowed C-n must not tick the selection sub-check"
+        );
+
+        // (b) List focus: the action fires and the sub-check completes on
+        // the dispatch itself, even though there is only one session so
+        // nothing visibly moves.
+        app.focus = PaneFocus::List;
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert!(
+            app.tutorial.as_ref().unwrap().selection_moved,
+            "NextSession firing must tick even with a single session"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the list-focused C-n stays a construct action, not PTY input"
+        );
+
+        // The taught order completes the step: C-x o ticks the focus
+        // sub-check and step 4 advances.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.tutorial.as_ref().map(|t| t.step),
+            Some(5),
+            "focus hop + selection move must complete step 4"
+        );
+        server.abort();
+    }
+
+    // Item: the tour card must own clicks over the PROGRAM view exactly as
+    // it does over a mouse-grabbing PTY. An open program sets
+    // `layout.modal_area`, and `handle_program_mouse` used to consume the
+    // Down (cursor placement / focus) before the click pipeline ever saw
+    // the card's zones.
+    #[tokio::test]
+    async fn tour_card_click_over_program_dispatches_card_zone() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.program_popup = Some(program_popup_for_test("s1", "draft", 3));
+        app.tutorial_start();
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let card = app.layout.tutorial_card_area.expect("card rect");
+        assert!(
+            app.layout.modal_area.is_some(),
+            "fixture: the open program must be registered as the modal"
+        );
+
+        // A card BODY click (inside the card, on no zone) is consumed: the
+        // program's cursor must not move and its popup must stay open.
+        let body = (card.x + 1, card.y);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: body.0,
+            row: body.1,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: body.0,
+            row: body.1,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert!(app.tutorial.is_some(), "body click is not an action");
+        let popup = app.program_popup.as_ref().expect("program stays open");
+        assert_eq!(
+            popup.cursor, 3,
+            "a card-body click must not place the program cursor"
+        );
+
+        // A card ZONE click dispatches the card's action through the full
+        // on_mouse path even with the program modal underneath.
+        let hit = *app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::TutorialEndTour)
+            .expect("end tour hint");
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x_start,
+            row: hit.y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: hit.x_start,
+            row: hit.y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert!(
+            app.tutorial.is_none(),
+            "[end tour] must dispatch even with the program modal underneath"
+        );
+        assert!(
+            app.program_popup.is_some(),
+            "the card click must not disturb the program popup"
+        );
+        server.abort();
+    }
+
+    // Item: while the help modal is open (step 7 opens it on purpose), its
+    // close-on-interaction semantics win over the card — a click on the
+    // card rect must not dispatch a card action behind help's back.
+    #[tokio::test]
+    async fn help_modal_wins_over_tour_card_clicks() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.tutorial_start();
+        app.help_visible = true;
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let hit = *app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::TutorialEndTour)
+            .expect("end tour hint");
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x_start,
+            row: hit.y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: hit.x_start,
+            row: hit.y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert!(
+            app.tutorial.is_some(),
+            "the card must not swallow interactions meant for the help modal"
+        );
+
+        // And help still closes on any key while the tour is active.
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .await;
+        assert!(!app.help_visible, "any key must still close help");
+        assert!(app.tutorial.is_some(), "closing help leaves the tour alone");
+        server.abort();
+    }
+
+    // Step 6's sub-checks tick on either member of each taught pair:
+    // C-x 2 / C-x 3 for the split, C-x 0 / C-x 1 for the collapse.
+    #[tokio::test]
+    async fn step6_either_split_and_either_collapse_tick_subchecks() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.tutorial_start();
+        {
+            let t = app.tutorial.as_mut().unwrap();
+            t.step = 6;
+            t.degraded = true; // degraded gate = split + collapse only
+        }
+        app.run_action(KeyAction::SplitWindowRight).await;
+        assert!(
+            app.tutorial.as_ref().unwrap().split_done,
+            "C-x 3 must count for the split sub-check"
+        );
+        app.run_action(KeyAction::DeleteOtherWindows).await;
+        assert_eq!(
+            app.tutorial.as_ref().map(|t| t.step),
+            Some(7),
+            "C-x 1 must count for the collapse sub-check and complete step 6"
+        );
+
+        // The other member of each pair works too.
+        let (mut app2, _dir2, server2) = captured_app().await;
+        app2.tutorial_start();
+        {
+            let t = app2.tutorial.as_mut().unwrap();
+            t.step = 6;
+            t.degraded = true;
+        }
+        app2.run_action(KeyAction::SplitWindowBelow).await;
+        app2.run_action(KeyAction::DeleteWindow).await;
+        assert_eq!(app2.tutorial.as_ref().map(|t| t.step), Some(7));
+        server.abort();
+        server2.abort();
+    }
+
+    // Footer [prev step] through the real click pipeline: prev from step 2
+    // returns to a re-armed step 1, whose footer then hides [prev step].
+    #[tokio::test]
+    async fn prev_step_click_navigates_back_and_hides_on_step1() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.tutorial_start();
+        app.tutorial.as_mut().unwrap().step = 2;
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let hit = *app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::TutorialPrevStep)
+            .expect("[prev step] zone on step 2");
+        app.handle_left_click(hit.x_start, hit.y).await;
+        let t = app.tutorial.as_ref().expect("tour still active");
+        assert_eq!(t.step, 1, "prev navigates back one step");
+        assert_eq!(
+            t.step1_phase,
+            Step1Phase::AwaitCtrlX,
+            "step 1 is re-armed from its first phase"
+        );
+
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            !app.layout
+                .shortcut_hints
+                .iter()
+                .any(|h| h.action == KeyAction::TutorialPrevStep),
+            "step 1 must not offer [prev step]"
+        );
         server.abort();
     }
 

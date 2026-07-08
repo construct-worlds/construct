@@ -114,9 +114,15 @@ pub enum KeyAction {
     /// profiles (verified unbound elsewhere in both tables). A no-op while a
     /// tour is already active.
     StartTutorial,
-    /// Tutorial footer: skip the current step without completing its
-    /// condition. Click-only — the card is the only entry point.
-    TutorialSkipStep,
+    /// Tutorial footer: advance to the next step without completing the
+    /// current one's condition. Click-only — the card is the only entry
+    /// point.
+    TutorialNextStep,
+    /// Tutorial footer: go back one step. Purely navigational — re-arms the
+    /// previous step's transient progress flags so it can be demonstrated
+    /// again, but never undoes real-world effects (sessions, program
+    /// contents). Click-only; hidden on step 1.
+    TutorialPrevStep,
     /// Tutorial footer: close the tour immediately. Click-only. Writes the
     /// done marker only when invoked from the final step.
     TutorialEndTour,

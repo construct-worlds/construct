@@ -41,6 +41,27 @@ tour while one is already active is a no-op. Starting it when sessions
 already exist is allowed — the tour creates an additional practice session
 rather than requiring an empty fleet.
 
+The card's footer offers plain step navigation — go to the next step
+without completing the current one's condition, go back to the previous
+step, or end the tour — labeled as navigation ("next"/"prev"), not as
+skipping. Backward navigation is purely presentational: it re-arms the
+target step's transient progress checks so the step can be demonstrated
+again, but it never undoes real-world effects (sessions stay alive, program
+contents stay put, already-observed facts stay acknowledged). Steps must
+therefore tolerate being re-entered when their real-world condition already
+holds — the step either acknowledges the existing state or completes again
+on the next observation, and forward navigation is always available, so
+navigation can never wedge the tour. Backward navigation is hidden on the
+first step and on the completed card.
+
+Because the card floats over live surfaces (a session's terminal, the
+program board), it owns pointer clicks inside its own footprint: a click on
+one of its controls must dispatch that control no matter what is painted
+underneath, and a click on its body must not act on the covered surface.
+Scroll gestures pass through (the card has nothing to scroll), in-flight
+drag gestures keep their original owner, and an open help overlay's
+close-on-interaction semantics take precedence over the card.
+
 When no agent harness is configured, the tour degrades gracefully instead of
 stalling on a step it cannot complete: session creation and the first
 message fall back to a shell session, the program-board step becomes
