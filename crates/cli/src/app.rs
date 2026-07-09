@@ -24185,12 +24185,17 @@ mod tests {
         {
             let t = app.tutorial.as_mut().unwrap();
             t.step = 6;
-            t.degraded = true; // degraded gate = split + collapse only
+            t.degraded = true; // degraded gate = the three user actions
         }
         app.run_action(KeyAction::SplitWindowRight).await;
         assert!(
             app.tutorial.as_ref().unwrap().split_done,
             "C-x 3 must count for the split sub-check"
+        );
+        app.run_action(KeyAction::FocusWindowDown).await;
+        assert!(
+            app.tutorial.as_ref().unwrap().hop_done,
+            "C-x <arrow> must count for the hop sub-check"
         );
         app.run_action(KeyAction::DeleteOtherWindows).await;
         assert_eq!(
@@ -24208,10 +24213,209 @@ mod tests {
             t.degraded = true;
         }
         app2.run_action(KeyAction::SplitWindowBelow).await;
+        app2.run_action(KeyAction::FocusWindowUp).await;
         app2.run_action(KeyAction::DeleteWindow).await;
         assert_eq!(app2.tutorial.as_ref().map(|t| t.step), Some(7));
         server.abort();
         server2.abort();
+    }
+
+    // Regression for the step-6 user report: the agent's task-to-## Done
+    // move was never detected. That edit reaches the TUI ONLY through the
+    // daemon's program/state event (an open popup deliberately does not
+    // absorb daemon updates into a locally-edited buffer), so the event
+    // path must tick the gate even while the popup shows a stale buffer.
+    #[tokio::test]
+    async fn program_state_event_ticks_done_with_stale_popup_buffer() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.tutorial_start();
+        {
+            let t = app.tutorial.as_mut().unwrap();
+            t.step = 6;
+            t.practice_session_id = Some("s1".into());
+        }
+        // The user's popup still shows the task under Todo (stale view of
+        // the agent's edit).
+        app.program_popup = Some(program_popup_for_test(
+            "s1",
+            "# Rule\n\n## Todo\n\n- Test task\n\n## In Progress\n\n## Done\n",
+            0,
+        ));
+
+        app.on_notification(Notification {
+            jsonrpc: "2.0".into(),
+            method: agentd_protocol::ipc_notif::PROGRAM_STATE.into(),
+            params: Some(
+                serde_json::to_value(agentd_protocol::ProgramStateNotificationPayload {
+                    program: agentd_protocol::ProgramDocument {
+                        session_id: "s1".into(),
+                        markdown:
+                            "# Rule\n\n## Todo\n\n## In Progress\n\n## Done\n\n- Test task\n"
+                                .into(),
+                        version: 2,
+                        updated_at_ms: 0,
+                        template_id: Some("tasks".into()),
+                    },
+                    active_run: None,
+                    blocks: Vec::new(),
+                })
+                .unwrap(),
+            ),
+        })
+        .await;
+        assert!(
+            app.tutorial.as_ref().unwrap().task_done,
+            "the daemon program/state event must tick the Done gate even \
+             while the popup buffer is stale"
+        );
+        server.abort();
+    }
+
+    // The practice session is unknown after a tour resume or [next step]
+    // navigation past step 2 (`practice_session_id` is never persisted) —
+    // the old strict scoping then silently dropped every program event and
+    // subagent creation, which is how the step-6 detections died in the
+    // user's flow. Unknown-practice events for the program/session the
+    // user is actually working with must tick AND adopt.
+    #[tokio::test]
+    async fn step6_detections_adopt_practice_when_unknown() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.tutorial_start();
+        app.tutorial.as_mut().unwrap().step = 6;
+        assert!(app.tutorial.as_ref().unwrap().practice_session_id.is_none());
+
+        // A subagent spawning during step 6 (kind Subagent, parented to the
+        // session the agent runs in) is accepted and its parent adopted.
+        let mut sub = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        sub.id = "sub-1".into();
+        sub.parent_session_id = Some("s1".into());
+        app.on_notification(Notification {
+            jsonrpc: "2.0".into(),
+            method: agentd_protocol::ipc_notif::STATE.into(),
+            params: Some(
+                serde_json::to_value(StateNotificationPayload { session: sub }).unwrap(),
+            ),
+        })
+        .await;
+        let t = app.tutorial.as_ref().unwrap();
+        assert_eq!(
+            t.subagent_session_id.as_deref(),
+            Some("sub-1"),
+            "unknown-practice tours must still see the board's subagent"
+        );
+        assert_eq!(
+            t.practice_session_id.as_deref(),
+            Some("s1"),
+            "the subagent's parent is adopted as the practice session"
+        );
+
+        // Program events: unknown practice + program for the SELECTED
+        // session ticks and adopts too.
+        let (mut app2, _dir2, server2) = captured_app().await;
+        app2.tutorial_start();
+        app2.tutorial.as_mut().unwrap().step = 6;
+        app2.on_notification(Notification {
+            jsonrpc: "2.0".into(),
+            method: agentd_protocol::ipc_notif::PROGRAM_STATE.into(),
+            params: Some(
+                serde_json::to_value(agentd_protocol::ProgramStateNotificationPayload {
+                    program: agentd_protocol::ProgramDocument {
+                        session_id: "s1".into(), // selected in captured_app
+                        markdown: "## Todo\n\n## In Progress\n\n## Done\n\n- Test task\n"
+                            .into(),
+                        version: 1,
+                        updated_at_ms: 0,
+                        template_id: Some("tasks".into()),
+                    },
+                    active_run: None,
+                    blocks: Vec::new(),
+                })
+                .unwrap(),
+            ),
+        })
+        .await;
+        let t2 = app2.tutorial.as_ref().unwrap();
+        assert!(t2.task_done, "selected session's program event must tick");
+        assert_eq!(t2.practice_session_id.as_deref(), Some("s1"));
+
+        // Negative: a program for some unrelated session (not displayed,
+        // not selected) never ticks an unknown-practice tour.
+        let (mut app3, _dir3, server3) = captured_app().await;
+        app3.tutorial_start();
+        app3.tutorial.as_mut().unwrap().step = 6;
+        app3.on_notification(Notification {
+            jsonrpc: "2.0".into(),
+            method: agentd_protocol::ipc_notif::PROGRAM_STATE.into(),
+            params: Some(
+                serde_json::to_value(agentd_protocol::ProgramStateNotificationPayload {
+                    program: agentd_protocol::ProgramDocument {
+                        session_id: "unrelated".into(),
+                        markdown: "## Done\n\n- Test task\n".into(),
+                        version: 1,
+                        updated_at_ms: 0,
+                        template_id: None,
+                    },
+                    active_run: None,
+                    blocks: Vec::new(),
+                })
+                .unwrap(),
+            ),
+        })
+        .await;
+        let t3 = app3.tutorial.as_ref().unwrap();
+        assert!(!t3.task_done, "unrelated programs must not tick");
+        assert!(t3.practice_session_id.is_none());
+        server.abort();
+        server2.abort();
+        server3.abort();
+    }
+
+    // Known-practice subagent linkage through the real STATE notification:
+    // `construct_subagent_create` stamps kind Subagent + parent_session_id
+    // of the creating session; the observer matches that parentage.
+    #[tokio::test]
+    async fn subagent_state_notification_registers_for_known_practice() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.tutorial_start();
+        {
+            let t = app.tutorial.as_mut().unwrap();
+            t.step = 6;
+            t.practice_session_id = Some("s1".into());
+        }
+        let mut sub = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        sub.id = "sub-9".into();
+        sub.parent_session_id = Some("s1".into());
+        app.on_notification(Notification {
+            jsonrpc: "2.0".into(),
+            method: agentd_protocol::ipc_notif::STATE.into(),
+            params: Some(
+                serde_json::to_value(StateNotificationPayload { session: sub }).unwrap(),
+            ),
+        })
+        .await;
+        assert_eq!(
+            app.tutorial.as_ref().unwrap().subagent_session_id.as_deref(),
+            Some("sub-9")
+        );
+
+        // A child of some OTHER session is ignored when practice is known.
+        let mut other = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        other.id = "sub-other".into();
+        other.parent_session_id = Some("someone-else".into());
+        app.on_notification(Notification {
+            jsonrpc: "2.0".into(),
+            method: agentd_protocol::ipc_notif::STATE.into(),
+            params: Some(
+                serde_json::to_value(StateNotificationPayload { session: other }).unwrap(),
+            ),
+        })
+        .await;
+        assert_eq!(
+            app.tutorial.as_ref().unwrap().subagent_session_id.as_deref(),
+            Some("sub-9"),
+            "unrelated subagents must not overwrite the tour's"
+        );
+        server.abort();
     }
 
     // Regression for the step-5 user report: "apply the Tasks template" and

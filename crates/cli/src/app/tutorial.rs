@@ -152,8 +152,16 @@ pub struct TutorialState {
     pub template_applied: bool,
     pub task_line_present: bool,
     pub run_started: bool,
-    // Step 6 sub-checks.
+    // Step 6 sub-checks. Checklist rows are USER actions only (split, hop,
+    // close) — what the AGENT does (spawning the subagent, moving the task
+    // to Done) is reported by the card's status line and still gates
+    // completion via `task_done`, but never renders as a checkbox: a box
+    // the user can't tick by doing something themselves reads as broken.
     pub split_done: bool,
+    /// The user hopped between panes: any `FocusWindow*` action
+    /// (`C-x <arrow>` in both profiles, `C-w h/j/k/l` in vim), or a click
+    /// on the card's hop label (which dispatches the same action).
+    pub hop_done: bool,
     pub task_done: bool,
     /// Step 6's wrap-up: the user collapsed the split back to one pane,
     /// via either `DeleteWindow` (close this pane) or `DeleteOtherWindows`
@@ -192,6 +200,7 @@ impl TutorialState {
             task_line_present: false,
             run_started: false,
             split_done: false,
+            hop_done: false,
             task_done: false,
             collapse_done: false,
             last_progress_at: Instant::now(),
@@ -249,13 +258,15 @@ impl TutorialState {
                 }
             }
             6 => {
-                // Both modes end on the collapse wrap-up (close the split
-                // with `C-x 0` / `C-x 1`); non-degraded additionally waits
-                // for the delegated task to land in ## Done first.
+                // Both modes require the three USER actions (split, hop,
+                // close the split — the checklist rows); non-degraded
+                // additionally waits for the agent's part, the delegated
+                // task landing in ## Done (the status-line gate).
+                let user_done = self.split_done && self.hop_done && self.collapse_done;
                 let ready = if self.degraded {
-                    self.split_done && self.collapse_done
+                    user_done
                 } else {
-                    self.task_done && self.collapse_done
+                    user_done && self.task_done
                 };
                 if ready {
                     self.advance(7);
@@ -291,6 +302,7 @@ impl TutorialState {
             }
             6 => {
                 self.split_done = false;
+                self.hop_done = false;
                 self.task_done = false;
                 self.collapse_done = false;
             }
@@ -365,24 +377,16 @@ impl TutorialState {
                 items
             }
             6 => {
-                // Ordered as the user experiences the step: split → hop /
-                // watch → the task lands in Done → collapse the split.
-                if self.degraded {
-                    vec![
-                        ("split the pane".to_string(), self.split_done),
-                        ("close the split".to_string(), self.collapse_done),
-                    ]
-                } else {
-                    vec![
-                        ("split the pane".to_string(), self.split_done),
-                        (
-                            "subagent appears".to_string(),
-                            self.subagent_session_id.is_some(),
-                        ),
-                        ("task moves to Done".to_string(), self.task_done),
-                        ("close the split".to_string(), self.collapse_done),
-                    ]
-                }
+                // USER actions only, in the order the user performs them.
+                // The agent's side (subagent spawning, the task reaching
+                // ## Done) is narrated by the card's status line instead —
+                // a checkbox the user can't tick themselves reads as
+                // broken. Identical rows in both modes.
+                vec![
+                    ("split the pane".to_string(), self.split_done),
+                    ("hop panes".to_string(), self.hop_done),
+                    ("close the split".to_string(), self.collapse_done),
+                ]
             }
             _ => Vec::new(),
         }
@@ -558,10 +562,14 @@ fn step6_split_line(profile: Profile) -> TutorialLine {
 /// card acknowledges that instead of pointing at a vanished session).
 fn step6_lines(state: &TutorialState, ctx: TutorialCardCtx) -> Vec<TutorialLine> {
     let profile = state.profile;
+    // Clickable hop label: dispatches a real pane-hop (and ticks the hop
+    // sub-check) so a mouse-only user can complete the row. `C-x <arrow>`
+    // is bound in both profiles.
+    let hop = || k("C-x <arrow>", KeyAction::FocusWindowDown);
     if state.degraded {
         return vec![
             step6_split_line(profile),
-            vec![t("Hop panes with C-x <arrow>, then close")],
+            vec![t("Hop panes with "), hop(), t(", then close")],
             vec![
                 t("the split: "),
                 k(
@@ -581,7 +589,7 @@ fn step6_lines(state: &TutorialState, ctx: TutorialCardCtx) -> Vec<TutorialLine>
     }
     let mut lines = vec![
         step6_split_line(profile),
-        vec![t("Hop panes with C-x <arrow>.")],
+        vec![t("Hop panes with "), hop(), t(".")],
         vec![],
     ];
     // `run_finished` covers both fast-model inverses: the task already sits
@@ -858,6 +866,16 @@ impl App {
                     t.split_done = true;
                     t.touch_progress();
                 }
+                // Any direction of pane-hopping counts; the card's hop
+                // label is clickable and dispatches one of these, so a
+                // mouse-only user can tick it too.
+                KeyAction::FocusWindowUp
+                | KeyAction::FocusWindowDown
+                | KeyAction::FocusWindowLeft
+                | KeyAction::FocusWindowRight => {
+                    t.hop_done = true;
+                    t.touch_progress();
+                }
                 // The wrap-up: either way of collapsing back to one pane
                 // counts (close this pane / keep only this one). Ticks on
                 // the action firing, layout-independent, so it can't wedge
@@ -989,11 +1007,29 @@ impl App {
                 }
             }
             6 => {
-                if let Some(practice) = t.practice_session_id.clone() {
-                    if session.parent_session_id.as_deref() == Some(practice.as_str()) {
-                        t.subagent_session_id = Some(session.id.clone());
-                        t.touch_progress();
+                // `construct_subagent_create` (the MCP tool the practice
+                // agent uses) and the board's direct dispatch both stamp
+                // `parent_session_id` with the creating session and kind
+                // Subagent. Match on parentage when the practice session is
+                // known; when it ISN'T (tour resumed after a TUI restart,
+                // or the user navigated here with [next step] without doing
+                // step 2 — `practice_session_id` is never persisted), any
+                // subagent spawning during step 6 is almost surely the
+                // board's doing, so accept it and ADOPT its parent as the
+                // practice session — that repairs the rest of the tour's
+                // scoped observers (Done detection, step 8's delete gate).
+                let is_tour_subagent = match t.practice_session_id.as_deref() {
+                    Some(practice) => {
+                        session.parent_session_id.as_deref() == Some(practice)
                     }
+                    None => session.kind == agentd_protocol::SessionKind::Subagent,
+                };
+                if is_tour_subagent {
+                    if t.practice_session_id.is_none() {
+                        t.practice_session_id = session.parent_session_id.clone();
+                    }
+                    t.subagent_session_id = Some(session.id.clone());
+                    t.touch_progress();
                 }
             }
             _ => {}
@@ -1001,14 +1037,40 @@ impl App {
     }
 
     fn tutorial_on_program_state(&mut self, program: &agentd_protocol::ProgramDocument) {
+        // Computed before borrowing the tour state mutably: is this program
+        // the one the user is actually looking at / working with?
+        let displayed = self
+            .program_popup
+            .as_ref()
+            .is_some_and(|p| p.program.session_id == program.session_id)
+            || self.selected_id().as_deref() == Some(program.session_id.as_str());
         let Some(t) = self.tutorial.as_mut() else {
             return;
         };
         if t.completed || !matches!(t.step, 5 | 6) {
             return;
         }
-        if t.practice_session_id.as_deref() != Some(program.session_id.as_str()) {
-            return;
+        // Scope to the practice session when known. When it isn't (tour
+        // resumed / steps skipped — `practice_session_id` is not
+        // persisted), fall back to the program being displayed or the
+        // selected session, and ADOPT it as the practice session so the
+        // remaining scoped observers work again. Without this fallback the
+        // agent's ## Done edit — which arrives ONLY through this daemon
+        // event, since an open popup deliberately does not absorb daemon
+        // updates into a locally-edited buffer — was silently dropped and
+        // step 6 could never detect completion (user report).
+        match t.practice_session_id.as_deref() {
+            Some(practice) => {
+                if practice != program.session_id.as_str() {
+                    return;
+                }
+            }
+            None => {
+                if !displayed {
+                    return;
+                }
+                t.practice_session_id = Some(program.session_id.clone());
+            }
         }
         if program.template_id.as_deref() == Some("tasks") {
             t.template_applied = true;
@@ -1092,7 +1154,17 @@ impl App {
         let Some(t) = self.tutorial.as_ref() else {
             return;
         };
-        if t.completed || t.step != 5 || (t.template_applied && t.task_line_present) {
+        let unticked = match t.step {
+            5 => !(t.template_applied && t.task_line_present),
+            // Step 6's ## Done gate combines two sources with OR: the
+            // daemon's program/state event (the agent's edits — the primary
+            // source, see `tutorial_on_program_state`) and this buffer scan
+            // (a popup whose view semantics DO refresh, or a user moving
+            // the line by hand). Sticky either way.
+            6 => !t.task_done,
+            _ => false,
+        };
+        if t.completed || !unticked {
             return;
         }
         let Some(popup) = self.program_popup.as_ref() else {
@@ -1110,17 +1182,27 @@ impl App {
         let template = popup.program.template_id.as_deref() == Some("tasks")
             || has_tasks_board_sections(&popup.buffer);
         let task = todo_section_has_task(&popup.buffer);
+        let done = done_section_has_task(&popup.buffer);
         let Some(t) = self.tutorial.as_mut() else {
             return;
         };
         let mut progressed = false;
-        if template && !t.template_applied {
-            t.template_applied = true;
-            progressed = true;
-        }
-        if task && !t.task_line_present {
-            t.task_line_present = true;
-            progressed = true;
+        match t.step {
+            5 => {
+                if template && !t.template_applied {
+                    t.template_applied = true;
+                    progressed = true;
+                }
+                if task && !t.task_line_present {
+                    t.task_line_present = true;
+                    progressed = true;
+                }
+            }
+            6 if done && !t.task_done => {
+                t.task_done = true;
+                progressed = true;
+            }
+            _ => {}
         }
         if progressed {
             t.touch_progress();
@@ -1427,13 +1509,14 @@ mod tests {
     }
 
     #[test]
-    fn step6_completion_requires_collapse_in_both_modes() {
+    fn step6_completion_requires_user_actions_in_both_modes() {
         let mut degraded = TutorialState::start(true, Profile::Emacs);
         degraded.step = 6;
         degraded.split_done = true;
-        degraded.recompute_completion();
-        assert_eq!(degraded.step, 6, "split alone no longer completes step 6");
         degraded.collapse_done = true;
+        degraded.recompute_completion();
+        assert_eq!(degraded.step, 6, "hop is part of the user gate");
+        degraded.hop_done = true;
         degraded.recompute_completion();
         assert_eq!(degraded.step, 7);
 
@@ -1442,9 +1525,46 @@ mod tests {
         normal.task_done = true;
         normal.recompute_completion();
         assert_eq!(normal.step, 6, "Done alone no longer completes step 6");
+        normal.split_done = true;
+        normal.hop_done = true;
         normal.collapse_done = true;
         normal.recompute_completion();
         assert_eq!(normal.step, 7);
+
+        // Fast-archive inverse: the subagent was observed and already
+        // archived; the Done gate (however it was detected) still
+        // completes the step — nothing waits on a still-listed subagent.
+        let mut fast = TutorialState::start(false, Profile::Emacs);
+        fast.step = 6;
+        fast.subagent_session_id = Some("sub".into());
+        fast.split_done = true;
+        fast.hop_done = true;
+        fast.collapse_done = true;
+        fast.task_done = true;
+        fast.recompute_completion();
+        assert_eq!(fast.step, 7);
+    }
+
+    #[test]
+    fn step6_checklist_is_user_actions_only() {
+        for degraded in [false, true] {
+            let mut state = TutorialState::start(degraded, Profile::Emacs);
+            state.step = 6;
+            // Regardless of what the agent has done so far…
+            state.subagent_session_id = Some("sub".into());
+            state.task_done = true;
+            let labels: Vec<String> =
+                state.checklist().into_iter().map(|(l, _)| l).collect();
+            assert_eq!(
+                labels,
+                vec!["split the pane", "hop panes", "close the split"],
+                "step-6 checklist must list user actions only (degraded={degraded})"
+            );
+            assert!(
+                !labels.iter().any(|l| l.contains("subagent") || l.contains("Done")),
+                "agent-driven progress must not render as a checkbox"
+            );
+        }
     }
 
     #[test]
