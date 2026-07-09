@@ -31,7 +31,9 @@ pub enum KeyAction {
     /// focus moves straight to the new session. Bound to `C-x F` (emacs) /
     /// `O` (vim).
     OpenForkCrossHarness,
-    /// Show / manage forks belonging to the selected parent.
+    /// Open the lineage view: a live tree of the selected session's fork
+    /// lineage (`forked_from`) and subagent parent/child relationships,
+    /// replacing the old flat "N forks" status line.
     OpenForkLog,
     /// Merge or discard the selected fork.
     OpenMerge,

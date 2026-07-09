@@ -308,6 +308,7 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     // already up), so render order between them doesn't matter.
     render_session_picker(f, app);
     render_configure_popup(f, app);
+    render_lineage_popup(f, app);
     capture_frame_text(f, app);
     render_hovered_url(f, app);
     render_text_selection(f, app);
@@ -9090,6 +9091,189 @@ fn render_tasks_popup(f: &mut Frame, app: &mut App) {
     f.render_widget(para, inner);
 }
 
+/// Keep `selected_raw` on screen within `visible` rows, scrolling the
+/// window just far enough in either direction. Simpler than
+/// `session_picker_scroll` because the lineage popup has no non-selectable
+/// header rows to keep visible above the selection — every row (including
+/// "+N more" markers) is a plain content line.
+fn lineage_popup_scroll(
+    total: usize,
+    selected_raw: Option<usize>,
+    prev_scroll: usize,
+    visible: usize,
+) -> usize {
+    let visible = visible.max(1);
+    let mut scroll = prev_scroll;
+    if let Some(sr) = selected_raw {
+        if sr < scroll {
+            scroll = sr;
+        } else if sr >= scroll + visible {
+            scroll = sr + 1 - visible;
+        }
+    }
+    scroll.min(total.saturating_sub(visible))
+}
+
+/// Render one flattened lineage row: rail prefix, edge glyph, status glyph,
+/// harness/title, compact stats, and (for forks) a terminal-state suffix.
+fn render_lineage_row(
+    row: &crate::lineage::LineageRow,
+    by_id: &HashMap<&str, &SessionSummary>,
+    theme: &Theme,
+    now_ms: i64,
+) -> Line<'static> {
+    let rail = row.rail_prefix();
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(
+        format!(" {rail}"),
+        Style::default().fg(theme.dim),
+    )];
+    match &row.kind {
+        crate::lineage::LineageRowKind::More(n) => {
+            spans.push(Span::styled(
+                format!(" +{n} more"),
+                Style::default()
+                    .fg(theme.muted)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        }
+        crate::lineage::LineageRowKind::Node { session_id, edge } => {
+            let (edge_glyph, edge_style) = match edge {
+                crate::lineage::LineageEdge::Root => ("◆", Style::default().fg(theme.accent)),
+                // Fork edges are dashed/lighter — mergeable siblings, not
+                // true parent/child helpers (spec 0078 vs spec 0014).
+                crate::lineage::LineageEdge::Fork => ("⑂", Style::default().fg(theme.dim)),
+                crate::lineage::LineageEdge::Subagent => ("▸", Style::default().fg(theme.harness)),
+            };
+            spans.push(Span::styled(format!("{edge_glyph} "), edge_style));
+            let Some(summary) = by_id.get(session_id.as_str()).copied() else {
+                spans.push(Span::styled(
+                    format!("{} (gone)", short_id(session_id)),
+                    Style::default().fg(theme.dim),
+                ));
+                return Line::from(spans);
+            };
+            let status_glyph = crate::lineage::status_glyph(summary.state);
+            let stats = crate::lineage::stats_label(summary, now_ms);
+            let title = summary.title.as_deref().filter(|t| !t.trim().is_empty());
+            let mut label = match title {
+                Some(t) => format!("{status_glyph} {} — {t} {stats}", summary.harness),
+                None => format!("{status_glyph} {} {stats}", summary.harness),
+            };
+            let mut label_style = state_style(theme, summary.state);
+            match crate::lineage::ForkStatus::of(summary) {
+                crate::lineage::ForkStatus::Merged => {
+                    label.push_str("  ↩ merged");
+                    label_style = Style::default().fg(theme.dim);
+                }
+                crate::lineage::ForkStatus::Discarded => {
+                    label.push_str("  ✗ discarded");
+                    label_style = Style::default()
+                        .fg(theme.dim)
+                        .add_modifier(Modifier::CROSSED_OUT);
+                }
+                crate::lineage::ForkStatus::Open => {}
+            }
+            spans.push(Span::styled(label, label_style));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Fork + subagent lineage view popup (`C-x q` / `q`, spec
+/// 0079-fork-and-subagent-lineage-view): a live `git log --graph`-style tree
+/// unifying fork lineage (spec 0078, `⑂`) and subagent parent/child edges
+/// (spec 0014, `▸`) for the selected session. Rows are rebuilt from live
+/// `App::sessions` on every frame (see `App::lineage_rows`), so a fork
+/// completing, merging, or a subagent finishing while the popup is open
+/// updates immediately.
+fn render_lineage_popup(f: &mut Frame, app: &mut App) {
+    let Some(popup) = app.lineage_popup.clone() else {
+        return;
+    };
+    let rows = app.lineage_rows();
+    let total = f.area();
+    let w = total.width.saturating_sub(6).min(100);
+    let h = total
+        .height
+        .saturating_sub(4)
+        .min((rows.len() as u16 + 4).max(8));
+    if w < 30 || h < 6 {
+        return;
+    }
+    let x = total.x + (total.width.saturating_sub(w)) / 2;
+    let y = total.y + (total.height.saturating_sub(h)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    app.layout.modal_area = Some(rect);
+    let title = format!(
+        " lineage — {} — j/k move · Enter jump · m merge · d discard · Esc close ",
+        short_id(&popup.focus_id)
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border_focused))
+        .title(Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(app.theme.info)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(rect);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+
+    if rows.is_empty() {
+        let p =
+            Paragraph::new("(session no longer exists)").style(Style::default().fg(app.theme.dim));
+        f.render_widget(p, inner);
+        return;
+    }
+
+    let selectable_positions: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.is_selectable())
+        .map(|(i, _)| i)
+        .collect();
+    let selected_raw = selectable_positions
+        .get(
+            popup
+                .selected
+                .min(selectable_positions.len().saturating_sub(1)),
+        )
+        .copied();
+
+    let visible = inner.height as usize;
+    let scroll = lineage_popup_scroll(rows.len(), selected_raw, popup.scroll, visible);
+    if let Some(p) = app.lineage_popup.as_mut() {
+        p.scroll = scroll;
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let by_id: HashMap<&str, &SessionSummary> =
+        app.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+
+    let highlight_style = Style::default()
+        .bg(app.theme.highlight_bg)
+        .fg(app.theme.highlight_fg)
+        .add_modifier(Modifier::BOLD);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .map(|(_, row)| ListItem::new(render_lineage_row(row, &by_id, &app.theme, now_ms)))
+        .collect();
+    let mut state = ListState::default();
+    state.select(selected_raw.map(|sr| sr - scroll));
+    let list = List::new(items).highlight_style(highlight_style);
+    f.render_stateful_widget(list, inner, &mut state);
+}
+
 struct ProgramPopupHoverOverlay {
     popup: crate::app::ProgramPopup,
     clip_bounds: Rect,
@@ -13731,6 +13915,124 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    fn lineage_test_summary(id: &str) -> SessionSummary {
+        let json = serde_json::json!({
+            "id": id,
+            "harness": "smith",
+            "cwd": "/tmp",
+            "state": "running",
+            "created_at": "2026-05-20T00:00:00Z",
+            "event_count": 3,
+        });
+        serde_json::from_value(json).expect("valid SessionSummary")
+    }
+
+    fn lineage_node_row(
+        session_id: &str,
+        edge: crate::lineage::LineageEdge,
+    ) -> crate::lineage::LineageRow {
+        crate::lineage::flatten(&crate::lineage::LineageNode {
+            session_id: session_id.to_string(),
+            edge,
+            children: Vec::new(),
+        })
+        .remove(0)
+    }
+
+    #[test]
+    fn lineage_row_renders_fork_and_subagent_edge_glyphs() {
+        let theme = Theme::default();
+        let by_id_owner = vec![lineage_test_summary("a")];
+        let by_id: HashMap<&str, &SessionSummary> =
+            by_id_owner.iter().map(|s| (s.id.as_str(), s)).collect();
+
+        let fork_row = lineage_node_row("a", crate::lineage::LineageEdge::Fork);
+        let text = line_text(&render_lineage_row(&fork_row, &by_id, &theme, 0));
+        assert!(
+            text.contains('⑂'),
+            "fork edge should render its glyph: {text}"
+        );
+
+        let subagent_row = lineage_node_row("a", crate::lineage::LineageEdge::Subagent);
+        let text = line_text(&render_lineage_row(&subagent_row, &by_id, &theme, 0));
+        assert!(
+            text.contains('▸'),
+            "subagent edge should render its glyph: {text}"
+        );
+
+        let root_row = lineage_node_row("a", crate::lineage::LineageEdge::Root);
+        let text = line_text(&render_lineage_row(&root_row, &by_id, &theme, 0));
+        assert!(text.contains('◆'), "root should render its glyph: {text}");
+    }
+
+    #[test]
+    fn lineage_row_renders_merged_fork_dimmed_and_discarded_struck_through() {
+        let theme = Theme::default();
+        let mut merged = lineage_test_summary("f");
+        merged.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "root".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+        });
+        merged.merge = Some(agentd_protocol::ForkMerge {
+            mode: agentd_protocol::ForkMergeMode::Result,
+            at_ms: 0,
+        });
+        let by_id: HashMap<&str, &SessionSummary> = [("f", &merged)].into_iter().collect();
+        let row = lineage_node_row("f", crate::lineage::LineageEdge::Fork);
+        let line = render_lineage_row(&row, &by_id, &theme, 0);
+        assert!(line_text(&line).contains("↩ merged"));
+        assert!(
+            !line
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::CROSSED_OUT)),
+            "a merged fork must not be struck through — that's reserved for discarded"
+        );
+
+        let mut discarded = merged.clone();
+        discarded.merge = Some(agentd_protocol::ForkMerge {
+            mode: agentd_protocol::ForkMergeMode::Discard,
+            at_ms: 0,
+        });
+        let by_id: HashMap<&str, &SessionSummary> = [("f", &discarded)].into_iter().collect();
+        let row = lineage_node_row("f", crate::lineage::LineageEdge::Fork);
+        let line = render_lineage_row(&row, &by_id, &theme, 0);
+        assert!(line_text(&line).contains("✗ discarded"));
+        assert!(
+            line.spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::CROSSED_OUT)),
+            "a discarded fork must render struck-through, distinct from an open or merged fork"
+        );
+    }
+
+    #[test]
+    fn lineage_row_more_marker_shows_count_and_is_not_an_edge() {
+        let theme = Theme::default();
+        let by_id: HashMap<&str, &SessionSummary> = HashMap::new();
+        let row = crate::lineage::LineageRow {
+            depth: 1,
+            is_last: true,
+            rails: vec![],
+            kind: crate::lineage::LineageRowKind::More(7),
+        };
+        let text = line_text(&render_lineage_row(&row, &by_id, &theme, 0));
+        assert!(text.contains("+7 more"));
+    }
+
+    #[test]
+    fn lineage_popup_scroll_keeps_selection_on_screen() {
+        // Selection below the window pulls the window down just enough.
+        assert_eq!(lineage_popup_scroll(20, Some(10), 0, 5), 6);
+        // Selection above the window pulls the window up to it.
+        assert_eq!(lineage_popup_scroll(20, Some(2), 8, 5), 2);
+        // Already visible: scroll untouched.
+        assert_eq!(lineage_popup_scroll(20, Some(4), 2, 5), 2);
+        // Fewer rows than the viewport: no scroll.
+        assert_eq!(lineage_popup_scroll(3, Some(1), 0, 5), 0);
     }
 
     #[test]

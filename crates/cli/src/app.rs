@@ -32,6 +32,7 @@ use tokio::sync::mpsc;
 mod configure;
 mod dynamic_ui;
 mod editor;
+mod lineage_popup;
 mod matrix_clicks;
 mod minibuffer;
 mod mouse;
@@ -44,6 +45,7 @@ pub use configure::{
     harness_guidance, no_agent_harness_available, smith_method_guidance, ConfigurePopup,
     ConfigureTab, CONFIGURE_TABS,
 };
+pub use lineage_popup::LineagePopup;
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
 };
@@ -1330,6 +1332,11 @@ pub struct App {
     /// /tasks popup state: `None` = closed, `Some(...)` = open with
     /// a snapshot of the session's task registry.
     pub tasks_popup: Option<TasksPopup>,
+    /// Fork + subagent lineage view popup (`C-x q` / `q`): `None` = closed.
+    /// Unlike `tasks_popup`, its rows are rebuilt from live `self.sessions`
+    /// on every render/key handling call rather than snapshotted at open
+    /// time — see `lineage_popup::App::lineage_rows`.
+    pub lineage_popup: Option<LineagePopup>,
     /// `/configure` onboarding dialog (spec 0069): `None` = closed. Opened by
     /// the command palette, or automatically on first run / when no agent
     /// harness is available. Captures all input while open.
@@ -3055,6 +3062,7 @@ async fn run_with_socket_initial_selection(
         matrix_reveal_hits: Vec::new(),
         orchestrator_desired_size: None,
         tasks_popup: None,
+        lineage_popup: None,
         configure_popup: None,
         session_picker: None,
         program_popup: None,
@@ -3314,6 +3322,16 @@ async fn run_loop(
     let mut reconnect: Option<ReconnectState> = None;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
+    // Lineage view popup (spec 0079): its per-node elapsed-time/cost stats
+    // are recomputed at render time from `SessionSummary` fields that are
+    // already kept live by the ordinary STATE broadcast subscription (same
+    // path the branch-rail fork badge uses) — this ticker's only job is a
+    // defensive re-`list()` while the popup is open, so a missed broadcast
+    // (a reconnect blip, e.g.) can't leave its stats stale for the rest of
+    // the session. Scoped strictly to "popup open" — never runs otherwise —
+    // so it's not a new always-on background polling loop.
+    let mut lineage_popup_refresh = tokio::time::interval(Duration::from_secs(1));
+    lineage_popup_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Re-probe harness availability while the welcome card (no session
     // selected) or the `/configure` dialog is showing, so installing a CLI
     // or exporting an API key updates the live status without a TUI
@@ -3824,6 +3842,9 @@ async fn run_loop(
                 } else if let Ok(list) = app.client.harnesses().await {
                     app.harnesses = list;
                 }
+            }
+            _ = lineage_popup_refresh.tick(), if app.connected && app.lineage_popup.is_some() => {
+                app.refresh_sessions().await;
             }
         }
     }
@@ -7446,6 +7467,9 @@ impl App {
         if self.tasks_popup.take().is_some() {
             return;
         }
+        if self.lineage_popup.take().is_some() {
+            return;
+        }
         if self.remote_control_popup.take().is_some() {
             if matches!(
                 self.minibuffer.as_ref().map(|m| &m.intent),
@@ -7817,6 +7841,12 @@ impl App {
         // chord is ever a dead end just because this dialog happened to be
         // on screen (it can auto-open with no prior user action).
         if self.configure_popup.is_some() && self.handle_configure_key(key).await {
+            return;
+        }
+        // Lineage view popup (`C-x q` / `q`): owns navigation/merge/discard/
+        // jump keys while open; anything else closes it and falls through to
+        // ordinary routing on the SAME key, exactly like `/configure` above.
+        if self.lineage_popup.is_some() && self.handle_lineage_popup_key(key).await {
             return;
         }
         if self.tasks_popup.is_some() {
@@ -8283,17 +8313,10 @@ impl App {
                 }
             }
             OpenForkLog => {
-                let Some(id) = self.selected_id() else {
-                    return;
-                };
-                let forks = self
-                    .sessions
-                    .iter()
-                    .filter(|s| {
-                        s.forked_from.as_ref().map(|f| f.session_id.as_str()) == Some(id.as_str())
-                    })
-                    .count();
-                self.set_status(format!("⑂{forks} forks — select one to open; C-x m merges"));
+                // spec 0079: the fork log grew from a flat "N forks" status
+                // line into a live tree/graph popup unifying fork lineage
+                // and subagent parent/child relationships.
+                self.open_lineage_popup();
             }
             OpenRename => match self.selection.clone() {
                 Selection::Session(id) => {
@@ -10690,6 +10713,7 @@ mod tests {
             resizing_program_popup: None,
             list_collapsed: false,
             tasks_popup: None,
+            lineage_popup: None,
             configure_popup: None,
             session_picker: None,
             program_popup: None,
