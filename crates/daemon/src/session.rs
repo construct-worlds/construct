@@ -2872,9 +2872,9 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Persist the terminal outcome of a side quest. Archiving remains a
+    /// Persist the terminal outcome of a fork. Archiving remains a
     /// separate primitive so callers can inject a result before retiring it.
-    pub async fn harvest(&self, id: &str, mode: agentd_protocol::QuestHarvestMode) -> Result<()> {
+    pub async fn merge(&self, id: &str, mode: agentd_protocol::ForkMergeMode) -> Result<()> {
         let entry = self
             .get_entry(id)
             .await
@@ -2882,9 +2882,9 @@ impl SessionManager {
         let snapshot = {
             let mut summary = entry.summary.write().await;
             if summary.forked_from.is_none() {
-                anyhow::bail!("session is not a side quest");
+                anyhow::bail!("session is not a fork");
             }
-            summary.harvest = Some(agentd_protocol::QuestHarvest {
+            summary.merge = Some(agentd_protocol::ForkMerge {
                 mode,
                 at_ms: chrono::Utc::now().timestamp_millis(),
             });
@@ -3728,7 +3728,7 @@ mod tests {
             operator_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
-            harvest: None,
+            merge: None,
         }
     }
 
@@ -4161,7 +4161,7 @@ mod tests {
                 operator_loop_disabled: false,
                 needs_attention: false,
                 forked_from: None,
-                harvest: None,
+                merge: None,
             }),
             transcript_count: AtomicU64::new(0),
             adapter: tokio::sync::Mutex::new(None),
@@ -5033,7 +5033,7 @@ mod tests {
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind: agentd_protocol::SessionKind::User,
             forked_from: None,
-            harvest: None,
+            merge: None,
             archived: false,
             operator_loop_disabled: false,
             needs_attention: false,
@@ -5172,7 +5172,7 @@ mod tests {
             operator_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
-            harvest: None,
+            merge: None,
         };
         let entry = Arc::new(SessionEntry {
             id: id.clone(),

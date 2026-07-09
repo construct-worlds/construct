@@ -843,7 +843,7 @@ pub mod ipc_method {
     /// transcript/worktree but is hidden from the list by default and is
     /// not auto-resumed on daemon startup. Reversed by `SESSION_RESTART`.
     pub const SESSION_ARCHIVE: &str = "session.archive";
-    pub const SESSION_HARVEST: &str = "session.harvest";
+    pub const SESSION_MERGE: &str = "session.merge";
     pub const SESSION_WIDGET_DELETE: &str = "session.widget.delete";
     /// Respawn a session's adapter — typically used to bring a `Done`
     /// session back to life so the user can continue typing. The
@@ -1814,11 +1814,11 @@ pub struct SessionSummary {
     /// survives daemon/client restart. Orthogonal to `state` — not a run state.
     #[serde(default)]
     pub needs_attention: bool,
-    /// Side-quest lineage. Normal sessions and subagents leave this unset.
+    /// Fork lineage. Normal sessions and subagents leave this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ForkedFrom>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harvest: Option<QuestHarvest>,
+    pub merge: Option<ForkMerge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1829,14 +1829,14 @@ pub struct ForkedFrom {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct QuestHarvest {
-    pub mode: QuestHarvestMode,
+pub struct ForkMerge {
+    pub mode: ForkMergeMode,
     pub at_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum QuestHarvestMode {
+pub enum ForkMergeMode {
     Result,
     Discard,
 }
@@ -2098,15 +2098,15 @@ pub struct CreateSessionParams {
     /// visible session in the same group/project region.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_after_session_id: Option<String>,
-    /// Optional side-quest ancestry, persisted on the new top-level session.
+    /// Optional fork ancestry, persisted on the new top-level session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ForkedFrom>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionHarvestParams {
+pub struct SessionMergeParams {
     pub session_id: String,
-    pub mode: QuestHarvestMode,
+    pub mode: ForkMergeMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1265,9 +1265,9 @@ async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SESSION_HARVEST, {
-        let p = params!(req, agentd_protocol::SessionHarvestParams);
-        match manager.harvest(&p.session_id, p.mode).await {
+    dispatch_entry!(ipc_method::SESSION_MERGE, {
+        let p = params!(req, agentd_protocol::SessionMergeParams);
+        match manager.merge(&p.session_id, p.mode).await {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }

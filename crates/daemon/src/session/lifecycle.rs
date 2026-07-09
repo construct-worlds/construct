@@ -93,7 +93,7 @@ impl SessionManager {
             operator_loop_disabled: params.kind == agentd_protocol::SessionKind::Orchestrator,
             needs_attention: false,
             forked_from: params.forked_from.clone(),
-            harvest: None,
+            merge: None,
         };
         self.storage.save_summary(&summary)?;
 
@@ -124,7 +124,7 @@ impl SessionManager {
         for (k, v) in &params.env {
             env_with_meta.insert(k.clone(), v.clone());
         }
-        // A same-harness Claude quest can continue byte-for-byte using Claude's
+        // A same-harness Claude fork can continue byte-for-byte using Claude's
         // native fork operation. The native id is deliberately adapter-private;
         // only the daemon reads it from the source session directory.
         if harness == "claude" {

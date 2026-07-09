@@ -448,7 +448,11 @@ impl Client {
                 parent_session_id: None,        // sibling, not a subagent
                 group_id: src.group_id.clone(), // same group → rendered alongside the source
                 position_after_session_id: Some(src.id.clone()),
-                forked_from: opts.side_quest.then(|| agentd_protocol::ForkedFrom {
+                // Every fork is lineage-tracked — the branch rail, fork log,
+                // and merge eligibility all key off `forked_from` being
+                // present, uniformly, whether the fork was the instant
+                // same-harness primary path or the cross-harness picker.
+                forked_from: Some(agentd_protocol::ForkedFrom {
                     session_id: src.id.clone(),
                     transcript_seq: transcript_seq.as_ref().map(|t| t.total).unwrap_or(0),
                     at_ms: SystemTime::now()
@@ -633,11 +637,11 @@ impl Client {
             .await?;
         Ok(())
     }
-    pub async fn harvest(&self, id: &str, mode: agentd_protocol::QuestHarvestMode) -> Result<()> {
+    pub async fn merge(&self, id: &str, mode: agentd_protocol::ForkMergeMode) -> Result<()> {
         let _: serde_json::Value = self
             .request(
-                ipc_method::SESSION_HARVEST,
-                &agentd_protocol::SessionHarvestParams {
+                ipc_method::SESSION_MERGE,
+                &agentd_protocol::SessionMergeParams {
                     session_id: id.to_string(),
                     mode,
                 },
@@ -1122,8 +1126,6 @@ pub struct ForkOptions {
     /// Initial PTY size for forks of terminal sessions. When omitted, the
     /// client uses a standard terminal default.
     pub pty_size: Option<PtySize>,
-    /// Mark this sibling fork as a user-driven side quest.
-    pub side_quest: bool,
 }
 
 impl Default for ForkOptions {
@@ -1134,7 +1136,6 @@ impl Default for ForkOptions {
             seed: true,
             max_seed_bytes: 0,
             pty_size: None,
-            side_quest: false,
         }
     }
 }
@@ -1195,8 +1196,8 @@ fn render_fork_seed(
     ))
 }
 
-/// Compact portable transcript rendering for a side-quest result.
-pub fn render_fork_seed_for_harvest(
+/// Compact portable transcript rendering for a fork-merge result.
+pub fn render_fork_seed_for_merge(
     events: &[agentd_protocol::TimestampedEvent],
     max_bytes: usize,
 ) -> Option<String> {
@@ -1356,5 +1357,131 @@ mod fork_tests {
         let o = ForkOptions::default();
         assert!(o.seed);
         assert_eq!(o.max_seed_bytes, 0, "0 = unlimited / full transcript");
+    }
+}
+
+#[cfg(test)]
+mod fork_lineage_tests {
+    use super::*;
+    use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt};
+    use tokio::net::UnixListener;
+
+    /// Regression test for the fork/merge unification: every fork is now
+    /// lineage-tracked (`forked_from` always set) — there is no more
+    /// `side_quest` gate distinguishing an "instant" fork from a "tracked"
+    /// one. This drives `fork_session` against a minimal mock daemon and
+    /// asserts the `session.create` params it sends carry `forked_from`,
+    /// even for a same-harness fork with default options (no explicit
+    /// harness override, no typed prompt) — the exact shape of the primary
+    /// instant-fork keybinding path.
+    #[tokio::test]
+    async fn fork_session_always_sets_forked_from() {
+        // Unix socket paths are capped well under `PathBuf`'s limits
+        // (SUN_LEN, ~104 bytes on macOS/BSD) — `std::env::temp_dir()` on
+        // macOS already eats most of that budget (`/var/folders/.../T/`),
+        // so bind directly under `/tmp` with a short, still-unique name
+        // rather than a long descriptive one.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+            % 1_000_000;
+        let sock =
+            std::path::PathBuf::from(format!("/tmp/afl{}{}.sock", std::process::id(), nanos));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon socket");
+
+        let captured = Arc::new(StdMutex::new(None::<serde_json::Value>));
+        let captured_srv = captured.clone();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = split(stream);
+            let mut reader = BufReader::new(r);
+            let mut line = String::new();
+            for _ in 0..4 {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    break;
+                }
+                let req: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let resp = match method {
+                    ipc_method::SESSION_GET => serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": {
+                            "summary": {
+                                "id": "src-1",
+                                "harness": "claude",
+                                "cwd": "/tmp",
+                                "state": "running",
+                                "created_at": "1970-01-01T00:00:00Z"
+                            },
+                            "events": []
+                        }
+                    }),
+                    ipc_method::SESSION_TRANSCRIPT => serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": { "events": [], "total": 0 }
+                    }),
+                    ipc_method::PROGRAM_GET => serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": {
+                            "program": {
+                                "session_id": "src-1",
+                                "markdown": "",
+                                "version": 0,
+                                "updated_at_ms": 0
+                            },
+                            "revisions": []
+                        }
+                    }),
+                    ipc_method::SESSION_CREATE => {
+                        *captured_srv.lock().unwrap() = req.get("params").cloned();
+                        serde_json::json!({
+                            "jsonrpc": "2.0", "id": id, "result": { "session_id": "new-1" }
+                        })
+                    }
+                    _ => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null}),
+                };
+                let s = resp.to_string() + "\n";
+                let _ = w.write_all(s.as_bytes()).await;
+            }
+        });
+
+        let client = Client::connect(&sock)
+            .await
+            .expect("connect to mock daemon");
+        // Default options: no explicit harness override (fork into the same
+        // "claude" harness the source already runs), no typed prompt.
+        let new_id = client
+            .fork_session("src-1", "claude", ForkOptions::default())
+            .await
+            .expect("fork_session");
+        assert_eq!(new_id, "new-1");
+
+        server.await.expect("mock daemon task");
+
+        let params = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("session.create params were captured");
+        let forked_from = params.get("forked_from").cloned();
+        assert!(
+            forked_from.as_ref().map(|v| !v.is_null()).unwrap_or(false),
+            "fork_session must always set forked_from, even without an explicit \
+             harness override: {params:?}"
+        );
+        assert_eq!(
+            forked_from
+                .as_ref()
+                .and_then(|f| f.get("session_id"))
+                .and_then(|s| s.as_str()),
+            Some("src-1")
+        );
+
+        let _ = std::fs::remove_file(&sock);
     }
 }

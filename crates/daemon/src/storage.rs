@@ -2274,7 +2274,7 @@ mod search_tests {
             kind: SessionKind::User,
             archived: false,
             forked_from: None,
-            harvest: None,
+            merge: None,
             operator_loop_disabled: false,
             needs_attention: false,
         }

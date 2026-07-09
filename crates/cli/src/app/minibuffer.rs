@@ -411,86 +411,50 @@ impl App {
                     Err(e) => self.set_status(format!("fork failed: {e}")),
                 }
             }
-            MinibufferIntent::SideQuest { source_session_id } => {
-                let question = input.trim().to_string();
-                if question.is_empty() {
-                    return;
-                }
-                let Some(source) = self
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == source_session_id)
-                    .cloned()
-                else {
-                    self.set_status("side quest: source disappeared".into());
-                    return;
-                };
-                let mut opts = agentd_client::ForkOptions::default();
-                opts.prompt = Some(question);
-                opts.side_quest = true;
-                let (cols, rows) = self.active_pane_size();
-                opts.pty_size = Some(agentd_protocol::PtySize {
-                    cols: cols.max(20),
-                    rows: rows.max(5),
-                });
-                match self
-                    .client
-                    .fork_session(&source_session_id, &source.harness, opts)
-                    .await
-                {
-                    Ok(id) => {
-                        self.set_status(format!("side quest created {}", short_id(&id)));
-                        self.refresh_sessions().await;
-                        self.select_session(id);
-                        self.focus = PaneFocus::View;
-                    }
-                    Err(e) => self.set_status(format!("side quest failed: {e}")),
-                }
-            }
-            MinibufferIntent::HarvestMenu { session_id } => {
+            MinibufferIntent::MergeMenu { session_id } => {
                 let choice = input.trim().to_ascii_lowercase();
-                let Some(quest) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+                let Some(fork) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
                     return;
                 };
-                let Some(parent) = quest.forked_from.as_ref().map(|f| f.session_id.clone()) else {
+                let Some(parent) = fork.forked_from.as_ref().map(|f| f.session_id.clone()) else {
                     return;
                 };
                 let mode = match choice.as_str() {
-                    "result" | "take result" => agentd_protocol::QuestHarvestMode::Result,
-                    "discard" | "d" => agentd_protocol::QuestHarvestMode::Discard,
+                    "result" | "take result" => agentd_protocol::ForkMergeMode::Result,
+                    "discard" | "d" => agentd_protocol::ForkMergeMode::Discard,
                     _ => {
-                        self.set_status("harvest: type result or discard".into());
+                        self.set_status("merge: type result or discard".into());
                         return;
                     }
                 };
-                if mode == agentd_protocol::QuestHarvestMode::Result {
+                if mode == agentd_protocol::ForkMergeMode::Result {
                     match self.client.transcript(&session_id, 0, None).await {
                         Ok(tr) => {
                             if let Some(summary) =
-                                agentd_client::render_fork_seed_for_harvest(&tr.events, 6000)
+                                agentd_client::render_fork_seed_for_merge(&tr.events, 6000)
                             {
-                                let title = quest.title.as_deref().unwrap_or("side quest");
+                                let title = fork.title.as_deref().unwrap_or("fork");
                                 if let Err(e) = self
                                     .client
                                     .send_input(
                                         &parent,
-                                        format!("⑂ side quest result ({title}): {summary}"),
+                                        format!("⑂ fork result ({title}): {summary}"),
                                     )
                                     .await
                                 {
-                                    self.set_status(format!("harvest input failed: {e}"));
+                                    self.set_status(format!("merge input failed: {e}"));
                                     return;
                                 }
                             }
                         }
                         Err(e) => {
-                            self.set_status(format!("harvest transcript failed: {e}"));
+                            self.set_status(format!("merge transcript failed: {e}"));
                             return;
                         }
                     }
                 }
-                if let Err(e) = self.client.harvest(&session_id, mode).await {
-                    self.set_status(format!("harvest failed: {e}"));
+                if let Err(e) = self.client.merge(&session_id, mode).await {
+                    self.set_status(format!("merge failed: {e}"));
                     return;
                 }
                 if let Err(e) = self.client.archive(&session_id).await {
@@ -499,7 +463,7 @@ impl App {
                 }
                 self.refresh_sessions().await;
                 self.select_session(parent);
-                self.set_status("side quest harvested".into());
+                self.set_status("fork merged".into());
             }
             MinibufferIntent::GroupDeleteConfirm { group_id } => {
                 let choice = parse_group_delete_choice(&input);

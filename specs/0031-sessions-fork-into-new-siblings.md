@@ -23,6 +23,14 @@ harness-agnostic transcript**. A same-harness fork may use that harness's
 native fork/resume facility when available; this is a faithful continuation
 within one harness, never a cross-harness state translation.
 
+Cross-harness forking as described in this spec — the harness picker,
+transcript-seed context — is the **secondary, explicit** fork path (spec
+0078): the user deliberately opts into a different harness. The **primary,
+default** fork is same-harness, favors native context fidelity over the
+transcript seed when the adapter supports it, and always records lineage
+(`forked_from`) the same way a cross-harness fork does — see spec 0078 for
+the unified fork/merge decision and its keybinding split.
+
 ## Reason
 
 A session's identity includes harness ownership (spec 0001), and the

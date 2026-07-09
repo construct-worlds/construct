@@ -701,15 +701,14 @@ pub enum MinibufferIntent {
     },
     NewSessionHarness,
     /// Harness picker for forking the selected session into a new sibling
-    /// (`OpenFork`). Shares the harness-picker UI/completion with
-    /// `NewSessionHarness`; on submit, calls `client.fork_session`.
+    /// (`OpenForkCrossHarness`). Shares the harness-picker UI/completion with
+    /// `NewSessionHarness`; on submit, calls `client.fork_session`. The
+    /// explicit, cross-harness counterpart to `OpenFork`'s instant
+    /// same-harness path, which never opens a minibuffer.
     ForkSessionHarness {
         source_session_id: String,
     },
-    SideQuest {
-        source_session_id: String,
-    },
-    HarvestMenu {
+    MergeMenu {
         session_id: String,
     },
     /// Second stage of the new-session wizard when the user typed `group`:
@@ -4567,14 +4566,14 @@ impl App {
                     .then_with(|| b.created_at.cmp(&a.created_at))
             });
         }
-        let mut quests_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
+        let mut forks_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
         for s in self.sessions.iter().filter(|s| s.forked_from.is_some()) {
             if let Some(parent) = s.forked_from.as_ref().map(|f| f.session_id.as_str()) {
-                quests_by_parent.entry(parent).or_default().push(s);
+                forks_by_parent.entry(parent).or_default().push(s);
             }
         }
-        for quests in quests_by_parent.values_mut() {
-            quests.sort_by_key(|s| s.position);
+        for forks in forks_by_parent.values_mut() {
+            forks.sort_by_key(|s| s.position);
         }
 
         let push_session = |out: &mut Vec<ListItem>, s: &SessionSummary, indented: bool| {
@@ -4623,10 +4622,10 @@ impl App {
                     }
                 }
             }
-            if let Some(quests) = quests_by_parent.get(s.id.as_str()) {
-                for quest in quests.iter().copied().filter(|q| !q.archived) {
+            if let Some(forks) = forks_by_parent.get(s.id.as_str()) {
+                for fork in forks.iter().copied().filter(|q| !q.archived) {
                     out.push(ListItem::Session {
-                        summary: quest.clone(),
+                        summary: fork.clone(),
                         indented: true,
                         has_children: false,
                         children_expanded: false,
@@ -8196,6 +8195,49 @@ impl App {
                 });
             }
             OpenFork => {
+                // Primary path: instant same-harness fork, no minibuffer.
+                // Every fork is lineage-tracked (`forked_from` always set by
+                // `Client::fork_session`), so the branch rail and fork log
+                // apply the same way as the explicit cross-harness path.
+                let Some(id) = self.selected_id() else {
+                    self.set_status("fork: no session selected".to_string());
+                    return;
+                };
+                let Some(source) = self.sessions.iter().find(|s| s.id == id).cloned() else {
+                    self.set_status("fork: source disappeared".to_string());
+                    return;
+                };
+                let (cols, rows) = self.active_pane_size();
+                let opts = agentd_client::ForkOptions {
+                    pty_size: Some(agentd_protocol::PtySize {
+                        cols: cols.max(20),
+                        rows: rows.max(5),
+                    }),
+                    ..Default::default()
+                };
+                match self.client.fork_session(&id, &source.harness, opts).await {
+                    Ok(new_id) => {
+                        self.set_status(format!(
+                            "forked {} → {}",
+                            short_id(&id),
+                            short_id(&new_id),
+                        ));
+                        self.refresh_sessions().await;
+                        // Mirror the new-session path: pre-insert an empty PTY
+                        // parser so the transcript bootstrap short-circuits and
+                        // the live subscription isn't raced into a double banner.
+                        if !self.histories.contains_key(&new_id) {
+                            self.histories
+                                .insert(new_id.clone(), crate::pty_render::ItemHistory::new());
+                        }
+                        self.select_session(new_id);
+                        self.sync_active_window_selection();
+                        self.focus = PaneFocus::View;
+                    }
+                    Err(e) => self.set_status(format!("fork failed: {e}")),
+                }
+            }
+            OpenForkCrossHarness => {
                 let Some(id) = self.selected_id() else {
                     self.set_status("fork: no session selected".to_string());
                     return;
@@ -8220,22 +8262,7 @@ impl App {
                     error: None,
                 });
             }
-            OpenSideQuest => {
-                let Some(id) = self.selected_id() else {
-                    self.set_status("side quest: no session selected".into());
-                    return;
-                };
-                self.minibuffer = Some(Minibuffer {
-                    prompt: "Side quest: ".into(),
-                    input: String::new(),
-                    cursor: 0,
-                    intent: MinibufferIntent::SideQuest {
-                        source_session_id: id,
-                    },
-                    error: None,
-                });
-            }
-            OpenHarvest => {
+            OpenMerge => {
                 let Some(id) = self.selected_id() else {
                     return;
                 };
@@ -8245,30 +8272,28 @@ impl App {
                     .any(|s| s.id == id && s.forked_from.is_some())
                 {
                     self.minibuffer = Some(Minibuffer {
-                        prompt: "Harvest [result/discard]: ".into(),
+                        prompt: "Merge [result/discard]: ".into(),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::HarvestMenu { session_id: id },
+                        intent: MinibufferIntent::MergeMenu { session_id: id },
                         error: None,
                     });
                 } else {
-                    self.set_status("harvest: select a side quest".into());
+                    self.set_status("merge: select a fork".into());
                 }
             }
-            OpenQuestLog => {
+            OpenForkLog => {
                 let Some(id) = self.selected_id() else {
                     return;
                 };
-                let quests = self
+                let forks = self
                     .sessions
                     .iter()
                     .filter(|s| {
                         s.forked_from.as_ref().map(|f| f.session_id.as_str()) == Some(id.as_str())
                     })
                     .count();
-                self.set_status(format!(
-                    "⑂{quests} side quests — select one to open; C-x h harvests"
-                ));
+                self.set_status(format!("⑂{forks} forks — select one to open; C-x m merges"));
             }
             OpenRename => match self.selection.clone() {
                 Selection::Session(id) => {
@@ -10874,7 +10899,7 @@ mod tests {
             operator_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
-            harvest: None,
+            merge: None,
         }
     }
 

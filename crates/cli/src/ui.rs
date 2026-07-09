@@ -1645,7 +1645,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     let name_avail = row_w.saturating_sub(prefix_w + 1 + harness_w + marker_w);
                     let mut raw_name = primary_label(s);
                     if s.forked_from.is_none() {
-                        let quests = app
+                        let forks = app
                             .sessions
                             .iter()
                             .filter(|q| {
@@ -1654,8 +1654,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                                     && !q.archived
                             })
                             .count();
-                        if quests > 0 {
-                            raw_name.push_str(&format!(" ⑂{quests}"));
+                        if forks > 0 {
+                            raw_name.push_str(&format!(" ⑂{forks}"));
                         }
                     }
                     let scroll = if is_selected && focused {
@@ -7669,7 +7669,10 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-x C-o         focus session terminal / refocus Program
     C-x d           show diff
     C-x r           rename selected session (clears title on empty submit)
-    C-x f           fork selected session into a new harness (seeded w/ history)
+    C-x f           fork selected session instantly (same harness, no prompt)
+    C-x F           fork selected session into a different harness (picker)
+    C-x q           fork log: forks of the selected session
+    C-x m           merge the selected fork (take result, or discard)
     C-c C-c         interrupt
 
   scrollback
@@ -7690,7 +7693,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
 
   mouse
     drag text       select visible TUI text and copy to terminal clipboard
-    C-x m           toggle mouse capture off/on for native selection fallback
+    C-x c           toggle mouse capture off/on for native selection fallback
 
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
@@ -7739,7 +7742,10 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     C-x C-o         focus session terminal / refocus Program
     g d             show diff
     r               rename selected session (clears title on empty submit)
-    O / f           fork selected session into a new harness (seeded w/ history)
+    f               fork selected session instantly (same harness, no prompt)
+    O               fork selected session into a different harness (picker)
+    q               fork log: forks of the selected session
+    m               merge the selected fork (take result, or discard)
     C-c             interrupt
 
   scrollback
@@ -7760,7 +7766,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
 
   mouse
     drag text       select visible TUI text and copy to terminal clipboard
-    C-x m           toggle mouse capture off/on for native selection fallback
+    C-x c           toggle mouse capture off/on for native selection fallback
 
   global
     :               command palette
@@ -13906,7 +13912,7 @@ mod tests {
             operator_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
-            harvest: None,
+            merge: None,
         }
     }
 

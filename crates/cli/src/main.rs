@@ -527,7 +527,6 @@ async fn main() -> Result<()> {
                         seed: !no_seed,
                         max_seed_bytes,
                         pty_size: None,
-                        side_quest: false,
                     },
                 )
                 .await?;
