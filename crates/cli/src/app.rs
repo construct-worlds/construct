@@ -23648,6 +23648,75 @@ mod tests {
         server2.abort();
     }
 
+    // While a tour is running, StartTutorial is a no-op — so neither the
+    // welcome-card CTA nor the modeline "tour: t" segment may keep looking
+    // clickable (the inverse of the card's click-ownership rule: if it
+    // can't respond it must not look clickable). The row dims, hover shows
+    // nothing, and no StartTutorial HintZone exists anywhere in the frame;
+    // both return to normal on the first frame after the tour ends.
+    #[tokio::test]
+    async fn tour_cta_dims_and_loses_zone_while_tour_active() {
+        let (mut app, _dir, server) = empty_app().await;
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        // Baseline: no tour → both zones (card CTA + modeline segment).
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let zones = |app: &App| {
+            app.layout
+                .shortcut_hints
+                .iter()
+                .filter(|h| h.action == KeyAction::StartTutorial)
+                .count()
+        };
+        assert_eq!(zones(&app), 2, "card CTA + modeline segment when idle");
+        let cta = *app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::StartTutorial)
+            .expect("card CTA zone");
+
+        app.tutorial_start();
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        assert_eq!(
+            zones(&app),
+            0,
+            "no StartTutorial zone may exist while a tour is running"
+        );
+        // The CTA label cell (where the zone used to start) renders dim,
+        // with none of the invite bold.
+        let cell_style = terminal
+            .backend()
+            .buffer()
+            .cell((cta.x_start, cta.y))
+            .map(|c| c.style())
+            .expect("CTA cell");
+        assert_eq!(
+            cell_style.fg,
+            Some(app.theme.dim),
+            "CTA must render dim while the tour runs"
+        );
+        assert!(
+            !cell_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "no invite emphasis while the tour runs"
+        );
+
+        // Tour ends → both affordances come back on the next frame.
+        app.tutorial_end_tour();
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        assert_eq!(zones(&app), 2, "zones return once the tour ends");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn starting_tutorial_renders_step1_card() {
         let (mut app, _dir, server) = empty_app().await;
@@ -24143,6 +24212,99 @@ mod tests {
         assert_eq!(app2.tutorial.as_ref().map(|t| t.step), Some(7));
         server.abort();
         server2.abort();
+    }
+
+    // Regression for the step-5 user report: "apply the Tasks template" and
+    // "add a task under Todo" never ticked. Both are LOCAL edits to the
+    // program popup's buffer — `apply_program_template` and typing mutate
+    // only client state, and the daemon (whose PROGRAM_STATE event was the
+    // only detector) learns about them on save/run. The checkmarks must
+    // appear as the user acts, before any save, via the render tick's
+    // buffer observation.
+    #[tokio::test]
+    async fn step5_local_template_and_task_edits_tick_before_any_save() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.tutorial_start();
+        {
+            let t = app.tutorial.as_mut().unwrap();
+            t.step = 5;
+            t.practice_session_id = Some("s1".into());
+        }
+        let board = "# Rule\n\n## Todo\n\n## In Progress\n\n## Done\n";
+
+        // A program on some OTHER session never ticks the practice checks.
+        app.program_popup = Some(program_popup_for_test("other", board, 0));
+        app.tutorial_tick(Instant::now());
+        let t = app.tutorial.as_ref().unwrap();
+        assert!(
+            !t.template_applied && !t.task_line_present,
+            "another session's program must not tick the sub-checks"
+        );
+
+        // Blank program on the practice session: still nothing.
+        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.tutorial_tick(Instant::now());
+        let t = app.tutorial.as_ref().unwrap();
+        assert!(!t.template_applied && !t.task_line_present);
+
+        // Apply the Tasks template — a purely client-side buffer swap, no
+        // daemon event. The template box ticks; the (empty) Todo must not
+        // tick the task box.
+        app.apply_program_template("tasks".into(), board.into());
+        app.tutorial_tick(Instant::now());
+        let t = app.tutorial.as_ref().unwrap();
+        assert!(
+            t.template_applied,
+            "template application must tick before any save"
+        );
+        assert!(
+            !t.task_line_present,
+            "the template's empty Todo must not tick the task box"
+        );
+
+        // Type a task line under ## Todo (still local, still unsaved).
+        app.program_popup.as_mut().unwrap().buffer =
+            "# Rule\n\n## Todo\n\n- Test task\n\n## In Progress\n\n## Done\n".into();
+        app.tutorial_tick(Instant::now());
+        let t = app.tutorial.as_ref().unwrap();
+        assert!(
+            t.task_line_present,
+            "a task line under Todo must tick before any save"
+        );
+        assert_eq!(t.step, 5, "non-degraded step 5 still waits for the run");
+
+        // Sticky: wiping the buffer afterwards never unticks.
+        app.program_popup.as_mut().unwrap().buffer = String::new();
+        app.tutorial_tick(Instant::now());
+        let t = app.tutorial.as_ref().unwrap();
+        assert!(
+            t.template_applied && t.task_line_present,
+            "ticks are sticky across later edits"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn step5_task_under_done_only_does_not_tick_task_box() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.tutorial_start();
+        {
+            let t = app.tutorial.as_mut().unwrap();
+            t.step = 5;
+            t.practice_session_id = Some("s1".into());
+        }
+        // Sections present (template box ticks on content), but the only
+        // task line sits under ## Done — the Todo box must stay unticked.
+        let md = "# Rule\n\n## Todo\n\n## In Progress\n\n## Done\n\n- Test task\n";
+        app.program_popup = Some(program_popup_for_test("s1", md, 0));
+        app.tutorial_tick(Instant::now());
+        let t = app.tutorial.as_ref().unwrap();
+        assert!(t.template_applied, "board sections tick the template box");
+        assert!(
+            !t.task_line_present,
+            "a task under Done only must not tick the Todo box"
+        );
+        server.abort();
     }
 
     // Footer [prev step] through the real click pipeline: prev from step 2

@@ -689,6 +689,19 @@ fn done_section_has_task(markdown: &str) -> bool {
     !section_lines(markdown, "Done").is_empty()
 }
 
+/// Content-shaped detection of the Tasks board: all three of its section
+/// headings present. Deliberately independent of `template_id` so a user
+/// who types the sections by hand passes step 5's "apply the template"
+/// check the same as one who clicked the template button.
+fn has_tasks_board_sections(markdown: &str) -> bool {
+    let has_heading = |name: &str| {
+        markdown
+            .lines()
+            .any(|line| line.trim().strip_prefix("## ").map(str::trim) == Some(name))
+    };
+    has_heading("Todo") && has_heading("In Progress") && has_heading("Done")
+}
+
 impl App {
     /// Entry point (1 of 2): bare `t` in the welcome card / palette command
     /// `tutorial`. A no-op while a tour is already active (spec 0077); the
@@ -1063,9 +1076,63 @@ impl App {
         }
     }
 
-    /// Drives the step 5/6 stall hint from the existing render tick — no
-    /// dedicated timer thread.
+    /// Client-side counterpart of [`Self::tutorial_on_program_state`] for
+    /// step 5's two content-driven sub-checks. Applying the Tasks template
+    /// and typing the task line are LOCAL edits to the program popup's
+    /// buffer — the daemon only learns about them on save (`C-x C-s`) or
+    /// run (`C-x C-r`), so waiting for its PROGRAM_STATE event left the
+    /// checklist unticked while the user was actually doing the step
+    /// (user report). Evaluated from the render tick — a cheap string scan
+    /// gated to step 5 with unticked boxes — so the checkmarks appear as
+    /// the user acts, before any save. The daemon event path stays as a
+    /// second source (a program synced from another client): whichever
+    /// source sees it first ticks, and ticks are sticky — later buffer
+    /// edits never untick them.
+    pub fn tutorial_observe_program_buffer(&mut self) {
+        let Some(t) = self.tutorial.as_ref() else {
+            return;
+        };
+        if t.completed || t.step != 5 || (t.template_applied && t.task_line_present) {
+            return;
+        }
+        let Some(popup) = self.program_popup.as_ref() else {
+            return;
+        };
+        // Scope to the practice session's program when we know it; a tour
+        // resumed after a TUI restart loses `practice_session_id` (it is
+        // not persisted), so fall back to whatever program the user is
+        // actually editing rather than leaving the step un-completable.
+        if let Some(practice) = t.practice_session_id.as_deref() {
+            if practice != popup.program.session_id.as_str() {
+                return;
+            }
+        }
+        let template = popup.program.template_id.as_deref() == Some("tasks")
+            || has_tasks_board_sections(&popup.buffer);
+        let task = todo_section_has_task(&popup.buffer);
+        let Some(t) = self.tutorial.as_mut() else {
+            return;
+        };
+        let mut progressed = false;
+        if template && !t.template_applied {
+            t.template_applied = true;
+            progressed = true;
+        }
+        if task && !t.task_line_present {
+            t.task_line_present = true;
+            progressed = true;
+        }
+        if progressed {
+            t.touch_progress();
+            t.recompute_completion();
+        }
+    }
+
+    /// Drives the step 5/6 stall hint and the client-side program-buffer
+    /// observation from the existing render tick — no dedicated timer
+    /// thread.
     pub fn tutorial_tick(&mut self, now: Instant) {
+        self.tutorial_observe_program_buffer();
         if let Some(t) = self.tutorial.as_mut() {
             t.tick(now);
         }
@@ -1103,6 +1170,19 @@ mod tests {
         let moved = "# Rule\n\n## Todo\n\n## In Progress\n\n- Test task\n\n## Done\n\n- Test task\n";
         assert!(!todo_section_has_task(moved));
         assert!(done_section_has_task(moved));
+    }
+
+    #[test]
+    fn tasks_board_sections_detected_by_content() {
+        let template = "# Rule\n\nblurb\n\n## Todo\n\n## In Progress\n\n## Done\n";
+        assert!(has_tasks_board_sections(template));
+        // Hand-typed sections count the same as the template button.
+        let hand_typed = "## Todo\n## In Progress\n## Done\n";
+        assert!(has_tasks_board_sections(hand_typed));
+        // A partial board does not.
+        let partial = "# Rule\n\n## Todo\n\n## Done\n";
+        assert!(!has_tasks_board_sections(partial));
+        assert!(!has_tasks_board_sections(""));
     }
 
     #[test]

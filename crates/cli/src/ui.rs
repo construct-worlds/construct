@@ -3467,6 +3467,13 @@ fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
     let tour_not_done =
         crate::tui_state::configure_dialog_seen() && !crate::tui_state::tutorial_done();
     let tour_invite_style = label_style.add_modifier(Modifier::BOLD);
+    // While a tour is running, StartTutorial is a no-op — so the CTA must
+    // not look clickable (the inverse of the tour card's click-ownership
+    // rule: if it looks clickable it must respond; if it can't respond it
+    // must not look clickable). The row still renders, but dimmed, with no
+    // hover treatment and no HintZone; it comes back to life on the next
+    // frame after the tour ends.
+    let tour_active = app.tutorial.is_some();
     let mouse = app.mouse_pos;
     // The tour CTA (row 4) sits under the blurb, above the chord list —
     // the audience the tour serves can't parse chord tables yet, so it
@@ -3486,6 +3493,9 @@ fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
     ];
     let mut hovered = [false; 5];
     for (i, (row, col, label, action)) in shortcut_rows.iter().enumerate() {
+        if *action == KeyAction::StartTutorial && tour_active {
+            continue; // inert while the tour runs: no zone, no hover
+        }
         let x_start = card.x + *col;
         let y = card.y + *row;
         let w = UnicodeWidthStr::width(*label) as u16;
@@ -3522,16 +3532,28 @@ fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
         )),
         Line::raw(""),
         // Tour call-to-action. "▶ " is 2 cols, matching the CTA zone's
-        // col offset in `shortcut_rows` above.
+        // col offset in `shortcut_rows` above. Dimmed whole (marker + label
+        // + suffix) while a tour is already running — `t` is inert then too.
         Line::from(vec![
-            Span::styled("▶ ", label_style),
             Span::styled(
-                "[start the interactive tour]",
-                tour_style(if tour_not_done {
-                    tour_invite_style
+                "▶ ",
+                if tour_active {
+                    Style::default().fg(app.theme.dim)
                 } else {
                     label_style
-                }),
+                },
+            ),
+            Span::styled(
+                "[start the interactive tour]",
+                if tour_active {
+                    Style::default().fg(app.theme.dim)
+                } else {
+                    tour_style(if tour_not_done {
+                        tour_invite_style
+                    } else {
+                        label_style
+                    })
+                },
             ),
             Span::styled("  — or press t", Style::default().fg(app.theme.dim)),
         ]),
@@ -6880,12 +6902,20 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             hint_col = hint_col.saturating_add(2);
         }
         let w = UnicodeWidthStr::width(*label) as u16;
-        let hovered = app
-            .mouse_pos
-            .is_some_and(|(mx, my)| my == area.y && mx >= hint_col && mx < hint_col + w);
+        // "tour: t" goes inert while a tour is already running — the action
+        // would be a no-op, so it must not look clickable: dimmed, no hover,
+        // no HintZone. (Same inverse of the tour card's click-ownership
+        // rule as the welcome-card CTA.)
+        let inert = *action == KeyAction::StartTutorial && app.tutorial.is_some();
+        let hovered = !inert
+            && app
+                .mouse_pos
+                .is_some_and(|(mx, my)| my == area.y && mx >= hint_col && mx < hint_col + w);
         let style = Style::default()
             .bg(app.theme.modeline_bg)
-            .fg(if hovered {
+            .fg(if inert {
+                app.theme.dim
+            } else if hovered {
                 app.theme.text
             } else {
                 app.theme.modeline_fg
@@ -6896,12 +6926,14 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
                 Modifier::empty()
             });
         spans.push(Span::styled((*label).to_string(), style));
-        app.layout.shortcut_hints.push(HintZone {
-            x_start: hint_col,
-            x_end: hint_col.saturating_add(w),
-            y: area.y,
-            action: *action,
-        });
+        if !inert {
+            app.layout.shortcut_hints.push(HintZone {
+                x_start: hint_col,
+                x_end: hint_col.saturating_add(w),
+                y: area.y,
+                action: *action,
+            });
+        }
         hint_col = hint_col.saturating_add(w);
     }
     spans.push(Span::raw(modeline_post_hint));
