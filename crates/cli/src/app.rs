@@ -33,6 +33,7 @@ mod configure;
 mod dynamic_ui;
 mod editor;
 mod lineage_popup;
+mod lineage_preview;
 mod matrix_clicks;
 mod minibuffer;
 mod mouse;
@@ -46,6 +47,7 @@ pub use configure::{
     ConfigureTab, CONFIGURE_TABS,
 };
 pub use lineage_popup::LineagePopup;
+pub use lineage_preview::LineagePreviewHover;
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
 };
@@ -58,6 +60,12 @@ pub(crate) const DYNAMIC_UI_AUTOHIDE_SECS: u64 = 15;
 /// pointer to travel from the square down onto the widget without it vanishing —
 /// distinct from the 15s create/update auto-reveal above.
 pub(crate) const DYNAMIC_UI_HOVER_GRACE_MS: u64 = 1000;
+/// How long a session's lineage preview (hover trigger: the pane title
+/// bar's harness label) lingers after the cursor leaves the label — kept as
+/// its own constant, independent of `DYNAMIC_UI_HOVER_GRACE_MS`, even though
+/// the value matches: the two features are unrelated and shouldn't be
+/// coupled just because they currently agree on a number.
+pub(crate) const LINEAGE_PREVIEW_HOVER_GRACE_MS: u64 = 1000;
 
 /// Which pane currently owns the keyboard. `View` covers both the transcript
 /// and the terminal renderer — when the view shows a PTY-backed session and
@@ -1337,6 +1345,17 @@ pub struct App {
     /// on every render/key handling call rather than snapshotted at open
     /// time — see `lineage_popup::App::lineage_rows`.
     pub lineage_popup: Option<LineagePopup>,
+    /// Session-attached lineage preview shown transiently because the cursor
+    /// is over a session's harness label (the pane title bar's right
+    /// cluster, `apply_pane_title_right_cluster`). At most one across the
+    /// fleet at a time — see `lineage_preview::LineagePreviewHover`. Distinct
+    /// from `lineage_popup`: this is a small, ambient, read-only surface, not
+    /// the full-screen modal.
+    pub lineage_preview_hover: Option<LineagePreviewHover>,
+    /// Session ids whose lineage preview is pinned open via a harness-label
+    /// click. Mirrors `dynamic_ui_selected`'s pin-by-click shape, but keyed
+    /// only by session id (one lineage preview per session, not per panel).
+    pub lineage_preview_pinned: HashSet<String>,
     /// `/configure` onboarding dialog (spec 0069): `None` = closed. Opened by
     /// the command palette, or automatically on first run / when no agent
     /// harness is available. Captures all input while open.
@@ -2592,6 +2611,26 @@ impl SessionTitleNameHit {
     }
 }
 
+/// A pane's clickable harness-label text in its title bar — registered only
+/// for sessions with fork/subagent lineage to show
+/// (`crate::lineage::has_lineage`). Hovering/clicking it drives the lineage
+/// preview (`app::lineage_preview`); ordinary sessions get no entry here and
+/// the label keeps its plain, non-interactive rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessLabelHit {
+    pub session_id: String,
+    pub row: u16,
+    pub start_col: u16,
+    /// Exclusive end column.
+    pub end_col: u16,
+}
+
+impl HarnessLabelHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
 /// Last-frame geometry for hit-testing mouse clicks.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutSnapshot {
@@ -2657,6 +2696,15 @@ pub struct LayoutSnapshot {
     /// entry per pane) — click starts an inline rename in place. Refreshed
     /// every frame by `render_detail`.
     pub session_title_name_hits: Vec<SessionTitleNameHit>,
+    /// Clickable harness-label hitboxes from the last frame — only populated
+    /// for sessions with lineage to show (see `HarnessLabelHit`). Hover/click
+    /// drives the session-attached lineage preview; the `C-x q`/`q` modal is
+    /// unaffected.
+    pub harness_label_hits: Vec<HarnessLabelHit>,
+    /// Bounds of the last-rendered lineage preview box (at most one across
+    /// the fleet, mirroring `dynamic_ui_popover_area`). `None` when no
+    /// preview is showing.
+    pub lineage_preview_area: Option<ratatui::layout::Rect>,
     /// Program title-bar Run button bounds: `(x_start, x_end, y)`.
     pub program_title_run_hit: Option<(u16, u16, u16)>,
     /// Program title-bar mode toggle bounds: `(x_start, x_end, y)`.
@@ -3063,6 +3111,8 @@ async fn run_with_socket_initial_selection(
         orchestrator_desired_size: None,
         tasks_popup: None,
         lineage_popup: None,
+        lineage_preview_hover: None,
+        lineage_preview_pinned: HashSet::new(),
         configure_popup: None,
         session_picker: None,
         program_popup: None,
@@ -7016,6 +7066,9 @@ impl App {
                 if self.is_over_dynamic_ui_overlay(ev.column, ev.row) {
                     return;
                 }
+                if self.is_over_lineage_preview(ev.column, ev.row) {
+                    return;
+                }
                 // Matrix-rain panel: the title bar doubles as a height
                 // handle. The panel is bottom-anchored, so dragging the top
                 // edge upward grows it and dragging downward shrinks it.
@@ -7099,7 +7152,9 @@ impl App {
                 } else if let Some((grab_offset, max_scrollback)) = self.dragging_terminal_scrollbar
                 {
                     self.drag_terminal_scrollbar_to_row(ev.row, grab_offset, max_scrollback);
-                } else if self.is_over_dynamic_ui_overlay(ev.column, ev.row) {
+                } else if self.is_over_dynamic_ui_overlay(ev.column, ev.row)
+                    || self.is_over_lineage_preview(ev.column, ev.row)
+                {
                     self.text_selection = None;
                 } else if let Some(sel) = self.text_selection.as_mut() {
                     sel.head = ScreenPoint {
@@ -7235,6 +7290,26 @@ impl App {
             self.session_title_menu = None;
         }
         if self.handle_dynamic_ui_overlay_click(col, row).await {
+            return;
+        }
+        // Clicking a session's harness label toggles its lineage preview pin
+        // (spec 0079) — only registered as a hit for sessions that actually
+        // have lineage to show (see `apply_pane_title_right_cluster`).
+        if let Some(hit) = self
+            .layout
+            .harness_label_hits
+            .iter()
+            .find(|hit| hit.contains(col, row))
+            .cloned()
+        {
+            self.toggle_lineage_preview_pin(hit.session_id);
+            return;
+        }
+        // A click elsewhere inside the lineage preview body is consumed
+        // rather than falling through to pane content underneath it (cursor
+        // placement, block toggling, session switch) — the preview is a
+        // read-only surface, so there is nothing there to act on.
+        if self.is_over_lineage_preview(col, row) {
             return;
         }
         // Tour card clicks — checked BEFORE the modal branch below, because
@@ -10588,6 +10663,8 @@ mod tests {
             minibuffer_choice_hits: Vec::new(),
             modal_area: None,
             session_title_name_hits: Vec::new(),
+            harness_label_hits: Vec::new(),
+            lineage_preview_area: None,
             program_title_run_hit: None,
             program_title_toggle_hit: None,
             program_title_close_hit: None,
@@ -10714,6 +10791,8 @@ mod tests {
             list_collapsed: false,
             tasks_popup: None,
             lineage_popup: None,
+            lineage_preview_hover: None,
+            lineage_preview_pinned: HashSet::new(),
             configure_popup: None,
             session_picker: None,
             program_popup: None,
@@ -26510,6 +26589,271 @@ mod tests {
             );
         }
         server.abort();
+    }
+
+    /// `s1` is a lone root with one fork (`s1-fork`) — enough lineage for
+    /// `crate::lineage::has_lineage("s1", ..)` to be true, so `s1`'s harness
+    /// label registers a hover/click hit (spec 0079).
+    async fn test_app_with_lineage() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        use agentd_client::Client;
+        use tokio::net::UnixListener;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut root = summary_with_kind(agentd_protocol::SessionKind::User);
+        // `has_pty` drives `select_session`'s "natural view" reset — without
+        // it, selecting "s1" flips the view to Chat (which doesn't render
+        // the sticky-widget/lineage-preview popover; see
+        // `render_terminal_for_window`) regardless of the test harness's
+        // default `ViewMode::Terminal`.
+        root.has_pty = true;
+        let mut fork = summary_with_kind(agentd_protocol::SessionKind::User);
+        fork.id = "s1-fork".into();
+        fork.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "s1".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+        });
+        let mut app = test_app(client, vec![root, fork]);
+        // An empty (but present) history takes `render_terminal_for_window`
+        // past its "(no PTY history yet)" placeholder and into the body that
+        // renders the sticky-widget/lineage-preview popover — without this,
+        // the pane never gets far enough to show either.
+        app.histories
+            .insert("s1".into(), crate::pty_render::ItemHistory::new());
+        (app, dir, server)
+    }
+
+    #[tokio::test]
+    async fn harness_label_registers_no_hit_without_lineage() {
+        let (mut app, _dir, server) = captured_app().await;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.layout.harness_label_hits.is_empty(),
+            "an ordinary session with no fork/subagent lineage must not register \
+             a harness-label hit — the label stays plain, non-interactive text"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn harness_label_registers_a_hit_for_a_session_with_lineage() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let hits: Vec<_> = app
+            .layout
+            .harness_label_hits
+            .iter()
+            .filter(|h| h.session_id == "s1")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the root of a fork should register exactly one harness-label hit"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lineage_preview_shows_on_hover_and_auto_hides_after_grace_lapses() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let hit = app
+            .layout
+            .harness_label_hits
+            .iter()
+            .find(|h| h.session_id == "s1")
+            .cloned()
+            .expect("harness label hit registered");
+
+        // No hover yet: the preview must not be showing.
+        assert!(!app.lineage_preview_visible("s1"));
+        assert!(app.layout.lineage_preview_area.is_none());
+
+        // Hover the harness label.
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.lineage_preview_visible("s1"),
+            "hovering the harness label should reveal the lineage preview"
+        );
+        let area = app
+            .layout
+            .lineage_preview_area
+            .expect("preview area recorded while hovered");
+        let buf = term.backend().buffer();
+        let text = rendered_text(buf);
+        assert!(
+            text.contains('⑂'),
+            "the preview must render the same fork-edge glyph the C-x q modal uses \
+             (reused from crate::lineage / render_lineage_row), not duplicated logic: {text:?}"
+        );
+        let _ = area;
+
+        // Move the pointer away and force the grace window to have already
+        // elapsed (rather than sleeping in a test) — the hover must drop and
+        // the preview must stop rendering.
+        app.mouse_pos = None;
+        app.lineage_preview_hover.as_mut().unwrap().until =
+            Instant::now() - Duration::from_millis(1);
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.lineage_preview_hover.is_none(),
+            "a lapsed hover must be cleared"
+        );
+        assert!(
+            app.layout.lineage_preview_area.is_none(),
+            "the preview must stop rendering once hover lapses and it isn't pinned"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lineage_preview_hover_over_the_body_extends_the_grace_window() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let hit = app
+            .layout
+            .harness_label_hits
+            .iter()
+            .find(|h| h.session_id == "s1")
+            .cloned()
+            .expect("harness label hit registered");
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let area = app
+            .layout
+            .lineage_preview_area
+            .expect("preview area recorded while hovered");
+        let until_over_label = app
+            .lineage_preview_hover
+            .as_ref()
+            .expect("hover armed by the label")
+            .until;
+
+        // The pointer travels off the label and down onto the preview body
+        // itself — the grace window must keep renewing there too (so the
+        // pointer can travel from the trigger down onto the preview without
+        // it vanishing mid-flight), not just while glued to the trigger glyph.
+        app.mouse_pos = Some((area.x + 1, area.y + 1));
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.lineage_preview_visible("s1"),
+            "the preview must still show while the pointer rests on its own body"
+        );
+        let until_over_body = app
+            .lineage_preview_hover
+            .as_ref()
+            .expect("hover still tracked while over the body")
+            .until;
+        assert!(
+            until_over_body >= until_over_label,
+            "hovering the body must renew (never shorten) the grace deadline"
+        );
+        assert!(app.layout.lineage_preview_area.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn harness_label_click_toggles_lineage_preview_pin() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let hit = app
+            .layout
+            .harness_label_hits
+            .iter()
+            .find(|h| h.session_id == "s1")
+            .cloned()
+            .expect("harness label hit registered");
+
+        assert!(!app.lineage_preview_pinned.contains("s1"));
+        app.handle_left_click(hit.start_col, hit.row).await;
+        assert!(
+            app.lineage_preview_pinned.contains("s1"),
+            "clicking the harness label should pin the lineage preview open"
+        );
+        assert!(app.lineage_preview_visible("s1"));
+        // Pinned stays visible with no hover and the pointer elsewhere.
+        app.mouse_pos = None;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.layout.lineage_preview_area.is_some());
+
+        app.handle_left_click(hit.start_col, hit.row).await;
+        assert!(
+            !app.lineage_preview_pinned.contains("s1"),
+            "clicking the harness label again should un-pin it"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lineage_preview_trigger_survives_narrow_terminal_without_overlap() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(40, 20);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render must not panic at a narrow terminal width");
+        if let Some(hit) = app
+            .layout
+            .harness_label_hits
+            .iter()
+            .find(|h| h.session_id == "s1")
+        {
+            // Close button occupies the final cells before the corner; the
+            // harness-label trigger must not spill into or past it, even at
+            // this width.
+            let view = app.layout.view_area.expect("view area");
+            let (close_start, _, _) = crate::ui::view_close_button_range(view);
+            assert!(
+                hit.end_col <= close_start,
+                "harness trigger {hit:?} must not overlap the close button starting at {close_start}"
+            );
+            assert!(hit.start_col < hit.end_col, "hit must have positive width");
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn harness_label_range_never_overlaps_the_close_button_at_narrow_width() {
+        let rect = Rect::new(0, 0, 30, 3);
+        let close_width = 3;
+        let harness_width = 10;
+        let (x_start, x_end, y) = crate::ui::harness_label_range(rect, close_width, harness_width);
+        assert_eq!(y, rect.y);
+        assert!(x_start < x_end, "harness span must have positive width");
+        assert_eq!(
+            x_end - x_start,
+            harness_width,
+            "harness keeps its full width even when the pane is narrow"
+        );
+        let close_x_start = rect.x + rect.width - 1 - close_width;
+        assert!(
+            x_end <= close_x_start,
+            "harness (ends {x_end}) must not overlap the close button starting at {close_x_start}"
+        );
     }
 
     #[tokio::test]

@@ -208,6 +208,23 @@ impl App {
             }
             return true;
         }
+        // Clicking the harness label pins/unpins that session's lineage
+        // preview (spec 0079) — same shared geometry as the plain session
+        // view (`harness_label_hits`, registered by
+        // `apply_pane_title_right_cluster` only when the session has
+        // lineage to show).
+        if let Some(hit) = self
+            .layout
+            .harness_label_hits
+            .iter()
+            .find(|hit| hit.contains(ev.column, ev.row))
+            .cloned()
+        {
+            if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.toggle_lineage_preview_pin(hit.session_id);
+            }
+            return true;
+        }
         // Clicking a template button in the empty-program placeholder fills the
         // buffer with that template's Markdown — a starting point the user then
         // edits. Checked before the generic cursor-placement handler so the

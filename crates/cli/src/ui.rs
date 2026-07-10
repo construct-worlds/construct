@@ -143,6 +143,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.main_window_areas.clear();
     app.layout.main_window_dividers.clear();
     app.layout.session_title_name_hits.clear();
+    app.layout.harness_label_hits.clear();
+    app.layout.lineage_preview_area = None;
     app.window_pane_sizes.clear();
     app.terminal_replayed_sessions_this_frame.clear();
     app.layout.dynamic_ui_popover_area = None;
@@ -819,6 +821,31 @@ pub fn dynamic_ui_trigger_range(
         .saturating_sub(close_reserved)
         .saturating_sub(harness_reserved);
     (x_end.saturating_sub(label_width), x_end, view_area.y)
+}
+
+/// On-screen span of the harness label itself in a pane's title-bar right
+/// cluster (`apply_pane_title_right_cluster`). Returns
+/// `(x_start, x_end_exclusive, y)`. Unlike [`dynamic_ui_trigger_range`]
+/// (which positions an element with something else — the harness label —
+/// still to its right), the harness label is always the rightmost element
+/// before the close button, so its span is just "titles_right minus close's
+/// own reserved width", with no further reservation beyond that.
+pub fn harness_label_range(
+    view_area: Rect,
+    close_width: u16,
+    harness_width: u16,
+) -> (u16, u16, u16) {
+    let titles_right = view_area
+        .x
+        .saturating_add(view_area.width)
+        .saturating_sub(1);
+    let close_reserved = if close_width > 0 {
+        close_width.saturating_add(1)
+    } else {
+        0
+    };
+    let x_end = titles_right.saturating_sub(close_reserved);
+    (x_end.saturating_sub(harness_width), x_end, view_area.y)
 }
 
 fn session_sticky_widget_panels(app: &App, session_id: &str) -> Vec<agentd_protocol::UiPanel> {
@@ -3169,6 +3196,12 @@ fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
 /// hit-tests the last 3 cells of the top border). Widget hit ranges are
 /// registered as a side effect of `render_session_widget_title` (into
 /// `dynamic_ui_widget_hits`); the close geometry is `view_close_button_range`.
+///
+/// On a session with fork/subagent lineage to show (spec 0079), the harness
+/// label doubles as the hover/click trigger for the session-attached lineage
+/// preview: its on-screen span is registered into `harness_label_hits` (via
+/// `harness_label_range`) and its style reacts to hover/pin state. Sessions
+/// with no lineage register no hit and render the label exactly as before.
 fn apply_pane_title_right_cluster<'a>(
     app: &mut App,
     area: Rect,
@@ -3189,10 +3222,6 @@ fn apply_pane_title_right_cluster<'a>(
         .as_deref()
         .map(UnicodeWidthStr::width)
         .unwrap_or(0) as u16;
-    let harness_right = harness_label_text.as_ref().map(|text| {
-        Line::from(Span::styled(text.clone(), border_style))
-            .alignment(ratatui::layout::Alignment::Right)
-    });
     // The close / session-actions button is the rightmost right-aligned title.
     // Its on-screen width must be known up front so the widget cluster's
     // hit geometry can account for it — the ☰ glyph is two cells wide, so
@@ -3204,6 +3233,61 @@ fn apply_pane_title_right_cluster<'a>(
     } else {
         0
     };
+    // Lineage preview trigger (spec 0079): on a session that actually has
+    // fork/subagent lineage to show, the harness label doubles as the
+    // hover/click trigger for a small, session-attached preview of the same
+    // tree the `C-x q`/`q` modal renders — hover reveals it (with a short
+    // grace so the pointer can travel down onto the preview body), a click
+    // pins it open. Ordinary sessions with no lineage get no hit-rect
+    // registered here and the label keeps rendering exactly as it always
+    // has (plain `border_style`, no hover/click behavior at all).
+    let mut harness_style = border_style;
+    if let Some(s) = summary {
+        if crate::lineage::has_lineage(&s.id, &app.sessions) {
+            let now = Instant::now();
+            if app
+                .lineage_preview_hover
+                .as_ref()
+                .is_some_and(|h| h.until <= now)
+            {
+                app.lineage_preview_hover = None;
+            }
+            let (x_start, x_end, y) = harness_label_range(area, close_width, harness_width);
+            let hovered = app
+                .mouse_pos
+                .is_some_and(|(mx, my)| my == y && mx >= x_start && mx < x_end);
+            if hovered {
+                app.lineage_preview_hover = Some(crate::app::LineagePreviewHover {
+                    session_id: s.id.clone(),
+                    until: now + Duration::from_millis(crate::app::LINEAGE_PREVIEW_HOVER_GRACE_MS),
+                });
+            }
+            app.layout
+                .harness_label_hits
+                .push(crate::app::HarnessLabelHit {
+                    session_id: s.id.clone(),
+                    row: y,
+                    start_col: x_start,
+                    end_col: x_end,
+                });
+            let pinned = app.lineage_preview_pinned.contains(&s.id);
+            harness_style = if pinned {
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if hovered {
+                Style::default()
+                    .fg(app.theme.matrix_flash_good)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                border_style
+            };
+        }
+    }
+    let harness_right = harness_label_text.as_ref().map(|text| {
+        Line::from(Span::styled(text.clone(), harness_style))
+            .alignment(ratatui::layout::Alignment::Right)
+    });
     let widget_title = summary.and_then(|s| {
         let panels = session_sticky_widget_panels(app, &s.id);
         (!panels.is_empty()).then(|| {
@@ -4096,6 +4180,7 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
         .any(|open_id| open_id == &id);
     if !program_open_for_session {
         render_visible_dynamic_ui_panels(f, area, app, &id, &sticky_panels);
+        render_lineage_preview(f, area, app, &id);
     }
     if app.dynamic_ui_popover_open.as_deref() == Some(id.as_str()) && !sticky_panels.is_empty() {
         render_dynamic_ui_dropdown(f, area, app, &sticky_panels);
@@ -9179,6 +9264,102 @@ fn render_lineage_row(
     Line::from(spans)
 }
 
+/// Bounds of a session's lineage preview box: anchored top-right of its own
+/// pane content area, directly below the title bar — the same corner
+/// `dynamic_ui_stack_area` anchors the sticky-widget popover to, so both
+/// session-attached surfaces read as belonging to the same pane. `None` when
+/// the pane is too small to fit a useful box (mirrors `dynamic_ui_stack_area`).
+fn lineage_preview_rect(session_area: Rect, row_count: usize) -> Option<Rect> {
+    if session_area.width < 24 || session_area.height < 4 {
+        return None;
+    }
+    let max_w = ((session_area.width as f32) * 0.6).round() as u16;
+    let width = max_w.clamp(24, session_area.width.saturating_sub(2).max(1));
+    let height = (row_count as u16)
+        .saturating_add(2)
+        .clamp(3, session_area.height.saturating_sub(1).max(3));
+    Some(Rect {
+        x: session_area
+            .x
+            .saturating_add(session_area.width.saturating_sub(width + 1)),
+        y: session_area.y,
+        width,
+        height: height.min(session_area.height),
+    })
+}
+
+/// Render `session_id`'s lineage preview (spec 0079) if its hover/pin state
+/// says it should show this frame — a small, read-only box anchored to
+/// `session_area` (that session's own pane), NOT the full-screen `C-x q`/`q`
+/// modal. Reuses `crate::lineage::build_tree`/`flatten` for the tree and
+/// `render_lineage_row` for each row's formatting directly, rather than
+/// re-deriving either — the preview and the modal render the exact same
+/// data, just at different scales.
+fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, session_id: &str) {
+    let now = Instant::now();
+    if app
+        .lineage_preview_hover
+        .as_ref()
+        .is_some_and(|h| h.until <= now)
+    {
+        app.lineage_preview_hover = None;
+    }
+    if !app.lineage_preview_visible(session_id) {
+        return;
+    }
+    let Some(root) = crate::lineage::build_tree(session_id, &app.sessions) else {
+        return;
+    };
+    let rows = crate::lineage::flatten(&root);
+    if rows.len() <= 1 {
+        // Nothing beyond the session itself to show — e.g. its one fork was
+        // just discarded and pruned from `app.sessions` while pinned open.
+        // Render nothing rather than an empty box; the pin quietly goes
+        // stale until the user clicks it off.
+        return;
+    }
+    let Some(area) = lineage_preview_rect(session_area, rows.len()) else {
+        return;
+    };
+    // Hovering the preview body itself (not just the harness-label trigger)
+    // holds the hover open, so the pointer can rest on it after sliding off
+    // the label — mirrors `render_visible_dynamic_ui_panels`'s identical
+    // widget-body hover-extend.
+    if let Some((mx, my)) = app.mouse_pos {
+        if contains_rect(area, mx, my) {
+            if let Some(hover) = app.lineage_preview_hover.as_mut() {
+                if hover.session_id == session_id {
+                    hover.until =
+                        now + Duration::from_millis(crate::app::LINEAGE_PREVIEW_HOVER_GRACE_MS);
+                }
+            }
+        }
+    }
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let by_id: HashMap<&str, &SessionSummary> =
+        app.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+    let lines: Vec<Line<'static>> = rows
+        .iter()
+        .take(inner.height as usize)
+        .map(|row| render_lineage_row(row, &by_id, &app.theme, now_ms))
+        .collect();
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.dim)),
+        area,
+    );
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    app.layout.lineage_preview_area = Some(area);
+}
+
 /// Fork + subagent lineage view popup (`C-x q` / `q`, spec
 /// 0079-fork-and-subagent-lineage-view): a live `git log --graph`-style tree
 /// unifying fork lineage (spec 0078, `⑂`) and subagent parent/child edges
@@ -10275,6 +10456,11 @@ fn render_program_popup_at(
                 &panels,
             );
         }
+        // Same reasoning as the sticky-widget re-render just above: the
+        // lineage preview is armed by the harness label
+        // `apply_pane_title_right_cluster` painted, but the program's own
+        // `Clear` wipes whatever the session view drew underneath it.
+        render_lineage_preview(f, safe_block_inner, app, &popup.program.session_id);
     }
     // Capture session-clip hitboxes for this program so hover can work for any
     // visible program, even when another split is focused. Only the active program

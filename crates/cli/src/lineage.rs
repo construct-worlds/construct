@@ -76,6 +76,27 @@ pub struct LineageNode {
     pub children: Vec<LineageChild>,
 }
 
+/// Whether `session_id` has any lineage relationship worth showing: it was
+/// itself forked from a parent, or at least one other session in `sessions`
+/// points back at it via `forked_from`/`parent_session_id`. Used to gate the
+/// lineage preview trigger (the pane title bar's harness label) on ordinary
+/// sessions that have nothing to show — cheaper than [`build_tree`] since it
+/// doesn't walk to the root or materialize the full tree, just answers
+/// yes/no for `session_id` itself.
+pub fn has_lineage(session_id: &str, sessions: &[SessionSummary]) -> bool {
+    sessions.iter().any(|s| {
+        if s.id == session_id {
+            s.forked_from.is_some()
+        } else {
+            (matches!(s.kind, SessionKind::Subagent)
+                && s.parent_session_id.as_deref() == Some(session_id))
+                || s.forked_from
+                    .as_ref()
+                    .is_some_and(|f| f.session_id == session_id)
+        }
+    })
+}
+
 /// Build the lineage tree containing `focus_id`: walk up through fork
 /// (`forked_from`) and subagent (`parent_session_id`) parent links to the
 /// topmost ancestor, then materialize the tree back down from there. `None`
@@ -522,6 +543,36 @@ mod tests {
         assert!(label.contains("42msg"));
         assert!(label.contains("1m05s"));
         assert!(label.contains("$0.50"));
+    }
+
+    #[test]
+    fn has_lineage_is_false_for_an_ordinary_session() {
+        let sessions = vec![base("a"), base("b")];
+        assert!(!has_lineage("a", &sessions));
+    }
+
+    #[test]
+    fn has_lineage_is_true_for_a_fork_itself() {
+        let sessions = vec![base("root"), forked_from(base("f"), "root")];
+        assert!(has_lineage("f", &sessions));
+    }
+
+    #[test]
+    fn has_lineage_is_true_for_a_session_with_a_fork_descendant() {
+        let sessions = vec![base("root"), forked_from(base("f"), "root")];
+        assert!(has_lineage("root", &sessions));
+    }
+
+    #[test]
+    fn has_lineage_is_true_for_a_session_with_a_subagent_descendant() {
+        let sessions = vec![base("root"), subagent_of(base("sub"), "root")];
+        assert!(has_lineage("root", &sessions));
+    }
+
+    #[test]
+    fn has_lineage_is_false_for_an_unknown_session_id() {
+        let sessions = vec![base("root")];
+        assert!(!has_lineage("ghost", &sessions));
     }
 
     #[test]
