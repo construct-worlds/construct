@@ -9574,6 +9574,61 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
         .collect();
     f.render_widget(Paragraph::new(lines), inner);
 
+    // Scrollbars when the diagram overflows the viewport — background
+    // tints only (same opacity approximation as the terminal scrollbar),
+    // preserving the diagram glyphs underneath. Vertical along the right
+    // inner column, horizontal along the bottom-pad row.
+    let track_color = blend_color(Color::Black, app.theme.text, 0.30);
+    let thumb_color = blend_color(Color::Black, app.theme.text, 0.80);
+    if rows.len() > visible && inner.width > 0 {
+        let track_h = visible;
+        let thumb_h = (track_h * track_h / rows.len().max(1)).clamp(1, track_h);
+        let denom = rows.len() - visible;
+        let max_top = track_h - thumb_h;
+        let top = if denom == 0 {
+            0
+        } else {
+            (scroll * max_top + denom / 2) / denom
+        };
+        let x = inner.x + inner.width - 1;
+        for r in 0..track_h {
+            if let Some(cell) = f.buffer_mut().cell_mut(ratatui::layout::Position {
+                x,
+                y: inner.y + r as u16,
+            }) {
+                cell.set_bg(if r >= top && r < top + thumb_h {
+                    thumb_color
+                } else {
+                    track_color
+                });
+            }
+        }
+    }
+    if content_w > inner.width as usize && inner.height > 0 {
+        let track_w = inner.width as usize;
+        let thumb_w = (track_w * track_w / content_w.max(1)).clamp(1, track_w);
+        let denom = content_w - track_w;
+        let max_left = track_w - thumb_w;
+        let left = if denom == 0 {
+            0
+        } else {
+            (scroll_x * max_left + denom / 2) / denom
+        };
+        let y = inner.y + inner.height - 1;
+        for cidx in 0..track_w {
+            if let Some(cell) = f.buffer_mut().cell_mut(ratatui::layout::Position {
+                x: inner.x + cidx as u16,
+                y,
+            }) {
+                cell.set_bg(if cidx >= left && cidx < left + thumb_w {
+                    thumb_color
+                } else {
+                    track_color
+                });
+            }
+        }
+    }
+
     app.layout.lineage_preview_area = Some(area);
     app.layout.lineage_preview_body_hit = Some(crate::app::LineagePreviewBodyHit {
         session_id: session_id.to_string(),

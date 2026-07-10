@@ -904,26 +904,49 @@ fn assign_offsets(lanes: &mut [Lane], i: usize) -> usize {
         footprints.insert(k, w);
     }
 
-    // Slot assignment: visit children by close time; each goes one slot
-    // outside every already-assigned sibling whose lifetime overlaps its
-    // own (inclusive overlap — a branch at the very instant a sibling
-    // closes still renders above that closing row, so they coexist).
+    // Slot assignment: visit children by close time. A lane must sit
+    // OUTSIDE an overlapping, already-assigned sibling only when that
+    // sibling MERGES — its merge arrow travels back to the parent lane
+    // and would cross any live lane inside it. Overlapping siblings that
+    // never merge (open forks, discards, terminal sessions) draw no
+    // returning arrow, so a later lane takes the INNERMOST slot whose
+    // occupants it doesn't overlap — reusing columns freed by
+    // earlier-closed lanes keeps the diagram narrow. (Inclusive overlap:
+    // a branch at the very instant a sibling closes still renders above
+    // that closing row, so they coexist.)
     let mut order = kids.clone();
     order.sort_by_key(|&k| (lanes[k].close_ms, lanes[k].box_ms, k));
+    let mut slots: Vec<Vec<usize>> = Vec::new();
     let mut slot_of: Vec<(usize, usize)> = Vec::new();
-    let mut nslots = 0usize;
     for &k in &order {
         let (kb, ke) = (lanes[k].box_ms, lanes[k].close_ms);
-        let mut slot = 0usize;
-        for &(j, sj) in &slot_of {
+        let overlaps = |j: usize, lanes: &[Lane]| {
             let (jb, je) = (lanes[j].box_ms, lanes[j].close_ms);
-            if kb <= je && jb <= ke {
-                slot = slot.max(sj + 1);
+            kb <= je && jb <= ke
+        };
+        let mut min_slot = 0usize;
+        for (s, occ) in slots.iter().enumerate() {
+            if occ
+                .iter()
+                .any(|&j| overlaps(j, lanes) && lanes[j].merge.is_some())
+            {
+                min_slot = min_slot.max(s + 1);
             }
         }
+        let mut slot = min_slot;
+        while slots
+            .get(slot)
+            .is_some_and(|occ| occ.iter().any(|&j| overlaps(j, lanes)))
+        {
+            slot += 1;
+        }
+        while slots.len() <= slot {
+            slots.push(Vec::new());
+        }
+        slots[slot].push(k);
         slot_of.push((k, slot));
-        nslots = nslots.max(slot + 1);
     }
+    let nslots = slots.len();
 
     // Slot geometry, inner to outer.
     let box_w = box_content_w(&lanes[i]) + 4;
@@ -1775,6 +1798,62 @@ mod tests {
              column ({}):\n{}",
             label_col("a"),
             text.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_late_open_fork_reuses_columns_freed_by_closed_lanes() {
+        // The screenshot scenario: a merged fork (M) and an early open fork
+        // (O1) force two slots — O1 must sit outside M because M's merge
+        // arrow returns to the parent lane. But a LATER open fork (O2),
+        // branching after M closed, overlaps only O1 — and O1 never merges
+        // (no returning arrow to cross), so O2 takes the freed inner slot
+        // instead of stacking a third column further right.
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 40);
+        let m = merged_at(
+            with_event_count(
+                with_created_at_ms(forked_from_at(base("m"), "root", 5, 1_000), 1_000),
+                4,
+            ),
+            ForkMergeMode::Result,
+            10,
+            3_000,
+        );
+        let o1 = with_event_count(
+            with_created_at_ms(forked_from_at(base("o1"), "root", 3, 500), 500),
+            2,
+        );
+        let o2 = with_event_count(
+            with_created_at_ms(forked_from_at(base("o2"), "root", 20, 5_000), 5_000),
+            2,
+        );
+        let sessions = vec![root, m, o1, o2];
+        let tree = build_tree("root", &sessions).unwrap();
+        let rows = flatten(&tree, &sessions, 9_000);
+        let label_col = |id: &str| {
+            let row = rows
+                .iter()
+                .find(|r| r.session_id() == Some(id))
+                .unwrap_or_else(|| panic!("{id} row"));
+            let mut col = 0usize;
+            for span in &row.spans {
+                if matches!(&span.role, LineageSpan::Node { .. }) {
+                    return col;
+                }
+                col += span.text.chars().count();
+            }
+            unreachable!()
+        };
+        assert_eq!(
+            label_col("o2"),
+            label_col("m"),
+            "o2 reuses the inner slot m freed:\n{}",
+            diagram_text(&rows).join("\n")
+        );
+        assert!(
+            label_col("o1") > label_col("o2"),
+            "o1 (which overlaps the merging m) stays outside:\n{}",
+            diagram_text(&rows).join("\n")
         );
     }
 

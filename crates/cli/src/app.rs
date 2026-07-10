@@ -7035,7 +7035,14 @@ impl App {
         match ev.kind {
             MouseEventKind::ScrollUp => {
                 if self.is_over_lineage_preview(ev.column, ev.row) {
-                    self.lineage_preview_scroll = self.lineage_preview_scroll.saturating_sub(2);
+                    // Shift+wheel scrolls sideways — the common convention
+                    // in terminals without a horizontal wheel.
+                    if ev.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                        self.lineage_preview_scroll_x =
+                            self.lineage_preview_scroll_x.saturating_sub(4);
+                    } else {
+                        self.lineage_preview_scroll = self.lineage_preview_scroll.saturating_sub(2);
+                    }
                 } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, -LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, -LIST_STEP)
                 {
@@ -7044,8 +7051,13 @@ impl App {
             }
             MouseEventKind::ScrollDown => {
                 if self.is_over_lineage_preview(ev.column, ev.row) {
-                    // Clamped to the diagram's height at render time.
-                    self.lineage_preview_scroll = self.lineage_preview_scroll.saturating_add(2);
+                    // Clamped to the diagram's extents at render time.
+                    if ev.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                        self.lineage_preview_scroll_x =
+                            self.lineage_preview_scroll_x.saturating_add(4);
+                    } else {
+                        self.lineage_preview_scroll = self.lineage_preview_scroll.saturating_add(2);
+                    }
                 } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, LIST_STEP)
                 {
@@ -27384,6 +27396,27 @@ mod tests {
                 "hit {hit:?} escapes the preview {area:?}"
             );
         }
+        // The overflowing diagram shows a horizontal scrollbar on the
+        // bottom-pad row (background tint) — and a vertical one on the
+        // right inner column, since the diagram is taller than 12 rows too.
+        let hbar_bg = term
+            .backend()
+            .buffer()
+            .cell((area.x + 2, area.y + area.height - 2))
+            .map(|c| c.style().bg);
+        assert!(
+            !matches!(hbar_bg, Some(None) | None),
+            "horizontal scrollbar tints the bottom-pad row: {hbar_bg:?}"
+        );
+        let vbar_bg = term
+            .backend()
+            .buffer()
+            .cell((area.x + area.width - 2, area.y + 2))
+            .map(|c| c.style().bg);
+        assert!(
+            !matches!(vbar_bg, Some(None) | None),
+            "vertical scrollbar tints the right inner column: {vbar_bg:?}"
+        );
         server.abort();
     }
 
@@ -27445,6 +27478,28 @@ mod tests {
         })
         .await;
         assert_eq!(app.lineage_preview_scroll_x, 4);
+        // Shift+wheel scrolls sideways too (terminals without a
+        // horizontal wheel).
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: area.x + 2,
+            row: area.y + 2,
+            modifiers: crossterm::event::KeyModifiers::SHIFT,
+        })
+        .await;
+        assert_eq!(app.lineage_preview_scroll_x, 8);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: area.x + 2,
+            row: area.y + 2,
+            modifiers: crossterm::event::KeyModifiers::SHIFT,
+        })
+        .await;
+        assert_eq!(app.lineage_preview_scroll_x, 4);
+        assert_eq!(
+            app.lineage_preview_scroll, 2,
+            "shift+wheel must not move the vertical scroll"
+        );
 
         // Dragging the left border widens the preview.
         app.on_mouse(MouseEvent {
