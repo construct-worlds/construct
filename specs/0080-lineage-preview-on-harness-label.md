@@ -101,8 +101,10 @@ brightens the border (bold) rather than changing its hue.
 ### Two visualization modes, toggled from the top border
 
 The preview draws the tree in one of two modes, switched by a toggle
-button on its top border (showing the current mode's name): the
-boxed-lane diagram described below, or a git-graph-style compact view —
+button on its top border (showing the current mode's name — "lineage"
+for the boxed-lane diagram, "lineage (compact)" for the rails view; the
+preview's minimum width keeps the toggle visible): the boxed-lane
+diagram described below, or a git-graph-style compact view —
 one two-column rail per session (columns reused once a lane closes),
 one-line entries in the same global time order, connectors curving
 between rails, and all text in a single left-aligned column right of the
@@ -127,7 +129,7 @@ preview is closed.
 
 The preview draws each session as a small bordered box (status glyph +
 title/harness) with that session's own timeline as a vertical lane
-hanging below the box — indented one column from the box's left edge —
+hanging below the box — indented two columns from the box's left edge —
 read top to bottom. A long session name wraps onto additional box rows
 (the box grows taller) up to a small line cap, after which it
 ellipsizes; box width is capped so one verbose title can't stretch the
@@ -160,12 +162,16 @@ info above that fork's arrow. A turn-info window renders at the row where
 its CLOSING event lands, on its own lane — so windows closing at the same
 instant share one row side by side (a merged fork's life next to its
 parent's while-it-was-out window at the merge; all live lanes' trailing
-windows together on the final "now" row). Lane columns use
-git-graph-style interval reuse in BOTH modes: each lane takes the
-innermost column whose occupants its lifetime doesn't overlap, keeping
-the diagram as narrow as the intervals allow; a merge arrow crossing a
-live lane placed inside it bridges over that lane's bar, exactly like
-git-graph merge lines do. A lane stays live down to its closing row.
+windows together on the final "now" row). Box placement is minimal-x:
+a box only needs its own rows free (every event gets fresh rows, so box
+rectangles never collide), leaving just two hard constraints — the
+branch arrow's minimum reach from the parent's lane, and lane-column
+uniqueness among lanes whose lifetimes overlap. Everything else
+overlaps freely: boxes reuse columns across different rows, vertical
+lines pass BEHIND boxes and turn info they cross (the bar gaps on those
+rows), and a merge arrow crossing a live lane bridges over its bar,
+exactly like git-graph merge lines do. The rails mode reuses columns by
+lifetime interval the same way.
 
 Every rail glyph, lane bar, connector, and turn-info span is tagged with
 its owning session: selecting or hovering a session (its box in boxes
@@ -177,8 +183,9 @@ Keyboard selection lands on the box label rows; boxes are the only
 selectable rows, and opening the preview from a fork or subagent starts
 the selection on THAT session's box, not the tree's root. The selection
 fills exactly the selected box's INTERIOR with the highlight background
-and brightens its border LINE (fg only — border glyphs never get a
-background); nothing outside the box is touched. The boxes are also
+and brightens its border LINE (fg only, in the same color as the
+preview widget's own border — border glyphs never get a background);
+nothing outside the box is touched. The boxes are also
 mouse targets: hovering one brightens its border the same way, and
 clicking it jumps to that session (closing the preview, exactly like
 Enter on the keyboard selection). A click on the preview's body outside
