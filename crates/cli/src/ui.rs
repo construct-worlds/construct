@@ -14227,15 +14227,27 @@ mod tests {
         let rows = crate::lineage::flatten(&tree, &sessions, 9_000);
         let lines = lineage_lines(&sessions, &rows, &theme);
         let text: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-        assert!(text.contains("↩ merged"), "{text}");
+        assert!(
+            !text.contains("↩ merged"),
+            "a merged fork's box carries no marker — the merge arrow and \
+             its ✓'d final window already say it: {text}"
+        );
         assert!(
             text.contains("↩ merge"),
             "merge-back arrow expected: {text}"
         );
-        let merged_label = lines
+        assert!(
+            text.contains("✓"),
+            "the merged fork's final window leads with ✓: {text}"
+        );
+        let merged_label = rows
             .iter()
-            .flat_map(|l| l.spans.iter())
-            .find(|s| s.content.contains("↩ merged"))
+            .zip(lines.iter())
+            .flat_map(|(row, line)| row.spans.iter().zip(line.spans.iter()))
+            .find_map(|(run, span)| match &run.role {
+                crate::lineage::LineageSpan::Node { session_id } if session_id == "f" => Some(span),
+                _ => None,
+            })
             .expect("merged fork label span");
         assert_eq!(merged_label.style.fg, Some(theme.dim));
         assert!(

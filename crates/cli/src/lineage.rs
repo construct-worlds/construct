@@ -232,13 +232,13 @@ pub enum LineageSpan {
         /// against `now_ms` at flatten time).
         end_ms: Option<i64>,
     },
-    /// The `•` bullet heading every turn-info line, sitting on the lane.
+    /// The `•` bullet heading a mid-timeline turn-info line, sitting on
+    /// the lane.
     SegmentBullet,
-    /// Terminal-outcome glyph appended after a node's FINAL turn-info
-    /// line: `✓` when the session ended `Done`, `✗` when it `Errored`.
-    /// (A fork's merged/discarded outcome is not repeated here — the merge
-    /// arrow and the box label's `↩ merged` / `✗ discarded` marker already
-    /// carry it.)
+    /// Terminal-outcome glyph heading a lane's FINAL turn-info line in
+    /// place of the bullet: `✓` when the lane ended well (fork merged,
+    /// session `Done`), `✗` when it dead-ended (fork discarded, session
+    /// `Errored`).
     SegmentOutcome { ok: bool },
     /// A node's box label text (status glyph, name, harness, terminal
     /// marker) — carries the session id so the renderer can style it by
@@ -403,26 +403,22 @@ pub fn selectable_indices(rows: &[LineageRow]) -> Vec<usize> {
 /// with a labeled arrow into its own box (placed to the right, with its
 /// own lane below it), and — when it merged back (`ForkMergeMode::Result`)
 /// — returns to the parent's lane with a merge arrow. Turn info renders
-/// ON the lanes, a `•` bullet sitting where the bar would be with the
-/// text to its right, between the markers that bound each window; the
-/// FINAL window appends `✓`/`✗` when the session ended Done/Errored:
+/// ON the lanes, a marker sitting where the bar would be with the text to
+/// its right: `•` mid-timeline, and on each lane's FINAL window a
+/// terminal-outcome glyph instead — `✓` (merged / Done) or `✗`
+/// (discarded / Errored). Rows pack tight: no blank spacer rows.
 ///
 /// ```text
 /// ┌───────────────────────────┐
 /// │ ● auth-refactor (claude)  │
 /// └───────────────────────────┘
-///  │
 ///  • 12 msgs · 8m12s
-///  │
-///  │                   ┌─────────────────────────────┐
-///  ├─ ⑂ fork ─────────▸│ ● idea A (claude)  ↩ merged │
-///  │                   └─────────────────────────────┘
-///  │                    │
-///  • 5 msgs · 3m40s     • 2 msgs · 1m05s
-///  │                    │
+///  │                   ┌───────────────────┐
+///  ├─ ⑂ fork ─────────▸│ ● idea A (claude) │
+///  │                   └───────────────────┘
+///  • 5 msgs · 3m40s     ✓ 2 msgs · 1m05s
 ///  │◂─ ↩ merge ─────────┘
-///  │
-///  • 3 msgs · 2m00s ✓
+///  • 3 msgs · 2m00s
 /// ```
 ///
 /// ### One global timeline
@@ -437,9 +433,14 @@ pub fn selectable_indices(rows: &[LineageRow]) -> Vec<usize> {
 /// own lane — so windows that close at the same instant (a merged fork's
 /// life and its parent's while-it-was-out window both close at the merge;
 /// several live lanes all "close" at now) share one row side by side,
-/// like the concept sketch. A lane whose end comes later stays live: its
-/// column keeps running down to its closing arrow/turn-info, later boxes
-/// stack to its right, and arrows crossing it break around its bar.
+/// like the concept sketch.
+///
+/// Lane columns nest by CLOSE time (`assign_offsets`): overlapping
+/// sibling lanes stack outward with the later-terminating one further
+/// out, so an inner lane's merge/end never crosses an outer lane that's
+/// still running; sequential siblings reuse the inner slot. A lane stays
+/// live until its closing row — arrows crossing a live lane break around
+/// its bar.
 ///
 /// ### Segment boundaries
 ///
@@ -471,9 +472,11 @@ pub fn flatten(root: &LineageNode, sessions: &[SessionSummary], now_ms: i64) -> 
     canvas.into_rows()
 }
 
-/// `"● name (harness)"` box text, plus a terminal-state marker for
-/// merged/discarded forks. The name is the session's title (truncated) when
-/// it has one; otherwise just the harness stands alone.
+/// `"● name (harness)"` box text. The name is the session's title
+/// (truncated) when it has one; otherwise just the harness stands alone.
+/// A merged fork gets NO marker here — the merge arrow and the `✓` on its
+/// final turn-info line already carry that outcome. A discarded fork
+/// keeps its `✗ discarded` marker since a discard draws no arrow.
 fn node_box_label(summary: Option<&SessionSummary>, session_id: &str) -> String {
     let Some(s) = summary else {
         let short: String = session_id.chars().take(8).collect();
@@ -492,20 +495,18 @@ fn node_box_label(summary: Option<&SessionSummary>, session_id: &str) -> String 
         }
         None => format!("{status} {}", s.harness),
     };
-    match ForkStatus::of(s) {
-        ForkStatus::Merged => label.push_str("  ↩ merged"),
-        ForkStatus::Discarded => label.push_str("  ✗ discarded"),
-        ForkStatus::Open => {}
+    if ForkStatus::of(s) == ForkStatus::Discarded {
+        label.push_str("  ✗ discarded");
     }
     label
 }
 
-/// Paint one turn-info line: a `•` bullet ON the lane, the info text two
-/// columns right of it, and — when `outcome` is set (a node's final
-/// window, session ended `Done`/`Errored`) — a trailing `✓`/`✗` glyph.
-/// The window's numbers ride along on the Segment span role for tests.
-/// Zero-message windows are the caller's job to skip. Returns one past
-/// the rightmost column painted.
+/// Paint one turn-info line: a marker ON the lane — `•` mid-timeline, or
+/// `✓`/`✗` when `outcome` is set (this is the lane's FINAL window and its
+/// terminal event was a merge/completion vs a discard/error) — with the
+/// info text two columns right of it. The window's numbers ride along on
+/// the Segment span role for tests. Zero-message windows are the caller's
+/// job to skip. Returns one past the rightmost column painted.
 #[allow(clippy::too_many_arguments)]
 fn put_segment(
     c: &mut Canvas,
@@ -518,7 +519,15 @@ fn put_segment(
     outcome: Option<bool>,
 ) -> usize {
     use unicode_width::UnicodeWidthStr;
-    c.put(y, lane, "•", &LineageSpan::SegmentBullet);
+    match outcome {
+        Some(ok) => c.put(
+            y,
+            lane,
+            if ok { "✓" } else { "✗" },
+            &LineageSpan::SegmentOutcome { ok },
+        ),
+        None => c.put(y, lane, "•", &LineageSpan::SegmentBullet),
+    }
     let text = segment_label(delta_events, start_ms, end_ms, now_ms);
     let w = UnicodeWidthStr::width(text.as_str());
     c.put(
@@ -531,18 +540,7 @@ fn put_segment(
             end_ms,
         },
     );
-    match outcome {
-        Some(ok) => {
-            c.put(
-                y,
-                lane + 3 + w,
-                if ok { "✓" } else { "✗" },
-                &LineageSpan::SegmentOutcome { ok },
-            );
-            lane + 4 + w
-        }
-        None => lane + 2 + w,
-    }
+    lane + 2 + w
 }
 
 /// `✓`/`✗` for a node's final turn-info line, from its live session state
@@ -581,15 +579,25 @@ struct Lane<'a> {
     /// discarded fork (at discard time), a session that went Done/Errored
     /// (at `last_event_at`), or a live session (at "now", open-ended).
     end: Option<(i64, Option<i64>, Option<bool>)>,
+    /// When this lane's terminal event lands: its merge time, or its end
+    /// time — the interval `[box_ms, close_ms]` is what column nesting
+    /// orders by (later-closing lanes sit further out).
+    close_ms: i64,
+    /// This lane's child lanes, in tree order.
+    children: Vec<usize>,
     /// Collapsed "+N more" markers among this lane's children.
     more: Vec<usize>,
-    /// Widest turn-info label this lane can emit (outcome glyph included)
-    /// — later boxes must clear it so lane text never runs into a box.
+    /// Widest turn-info label this lane can emit — later boxes must clear
+    /// it so lane text never runs into a box.
     max_seg_w: usize,
     label: String,
+    /// Box-left offset relative to the parent's box left edge, assigned
+    /// upfront by `assign_offsets` (later-closing siblings further out).
+    x_off: usize,
     // Running state, filled in as the global walk proceeds.
     cp_seq: u64,
     cp_ms: i64,
+    x_abs: usize,
     lane_col: usize,
     box_bottom: usize,
     /// Last row this lane's content reaches (inclusive) — the end-fill
@@ -597,6 +605,15 @@ struct Lane<'a> {
     last_row: usize,
     placed: bool,
     ended: bool,
+}
+
+/// The glyph + word labeling a lane's branch arrow.
+fn edge_word_of(edge: LineageEdge) -> &'static str {
+    match edge {
+        LineageEdge::Fork => "⑂ fork",
+        LineageEdge::Subagent => "▸ subagent",
+        LineageEdge::Root => "",
+    }
 }
 
 /// Event kinds on the global timeline, in tie-break order: a box appears
@@ -643,11 +660,10 @@ fn collect_lanes<'a>(
     let end = if merge.is_some() {
         None
     } else if let Some(m) = merge_rec.filter(|m| m.mode == ForkMergeMode::Discard) {
-        // A discarded fork's lane ends at the discard, its final window
-        // frozen there. No outcome glyph: the box label's "✗ discarded"
-        // already carries the outcome.
+        // A discarded fork's lane dead-ends at the discard, its final
+        // window frozen there and marked `✗`.
         let t = m.at_ms.max(box_ms);
-        Some((t, Some(m.at_ms), node_outcome_of(summary)))
+        Some((t, Some(m.at_ms), Some(false)))
     } else if let Some(ok) = node_outcome_of(summary) {
         // Session reached a terminal state: the lane ends when its last
         // event landed, and the final window carries ✓/✗.
@@ -660,6 +676,10 @@ fn collect_lanes<'a>(
         // Live: the lane runs to "now", its final window open-ended.
         Some((now_ms.max(box_ms), None, None))
     };
+    let close_ms = merge
+        .map(|(at, _)| at)
+        .or(end.map(|(at, _, _)| at))
+        .unwrap();
     let idx = lanes.len();
     lanes.push(Lane {
         node,
@@ -669,11 +689,15 @@ fn collect_lanes<'a>(
         fork_seq: forked.map(|f| f.transcript_seq),
         merge,
         end,
+        close_ms,
+        children: Vec::new(),
         more: Vec::new(),
         max_seg_w: 0,
         label: node_box_label(summary, &node.session_id),
+        x_off: 0,
         cp_seq: 0,
         cp_ms: box_ms,
+        x_abs: 0,
         lane_col: 0,
         box_bottom: 0,
         last_row: 0,
@@ -684,7 +708,8 @@ fn collect_lanes<'a>(
         match child {
             LineageChild::More(n) => lanes[idx].more.push(*n),
             LineageChild::Node(cn) => {
-                collect_lanes(cn, by_id, Some(idx), now_ms, lanes);
+                let ci = collect_lanes(cn, by_id, Some(idx), now_ms, lanes);
+                lanes[idx].children.push(ci);
             }
         }
     }
@@ -714,15 +739,15 @@ fn build_events(lanes: &[Lane]) -> Vec<(i64, u8, usize)> {
 }
 
 /// Dry-run the event walk once to find each lane's widest turn-info label
-/// (outcome glyph included) — needed before layout so box columns can be
-/// allocated clear of every label a lane will ever emit. Resets each
-/// lane's checkpoint state afterwards for the real walk.
+/// — needed before layout so box columns can be allocated clear of every
+/// label a lane will ever emit. Resets each lane's checkpoint state
+/// afterwards for the real walk.
 fn compute_max_seg_widths(lanes: &mut [Lane], events: &[(i64, u8, usize)], now_ms: i64) {
     use unicode_width::UnicodeWidthStr;
-    fn probe(lane: &mut Lane, delta: u64, start: i64, end: Option<i64>, extra: usize, now: i64) {
+    fn probe(lane: &mut Lane, delta: u64, start: i64, end: Option<i64>, now: i64) {
         if delta > 0 {
             let w = UnicodeWidthStr::width(segment_label(delta, start, end, now).as_str());
-            lane.max_seg_w = lane.max_seg_w.max(w + extra);
+            lane.max_seg_w = lane.max_seg_w.max(w);
         }
     }
     for &(_, kind, i) in events {
@@ -734,7 +759,7 @@ fn compute_max_seg_widths(lanes: &mut [Lane], events: &[(i64, u8, usize)], now_m
                 let box_ms = lanes[i].box_ms;
                 let d = seq.saturating_sub(lanes[p].cp_seq);
                 let cp_ms = lanes[p].cp_ms;
-                probe(&mut lanes[p], d, cp_ms, Some(box_ms), 0, now_ms);
+                probe(&mut lanes[p], d, cp_ms, Some(box_ms), now_ms);
                 lanes[p].cp_seq = seq;
                 lanes[p].cp_ms = box_ms;
             }
@@ -743,7 +768,7 @@ fn compute_max_seg_widths(lanes: &mut [Lane], events: &[(i64, u8, usize)], now_m
                 if let Some(p) = lanes[i].parent {
                     let d = mseq.saturating_sub(lanes[p].cp_seq);
                     let cp_ms = lanes[p].cp_ms;
-                    probe(&mut lanes[p], d, cp_ms, Some(at), 0, now_ms);
+                    probe(&mut lanes[p], d, cp_ms, Some(at), now_ms);
                     lanes[p].cp_seq = mseq;
                     lanes[p].cp_ms = at;
                 }
@@ -752,22 +777,16 @@ fn compute_max_seg_widths(lanes: &mut [Lane], events: &[(i64, u8, usize)], now_m
                     .map(|s| s.event_count.saturating_sub(lanes[i].cp_seq))
                     .unwrap_or(0);
                 let cp_ms = lanes[i].cp_ms;
-                let extra = if node_outcome_of(lanes[i].summary).is_some() {
-                    2
-                } else {
-                    0
-                };
-                probe(&mut lanes[i], df, cp_ms, Some(at), extra, now_ms);
+                probe(&mut lanes[i], df, cp_ms, Some(at), now_ms);
             }
             EV_END => {
-                let (_, label_end, outcome) = lanes[i].end.expect("end event has end data");
+                let (_, label_end, _) = lanes[i].end.expect("end event has end data");
                 let d = lanes[i]
                     .summary
                     .map(|s| s.event_count.saturating_sub(lanes[i].cp_seq))
                     .unwrap_or(0);
                 let cp_ms = lanes[i].cp_ms;
-                let extra = if outcome.is_some() { 2 } else { 0 };
-                probe(&mut lanes[i], d, cp_ms, label_end, extra, now_ms);
+                probe(&mut lanes[i], d, cp_ms, label_end, now_ms);
             }
             _ => unreachable!(),
         }
@@ -776,6 +795,81 @@ fn compute_max_seg_widths(lanes: &mut [Lane], events: &[(i64, u8, usize)], now_m
         lane.cp_seq = 0;
         lane.cp_ms = lane.box_ms;
     }
+}
+
+/// Assign every lane's horizontal offset (relative to its parent's box)
+/// bottom-up, and return this subtree's footprint: columns from the
+/// lane's box-left edge to its subtree's right edge.
+///
+/// Sibling lanes whose lifetimes overlap stack outward ordered by CLOSE
+/// time — a lane whose terminal event (merge, discard, error, complete,
+/// "now") comes later sits further out than one that closes earlier, so
+/// an inner lane's merge/end never has to cross an outer lane that's
+/// still running, and closing arrows nest instead of crossing. Siblings
+/// whose lifetimes don't overlap reuse the same slot (their rows are
+/// disjoint), keeping sequential forks compact.
+fn assign_offsets(lanes: &mut [Lane], i: usize) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    let kids = lanes[i].children.clone();
+    let mut footprints: HashMap<usize, usize> = HashMap::new();
+    for &k in &kids {
+        let w = assign_offsets(lanes, k);
+        footprints.insert(k, w);
+    }
+
+    // Slot assignment: visit children by close time; each goes one slot
+    // outside every already-assigned sibling whose lifetime overlaps its
+    // own (inclusive overlap — a branch at the very instant a sibling
+    // closes still renders above that closing row, so they coexist).
+    let mut order = kids.clone();
+    order.sort_by_key(|&k| (lanes[k].close_ms, lanes[k].box_ms, k));
+    let mut slot_of: Vec<(usize, usize)> = Vec::new();
+    let mut nslots = 0usize;
+    for &k in &order {
+        let (kb, ke) = (lanes[k].box_ms, lanes[k].close_ms);
+        let mut slot = 0usize;
+        for &(j, sj) in &slot_of {
+            let (jb, je) = (lanes[j].box_ms, lanes[j].close_ms);
+            if kb <= je && jb <= ke {
+                slot = slot.max(sj + 1);
+            }
+        }
+        slot_of.push((k, slot));
+        nslots = nslots.max(slot + 1);
+    }
+
+    // Slot geometry, inner to outer.
+    let box_w = UnicodeWidthStr::width(lanes[i].label.as_str()) + 4;
+    let own_reach = box_w.max(3 + lanes[i].max_seg_w);
+    let mut edge = 0usize;
+    for s in 0..nslots {
+        let occupants: Vec<usize> = slot_of
+            .iter()
+            .filter(|&&(_, sj)| sj == s)
+            .map(|&(k, _)| k)
+            .collect();
+        let max_ew = occupants
+            .iter()
+            .map(|&k| UnicodeWidthStr::width(edge_word_of(lanes[k].node.edge)))
+            .max()
+            .unwrap_or(0);
+        // Past the arrow's own minimum and past this lane's widest label
+        // (marker + gap + label + 2 blank columns), then past the inner
+        // slot's edge.
+        let off_min = (max_ew + 7).max(lanes[i].max_seg_w + 5);
+        let off = if s == 0 {
+            off_min
+        } else {
+            off_min.max(edge + 2)
+        };
+        let mut slot_w = 0usize;
+        for &k in &occupants {
+            lanes[k].x_off = off;
+            slot_w = slot_w.max(footprints[&k]);
+        }
+        edge = off + slot_w;
+    }
+    own_reach.max(edge)
 }
 
 /// Paint one session box with its top-left at `(x, y)` and register its
@@ -814,9 +908,10 @@ fn layout_tree(
     use unicode_width::UnicodeWidthStr;
 
     let mut lanes: Vec<Lane> = Vec::new();
-    collect_lanes(root, by_id, None, now_ms, &mut lanes);
+    let root_idx = collect_lanes(root, by_id, None, now_ms, &mut lanes);
     let events = build_events(&lanes);
     compute_max_seg_widths(&mut lanes, &events, now_ms);
+    assign_offsets(&mut lanes, root_idx);
 
     let mut cur = 0usize;
     let mut gi = 0usize;
@@ -828,6 +923,7 @@ fn layout_tree(
                     // The root's box tops the diagram; its lane state
                     // starts right below.
                     draw_box(c, &lanes[i], 1, cur);
+                    lanes[i].x_abs = 1;
                     lanes[i].lane_col = 2;
                     lanes[i].box_bottom = cur + 3;
                     lanes[i].last_row = cur + 2;
@@ -836,9 +932,7 @@ fn layout_tree(
                     gi += 1;
                     continue;
                 };
-                // A fork-out closes a window on the parent's lane;
-                // subagent spawns just get a spacer row.
-                cur += 1;
+                // A fork-out closes a window on the parent's lane.
                 if let Some(seq) = lanes[i].fork_seq {
                     let d = seq.saturating_sub(lanes[p].cp_seq);
                     if d > 0 {
@@ -852,25 +946,18 @@ fn layout_tree(
                             now_ms,
                             None,
                         );
-                        cur += 2;
+                        cur += 1;
                     }
                     lanes[p].cp_seq = seq;
                     lanes[p].cp_ms = lanes[i].box_ms;
                 }
-                let edge_word = match lanes[i].node.edge {
-                    LineageEdge::Fork => "⑂ fork",
-                    LineageEdge::Subagent => "▸ subagent",
-                    LineageEdge::Root => "",
-                };
+                let edge_word = edge_word_of(lanes[i].node.edge);
                 let ew = UnicodeWidthStr::width(edge_word);
-                // Column: past the arrow's own minimum, and past every
-                // live lane's widest turn-info reach (bullet + gap + label
-                // + 2 blank columns) so nothing this box could share a row
-                // with ever runs into it.
-                let mut x = lanes[p].lane_col + ew + 6;
-                for lane in lanes.iter().filter(|l| l.placed && !l.ended) {
-                    x = x.max(lane.lane_col + lane.max_seg_w + 4);
-                }
+                // Column pre-assigned by `assign_offsets`: overlapping
+                // siblings stack outward by close time, so a lane that
+                // terminates later sits further out than one that
+                // terminated earlier.
+                let x = lanes[p].x_abs + lanes[i].x_off;
                 draw_box(c, &lanes[i], x, cur);
                 // Branch arrow into the box's label row, bridging over any
                 // live lane it crosses (their bar is painted first; the
@@ -895,6 +982,7 @@ fn layout_tree(
                 }
                 c.put(ay, x - 1, "▸", &LineageSpan::Rail);
                 lanes[p].last_row = lanes[p].last_row.max(ay);
+                lanes[i].x_abs = x;
                 lanes[i].lane_col = x + 1;
                 lanes[i].box_bottom = cur + 3;
                 lanes[i].last_row = cur + 2;
@@ -910,11 +998,12 @@ fn layout_tree(
                     .summary
                     .map(|s| s.event_count.saturating_sub(lanes[i].cp_seq))
                     .unwrap_or(0);
-                cur += 1;
                 if dp > 0 || df > 0 {
                     // Both windows close at this same instant — they share
                     // one row, each on its own lane (the concept sketch's
-                    // side-by-side "(turn info)" pair).
+                    // side-by-side "(turn info)" pair). Merging IS the
+                    // fork's successful completion: its final window leads
+                    // with ✓.
                     if dp > 0 {
                         put_segment(
                             c,
@@ -936,10 +1025,10 @@ fn layout_tree(
                             lanes[i].cp_ms,
                             Some(at),
                             now_ms,
-                            node_outcome_of(lanes[i].summary),
+                            Some(true),
                         );
                     }
-                    cur += 2;
+                    cur += 1;
                 }
                 for n in std::mem::take(&mut lanes[i].more) {
                     c.put(cur, lanes[i].lane_col, "├─ ", &LineageSpan::Rail);
@@ -1007,7 +1096,6 @@ fn layout_tree(
                     })
                     .collect();
                 if !closing.is_empty() {
-                    cur += 1;
                     for &(j, d) in &closing {
                         let (_, label_end, outcome) = lanes[j].end.expect("end event has end data");
                         put_segment(
@@ -1372,20 +1460,17 @@ mod tests {
                 " ┌─────────┐".to_string(),
                 format!(" │ {g} smith │"),
                 " └─────────┘".to_string(),
-                "  │".to_string(),
                 "  • 12 msgs · 5m00s".to_string(),
-                "  │".to_string(),
-                "  │                  ┌───────────────────┐".to_string(),
-                format!("  ├─ ⑂ fork ────────▸│ {g} smith  ↩ merged │"),
-                "  │                  └───────────────────┘".to_string(),
-                "  │                   │".to_string(),
+                "  │                  ┌─────────┐".to_string(),
+                format!("  ├─ ⑂ fork ────────▸│ {g} smith │"),
+                "  │                  └─────────┘".to_string(),
                 // Both windows close at the merge instant, so they share
                 // one row side by side — the concept sketch's paired
-                // "(turn info)  (turn info)".
-                "  • 3 msgs · 3m20s    • 2 msgs · 3m20s".to_string(),
-                "  │                   │".to_string(),
+                // "(turn info)  (turn info)". Merging IS the fork's
+                // completion, so its final window leads with ✓ (and its
+                // box carries no "↩ merged" marker).
+                "  • 3 msgs · 3m20s    ✓ 2 msgs · 3m20s".to_string(),
                 "  │◂─ ↩ merge ────────┘".to_string(),
-                "  │".to_string(),
                 "  • 5 msgs · 5m00s".to_string(),
             ]
         );
@@ -1411,7 +1496,10 @@ mod tests {
             9_000,
         );
         let text = diagram_text(&rows).join("\n");
-        assert!(text.contains("• 3 msgs"), "{text}");
+        assert!(
+            text.contains("✓ 3 msgs"),
+            "the terminal glyph replaces the bullet on the final window: {text}"
+        );
         assert!(
             rows.iter()
                 .flat_map(|r| r.spans.iter())
@@ -1483,6 +1571,78 @@ mod tests {
             .spans
             .iter()
             .any(|s| matches!(s.role, LineageSpan::SegmentOutcome { ok: true })));
+    }
+
+    #[test]
+    fn later_closing_lane_sits_outside_an_earlier_closing_one() {
+        // A branches FIRST (t=1000) but never closes (open fork, "ends" at
+        // now); B branches later (t=2000) and merges back at t=5000. B's
+        // terminal event comes earlier, so B nests INSIDE (left of) A —
+        // B's merge arrow returns to the parent lane without crossing A's
+        // still-running lane, and closing arrows nest instead of crossing.
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 20);
+        let a = with_event_count(
+            with_created_at_ms(forked_from_at(base("a"), "root", 5, 1_000), 1_000),
+            3,
+        );
+        let b = merged_at(
+            with_event_count(
+                with_created_at_ms(forked_from_at(base("b"), "root", 10, 2_000), 2_000),
+                2,
+            ),
+            ForkMergeMode::Result,
+            14,
+            5_000,
+        );
+        let sessions = vec![root, a, b];
+        let tree = build_tree("root", &sessions).unwrap();
+        let rows = flatten(&tree, &sessions, 9_000);
+        let text = diagram_text(&rows);
+
+        let label_col = |id: &str| {
+            let row = rows
+                .iter()
+                .find(|r| r.session_id() == Some(id))
+                .unwrap_or_else(|| panic!("{id} row"));
+            let mut col = 0usize;
+            for span in &row.spans {
+                if matches!(&span.role, LineageSpan::Node { .. }) {
+                    return col;
+                }
+                col += span.text.chars().count();
+            }
+            unreachable!()
+        };
+        let row_of = |id: &str| {
+            rows.iter()
+                .position(|r| r.session_id() == Some(id))
+                .unwrap()
+        };
+        assert!(
+            row_of("a") < row_of("b"),
+            "a branched first, so its box renders first:\n{}",
+            text.join("\n")
+        );
+        assert!(
+            label_col("a") > label_col("b"),
+            "a closes later (still open) than b (merged at t=5000), so a's \
+             lane sits OUTSIDE b's:\n{}",
+            text.join("\n")
+        );
+        // And b's merge arrow must not cross a's live lane: the arrow's
+        // span [parent lane, b's lane] lies entirely left of a's lane.
+        let merge_line = text
+            .iter()
+            .find(|l| l.contains("◂─ ↩ merge"))
+            .expect("merge arrow row");
+        let merge_end = merge_line.chars().count();
+        assert!(
+            merge_end <= label_col("a"),
+            "b's merge arrow (width {merge_end}) must end before a's box \
+             column ({}):\n{}",
+            label_col("a"),
+            text.join("\n")
+        );
     }
 
     #[test]
