@@ -1806,6 +1806,10 @@ async fn load_session_hydration(req: SessionHydrationRequest) -> Result<SessionH
     .context("join session hydration worker")?
 }
 
+fn should_force_hydration_redraw(history_is_alt_screen: bool, remote_visible: bool) -> bool {
+    history_is_alt_screen || remote_visible
+}
+
 fn blocking_request<P, R>(socket: &std::path::Path, method: &str, params: &P) -> Result<R>
 where
     P: serde::Serialize + ?Sized,
@@ -4622,13 +4626,14 @@ impl App {
             let (cols, rows) = self
                 .session_pane_size(&session_id)
                 .unwrap_or(self.terminal_pane_size);
-            // For alt-screen PTY sessions (grok, interactive codex, etc.), the
-            // daemon's pty_resize dedup silently drops a same-size resize, which
-            // means the child never gets SIGWINCH and doesn't repaint after a
-            // TUI-only restart. Send a one-column bump first — mirroring the
-            // force_redraw_size_on_resume pattern — to guarantee a SIGWINCH even
-            // when the terminal dimensions haven't changed since the last session.
-            if hydration.history_is_alt_screen && cols > 1 {
+            // Alt-screen sessions and visible SSH sessions cannot rely on a
+            // replayed grid alone. The daemon's pty_resize dedup drops a
+            // same-size resize, so send a one-column bump first — mirroring
+            // force_redraw_size_on_resume — to guarantee a clean child repaint.
+            let remote_visible = is_remote_session() && self.session_visible_on_screen(&session_id);
+            if should_force_hydration_redraw(hydration.history_is_alt_screen, remote_visible)
+                && cols > 1
+            {
                 let _ = self
                     .client
                     .pty_resize(&session_id, cols.saturating_add(1), rows)
@@ -5150,6 +5155,18 @@ impl App {
         let (cols, rows) = self
             .session_pane_size(id)
             .unwrap_or_else(|| self.active_pane_size());
+        // A same-size resize is intentionally deduplicated by the daemon. On
+        // SSH that can leave a freshly attached TUI displaying an imperfect
+        // replay until the user manually resizes. Bump the visible remote
+        // session by one column first so the child supplies a clean redraw at
+        // the geometry this client actually renders.
+        let remote_visible = is_remote_session() && self.session_visible_on_screen(id);
+        if should_force_hydration_redraw(false, remote_visible) && cols > 1 {
+            let _ = self
+                .client
+                .pty_resize(id, cols.saturating_add(1), rows)
+                .await;
+        }
         let _ = self.client.pty_resize(id, cols, rows).await;
     }
 
@@ -10586,6 +10603,13 @@ mod tests {
             assert!(is_remote_session_with(|name| name == marker));
         }
         assert!(!is_remote_session_with(|_| false));
+    }
+
+    #[test]
+    fn remote_visible_hydration_forces_normal_screen_redraw() {
+        assert!(should_force_hydration_redraw(false, true));
+        assert!(should_force_hydration_redraw(true, false));
+        assert!(!should_force_hydration_redraw(false, false));
     }
 
     #[test]

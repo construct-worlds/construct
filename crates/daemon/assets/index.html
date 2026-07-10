@@ -2671,6 +2671,19 @@ function xtermThemeFor(name = loadWebThemeName()) {
   return { ...WEB_THEMES[name].terminal };
 }
 
+function webTerminalBackground(name = loadWebThemeName()) {
+  const color = WEB_THEMES[name]?.terminal?.background || "";
+  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(color);
+  if (!match) return null;
+  return match.slice(1).map((component) => parseInt(component, 16));
+}
+
+function reportWebTerminalBackground(name = loadWebThemeName()) {
+  if (typeof state === "undefined" || !state.ws || state.ws.readyState !== 1) return;
+  rpc("client.set_terminal_background", { background: webTerminalBackground(name) })
+    .catch((e) => console.warn("terminal background report failed:", e));
+}
+
 function applyWebTheme(name, { persist = true } = {}) {
   const themeName = WEB_THEMES[name] ? name : "matrix";
   const theme = WEB_THEMES[themeName];
@@ -2687,6 +2700,7 @@ function applyWebTheme(name, { persist = true } = {}) {
     }
     if (state.term) state.term.options.theme = xtermThemeFor(themeName);
     if (state.program?.hover?.term) state.program.hover.term.options.theme = xtermThemeFor(themeName);
+    reportWebTerminalBackground(themeName);
   }
 }
 
@@ -3231,6 +3245,10 @@ function connect() {
   ws.addEventListener("open", () => {
     setConnState("open", "connected");
     state.reconnectDelay = 1000;
+    // Unlike the native TUI's background-aware themes, every WebUI xterm
+    // paints an explicit background. Report it before subscribing so the
+    // daemon answers and strips live OSC background probes exactly once.
+    reportWebTerminalBackground();
     // Pull initial state, then subscribe globally so we get state
     // notifications for every session (we filter to currentId
     // when rendering).
@@ -6977,6 +6995,10 @@ function createTerminalHandle(id) {
     ptyReplayTotalBytes: 0,
     ptyReplayNextBytes: PTY_REPLAY_INITIAL_BYTES,
     ptyReplayLoadingOlder: false,
+    // Historical terminal bytes can contain OSC/CSI queries. xterm answers
+    // those through onData, the same channel as user keystrokes, so replay
+    // must never be allowed to inject a fresh response into the live child.
+    replayingPty: false,
     ptyAltScreenFilterCarry: new Uint8Array(0),
     lastReportedSize: { cols: 0, rows: 0 },
   };
@@ -6987,7 +7009,7 @@ function createTerminalHandle(id) {
   // codepoints; we re-encode through TextEncoder so multi-byte
   // input round-trips cleanly.
   term.onData((s) => {
-    if (state.mode !== "terminal" || state.currentId !== id || currentInlineWidget(id)) return;
+    if (handle.replayingPty || state.mode !== "terminal" || state.currentId !== id || currentInlineWidget(id)) return;
     claimTerminalGeometryNow();
     const data = encodeBase64Utf8(s);
     rpc("session.pty_input", { session_id: id, data })
@@ -7079,10 +7101,15 @@ function writeTermBytes(term, bytes) {
 
 async function replayPtyChunks(handle) {
   if (!handle || !handle.term) return;
-  handle.term.reset();
-  handle.ptyAltScreenFilterCarry = new Uint8Array(0);
-  for (const chunk of handle.ptyReplayChunks) {
-    await writeTermBytes(handle.term, chunk.bytes);
+  handle.replayingPty = true;
+  try {
+    handle.term.reset();
+    handle.ptyAltScreenFilterCarry = new Uint8Array(0);
+    for (const chunk of handle.ptyReplayChunks) {
+      await writeTermBytes(handle.term, chunk.bytes);
+    }
+  } finally {
+    handle.replayingPty = false;
   }
 }
 
@@ -8822,33 +8849,39 @@ function writeToTerm(s) {
 // the PTY events.
 async function replayTranscriptToTerm(events) {
   if (!state.term) return;
-  for (const te of events) {
-    const e = te && te.event;
-    if (!e || !e.type) continue;
-    switch (e.type) {
-      case "pty":
-        resetTermToolGroup();
-        await writeTermBytes(state.term, decodeBase64ToBytes(e.data || ""));
-        break;
-      case "tool_use":
-        await writeTermData(state.term, toolUseGroupedLine(e.tool, e.args));
-        break;
-      case "tool_result":
-        await writeTermData(state.term, toolResultGroupedLine(e.ok, e.output));
-        break;
-      case "editor_state":
-        state.editorById.set(state.currentId, e);
-        break;
-      case "agent_status":
-        if (e.active) state.agentStatusById.set(state.currentId, e);
-        else state.agentStatusById.delete(state.currentId);
-        break;
-      // browser_preview: ephemeral, live-only — deliberately NOT replayed
-      // from the historical transcript (it would resurrect a stale
-      // thumbnail on reload). The live WS path is the sole setter.
-      // message / reasoning / status / cost / …: prose is already in
-      // the PTY events; structured chrome isn't shown in terminal mode.
+  const handle = terminalHandleForSession(state.currentId);
+  if (handle) handle.replayingPty = true;
+  try {
+    for (const te of events) {
+      const e = te && te.event;
+      if (!e || !e.type) continue;
+      switch (e.type) {
+        case "pty":
+          resetTermToolGroup();
+          await writeTermBytes(state.term, decodeBase64ToBytes(e.data || ""));
+          break;
+        case "tool_use":
+          await writeTermData(state.term, toolUseGroupedLine(e.tool, e.args));
+          break;
+        case "tool_result":
+          await writeTermData(state.term, toolResultGroupedLine(e.ok, e.output));
+          break;
+        case "editor_state":
+          state.editorById.set(state.currentId, e);
+          break;
+        case "agent_status":
+          if (e.active) state.agentStatusById.set(state.currentId, e);
+          else state.agentStatusById.delete(state.currentId);
+          break;
+        // browser_preview: ephemeral, live-only — deliberately NOT replayed
+        // from the historical transcript (it would resurrect a stale
+        // thumbnail on reload). The live WS path is the sole setter.
+        // message / reasoning / status / cost / …: prose is already in
+        // the PTY events; structured chrome isn't shown in terminal mode.
+      }
     }
+  } finally {
+    if (handle) handle.replayingPty = false;
   }
 }
 

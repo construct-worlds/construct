@@ -1,7 +1,7 @@
 # 0073-painted-themes-report-background-to-child-ptys
 
 Status: accepted
-Date: 2026-07-09
+Date: 2026-07-10
 Area: architecture
 Scope: How child PTY terminal-background probes (OSC 11) are answered when a client theme paints the frame background.
 
@@ -26,16 +26,28 @@ The first implementation answered from the TUI by watching the broadcast byte st
 ## Consequences
 
 - Future theme changes must preserve the painted/background-aware distinction: painted themes report their color, background-aware themes report "none".
+- Web terminal emulators always paint their configured terminal background,
+  including themes whose native-TUI counterpart is background-aware. Web
+  clients therefore report the xterm background color on connect and theme
+  change so live probes remain under the daemon's single-response authority.
 - Responses are generated from reported theme data, so live theme changes affect subsequent probes without adapter changes.
 - Because probes are stripped from the downstream stream whenever a painted background is in effect, client-side terminal emulators only see (and may answer) probes when no painted background is reported — which preserves pre-spec behavior for background-aware themes.
 - With several clients connected on different themes, the most recent reporter wins; children see one coherent answer, not one answer per client.
+- Historical replay must not generate input. Terminal emulators can answer
+  OSC/CSI queries while parsing output, so clients suppress their input path
+  while feeding stored bytes into an emulator. Otherwise every reload or
+  attached tab can inject a stale response into the live child.
 
 ## Non-Goals
 
 - Replayed transcript bytes and historical PTY snapshots never trigger responses; only live child output does.
-- The web client does not yet report its painted background; wiring that report (and deciding how an idle background tab should rank against the client the user is actually looking at) is follow-up work. Until then, web-only users keep xterm.js's native probe answering.
 
 ## Examples
 
 - A child runs `printf '\x1b]11;?\x07'` while the user's TUI uses the dark painted theme: the child receives one `\x1b]11;rgb:…\x07` reply with the theme's background; the probe bytes never appear in the transcript or any client's stream.
-- The same child under the Matrix theme: no reply is synthesized, the probe passes through to clients, and the child times out to its own default (or an attached terminal emulator answers, as before).
+- The same child under the native TUI's Matrix theme, with no painted client
+  connected: no reply is synthesized, so the probe passes through as before.
+- A WebUI xterm using Matrix reports its configured dark-green background;
+  the daemon answers and strips the live probe before xterm sees it.
+- Reloading a WebUI session whose PTY history contains an old probe paints
+  that history without sending xterm's generated response to the live child.
