@@ -202,6 +202,10 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
 /// lazily — sometimes within a second, sometimes only after the first
 /// turn completes minutes later. To keep the work cheap, files that
 /// don't bear our originator are remembered and not re-read.
+///
+/// After the first match we keep scanning: `/clear` / `/new` mint a new
+/// codex session id under the same originator tag, and resume/fork must
+/// follow the newest matching rollout — not the first one we ever saw.
 fn spawn_interactive_transcript_watcher(
     sid_file: PathBuf,
     expected_originator: String,
@@ -220,40 +224,33 @@ fn spawn_interactive_transcript_watcher(
         // stays cheap to poll.
         let mut not_ours: HashSet<String> = HashSet::new();
         let mut selected: Option<(String, PathBuf)> = None;
+        let mut selected_mtime: Option<std::time::SystemTime> = None;
         let mut next_line: usize = 0;
-        let mut initialized = false;
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
 
-            if selected.is_none() {
-                for (name, path) in list_rollouts(&sessions_root) {
-                    if not_ours.contains(&name) {
-                        continue;
-                    }
-                    let Some(meta) = read_session_meta(&path) else {
-                        // File exists but session_meta isn't readable yet.
-                        // Don't blacklist — codex may still be writing.
-                        continue;
-                    };
-                    let uuid = meta.id.clone().or_else(|| uuid_from_rollout_name(&name));
-                    let originator_matches =
-                        meta.originator.as_deref() == Some(expected_originator.as_str());
-                    let uuid_matches = expected_uuid
-                        .as_deref()
-                        .is_some_and(|want| uuid.as_deref() == Some(want));
-                    if !originator_matches && !uuid_matches {
-                        not_ours.insert(name);
-                        continue;
-                    }
-                    let Some(uuid) = uuid else {
-                        emit.log(format!(
-                            "codex: rollout {name} matched but had no id; skipping"
-                        ));
-                        not_ours.insert(name);
-                        continue;
-                    };
+            // Prefer the newest matching rollout. On first attach this
+            // picks the live session; after /clear|/new a fresher file
+            // appears with the same originator and we rebind.
+            if let Some((name, path, uuid, mtime)) = find_best_matching_rollout(
+                &sessions_root,
+                &expected_originator,
+                expected_uuid.as_deref(),
+                &mut not_ours,
+            ) {
+                let is_new = selected
+                    .as_ref()
+                    .map(|(cur, _)| cur != &name)
+                    .unwrap_or(true);
+                let is_newer = match (selected_mtime, mtime) {
+                    (Some(prev), Some(cur)) => cur > prev,
+                    (None, _) => true,
+                    (Some(_), None) => is_new,
+                };
+                if is_new && (selected.is_none() || is_newer) {
+                    let first_select = selected.is_none();
                     let should_write = std::fs::read_to_string(&sid_file)
                         .ok()
                         .map(|s| s.trim() != uuid)
@@ -271,27 +268,77 @@ fn spawn_interactive_transcript_watcher(
                             ));
                         }
                     }
-                    if skip_existing {
-                        next_line = count_jsonl_lines(&path);
+                    // Skip existing lines only on the initial attach of a
+                    // resumed session. Mid-session rebinds (after /clear)
+                    // start at line 0 so chat mode sees the new conversation.
+                    next_line = if first_select && skip_existing {
+                        count_jsonl_lines(&path)
+                    } else {
+                        0
+                    };
+                    if !first_select {
+                        emit.log(format!(
+                            "codex: native session id rebinding to {uuid} (from {})",
+                            path.display()
+                        ));
                     }
-                    initialized = true;
                     selected = Some((name, path));
-                    break;
+                    selected_mtime = mtime;
                 }
             }
 
             let Some((_, path)) = selected.as_ref() else {
                 continue;
             };
-            if !initialized {
-                if skip_existing {
-                    next_line = count_jsonl_lines(path);
-                }
-                initialized = true;
-            }
             emit_new_codex_rollout_lines(path, &mut next_line, &emit);
         }
     });
+}
+
+/// Scan rollouts under `sessions_root` and return the best match for this
+/// construct session: originator tag match, or (on resume) an exact uuid
+/// match. Among matches, the newest mtime wins so /clear's fresh rollout
+/// supersedes the pre-clear one.
+fn find_best_matching_rollout(
+    sessions_root: &Path,
+    expected_originator: &str,
+    expected_uuid: Option<&str>,
+    not_ours: &mut HashSet<String>,
+) -> Option<(String, PathBuf, String, Option<std::time::SystemTime>)> {
+    let mut best: Option<(String, PathBuf, String, Option<std::time::SystemTime>)> = None;
+    for (name, path) in list_rollouts(sessions_root) {
+        if not_ours.contains(&name) {
+            continue;
+        }
+        let Some(meta) = read_session_meta(&path) else {
+            // File exists but session_meta isn't readable yet.
+            // Don't blacklist — codex may still be writing.
+            continue;
+        };
+        let uuid = meta.id.clone().or_else(|| uuid_from_rollout_name(&name));
+        let originator_matches = meta.originator.as_deref() == Some(expected_originator);
+        let uuid_matches = expected_uuid
+            .is_some_and(|want| uuid.as_deref() == Some(want));
+        if !originator_matches && !uuid_matches {
+            not_ours.insert(name);
+            continue;
+        }
+        let Some(uuid) = uuid else {
+            not_ours.insert(name);
+            continue;
+        };
+        let mtime = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok();
+        let take = match best.as_ref().and_then(|(_, _, _, t)| *t) {
+            Some(prev) => mtime.is_some_and(|cur| cur >= prev),
+            None => true,
+        };
+        if take {
+            best = Some((name, path, uuid, mtime));
+        }
+    }
+    best
 }
 
 fn count_jsonl_lines(path: &Path) -> usize {
@@ -602,8 +649,16 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         let _ = stderr_task.await;
         let _ = child.wait().await;
 
-        if codex_session_id.is_none() {
-            codex_session_id = captured_sid.lock().unwrap().clone();
+        // Always adopt the latest native id so a mid-run reset is honored
+        // on subsequent turns (and written for daemon resume).
+        if let Some(sid) = captured_sid.lock().unwrap().clone() {
+            if codex_session_id.as_ref() != Some(&sid) {
+                if let Ok(dir) = std::env::var("CONSTRUCT_SESSION_DATA_DIR") {
+                    let p = PathBuf::from(dir).join("codex_session_id.txt");
+                    let _ = std::fs::write(p, &sid);
+                }
+                codex_session_id = Some(sid);
+            }
         }
 
         match outcome {
@@ -664,9 +719,8 @@ where
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
                 if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
                     let mut g = captured_sid.lock().unwrap();
-                    if g.is_none() {
-                        *g = Some(sid.to_string());
-                    }
+                    // Keep the most recently observed id (not only the first).
+                    *g = Some(sid.to_string());
                 }
                 if !try_emit_structured(&emit, &v) {
                     emit.emit(SessionEvent::Message {
@@ -861,6 +915,63 @@ mod tests {
         let blank = tmp.join("rollout-blank.jsonl");
         std::fs::write(&blank, "").unwrap();
         assert!(read_session_meta(&blank).is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_best_matching_rollout_prefers_newest_after_clear() {
+        // Simulate /clear: two rollouts share our originator; the newer
+        // mtime (post-clear) must win so resume/fork follow the active id.
+        let tmp = std::env::temp_dir().join(format!(
+            "agentd-codex-best-match-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let old_name = "rollout-2026-05-16T14-21-02-019e32aa-014a-7ff0-9a3f-7ae773961a37.jsonl";
+        let new_name = "rollout-2026-05-16T15-00-00-019e32bb-014a-7ff0-9a3f-7ae773961a99.jsonl";
+        let old_path = tmp.join(old_name);
+        let new_path = tmp.join(new_name);
+        let originator = "agentd:sess-clear-test";
+        let meta = |id: &str| {
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":\
+                 {{\"id\":\"{id}\",\"originator\":\"{originator}\"}}}}\n"
+            )
+        };
+        std::fs::write(
+            &old_path,
+            meta("019e32aa-014a-7ff0-9a3f-7ae773961a37"),
+        )
+        .unwrap();
+        // Ensure distinct mtimes so "newest" is well-defined.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(
+            &new_path,
+            meta("019e32bb-014a-7ff0-9a3f-7ae773961a99"),
+        )
+        .unwrap();
+
+        // Unrelated originator must be ignored.
+        std::fs::write(
+            tmp.join("rollout-2026-05-16T16-00-00-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":\
+             {\"id\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\
+             \"originator\":\"codex-tui\"}}\n",
+        )
+        .unwrap();
+
+        let mut not_ours = HashSet::new();
+        let best = find_best_matching_rollout(&tmp, originator, None, &mut not_ours)
+            .expect("should find a match");
+        assert_eq!(best.0, new_name);
+        assert_eq!(best.2, "019e32bb-014a-7ff0-9a3f-7ae773961a99");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
