@@ -352,6 +352,7 @@ fn spawn_interactive_transcript_watcher(
         let mut child_lines: HashMap<String, usize> = HashMap::new();
         let mut child_states: HashMap<String, SessionState> = HashMap::new();
         let mut child_parents: HashMap<String, String> = HashMap::new();
+        let mut last_snapshot: Option<Vec<String>> = None;
         let mut initial_scan = true;
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -394,17 +395,28 @@ fn spawn_interactive_transcript_watcher(
             let Some(dir) = subagents_dir.as_ref() else {
                 continue;
             };
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                continue;
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if last_snapshot.as_ref().is_some_and(|ids| !ids.is_empty()) {
+                        emit.emit(SessionEvent::NativeSubagentSnapshot { ids: Vec::new() });
+                        last_snapshot = Some(Vec::new());
+                    }
+                    continue;
+                }
+                Err(_) => continue,
             };
+            let mut retained_native_ids = Vec::new();
             for entry in entries.flatten() {
                 let child_path = entry.path();
                 let Some(name) = child_path.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
-                let Some(native_id) = name.strip_prefix("agent-").map(str::to_string) else {
+                if !name.starts_with("agent-") {
                     continue;
-                };
+                }
+                let native_id = normalize_claude_agent_id(name);
+                retained_native_ids.push(native_id.clone());
                 let first_seen = !child_lines.contains_key(&native_id);
                 let next = child_lines.entry(native_id.clone()).or_insert_with(|| {
                     if skip_existing && this_is_initial_scan {
@@ -450,6 +462,14 @@ fn spawn_interactive_transcript_watcher(
                         });
                     }
                 }
+            }
+            retained_native_ids.sort();
+            retained_native_ids.dedup();
+            if last_snapshot.as_ref() != Some(&retained_native_ids) {
+                emit.emit(SessionEvent::NativeSubagentSnapshot {
+                    ids: retained_native_ids.clone(),
+                });
+                last_snapshot = Some(retained_native_ids);
             }
         }
     });
@@ -553,7 +573,9 @@ fn read_new_claude_values(path: &Path, next_line: &mut usize, emit: &EventEmitte
 
 fn claude_native_subagent_update(value: &Value) -> Option<(String, SessionState, Option<String>)> {
     let raw = serde_json::to_string(value).ok()?;
-    let id = xml_tag(&raw, "task-id").or_else(|| agent_id_from_text(&raw))?;
+    let id = normalize_claude_agent_id(
+        &xml_tag(&raw, "task-id").or_else(|| agent_id_from_text(&raw))?,
+    );
     let status = xml_tag(&raw, "status").unwrap_or_else(|| "running".into());
     let state = match status.as_str() {
         "completed" => SessionState::Done,
@@ -563,6 +585,10 @@ fn claude_native_subagent_update(value: &Value) -> Option<(String, SessionState,
     };
     let title = xml_tag(&raw, "summary");
     Some((id, state, title))
+}
+
+fn normalize_claude_agent_id(id: &str) -> String {
+    id.trim().strip_prefix("agent-").unwrap_or(id.trim()).to_string()
 }
 
 fn agent_id_from_text(raw: &str) -> Option<String> {
@@ -1014,6 +1040,17 @@ mod tests {
                 SessionState::Done,
                 Some("Inspect parser".into())
             ))
+        );
+        assert_eq!(normalize_claude_agent_id("abc123"), "abc123");
+        assert_eq!(normalize_claude_agent_id("agent-abc123"), "abc123");
+
+        let prefixed_complete = serde_json::json!({
+            "content": "<task-notification><task-id>agent-abc123</task-id><status>completed</status></task-notification>"
+        });
+        assert_eq!(
+            claude_native_subagent_update(&prefixed_complete)
+                .map(|(id, _, _)| id),
+            Some("abc123".into())
         );
     }
 

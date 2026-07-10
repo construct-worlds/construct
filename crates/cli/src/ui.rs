@@ -7836,6 +7836,7 @@ fn chat_event_kind(ev: &SessionEvent) -> ChatEventKind {
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::NativeSubagentSnapshot { .. }
         | SessionEvent::NativeSubagent { .. }
         | SessionEvent::AgentStatus(_) => ChatEventKind::Hidden,
         SessionEvent::Message { role, text } if should_render_chat_message(*role, text) => {
@@ -8023,6 +8024,7 @@ fn format_chat_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::NativeSubagentSnapshot { .. }
         | SessionEvent::NativeSubagent { .. }
         | SessionEvent::AgentStatus(_) => Vec::new(),
         SessionEvent::Message { role, text } => {
@@ -8805,6 +8807,9 @@ fn shorten(s: &str, max: usize) -> String {
 
 pub fn short_event_label(ev: &SessionEvent) -> String {
     match ev {
+        SessionEvent::NativeSubagentSnapshot { ids } => {
+            format!("native-subagent-snapshot {}", ids.len())
+        }
         SessionEvent::NativeSubagent { id, state, .. } => {
             format!("native-subagent {id} {state:?}")
         }

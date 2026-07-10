@@ -338,6 +338,12 @@ pub struct UiAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
+    /// Authoritative set of harness-native children currently retained by the
+    /// wrapped harness. The daemon archives mirrors owned by this session when
+    /// their native id is absent, and later upserts may unarchive them.
+    NativeSubagentSnapshot {
+        ids: Vec<String>,
+    },
     /// A child agent created and owned by the wrapped harness (for example a
     /// Claude Code or Codex native subagent). The daemon projects these as
     /// read-only virtual sessions; it must not spawn, resume, or directly

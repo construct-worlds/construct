@@ -8847,5 +8847,36 @@ done
                 ..
             }] if text == "found it"
         ));
+
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagentSnapshot { ids: Vec::new() },
+            )
+            .await;
+        assert!(
+            manager
+                .detail(&projected_id)
+                .await
+                .expect("archived mirror")
+                .summary
+                .archived,
+            "a child absent from the authoritative snapshot is archived"
+        );
+
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagentSnapshot {
+                    ids: vec!["native-child".into()],
+                },
+            )
+            .await;
+        let restored = manager
+            .detail(&projected_id)
+            .await
+            .expect("restored mirror");
+        assert!(!restored.summary.archived);
+        assert_eq!(restored.summary.state, SessionState::Running);
     }
 }

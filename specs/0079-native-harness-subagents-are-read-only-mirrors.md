@@ -22,6 +22,11 @@ Native parent links are recursive. A native subagent created by another native
 subagent appears beneath that native parent rather than being flattened under
 the owning Construct session.
 
+When a harness can publish an authoritative retained-child snapshot, Construct
+archives mirrors absent from that snapshot and restores them if they reappear.
+Harness-native identifiers are canonicalized across transcript filenames and
+lifecycle notifications before they become mirror identities.
+
 ## Reason
 
 Claude Code and Codex both persist stable child identities, parentage, semantic
@@ -40,6 +45,8 @@ child that is already owned by its parent.
 - The daemon persists virtual child summaries and transcripts so ordinary
   list, detail, transcript, focus, and preview paths work unchanged.
 - Virtual children are excluded from daemon startup auto-resume.
+- Removed native children become archived mirrors rather than stale active
+  rows, preserving their transcripts without implying they still exist.
 - Clients visibly label native children and must support recursive child
   traversal.
 - Harness transcript formats are discovery inputs, not a lifecycle ownership

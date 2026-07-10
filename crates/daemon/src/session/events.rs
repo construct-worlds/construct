@@ -17,6 +17,10 @@ impl SessionManager {
         if self.is_shutting_down.load(Ordering::Acquire) {
             return;
         }
+        if let SessionEvent::NativeSubagentSnapshot { ids } = event {
+            self.reconcile_native_subagent_snapshot(entry, ids).await;
+            return;
+        }
         if let SessionEvent::NativeSubagent {
             id,
             parent_id,
@@ -356,6 +360,7 @@ impl SessionManager {
                     s.pending_input = false;
                 }
                 SessionEvent::Reset
+                | SessionEvent::NativeSubagentSnapshot { .. }
                 | SessionEvent::NativeSubagent { .. }
                 | SessionEvent::Message { .. }
                 | SessionEvent::Reasoning { .. }
@@ -581,11 +586,13 @@ impl SessionManager {
             let mut summary = entry.summary.write().await;
             summary.parent_session_id = Some(parent_session_id);
             summary.state = state;
+            summary.archived = false;
             if title.as_ref().is_some_and(|title| !title.trim().is_empty()) {
                 summary.title = title;
             }
             summary.clone()
         };
+        entry.archived.store(false, Ordering::SeqCst);
         let _ = self.storage.save_summary(&snapshot);
         let _ = self
             .broadcast
@@ -595,8 +602,60 @@ impl SessionManager {
 
         if let Some(child_event) = event {
             // Adapters must not recursively wrap native-child routing events.
-            if !matches!(*child_event, SessionEvent::NativeSubagent { .. }) {
+            if !matches!(
+                *child_event,
+                SessionEvent::NativeSubagent { .. }
+                    | SessionEvent::NativeSubagentSnapshot { .. }
+            ) {
                 Box::pin(self.handle_event(&entry, *child_event)).await;
+            }
+        }
+    }
+
+    async fn reconcile_native_subagent_snapshot(
+        &self,
+        owner: &Arc<SessionEntry>,
+        native_ids: Vec<String>,
+    ) {
+        let retained: std::collections::HashSet<&str> =
+            native_ids.iter().map(String::as_str).collect();
+        let mirrored: Vec<(String, String, bool)> = {
+            let sessions = self.sessions.read().await;
+            let mut out = Vec::new();
+            for (id, entry) in sessions.iter() {
+                let summary = entry.summary.read().await;
+                if let Some(native) = &summary.native_subagent {
+                    if native.owner_session_id == owner.id {
+                        out.push((id.clone(), native.native_id.clone(), summary.archived));
+                    }
+                }
+            }
+            out
+        };
+        for (session_id, native_id, archived) in mirrored {
+            if retained.contains(native_id.as_str()) && archived {
+                if let Some(entry) = self.get_entry(&session_id).await {
+                    let snapshot = {
+                        let mut summary = entry.summary.write().await;
+                        summary.archived = false;
+                        summary.state = SessionState::Running;
+                        summary.clone()
+                    };
+                    entry.archived.store(false, Ordering::SeqCst);
+                    let _ = self.storage.save_summary(&snapshot);
+                    let _ = self.broadcast.send(BroadcastMsg::State(
+                        StateNotificationPayload { session: snapshot },
+                    ));
+                }
+            } else if !retained.contains(native_id.as_str()) && !archived {
+                if let Err(error) = self.archive_native_mirror(&session_id).await {
+                    tracing::warn!(
+                        owner = %owner.id,
+                        session = %session_id,
+                        ?error,
+                        "archive removed native subagent mirror failed"
+                    );
+                }
             }
         }
     }

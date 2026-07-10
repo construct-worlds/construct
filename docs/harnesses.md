@@ -86,7 +86,8 @@ Claude Code and Codex subagents created through their native delegation tools
 appear beneath the owning session as `(native)` child rows. Their live state and
 structured transcript are inspectable like any other session, including nested
 children. These rows are read-only mirrors: use the parent CLI's native
-subagent commands to message, interrupt, resume, or remove them.
+subagent commands to message, interrupt, resume, or remove them. Removing a
+Claude child archives its mirror while retaining the transcript.
 
 ## Interactive and headless sessions
 
