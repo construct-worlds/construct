@@ -101,47 +101,57 @@ existing theme colors rather than inventing a third lineage-specific hue,
 and gives a focused preview the same "this pane owns your keystrokes" visual
 language every other focused pane already uses.
 
+### The preview renders as a boxed-lane diagram
+
+The preview draws each session as a small bordered box (status glyph +
+title/harness [+ terminal marker]) with that session's own timeline as a
+vertical lane hanging below the box, read top to bottom. A fork branches
+off the parent's lane with a labeled arrow (`├─⑂ fork ──▸`) into the
+child's box, placed to the right with its own lane below it; a fork that
+merged returns to the parent's lane with a labeled merge arrow
+(`│◂─ ↩ merge ──┘`). A subagent branches the same way (`▸ subagent`
+arrow) but never merges back. Keyboard selection lands on the box label
+rows; boxes are the only selectable rows.
+
 ### Activity stats are per-segment, not per-node
 
-Activity stats (message/turn count, elapsed time) are rendered as separate,
-non-selectable annotation rows on the rail — positioned BETWEEN the markers
-that bound them — rather than attached to each node's own line. The markers
-on a node's own timeline are: its own creation, each fork child's fork-out
-point, each fork child's merge-back point (only when it actually merged —
-a discard doesn't inject anything into the parent's transcript, so it isn't
-a boundary), and "now" (or the node's own terminal point, if it has one).
-Each gap between consecutive markers becomes one segment row describing
-what happened in exactly that window, e.g.:
+Activity stats (message/turn count, elapsed time) render as turn-info
+lines ON the lanes, positioned BETWEEN the markers that bound them —
+never on a node's own box label. The markers on a node's own timeline
+are: its own creation, each fork child's fork-out point, each fork
+child's merge-back point (only when it actually merged — a discard
+doesn't inject anything into the parent's transcript, so it isn't a
+boundary), and "now" (or the node's own terminal point, if it has one).
+Each gap between consecutive markers becomes one turn-info line
+describing exactly that window. The parent's activity WHILE a merged
+fork was out renders side-by-side with the fork's own lane — the two
+windows covered the same wall-clock span, so they sit level with each
+other:
 
 ```
-◆ ● claude — auth-refactor
-│   12 msgs · 8m12s
-│ ⑂ ● claude — fork idea A  ↩ merged
-│ │   2 msgs · 1m05s
-│   5 msgs · 3m40s
-│ ⑂ ● claude — fork idea B
-  │   1 msg · 30s
+┌───────────────────────────┐
+│ ● auth-refactor (claude)  │
+└───────────────────────────┘
+  │
+  12 msgs · 8m12s
+  │
+  │               ┌──────────────────────────────┐
+  ├─⑂ fork ──────▸│ ● idea A (claude)  ↩ merged  │
+  │               └──────────────────────────────┘
+  5 msgs · 3m40s    │
+  │                 2 msgs · 1m05s
+  │                 │
+  │◂─ ↩ merge ──────┘
+  │
+  3 msgs · 2m00s
 ```
 
-A node's own line no longer carries stats at all — it's rail + edge glyph +
-status glyph + harness [+ title] [+ merged/discarded marker], nothing more.
-
-The rail itself (the `│` columns on the left) is a pure vertical-line
-connector, not a `git log --graph`-style tree with `├─`/`└─` branch
-corners — it mirrors the `:::timeline` markdown extension's rendering
-convention instead (same one-column-per-nesting-level `│` used elsewhere
-in this UI for checklists), on the reasoning that a node's own edge glyph
-(`◆`/`⑂`/`▸`) already marks "a branch starts here", so a second, redundant
-corner glyph on the rail added visual noise without adding information.
-Whether a column keeps drawing `│` below a given row, or goes blank, is
-carried by that row's ancestors' `is_last` — a sibling that isn't the last
-one (e.g. "fork idea A" above, with "fork idea B" still to come) reads
-identically to one that is; the difference only shows up one level down, in
-whether ITS children's rail carries a `│` in that column or not.
-A childless node still gets exactly one segment (its whole life, start to
+A childless node still gets exactly one window (its whole life, start to
 "now" or to its own terminal point), so every node's activity ends up
 visible somewhere, not just nodes with forks. A window with zero messages
-in it is skipped entirely rather than rendered as a "0 msgs" line.
+in it is skipped entirely rather than rendered as a "0 msgs" line —
+leaving just the lane bar. Diagram rows never wrap; a too-wide diagram
+clips at the preview's edge.
 
 This is possible without any extra fetch because `SessionSummary::event_count`,
 `ForkedFrom::transcript_seq`, and `ForkMerge::merged_seq` are all the same

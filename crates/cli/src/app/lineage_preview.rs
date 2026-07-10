@@ -133,8 +133,9 @@ impl App {
     /// `App::sessions` on every call (no popup-owned copy to go stale), same
     /// approach the deleted modal's `lineage_rows` used.
     pub(crate) fn lineage_preview_rows(&self, session_id: &str) -> Vec<LineageRow> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
         crate::lineage::build_tree(session_id, &self.sessions)
-            .map(|root| crate::lineage::flatten(&root, &self.sessions))
+            .map(|root| crate::lineage::flatten(&root, &self.sessions, now_ms))
             .unwrap_or_default()
     }
 

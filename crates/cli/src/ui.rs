@@ -9221,76 +9221,52 @@ fn lineage_row_scroll(
     scroll.min(total.saturating_sub(visible))
 }
 
-/// Render one flattened lineage row: rail prefix, then either a node's own
-/// edge glyph/status/harness/title/terminal-state suffix, a segment's
-/// compact activity annotation, or a "+N more" collapse marker.
+/// Style one flattened lineage-diagram row: the layout (boxes, lanes,
+/// arrows, turn info — see `crate::lineage::flatten`) arrives fully
+/// composed as role-tagged text runs; this just maps each role to a theme
+/// style. A node's label is styled by that session's live state, dimmed
+/// when merged and struck through when discarded — same treatment its old
+/// flat-row rendering used.
 fn render_lineage_row(
     row: &crate::lineage::LineageRow,
     by_id: &HashMap<&str, &SessionSummary>,
     theme: &Theme,
-    now_ms: i64,
 ) -> Line<'static> {
-    let rail = row.rail_prefix();
-    let mut spans: Vec<Span<'static>> = vec![Span::styled(
-        format!(" {rail}"),
-        Style::default().fg(theme.dim),
-    )];
-    match &row.kind {
-        crate::lineage::LineageRowKind::More(n) => {
-            spans.push(Span::styled(
-                format!(" +{n} more"),
-                Style::default()
+    let spans: Vec<Span<'static>> = row
+        .spans
+        .iter()
+        .map(|run| {
+            let style = match &run.role {
+                crate::lineage::LineageSpan::Rail | crate::lineage::LineageSpan::Border => {
+                    Style::default().fg(theme.dim)
+                }
+                crate::lineage::LineageSpan::Edge(edge) => match edge {
+                    crate::lineage::LineageEdge::Root => Style::default().fg(theme.accent),
+                    // Fork edges are lighter — mergeable siblings, not true
+                    // parent/child helpers (spec 0078 vs spec 0014).
+                    crate::lineage::LineageEdge::Fork => Style::default().fg(theme.dim),
+                    crate::lineage::LineageEdge::Subagent => Style::default().fg(theme.harness),
+                },
+                crate::lineage::LineageSpan::Segment { .. } => Style::default().fg(theme.dim),
+                crate::lineage::LineageSpan::More(_) => Style::default()
                     .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
-            ));
-        }
-        crate::lineage::LineageRowKind::Segment {
-            delta_events,
-            start_ms,
-            end_ms,
-        } => {
-            let label = crate::lineage::segment_label(*delta_events, *start_ms, *end_ms, now_ms);
-            spans.push(Span::styled(label, Style::default().fg(theme.dim)));
-        }
-        crate::lineage::LineageRowKind::Node { session_id, edge } => {
-            let (edge_glyph, edge_style) = match edge {
-                crate::lineage::LineageEdge::Root => ("◆", Style::default().fg(theme.accent)),
-                // Fork edges are dashed/lighter — mergeable siblings, not
-                // true parent/child helpers (spec 0078 vs spec 0014).
-                crate::lineage::LineageEdge::Fork => ("⑂", Style::default().fg(theme.dim)),
-                crate::lineage::LineageEdge::Subagent => ("▸", Style::default().fg(theme.harness)),
-            };
-            spans.push(Span::styled(format!("{edge_glyph} "), edge_style));
-            let Some(summary) = by_id.get(session_id.as_str()).copied() else {
-                spans.push(Span::styled(
-                    format!("{} (gone)", short_id(session_id)),
-                    Style::default().fg(theme.dim),
-                ));
-                return Line::from(spans);
-            };
-            let status_glyph = crate::lineage::status_glyph(summary.state);
-            let title = summary.title.as_deref().filter(|t| !t.trim().is_empty());
-            let mut label = match title {
-                Some(t) => format!("{status_glyph} {} — {t}", summary.harness),
-                None => format!("{status_glyph} {}", summary.harness),
-            };
-            let mut label_style = state_style(theme, summary.state);
-            match crate::lineage::ForkStatus::of(summary) {
-                crate::lineage::ForkStatus::Merged => {
-                    label.push_str("  ↩ merged");
-                    label_style = Style::default().fg(theme.dim);
+                crate::lineage::LineageSpan::Node { session_id } => {
+                    match by_id.get(session_id.as_str()) {
+                        None => Style::default().fg(theme.dim),
+                        Some(summary) => match crate::lineage::ForkStatus::of(summary) {
+                            crate::lineage::ForkStatus::Merged => Style::default().fg(theme.dim),
+                            crate::lineage::ForkStatus::Discarded => Style::default()
+                                .fg(theme.dim)
+                                .add_modifier(Modifier::CROSSED_OUT),
+                            crate::lineage::ForkStatus::Open => state_style(theme, summary.state),
+                        },
+                    }
                 }
-                crate::lineage::ForkStatus::Discarded => {
-                    label.push_str("  ✗ discarded");
-                    label_style = Style::default()
-                        .fg(theme.dim)
-                        .add_modifier(Modifier::CROSSED_OUT);
-                }
-                crate::lineage::ForkStatus::Open => {}
-            }
-            spans.push(Span::styled(label, label_style));
-        }
-    }
+            };
+            Span::styled(run.text.clone(), style)
+        })
+        .collect();
     Line::from(spans)
 }
 
@@ -9352,10 +9328,10 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
         return;
     }
     let rows = app.lineage_preview_rows(session_id);
-    if rows.len() <= 1 {
+    if rows.iter().filter(|r| r.is_selectable()).count() <= 1 {
         // Nothing beyond the session itself to show — e.g. its one fork was
         // just discarded and pruned from `app.sessions` while pinned open.
-        // Render nothing rather than an empty box; the pin quietly goes
+        // Render nothing rather than a lone box; the pin quietly goes
         // stale until the user clicks it off.
         return;
     }
@@ -9391,7 +9367,6 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
         area,
     );
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
     let by_id: HashMap<&str, &SessionSummary> =
         app.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
 
@@ -9420,19 +9395,22 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
             .enumerate()
             .skip(scroll)
             .take(visible)
-            .map(|(_, row)| ListItem::new(render_lineage_row(row, &by_id, &app.theme, now_ms)))
+            .map(|(_, row)| ListItem::new(render_lineage_row(row, &by_id, &app.theme)))
             .collect();
         let mut state = ListState::default();
         state.select(selected_raw.map(|sr| sr - scroll));
         let list = List::new(items).highlight_style(highlight_style);
         f.render_stateful_widget(list, inner, &mut state);
     } else {
+        // No wrapping: these are diagram rows (boxes, lanes, arrows) —
+        // wrapping would shear the drawing. A too-wide diagram clips at the
+        // preview's edge instead.
         let lines: Vec<Line<'static>> = rows
             .iter()
             .take(inner.height as usize)
-            .map(|row| render_lineage_row(row, &by_id, &app.theme, now_ms))
+            .map(|row| render_lineage_row(row, &by_id, &app.theme))
             .collect();
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        f.render_widget(Paragraph::new(lines), inner);
     }
 
     app.layout.lineage_preview_area = Some(area);
@@ -14113,172 +14091,180 @@ mod tests {
         serde_json::from_value(json).expect("valid SessionSummary")
     }
 
-    fn lineage_node_row(
-        session_id: &str,
-        edge: crate::lineage::LineageEdge,
-    ) -> crate::lineage::LineageRow {
-        // `&[]`: these tests only look at index 0 (the node's own row),
-        // which `flatten` always emits first regardless of whether it can
-        // find a summary to derive segment rows from.
-        crate::lineage::flatten(
-            &crate::lineage::LineageNode {
-                session_id: session_id.to_string(),
-                edge,
-                children: Vec::new(),
-            },
-            &[],
-        )
-        .remove(0)
+    /// A root + fork + subagent fixture, flattened into diagram rows.
+    fn lineage_test_rows() -> (Vec<SessionSummary>, Vec<crate::lineage::LineageRow>) {
+        let root = lineage_test_summary("root");
+        let mut fork = lineage_test_summary("f");
+        fork.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "root".into(),
+            transcript_seq: 1,
+            at_ms: 1_000,
+        });
+        let mut sub = lineage_test_summary("s");
+        sub.kind = agentd_protocol::SessionKind::Subagent;
+        sub.parent_session_id = Some("root".into());
+        let sessions = vec![root, fork, sub];
+        let tree = crate::lineage::build_tree("root", &sessions).expect("tree");
+        let rows = crate::lineage::flatten(&tree, &sessions, 9_000);
+        (sessions, rows)
+    }
+
+    fn lineage_lines(
+        sessions: &[SessionSummary],
+        rows: &[crate::lineage::LineageRow],
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
+        let by_id: HashMap<&str, &SessionSummary> =
+            sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+        rows.iter()
+            .map(|r| render_lineage_row(r, &by_id, theme))
+            .collect()
     }
 
     #[test]
-    fn lineage_row_renders_fork_and_subagent_edge_glyphs() {
+    fn lineage_diagram_renders_labeled_fork_and_subagent_arrows() {
         let theme = Theme::default();
-        let by_id_owner = vec![lineage_test_summary("a")];
-        let by_id: HashMap<&str, &SessionSummary> =
-            by_id_owner.iter().map(|s| (s.id.as_str(), s)).collect();
-
-        let fork_row = lineage_node_row("a", crate::lineage::LineageEdge::Fork);
-        let text = line_text(&render_lineage_row(&fork_row, &by_id, &theme, 0));
-        assert!(
-            text.contains('⑂'),
-            "fork edge should render its glyph: {text}"
+        let (sessions, rows) = lineage_test_rows();
+        let lines = lineage_lines(&sessions, &rows, &theme);
+        let all_spans: Vec<&Span<'static>> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+        let fork_span = all_spans
+            .iter()
+            .find(|s| s.content.as_ref() == "⑂ fork")
+            .expect("fork arrow label span");
+        assert_eq!(fork_span.style.fg, Some(theme.dim));
+        let sub_span = all_spans
+            .iter()
+            .find(|s| s.content.as_ref() == "▸ subagent")
+            .expect("subagent arrow label span");
+        assert_eq!(
+            sub_span.style.fg,
+            Some(theme.harness),
+            "subagent arrows keep the harness accent, distinct from fork arrows"
         );
-
-        let subagent_row = lineage_node_row("a", crate::lineage::LineageEdge::Subagent);
-        let text = line_text(&render_lineage_row(&subagent_row, &by_id, &theme, 0));
-        assert!(
-            text.contains('▸'),
-            "subagent edge should render its glyph: {text}"
-        );
-
-        let root_row = lineage_node_row("a", crate::lineage::LineageEdge::Root);
-        let text = line_text(&render_lineage_row(&root_row, &by_id, &theme, 0));
-        assert!(text.contains('◆'), "root should render its glyph: {text}");
     }
 
     #[test]
     fn lineage_row_renders_merged_fork_dimmed_and_discarded_struck_through() {
         let theme = Theme::default();
-        let mut merged = lineage_test_summary("f");
-        merged.forked_from = Some(agentd_protocol::ForkedFrom {
-            session_id: "root".into(),
-            transcript_seq: 0,
-            at_ms: 0,
-        });
-        merged.merge = Some(agentd_protocol::ForkMerge {
+        let (mut sessions, _) = lineage_test_rows();
+        sessions[1].merge = Some(agentd_protocol::ForkMerge {
             mode: agentd_protocol::ForkMergeMode::Result,
-            at_ms: 0,
-            merged_seq: 0,
+            at_ms: 2_000,
+            merged_seq: 2,
         });
-        let by_id: HashMap<&str, &SessionSummary> = [("f", &merged)].into_iter().collect();
-        let row = lineage_node_row("f", crate::lineage::LineageEdge::Fork);
-        let line = render_lineage_row(&row, &by_id, &theme, 0);
-        assert!(line_text(&line).contains("↩ merged"));
+        let tree = crate::lineage::build_tree("root", &sessions).expect("tree");
+        let rows = crate::lineage::flatten(&tree, &sessions, 9_000);
+        let lines = lineage_lines(&sessions, &rows, &theme);
+        let text: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("↩ merged"), "{text}");
         assert!(
-            !line
-                .spans
-                .iter()
-                .any(|s| s.style.add_modifier.contains(Modifier::CROSSED_OUT)),
+            text.contains("↩ merge"),
+            "merge-back arrow expected: {text}"
+        );
+        let merged_label = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains("↩ merged"))
+            .expect("merged fork label span");
+        assert_eq!(merged_label.style.fg, Some(theme.dim));
+        assert!(
+            !merged_label
+                .style
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT),
             "a merged fork must not be struck through — that's reserved for discarded"
         );
 
-        let mut discarded = merged.clone();
-        discarded.merge = Some(agentd_protocol::ForkMerge {
+        sessions[1].merge = Some(agentd_protocol::ForkMerge {
             mode: agentd_protocol::ForkMergeMode::Discard,
-            at_ms: 0,
-            merged_seq: 0,
+            at_ms: 2_000,
+            merged_seq: 2,
         });
-        let by_id: HashMap<&str, &SessionSummary> = [("f", &discarded)].into_iter().collect();
-        let row = lineage_node_row("f", crate::lineage::LineageEdge::Fork);
-        let line = render_lineage_row(&row, &by_id, &theme, 0);
-        assert!(line_text(&line).contains("✗ discarded"));
+        let tree = crate::lineage::build_tree("root", &sessions).expect("tree");
+        let rows = crate::lineage::flatten(&tree, &sessions, 9_000);
+        let lines = lineage_lines(&sessions, &rows, &theme);
+        let discarded_label = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains("✗ discarded"))
+            .expect("discarded fork label span");
         assert!(
-            line.spans
-                .iter()
-                .any(|s| s.style.add_modifier.contains(Modifier::CROSSED_OUT)),
+            discarded_label
+                .style
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT),
             "a discarded fork must render struck-through, distinct from an open or merged fork"
         );
     }
 
     #[test]
-    fn lineage_row_more_marker_shows_count_and_is_not_an_edge() {
+    fn lineage_row_more_marker_shows_count() {
         let theme = Theme::default();
-        let by_id: HashMap<&str, &SessionSummary> = HashMap::new();
-        let row = crate::lineage::LineageRow {
-            depth: 1,
-            is_last: true,
-            rails: vec![],
-            kind: crate::lineage::LineageRowKind::More(7),
-        };
-        let text = line_text(&render_lineage_row(&row, &by_id, &theme, 0));
-        assert!(text.contains("+7 more"));
+        let mut sessions = vec![lineage_test_summary("root")];
+        for i in 0..(crate::lineage::MAX_SIBLINGS + 7) {
+            let mut f = lineage_test_summary(&format!("f{i}"));
+            f.forked_from = Some(agentd_protocol::ForkedFrom {
+                session_id: "root".into(),
+                transcript_seq: 0,
+                at_ms: 0,
+            });
+            sessions.push(f);
+        }
+        let tree = crate::lineage::build_tree("root", &sessions).expect("tree");
+        let rows = crate::lineage::flatten(&tree, &sessions, 0);
+        let lines = lineage_lines(&sessions, &rows, &theme);
+        let text: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("+7 more"), "{text}");
     }
 
     #[test]
     fn lineage_row_no_longer_shows_per_node_stats() {
-        // Stats moved from the node's own line to separate Segment rows —
-        // a node's line is just rail + edge + status + harness [+ title]
-        // [+ terminal marker] now.
+        // Stats live on the lanes as turn-info rows — a node's own box
+        // label row is just status glyph + name/harness [+ terminal
+        // marker], never message counts.
         let theme = Theme::default();
-        let by_id_owner = vec![lineage_test_summary("a")];
-        let by_id: HashMap<&str, &SessionSummary> =
-            by_id_owner.iter().map(|s| (s.id.as_str(), s)).collect();
-        let row = lineage_node_row("a", crate::lineage::LineageEdge::Root);
-        let text = line_text(&render_lineage_row(&row, &by_id, &theme, 0));
-        assert!(
-            !text.contains("msg"),
-            "a node's own line must not carry message-count stats anymore: {text}"
-        );
+        let (sessions, rows) = lineage_test_rows();
+        let lines = lineage_lines(&sessions, &rows, &theme);
+        for (row, line) in rows.iter().zip(lines.iter()) {
+            if row.is_selectable() {
+                let text = line_text(line);
+                assert!(
+                    !text.contains("msg"),
+                    "a node's box row must not carry message-count stats: {text}"
+                );
+            }
+        }
     }
 
     #[test]
     fn lineage_row_renders_segment_text_and_style_distinct_from_a_node_row() {
         let theme = Theme::default();
-        let by_id_owner = vec![lineage_test_summary("a")];
-        let by_id: HashMap<&str, &SessionSummary> =
-            by_id_owner.iter().map(|s| (s.id.as_str(), s)).collect();
+        let (sessions, rows) = lineage_test_rows();
+        let lines = lineage_lines(&sessions, &rows, &theme);
 
-        let node_row = lineage_node_row("a", crate::lineage::LineageEdge::Root);
-        let node_line = render_lineage_row(&node_row, &by_id, &theme, 60_000);
-        let node_text = line_text(&node_line);
+        // Some lane row carries turn info ("N msgs · elapsed"), styled dim.
+        let segment_span = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains("msgs \u{b7}") || s.content.contains("msg \u{b7}"))
+            .expect("a turn-info span somewhere in the diagram");
+        assert_eq!(segment_span.style.fg, Some(theme.dim));
 
-        let segment_row = crate::lineage::LineageRow {
-            depth: 1,
-            is_last: false,
-            rails: vec![],
-            kind: crate::lineage::LineageRowKind::Segment {
-                delta_events: 4,
-                start_ms: 0,
-                end_ms: Some(65_000),
-            },
-        };
-        let segment_line = render_lineage_row(&segment_row, &by_id, &theme, 60_000);
-        let segment_text = line_text(&segment_line);
-
-        assert!(
-            segment_text.contains("4 msgs"),
-            "segment row should show its own message count: {segment_text}"
-        );
-        assert!(
-            segment_text.contains("1m05s"),
-            "segment row should show its elapsed window: {segment_text}"
-        );
+        // A node's box label is styled by live state — not the dim used for
+        // wiring/turn info.
+        let node_idx = rows
+            .iter()
+            .position(|r| r.is_selectable())
+            .expect("node row");
+        let node_label = lines[node_idx]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("smith"))
+            .expect("node label span");
         assert_ne!(
-            node_text, segment_text,
-            "a segment row's text must read as distinct content from a node row's"
+            node_label.style.fg, segment_span.style.fg,
+            "node labels must render visually distinct from turn-info rows"
         );
-
-        // Style: a node row's label uses `state_style` (bright, per-state),
-        // a segment row's is uniformly `theme.dim` — the two must not
-        // collapse to the same look.
-        let node_label_style = node_line.spans.last().expect("node label span").style;
-        let segment_style = segment_line.spans.last().expect("segment span").style;
-        assert_ne!(
-            node_label_style.fg, segment_style.fg,
-            "segment rows must render visually distinct from node rows"
-        );
-        assert_eq!(segment_style.fg, Some(theme.dim));
     }
 
     #[test]

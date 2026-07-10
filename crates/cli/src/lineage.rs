@@ -1,8 +1,9 @@
-//! Fork + subagent lineage tree: pure construction and a vertical-rail
-//! layout (`:::timeline`-style `│` connectors, not `git log --graph`
-//! branch corners — see `LineageRow::rail_prefix`), decoupled from `App`
-//! and ratatui so the same logic can back the lineage preview
-//! (specs/0080-lineage-preview-on-harness-label.md).
+//! Fork + subagent lineage tree: pure construction and a boxed-lane
+//! diagram layout (each session a bordered box, each session's own
+//! timeline a vertical lane below its box, forks branching right with
+//! labeled arrows and merging back with return arrows — see `flatten`),
+//! decoupled from `App` and ratatui so the layout can be unit-tested as
+//! plain text (specs/0080-lineage-preview-on-harness-label.md).
 //!
 //! A session has at most one incoming lineage edge — either it was forked
 //! from a parent (`forked_from`, spec 0078) or it is a subagent parented to
@@ -201,20 +202,22 @@ fn build_subtree(
     })
 }
 
-/// What a flattened row represents.
+/// Role of one styled text run within a rendered diagram row — the TUI
+/// renderer maps each role to a theme style, keeping this module free of
+/// ratatui types so the whole layout is unit-testable as plain text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LineageRowKind {
-    Node {
-        session_id: String,
-        edge: LineageEdge,
-    },
-    /// Activity on a node's own timeline within ONE window — bounded by its
-    /// own creation, each fork child's fork-out/merge-back points on this
-    /// node's timeline, and "now" (or this node's own terminal point, if it
-    /// has one). A rail annotation, not attached to any one node's own
-    /// line — see the "Design notes" doc comment above `push_segment` for
-    /// how these windows are computed. Not selectable — skipped by
-    /// `selectable_indices`, same as `More`.
+pub enum LineageSpan {
+    /// Diagram wiring: lane bars, branch/merge arrow shafts, connectors.
+    Rail,
+    /// Session-box border fragments.
+    Border,
+    /// The glyph + word labeling a branch arrow (`⑂ fork` / `▸ subagent`).
+    Edge(LineageEdge),
+    /// Turn info for one activity window on some node's own timeline —
+    /// bounded by that node's creation, a fork child's fork-out /
+    /// merge-back points, and "now" (or the node's own terminal point).
+    /// The window's numbers ride along so tests can assert boundaries
+    /// without parsing the rendered text.
     Segment {
         /// Messages/turns within this window (`SessionSummary::event_count`
         /// / `ForkedFrom::transcript_seq` / `ForkMerge::merged_seq` units —
@@ -222,68 +225,139 @@ pub enum LineageRowKind {
         delta_events: u64,
         /// Start of this window, epoch ms.
         start_ms: i64,
-        /// End of this window, epoch ms. `None` means this window is still
-        /// open — its end is "now" at render time rather than baked in
-        /// here, exactly like `render_lineage_row` used to take `now_ms`
-        /// at render time rather than storing elapsed text on the row.
+        /// End of this window, epoch ms; `None` = still open (measured
+        /// against `now_ms` at flatten time).
         end_ms: Option<i64>,
     },
-    /// A "+N more" collapse marker — not selectable.
+    /// A node's box label text (status glyph, name, harness, terminal
+    /// marker) — carries the session id so the renderer can style it by
+    /// that session's live state.
+    Node { session_id: String },
+    /// "+N more" collapse marker.
     More(usize),
 }
 
-/// One flattened, renderable line of the tree.
+/// One styled run of text within a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineageSpanRun {
+    pub text: String,
+    pub role: LineageSpan,
+}
+
+/// One renderable line of the lineage diagram.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageRow {
-    pub depth: usize,
-    /// Whether this row is the last among its siblings — determines
-    /// whether ITS OWN children's rail column below it draws a continuing
-    /// `│` (`false`, more siblings follow after this subtree) or goes
-    /// blank (`true`, nothing more at this level). No longer affects this
-    /// row's own prefix glyph — see `rail_prefix`.
-    pub is_last: bool,
-    /// Per-ancestor-level: draw a continuing `│` rail (`true`) or blank
-    /// space (`false`) in that column. Length is `depth` (root excluded).
-    pub rails: Vec<bool>,
-    pub kind: LineageRowKind,
+    pub spans: Vec<LineageSpanRun>,
+    /// `Some(session id)` when this row is a node's box label row — the
+    /// row keyboard selection lands on. Everything else (borders, lane
+    /// bars, segments, arrows, "+N more") is not selectable.
+    pub node_session_id: Option<String>,
 }
 
 impl LineageRow {
     pub fn session_id(&self) -> Option<&str> {
-        match &self.kind {
-            LineageRowKind::Node { session_id, .. } => Some(session_id),
-            LineageRowKind::Segment { .. } | LineageRowKind::More(_) => None,
-        }
+        self.node_session_id.as_deref()
     }
 
     pub fn is_selectable(&self) -> bool {
-        matches!(self.kind, LineageRowKind::Node { .. })
+        self.node_session_id.is_some()
     }
 
-    /// Rail prefix: pure `│` vertical connectors and indent, one column per
-    /// ancestor level plus one for this row's own depth — glyphs only, no
-    /// session label (callers append the edge glyph/status/stats, or the
-    /// segment text, after this).
-    ///
-    /// Mirrors the `:::timeline` markdown extension's vertical-line
-    /// convention (`render_timeline_nested_line`) rather than a `git log
-    /// --graph`-style `├─`/`└─` branch corner: a node's own edge glyph
-    /// (`◆`/`⑂`/`▸`) already marks "a branch starts here", so a separate
-    /// corner glyph on the rail itself is redundant. Whether a level's
-    /// column keeps drawing `│` below a given row is carried entirely by
-    /// `rails` (set from ancestors' `is_last`) — this method never branches
-    /// on `is_last` or on `LineageRowKind` for the glyph itself, so a
-    /// `Segment` row's rail reads identically to a `Node` row's at the same
-    /// depth: both are annotations sitting ON the rail, not a fork in it.
-    pub fn rail_prefix(&self) -> String {
-        let mut out = String::new();
-        for r in &self.rails {
-            out.push_str(if *r { "\u{2502} " } else { "  " });
+    /// The row's full text with styling stripped — for tests and debugging.
+    pub fn text(&self) -> String {
+        self.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+}
+
+/// A plain character grid the diagram is laid out onto before being cut
+/// into styled rows. Cells hold `(char, role)`; unset cells become spaces.
+/// A `'\0'` cell marks the continuation column of a double-width character
+/// (CJK titles) — it occupies grid space for alignment math but emits no
+/// text of its own.
+#[derive(Default)]
+struct Canvas {
+    cells: Vec<Vec<Option<(char, LineageSpan)>>>,
+    /// `(row, session id)` for each node's box label row, in paint order.
+    node_rows: Vec<(usize, String)>,
+}
+
+impl Canvas {
+    fn put(&mut self, y: usize, x: usize, text: &str, role: &LineageSpan) {
+        if self.cells.len() <= y {
+            self.cells.resize_with(y + 1, Vec::new);
         }
-        if self.depth > 0 {
-            out.push_str("\u{2502} ");
+        let row = &mut self.cells[y];
+        let mut cx = x;
+        for ch in text.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(ch)
+                .unwrap_or(1)
+                .max(1);
+            if row.len() <= cx + w - 1 {
+                row.resize(cx + w, None);
+            }
+            row[cx] = Some((ch, role.clone()));
+            for pad in 1..w {
+                row[cx + pad] = Some(('\0', role.clone()));
+            }
+            cx += w;
         }
-        out
+    }
+
+    /// Draw a lane bar only where nothing else has been painted — used to
+    /// continue a parent's lane through the rows a child block occupies
+    /// without overwriting the branch arrow or turn-info text on that lane.
+    fn put_if_empty(&mut self, y: usize, x: usize, ch: char, role: &LineageSpan) {
+        if self.cells.len() <= y {
+            self.cells.resize_with(y + 1, Vec::new);
+        }
+        let row = &mut self.cells[y];
+        if row.len() <= x {
+            row.resize(x + 1, None);
+        }
+        if row[x].is_none() {
+            row[x] = Some((ch, role.clone()));
+        }
+    }
+
+    fn into_rows(self) -> Vec<LineageRow> {
+        let node_by_row: HashMap<usize, String> = self.node_rows.into_iter().collect();
+        self.cells
+            .into_iter()
+            .enumerate()
+            .map(|(y, cells)| {
+                let mut spans: Vec<LineageSpanRun> = Vec::new();
+                let last = cells.iter().rposition(|c| c.is_some());
+                if let Some(last) = last {
+                    let mut cur_role: Option<LineageSpan> = None;
+                    let mut cur_text = String::new();
+                    for cell in cells.into_iter().take(last + 1) {
+                        let (ch, role) = cell.unwrap_or((' ', LineageSpan::Rail));
+                        if cur_role.as_ref() != Some(&role) {
+                            if let Some(role) = cur_role.take() {
+                                spans.push(LineageSpanRun {
+                                    text: std::mem::take(&mut cur_text),
+                                    role,
+                                });
+                            }
+                            cur_role = Some(role);
+                        }
+                        if ch != '\0' {
+                            cur_text.push(ch);
+                        }
+                    }
+                    if let Some(role) = cur_role {
+                        spans.push(LineageSpanRun {
+                            text: cur_text,
+                            role,
+                        });
+                    }
+                }
+                LineageRow {
+                    spans,
+                    node_session_id: node_by_row.get(&y).cloned(),
+                }
+            })
+            .collect()
     }
 }
 
@@ -302,202 +376,305 @@ pub fn selectable_indices(rows: &[LineageRow]) -> Vec<usize> {
         .collect()
 }
 
-/// Flatten a tree into renderable rows in depth-first, top-to-bottom order —
-/// the order a `git log --graph`-style rail expects. `sessions` is used to
-/// derive each node's activity-segment rows (see "Design notes" below) — the
-/// same slice `build_tree` used to construct `root`, passed again here
-/// rather than threaded through the tree itself, since segment math needs
-/// live `SessionSummary` fields (`event_count`, `forked_from`, `merge`) that
-/// `LineageNode` deliberately doesn't carry.
+/// Lay the tree out as a boxed-lane diagram and cut it into renderable
+/// rows. `sessions` is the same slice `build_tree` used, passed again here
+/// since segment math needs live `SessionSummary` fields (`event_count`,
+/// `forked_from`, `merge`) that `LineageNode` deliberately doesn't carry;
+/// `now_ms` is the render frame's clock, used to compose open-ended
+/// turn-info labels (the diagram is rebuilt from live state every frame,
+/// so labels never go stale).
 ///
-/// ### Design notes: segment boundaries
+/// ### The diagram
 ///
-/// Each node's own timeline is chopped into activity windows at the points
-/// where fork children branch off it and merge back into it — all on the
-/// SAME counter (`SessionSummary::event_count` == `ForkedFrom::
-/// transcript_seq` == `ForkMerge::merged_seq`, the transcript's own
-/// sequence counter), so the boundaries and their deltas are plain
-/// arithmetic over data already in memory, no extra fetch:
+/// Each session renders as a bordered box; its own timeline is a vertical
+/// lane hanging below the box's left edge, read top to bottom. A fork
+/// child branches off the parent's lane with a labeled arrow into its own
+/// box (placed to the right, with its own lane below it), and — when it
+/// merged back (`ForkMergeMode::Result`) — returns to the parent's lane
+/// with a merge arrow. Turn info renders ON the lanes, between the
+/// markers that bound each window:
+///
+/// ```text
+/// ┌───────────────────────────┐
+/// │ ● auth-refactor (claude)  │
+/// └───────────────────────────┘
+///   │
+///   12 msgs · 8m12s
+///   │
+///   │               ┌──────────────────────────────┐
+///   ├─⑂ fork ──────▸│ ● idea A (claude)  ↩ merged  │
+///   │               └──────────────────────────────┘
+///   5 msgs · 3m40s    │
+///   │                 2 msgs · 1m05s
+///   │                 │
+///   │◂─ ↩ merge ──────┘
+///   │
+///   3 msgs · 2m00s
+/// ```
+///
+/// ### Segment boundaries
+///
+/// The markers carving a node's own lane into windows are all on the SAME
+/// counter (`SessionSummary::event_count` == `ForkedFrom::transcript_seq`
+/// == `ForkMerge::merged_seq`, the transcript's own sequence counter), so
+/// boundaries and deltas are plain arithmetic over data already in memory:
 ///
 /// - `0` (the node's own creation).
-/// - Each FORK child's `forked_from.transcript_seq` (subagents don't share
-///   this timeline relationship — spec 0014 doesn't stamp a parent-timeline
-///   position the way spec 0078 forks do — so they're skipped as
-///   checkpoints and simply recursed into in place).
-/// - Each fork child's `merge.merged_seq`, but ONLY when it actually merged
-///   (`ForkMergeMode::Result`) — a discard never injects anything into the
-///   parent's transcript, so it contributes no further checkpoint beyond
-///   its own fork-out point.
+/// - Each FORK child's `forked_from.transcript_seq` (subagents don't stamp
+///   a parent-timeline position — spec 0014 vs spec 0078 — so a subagent
+///   branch arrow never advances the checkpoint; the branch is drawn at
+///   the walk's current position).
+/// - Each fork child's `merge.merged_seq`, ONLY when it actually merged —
+///   a discard never injects anything into the parent's transcript, so it
+///   contributes no checkpoint beyond its own fork-out point. The parent's
+///   activity WHILE a merged fork was out renders side-by-side with the
+///   fork's own lane (both windows covered the same wall-clock span),
+///   mirroring the concept sketch this layout implements.
 /// - The node's own current `event_count` as the final checkpoint — except
 ///   when the node ITSELF has a terminal outcome (it's a fork that has
-///   since merged/discarded, per its own `merge`), in which case its own
-///   timeline effectively froze at `merge.at_ms` and that's used as the
-///   final segment's end instead of "now".
+///   since merged/discarded), in which case its timeline froze at
+///   `merge.at_ms` and that's the final window's end instead of "now".
 ///
-/// A leaf (no fork/subagent children at all) still gets exactly one segment
-/// — its whole life is a single window, computed the same way as any
-/// node's trailing "since the last checkpoint" segment would be. This
-/// keeps every node's activity visible somewhere, not just nodes with
-/// forks; a node whose only children are subagents falls out of the same
-/// general loop with an identical result (subagents never advance the
-/// checkpoint, so the whole lifetime becomes one trailing segment,
-/// positioned after their subtrees).
-///
-/// A window with zero messages in it (two consecutive checkpoints land on
-/// the same `transcript_seq`, e.g. nothing happened on the parent while a
-/// fork was outstanding) is skipped entirely rather than rendered as a "0
-/// msgs" line — true of every window, not just the trailing one.
-pub fn flatten(root: &LineageNode, sessions: &[SessionSummary]) -> Vec<LineageRow> {
+/// A childless node still gets exactly one window — its whole life — so
+/// every node's activity is visible somewhere. A window with zero messages
+/// is skipped (no "0 msgs" line), leaving just the lane bar.
+pub fn flatten(root: &LineageNode, sessions: &[SessionSummary], now_ms: i64) -> Vec<LineageRow> {
     let by_id: HashMap<&str, &SessionSummary> =
         sessions.iter().map(|s| (s.id.as_str(), s)).collect();
-    let mut out = Vec::new();
-    flatten_rec(root, &by_id, 0, &[], true, &mut out);
-    out
+    let mut canvas = Canvas::default();
+    layout_node(&mut canvas, root, &by_id, 1, 0, now_ms);
+    canvas.into_rows()
 }
 
-fn flatten_rec(
-    node: &LineageNode,
-    by_id: &HashMap<&str, &SessionSummary>,
-    depth: usize,
-    rails: &[bool],
-    is_last: bool,
-    out: &mut Vec<LineageRow>,
-) {
-    out.push(LineageRow {
-        depth,
-        is_last,
-        rails: rails.to_vec(),
-        kind: LineageRowKind::Node {
-            session_id: node.session_id.clone(),
-            edge: node.edge,
-        },
-    });
-    let mut child_rails = rails.to_vec();
-    if depth > 0 {
-        child_rails.push(!is_last);
-    }
-
-    // A node's own timeline can only be carved into segments with its
-    // summary in hand (event_count, created_at, merge). Without one — e.g.
-    // it was deleted between `build_tree` and this call — fall back to
-    // plain recursion with no segment rows for this node; there's nothing
-    // to compute them from.
-    let Some(summary) = by_id.get(node.session_id.as_str()).copied() else {
-        let n = node.children.len();
-        for (i, child) in node.children.iter().enumerate() {
-            push_child(child, by_id, depth + 1, &child_rails, i + 1 == n, out);
-        }
-        return;
+/// `"● name (harness)"` box text, plus a terminal-state marker for
+/// merged/discarded forks. The name is the session's title (truncated) when
+/// it has one; otherwise just the harness stands alone.
+fn node_box_label(summary: Option<&SessionSummary>, session_id: &str) -> String {
+    let Some(s) = summary else {
+        let short: String = session_id.chars().take(8).collect();
+        return format!("{short} (gone)");
     };
-
-    if node.children.is_empty() {
-        push_segment(
-            out,
-            depth + 1,
-            &child_rails,
-            summary.event_count,
-            summary.created_at.timestamp_millis(),
-            summary.merge.as_ref().map(|m| m.at_ms),
-        );
-        return;
-    }
-
-    // Walk this node's own timeline forward through its children in
-    // display order (subagents first, then forks — see `build_subtree`),
-    // emitting a segment for the gap since the last checkpoint immediately
-    // before each fork's subtree, and advancing the checkpoint past that
-    // fork's merge (if any) immediately after.
-    let mut checkpoint_seq = 0u64;
-    let mut checkpoint_ms = summary.created_at.timestamp_millis();
-    let n = node.children.len();
-    for (i, child) in node.children.iter().enumerate() {
-        let child_is_last = i + 1 == n;
-        if let LineageChild::Node(cn) = child {
-            if cn.edge == LineageEdge::Fork {
-                if let Some(forked) = by_id
-                    .get(cn.session_id.as_str())
-                    .and_then(|s| s.forked_from.as_ref())
-                {
-                    push_segment(
-                        out,
-                        depth + 1,
-                        &child_rails,
-                        forked.transcript_seq.saturating_sub(checkpoint_seq),
-                        checkpoint_ms,
-                        Some(forked.at_ms),
-                    );
-                    checkpoint_seq = forked.transcript_seq;
-                    checkpoint_ms = forked.at_ms;
-                }
-            }
+    let status = status_glyph(s.state);
+    let title = s.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    let mut label = match title {
+        Some(t) => {
+            let name: String = if t.chars().count() > 24 {
+                t.chars().take(23).chain(std::iter::once('…')).collect()
+            } else {
+                t.to_string()
+            };
+            format!("{status} {name} ({})", s.harness)
         }
-        push_child(child, by_id, depth + 1, &child_rails, child_is_last, out);
-        if let LineageChild::Node(cn) = child {
-            if cn.edge == LineageEdge::Fork {
-                if let Some(m) = by_id
-                    .get(cn.session_id.as_str())
-                    .and_then(|s| s.merge.as_ref())
-                    .filter(|m| m.mode == ForkMergeMode::Result)
-                {
-                    checkpoint_seq = m.merged_seq;
-                    checkpoint_ms = m.at_ms;
-                }
-            }
-        }
+        None => format!("{status} {}", s.harness),
+    };
+    match ForkStatus::of(s) {
+        ForkStatus::Merged => label.push_str("  ↩ merged"),
+        ForkStatus::Discarded => label.push_str("  ✗ discarded"),
+        ForkStatus::Open => {}
     }
-    push_segment(
-        out,
-        depth + 1,
-        &child_rails,
-        summary.event_count.saturating_sub(checkpoint_seq),
-        checkpoint_ms,
-        summary.merge.as_ref().map(|m| m.at_ms),
-    );
+    label
 }
 
-fn push_child(
-    child: &LineageChild,
-    by_id: &HashMap<&str, &SessionSummary>,
-    depth: usize,
-    rails: &[bool],
-    is_last: bool,
-    out: &mut Vec<LineageRow>,
-) {
-    match child {
-        LineageChild::Node(cn) => flatten_rec(cn, by_id, depth, rails, is_last, out),
-        LineageChild::More(count) => out.push(LineageRow {
-            depth,
-            is_last,
-            rails: rails.to_vec(),
-            kind: LineageRowKind::More(*count),
-        }),
-    }
-}
-
-/// Push one activity-segment row for the window
-/// `[start_ms, end_ms.unwrap_or(<now, at render time>))`, unless it's empty
-/// — a `0`-message window isn't worth a "0 msgs" line.
-fn push_segment(
-    out: &mut Vec<LineageRow>,
-    depth: usize,
-    rails: &[bool],
+/// Paint one turn-info line at `(y, x)` — the window's numbers ride along
+/// on the span role for tests. Zero-message windows are the caller's job
+/// to skip.
+fn put_segment(
+    c: &mut Canvas,
+    y: usize,
+    x: usize,
     delta_events: u64,
     start_ms: i64,
     end_ms: Option<i64>,
+    now_ms: i64,
 ) {
-    if delta_events == 0 {
-        return;
-    }
-    out.push(LineageRow {
-        depth,
-        is_last: false,
-        rails: rails.to_vec(),
-        kind: LineageRowKind::Segment {
+    let text = segment_label(delta_events, start_ms, end_ms, now_ms);
+    c.put(
+        y,
+        x,
+        &text,
+        &LineageSpan::Segment {
             delta_events,
             start_ms,
             end_ms,
         },
-    });
+    );
+}
+
+/// Paint `node`'s box at `(x, y)`, its lane and children below it, and
+/// return the first free row past everything painted.
+fn layout_node(
+    c: &mut Canvas,
+    node: &LineageNode,
+    by_id: &HashMap<&str, &SessionSummary>,
+    x: usize,
+    y: usize,
+    now_ms: i64,
+) -> usize {
+    use unicode_width::UnicodeWidthStr;
+
+    let summary = by_id.get(node.session_id.as_str()).copied();
+    let label = node_box_label(summary, &node.session_id);
+    let lw = UnicodeWidthStr::width(label.as_str());
+    let border = LineageSpan::Border;
+    c.put(y, x, &format!("┌{}┐", "─".repeat(lw + 2)), &border);
+    c.put(y + 1, x, "│ ", &border);
+    c.put(
+        y + 1,
+        x + 2,
+        &label,
+        &LineageSpan::Node {
+            session_id: node.session_id.clone(),
+        },
+    );
+    c.put(y + 1, x + 2 + lw, " │", &border);
+    c.put(y + 2, x, &format!("└{}┘", "─".repeat(lw + 2)), &border);
+    c.node_rows.push((y + 1, node.session_id.clone()));
+
+    // The node's own lane hangs below the box's left edge.
+    let lane = x + 2;
+    let mut cur = y + 3;
+
+    let mut cp_seq: u64 = 0;
+    let mut cp_ms: i64 = summary
+        .map(|s| s.created_at.timestamp_millis())
+        .unwrap_or(0);
+
+    for child in &node.children {
+        let cn = match child {
+            LineageChild::More(n) => {
+                c.put(cur, lane, "├─ ", &LineageSpan::Rail);
+                c.put(cur, lane + 3, &format!("+{n} more"), &LineageSpan::More(*n));
+                cur += 1;
+                continue;
+            }
+            LineageChild::Node(cn) => cn,
+        };
+        let cs = by_id.get(cn.session_id.as_str()).copied();
+        let forked = if cn.edge == LineageEdge::Fork {
+            cs.and_then(|s| s.forked_from.as_ref())
+        } else {
+            None
+        };
+
+        // Window on this node's own lane since the last checkpoint, closed
+        // by this fork's fork-out point. Subagent branches don't close a
+        // window — just a connecting bar row before the branch arrow.
+        if let Some(f) = forked {
+            let delta = f.transcript_seq.saturating_sub(cp_seq);
+            if delta > 0 {
+                c.put(cur, lane, "│", &LineageSpan::Rail);
+                put_segment(c, cur + 1, lane, delta, cp_ms, Some(f.at_ms), now_ms);
+                c.put(cur + 2, lane, "│", &LineageSpan::Rail);
+                cur += 3;
+            } else {
+                c.put(cur, lane, "│", &LineageSpan::Rail);
+                cur += 1;
+            }
+            cp_seq = f.transcript_seq;
+            cp_ms = f.at_ms;
+        } else {
+            c.put(cur, lane, "│", &LineageSpan::Rail);
+            cur += 1;
+        }
+
+        // A merged fork closes a window on this node's lane at merge-back;
+        // that "while the fork was out" window renders side-by-side with
+        // the fork's own lane, so its label width helps size the branch
+        // arrow (the label must fit left of the child's box column).
+        let merge = if forked.is_some() {
+            cs.and_then(|s| s.merge.as_ref())
+                .filter(|m| m.mode == ForkMergeMode::Result)
+        } else {
+            None
+        };
+        let during = merge.map(|m| (m.merged_seq.saturating_sub(cp_seq), cp_ms, m.at_ms));
+        let during_w = during
+            .filter(|(d, _, _)| *d > 0)
+            .map(|(d, s, e)| UnicodeWidthStr::width(segment_label(d, s, Some(e), now_ms).as_str()))
+            .unwrap_or(0);
+        let edge_word = match cn.edge {
+            LineageEdge::Fork => "⑂ fork",
+            LineageEdge::Subagent => "▸ subagent",
+            LineageEdge::Root => "",
+        };
+        let ew = UnicodeWidthStr::width(edge_word);
+        // "├─" + word + gap + at least one "─" + "▸", stretched so a
+        // side-by-side during-window label can't collide with the child's
+        // box column.
+        let arrow_w = (ew + 5).max(during_w + 2);
+        let child_x = lane + arrow_w;
+        let child_top = cur;
+        let child_bottom = layout_node(c, cn, by_id, child_x, child_top, now_ms);
+
+        // Branch arrow into the child's box label row.
+        let ay = child_top + 1;
+        c.put(ay, lane, "├─", &LineageSpan::Rail);
+        c.put(ay, lane + 2, edge_word, &LineageSpan::Edge(cn.edge));
+        let dash_from = lane + 2 + ew + 1;
+        if child_x - 1 > dash_from {
+            c.put(
+                ay,
+                dash_from,
+                &"─".repeat(child_x - 1 - dash_from),
+                &LineageSpan::Rail,
+            );
+        }
+        c.put(ay, child_x - 1, "▸", &LineageSpan::Rail);
+
+        // This node's lane continues through the child's block.
+        for yy in child_top..child_bottom {
+            c.put_if_empty(yy, lane, '│', &LineageSpan::Rail);
+        }
+        cur = child_bottom;
+
+        // Side-by-side turn info: this node's own activity while the fork
+        // was out, on its own lane, level with the fork's block.
+        if let Some((d, s, e)) = during {
+            if d > 0 {
+                let info_y = child_top + 3;
+                put_segment(c, info_y, lane, d, s, Some(e), now_ms);
+                cur = cur.max(info_y + 1);
+            }
+        }
+
+        if let Some(m) = merge {
+            // One connector row so both lanes visibly reach the merge
+            // arrow, then the arrow itself flowing child → parent.
+            let child_lane = child_x + 2;
+            c.put_if_empty(cur, lane, '│', &LineageSpan::Rail);
+            c.put_if_empty(cur, child_lane, '│', &LineageSpan::Rail);
+            cur += 1;
+            c.put(cur, lane, "│", &LineageSpan::Rail);
+            let word = "◂─ ↩ merge ";
+            c.put(cur, lane + 1, word, &LineageSpan::Rail);
+            let from = lane + 1 + UnicodeWidthStr::width(word);
+            if child_lane > from {
+                c.put(
+                    cur,
+                    from,
+                    &"─".repeat(child_lane - from),
+                    &LineageSpan::Rail,
+                );
+            }
+            c.put(cur, child_lane, "┘", &LineageSpan::Rail);
+            cur += 1;
+            cp_seq = m.merged_seq;
+            cp_ms = m.at_ms;
+        }
+    }
+
+    // Trailing window: last checkpoint → now, or → this node's own
+    // terminal point if it has one (it's a fork that has merged/discarded).
+    if let Some(s) = summary {
+        let delta = s.event_count.saturating_sub(cp_seq);
+        if delta > 0 {
+            let end = s.merge.as_ref().map(|m| m.at_ms);
+            c.put(cur, lane, "│", &LineageSpan::Rail);
+            put_segment(c, cur + 1, lane, delta, cp_ms, end, now_ms);
+            cur += 2;
+        }
+    }
+    cur
 }
 
 /// Status glyph for a node — reuses [`SessionState::glyph`], the same
@@ -628,14 +805,38 @@ mod tests {
         s
     }
 
-    /// Segment rows' `delta_events`, in flattened (on-screen) order — the
-    /// shared assertion helper for the segment-boundary tests below.
+    /// Every turn-info window's `delta_events`, in on-screen (row-major)
+    /// order — the shared assertion helper for the segment-boundary tests
+    /// below.
     fn segment_deltas(rows: &[LineageRow]) -> Vec<u64> {
         rows.iter()
-            .filter_map(|r| match &r.kind {
-                LineageRowKind::Segment { delta_events, .. } => Some(*delta_events),
+            .flat_map(|r| r.spans.iter())
+            .filter_map(|s| match &s.role {
+                LineageSpan::Segment { delta_events, .. } => Some(*delta_events),
                 _ => None,
             })
+            .collect()
+    }
+
+    /// Same, but the full `(delta, start, end)` triples.
+    fn segments(rows: &[LineageRow]) -> Vec<(u64, i64, Option<i64>)> {
+        rows.iter()
+            .flat_map(|r| r.spans.iter())
+            .filter_map(|s| match &s.role {
+                LineageSpan::Segment {
+                    delta_events,
+                    start_ms,
+                    end_ms,
+                } => Some((*delta_events, *start_ms, *end_ms)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The diagram's plain-text lines (right-trimmed) — for shape asserts.
+    fn diagram_text(rows: &[LineageRow]) -> Vec<String> {
+        rows.iter()
+            .map(|r| r.text().trim_end().to_string())
             .collect()
     }
 
@@ -693,19 +894,32 @@ mod tests {
     }
 
     #[test]
-    fn recursive_fork_of_a_fork_nests_at_depth_two() {
+    fn recursive_fork_of_a_fork_nests_boxes_rightward() {
         let sessions = vec![
             base("a"),
             forked_from(base("b"), "a"),
             forked_from(base("c"), "b"),
         ];
         let tree = build_tree("a", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
-        let c_row = rows
-            .iter()
-            .find(|r| r.session_id() == Some("c"))
-            .expect("c row");
-        assert_eq!(c_row.depth, 2);
+        let rows = flatten(&tree, &sessions, 0);
+        // Each nesting level's box starts strictly further right — measured
+        // as the column where the node label span begins on that node's row.
+        let label_col = |id: &str| {
+            let row = rows
+                .iter()
+                .find(|r| r.session_id() == Some(id))
+                .unwrap_or_else(|| panic!("{id} row"));
+            let mut col = 0usize;
+            for span in &row.spans {
+                if matches!(&span.role, LineageSpan::Node { .. }) {
+                    return col;
+                }
+                col += span.text.chars().count();
+            }
+            panic!("{id} has no node span");
+        };
+        assert!(label_col("a") < label_col("b"));
+        assert!(label_col("b") < label_col("c"));
     }
 
     #[test]
@@ -728,18 +942,16 @@ mod tests {
             sessions.push(forked_from(base(&format!("s{i}")), &format!("s{}", i - 1)));
         }
         let tree = build_tree("s0", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
+        let rows = flatten(&tree, &sessions, 0);
         // Depths 0..MAX_DEPTH-1 render as real nodes; beyond that collapses.
         assert!(rows
             .iter()
-            .any(|r| matches!(r.kind, LineageRowKind::More(_))));
-        let deepest_node_depth = rows
-            .iter()
-            .filter(|r| r.is_selectable())
-            .map(|r| r.depth)
-            .max()
-            .unwrap();
-        assert!(deepest_node_depth < MAX_DEPTH);
+            .flat_map(|r| r.spans.iter())
+            .any(|s| matches!(s.role, LineageSpan::More(_))));
+        assert!(
+            selectable_indices(&rows).len() < MAX_DEPTH + 3,
+            "the collapsed tail must not materialize as selectable node rows"
+        );
     }
 
     #[test]
@@ -763,42 +975,78 @@ mod tests {
     }
 
     #[test]
-    fn rail_prefix_is_a_pure_vertical_rail_with_no_branch_corner() {
-        // root
-        // │ a
-        // │ │ b
-        // │ c
-        //
-        // Unlike `git log --graph`, there's no `├─`/`└─` corner marking a
-        // or c as a branch point — every non-root row gets a plain `│ ` at
-        // its own depth (mirrors `:::timeline`'s vertical connectors,
-        // spec 0080). `a` not being the last sibling (c follows) still
-        // shows up, just one level down: `b`'s rail carries a `│` in its
-        // ancestor column because `a.is_last == false`, not because `a`'s
-        // OWN prefix looked any different from `c`'s.
-        let sessions = vec![
-            base("root"),
-            forked_from(base("a"), "root"),
-            forked_from(base("b"), "a"),
-            forked_from(base("c"), "root"),
-        ];
-        let tree = build_tree("root", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
-        let by_id: HashMap<&str, &LineageRow> = rows
-            .iter()
-            .filter_map(|r| r.session_id().map(|id| (id, r)))
-            .collect();
-
-        assert_eq!(by_id["root"].rail_prefix(), "");
-        assert_eq!(by_id["a"].rail_prefix(), "\u{2502} ");
-        assert_eq!(by_id["b"].rail_prefix(), "\u{2502} \u{2502} ");
-        assert_eq!(by_id["c"].rail_prefix(), "\u{2502} ");
-        assert_eq!(
-            by_id["a"].rail_prefix(),
-            by_id["c"].rail_prefix(),
-            "a non-last sibling's own rail prefix must read identically to \
-             the last sibling's — is_last only affects rows NESTED under it"
+    fn diagram_matches_the_concept_layout_for_a_single_merged_fork() {
+        // The canonical scenario from the concept sketch: a parent whose
+        // fork merged back. Locks in the full shape — boxes, lanes,
+        // labeled branch/merge arrows, side-by-side turn info.
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 20);
+        let fork = merged_at(
+            with_event_count(
+                with_created_at_ms(forked_from_at(base("f"), "root", 12, 300_000), 300_000),
+                2,
+            ),
+            ForkMergeMode::Result,
+            15,
+            500_000,
         );
+        let sessions = vec![root, fork];
+        let tree = build_tree("root", &sessions).unwrap();
+        let rows = flatten(&tree, &sessions, 800_000);
+        let g = status_glyph(SessionState::Running);
+        assert_eq!(
+            diagram_text(&rows),
+            vec![
+                " ┌─────────┐".to_string(),
+                format!(" │ {g} smith │"),
+                " └─────────┘".to_string(),
+                "   │".to_string(),
+                "   12 msgs · 5m00s".to_string(),
+                "   │".to_string(),
+                "   │               ┌───────────────────┐".to_string(),
+                format!("   ├─⑂ fork ──────▸│ {g} smith  ↩ merged │"),
+                "   │               └───────────────────┘".to_string(),
+                "   3 msgs · 3m20s    │".to_string(),
+                "   │                 2 msgs · 3m20s".to_string(),
+                "   │                 │".to_string(),
+                "   │◂─ ↩ merge ──────┘".to_string(),
+                "   │".to_string(),
+                "   5 msgs · 5m00s".to_string(),
+            ]
+        );
+        // The two box label rows are the (only) selectable rows, in
+        // parent-then-child order.
+        let ids: Vec<_> = selectable_indices(&rows)
+            .into_iter()
+            .map(|i| rows[i].session_id().unwrap().to_string())
+            .collect();
+        assert_eq!(ids, vec!["root".to_string(), "f".to_string()]);
+    }
+
+    #[test]
+    fn discarded_fork_gets_no_merge_arrow_and_a_struck_marker() {
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 10);
+        let fork = merged_at(
+            with_event_count(
+                with_created_at_ms(forked_from_at(base("f"), "root", 4, 1_000), 1_000),
+                3,
+            ),
+            ForkMergeMode::Discard,
+            999, // deliberately poisoned: a discard must never be read as a checkpoint
+            2_000,
+        );
+        let sessions = vec![root, fork];
+        let tree = build_tree("root", &sessions).unwrap();
+        let rows = flatten(&tree, &sessions, 9_000);
+        let text = diagram_text(&rows).join("\n");
+        assert!(
+            !text.contains("◂─"),
+            "a discarded fork must not draw a merge-back arrow:\n{text}"
+        );
+        assert!(text.contains("✗ discarded"), "{text}");
+        // Root: 4 before the fork, then its trailing window counts from the
+        // FORK-OUT point (4), not the poisoned discard seq: 10 - 4 = 6. The
+        // fork's own life (3) sits in between.
+        assert_eq!(segment_deltas(&rows), vec![4, 3, 6]);
     }
 
     #[test]
@@ -863,7 +1111,7 @@ mod tests {
             sessions.push(forked_from(base(&format!("f{i}")), "root"));
         }
         let tree = build_tree("root", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
+        let rows = flatten(&tree, &sessions, 0);
         let selectable = selectable_indices(&rows);
         assert_eq!(
             selectable.len(),
@@ -880,26 +1128,12 @@ mod tests {
         let root = with_event_count(with_created_at_ms(base("root"), 0), 9);
         let sessions = vec![root];
         let tree = build_tree("root", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
+        let rows = flatten(&tree, &sessions, 0);
         assert_eq!(
-            segment_deltas(&rows),
-            vec![9],
-            "a childless node still gets one segment covering its whole life"
-        );
-        let LineageRowKind::Segment {
-            start_ms, end_ms, ..
-        } = &rows
-            .iter()
-            .find(|r| matches!(r.kind, LineageRowKind::Segment { .. }))
-            .unwrap()
-            .kind
-        else {
-            unreachable!()
-        };
-        assert_eq!(*start_ms, 0);
-        assert_eq!(
-            *end_ms, None,
-            "a still-open node's trailing segment has no baked-in end — it's \"now\" at render time"
+            segments(&rows),
+            vec![(9, 0, None)],
+            "a childless node gets one segment covering its whole life, \
+             open-ended (its end is \"now\" at render time, not baked in)"
         );
     }
 
@@ -924,19 +1158,12 @@ mod tests {
         // first); find it by its distinctive delta rather than assuming
         // position.
         let tree = build_tree("f", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
-        let seg = rows
-            .iter()
-            .find_map(|r| match &r.kind {
-                LineageRowKind::Segment {
-                    delta_events: 7,
-                    start_ms,
-                    end_ms,
-                } => Some((*start_ms, *end_ms)),
-                _ => None,
-            })
+        let rows = flatten(&tree, &sessions, 999_999);
+        let seg = segments(&rows)
+            .into_iter()
+            .find(|(d, _, _)| *d == 7)
             .expect("f's own leaf segment (delta_events = f.event_count = 7)");
-        assert_eq!(seg, (1_000, Some(3_000)));
+        assert_eq!(seg, (7, 1_000, Some(3_000)));
     }
 
     #[test]
@@ -948,10 +1175,11 @@ mod tests {
         );
         let sessions = vec![root, fork];
         let tree = build_tree("root", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
+        let rows = flatten(&tree, &sessions, 9_000);
         // root: [0, 12) before the fork, then [12, 20) since the fork (still
-        // open, so it's a trailing "to now" segment); f: its own [0, 2)
-        // life, still open too.
+        // open, so it's a trailing "to now" segment AFTER the fork's block —
+        // an open fork has no merge-back point to pin a side-by-side window
+        // to); f: its own [0, 2) life, still open too.
         assert_eq!(segment_deltas(&rows), vec![12, 2, 8]);
     }
 
@@ -987,11 +1215,14 @@ mod tests {
         );
         let sessions = vec![root, a, b, c];
         let tree = build_tree("root", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
+        let rows = flatten(&tree, &sessions, 9_000);
         assert_eq!(
             segment_deltas(&rows),
             vec![
                 5, // root, before A forked: [0, 5)
+                5, // root, while A was out ([5, 10) — its merge closed this
+                // window), rendered side-by-side with A's block so it
+                // appears before A's own trailing segment in row order
                 7, // A's own whole life
                 5, // root, between A merging back (seq 10) and B forking (seq 15)
                 3, // B's own whole life
@@ -1025,11 +1256,13 @@ mod tests {
         );
         let sessions = vec![root, a, b];
         let tree = build_tree("root", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
+        let rows = flatten(&tree, &sessions, 9_000);
         assert_eq!(
             segment_deltas(&rows),
             vec![
                 5, // root before a forked
+                3, // root while a was out ([5, 8) closed by a's merge),
+                // side-by-side with a's block
                 4, // a's own life
                 // no zero-length "a merged to b forked" segment
                 1, // b's own life
@@ -1048,21 +1281,26 @@ mod tests {
         let sub = with_event_count(with_created_at_ms(subagent_of(base("s"), "root"), 500), 2);
         let sessions = vec![root, sub];
         let tree = build_tree("root", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
+        let rows = flatten(&tree, &sessions, 9_000);
         assert_eq!(
             segment_deltas(&rows),
             vec![2, 9],
             "s's own leaf segment, then root's whole-life segment (unsplit by the subagent)"
         );
         // And root's segment must come after s's entire subtree in render
-        // order (it's the last row).
-        assert!(matches!(
-            rows.last().unwrap().kind,
-            LineageRowKind::Segment {
+        // order (it's the last row), and the branch arrow must be labeled
+        // as a subagent edge, not a fork.
+        assert!(rows.last().unwrap().spans.iter().any(|s| matches!(
+            s.role,
+            LineageSpan::Segment {
                 delta_events: 9,
                 ..
             }
-        ));
+        )));
+        assert!(rows.iter().flat_map(|r| r.spans.iter()).any(|s| matches!(
+            s.role,
+            LineageSpan::Edge(LineageEdge::Subagent)
+        ) && s.text == "▸ subagent"));
     }
 
     #[test]
@@ -1070,35 +1308,43 @@ mod tests {
         let root = with_event_count(with_created_at_ms(base("root"), 0), 5);
         let sessions = vec![root];
         let tree = build_tree("root", &sessions).unwrap();
-        let rows = flatten(&tree, &sessions);
-        let selectable = selectable_indices(&rows);
-        for idx in selectable {
-            assert!(!matches!(rows[idx].kind, LineageRowKind::Segment { .. }));
+        let rows = flatten(&tree, &sessions, 0);
+        for idx in selectable_indices(&rows) {
+            assert!(!rows[idx]
+                .spans
+                .iter()
+                .any(|s| matches!(s.role, LineageSpan::Segment { .. })));
         }
         assert!(
             rows.iter()
-                .any(|r| matches!(r.kind, LineageRowKind::Segment { .. })),
-            "sanity: this tree does have a segment row"
+                .flat_map(|r| r.spans.iter())
+                .any(|s| matches!(s.role, LineageSpan::Segment { .. })),
+            "sanity: this tree does have a turn-info row"
         );
     }
 
     #[test]
-    fn segment_row_rail_prefix_matches_a_node_rows_at_the_same_position() {
-        // A Segment row's rail reads identically to what a Node row at the
-        // same depth/is_last/rails would produce — `rail_prefix` doesn't
-        // branch on `LineageRowKind` at all anymore (no more corner glyph
-        // to special-case away from), so `is_last: true` here changes
-        // nothing about this row's OWN prefix either.
-        let row = LineageRow {
-            depth: 1,
-            is_last: true,
-            rails: vec![],
-            kind: LineageRowKind::Segment {
-                delta_events: 3,
-                start_ms: 0,
-                end_ms: Some(1_000),
-            },
+    fn wide_characters_in_titles_keep_box_borders_aligned() {
+        // A CJK title occupies two columns per character — the box's right
+        // border and closing corner must land at the same display column on
+        // all three box rows, or the diagram shears.
+        let mut root = with_event_count(with_created_at_ms(base("root"), 0), 1);
+        root.title = Some("한글 제목".to_string());
+        let sessions = vec![root];
+        let tree = build_tree("root", &sessions).unwrap();
+        let rows = flatten(&tree, &sessions, 0);
+        let text = diagram_text(&rows);
+        let width = |s: &str| {
+            s.chars()
+                .map(|c| {
+                    unicode_width::UnicodeWidthChar::width(c)
+                        .unwrap_or(1)
+                        .max(1)
+                })
+                .sum::<usize>()
         };
-        assert_eq!(row.rail_prefix(), "\u{2502} ");
+        assert_eq!(width(&text[0]), width(&text[1]), "{text:?}");
+        assert_eq!(width(&text[1]), width(&text[2]), "{text:?}");
+        assert!(text[1].contains("한글 제목"), "{text:?}");
     }
 }
