@@ -27386,14 +27386,23 @@ mod tests {
         // whenever the diagram was wider than the widget (a nested fork's
         // box starts deep to the right) — an immediate panic on render.
         let (mut app, _dir, server) = test_app_with_lineage().await;
-        let mut nested = summary_with_kind(agentd_protocol::SessionKind::User);
-        nested.id = "s1-fork-fork".into();
-        nested.forked_from = Some(agentd_protocol::ForkedFrom {
-            session_id: "s1-fork".into(),
-            transcript_seq: 0,
-            at_ms: 0,
-        });
-        app.sessions.push(nested);
+        // Nest deep enough that the innermost box starts past a 24-column
+        // preview even under the compact (column-reusing) layout.
+        for depth in 0..3 {
+            let mut nested = summary_with_kind(agentd_protocol::SessionKind::User);
+            let parent = if depth == 0 {
+                "s1-fork".to_string()
+            } else {
+                format!("s1-fork{}", "-fork".repeat(depth))
+            };
+            nested.id = format!("s1-fork{}", "-fork".repeat(depth + 1));
+            nested.forked_from = Some(agentd_protocol::ForkedFrom {
+                session_id: parent,
+                transcript_seq: 0,
+                at_ms: 0,
+            });
+            app.sessions.push(nested);
+        }
         app.select_session("s1".to_string());
         app.lineage_preview_pinned.insert("s1".to_string());
         // Force a viewport far narrower than the nested diagram so the
@@ -27407,7 +27416,7 @@ mod tests {
             !app.layout
                 .lineage_preview_box_hits
                 .iter()
-                .any(|h| h.session_id == "s1-fork-fork"),
+                .any(|h| h.session_id == "s1-fork-fork-fork-fork"),
             "a box entirely past the right edge registers no hit rect"
         );
         // And every registered hit stays inside the preview's inner rect.

@@ -231,15 +231,18 @@ pub enum LineageSpan {
         /// End of this window, epoch ms; `None` = still open (measured
         /// against `now_ms` at flatten time).
         end_ms: Option<i64>,
+        /// The lane this window belongs to.
+        session_id: String,
     },
     /// The `•` bullet heading a mid-timeline turn-info line, sitting on
-    /// the lane.
-    SegmentBullet,
+    /// the lane — tagged with the lane's session so hover/selection can
+    /// light a session's whole timeline.
+    SegmentBullet { session_id: String },
     /// Terminal-outcome glyph heading a lane's FINAL turn-info line in
     /// place of the bullet: `✓` when the lane ended well (fork merged,
     /// session `Done`), `✗` when it dead-ended (fork discarded, session
     /// `Errored`).
-    SegmentOutcome { ok: bool },
+    SegmentOutcome { ok: bool, session_id: String },
     /// A node's box label text (status glyph, name, harness, terminal
     /// marker) — carries the session id so the renderer can style it by
     /// that session's live state.
@@ -634,6 +637,7 @@ fn put_segment(
     end_ms: Option<i64>,
     now_ms: i64,
     outcome: Option<bool>,
+    owner: &str,
 ) -> usize {
     use unicode_width::UnicodeWidthStr;
     match outcome {
@@ -641,9 +645,19 @@ fn put_segment(
             y,
             lane,
             if ok { "✓" } else { "✗" },
-            &LineageSpan::SegmentOutcome { ok },
+            &LineageSpan::SegmentOutcome {
+                ok,
+                session_id: owner.to_string(),
+            },
         ),
-        None => c.put(y, lane, "•", &LineageSpan::SegmentBullet),
+        None => c.put(
+            y,
+            lane,
+            "•",
+            &LineageSpan::SegmentBullet {
+                session_id: owner.to_string(),
+            },
+        ),
     }
     let text = segment_label(delta_events, start_ms, end_ms, now_ms);
     let w = UnicodeWidthStr::width(text.as_str());
@@ -655,6 +669,7 @@ fn put_segment(
             delta_events,
             start_ms,
             end_ms,
+            session_id: owner.to_string(),
         },
     );
     lane + 2 + w
@@ -935,16 +950,13 @@ fn assign_offsets(lanes: &mut [Lane], i: usize) -> usize {
         footprints.insert(k, w);
     }
 
-    // Slot assignment: visit children by close time. A lane must sit
-    // OUTSIDE an overlapping, already-assigned sibling only when that
-    // sibling MERGES — its merge arrow travels back to the parent lane
-    // and would cross any live lane inside it. Overlapping siblings that
-    // never merge (open forks, discards, terminal sessions) draw no
-    // returning arrow, so a later lane takes the INNERMOST slot whose
-    // occupants it doesn't overlap — reusing columns freed by
-    // earlier-closed lanes keeps the diagram narrow. (Inclusive overlap:
-    // a branch at the very instant a sibling closes still renders above
-    // that closing row, so they coexist.)
+    // Slot assignment: visit children by close time; each takes the
+    // INNERMOST slot whose occupants its lifetime doesn't overlap —
+    // git-graph-style column reuse, as compact as the intervals allow. A
+    // merge arrow crossing a live lane placed inside it simply bridges
+    // over its bar, exactly like git-graph merge lines do. (Inclusive
+    // overlap: a branch at the very instant a sibling closes still
+    // renders above that closing row, so they coexist.)
     let mut order = kids.clone();
     order.sort_by_key(|&k| (lanes[k].close_ms, lanes[k].box_ms, k));
     let mut slots: Vec<Vec<usize>> = Vec::new();
@@ -955,16 +967,7 @@ fn assign_offsets(lanes: &mut [Lane], i: usize) -> usize {
             let (jb, je) = (lanes[j].box_ms, lanes[j].close_ms);
             kb <= je && jb <= ke
         };
-        let mut min_slot = 0usize;
-        for (s, occ) in slots.iter().enumerate() {
-            if occ
-                .iter()
-                .any(|&j| overlaps(j, lanes) && lanes[j].merge.is_some())
-            {
-                min_slot = min_slot.max(s + 1);
-            }
-        }
-        let mut slot = min_slot;
+        let mut slot = 0usize;
         while slots
             .get(slot)
             .is_some_and(|occ| occ.iter().any(|&j| overlaps(j, lanes)))
@@ -989,15 +992,10 @@ fn assign_offsets(lanes: &mut [Lane], i: usize) -> usize {
             .filter(|&&(_, sj)| sj == s)
             .map(|&(k, _)| k)
             .collect();
-        let max_ew = occupants
-            .iter()
-            .map(|&k| UnicodeWidthStr::width(edge_word_of(lanes[k].node.edge)))
-            .max()
-            .unwrap_or(0);
-        // Past the arrow's own minimum and past this lane's widest label
-        // (marker + gap + label + 2 blank columns), then past the inner
-        // slot's edge.
-        let off_min = (max_ew + 7).max(lanes[i].max_seg_w + 5);
+        // Past the icon-only arrow's minimum (├─⑂─▸) and past this
+        // lane's widest label (marker + gap + label + 2 blank columns),
+        // then past the inner slot's edge.
+        let off_min = 8.max(lanes[i].max_seg_w + 5);
         let off = if s == 0 {
             off_min
         } else {
@@ -1120,13 +1118,20 @@ fn layout_tree(
                             Some(lanes[i].box_ms),
                             now_ms,
                             None,
+                            &lanes[p].node.session_id,
                         );
                         cur += 1;
                     }
                     lanes[p].cp_seq = seq;
                     lanes[p].cp_ms = lanes[i].box_ms;
                 }
-                let edge_word = edge_word_of(lanes[i].node.edge);
+                // Icon-only arrow label — the glyph alone (⑂ / ▸) marks the
+                // edge kind.
+                let edge_word = match lanes[i].node.edge {
+                    LineageEdge::Fork => "⑂",
+                    LineageEdge::Subagent => "▸",
+                    LineageEdge::Root => "",
+                };
                 let ew = UnicodeWidthStr::width(edge_word);
                 // Column pre-assigned by `assign_offsets`: overlapping
                 // siblings stack outward by close time, so a lane that
@@ -1142,20 +1147,33 @@ fn layout_tree(
                 let plane = lanes[p].lane_col;
                 for lane in lanes.iter().filter(|l| l.placed && !l.ended) {
                     if lane.lane_col > plane && lane.lane_col < x && lane.box_bottom <= ay {
-                        c.put_if_empty(ay, lane.lane_col, '│', &LineageSpan::Rail);
+                        let sid = lane.node.session_id.clone();
+                        c.put_if_empty(
+                            ay,
+                            lane.lane_col,
+                            '│',
+                            &LineageSpan::Border { session_id: sid },
+                        );
                     }
                 }
-                c.put(ay, plane, "├─", &LineageSpan::Rail);
+                let child_border = LineageSpan::Border {
+                    session_id: lanes[i].node.session_id.clone(),
+                };
+                let parent_border = LineageSpan::Border {
+                    session_id: lanes[p].node.session_id.clone(),
+                };
+                c.put(ay, plane, "├", &parent_border);
+                c.put(ay, plane + 1, "─", &child_border);
                 c.put(
                     ay,
-                    plane + 3,
+                    plane + 2,
                     edge_word,
                     &LineageSpan::Edge(lanes[i].node.edge),
                 );
-                for dx in (plane + 3 + ew + 1)..x.saturating_sub(1) {
-                    c.put_if_empty(ay, dx, '─', &LineageSpan::Rail);
+                for dx in (plane + 2 + ew)..x.saturating_sub(1) {
+                    c.put_if_empty(ay, dx, '─', &child_border);
                 }
-                c.put(ay, x - 1, "▸", &LineageSpan::Rail);
+                c.put(ay, x - 1, "▸", &child_border);
                 lanes[p].last_row = lanes[p].last_row.max(ay);
                 lanes[i].x_abs = x;
                 lanes[i].lane_col = x + 1;
@@ -1191,6 +1209,7 @@ fn layout_tree(
                             Some(at),
                             now_ms,
                             None,
+                            &lanes[p].node.session_id,
                         );
                     }
                     if df > 0 {
@@ -1203,6 +1222,7 @@ fn layout_tree(
                             Some(at),
                             now_ms,
                             Some(true),
+                            &lanes[i].node.session_id,
                         );
                     }
                     cur += 1;
@@ -1223,16 +1243,28 @@ fn layout_tree(
                 let flane = lanes[i].lane_col;
                 for lane in lanes.iter().filter(|l| l.placed && !l.ended) {
                     if lane.lane_col > plane && lane.lane_col < flane && lane.box_bottom <= cur {
-                        c.put_if_empty(cur, lane.lane_col, '│', &LineageSpan::Rail);
+                        let sid = lane.node.session_id.clone();
+                        c.put_if_empty(
+                            cur,
+                            lane.lane_col,
+                            '│',
+                            &LineageSpan::Border { session_id: sid },
+                        );
                     }
                 }
-                c.put(cur, plane, "│", &LineageSpan::Rail);
-                let word = "◂─ ↩ merge ";
-                c.put(cur, plane + 1, word, &LineageSpan::Rail);
-                for dx in (plane + 1 + UnicodeWidthStr::width(word))..flane {
-                    c.put_if_empty(cur, dx, '─', &LineageSpan::Rail);
+                let fork_border = LineageSpan::Border {
+                    session_id: lanes[i].node.session_id.clone(),
+                };
+                let parent_border = LineageSpan::Border {
+                    session_id: lanes[p].node.session_id.clone(),
+                };
+                c.put(cur, plane, "│", &parent_border);
+                // Icon-only merge arrow: ◂─↩──…──┘
+                c.put(cur, plane + 1, "◂─↩", &fork_border);
+                for dx in (plane + 4)..flane {
+                    c.put_if_empty(cur, dx, '─', &fork_border);
                 }
-                c.put(cur, flane, "┘", &LineageSpan::Rail);
+                c.put(cur, flane, "┘", &fork_border);
                 lanes[p].cp_seq = mseq;
                 lanes[p].cp_ms = at;
                 lanes[p].last_row = lanes[p].last_row.max(cur);
@@ -1278,6 +1310,7 @@ fn layout_tree(
                     cur += 1;
                     for &(j, d) in &closing {
                         let (_, label_end, outcome) = lanes[j].end.expect("end event has end data");
+                        let owner = lanes[j].node.session_id.clone();
                         put_segment(
                             c,
                             cur,
@@ -1287,6 +1320,7 @@ fn layout_tree(
                             label_end,
                             now_ms,
                             outcome,
+                            &owner,
                         );
                         lanes[j].last_row = cur;
                     }
@@ -1309,8 +1343,11 @@ fn layout_tree(
         if !lane.placed {
             continue;
         }
+        let border = LineageSpan::Border {
+            session_id: lane.node.session_id.clone(),
+        };
         for yy in lane.box_bottom..=lane.last_row {
-            c.put_if_empty(yy, lane.lane_col, '│', &LineageSpan::Rail);
+            c.put_if_empty(yy, lane.lane_col, '│', &border);
         }
     }
 }
@@ -1357,7 +1394,6 @@ pub fn flatten_rails(
     let text_x = 1 + 2 * nrails + 1;
 
     let mut c = Canvas::default();
-    let rail_span = LineageSpan::Rail;
     // Per-lane row extents for the end-fill: (first row below its entry
     // row, last row its rail reaches).
     let mut first_row: Vec<usize> = vec![0; lanes.len()];
@@ -1395,15 +1431,26 @@ pub fn flatten_rails(
                     delta: u64,
                     start: i64,
                     end: Option<i64>,
-                    outcome: Option<bool>| {
+                    outcome: Option<bool>,
+                    owner: &str| {
         match outcome {
             Some(ok) => c.put(
                 row,
                 rail_col,
                 if ok { "✓" } else { "✗" },
-                &LineageSpan::SegmentOutcome { ok },
+                &LineageSpan::SegmentOutcome {
+                    ok,
+                    session_id: owner.to_string(),
+                },
             ),
-            None => c.put(row, rail_col, "•", &LineageSpan::SegmentBullet),
+            None => c.put(
+                row,
+                rail_col,
+                "•",
+                &LineageSpan::SegmentBullet {
+                    session_id: owner.to_string(),
+                },
+            ),
         }
         c.put(
             row,
@@ -1413,6 +1460,7 @@ pub fn flatten_rails(
                 delta_events: delta,
                 start_ms: start,
                 end_ms: end,
+                session_id: owner.to_string(),
             },
         );
     };
@@ -1423,18 +1471,24 @@ pub fn flatten_rails(
                            row: usize,
                            from: usize,
                            to: usize,
+                           lanes: &[Lane],
                            lanes_placed: &[bool],
                            lanes_ended: &[bool],
-                           rail_of: &[usize]| {
+                           rail_of: &[usize],
+                           owner: &str| {
         let (lo, hi) = (from.min(to), from.max(to));
         for (i, &r) in rail_of.iter().enumerate() {
             let rc = col(r);
             if rc > lo && rc < hi && lanes_placed[i] && !lanes_ended[i] {
-                c.put_if_empty(row, rc, '│', &LineageSpan::Rail);
+                let sid = lanes[i].node.session_id.clone();
+                c.put_if_empty(row, rc, '│', &LineageSpan::Border { session_id: sid });
             }
         }
+        let dash = LineageSpan::Border {
+            session_id: owner.to_string(),
+        };
         for x in (lo + 1)..hi {
-            c.put_if_empty(row, x, '─', &LineageSpan::Rail);
+            c.put_if_empty(row, x, '─', &dash);
         }
     };
 
@@ -1445,7 +1499,10 @@ pub fn flatten_rails(
         match kind {
             EV_BOX => {
                 if lanes[i].parent.is_none() {
-                    c.put(cur, col(0), "●", &rail_span);
+                    let border = LineageSpan::Border {
+                        session_id: lanes[i].node.session_id.clone(),
+                    };
+                    c.put(cur, col(0), "●", &border);
                     put_label(&mut c, cur, &lanes[i], None);
                     placed[i] = true;
                     first_row[i] = cur + 1;
@@ -1458,6 +1515,7 @@ pub fn flatten_rails(
                 if let Some(seq) = lanes[i].fork_seq {
                     let d = seq.saturating_sub(lanes[p].cp_seq);
                     if d > 0 {
+                        let owner = lanes[p].node.session_id.clone();
                         put_info(
                             &mut c,
                             cur,
@@ -1466,6 +1524,7 @@ pub fn flatten_rails(
                             lanes[p].cp_ms,
                             Some(lanes[i].box_ms),
                             None,
+                            &owner,
                         );
                         last_row[p] = last_row[p].max(cur);
                         cur += 1;
@@ -1474,9 +1533,25 @@ pub fn flatten_rails(
                     lanes[p].cp_ms = lanes[i].box_ms;
                 }
                 let (pc, cc) = (col(rail_of[p]), col(rail_of[i]));
-                bridge_and_dash(&mut c, cur, pc, cc, &placed, &ended, &rail_of);
-                c.put(cur, pc, "├", &rail_span);
-                c.put(cur, cc, if cc > pc { "┐" } else { "┌" }, &rail_span);
+                let child_border = LineageSpan::Border {
+                    session_id: lanes[i].node.session_id.clone(),
+                };
+                let parent_border = LineageSpan::Border {
+                    session_id: lanes[p].node.session_id.clone(),
+                };
+                bridge_and_dash(
+                    &mut c,
+                    cur,
+                    pc,
+                    cc,
+                    &lanes,
+                    &placed,
+                    &ended,
+                    &rail_of,
+                    &lanes[i].node.session_id.clone(),
+                );
+                c.put(cur, pc, "├", &parent_border);
+                c.put(cur, cc, if cc > pc { "┐" } else { "┌" }, &child_border);
                 let glyph = match lanes[i].node.edge {
                     LineageEdge::Fork => "⑂",
                     LineageEdge::Subagent => "▸",
@@ -1495,6 +1570,7 @@ pub fn flatten_rails(
                 let p = lanes[i].parent.expect("a merging fork has a parent");
                 let dp = mseq.saturating_sub(lanes[p].cp_seq);
                 if dp > 0 {
+                    let owner = lanes[p].node.session_id.clone();
                     put_info(
                         &mut c,
                         cur,
@@ -1503,6 +1579,7 @@ pub fn flatten_rails(
                         lanes[p].cp_ms,
                         Some(at),
                         None,
+                        &owner,
                     );
                     last_row[p] = last_row[p].max(cur);
                     cur += 1;
@@ -1512,6 +1589,7 @@ pub fn flatten_rails(
                     .map(|s| s.event_count.saturating_sub(lanes[i].cp_seq))
                     .unwrap_or(0);
                 if df > 0 {
+                    let owner = lanes[i].node.session_id.clone();
                     put_info(
                         &mut c,
                         cur,
@@ -1520,15 +1598,25 @@ pub fn flatten_rails(
                         lanes[i].cp_ms,
                         Some(at),
                         Some(true),
+                        &owner,
                     );
                     last_row[i] = last_row[i].max(cur);
                     cur += 1;
                 }
                 let (pc, cc) = (col(rail_of[p]), col(rail_of[i]));
-                bridge_and_dash(&mut c, cur, pc, cc, &placed, &ended, &rail_of);
-                c.put(cur, pc, "├", &rail_span);
-                c.put(cur, cc, if cc > pc { "┘" } else { "└" }, &rail_span);
-                c.put(cur, text_x, "↩ merge", &LineageSpan::Rail);
+                let fork_border = LineageSpan::Border {
+                    session_id: lanes[i].node.session_id.clone(),
+                };
+                let parent_border = LineageSpan::Border {
+                    session_id: lanes[p].node.session_id.clone(),
+                };
+                let owner = lanes[i].node.session_id.clone();
+                bridge_and_dash(
+                    &mut c, cur, pc, cc, &lanes, &placed, &ended, &rail_of, &owner,
+                );
+                c.put(cur, pc, "├", &parent_border);
+                c.put(cur, cc, if cc > pc { "┘" } else { "└" }, &fork_border);
+                c.put(cur, text_x, "↩ merge", &fork_border);
                 lanes[p].cp_seq = mseq;
                 lanes[p].cp_ms = at;
                 last_row[i] = last_row[i].max(cur);
@@ -1544,8 +1632,11 @@ pub fn flatten_rails(
                     group.push(events[gi].2);
                 }
                 for &j in &group {
+                    let border = LineageSpan::Border {
+                        session_id: lanes[j].node.session_id.clone(),
+                    };
                     for n in std::mem::take(&mut lanes[j].more) {
-                        c.put(cur, col(rail_of[j]), "├", &rail_span);
+                        c.put(cur, col(rail_of[j]), "├", &border);
                         c.put(cur, text_x, &format!("+{n} more"), &LineageSpan::More(n));
                         last_row[j] = last_row[j].max(cur);
                         cur += 1;
@@ -1556,6 +1647,7 @@ pub fn flatten_rails(
                         .unwrap_or(0);
                     if d > 0 {
                         let (_, label_end, outcome) = lanes[j].end.expect("end event has end data");
+                        let owner = lanes[j].node.session_id.clone();
                         put_info(
                             &mut c,
                             cur,
@@ -1564,6 +1656,7 @@ pub fn flatten_rails(
                             lanes[j].cp_ms,
                             label_end,
                             outcome,
+                            &owner,
                         );
                         last_row[j] = last_row[j].max(cur);
                         cur += 1;
@@ -1583,8 +1676,11 @@ pub fn flatten_rails(
             continue;
         }
         let rc = col(rail_of[i]);
+        let border = LineageSpan::Border {
+            session_id: lanes[i].node.session_id.clone(),
+        };
         for yy in first_row[i]..=last_row[i] {
-            c.put_if_empty(yy, rc, '│', &LineageSpan::Rail);
+            c.put_if_empty(yy, rc, '│', &border);
         }
     }
 
@@ -1742,6 +1838,7 @@ mod tests {
                     delta_events,
                     start_ms,
                     end_ms,
+                    ..
                 } => Some((*delta_events, *start_ms, *end_ms)),
                 _ => None,
             })
@@ -1924,7 +2021,7 @@ mod tests {
                 "  │".to_string(),
                 "  • 12 msgs · 5m00s".to_string(),
                 "  │                  ┌─────────┐".to_string(),
-                format!("  ├─ ⑂ fork ────────▸│ {g} smith │"),
+                format!("  ├─⑂───────────────▸│ {g} smith │"),
                 "  │                  └─────────┘".to_string(),
                 "  │                   │".to_string(),
                 // Both windows close at the merge instant, so they share
@@ -1933,7 +2030,7 @@ mod tests {
                 // completion, so its final window leads with ✓ (and its
                 // box carries no "↩ merged" marker).
                 "  • 3 msgs · 3m20s    ✓ 2 msgs · 3m20s".to_string(),
-                "  │◂─ ↩ merge ────────┘".to_string(),
+                "  │◂─↩────────────────┘".to_string(),
                 "  │".to_string(),
                 "  • 5 msgs · 5m00s".to_string(),
             ]
@@ -1965,11 +2062,10 @@ mod tests {
             "the terminal glyph replaces the bullet on the final window: {text}"
         );
         assert!(
-            rows.iter()
-                .flat_map(|r| r.spans.iter())
-                .any(
-                    |s| matches!(s.role, LineageSpan::SegmentOutcome { ok: true }) && s.text == "✓"
-                ),
+            rows.iter().flat_map(|r| r.spans.iter()).any(|s| matches!(
+                s.role,
+                LineageSpan::SegmentOutcome { ok: true, .. }
+            ) && s.text == "✓"),
             "{text}"
         );
 
@@ -1980,10 +2076,10 @@ mod tests {
             &[errored],
             9_000,
         );
-        assert!(rows
-            .iter()
-            .flat_map(|r| r.spans.iter())
-            .any(|s| matches!(s.role, LineageSpan::SegmentOutcome { ok: false }) && s.text == "✗"));
+        assert!(rows.iter().flat_map(|r| r.spans.iter()).any(|s| matches!(
+            s.role,
+            LineageSpan::SegmentOutcome { ok: false, .. }
+        ) && s.text == "✗"));
 
         // Still running: no outcome glyph anywhere.
         let live = with_event_count(with_created_at_ms(base("live"), 0), 3);
@@ -2034,7 +2130,7 @@ mod tests {
         assert!(rows[last_seg_row]
             .spans
             .iter()
-            .any(|s| matches!(s.role, LineageSpan::SegmentOutcome { ok: true })));
+            .any(|s| matches!(s.role, LineageSpan::SegmentOutcome { ok: true, .. })));
     }
 
     #[test]
@@ -2097,7 +2193,7 @@ mod tests {
         // span [parent lane, b's lane] lies entirely left of a's lane.
         let merge_line = text
             .iter()
-            .find(|l| l.contains("◂─ ↩ merge"))
+            .find(|l| l.contains("◂─↩"))
             .expect("merge arrow row");
         let merge_end = merge_line.chars().count();
         assert!(
@@ -2270,12 +2366,12 @@ mod tests {
             .position(|r| {
                 r.spans
                     .iter()
-                    .any(|s| matches!(s.role, LineageSpan::SegmentOutcome { ok: true }))
+                    .any(|s| matches!(s.role, LineageSpan::SegmentOutcome { ok: true, .. }))
             })
             .expect("s's ✓ row");
         let fork_arrow_row = rows
             .iter()
-            .position(|r| r.text().contains("⑂ fork"))
+            .position(|r| r.text().contains('⑂'))
             .expect("f's branch arrow row");
         assert!(
             sub_done_row < fork_arrow_row,
@@ -2314,14 +2410,13 @@ mod tests {
         let fork_rows: Vec<usize> = text
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains("⑂ fork"))
+            .filter(|(_, l)| l.contains('⑂'))
             .map(|(i, _)| i)
             .collect();
-        // "◂─ ↩ merge" is the arrow; a bare "↩ merge" would also match the
-        // merged box's own "↩ merged" label suffix.
+        // "◂─↩" is the merge arrow's icon-only head.
         let merge_row = text
             .iter()
-            .position(|l| l.contains("◂─ ↩ merge"))
+            .position(|l| l.contains("◂─↩"))
             .expect("merge arrow row");
         assert_eq!(fork_rows.len(), 2, "{text:#?}");
         assert!(
@@ -2645,10 +2740,10 @@ mod tests {
                 ..
             }
         )));
-        assert!(rows.iter().flat_map(|r| r.spans.iter()).any(|s| matches!(
-            s.role,
-            LineageSpan::Edge(LineageEdge::Subagent)
-        ) && s.text == "▸ subagent"));
+        assert!(rows
+            .iter()
+            .flat_map(|r| r.spans.iter())
+            .any(|s| matches!(s.role, LineageSpan::Edge(LineageEdge::Subagent)) && s.text == "▸"));
     }
 
     #[test]

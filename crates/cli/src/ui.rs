@@ -9267,16 +9267,35 @@ fn render_lineage_row(
                 // Fork and subagent arrow labels render at the same
                 // brightness — the word already tells them apart.
                 crate::lineage::LineageSpan::Edge(_) => Style::default().fg(theme.dim),
-                crate::lineage::LineageSpan::Segment { .. }
-                | crate::lineage::LineageSpan::SegmentBullet => Style::default().fg(theme.dim),
+                // Turn info lights up with its owning session when that
+                // session is selected or hovered — the whole timeline of
+                // the picked lane reads as one highlighted unit.
+                crate::lineage::LineageSpan::Segment { session_id, .. }
+                | crate::lineage::LineageSpan::SegmentBullet { session_id } => {
+                    if selected_session == Some(session_id.as_str())
+                        || hovered_session == Some(session_id.as_str())
+                    {
+                        border_highlight
+                    } else {
+                        Style::default().fg(theme.dim)
+                    }
+                }
                 // Terminal-outcome glyphs borrow the checklist marks'
                 // palette (`checklist_mark_style`): done glows, failure
-                // warns.
-                crate::lineage::LineageSpan::SegmentOutcome { ok: true } => {
-                    Style::default().fg(theme.matrix_flash_good)
-                }
-                crate::lineage::LineageSpan::SegmentOutcome { ok: false } => {
-                    Style::default().fg(theme.warning)
+                // warns; highlight adds bold.
+                crate::lineage::LineageSpan::SegmentOutcome { ok, session_id } => {
+                    let base = if *ok {
+                        Style::default().fg(theme.matrix_flash_good)
+                    } else {
+                        Style::default().fg(theme.warning)
+                    };
+                    if selected_session == Some(session_id.as_str())
+                        || hovered_session == Some(session_id.as_str())
+                    {
+                        base.add_modifier(Modifier::BOLD)
+                    } else {
+                        base
+                    }
                 }
                 crate::lineage::LineageSpan::More(_) => Style::default()
                     .fg(theme.muted)
@@ -9285,7 +9304,7 @@ fn render_lineage_row(
                     if selected_session == Some(session_id.as_str()) {
                         interior_highlight
                     } else {
-                        match by_id.get(session_id.as_str()) {
+                        let mut style = match by_id.get(session_id.as_str()) {
                             None => Style::default().fg(theme.dim),
                             Some(summary) => {
                                 let mut style = state_style(theme, summary.state);
@@ -9296,7 +9315,11 @@ fn render_lineage_row(
                                 }
                                 style
                             }
+                        };
+                        if hovered_session == Some(session_id.as_str()) {
+                            style = style.add_modifier(Modifier::BOLD);
                         }
+                        style
                     }
                 }
             };
@@ -14366,11 +14389,11 @@ mod tests {
         let all_spans: Vec<&Span<'static>> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let fork_span = all_spans
             .iter()
-            .find(|s| s.content.as_ref() == "⑂ fork")
+            .find(|s| s.content.as_ref() == "⑂")
             .expect("fork arrow label span");
         let sub_span = all_spans
             .iter()
-            .find(|s| s.content.as_ref() == "▸ subagent")
+            .find(|s| s.content.as_ref() == "▸")
             .expect("subagent arrow label span");
         assert_eq!(fork_span.style.fg, Some(theme.dim));
         assert_eq!(
@@ -14463,10 +14486,7 @@ mod tests {
             "a merged fork's box carries no marker — the merge arrow and \
              its ✓'d final window already say it: {text}"
         );
-        assert!(
-            text.contains("↩ merge"),
-            "merge-back arrow expected: {text}"
-        );
+        assert!(text.contains("◂─↩"), "merge-back arrow expected: {text}");
         assert!(
             text.contains("✓"),
             "the merged fork's final window leads with ✓: {text}"
@@ -14515,6 +14535,58 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::CROSSED_OUT),
             "a discarded fork must render struck-through, distinct from an open or merged fork"
+        );
+    }
+
+    #[test]
+    fn selecting_or_hovering_a_session_lights_its_rails_and_turn_info() {
+        // Rails mode: every rail glyph and turn-info span is tagged with
+        // its owning session; selection/hover brightens exactly that
+        // session's rails, connectors, and windows — nothing else's.
+        let theme = Theme::default();
+        let root = lineage_test_summary("root");
+        let mut fork = lineage_test_summary("f");
+        fork.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "root".into(),
+            transcript_seq: 1,
+            at_ms: 1_000,
+        });
+        let sessions = vec![root, fork];
+        let by_id: HashMap<&str, &SessionSummary> =
+            sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+        let tree = crate::lineage::build_tree("root", &sessions).expect("tree");
+        let (rows, _) = crate::lineage::flatten_rails(&tree, &sessions, 9_000);
+        let lines: Vec<Line<'static>> = rows
+            .iter()
+            .map(|r| render_lineage_row(r, &by_id, &theme, None, Some("f")))
+            .collect();
+        let mut lit_f = 0usize;
+        for (run, span) in rows
+            .iter()
+            .zip(lines.iter())
+            .flat_map(|(row, line)| row.spans.iter().zip(line.spans.iter()))
+        {
+            let is_lit = span.style.fg == Some(theme.matrix_flash_good)
+                && span.style.add_modifier.contains(Modifier::BOLD);
+            match &run.role {
+                crate::lineage::LineageSpan::Border { session_id }
+                | crate::lineage::LineageSpan::SegmentBullet { session_id }
+                | crate::lineage::LineageSpan::Segment { session_id, .. } => {
+                    assert_eq!(
+                        is_lit,
+                        session_id == "f",
+                        "highlight follows ownership: {run:?}"
+                    );
+                    if is_lit {
+                        lit_f += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            lit_f >= 2,
+            "f's rail glyphs and turn info light up (got {lit_f})"
         );
     }
 
