@@ -314,8 +314,8 @@ impl LineageViewMode {
     /// Short label for the top-border toggle button.
     pub fn label(self) -> &'static str {
         match self {
-            LineageViewMode::Boxes => "boxes",
-            LineageViewMode::Rails => "rails",
+            LineageViewMode::Boxes => "lineage",
+            LineageViewMode::Rails => "lineage (compact)",
         }
     }
 }
@@ -718,15 +718,10 @@ struct Lane<'a> {
     /// time — the interval `[box_ms, close_ms]` is what column nesting
     /// orders by (later-closing lanes sit further out).
     close_ms: i64,
-    /// This lane's child lanes, in tree order.
-    children: Vec<usize>,
     /// Collapsed "+N more" markers among this lane's children.
     more: Vec<usize>,
     /// Wrapped box label lines (see `wrap_box_label`).
     label_lines: Vec<String>,
-    /// Box-left offset relative to the parent's box left edge, assigned
-    /// upfront by `assign_offsets` (later-closing siblings further out).
-    x_off: usize,
     // Running state, filled in as the global walk proceeds.
     cp_seq: u64,
     cp_ms: i64,
@@ -738,15 +733,6 @@ struct Lane<'a> {
     last_row: usize,
     placed: bool,
     ended: bool,
-}
-
-/// The glyph + word labeling a lane's branch arrow.
-fn edge_word_of(edge: LineageEdge) -> &'static str {
-    match edge {
-        LineageEdge::Fork => "⑂ fork",
-        LineageEdge::Subagent => "▸ subagent",
-        LineageEdge::Root => "",
-    }
 }
 
 /// Event kinds on the global timeline, in tie-break order: a box appears
@@ -827,10 +813,8 @@ fn collect_lanes<'a>(
         merge,
         end,
         close_ms,
-        children: Vec::new(),
         more: Vec::new(),
         label_lines: wrap_box_label(&node_box_label(summary, &node.session_id)),
-        x_off: 0,
         cp_seq: 0,
         cp_ms: box_ms,
         x_abs: 0,
@@ -844,8 +828,7 @@ fn collect_lanes<'a>(
         match child {
             LineageChild::More(n) => lanes[idx].more.push(*n),
             LineageChild::Node(cn) => {
-                let ci = collect_lanes(cn, by_id, Some(idx), now_ms, lanes);
-                lanes[idx].children.push(ci);
+                collect_lanes(cn, by_id, Some(idx), now_ms, lanes);
             }
         }
     }
@@ -872,89 +855,6 @@ fn build_events(lanes: &[Lane]) -> Vec<(i64, u8, usize)> {
     }
     events.sort_unstable();
     events
-}
-
-/// Assign every lane's horizontal offset (relative to its parent's box)
-/// bottom-up, and return this subtree's footprint: columns from the
-/// lane's box-left edge to its subtree's right edge.
-///
-/// Sibling lanes whose lifetimes overlap stack outward ordered by CLOSE
-/// time — a lane whose terminal event (merge, discard, error, complete,
-/// "now") comes later sits further out than one that closes earlier, so
-/// an inner lane's merge/end never has to cross an outer lane that's
-/// still running, and closing arrows nest instead of crossing. Siblings
-/// whose lifetimes don't overlap reuse the same slot (their rows are
-/// disjoint), keeping sequential forks compact.
-fn assign_offsets(lanes: &mut [Lane], i: usize) -> usize {
-    use unicode_width::UnicodeWidthStr;
-    let kids = lanes[i].children.clone();
-    let mut footprints: HashMap<usize, usize> = HashMap::new();
-    for &k in &kids {
-        let w = assign_offsets(lanes, k);
-        footprints.insert(k, w);
-    }
-
-    // Slot assignment: visit children by close time; each takes the
-    // INNERMOST slot whose occupants its lifetime doesn't overlap —
-    // git-graph-style column reuse, as compact as the intervals allow. A
-    // merge arrow crossing a live lane placed inside it simply bridges
-    // over its bar, exactly like git-graph merge lines do. (Inclusive
-    // overlap: a branch at the very instant a sibling closes still
-    // renders above that closing row, so they coexist.)
-    let mut order = kids.clone();
-    order.sort_by_key(|&k| (lanes[k].close_ms, lanes[k].box_ms, k));
-    let mut slots: Vec<Vec<usize>> = Vec::new();
-    let mut slot_of: Vec<(usize, usize)> = Vec::new();
-    for &k in &order {
-        let (kb, ke) = (lanes[k].box_ms, lanes[k].close_ms);
-        let overlaps = |j: usize, lanes: &[Lane]| {
-            let (jb, je) = (lanes[j].box_ms, lanes[j].close_ms);
-            kb <= je && jb <= ke
-        };
-        let mut slot = 0usize;
-        while slots
-            .get(slot)
-            .is_some_and(|occ| occ.iter().any(|&j| overlaps(j, lanes)))
-        {
-            slot += 1;
-        }
-        while slots.len() <= slot {
-            slots.push(Vec::new());
-        }
-        slots[slot].push(k);
-        slot_of.push((k, slot));
-    }
-    let nslots = slots.len();
-
-    // Slot geometry, inner to outer. Labels reserve NO columns — turn
-    // info is allowed to run underneath other lanes' bars (the text wins
-    // the cell; the bar shows a gap on that row), so only boxes and
-    // arrows determine the width.
-    let box_w = box_content_w(&lanes[i]) + 4;
-    let own_reach = box_w;
-    let mut edge = 0usize;
-    for s in 0..nslots {
-        let occupants: Vec<usize> = slot_of
-            .iter()
-            .filter(|&&(_, sj)| sj == s)
-            .map(|&(k, _)| k)
-            .collect();
-        // Past the spaced icon arrow's minimum (├─ ⑂ ─▸), then past the
-        // inner slot's edge.
-        let off_min = 8;
-        let off = if s == 0 {
-            off_min
-        } else {
-            off_min.max(edge + 2)
-        };
-        let mut slot_w = 0usize;
-        for &k in &occupants {
-            lanes[k].x_off = off;
-            slot_w = slot_w.max(footprints[&k]);
-        }
-        edge = off + slot_w;
-    }
-    own_reach.max(edge)
 }
 
 /// Interior (content) width of a lane's box: its widest wrapped label line.
@@ -1043,9 +943,8 @@ fn layout_tree(
     use unicode_width::UnicodeWidthStr;
 
     let mut lanes: Vec<Lane> = Vec::new();
-    let root_idx = collect_lanes(root, by_id, None, now_ms, &mut lanes);
+    let _root_idx = collect_lanes(root, by_id, None, now_ms, &mut lanes);
     let events = build_events(&lanes);
-    assign_offsets(&mut lanes, root_idx);
 
     let mut cur = 0usize;
     let mut gi = 0usize;
@@ -1059,7 +958,7 @@ fn layout_tree(
                     // starts right below.
                     draw_box(c, &lanes[i], 1, cur);
                     lanes[i].x_abs = 1;
-                    lanes[i].lane_col = 2;
+                    lanes[i].lane_col = 3;
                     lanes[i].box_bottom = cur + h;
                     lanes[i].last_row = cur + h - 1;
                     lanes[i].placed = true;
@@ -1099,11 +998,32 @@ fn layout_tree(
                     LineageEdge::Root => "",
                 };
                 let ew = UnicodeWidthStr::width(edge_word);
-                // Column pre-assigned by `assign_offsets`: overlapping
-                // siblings stack outward by close time, so a lane that
-                // terminates later sits further out than one that
-                // terminated earlier.
-                let x = lanes[p].x_abs + lanes[i].x_off;
+                // Minimal-x placement: boxes only need THEIR OWN rows
+                // free (every event gets fresh rows, so box rects never
+                // collide), and a lane's bar simply gaps behind anything
+                // painted over its column later. The only hard constraints
+                // are the branch arrow's minimum reach from the parent's
+                // lane and lane-column uniqueness among lanes whose
+                // lifetimes overlap (two bars sharing a column would be
+                // unreadable). Everything else — vertical lines crossing
+                // under boxes and turn info — is allowed, which is what
+                // keeps the diagram narrow.
+                let (this_lo, this_hi) = (lanes[i].box_ms, lanes[i].close_ms);
+                let mut x = lanes[p].lane_col + 7;
+                loop {
+                    let cand_lane = x + 2;
+                    let conflict = lanes.iter().enumerate().any(|(j, l)| {
+                        j != i
+                            && l.placed
+                            && l.lane_col == cand_lane
+                            && l.box_ms <= this_hi
+                            && this_lo <= l.close_ms
+                    });
+                    if !conflict {
+                        break;
+                    }
+                    x += 2;
+                }
                 draw_box(c, &lanes[i], x, cur);
                 // Branch arrow into the box's label row, bridging over any
                 // live lane it crosses (their bar is painted first; the
@@ -1142,7 +1062,7 @@ fn layout_tree(
                 c.put(ay, x - 1, "▸", &child_border);
                 lanes[p].last_row = lanes[p].last_row.max(ay);
                 lanes[i].x_abs = x;
-                lanes[i].lane_col = x + 1;
+                lanes[i].lane_col = x + 2;
                 lanes[i].box_bottom = cur + h;
                 lanes[i].last_row = cur + h - 1;
                 lanes[i].placed = true;
@@ -2018,23 +1938,23 @@ mod tests {
                 // structural row below (box top, arrow) carries the bar
                 // for mid-timeline windows, and a terminal window gets
                 // nothing below — its lane ends there.
-                "  │".to_string(),
-                "  • 12 msgs · 5m00s".to_string(),
-                "  │      ┌─────────┐".to_string(),
-                format!("  ├─ ⑂ ─▸│ {g} smith │"),
-                "  │      └─────────┘".to_string(),
-                "  │       │".to_string(),
+                "   │".to_string(),
+                "   • 12 msgs · 5m00s".to_string(),
+                "   │      ┌─────────┐".to_string(),
+                format!("   ├─ ⑂ ─▸│ {g} smith │"),
+                "   │      └─────────┘".to_string(),
+                "   │        │".to_string(),
                 // Labels reserve no columns: the parent's window text runs
                 // underneath the fork's lane (the bar shows a gap on that
                 // row), and the fork's ✓ window — which would collide —
                 // staggers onto the next row. Merging IS the fork's
                 // completion, so its final window leads with ✓ (and its
                 // box carries no "↩ merged" marker).
-                "  • 3 msgs · 3m20s".to_string(),
-                "  │       ✓ 2 msgs · 3m20s".to_string(),
-                "  │◂─ ↩ ──┘".to_string(),
-                "  │".to_string(),
-                "  • 5 msgs · 5m00s".to_string(),
+                "   • 3 msgs · 3m20s".to_string(),
+                "   │        ✓ 2 msgs · 3m20s".to_string(),
+                "   │◂─ ↩ ───┘".to_string(),
+                "   │".to_string(),
+                "   • 5 msgs · 5m00s".to_string(),
             ]
         );
         // The two box label rows are the (only) selectable rows, in
@@ -2133,12 +2053,13 @@ mod tests {
     }
 
     #[test]
-    fn later_closing_lane_sits_outside_an_earlier_closing_one() {
-        // A branches FIRST (t=1000) but never closes (open fork, "ends" at
-        // now); B branches later (t=2000) and merges back at t=5000. B's
-        // terminal event comes earlier, so B nests INSIDE (left of) A —
-        // B's merge arrow returns to the parent lane without crossing A's
-        // still-running lane, and closing arrows nest instead of crossing.
+    fn merge_arrows_bridge_over_live_lanes_in_the_compact_layout() {
+        // A branches FIRST (t=1000) and stays open; B branches later
+        // (t=2000, shifted just right of A's lane) and merges back at
+        // t=5000 while A still runs. With minimal-x placement, B's merge
+        // arrow travels back to the parent lane THROUGH A's live lane —
+        // and bridges over its bar (─│─), exactly like git-graph merge
+        // lines, instead of forcing B's whole column further out.
         let root = with_event_count(with_created_at_ms(base("root"), 0), 20);
         let a = with_event_count(
             with_created_at_ms(forked_from_at(base("a"), "root", 5, 1_000), 1_000),
@@ -2183,23 +2104,18 @@ mod tests {
             text.join("\n")
         );
         assert!(
-            label_col("a") > label_col("b"),
-            "a closes later (still open) than b (merged at t=5000), so a's \
-             lane sits OUTSIDE b's:\n{}",
+            label_col("b") > label_col("a"),
+            "b shifts just right of a's lane (minimal-x placement):\n{}",
             text.join("\n")
         );
-        // And b's merge arrow must not cross a's live lane: the arrow's
-        // span [parent lane, b's lane] lies entirely left of a's lane.
+        // B's merge arrow crosses A's live lane and bridges over its bar.
         let merge_line = text
             .iter()
             .find(|l| l.contains("◂─ ↩"))
             .expect("merge arrow row");
-        let merge_end = merge_line.chars().count();
         assert!(
-            merge_end <= label_col("a"),
-            "b's merge arrow (width {merge_end}) must end before a's box \
-             column ({}):\n{}",
-            label_col("a"),
+            merge_line.contains("─│─") || merge_line.contains("─│") && merge_line.contains("┘"),
+            "the merge arrow bridges over a's live lane:\n{}",
             text.join("\n")
         );
     }
@@ -2328,12 +2244,13 @@ mod tests {
         assert_eq!(
             label_col("o2"),
             label_col("m"),
-            "o2 reuses the inner slot m freed:\n{}",
+            "o2 reuses the column m freed (m closed before o2 branched):\n{}",
             diagram_text(&rows).join("\n")
         );
         assert!(
-            label_col("o1") > label_col("o2"),
-            "o1 (which overlaps the merging m) stays outside:\n{}",
+            label_col("o1") < label_col("o2"),
+            "o1 branched first and takes the innermost column; overlapping \
+             lanes shift just past it:\n{}",
             diagram_text(&rows).join("\n")
         );
     }
@@ -2466,11 +2383,10 @@ mod tests {
             unreachable!()
         };
         assert!(label_col(b_row) > label_col(a_row), "{}", text.join("\n"));
-        let b_arrow_line = &text[fork_rows[1]];
-        assert!(
-            b_arrow_line.contains("─│") || b_arrow_line.contains("│─"),
-            "B's arrow shaft must bridge over A's live lane bar: {b_arrow_line}"
-        );
+        // (With minimal-x placement B sits just right of A's lane, so its
+        // branch arrow no longer crosses it — merge-arrow bridging is
+        // covered by `merge_arrows_bridge_over_live_lanes_in_the_compact_
+        // layout`.)
 
         // Segment order is chronological: pre-A (5), root while only A was
         // out (3 = seq 8 - seq 5, closed by B's fork-out), then A's

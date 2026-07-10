@@ -9246,9 +9246,9 @@ fn render_lineage_row(
         .bg(theme.highlight_bg)
         .fg(theme.highlight_fg)
         .add_modifier(Modifier::BOLD);
-    let border_highlight = Style::default()
-        .fg(theme.matrix_flash_good)
-        .add_modifier(Modifier::BOLD);
+    // Matches the preview widget's own border color, so highlighted
+    // lines read as part of the same chrome.
+    let border_highlight = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
     let spans: Vec<Span<'static>> = row
         .spans
         .iter()
@@ -9393,6 +9393,7 @@ fn lineage_preview_rect(
     session_area: Rect,
     row_count: usize,
     content_w: usize,
+    min_w: u16,
     size_override: Option<(u16, u16)>,
 ) -> Option<Rect> {
     if session_area.width < 24 || session_area.height < 4 {
@@ -9402,12 +9403,13 @@ fn lineage_preview_rect(
     let max_h = session_area.height.saturating_sub(1).max(4);
     // Size to content by default: diagram width + borders + a right pad,
     // diagram height + borders + one blank bottom-pad row. A user
-    // drag-resize overrides both.
+    // drag-resize overrides both. `min_w` keeps the top-border toggle
+    // button visible even for tiny diagrams.
     let (want_w, want_h) = size_override.unwrap_or((
         (content_w as u16).saturating_add(4),
         (row_count as u16).saturating_add(3),
     ));
-    let width = want_w.clamp(24.min(max_w), max_w);
+    let width = want_w.clamp(min_w.max(24).min(max_w), max_w);
     let height = want_h.clamp(4.min(max_h), max_h);
     Some(Rect {
         x: session_area
@@ -9467,10 +9469,13 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
         .map(|r| UnicodeWidthStr::width(r.text().as_str()))
         .max()
         .unwrap_or(0);
+    let toggle_label = format!(" {} ⇄ ", app.lineage_preview_mode.label());
+    let toggle_w = toggle_label.chars().count() as u16;
     let Some(area) = lineage_preview_rect(
         session_area,
         rows.len(),
         content_w,
+        toggle_w + 6,
         app.lineage_preview_size,
     ) else {
         return;
@@ -9513,9 +9518,7 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
         area,
     );
     // View-mode toggle on the top border: shows the current mode, click
-    // switches to the other (boxed-lane diagram ⇄ git-graph rails).
-    let toggle_label = format!(" {} ⇄ ", app.lineage_preview_mode.label());
-    let toggle_w = toggle_label.chars().count() as u16;
+    // switches to the other (boxed-lane diagram ⇄ compact rails).
     if area.width > toggle_w + 4 {
         let toggle_rect = Rect {
             x: area.x + 2,
@@ -14457,7 +14460,9 @@ mod tests {
                         !has_bg,
                         "the border LINE brightens, its background stays clear"
                     );
-                    assert_eq!(span.style.fg, Some(theme.matrix_flash_good));
+                    // The highlight matches the widget's own border color.
+                    assert_eq!(span.style.fg, Some(theme.text));
+                    assert!(span.style.add_modifier.contains(Modifier::BOLD));
                     saw_border = true;
                 }
                 _ => {
@@ -14482,7 +14487,7 @@ mod tests {
                 if session_id == "f" {
                     assert_eq!(
                         span.style.fg,
-                        Some(theme.matrix_flash_good),
+                        Some(theme.text),
                         "hover brightens the hovered box's border"
                     );
                 }
@@ -14588,7 +14593,7 @@ mod tests {
             .zip(lines.iter())
             .flat_map(|(row, line)| row.spans.iter().zip(line.spans.iter()))
         {
-            let is_lit = span.style.fg == Some(theme.matrix_flash_good)
+            let is_lit = span.style.fg == Some(theme.text)
                 && span.style.add_modifier.contains(Modifier::BOLD);
             match &run.role {
                 crate::lineage::LineageSpan::Border { session_id }
