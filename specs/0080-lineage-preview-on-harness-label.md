@@ -94,9 +94,8 @@ same `App::apply_fork_merge` any other merge/discard path in this UI uses.
 ### The widget's border is the lineage accent, not the pane border color
 
 The preview's border deliberately does NOT reuse the session panes' border
-colors — it uses the lineage feature's own accent, the same color the
-harness-label trigger highlights with on hover and while toggled, so the
-label and the widget it opens read as one affordance. Keyboard focus
+colors — it uses the default foreground text color, so the widget reads
+as content-level chrome rather than another pane. Keyboard focus
 brightens the border (bold) rather than changing its hue.
 
 ### Two visualization modes, toggled from the top border
@@ -132,9 +131,10 @@ hanging below the box — indented one column from the box's left edge —
 read top to bottom. A long session name wraps onto additional box rows
 (the box grows taller) up to a small line cap, after which it
 ellipsizes; box width is capped so one verbose title can't stretch the
-whole diagram. Fork/subagent labels style exactly like any normal
-session's (by live state) — a session is never dimmed for being a fork;
-a discarded fork adds a strikethrough on top of its state color. A fork branches off the parent's lane with an
+whole diagram. Labels mirror the session list's styling: only the
+status glyph carries the live-state color (a Done session's check mark
+goes blue-ish); the name itself keeps the default text color, never
+dimmed for being a fork, with a discarded fork adding a strikethrough. A fork branches off the parent's lane with an
 arrow (`├─ ⑂ ──▸`, icon-only with a space either side of the glyph —
 the glyph alone marks the edge kind) into the child's box, placed to
 the right with its own lane below it; a fork that merged returns to the
@@ -219,9 +219,12 @@ window's CLOSING event renders:
  • 3 msgs · 2m00s
 ```
 
-A childless node still gets exactly one window (its whole life, start to
-"now" or to its own terminal point), so every node's activity ends up
-visible somewhere, not just nodes with forks. A window with zero messages
+A childless node still gets exactly one window (its whole life), so
+every node's activity ends up visible somewhere, not just nodes with
+forks. A live lane's final window measures its elapsed only up to the
+session's last activity (`last_event_at`) — execution time for the
+turns, not idle wall-clock ticking toward "now"; only its ROW position
+sits at "now" on the timeline. A window with zero messages
 in it is skipped entirely rather than rendered as a "0 msgs" line —
 leaving just the lane bar. Diagram rows never wrap; a too-wide diagram
 clips at the preview's edge.

@@ -27617,7 +27617,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lineage_preview_border_uses_the_lineage_accent_not_pane_colors() {
+    async fn lineage_preview_border_uses_the_default_text_color() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
         app.lineage_preview_pinned.insert("s1".to_string());
@@ -27638,16 +27638,16 @@ mod tests {
         let unfocused = cell_style(&term);
         assert_eq!(
             unfocused.fg,
-            Some(app.theme.matrix_flash_good),
-            "the preview border uses the lineage accent (the harness-label \
-             highlight color), distinct from session pane borders"
+            Some(app.theme.text),
+            "the preview border uses the default foreground text color, \
+             distinct from session pane borders"
         );
         assert_ne!(unfocused.fg, Some(app.theme.border));
 
         app.lineage_preview_focused = Some("s1".to_string());
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let focused = cell_style(&term);
-        assert_eq!(focused.fg, Some(app.theme.matrix_flash_good));
+        assert_eq!(focused.fg, Some(app.theme.text));
         assert!(
             focused
                 .add_modifier

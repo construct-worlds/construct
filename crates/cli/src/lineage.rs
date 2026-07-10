@@ -243,9 +243,12 @@ pub enum LineageSpan {
     /// session `Done`), `✗` when it dead-ended (fork discarded, session
     /// `Errored`).
     SegmentOutcome { ok: bool, session_id: String },
-    /// A node's box label text (status glyph, name, harness, terminal
-    /// marker) — carries the session id so the renderer can style it by
-    /// that session's live state.
+    /// A node's status glyph — the ONLY label part styled by live session
+    /// state, mirroring the session list (name text stays the default
+    /// text color; only the check mark goes blue when Done, etc.).
+    NodeStatus { session_id: String },
+    /// A node's box label text (name, harness, terminal marker) — default
+    /// text color; carries the session id for selection/hover.
     Node { session_id: String },
     /// "+N more" collapse marker.
     More(usize),
@@ -803,8 +806,12 @@ fn collect_lanes<'a>(
             .max(box_ms);
         Some((t, Some(t), Some(ok)))
     } else {
-        // Live: the lane runs to "now", its final window open-ended.
-        Some((now_ms.max(box_ms), None, None))
+        // Live: the lane's row position runs to "now", but its final
+        // window's elapsed measures only up to the session's last
+        // activity (`last_event_at`) — execution time for the turns, not
+        // idle wall-clock ticking toward now.
+        let label_end = summary.and_then(|s| s.last_event_at.map(|d| d.timestamp_millis()));
+        Some((now_ms.max(box_ms), label_end, None))
     };
     let close_ms = merge
         .map(|(at, _)| at)
@@ -977,13 +984,34 @@ fn draw_box(c: &mut Canvas, lane: &Lane, x: usize, y: usize) {
         session_id: lane.node.session_id.clone(),
     };
     c.put(y, x, &format!("┌{}┐", "─".repeat(lw + 2)), &border);
+    let status = lane.summary.map(|s| status_glyph(s.state));
     for (li, line) in lane.label_lines.iter().enumerate() {
         let pad = lw - UnicodeWidthStr::width(line.as_str());
         c.put(y + 1 + li, x, "│ ", &border);
+        let mut tx = x + 2;
+        let mut rest: &str = line;
+        // The status glyph opens the first label line — split it into its
+        // own state-colored span, like the session list's status column.
+        if li == 0 {
+            if let Some(g) = status {
+                if let Some(stripped) = line.strip_prefix(g) {
+                    c.put(
+                        y + 1,
+                        tx,
+                        g,
+                        &LineageSpan::NodeStatus {
+                            session_id: lane.node.session_id.clone(),
+                        },
+                    );
+                    tx += UnicodeWidthStr::width(g);
+                    rest = stripped;
+                }
+            }
+        }
         c.put(
             y + 1 + li,
-            x + 2,
-            &format!("{line}{}", " ".repeat(pad)),
+            tx,
+            &format!("{rest}{}", " ".repeat(pad)),
             &LineageSpan::Node {
                 session_id: lane.node.session_id.clone(),
             },
@@ -1362,10 +1390,28 @@ pub fn flatten_rails(
             x += UnicodeWidthStr::width(glyph) + 1;
         }
         let label = lane.label_lines.join(" ");
+        let mut rest: &str = &label;
+        // Split the leading status glyph into its own state-colored span,
+        // like the session list's status column.
+        if let Some(g) = lane.summary.map(|s| status_glyph(s.state)) {
+            if let Some(stripped) = label.strip_prefix(g) {
+                c.put(
+                    row,
+                    x,
+                    g,
+                    &LineageSpan::NodeStatus {
+                        session_id: lane.node.session_id.clone(),
+                    },
+                );
+                x += UnicodeWidthStr::width(g);
+                rest = stripped;
+            }
+        }
+        let rest = rest.to_string();
         c.put(
             row,
             x,
-            &label,
+            &rest,
             &LineageSpan::Node {
                 session_id: lane.node.session_id.clone(),
             },
@@ -1375,7 +1421,7 @@ pub fn flatten_rails(
             session_id: lane.node.session_id.clone(),
             x: text_x,
             y: row,
-            width: x - text_x + UnicodeWidthStr::width(label.as_str()),
+            width: x - text_x + UnicodeWidthStr::width(rest.as_str()),
             height: 1,
         });
     };
@@ -2290,6 +2336,25 @@ mod tests {
             "o1 (which overlaps the merging m) stays outside:\n{}",
             diagram_text(&rows).join("\n")
         );
+    }
+
+    #[test]
+    fn live_lane_elapsed_measures_to_last_activity_not_now() {
+        // A live session's trailing window freezes its elapsed at
+        // `last_event_at` — execution time for the turns, not idle
+        // wall-clock ticking toward now.
+        let mut root = with_event_count(with_created_at_ms(base("root"), 0), 5);
+        root.last_event_at = Some(Utc.timestamp_millis_opt(60_000).unwrap());
+        let sessions = vec![root];
+        let tree = build_tree("root", &sessions).unwrap();
+        let rows = flatten(&tree, &sessions, 3_600_000);
+        assert_eq!(
+            segments(&rows),
+            vec![(5, 0, Some(60_000))],
+            "elapsed ends at last_event_at, not at now (an hour later)"
+        );
+        let text = diagram_text(&rows).join("\n");
+        assert!(text.contains("1m00s"), "{text}");
     }
 
     #[test]

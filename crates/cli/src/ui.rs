@@ -9300,6 +9300,23 @@ fn render_lineage_row(
                 crate::lineage::LineageSpan::More(_) => Style::default()
                     .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
+                // Mirrors the session list: only the status glyph carries
+                // the live-state color; the name itself stays the default
+                // text color.
+                crate::lineage::LineageSpan::NodeStatus { session_id } => {
+                    if selected_session == Some(session_id.as_str()) {
+                        interior_highlight
+                    } else {
+                        let mut style = match by_id.get(session_id.as_str()) {
+                            None => Style::default().fg(theme.dim),
+                            Some(summary) => state_style(theme, summary.state),
+                        };
+                        if hovered_session == Some(session_id.as_str()) {
+                            style = style.add_modifier(Modifier::BOLD);
+                        }
+                        style
+                    }
+                }
                 crate::lineage::LineageSpan::Node { session_id } => {
                     if selected_session == Some(session_id.as_str()) {
                         interior_highlight
@@ -9307,7 +9324,7 @@ fn render_lineage_row(
                         let mut style = match by_id.get(session_id.as_str()) {
                             None => Style::default().fg(theme.dim),
                             Some(summary) => {
-                                let mut style = state_style(theme, summary.state);
+                                let mut style = Style::default().fg(theme.text);
                                 if crate::lineage::ForkStatus::of(summary)
                                     == crate::lineage::ForkStatus::Discarded
                                 {
@@ -9480,12 +9497,14 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
     };
     let focused = app.lineage_preview_focused.as_deref() == Some(session_id);
     f.render_widget(Clear, area);
+    // Default foreground text color — distinct from the session panes'
+    // border colors; keyboard focus brightens it (bold).
     let border_style = if focused {
         Style::default()
-            .fg(app.theme.matrix_flash_good)
+            .fg(app.theme.text)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(app.theme.matrix_flash_good)
+        Style::default().fg(app.theme.text)
     };
     f.render_widget(
         Block::default()
@@ -14426,7 +14445,10 @@ mod tests {
         {
             let has_bg = span.style.bg == Some(theme.highlight_bg);
             match &run.role {
-                crate::lineage::LineageSpan::Node { session_id } if session_id == "f" => {
+                crate::lineage::LineageSpan::Node { session_id }
+                | crate::lineage::LineageSpan::NodeStatus { session_id }
+                    if session_id == "f" =>
+                {
                     assert!(has_bg, "selected interior carries the highlight fill");
                     saw_interior = true;
                 }
@@ -14588,6 +14610,57 @@ mod tests {
             lit_f >= 2,
             "f's rail glyphs and turn info light up (got {lit_f})"
         );
+    }
+
+    #[test]
+    fn done_sessions_color_only_the_status_glyph_like_the_session_list() {
+        // In the session list a Done session keeps its name in the default
+        // text color and only the check-mark glyph goes state-colored —
+        // the lineage views match that in both modes.
+        let theme = Theme::default();
+        let (mut sessions, _) = lineage_test_rows();
+        sessions[1].state = agentd_protocol::SessionState::Done;
+        let tree = crate::lineage::build_tree("root", &sessions).expect("tree");
+        let by_id: HashMap<&str, &SessionSummary> =
+            sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+        for rows in [
+            crate::lineage::flatten(&tree, &sessions, 9_000),
+            crate::lineage::flatten_rails(&tree, &sessions, 9_000).0,
+        ] {
+            let lines: Vec<Line<'static>> = rows
+                .iter()
+                .map(|r| render_lineage_row(r, &by_id, &theme, None, None))
+                .collect();
+            let span_style = |want_status: bool| {
+                rows.iter()
+                    .zip(lines.iter())
+                    .flat_map(|(row, line)| row.spans.iter().zip(line.spans.iter()))
+                    .find_map(|(run, span)| match &run.role {
+                        crate::lineage::LineageSpan::NodeStatus { session_id }
+                            if want_status && session_id == "f" =>
+                        {
+                            Some(span.style)
+                        }
+                        crate::lineage::LineageSpan::Node { session_id }
+                            if !want_status && session_id == "f" =>
+                        {
+                            Some(span.style)
+                        }
+                        _ => None,
+                    })
+                    .expect("span")
+            };
+            assert_eq!(
+                span_style(true).fg,
+                Some(theme.info),
+                "the Done glyph goes state-colored (blue-ish)"
+            );
+            assert_eq!(
+                span_style(false).fg,
+                Some(theme.text),
+                "the name keeps the default text color"
+            );
+        }
     }
 
     #[test]
