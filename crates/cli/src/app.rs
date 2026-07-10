@@ -617,6 +617,7 @@ fn chat_scroll_kind(ev: &SessionEvent) -> ChatScrollKind {
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
         | SessionEvent::NativeSubagentSnapshot { .. }
+        | SessionEvent::NativeSubagentRemoved { .. }
         | SessionEvent::NativeSubagent { .. }
         | SessionEvent::AgentStatus(_) => ChatScrollKind::Hidden,
         SessionEvent::Message { role, text }

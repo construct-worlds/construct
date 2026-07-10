@@ -382,12 +382,15 @@ fn spawn_interactive_transcript_watcher(
                 if let Some((id, state, title)) = claude_native_subagent_update(&value) {
                     child_states.insert(id.clone(), state);
                     emit.emit(SessionEvent::NativeSubagent {
-                        id,
+                        id: id.clone(),
                         parent_id: None,
                         title,
                         state,
                         event: None,
                     });
+                    if matches!(state, SessionState::Done | SessionState::Errored) {
+                        emit.emit(SessionEvent::NativeSubagentRemoved { id });
+                    }
                 }
             }
             let this_is_initial_scan = initial_scan;
@@ -441,12 +444,15 @@ fn spawn_interactive_transcript_watcher(
                         child_states.insert(nested_id.clone(), nested_state);
                         child_parents.insert(nested_id.clone(), native_id.clone());
                         emit.emit(SessionEvent::NativeSubagent {
-                            id: nested_id,
+                            id: nested_id.clone(),
                             parent_id: Some(native_id.clone()),
                             title,
                             state: nested_state,
                             event: None,
                         });
+                        if matches!(nested_state, SessionState::Done | SessionState::Errored) {
+                            emit.emit(SessionEvent::NativeSubagentRemoved { id: nested_id });
+                        }
                     }
                     for event in claude_events_from_json(&value) {
                         emit.emit(SessionEvent::NativeSubagent {
@@ -569,10 +575,19 @@ fn read_new_claude_values(path: &Path, next_line: &mut usize, emit: &EventEmitte
 
 fn claude_native_subagent_update(value: &Value) -> Option<(String, SessionState, Option<String>)> {
     let raw = serde_json::to_string(value).ok()?;
-    let id = normalize_claude_agent_id(
-        &xml_tag(&raw, "task-id").or_else(|| agent_id_from_text(&raw))?,
-    );
-    let status = xml_tag(&raw, "status").unwrap_or_else(|| "running".into());
+    let id = value
+        .pointer("/toolUseResult/agentId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| xml_tag(&raw, "task-id"))
+        .or_else(|| agent_id_from_text(&raw))?;
+    let id = normalize_claude_agent_id(&id);
+    let status = value
+        .pointer("/toolUseResult/status")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| xml_tag(&raw, "status"))
+        .unwrap_or_else(|| "running".into());
     let state = match status.as_str() {
         "completed" => SessionState::Done,
         "failed" | "errored" => SessionState::Errored,
@@ -584,7 +599,10 @@ fn claude_native_subagent_update(value: &Value) -> Option<(String, SessionState,
 }
 
 fn normalize_claude_agent_id(id: &str) -> String {
-    id.trim().strip_prefix("agent-").unwrap_or(id.trim()).to_string()
+    id.trim()
+        .strip_prefix("agent-")
+        .unwrap_or(id.trim())
+        .to_string()
 }
 
 fn claude_subagent_id_from_path(path: &Path) -> Option<String> {
@@ -1046,6 +1064,15 @@ mod tests {
                 Some("Inspect parser".into())
             ))
         );
+
+        let foreground_complete = serde_json::json!({
+            "type": "user",
+            "toolUseResult": {"status": "completed", "agentId": "agent-def456"}
+        });
+        assert_eq!(
+            claude_native_subagent_update(&foreground_complete),
+            Some(("def456".into(), SessionState::Done, None))
+        );
         assert_eq!(normalize_claude_agent_id("abc123"), "abc123");
         assert_eq!(normalize_claude_agent_id("agent-abc123"), "abc123");
         assert_eq!(
@@ -1061,8 +1088,7 @@ mod tests {
             "content": "<task-notification><task-id>agent-abc123</task-id><status>completed</status></task-notification>"
         });
         assert_eq!(
-            claude_native_subagent_update(&prefixed_complete)
-                .map(|(id, _, _)| id),
+            claude_native_subagent_update(&prefixed_complete).map(|(id, _, _)| id),
             Some("abc123".into())
         );
     }

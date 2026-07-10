@@ -8876,7 +8876,47 @@ done
             .detail(&projected_id)
             .await
             .expect("restored mirror");
-        assert!(!restored.summary.archived);
-        assert_eq!(restored.summary.state, SessionState::Running);
+        assert!(
+            restored.summary.archived,
+            "retained transcript files do not resurrect an archived native child"
+        );
+
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagent {
+                    id: "native-child".into(),
+                    parent_id: None,
+                    title: None,
+                    state: SessionState::Running,
+                    event: None,
+                },
+            )
+            .await;
+        assert!(
+            !manager
+                .detail(&projected_id)
+                .await
+                .expect("active mirror")
+                .summary
+                .archived
+        );
+
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagentRemoved {
+                    id: "native-child".into(),
+                },
+            )
+            .await;
+        assert!(
+            manager
+                .detail(&projected_id)
+                .await
+                .expect("removed mirror")
+                .summary
+                .archived
+        );
     }
 }

@@ -344,6 +344,11 @@ pub enum SessionEvent {
     NativeSubagentSnapshot {
         ids: Vec<String>,
     },
+    /// The harness removed a child from its native active-agent view. The
+    /// daemon archives the corresponding mirror without deleting its history.
+    NativeSubagentRemoved {
+        id: String,
+    },
     /// A child agent created and owned by the wrapped harness (for example a
     /// Claude Code or Codex native subagent). The daemon projects these as
     /// read-only virtual sessions; it must not spawn, resume, or directly

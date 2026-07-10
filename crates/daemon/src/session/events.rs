@@ -21,6 +21,13 @@ impl SessionManager {
             self.reconcile_native_subagent_snapshot(entry, ids).await;
             return;
         }
+        if let SessionEvent::NativeSubagentRemoved { id } = event {
+            let session_id = native_subagent_session_id(&entry.id, &id);
+            if let Err(error) = self.archive_native_mirror(&session_id).await {
+                tracing::warn!(owner = %entry.id, native_id = %id, ?error, "archive removed native subagent mirror failed");
+            }
+            return;
+        }
         if let SessionEvent::NativeSubagent {
             id,
             parent_id,
@@ -361,6 +368,7 @@ impl SessionManager {
                 }
                 SessionEvent::Reset
                 | SessionEvent::NativeSubagentSnapshot { .. }
+                | SessionEvent::NativeSubagentRemoved { .. }
                 | SessionEvent::NativeSubagent { .. }
                 | SessionEvent::Message { .. }
                 | SessionEvent::Reasoning { .. }
@@ -606,6 +614,7 @@ impl SessionManager {
                 *child_event,
                 SessionEvent::NativeSubagent { .. }
                     | SessionEvent::NativeSubagentSnapshot { .. }
+                    | SessionEvent::NativeSubagentRemoved { .. }
             ) {
                 Box::pin(self.handle_event(&entry, *child_event)).await;
             }
@@ -633,21 +642,7 @@ impl SessionManager {
             out
         };
         for (session_id, native_id, archived) in mirrored {
-            if retained.contains(native_id.as_str()) && archived {
-                if let Some(entry) = self.get_entry(&session_id).await {
-                    let snapshot = {
-                        let mut summary = entry.summary.write().await;
-                        summary.archived = false;
-                        summary.state = SessionState::Running;
-                        summary.clone()
-                    };
-                    entry.archived.store(false, Ordering::SeqCst);
-                    let _ = self.storage.save_summary(&snapshot);
-                    let _ = self.broadcast.send(BroadcastMsg::State(
-                        StateNotificationPayload { session: snapshot },
-                    ));
-                }
-            } else if !retained.contains(native_id.as_str()) && !archived {
+            if !retained.contains(native_id.as_str()) && !archived {
                 if let Err(error) = self.archive_native_mirror(&session_id).await {
                     tracing::warn!(
                         owner = %owner.id,

@@ -23,9 +23,15 @@ subagent appears beneath that native parent rather than being flattened under
 the owning Construct session.
 
 When a harness can publish an authoritative retained-child snapshot, Construct
-archives mirrors absent from that snapshot and restores them if they reappear.
+archives mirrors absent from that snapshot. Retained transcript files do not
+restore an archived mirror; a later native activity event does.
 Harness-native identifiers are canonicalized across transcript filenames and
 lifecycle notifications before they become mirror identities.
+
+For Claude Code, a terminal status in the parent transcript is the native-view
+removal signal. Construct archives the mirror at that point because Claude can
+retain the child's transcript files after dropping it from the active-agent
+view.
 
 ## Reason
 
@@ -64,8 +70,8 @@ child that is already owned by its parent.
 ## Examples
 
 - A Claude Code session launches an Agent task. A `(native) claude` child row
-  appears under it, streams the child's semantic transcript, and becomes done
-  when Claude reports the task completion.
+  appears under it, streams the child's semantic transcript, and is archived
+  when Claude reports task completion or failure.
 - A Codex rollout declares a parent thread. A `(native) codex` child row appears
   under the Construct session associated with that parent rollout.
 - A native Codex child launches another child. The grandchild appears beneath
