@@ -1832,6 +1832,15 @@ pub struct ForkedFrom {
 pub struct ForkMerge {
     pub mode: ForkMergeMode,
     pub at_ms: i64,
+    /// The parent's `event_count` (transcript sequence counter) at the
+    /// moment this fork merged back — the same counter scale as
+    /// `ForkedFrom::transcript_seq`, so lineage rendering can carve the
+    /// parent's timeline into segments (fork-out to merge-back, merge-back
+    /// to the next fork-out, ...) using plain arithmetic, no extra fetch.
+    /// `#[serde(default)]` so merge records persisted before this field
+    /// existed still deserialize (as `0`) rather than fail to load.
+    #[serde(default)]
+    pub merged_seq: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

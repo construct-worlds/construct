@@ -12,11 +12,12 @@ parent, or it has at least one live fork/subagent descendant) gets an
 additional behavior on its pane title bar's existing harness label (the
 right-aligned harness name in `apply_pane_title_right_cluster`): hovering it
 reveals a small preview box anchored to that session's own pane, rendering
-the same tree data a fork/subagent lineage graph shows (edge glyphs,
-status, compact stats). Clicking the label toggles a persistent pin, keeping
-the preview open regardless of hover. Ordinary sessions with no lineage get
-no hit-rect on the label at all — it renders exactly as it always has, with
-no hover/click behavior and no visual change.
+the same tree data a fork/subagent lineage graph shows (edge glyphs, status,
+and activity stats — see "Activity stats are per-segment, not per-node"
+below). Clicking the label toggles a persistent pin, keeping the preview
+open regardless of hover. Ordinary sessions with no lineage get no hit-rect
+on the label at all — it renders exactly as it always has, with no
+hover/click behavior and no visual change.
 
 This preview is the ONLY lineage UI. An earlier iteration of this feature
 (spec 0079) had a second, architecturally distinct surface — a full-screen
@@ -100,6 +101,50 @@ existing theme colors rather than inventing a third lineage-specific hue,
 and gives a focused preview the same "this pane owns your keystrokes" visual
 language every other focused pane already uses.
 
+### Activity stats are per-segment, not per-node
+
+Activity stats (message/turn count, elapsed time) are rendered as separate,
+non-selectable annotation rows on the rail — positioned BETWEEN the markers
+that bound them — rather than attached to each node's own line. The markers
+on a node's own timeline are: its own creation, each fork child's fork-out
+point, each fork child's merge-back point (only when it actually merged —
+a discard doesn't inject anything into the parent's transcript, so it isn't
+a boundary), and "now" (or the node's own terminal point, if it has one).
+Each gap between consecutive markers becomes one segment row describing
+what happened in exactly that window, e.g.:
+
+```
+◆ ● claude — auth-refactor
+│   12 msgs · 8m12s
+├─⑂ ● claude — fork idea A
+│  │   2 msgs · 1m05s
+│  ↩ merged
+│   5 msgs · 3m40s
+└─⑂ ● claude — fork idea B
+   │   1 msg · 30s
+```
+
+A node's own line no longer carries stats at all — it's rail + edge glyph +
+status glyph + harness [+ title] [+ merged/discarded marker], nothing more.
+A childless node still gets exactly one segment (its whole life, start to
+"now" or to its own terminal point), so every node's activity ends up
+visible somewhere, not just nodes with forks. A window with zero messages
+in it is skipped entirely rather than rendered as a "0 msgs" line.
+
+This is possible without any extra fetch because `SessionSummary::event_count`,
+`ForkedFrom::transcript_seq`, and `ForkMerge::merged_seq` are all the same
+counter (the transcript's own sequence number) — a child's
+`forked_from.transcript_seq` is a precise, already-in-memory snapshot of the
+parent's position at fork time, and `ForkMerge::merged_seq` (stamped by the
+daemon from the parent's own `event_count` at the moment of merge) is the
+same for the merge-back point. Segment math is therefore plain arithmetic
+over data already on `SessionSummary`, computed fresh on every render from
+live session state — never a stored/cached total.
+
+Subagent children (spec 0014) don't stamp a parent-timeline position the
+way forks do, so they don't act as boundary markers; they're simply
+recursed into in place without splitting the parent's timeline.
+
 ## Reason
 
 A session's fork/subagent lineage is a per-session fact, not a
@@ -137,6 +182,13 @@ own pane.
 - A future removal of the session-widget system (spec 0003) does not need
   to touch this feature — it was built to mirror that system's shape, not
   depend on its code.
+- `ForkMerge` (protocol) gained `merged_seq: u64`, stamped by the daemon
+  from the parent's `event_count` at merge time — the parent-timeline
+  counterpart to `ForkedFrom::transcript_seq`, and the one piece of data
+  segment rendering needed that wasn't already on `SessionSummary`.
+- The lineage row model gained a non-selectable `Segment` row kind,
+  interleaved into the flattened row list at the correct points alongside
+  node rows and the existing "+N more" collapse marker.
 
 ## Non-Goals
 
@@ -148,3 +200,7 @@ own pane.
   hover/pin/focus-triggered, never rendered unconditionally.
 - Does not change what merge/discard or jump-in DO (spec 0078 governs
   those); it only changes where the keys that trigger them live.
+- Does not attribute cost (`SessionSummary::cost_usd`) to individual
+  segments — it's a single cumulative total with no per-checkpoint snapshot
+  the way `event_count` has, so it was dropped from the lineage view
+  entirely rather than approximated or misattributed to one window.

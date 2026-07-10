@@ -2879,14 +2879,33 @@ impl SessionManager {
             .get_entry(id)
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown session: {id}"))?;
+        let parent_id = entry
+            .summary
+            .read()
+            .await
+            .forked_from
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("session is not a fork"))?
+            .session_id
+            .clone();
+        // The parent's CURRENT `event_count` at the moment of the merge is
+        // exactly where this fork's result (or discard) lands on the
+        // parent's own timeline — same counter scale as
+        // `ForkedFrom::transcript_seq` (see the doc comment on
+        // `ForkMerge::merged_seq`), so lineage rendering can later carve
+        // that timeline into segments without an extra fetch. A parent that
+        // has since been deleted has no timeline left to mark; fall back to
+        // 0 rather than failing the merge over it.
+        let merged_seq = match self.get_entry(&parent_id).await {
+            Some(parent) => parent.summary().await.event_count,
+            None => 0,
+        };
         let snapshot = {
             let mut summary = entry.summary.write().await;
-            if summary.forked_from.is_none() {
-                anyhow::bail!("session is not a fork");
-            }
             summary.merge = Some(agentd_protocol::ForkMerge {
                 mode,
                 at_ms: chrono::Utc::now().timestamp_millis(),
+                merged_seq,
             });
             summary.clone()
         };
@@ -4396,6 +4415,134 @@ mod tests {
         assert!(
             saw_archived_event,
             "archive must broadcast a State event for the session",
+        );
+    }
+
+    /// The TUI's lineage preview carves a node's own timeline into activity
+    /// segments using `ForkedFrom::transcript_seq` and `ForkMerge::
+    /// merged_seq` as matching checkpoints on the SAME counter
+    /// (`SessionSummary::event_count`) — so `merge()` must stamp
+    /// `merged_seq` from the PARENT's event_count at the moment of the
+    /// merge, not the fork's own.
+    #[tokio::test]
+    async fn merge_stamps_merged_seq_from_the_parents_current_event_count() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let parent = synthetic_entry("parent", agentd_protocol::SessionKind::User, 0);
+        parent.summary.write().await.event_count = 17;
+        mgr.sessions.write().await.insert("parent".into(), parent);
+
+        let fork = synthetic_entry("fork", agentd_protocol::SessionKind::User, 10);
+        fork.summary.write().await.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "parent".into(),
+            transcript_seq: 5,
+            at_ms: 0,
+        });
+        fork.summary.write().await.event_count = 2;
+        mgr.sessions.write().await.insert("fork".into(), fork);
+
+        mgr.merge("fork", agentd_protocol::ForkMergeMode::Result)
+            .await
+            .expect("merge");
+
+        let fork_summary = mgr
+            .get_entry("fork")
+            .await
+            .expect("fork entry")
+            .summary()
+            .await;
+        let merge = fork_summary.merge.expect("merge outcome recorded");
+        assert_eq!(merge.mode, agentd_protocol::ForkMergeMode::Result);
+        assert_eq!(
+            merge.merged_seq, 17,
+            "merged_seq must come from the PARENT's event_count, not the fork's own"
+        );
+
+        // The parent's own event_count is untouched by merge() itself — the
+        // caller injects the result message through the parent's ordinary
+        // input path first (spec 0078), which is what actually advances it;
+        // merge() only records the outcome/checkpoint.
+        let parent_summary = mgr
+            .get_entry("parent")
+            .await
+            .expect("parent entry")
+            .summary()
+            .await;
+        assert_eq!(parent_summary.event_count, 17);
+    }
+
+    #[tokio::test]
+    async fn merge_with_a_gone_parent_falls_back_to_zero_merged_seq() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        // The fork's parent was deleted before the fork got merged/discarded
+        // — merge() must still succeed (there's still a terminal outcome to
+        // record for the fork itself), just with no parent timeline to stamp.
+        let fork = synthetic_entry("orphan-fork", agentd_protocol::SessionKind::User, 0);
+        fork.summary.write().await.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "long-gone".into(),
+            transcript_seq: 3,
+            at_ms: 0,
+        });
+        mgr.sessions
+            .write()
+            .await
+            .insert("orphan-fork".into(), fork);
+
+        mgr.merge("orphan-fork", agentd_protocol::ForkMergeMode::Discard)
+            .await
+            .expect("merge succeeds even with no parent entry left");
+
+        let summary = mgr
+            .get_entry("orphan-fork")
+            .await
+            .expect("entry")
+            .summary()
+            .await;
+        assert_eq!(summary.merge.expect("merge recorded").merged_seq, 0);
+    }
+
+    #[tokio::test]
+    async fn merge_on_a_non_fork_session_fails() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        mgr.sessions.write().await.insert(
+            "solo".into(),
+            synthetic_entry("solo", agentd_protocol::SessionKind::User, 0),
+        );
+
+        assert!(
+            mgr.merge("solo", agentd_protocol::ForkMergeMode::Result)
+                .await
+                .is_err(),
+            "an ordinary session with no forked_from must not be mergeable"
         );
     }
 

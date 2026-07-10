@@ -9221,8 +9221,9 @@ fn lineage_row_scroll(
     scroll.min(total.saturating_sub(visible))
 }
 
-/// Render one flattened lineage row: rail prefix, edge glyph, status glyph,
-/// harness/title, compact stats, and (for forks) a terminal-state suffix.
+/// Render one flattened lineage row: rail prefix, then either a node's own
+/// edge glyph/status/harness/title/terminal-state suffix, a segment's
+/// compact activity annotation, or a "+N more" collapse marker.
 fn render_lineage_row(
     row: &crate::lineage::LineageRow,
     by_id: &HashMap<&str, &SessionSummary>,
@@ -9243,6 +9244,14 @@ fn render_lineage_row(
                     .add_modifier(Modifier::ITALIC),
             ));
         }
+        crate::lineage::LineageRowKind::Segment {
+            delta_events,
+            start_ms,
+            end_ms,
+        } => {
+            let label = crate::lineage::segment_label(*delta_events, *start_ms, *end_ms, now_ms);
+            spans.push(Span::styled(label, Style::default().fg(theme.dim)));
+        }
         crate::lineage::LineageRowKind::Node { session_id, edge } => {
             let (edge_glyph, edge_style) = match edge {
                 crate::lineage::LineageEdge::Root => ("◆", Style::default().fg(theme.accent)),
@@ -9260,11 +9269,10 @@ fn render_lineage_row(
                 return Line::from(spans);
             };
             let status_glyph = crate::lineage::status_glyph(summary.state);
-            let stats = crate::lineage::stats_label(summary, now_ms);
             let title = summary.title.as_deref().filter(|t| !t.trim().is_empty());
             let mut label = match title {
-                Some(t) => format!("{status_glyph} {} — {t} {stats}", summary.harness),
-                None => format!("{status_glyph} {} {stats}", summary.harness),
+                Some(t) => format!("{status_glyph} {} — {t}", summary.harness),
+                None => format!("{status_glyph} {}", summary.harness),
             };
             let mut label_style = state_style(theme, summary.state);
             match crate::lineage::ForkStatus::of(summary) {
@@ -14109,11 +14117,17 @@ mod tests {
         session_id: &str,
         edge: crate::lineage::LineageEdge,
     ) -> crate::lineage::LineageRow {
-        crate::lineage::flatten(&crate::lineage::LineageNode {
-            session_id: session_id.to_string(),
-            edge,
-            children: Vec::new(),
-        })
+        // `&[]`: these tests only look at index 0 (the node's own row),
+        // which `flatten` always emits first regardless of whether it can
+        // find a summary to derive segment rows from.
+        crate::lineage::flatten(
+            &crate::lineage::LineageNode {
+                session_id: session_id.to_string(),
+                edge,
+                children: Vec::new(),
+            },
+            &[],
+        )
         .remove(0)
     }
 
@@ -14155,6 +14169,7 @@ mod tests {
         merged.merge = Some(agentd_protocol::ForkMerge {
             mode: agentd_protocol::ForkMergeMode::Result,
             at_ms: 0,
+            merged_seq: 0,
         });
         let by_id: HashMap<&str, &SessionSummary> = [("f", &merged)].into_iter().collect();
         let row = lineage_node_row("f", crate::lineage::LineageEdge::Fork);
@@ -14172,6 +14187,7 @@ mod tests {
         discarded.merge = Some(agentd_protocol::ForkMerge {
             mode: agentd_protocol::ForkMergeMode::Discard,
             at_ms: 0,
+            merged_seq: 0,
         });
         let by_id: HashMap<&str, &SessionSummary> = [("f", &discarded)].into_iter().collect();
         let row = lineage_node_row("f", crate::lineage::LineageEdge::Fork);
@@ -14197,6 +14213,72 @@ mod tests {
         };
         let text = line_text(&render_lineage_row(&row, &by_id, &theme, 0));
         assert!(text.contains("+7 more"));
+    }
+
+    #[test]
+    fn lineage_row_no_longer_shows_per_node_stats() {
+        // Stats moved from the node's own line to separate Segment rows —
+        // a node's line is just rail + edge + status + harness [+ title]
+        // [+ terminal marker] now.
+        let theme = Theme::default();
+        let by_id_owner = vec![lineage_test_summary("a")];
+        let by_id: HashMap<&str, &SessionSummary> =
+            by_id_owner.iter().map(|s| (s.id.as_str(), s)).collect();
+        let row = lineage_node_row("a", crate::lineage::LineageEdge::Root);
+        let text = line_text(&render_lineage_row(&row, &by_id, &theme, 0));
+        assert!(
+            !text.contains("msg"),
+            "a node's own line must not carry message-count stats anymore: {text}"
+        );
+    }
+
+    #[test]
+    fn lineage_row_renders_segment_text_and_style_distinct_from_a_node_row() {
+        let theme = Theme::default();
+        let by_id_owner = vec![lineage_test_summary("a")];
+        let by_id: HashMap<&str, &SessionSummary> =
+            by_id_owner.iter().map(|s| (s.id.as_str(), s)).collect();
+
+        let node_row = lineage_node_row("a", crate::lineage::LineageEdge::Root);
+        let node_line = render_lineage_row(&node_row, &by_id, &theme, 60_000);
+        let node_text = line_text(&node_line);
+
+        let segment_row = crate::lineage::LineageRow {
+            depth: 1,
+            is_last: false,
+            rails: vec![],
+            kind: crate::lineage::LineageRowKind::Segment {
+                delta_events: 4,
+                start_ms: 0,
+                end_ms: Some(65_000),
+            },
+        };
+        let segment_line = render_lineage_row(&segment_row, &by_id, &theme, 60_000);
+        let segment_text = line_text(&segment_line);
+
+        assert!(
+            segment_text.contains("4 msgs"),
+            "segment row should show its own message count: {segment_text}"
+        );
+        assert!(
+            segment_text.contains("1m05s"),
+            "segment row should show its elapsed window: {segment_text}"
+        );
+        assert_ne!(
+            node_text, segment_text,
+            "a segment row's text must read as distinct content from a node row's"
+        );
+
+        // Style: a node row's label uses `state_style` (bright, per-state),
+        // a segment row's is uniformly `theme.dim` — the two must not
+        // collapse to the same look.
+        let node_label_style = node_line.spans.last().expect("node label span").style;
+        let segment_style = segment_line.spans.last().expect("segment span").style;
+        assert_ne!(
+            node_label_style.fg, segment_style.fg,
+            "segment rows must render visually distinct from node rows"
+        );
+        assert_eq!(segment_style.fg, Some(theme.dim));
     }
 
     #[test]

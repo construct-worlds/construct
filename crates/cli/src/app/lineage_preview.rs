@@ -134,7 +134,7 @@ impl App {
     /// approach the deleted modal's `lineage_rows` used.
     pub(crate) fn lineage_preview_rows(&self, session_id: &str) -> Vec<LineageRow> {
         crate::lineage::build_tree(session_id, &self.sessions)
-            .map(|root| crate::lineage::flatten(&root))
+            .map(|root| crate::lineage::flatten(&root, &self.sessions))
             .unwrap_or_default()
     }
 
@@ -530,6 +530,7 @@ mod tests {
         fork.merge = Some(agentd_protocol::ForkMerge {
             mode: agentd_protocol::ForkMergeMode::Result,
             at_ms: 0,
+            merged_seq: 0,
         });
         fork.archived = true;
         let (mut app, _dir, _server) = test_app_with_sessions(vec![summary("root"), fork]).await;
