@@ -116,16 +116,28 @@ what happened in exactly that window, e.g.:
 ```
 ◆ ● claude — auth-refactor
 │   12 msgs · 8m12s
-├─⑂ ● claude — fork idea A
-│  │   2 msgs · 1m05s
-│  ↩ merged
+│ ⑂ ● claude — fork idea A  ↩ merged
+│ │   2 msgs · 1m05s
 │   5 msgs · 3m40s
-└─⑂ ● claude — fork idea B
-   │   1 msg · 30s
+│ ⑂ ● claude — fork idea B
+  │   1 msg · 30s
 ```
 
 A node's own line no longer carries stats at all — it's rail + edge glyph +
 status glyph + harness [+ title] [+ merged/discarded marker], nothing more.
+
+The rail itself (the `│` columns on the left) is a pure vertical-line
+connector, not a `git log --graph`-style tree with `├─`/`└─` branch
+corners — it mirrors the `:::timeline` markdown extension's rendering
+convention instead (same one-column-per-nesting-level `│` used elsewhere
+in this UI for checklists), on the reasoning that a node's own edge glyph
+(`◆`/`⑂`/`▸`) already marks "a branch starts here", so a second, redundant
+corner glyph on the rail added visual noise without adding information.
+Whether a column keeps drawing `│` below a given row, or goes blank, is
+carried by that row's ancestors' `is_last` — a sibling that isn't the last
+one (e.g. "fork idea A" above, with "fork idea B" still to come) reads
+identically to one that is; the difference only shows up one level down, in
+whether ITS children's rail carries a `│` in that column or not.
 A childless node still gets exactly one segment (its whole life, start to
 "now" or to its own terminal point), so every node's activity ends up
 visible somewhere, not just nodes with forks. A window with zero messages

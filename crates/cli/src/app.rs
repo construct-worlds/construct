@@ -6976,6 +6976,23 @@ impl App {
             && self.dragging_terminal_scrollbar.is_none()
             && self.text_selection.is_none()
             && !card_owns_event
+            // The lineage preview box (spec 0080) renders on top of its
+            // own pane's content, in the same screen cells `main_window_
+            // areas`' inner_area covers — so without this exclusion, a
+            // click meant for the preview (e.g. to focus it) lands inside
+            // a mouse-tracking child's hit-test region too and gets
+            // forwarded into the PTY underneath instead of ever reaching
+            // `handle_left_click`. `is_over_lineage_preview`'s own doc
+            // comment already states the intent ("swallow clicks/drag-
+            // starts over the preview body so it doesn't act as a click-
+            // through") — this is the other half of that: the preview must
+            // win the hit-test before a mouse-grabbing child ever sees the
+            // event, not just after. The border-only harness-label trigger
+            // that opens/pins the preview doesn't need this (labels live on
+            // the pane's title-bar row, outside `inner_area`, so they were
+            // never reachable by `forward_mouse_to_child` in the first
+            // place) — only the body, which does overlap pane content.
+            && !self.is_over_lineage_preview(ev.column, ev.row)
             && self.forward_mouse_to_child(&ev)
         {
             return;
@@ -27136,6 +27153,84 @@ mod tests {
             rx.try_recv().is_ok(),
             "unlike the tutorial-card fix, this one is a side effect only — \
              the click must still forward to the child PTY as normal"
+        );
+        server.abort();
+    }
+
+    // The other half of the bug fixed above: a click landing ON the preview
+    // body itself, when the underlying pane's child has grabbed the mouse,
+    // used to reach `forward_mouse_to_child` first (it hit-tests only
+    // `main_window_areas`' `inner_area`, with no knowledge of the preview
+    // rendered on top of it) and get forwarded into the child's PTY —
+    // consumed entirely, `handle_left_click` and its
+    // `lineage_preview_body_hit` check never ran, so a click meant to focus
+    // the widget silently did nothing (unlike the click-elsewhere case,
+    // this one really must be swallowed, not just observed as a side
+    // effect — the click is FOR the preview).
+    #[tokio::test]
+    async fn clicking_the_preview_body_through_a_mouse_grabbing_pane_still_focuses_it() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        app.view = ViewMode::Terminal;
+
+        let mut history = crate::pty_render::ItemHistory::new();
+        history.feed_pty(b"\x1b[?1000h");
+        let _ = history.replay(120, 40, 0);
+        app.histories.insert("s1".into(), history);
+        assert_ne!(
+            app.histories.get("s1").unwrap().mouse_protocol_mode(),
+            vt100::MouseProtocolMode::None,
+            "test setup must put the pane's child in a mouse-tracking mode"
+        );
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        let hit = {
+            term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+            app.layout
+                .harness_label_hits
+                .iter()
+                .find(|h| h.session_id == "s1")
+                .cloned()
+                .expect("harness label hit registered")
+        };
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.lineage_preview_visible("s1"));
+        let body = app
+            .layout
+            .lineage_preview_body_hit
+            .clone()
+            .expect("preview body hit registered while visible");
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: body.area.x,
+            row: body.area.y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: body.area.x,
+            row: body.area.y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+
+        assert_eq!(
+            app.lineage_preview_focused.as_deref(),
+            Some("s1"),
+            "a click on the preview body must focus it even though the pane \
+             underneath has grabbed the mouse"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the click is FOR the preview, not the child — it must not also \
+             forward into the mouse-grabbing PTY"
         );
         server.abort();
     }

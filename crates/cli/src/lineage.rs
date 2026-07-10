@@ -1,7 +1,8 @@
-//! Fork + subagent lineage tree: pure construction and `git log --graph`-style
-//! layout, decoupled from `App` and ratatui so the same logic can back the
-//! `C-x q` / `q` popup today and a future pinnable/dockable panel later
-//! without a rewrite (see specs/0079-fork-and-subagent-lineage-view.md).
+//! Fork + subagent lineage tree: pure construction and a vertical-rail
+//! layout (`:::timeline`-style `│` connectors, not `git log --graph`
+//! branch corners — see `LineageRow::rail_prefix`), decoupled from `App`
+//! and ratatui so the same logic can back the lineage preview
+//! (specs/0080-lineage-preview-on-harness-label.md).
 //!
 //! A session has at most one incoming lineage edge — either it was forked
 //! from a parent (`forked_from`, spec 0078) or it is a subagent parented to
@@ -235,8 +236,11 @@ pub enum LineageRowKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageRow {
     pub depth: usize,
-    /// Whether this row is the last among its siblings — selects the
-    /// `└─` vs `├─` connector and whether the rail continues below it.
+    /// Whether this row is the last among its siblings — determines
+    /// whether ITS OWN children's rail column below it draws a continuing
+    /// `│` (`false`, more siblings follow after this subtree) or goes
+    /// blank (`true`, nothing more at this level). No longer affects this
+    /// row's own prefix glyph — see `rail_prefix`.
     pub is_last: bool,
     /// Per-ancestor-level: draw a continuing `│` rail (`true`) or blank
     /// space (`false`) in that column. Length is `depth` (root excluded).
@@ -256,28 +260,28 @@ impl LineageRow {
         matches!(self.kind, LineageRowKind::Node { .. })
     }
 
-    /// Compact `git log --graph`-style rail prefix, e.g. `"│ ├─"` — glyphs
-    /// only, no session label (callers append the edge glyph/status/stats,
-    /// or the segment text, after this).
+    /// Rail prefix: pure `│` vertical connectors and indent, one column per
+    /// ancestor level plus one for this row's own depth — glyphs only, no
+    /// session label (callers append the edge glyph/status/stats, or the
+    /// segment text, after this).
     ///
-    /// A `Segment` row always gets a plain continuing `│` rather than a
-    /// `├─`/`└─` branch connector — it isn't a branch, it's an annotation
-    /// sitting on the rail between the markers it describes, so it never
-    /// changes the tree's shape the way a real child does.
+    /// Mirrors the `:::timeline` markdown extension's vertical-line
+    /// convention (`render_timeline_nested_line`) rather than a `git log
+    /// --graph`-style `├─`/`└─` branch corner: a node's own edge glyph
+    /// (`◆`/`⑂`/`▸`) already marks "a branch starts here", so a separate
+    /// corner glyph on the rail itself is redundant. Whether a level's
+    /// column keeps drawing `│` below a given row is carried entirely by
+    /// `rails` (set from ancestors' `is_last`) — this method never branches
+    /// on `is_last` or on `LineageRowKind` for the glyph itself, so a
+    /// `Segment` row's rail reads identically to a `Node` row's at the same
+    /// depth: both are annotations sitting ON the rail, not a fork in it.
     pub fn rail_prefix(&self) -> String {
         let mut out = String::new();
         for r in &self.rails {
             out.push_str(if *r { "\u{2502} " } else { "  " });
         }
         if self.depth > 0 {
-            match &self.kind {
-                LineageRowKind::Segment { .. } => out.push_str("\u{2502} "),
-                _ => out.push_str(if self.is_last {
-                    "\u{2514}\u{2500}"
-                } else {
-                    "\u{251c}\u{2500}"
-                }),
-            }
+            out.push_str("\u{2502} ");
         }
         out
     }
@@ -759,11 +763,19 @@ mod tests {
     }
 
     #[test]
-    fn rail_prefix_matches_git_log_graph_shape() {
+    fn rail_prefix_is_a_pure_vertical_rail_with_no_branch_corner() {
         // root
-        // ├─ a
-        // │  └─ b
-        // └─ c
+        // │ a
+        // │ │ b
+        // │ c
+        //
+        // Unlike `git log --graph`, there's no `├─`/`└─` corner marking a
+        // or c as a branch point — every non-root row gets a plain `│ ` at
+        // its own depth (mirrors `:::timeline`'s vertical connectors,
+        // spec 0080). `a` not being the last sibling (c follows) still
+        // shows up, just one level down: `b`'s rail carries a `│` in its
+        // ancestor column because `a.is_last == false`, not because `a`'s
+        // OWN prefix looked any different from `c`'s.
         let sessions = vec![
             base("root"),
             forked_from(base("a"), "root"),
@@ -778,9 +790,15 @@ mod tests {
             .collect();
 
         assert_eq!(by_id["root"].rail_prefix(), "");
-        assert_eq!(by_id["a"].rail_prefix(), "\u{251c}\u{2500}");
-        assert_eq!(by_id["b"].rail_prefix(), "\u{2502} \u{2514}\u{2500}");
-        assert_eq!(by_id["c"].rail_prefix(), "\u{2514}\u{2500}");
+        assert_eq!(by_id["a"].rail_prefix(), "\u{2502} ");
+        assert_eq!(by_id["b"].rail_prefix(), "\u{2502} \u{2502} ");
+        assert_eq!(by_id["c"].rail_prefix(), "\u{2502} ");
+        assert_eq!(
+            by_id["a"].rail_prefix(),
+            by_id["c"].rail_prefix(),
+            "a non-last sibling's own rail prefix must read identically to \
+             the last sibling's — is_last only affects rows NESTED under it"
+        );
     }
 
     #[test]
@@ -1065,10 +1083,12 @@ mod tests {
     }
 
     #[test]
-    fn segment_row_rail_prefix_never_uses_a_branch_connector() {
-        // Segment rows always render a plain continuing bar, never a
-        // "├─"/"└─" branch connector — they're annotations on the rail, not
-        // tree branches.
+    fn segment_row_rail_prefix_matches_a_node_rows_at_the_same_position() {
+        // A Segment row's rail reads identically to what a Node row at the
+        // same depth/is_last/rails would produce — `rail_prefix` doesn't
+        // branch on `LineageRowKind` at all anymore (no more corner glyph
+        // to special-case away from), so `is_last: true` here changes
+        // nothing about this row's OWN prefix either.
         let row = LineageRow {
             depth: 1,
             is_last: true,
