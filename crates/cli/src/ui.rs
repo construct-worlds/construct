@@ -11209,19 +11209,34 @@ fn render_session_hover_card(
         .width
         .saturating_sub(2)
         .clamp(1, PROGRAM_CLIP_HOVER_PREVIEW_COLS);
-    let preview_output = app
-        .histories
-        .get_mut(session_id)
-        .map(|history| history.replay(max_w.max(1), PROGRAM_CLIP_HOVER_PREVIEW_ROWS, 0));
+    let content_w = max_w;
+    let content_h = PROGRAM_CLIP_HOVER_PREVIEW_ROWS;
+    // Replay at the parser's CURRENT cached size, never at the card's size.
+    // The `ItemHistory` is shared with the main view, split panes, and pin
+    // tiles, and `replay` resizes the cached vt100 parser (and the shadow
+    // parser) to the requested dims — replaying at card dims here would
+    // visibly reflow the session everywhere else it's shown and, while it's
+    // also on screen, rebuild the shared parser on every frame (the same
+    // thrash `pin_tile_reuses_cached_size_to_avoid_split_thrash` guards
+    // against for pin tiles; see `render_pin_strip`). The card CROPS the
+    // full-size screen instead, exactly like a pin tile. Fall back to the
+    // main-view pane size only to seed a session that has never been
+    // rendered anywhere yet.
+    let (main_cols, main_rows) = app.terminal_pane_size;
+    let preview_output = app.histories.get_mut(session_id).map(|history| {
+        let (cols, rows) = history.cached_dims().unwrap_or((
+            main_cols.max(content_w).max(1),
+            main_rows.max(content_h).max(1),
+        ));
+        history.replay(cols, rows, 0)
+    });
     let Some(out) = preview_output else {
         return false;
     };
-    if non_empty_row_span(out.screen) == 0 {
+    let content_rows = non_empty_row_span(out.screen);
+    if content_rows == 0 {
         return false;
     }
-
-    let content_w = max_w;
-    let content_h = PROGRAM_CLIP_HOVER_PREVIEW_ROWS;
     let (width, height) = session_hover_card_size(content_w, content_h, max_w);
     let Some(area) = session_hover_card_rect(modal, width, height, anchor_col, anchor_row) else {
         return false;
@@ -11247,16 +11262,18 @@ fn render_session_hover_card(
         width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
     };
-    render_pty_tail(
+    // Crop the tail of the full-size screen into the card, anchored at the
+    // bottom of the *content* rather than the screen: for fullscreen harness
+    // output (status bar on the last row) this is identical to the screen
+    // tail, while a sparse session whose few lines sit at the top of a tall
+    // parser still shows them instead of a blank window.
+    render_pty_screen(
         f,
-        Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: inner.height,
-        },
+        inner,
         out.screen,
         &app.theme,
+        false,
+        content_rows.saturating_sub(inner.height),
     );
     true
 }

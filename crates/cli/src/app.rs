@@ -15562,6 +15562,76 @@ mod tests {
         server.abort();
     }
 
+    /// REGRESSION: hovering a `@{session:…}` clip must CROP the session's
+    /// existing viewport, never resize it. `ItemHistory` is shared with the
+    /// main view, split panes, and pin tiles, and `replay` resizes the cached
+    /// vt100 parser to the requested dims — so a hover card replaying at its
+    /// own 64x22 preview size visibly reflowed the session everywhere else it
+    /// was shown and thrashed the shared parser between the two sizes on
+    /// every frame while both were on screen (the same failure shape as
+    /// `pin_tile_reuses_cached_size_to_avoid_split_thrash`).
+    #[tokio::test]
+    async fn program_session_hover_card_crops_without_resizing_shared_parser() {
+        use crate::pty_render::ItemHistory;
+
+        let (mut app, _dir, server) = empty_app().await;
+        let mut s1 = summary_with_kind(agentd_protocol::SessionKind::User);
+        let mut s2 = summary_with_kind(agentd_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s2.id = "s2".into();
+        app.sessions = vec![s1, s2];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:s2}", 0));
+        app.program_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+
+        // Simulate the main/split render having already sized the shared
+        // parser: seed the history with a full-size 140x40 replay.
+        let mut history = ItemHistory::new();
+        history.feed_pty(b"HOVER_CROP_MARKER\nsecond line");
+        let _ = history.replay(140, 40, 0);
+        app.histories.insert("s2".into(), history);
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let hit = app
+            .layout
+            .program_clip_hits
+            .first()
+            .cloned()
+            .expect("clip hit for s2");
+        app.mouse_pos = Some((hit.col_start, hit.row));
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program hover card should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("HOVER_CROP_"),
+            "hover card should show the cropped session tail: {text}"
+        );
+        assert_eq!(
+            app.histories
+                .get("s2")
+                .expect("history")
+                .cached_dims()
+                .expect("parser cached after replay"),
+            (140, 40),
+            "hover card must crop the session's existing viewport, not \
+             resize the shared parser to the tooltip's preview size"
+        );
+        // The next main-view-sized replay is the no-op cache-hit path: the
+        // hover render left the parser at the main view's dims.
+        let out = app
+            .histories
+            .get_mut("s2")
+            .expect("history")
+            .replay(140, 40, 0);
+        assert_eq!(out.screen.size(), (40, 140));
+        server.abort();
+    }
+
     #[tokio::test]
     async fn program_session_hover_card_works_on_unfocused_split_program() {
         use crate::pty_render::ItemHistory;
