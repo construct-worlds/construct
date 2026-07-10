@@ -81,7 +81,7 @@ pub struct LineageNode {
 /// Whether `session_id` has any lineage relationship worth showing: it was
 /// itself forked from a parent, or at least one other session in `sessions`
 /// points back at it via `forked_from`/`parent_session_id`. Used to gate the
-/// lineage preview trigger (the pane title bar's harness label) on ordinary
+/// sidebar lineage section (spec 0081) on ordinary
 /// sessions that have nothing to show — cheaper than [`build_tree`] since it
 /// doesn't walk to the root or materialize the full tree, just answers
 /// yes/no for `session_id` itself.
@@ -294,7 +294,7 @@ pub const MAX_BOX_CONTENT_W: usize = 28;
 /// Maximum wrapped label rows per box — content past this is ellipsized.
 pub const MAX_BOX_LINES: usize = 2;
 
-/// How the lineage preview draws the tree — toggled from the preview's
+/// How the lineage section draws the tree — toggled from the section's
 /// top border.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LineageViewMode {
@@ -321,6 +321,16 @@ impl LineageViewMode {
         match self {
             LineageViewMode::Boxes => "lineage",
             LineageViewMode::Rails => "lineage (compact)",
+        }
+    }
+
+    /// A one-word name for this mode — used where the surrounding UI
+    /// already says "lineage" (the sidebar section header), so the full
+    /// [`Self::label`] would be redundant.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            LineageViewMode::Boxes => "full",
+            LineageViewMode::Rails => "compact",
         }
     }
 }
@@ -437,9 +447,9 @@ impl Canvas {
 /// Indices of the selectable (non-`More`) rows within a flattened row list,
 /// in on-screen order — the shared "which rows can the cursor land on"
 /// logic behind keyboard navigation. Kept here, next to `flatten`, so both
-/// the lineage preview's rendering (`ui.rs::render_lineage_preview`, to
+/// the lineage section's rendering (`ui.rs::render_lineage_section`, to
 /// highlight the selected row) and its keyboard navigation
-/// (`app/lineage_preview.rs`, to move/clamp the selection) share one
+/// (`app/lineage_section.rs`, to move/clamp the selection) share one
 /// definition rather than re-deriving it.
 pub fn selectable_indices(rows: &[LineageRow]) -> Vec<usize> {
     rows.iter()

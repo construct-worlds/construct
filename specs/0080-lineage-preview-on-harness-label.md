@@ -1,6 +1,6 @@
 # 0080-lineage-preview-on-harness-label
 
-Status: accepted
+Status: superseded by 0081-lineage-section-in-sidebar
 Date: 2026-07-09
 Area: tui
 Scope: The pane title bar's harness label doubles as a hover/click trigger for a small, session-attached preview of that session's fork/subagent lineage, and that preview can itself be given keyboard focus to navigate, merge, discard, and jump — there is no separate full-screen lineage dialog.

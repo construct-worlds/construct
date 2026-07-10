@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 mod configure;
 mod dynamic_ui;
 mod editor;
-mod lineage_preview;
+mod lineage_section;
 mod matrix_clicks;
 mod minibuffer;
 mod mouse;
@@ -45,7 +45,6 @@ pub use configure::{
     harness_guidance, no_agent_harness_available, smith_method_guidance, ConfigurePopup,
     ConfigureTab, CONFIGURE_TABS,
 };
-pub use lineage_preview::LineagePreviewHover;
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
 };
@@ -58,12 +57,6 @@ pub(crate) const DYNAMIC_UI_AUTOHIDE_SECS: u64 = 15;
 /// pointer to travel from the square down onto the widget without it vanishing —
 /// distinct from the 15s create/update auto-reveal above.
 pub(crate) const DYNAMIC_UI_HOVER_GRACE_MS: u64 = 1000;
-/// How long a session's lineage preview (hover trigger: the pane title
-/// bar's harness label) lingers after the cursor leaves the label — kept as
-/// its own constant, independent of `DYNAMIC_UI_HOVER_GRACE_MS`, even though
-/// the value matches: the two features are unrelated and shouldn't be
-/// coupled just because they currently agree on a number.
-pub(crate) const LINEAGE_PREVIEW_HOVER_GRACE_MS: u64 = 1000;
 
 /// Which pane currently owns the keyboard. `View` covers both the transcript
 /// and the terminal renderer — when the view shows a PTY-backed session and
@@ -1338,55 +1331,29 @@ pub struct App {
     /// /tasks popup state: `None` = closed, `Some(...)` = open with
     /// a snapshot of the session's task registry.
     pub tasks_popup: Option<TasksPopup>,
-    /// Session-attached lineage preview shown transiently because the cursor
-    /// is over a session's harness label (the pane title bar's right
-    /// cluster, `apply_pane_title_right_cluster`). At most one across the
-    /// fleet at a time — see `lineage_preview::LineagePreviewHover`.
-    pub lineage_preview_hover: Option<LineagePreviewHover>,
-    /// Session ids whose lineage preview is pinned open via a harness-label
-    /// click (or via entering keyboard focus — see `lineage_preview_focused`
-    /// below). Mirrors `dynamic_ui_selected`'s pin-by-click shape, but keyed
-    /// only by session id (one lineage preview per session, not per panel).
-    pub lineage_preview_pinned: HashSet<String>,
-    /// The session id whose lineage preview currently owns keyboard input,
-    /// or `None` when no preview is keyboard-focused. Entered by clicking
-    /// inside a visible preview's body, or via `C-x Tab` (spec 0080) — the
-    /// keyboard-only replacement for the old `C-x q` / `q` full-screen popup
-    /// (spec 0079, superseded), which this project deleted in favor of
-    /// making the per-session preview itself keyboard-interactive rather
-    /// than keeping a second, architecturally distinct global dialog.
-    /// Entering focus also inserts the session into `lineage_preview_pinned`
-    /// (see `App::activate_lineage_preview_focus`) so a preview that's about
-    /// to auto-hide from a hover timeout doesn't vanish out from under
-    /// active keyboard interaction. While `Some`, `App::on_key` routes
-    /// navigation/merge/discard/jump keys to
-    /// `App::handle_lineage_preview_focus_key` before ordinary dispatch.
-    pub lineage_preview_focused: Option<String>,
-    /// Logical index into the focused preview's current flattened,
-    /// selectable (non-`More`) rows — meaningful only while
-    /// `lineage_preview_focused` is `Some`. Reset to `0` every time focus is
-    /// (re-)entered. Clamped at use, mirroring the deleted popup's identical
-    /// field.
-    pub lineage_preview_selected: usize,
-    /// First visible raw-row index of the preview, clamped at render time.
+    /// Whether the sidebar's lineage section (spec 0081) currently owns
+    /// keyboard input. Entered via bare `Tab` (with the list pane focused),
+    /// `C-x Tab` (from anywhere), or a click inside the section's body.
+    /// While `true`, `App::on_key` routes navigation/merge/discard/jump keys
+    /// to `App::handle_lineage_focus_key` before ordinary dispatch.
+    pub lineage_focused: bool,
+    /// Whether the lineage section is collapsed to just its header row —
+    /// toggled by clicking the header. Persisted across launches.
+    pub lineage_collapsed: bool,
+    /// Logical index into the section's current flattened, selectable
+    /// (non-`More`) rows — meaningful only while `lineage_focused`. Reset
+    /// every time focus is (re-)entered. Clamped at use.
+    pub lineage_selected: usize,
+    /// First visible raw-row index of the section, clamped at render time.
     /// While keyboard-focused the selection drags it (to keep the
-    /// highlighted box on screen); the mouse wheel moves it directly in
-    /// any mode.
-    pub lineage_preview_scroll: usize,
-    /// First visible diagram column — the preview's horizontal scroll,
+    /// highlighted node on screen); the mouse wheel moves it directly.
+    pub lineage_scroll: usize,
+    /// First visible diagram column — the section's horizontal scroll,
     /// moved by horizontal wheel events. Clamped at render time.
-    pub lineage_preview_scroll_x: usize,
-    /// User drag-resize override for the preview's outer (width, height).
-    /// `None` = size to the diagram's content. Clamped to the pane at
-    /// render time.
-    pub lineage_preview_size: Option<(u16, u16)>,
-    /// In-flight preview border drag: `(right_col, top_row, resize_w,
-    /// resize_h)` — the anchored edges stay put while the left/bottom
-    /// border follows the pointer.
-    pub resizing_lineage_preview: Option<(u16, u16, bool, bool)>,
-    /// Which visualization the preview draws (boxed-lane diagram vs
-    /// git-graph-style rails) — toggled from the preview's top border.
-    pub lineage_preview_mode: crate::lineage::LineageViewMode,
+    pub lineage_scroll_x: usize,
+    /// Which visualization the section draws (boxed-lane diagram vs
+    /// git-graph-style rails) — toggled from the section header.
+    pub lineage_mode: crate::lineage::LineageViewMode,
     /// `/configure` onboarding dialog (spec 0069): `None` = closed. Opened by
     /// the command palette, or automatically on first run / when no agent
     /// harness is available. Captures all input while open.
@@ -2642,49 +2609,8 @@ impl SessionTitleNameHit {
     }
 }
 
-/// A pane's clickable harness-label text in its title bar — registered only
-/// for sessions with fork/subagent lineage to show
-/// (`crate::lineage::has_lineage`). Hovering/clicking it drives the lineage
-/// preview (`app::lineage_preview`); ordinary sessions get no entry here and
-/// the label keeps its plain, non-interactive rendering.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HarnessLabelHit {
-    pub session_id: String,
-    pub row: u16,
-    pub start_col: u16,
-    /// Exclusive end column.
-    pub end_col: u16,
-}
-
-impl HarnessLabelHit {
-    pub fn contains(&self, col: u16, row: u16) -> bool {
-        row == self.row && col >= self.start_col && col < self.end_col
-    }
-}
-
-/// The last-rendered lineage preview's body (rows/content area, i.e. the
-/// block's inner rect) tagged with the session it belongs to — distinct
-/// from `HarnessLabelHit` (the trigger that opens/pins it) and from
-/// `LayoutSnapshot::lineage_preview_area` (the full bordered box, used only
-/// to swallow stray clicks/drags so they don't fall through to the pane
-/// underneath). Clicking inside this rect gives that session's preview
-/// keyboard focus (`App::activate_lineage_preview_focus`) — pinning it open
-/// first if it wasn't already, since focusing implies wanting to keep
-/// interacting with it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LineagePreviewBodyHit {
-    pub session_id: String,
-    pub area: ratatui::layout::Rect,
-}
-
-impl LineagePreviewBodyHit {
-    pub fn contains(&self, col: u16, row: u16) -> bool {
-        App::rect_contains(self.area, col, row)
-    }
-}
-
-/// One session box inside the last-rendered lineage preview, in screen
-/// coordinates (clipped to the preview's viewport). Hovering it brightens
+/// One session box inside the last-rendered lineage section, in screen
+/// coordinates (clipped to the section's viewport). Hovering it brightens
 /// that box's border; clicking it jumps to the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageBoxHit {
@@ -2763,25 +2689,20 @@ pub struct LayoutSnapshot {
     /// entry per pane) — click starts an inline rename in place. Refreshed
     /// every frame by `render_detail`.
     pub session_title_name_hits: Vec<SessionTitleNameHit>,
-    /// Clickable harness-label hitboxes from the last frame — only populated
-    /// for sessions with lineage to show (see `HarnessLabelHit`). Hover
-    /// reveals the session-attached lineage preview; click toggles its pin.
-    pub harness_label_hits: Vec<HarnessLabelHit>,
-    /// Bounds of the last-rendered lineage preview box (at most one across
-    /// the fleet, mirroring `dynamic_ui_popover_area`). `None` when no
-    /// preview is showing.
-    pub lineage_preview_area: Option<ratatui::layout::Rect>,
-    /// The last-rendered lineage preview's body (rows/content) rect, tagged
-    /// with its owning session — see `LineagePreviewBodyHit`. `None` when no
-    /// preview is showing.
-    pub lineage_preview_body_hit: Option<LineagePreviewBodyHit>,
-    /// Every session box inside the last-rendered lineage preview, in
-    /// screen coordinates — hover brightens a box's border, click jumps to
-    /// that session. Rebuilt every frame the preview renders.
-    pub lineage_preview_box_hits: Vec<LineageBoxHit>,
-    /// The view-mode toggle button on the preview's top border — click
+    /// Bounds of the sidebar's lineage section from the last frame (header
+    /// row included). `None` when the selected session has no lineage to
+    /// show (or the sidebar is collapsed/hidden).
+    pub lineage_area: Option<ratatui::layout::Rect>,
+    /// The lineage section's 1-row header — click toggles the section
+    /// between expanded and collapsed-to-header.
+    pub lineage_header_hit: Option<ratatui::layout::Rect>,
+    /// The view-mode toggle at the right end of the section header — click
     /// switches between the boxed-lane diagram and git-graph-style rails.
-    pub lineage_preview_mode_toggle_hit: Option<ratatui::layout::Rect>,
+    pub lineage_toggle_hit: Option<ratatui::layout::Rect>,
+    /// Every session box inside the last-rendered lineage section, in
+    /// screen coordinates — hover brightens a box's border, click jumps to
+    /// that session. Rebuilt every frame the section renders.
+    pub lineage_box_hits: Vec<LineageBoxHit>,
     /// Program title-bar Run button bounds: `(x_start, x_end, y)`.
     pub program_title_run_hit: Option<(u16, u16, u16)>,
     /// Program title-bar mode toggle bounds: `(x_start, x_end, y)`.
@@ -3187,15 +3108,12 @@ async fn run_with_socket_initial_selection(
         matrix_reveal_hits: Vec::new(),
         orchestrator_desired_size: None,
         tasks_popup: None,
-        lineage_preview_hover: None,
-        lineage_preview_pinned: HashSet::new(),
-        lineage_preview_focused: None,
-        lineage_preview_selected: 0,
-        lineage_preview_scroll: 0,
-        lineage_preview_scroll_x: 0,
-        lineage_preview_size: None,
-        resizing_lineage_preview: None,
-        lineage_preview_mode: crate::lineage::LineageViewMode::default(),
+        lineage_focused: false,
+        lineage_collapsed: false,
+        lineage_selected: 0,
+        lineage_scroll: 0,
+        lineage_scroll_x: 0,
+        lineage_mode: crate::lineage::LineageViewMode::Rails,
         configure_popup: None,
         session_picker: None,
         program_popup: None,
@@ -3302,17 +3220,13 @@ async fn run_with_socket_initial_selection(
     }
     app.restore_open_program_popups(&persisted.open_program_session_ids)
         .await;
-    // Reopen lineage previews that were pinned when the TUI last quit —
-    // pins for sessions that no longer exist are harmless (the preview
-    // only renders when the session has lineage to show).
-    app.lineage_preview_pinned = persisted
-        .lineage_pinned_session_ids
-        .iter()
-        .cloned()
-        .collect();
-    if persisted.lineage_view_compact {
-        app.lineage_preview_mode = crate::lineage::LineageViewMode::Rails;
-    }
+    // The lineage section's collapse state and view mode survive restarts.
+    app.lineage_collapsed = persisted.lineage_collapsed;
+    app.lineage_mode = if persisted.lineage_view_compact {
+        crate::lineage::LineageViewMode::Rails
+    } else {
+        crate::lineage::LineageViewMode::Boxes
+    };
 
     // Subscribe to all session events.
     if let Err(e) = client.subscribe(None).await {
@@ -3421,12 +3335,8 @@ async fn run_with_socket_initial_selection(
             .as_ref()
             .filter(|t| !t.completed)
             .map(|t| t.step),
-        lineage_pinned_session_ids: {
-            let mut ids: Vec<String> = app.lineage_preview_pinned.iter().cloned().collect();
-            ids.sort();
-            ids
-        },
-        lineage_view_compact: app.lineage_preview_mode == crate::lineage::LineageViewMode::Rails,
+        lineage_collapsed: app.lineage_collapsed,
+        lineage_view_compact: app.lineage_mode == crate::lineage::LineageViewMode::Rails,
     });
 
     result
@@ -3477,14 +3387,14 @@ async fn run_loop(
     // are recomputed at render time from `SessionSummary` fields that are
     // already kept live by the ordinary STATE broadcast subscription (same
     // path the branch-rail fork badge uses) — this ticker's only job is a
-    // defensive re-`list()` while a preview is keyboard-focused (the
+    // defensive re-`list()` while the lineage section is keyboard-focused (the
     // interactive case that most benefits from staying current), so a
     // missed broadcast (a reconnect blip, e.g.) can't leave its stats stale
-    // for the rest of the session. Scoped strictly to "a preview is
+    // for the rest of the session. Scoped strictly to "the section is
     // focused" — never runs otherwise — so it's not a new always-on
     // background polling loop.
-    let mut lineage_preview_refresh = tokio::time::interval(Duration::from_secs(1));
-    lineage_preview_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut lineage_refresh = tokio::time::interval(Duration::from_secs(1));
+    lineage_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Re-probe harness availability while the welcome card (no session
     // selected) or the `/configure` dialog is showing, so installing a CLI
     // or exporting an API key updates the live status without a TUI
@@ -3996,7 +3906,7 @@ async fn run_loop(
                     app.harnesses = list;
                 }
             }
-            _ = lineage_preview_refresh.tick(), if app.connected && app.lineage_preview_focused.is_some() => {
+            _ = lineage_refresh.tick(), if app.connected && app.lineage_focused => {
                 app.refresh_sessions().await;
             }
         }
@@ -6943,25 +6853,18 @@ impl App {
                 }
             }
         }
-        // A focused lineage preview (spec 0080) loses keyboard focus on any
-        // click outside it — same "blur on click away" principle as the
+        // A focused lineage section (spec 0081) loses keyboard focus on any
+        // click outside it — the same "blur on click away" principle as the
         // title-rename commit just above, and for the same reason: this must
-        // run before `forward_mouse_to_child` below, not inside
-        // `handle_left_click`. A click on ANOTHER pane (or even THIS pane's
-        // own PTY content) whose session has grabbed the mouse is forwarded
-        // and returns before ever reaching `handle_left_click` — so a check
-        // placed there alone never fires for that case, and a click on a
-        // different split (or the same session's own content, once the
-        // preview isn't over it) silently left the preview looking focused.
-        // A side effect only — the click still proceeds normally afterward,
-        // to `forward_mouse_to_child`, pane-focus switching, or wherever else
-        // it was headed (the `handle_left_click` copy of this check stays too,
-        // as a second layer for whatever reaches it directly).
+        // run before `forward_mouse_to_child` below, since a click on a
+        // mouse-grabbing pane is forwarded and never reaches
+        // `handle_left_click`. A side effect only — the click still proceeds
+        // normally afterward.
         if matches!(ev.kind, MouseEventKind::Down(_))
-            && self.lineage_preview_focused.is_some()
-            && !self.is_over_lineage_preview(ev.column, ev.row)
+            && self.lineage_focused
+            && !self.is_over_lineage_section(ev.column, ev.row)
         {
-            self.lineage_preview_focused = None;
+            self.lineage_focused = false;
         }
         // If the cursor is over a pane whose child has grabbed the mouse
         // (e.g. Claude Code in fullscreen), forward the event into that PTY and
@@ -7002,7 +6905,6 @@ impl App {
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
             && self.resizing_program_popup.is_none()
-            && self.resizing_lineage_preview.is_none()
             && self.dragging_terminal_scrollbar.is_none()
             && self.text_selection.is_none()
             && self.mouse_over_tutorial_card(ev.column, ev.row);
@@ -7031,41 +6933,22 @@ impl App {
             && self.resizing_orchestrator_panel.is_none()
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
-            && self.resizing_lineage_preview.is_none()
             && self.dragging_terminal_scrollbar.is_none()
             && self.text_selection.is_none()
             && !card_owns_event
-            // The lineage preview box (spec 0080) renders on top of its
-            // own pane's content, in the same screen cells `main_window_
-            // areas`' inner_area covers — so without this exclusion, a
-            // click meant for the preview (e.g. to focus it) lands inside
-            // a mouse-tracking child's hit-test region too and gets
-            // forwarded into the PTY underneath instead of ever reaching
-            // `handle_left_click`. `is_over_lineage_preview`'s own doc
-            // comment already states the intent ("swallow clicks/drag-
-            // starts over the preview body so it doesn't act as a click-
-            // through") — this is the other half of that: the preview must
-            // win the hit-test before a mouse-grabbing child ever sees the
-            // event, not just after. The border-only harness-label trigger
-            // that opens/pins the preview doesn't need this (labels live on
-            // the pane's title-bar row, outside `inner_area`, so they were
-            // never reachable by `forward_mouse_to_child` in the first
-            // place) — only the body, which does overlap pane content.
-            && !self.is_over_lineage_preview(ev.column, ev.row)
             && self.forward_mouse_to_child(&ev)
         {
             return;
         }
         match ev.kind {
             MouseEventKind::ScrollUp => {
-                if self.is_over_lineage_preview(ev.column, ev.row) {
+                if self.is_over_lineage_section(ev.column, ev.row) {
                     // Shift+wheel scrolls sideways — the common convention
                     // in terminals without a horizontal wheel.
                     if ev.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-                        self.lineage_preview_scroll_x =
-                            self.lineage_preview_scroll_x.saturating_sub(4);
+                        self.lineage_scroll_x = self.lineage_scroll_x.saturating_sub(4);
                     } else {
-                        self.lineage_preview_scroll = self.lineage_preview_scroll.saturating_sub(2);
+                        self.lineage_scroll = self.lineage_scroll.saturating_sub(2);
                     }
                 } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, -LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, -LIST_STEP)
@@ -7074,13 +6957,12 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
-                if self.is_over_lineage_preview(ev.column, ev.row) {
+                if self.is_over_lineage_section(ev.column, ev.row) {
                     // Clamped to the diagram's extents at render time.
                     if ev.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-                        self.lineage_preview_scroll_x =
-                            self.lineage_preview_scroll_x.saturating_add(4);
+                        self.lineage_scroll_x = self.lineage_scroll_x.saturating_add(4);
                     } else {
-                        self.lineage_preview_scroll = self.lineage_preview_scroll.saturating_add(2);
+                        self.lineage_scroll = self.lineage_scroll.saturating_add(2);
                     }
                 } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, LIST_STEP)
@@ -7089,14 +6971,14 @@ impl App {
                 }
             }
             MouseEventKind::ScrollLeft => {
-                if self.is_over_lineage_preview(ev.column, ev.row) {
-                    self.lineage_preview_scroll_x = self.lineage_preview_scroll_x.saturating_sub(4);
+                if self.is_over_lineage_section(ev.column, ev.row) {
+                    self.lineage_scroll_x = self.lineage_scroll_x.saturating_sub(4);
                 }
             }
             MouseEventKind::ScrollRight => {
-                if self.is_over_lineage_preview(ev.column, ev.row) {
+                if self.is_over_lineage_section(ev.column, ev.row) {
                     // Clamped to the diagram's width at render time.
-                    self.lineage_preview_scroll_x = self.lineage_preview_scroll_x.saturating_add(4);
+                    self.lineage_scroll_x = self.lineage_scroll_x.saturating_add(4);
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -7236,25 +7118,7 @@ impl App {
                 if self.is_over_dynamic_ui_overlay(ev.column, ev.row) {
                     return;
                 }
-                // Lineage preview resize handles: the preview is anchored
-                // top-right, so dragging its LEFT border adjusts width and
-                // its BOTTOM border adjusts height (the corner does both).
-                if let Some(area) = self.layout.lineage_preview_area {
-                    if area.width >= 2 && area.height >= 2 {
-                        let on_left = ev.column == area.x
-                            && ev.row >= area.y
-                            && ev.row < area.y + area.height;
-                        let on_bottom = ev.row == area.y + area.height - 1
-                            && ev.column >= area.x
-                            && ev.column < area.x + area.width;
-                        if on_left || on_bottom {
-                            self.resizing_lineage_preview =
-                                Some((area.x + area.width - 1, area.y, on_left, on_bottom));
-                            return;
-                        }
-                    }
-                }
-                if self.is_over_lineage_preview(ev.column, ev.row) {
+                if self.is_over_lineage_section(ev.column, ev.row) {
                     return;
                 }
                 // Matrix-rain panel: the title bar doubles as a height
@@ -7340,24 +7204,8 @@ impl App {
                 } else if let Some((grab_offset, max_scrollback)) = self.dragging_terminal_scrollbar
                 {
                     self.drag_terminal_scrollbar_to_row(ev.row, grab_offset, max_scrollback);
-                } else if let Some((right, top, resize_w, resize_h)) = self.resizing_lineage_preview
-                {
-                    // The preview anchors top-right; the dragged border
-                    // follows the pointer, the opposite edges stay put.
-                    let area = self.layout.lineage_preview_area.unwrap_or_default();
-                    let w = if resize_w {
-                        right.saturating_sub(ev.column).saturating_add(1).max(16)
-                    } else {
-                        area.width
-                    };
-                    let h = if resize_h {
-                        ev.row.saturating_sub(top).saturating_add(1).max(4)
-                    } else {
-                        area.height
-                    };
-                    self.lineage_preview_size = Some((w, h));
                 } else if self.is_over_dynamic_ui_overlay(ev.column, ev.row)
-                    || self.is_over_lineage_preview(ev.column, ev.row)
+                    || self.is_over_lineage_section(ev.column, ev.row)
                 {
                     self.text_selection = None;
                 } else if let Some(sel) = self.text_selection.as_mut() {
@@ -7375,15 +7223,13 @@ impl App {
                     || self.resizing_orchestrator_panel.is_some()
                     || self.dragging_terminal_scrollbar.is_some()
                     || self.resizing_matrix_rain.is_some()
-                    || self.resizing_main_window.is_some()
-                    || self.resizing_lineage_preview.is_some();
+                    || self.resizing_main_window.is_some();
                 self.resizing_list = None;
                 self.resizing_pin_strip = None;
                 self.resizing_orchestrator_panel = None;
                 self.dragging_terminal_scrollbar = None;
                 self.resizing_matrix_rain = None;
                 self.resizing_main_window = None;
-                self.resizing_lineage_preview = None;
                 if was_resizing {
                     self.text_selection = None;
                     return;
@@ -7497,76 +7343,6 @@ impl App {
         }
         if self.handle_dynamic_ui_overlay_click(col, row).await {
             return;
-        }
-        // Clicking a session's harness label toggles its lineage preview pin
-        // (spec 0080) — only registered as a hit for sessions that actually
-        // have lineage to show (see `apply_pane_title_right_cluster`).
-        if let Some(hit) = self
-            .layout
-            .harness_label_hits
-            .iter()
-            .find(|hit| hit.contains(col, row))
-            .cloned()
-        {
-            self.toggle_lineage_preview_pin(hit.session_id);
-            return;
-        }
-        // The view-mode toggle on the preview's top border switches
-        // between the boxed-lane diagram and git-graph-style rails.
-        if self
-            .layout
-            .lineage_preview_mode_toggle_hit
-            .is_some_and(|r| Self::rect_contains(r, col, row))
-        {
-            self.lineage_preview_mode = self.lineage_preview_mode.toggled();
-            // The two modes have different geometries — stale scroll
-            // offsets from one would land nowhere in the other.
-            self.lineage_preview_scroll = 0;
-            self.lineage_preview_scroll_x = 0;
-            return;
-        }
-        // Clicking a session box inside the preview jumps to that session —
-        // and closes the preview, exactly like Enter on the keyboard
-        // selection (leaving to go work in the picked session).
-        if let Some(hit) = self
-            .layout
-            .lineage_preview_box_hits
-            .iter()
-            .find(|hit| hit.contains(col, row))
-            .cloned()
-        {
-            if let Some(owner) = self.layout.lineage_preview_body_hit.clone() {
-                self.lineage_preview_pinned.remove(&owner.session_id);
-            }
-            self.lineage_preview_focused = None;
-            self.jump_to_lineage_session(&hit.session_id);
-            return;
-        }
-        // Clicking inside the preview's body (not the harness-label trigger
-        // above, not a session box) gives it keyboard focus for
-        // j/k/Enter/m/d — pinning it open first if it wasn't already, since
-        // focusing implies wanting to keep interacting with it (spec 0080).
-        if let Some(hit) = self.layout.lineage_preview_body_hit.clone() {
-            if hit.contains(col, row) {
-                self.activate_lineage_preview_focus(hit.session_id);
-                return;
-            }
-        }
-        // A click elsewhere inside the lineage preview box (its border) is
-        // consumed rather than falling through to pane content underneath it
-        // (cursor placement, block toggling, session switch).
-        if self.is_over_lineage_preview(col, row) {
-            return;
-        }
-        // Reaching here means the click landed on neither a harness label,
-        // nor any preview's body, nor any preview's border — genuinely
-        // elsewhere. If a preview currently owns keyboard focus, clicking
-        // away from it loses that focus, the same way clicking away from any
-        // other focused element in this UI (a text field, a focused pane)
-        // does. This does NOT touch the pin: a preview the user pinned open
-        // stays visible after losing focus, same as `Esc` (spec 0080).
-        if self.lineage_preview_focused.is_some() {
-            self.lineage_preview_focused = None;
         }
         // Tour card clicks — checked BEFORE the modal branch below, because
         // an open program sets `modal_area` and would otherwise claim the
@@ -8171,14 +7947,12 @@ impl App {
         if self.configure_popup.is_some() && self.handle_configure_key(key).await {
             return;
         }
-        // Lineage preview, keyboard-focused mode (`C-x Tab`, spec 0080 —
-        // supersedes the old `C-x q` / `q` popup, spec 0079): owns
+        // The sidebar's lineage section, keyboard-focused (bare `Tab` from
+        // the list pane, or `C-x Tab` from anywhere — spec 0081): owns
         // navigation/merge/discard/jump keys while focused; anything else
         // clears focus and falls through to ordinary routing on the SAME
         // key, exactly like `/configure` above.
-        if self.lineage_preview_focused.is_some()
-            && self.handle_lineage_preview_focus_key(key).await
-        {
+        if self.lineage_focused && self.handle_lineage_focus_key(key).await {
             return;
         }
         if self.tasks_popup.is_some() {
@@ -8299,6 +8073,22 @@ impl App {
                         return;
                     }
                 }
+            }
+            // Bare `Tab`, with the list pane focused, moves keyboard focus
+            // from the session rows into the sidebar's lineage section (the
+            // reverse direction — section back to sessions — is the `Tab`
+            // arm in `handle_lineage_focus_key`, which runs before this).
+            // Inert when the selected session has no lineage section, so Tab
+            // keeps meaning nothing in a bare list. View-focused panes never
+            // reach here with a bare Tab (PTY capture forwards it), keeping
+            // terminal Tab-completion untouched.
+            if key.modifiers.is_empty()
+                && matches!(key.code, KeyCode::Tab)
+                && self.focus == PaneFocus::List
+                && self.activate_lineage_focus()
+            {
+                self.chord_label.clear();
+                return;
             }
             // `Shift+Arrow` moves focus to the spatially adjacent split window.
             // Scoped to an unzoomed, view-focused split layout so it only
@@ -8644,11 +8434,11 @@ impl App {
                     self.set_status("merge: select a fork".into());
                 }
             }
-            ToggleLineagePreviewFocus => {
-                // spec 0080: `C-x Tab` is the keyboard-only entry point for
-                // the per-session lineage preview, replacing the old
-                // full-screen fork-log popup (spec 0079, superseded).
-                self.toggle_lineage_preview_focus();
+            ToggleLineageFocus => {
+                // spec 0081: `C-x Tab` toggles the sidebar lineage section's
+                // keyboard focus from anywhere (bare `Tab` does the same
+                // from within the list pane).
+                self.toggle_lineage_focus();
             }
             OpenRename => match self.selection.clone() {
                 Selection::Session(id) => {
@@ -10920,11 +10710,10 @@ mod tests {
             minibuffer_choice_hits: Vec::new(),
             modal_area: None,
             session_title_name_hits: Vec::new(),
-            harness_label_hits: Vec::new(),
-            lineage_preview_area: None,
-            lineage_preview_body_hit: None,
-            lineage_preview_box_hits: Vec::new(),
-            lineage_preview_mode_toggle_hit: None,
+            lineage_area: None,
+            lineage_header_hit: None,
+            lineage_toggle_hit: None,
+            lineage_box_hits: Vec::new(),
             program_title_run_hit: None,
             program_title_toggle_hit: None,
             program_title_close_hit: None,
@@ -11050,15 +10839,12 @@ mod tests {
             resizing_program_popup: None,
             list_collapsed: false,
             tasks_popup: None,
-            lineage_preview_hover: None,
-            lineage_preview_pinned: HashSet::new(),
-            lineage_preview_focused: None,
-            lineage_preview_selected: 0,
-            lineage_preview_scroll: 0,
-            lineage_preview_scroll_x: 0,
-            lineage_preview_size: None,
-            resizing_lineage_preview: None,
-            lineage_preview_mode: crate::lineage::LineageViewMode::default(),
+            lineage_focused: false,
+            lineage_collapsed: false,
+            lineage_selected: 0,
+            lineage_scroll: 0,
+            lineage_scroll_x: 0,
+            lineage_mode: crate::lineage::LineageViewMode::Rails,
             configure_popup: None,
             session_picker: None,
             program_popup: None,
@@ -26861,8 +26647,8 @@ mod tests {
     }
 
     /// `s1` is a lone root with one fork (`s1-fork`) — enough lineage for
-    /// `crate::lineage::has_lineage("s1", ..)` to be true, so `s1`'s harness
-    /// label registers a hover/click hit (spec 0079).
+    /// the sidebar's lineage section (spec 0081) to render while `s1` (or
+    /// the fork) is selected.
     async fn test_app_with_lineage() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
         use agentd_client::Client;
         use tokio::net::UnixListener;
@@ -26878,11 +26664,6 @@ mod tests {
         });
         let client = Client::connect(&sock).await.expect("client connects");
         let mut root = summary_with_kind(agentd_protocol::SessionKind::User);
-        // `has_pty` drives `select_session`'s "natural view" reset — without
-        // it, selecting "s1" flips the view to Chat (which doesn't render
-        // the sticky-widget/lineage-preview popover; see
-        // `render_terminal_for_window`) regardless of the test harness's
-        // default `ViewMode::Terminal`.
         root.has_pty = true;
         let mut fork = summary_with_kind(agentd_protocol::SessionKind::User);
         fork.id = "s1-fork".into();
@@ -26894,658 +26675,139 @@ mod tests {
             parent_message_count: 0,
         });
         let mut app = test_app(client, vec![root, fork]);
-        // An empty (but present) history takes `render_terminal_for_window`
-        // past its "(no PTY history yet)" placeholder and into the body that
-        // renders the sticky-widget/lineage-preview popover — without this,
-        // the pane never gets far enough to show either.
         app.histories
             .insert("s1".into(), crate::pty_render::ItemHistory::new());
         (app, dir, server)
     }
 
     #[tokio::test]
-    async fn harness_label_registers_no_hit_without_lineage() {
+    async fn lineage_section_absent_without_lineage() {
         let (mut app, _dir, server) = captured_app().await;
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         assert!(
-            app.layout.harness_label_hits.is_empty(),
-            "an ordinary session with no fork/subagent lineage must not register \
-             a harness-label hit — the label stays plain, non-interactive text"
+            app.layout.lineage_area.is_none(),
+            "an ordinary session with no fork/subagent lineage gets no sidebar \
+             lineage section at all"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn harness_label_registers_a_hit_for_a_session_with_lineage() {
+    async fn lineage_section_renders_below_the_session_rows() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let hits: Vec<_> = app
-            .layout
-            .harness_label_hits
-            .iter()
-            .filter(|h| h.session_id == "s1")
-            .collect();
+        let area = app.layout.lineage_area.expect("lineage section rendered");
+        let rows = app.layout.list_items_area.expect("list rows area");
+        assert!(
+            area.y >= rows.y + rows.height,
+            "the section sits below the session rows: {area:?} vs {rows:?}"
+        );
+        if let Some(rain) = app.layout.matrix_rain_area {
+            if rain.height > 0 {
+                assert!(
+                    area.y + area.height <= rain.y,
+                    "the section sits above the operator panel: {area:?} vs {rain:?}"
+                );
+            }
+        }
+        let header = term
+            .backend()
+            .buffer()
+            .content()
+            .chunks(term.backend().buffer().area.width as usize)
+            .nth(area.y as usize)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .unwrap_or_default();
+        assert!(
+            header.contains("⑂ lineage"),
+            "the header row names the section: {header:?}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lineage_section_follows_the_list_selection() {
+        // The section is a detail panel of the selected session — selecting
+        // the fork keeps the same tree on screen (root resolution walks up).
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1-fork".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.layout.lineage_area.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn clicking_the_section_header_collapses_it_to_one_row() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let header = app.layout.lineage_header_hit.expect("header hit");
+        assert!(
+            app.layout.lineage_area.expect("area").height > 1,
+            "expanded by default"
+        );
+
+        app.handle_left_click(header.x + 1, header.y).await;
+        assert!(app.lineage_collapsed);
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         assert_eq!(
-            hits.len(),
+            app.layout.lineage_area.expect("area").height,
             1,
-            "the root of a fork should register exactly one harness-label hit"
+            "collapsed to just the header row"
         );
+
+        let header = app.layout.lineage_header_hit.expect("header hit");
+        app.handle_left_click(header.x + 1, header.y).await;
+        assert!(!app.lineage_collapsed, "clicking again expands it");
         server.abort();
     }
 
     #[tokio::test]
-    async fn lineage_preview_shows_on_hover_and_auto_hides_after_grace_lapses() {
+    async fn clicking_the_mode_toggle_switches_visualization() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
+        app.lineage_scroll = 3;
+        app.lineage_scroll_x = 7;
+        let before = app.lineage_mode;
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let hit = app
-            .layout
-            .harness_label_hits
-            .iter()
-            .find(|h| h.session_id == "s1")
-            .cloned()
-            .expect("harness label hit registered");
-
-        // No hover yet: the preview must not be showing.
-        assert!(!app.lineage_preview_visible("s1"));
-        assert!(app.layout.lineage_preview_area.is_none());
-
-        // Hover the harness label.
-        app.mouse_pos = Some((hit.start_col, hit.row));
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        assert!(
-            app.lineage_preview_visible("s1"),
-            "hovering the harness label should reveal the lineage preview"
-        );
-        let area = app
-            .layout
-            .lineage_preview_area
-            .expect("preview area recorded while hovered");
-        let buf = term.backend().buffer();
-        let text = rendered_text(buf);
-        assert!(
-            text.contains('⑂'),
-            "the preview must render the same fork-edge glyph the C-x q modal uses \
-             (reused from crate::lineage / render_lineage_row), not duplicated logic: {text:?}"
-        );
-        let _ = area;
-
-        // Move the pointer away and force the grace window to have already
-        // elapsed (rather than sleeping in a test) — the hover must drop and
-        // the preview must stop rendering.
-        app.mouse_pos = None;
-        app.lineage_preview_hover.as_mut().unwrap().until =
-            Instant::now() - Duration::from_millis(1);
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        assert!(
-            app.lineage_preview_hover.is_none(),
-            "a lapsed hover must be cleared"
-        );
-        assert!(
-            app.layout.lineage_preview_area.is_none(),
-            "the preview must stop rendering once hover lapses and it isn't pinned"
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn lineage_preview_hover_over_the_body_extends_the_grace_window() {
-        let (mut app, _dir, server) = test_app_with_lineage().await;
-        app.select_session("s1".to_string());
-        let backend = ratatui::backend::TestBackend::new(120, 40);
-        let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let hit = app
-            .layout
-            .harness_label_hits
-            .iter()
-            .find(|h| h.session_id == "s1")
-            .cloned()
-            .expect("harness label hit registered");
-        app.mouse_pos = Some((hit.start_col, hit.row));
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let area = app
-            .layout
-            .lineage_preview_area
-            .expect("preview area recorded while hovered");
-        let until_over_label = app
-            .lineage_preview_hover
-            .as_ref()
-            .expect("hover armed by the label")
-            .until;
-
-        // The pointer travels off the label and down onto the preview body
-        // itself — the grace window must keep renewing there too (so the
-        // pointer can travel from the trigger down onto the preview without
-        // it vanishing mid-flight), not just while glued to the trigger glyph.
-        app.mouse_pos = Some((area.x + 1, area.y + 1));
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        assert!(
-            app.lineage_preview_visible("s1"),
-            "the preview must still show while the pointer rests on its own body"
-        );
-        let until_over_body = app
-            .lineage_preview_hover
-            .as_ref()
-            .expect("hover still tracked while over the body")
-            .until;
-        assert!(
-            until_over_body >= until_over_label,
-            "hovering the body must renew (never shorten) the grace deadline"
-        );
-        assert!(app.layout.lineage_preview_area.is_some());
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn harness_label_click_toggles_lineage_preview_pin() {
-        let (mut app, _dir, server) = test_app_with_lineage().await;
-        app.select_session("s1".to_string());
-        let backend = ratatui::backend::TestBackend::new(120, 40);
-        let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let hit = app
-            .layout
-            .harness_label_hits
-            .iter()
-            .find(|h| h.session_id == "s1")
-            .cloned()
-            .expect("harness label hit registered");
-
-        assert!(!app.lineage_preview_pinned.contains("s1"));
-        app.handle_left_click(hit.start_col, hit.row).await;
-        assert!(
-            app.lineage_preview_pinned.contains("s1"),
-            "clicking the harness label should pin the lineage preview open"
-        );
-        assert!(app.lineage_preview_visible("s1"));
-        // Pinned stays visible with no hover and the pointer elsewhere.
-        app.mouse_pos = None;
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        assert!(app.layout.lineage_preview_area.is_some());
-
-        app.handle_left_click(hit.start_col, hit.row).await;
-        assert!(
-            !app.lineage_preview_pinned.contains("s1"),
-            "clicking the harness label again should un-pin it"
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn clicking_the_preview_body_focuses_and_pins_it() {
-        let (mut app, _dir, server) = test_app_with_lineage().await;
-        app.select_session("s1".to_string());
-        let backend = ratatui::backend::TestBackend::new(120, 40);
-        let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let hit = app
-            .layout
-            .harness_label_hits
-            .iter()
-            .find(|h| h.session_id == "s1")
-            .cloned()
-            .expect("harness label hit registered");
-
-        // Hover (not pinned) so the preview renders and registers a body hit.
-        app.mouse_pos = Some((hit.start_col, hit.row));
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        assert!(app.lineage_preview_visible("s1"));
-        assert!(!app.lineage_preview_pinned.contains("s1"));
-
-        let body = app
-            .layout
-            .lineage_preview_body_hit
-            .clone()
-            .expect("preview body hit registered while visible");
-        assert_eq!(body.session_id, "s1");
-
-        app.handle_left_click(body.area.x, body.area.y).await;
+        let toggle = app.layout.lineage_toggle_hit.expect("toggle hit");
+        app.handle_left_click(toggle.x + 1, toggle.y).await;
+        assert_eq!(app.lineage_mode, before.toggled());
         assert_eq!(
-            app.lineage_preview_focused.as_deref(),
-            Some("s1"),
-            "clicking inside the preview body should give it keyboard focus"
-        );
-        assert!(
-            app.lineage_preview_pinned.contains("s1"),
-            "entering focus should pin the preview open so a hover-timeout \
-             can't yank it away mid-interaction"
+            (app.lineage_scroll, app.lineage_scroll_x),
+            (0, 0),
+            "mode switch resets both scroll offsets — the geometries differ"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn clicking_the_preview_body_via_real_mouse_events_focuses_it() {
-        // Companion to `clicking_the_preview_body_focuses_and_pins_it` above,
-        // which calls `handle_left_click` directly — this goes through the
-        // real `on_mouse` Down-then-Up sequence a genuine click generates
-        // (clicks are processed on release in this app; see
-        // `MouseEventKind::Up(MouseButton::Left)` in `on_mouse`), to rule out
-        // any discrepancy between the two paths (e.g. `Down`'s
-        // `is_over_lineage_preview` swallow-and-return interacting badly with
-        // the click ultimately reaching `handle_left_click` on `Up`).
-        use crossterm::event::MouseButton;
+    async fn clicking_a_session_box_in_the_section_jumps_to_that_session() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
-        let backend = ratatui::backend::TestBackend::new(120, 40);
-        let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let hit = app
-            .layout
-            .harness_label_hits
-            .iter()
-            .find(|h| h.session_id == "s1")
-            .cloned()
-            .expect("harness label hit registered");
-
-        app.mouse_pos = Some((hit.start_col, hit.row));
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        assert!(app.lineage_preview_visible("s1"));
-
-        let body = app
-            .layout
-            .lineage_preview_body_hit
-            .clone()
-            .expect("preview body hit registered while visible");
-
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: body.area.x,
-            row: body.area.y,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        })
-        .await;
-        assert!(
-            app.text_selection.is_none(),
-            "mouse-down over the preview body must not start a text selection"
-        );
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::Up(MouseButton::Left),
-            column: body.area.x,
-            row: body.area.y,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        })
-        .await;
-
-        assert_eq!(
-            app.lineage_preview_focused.as_deref(),
-            Some("s1"),
-            "a real click (Down then Up) inside the preview body should focus it"
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn clicking_elsewhere_clears_lineage_preview_focus() {
-        let (mut app, _dir, server) = test_app_with_lineage().await;
-        app.select_session("s1".to_string());
-        app.activate_lineage_preview_focus("s1".to_string());
-        assert_eq!(app.lineage_preview_focused.as_deref(), Some("s1"));
-
-        // Click a screen cell nowhere near the preview (top-left corner).
-        app.handle_left_click(0, 0).await;
-
-        assert!(
-            app.lineage_preview_focused.is_none(),
-            "clicking elsewhere should clear focus"
-        );
-        assert!(
-            app.lineage_preview_pinned.contains("s1"),
-            "clicking elsewhere must not un-pin — only lose focus, same as Esc"
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn lineage_preview_stays_put_while_program_slides_right_for_terminal_focus() {
-        // Regression test: `render_lineage_preview`'s call site inside the
-        // Program popup used to be handed `safe_block_inner` — derived from
-        // the popup's own `rect`, which `program_popup_visible_rect` shifts
-        // right while terminal focus is active (`C-x C-o`) so the terminal
-        // underneath is exposed. Since the preview anchors to the RIGHT edge
-        // of whatever rect it's given, it slid right along with the popup
-        // instead of staying fixed to the pane's own boundary.
-        let (mut app, _dir, server) = test_app_with_lineage().await;
-        app.select_session("s1".to_string());
-        app.lineage_preview_pinned.insert("s1".to_string());
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
-        {
-            let popup = app.program_popup.as_mut().expect("program just set");
-            // Backdate the open-reveal so the popup renders fully open, not
-            // mid-animation (a documented pitfall: a fresh `revealed_at`
-            // renders blank for the first `PROGRAM_REVEAL_MS`).
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        }
-        let backend = ratatui::backend::TestBackend::new(120, 40);
-        let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let area_before_slide = app
-            .layout
-            .lineage_preview_area
-            .expect("preview area recorded with the program open, not yet slid");
-
-        app.set_program_terminal_focus(true);
-        {
-            let popup = app.program_popup.as_mut().expect("program remains open");
-            // Backdate the slide-changed timestamp too, so the popup renders
-            // fully slid (fraction 1.0) rather than mid-animation.
-            popup.slide_from = 1.0;
-            popup.slide_changed_at =
-                Some(Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS));
-        }
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let area_after_slide = app
-            .layout
-            .lineage_preview_area
-            .expect("preview area recorded with the program slid for terminal focus");
-
-        assert_eq!(
-            area_before_slide, area_after_slide,
-            "the lineage preview must stay anchored to the pane's own boundary, \
-             not slide along with the Program popup"
-        );
-        server.abort();
-    }
-
-    // Regression test for the same class of bug PR #735 fixed for the
-    // tutorial card (see `tutorial_card_click_reaches_card_through_on_mouse_
-    // over_grabbing_child` above): `clicking_elsewhere_clears_lineage_preview_
-    // focus` calls `handle_left_click` directly, which skips the real
-    // dispatch path — `on_mouse` → `forward_mouse_to_child` hands any click
-    // over a mouse-tracking pane's content straight to that child's PTY and
-    // returns *before* `handle_left_click` (and the focus-clearing check
-    // inside it) ever runs. A click on a session's own PTY content (or
-    // another split's), when that session's child has grabbed the mouse
-    // (e.g. Claude Code enabling DECSET mouse tracking — very common), used
-    // to leave a focused lineage preview looking focused forever. Unlike the
-    // tutorial-card fix, this one does NOT consume the click — the preview
-    // just loses focus as a side effect, and the click still forwards to the
-    // child exactly as it would without a preview involved.
-    #[tokio::test]
-    async fn clicking_a_mouse_grabbing_pane_still_clears_lineage_preview_focus() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        let (mut app, _dir, server) = test_app_with_lineage().await;
-        app.select_session("s1".to_string());
-        app.view = ViewMode::Terminal;
-
-        // s1's own child enables mouse tracking (DECSET ?1000h) — the
-        // "session underneath" case: clicking its PTY content, not just some
-        // OTHER split, must also clear focus.
-        let mut history = crate::pty_render::ItemHistory::new();
-        history.feed_pty(b"\x1b[?1000h");
-        let _ = history.replay(120, 40, 0);
-        app.histories.insert("s1".into(), history);
-        assert_ne!(
-            app.histories.get("s1").unwrap().mouse_protocol_mode(),
-            vt100::MouseProtocolMode::None,
-            "test setup must put the pane's child in a mouse-tracking mode"
-        );
-
-        app.activate_lineage_preview_focus("s1".to_string());
-        assert_eq!(app.lineage_preview_focused.as_deref(), Some("s1"));
-
-        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
-        app.pty_input_tx = tx;
-        let backend = ratatui::backend::TestBackend::new(120, 40);
-        let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-
-        // Click well away from the preview's own rendered box (top-left
-        // corner of the pane's content, not the label or the preview).
-        let pane = app.layout.main_window_areas[0].inner_area;
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: pane.x,
-            row: pane.y,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        })
-        .await;
-
-        assert!(
-            app.lineage_preview_focused.is_none(),
-            "clicking the mouse-grabbing pane's own content should clear \
-             lineage preview focus even though the event is forwarded, not \
-             handled by handle_left_click"
-        );
-        assert!(
-            rx.try_recv().is_ok(),
-            "unlike the tutorial-card fix, this one is a side effect only — \
-             the click must still forward to the child PTY as normal"
-        );
-        server.abort();
-    }
-
-    // The other half of the bug fixed above: a click landing ON the preview
-    // body itself, when the underlying pane's child has grabbed the mouse,
-    // used to reach `forward_mouse_to_child` first (it hit-tests only
-    // `main_window_areas`' `inner_area`, with no knowledge of the preview
-    // rendered on top of it) and get forwarded into the child's PTY —
-    // consumed entirely, `handle_left_click` and its
-    // `lineage_preview_body_hit` check never ran, so a click meant to focus
-    // the widget silently did nothing (unlike the click-elsewhere case,
-    // this one really must be swallowed, not just observed as a side
-    // effect — the click is FOR the preview).
-    #[tokio::test]
-    async fn clicking_the_preview_body_through_a_mouse_grabbing_pane_still_focuses_it() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        let (mut app, _dir, server) = test_app_with_lineage().await;
-        app.select_session("s1".to_string());
-        app.view = ViewMode::Terminal;
-
-        let mut history = crate::pty_render::ItemHistory::new();
-        history.feed_pty(b"\x1b[?1000h");
-        let _ = history.replay(120, 40, 0);
-        app.histories.insert("s1".into(), history);
-        assert_ne!(
-            app.histories.get("s1").unwrap().mouse_protocol_mode(),
-            vt100::MouseProtocolMode::None,
-            "test setup must put the pane's child in a mouse-tracking mode"
-        );
-
-        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
-        app.pty_input_tx = tx;
-        let backend = ratatui::backend::TestBackend::new(120, 40);
-        let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        let hit = {
-            term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-            app.layout
-                .harness_label_hits
-                .iter()
-                .find(|h| h.session_id == "s1")
-                .cloned()
-                .expect("harness label hit registered")
-        };
-        app.mouse_pos = Some((hit.start_col, hit.row));
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        assert!(app.lineage_preview_visible("s1"));
-        let body = app
-            .layout
-            .lineage_preview_body_hit
-            .clone()
-            .expect("preview body hit registered while visible");
-
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: body.area.x,
-            row: body.area.y,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        })
-        .await;
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::Up(MouseButton::Left),
-            column: body.area.x,
-            row: body.area.y,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        })
-        .await;
-
-        assert_eq!(
-            app.lineage_preview_focused.as_deref(),
-            Some("s1"),
-            "a click on the preview body must focus it even though the pane \
-             underneath has grabbed the mouse"
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "the click is FOR the preview, not the child — it must not also \
-             forward into the mouse-grabbing PTY"
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn boxes_past_the_preview_right_edge_do_not_panic_the_render() {
-        // Regression test: the box-hit viewport clip skipped boxes above,
-        // below, and left of the viewport but NOT ones starting past its
-        // RIGHT edge, so `right.min(view_right) - vis_x` underflowed
-        // whenever the diagram was wider than the widget (a nested fork's
-        // box starts deep to the right) — an immediate panic on render.
-        let (mut app, _dir, server) = test_app_with_lineage().await;
-        // Nest deep enough that the innermost box starts past a 24-column
-        // preview even under the compact (column-reusing) layout.
-        for depth in 0..3 {
-            let mut nested = summary_with_kind(agentd_protocol::SessionKind::User);
-            let parent = if depth == 0 {
-                "s1-fork".to_string()
-            } else {
-                format!("s1-fork{}", "-fork".repeat(depth))
-            };
-            nested.id = format!("s1-fork{}", "-fork".repeat(depth + 1));
-            nested.forked_from = Some(agentd_protocol::ForkedFrom {
-                session_id: parent,
-                transcript_seq: 0,
-                at_ms: 0,
-                parent_busy_ms: 0,
-                parent_message_count: 0,
-            });
-            app.sessions.push(nested);
-        }
-        app.select_session("s1".to_string());
-        app.lineage_preview_pinned.insert("s1".to_string());
-        // Force a viewport far narrower than the nested diagram so the
-        // deepest box lies entirely past the right edge.
-        app.lineage_preview_size = Some((24, 12));
-        let backend = ratatui::backend::TestBackend::new(120, 40);
-        let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        // The fully-clipped box must simply register no hit.
-        assert!(
-            !app.layout
-                .lineage_preview_box_hits
-                .iter()
-                .any(|h| h.session_id == "s1-fork-fork-fork-fork"),
-            "a box entirely past the right edge registers no hit rect"
-        );
-        // And every registered hit stays inside the preview's inner rect.
-        let area = app.layout.lineage_preview_area.expect("preview area");
-        for hit in &app.layout.lineage_preview_box_hits {
-            assert!(
-                hit.area.x >= area.x + 1 && hit.area.x + hit.area.width <= area.x + area.width - 1,
-                "hit {hit:?} escapes the preview {area:?}"
-            );
-        }
-        // The overflowing diagram shows a horizontal scrollbar on the
-        // bottom-pad row (background tint) — and a vertical one on the
-        // right inner column, since the diagram is taller than 12 rows too.
-        let hbar_bg = term
-            .backend()
-            .buffer()
-            .cell((area.x + 2, area.y + area.height - 2))
-            .map(|c| c.style().bg);
-        assert!(
-            !matches!(hbar_bg, Some(None) | None),
-            "horizontal scrollbar tints the bottom-pad row: {hbar_bg:?}"
-        );
-        let vbar_bg = term
-            .backend()
-            .buffer()
-            .cell((area.x + area.width - 2, area.y + 2))
-            .map(|c| c.style().bg);
-        assert!(
-            !matches!(vbar_bg, Some(None) | None),
-            "vertical scrollbar tints the right inner column: {vbar_bg:?}"
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn top_border_toggle_switches_between_boxes_and_rails_views() {
-        let (mut app, _dir, server) = test_app_with_lineage().await;
-        app.select_session("s1".to_string());
-        app.lineage_preview_pinned.insert("s1".to_string());
-        let backend = ratatui::backend::TestBackend::new(120, 40);
-        let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        assert_eq!(
-            app.lineage_preview_mode,
-            crate::lineage::LineageViewMode::Boxes
-        );
-        let boxes_rows = app.lineage_preview_rows("s1");
-        let toggle = app
-            .layout
-            .lineage_preview_mode_toggle_hit
-            .expect("toggle button on the top border");
-
-        app.handle_left_click(toggle.x, toggle.y).await;
-        assert_eq!(
-            app.lineage_preview_mode,
-            crate::lineage::LineageViewMode::Rails,
-            "clicking the toggle switches to the rails view"
-        );
-        let rails_rows = app.lineage_preview_rows("s1");
-        assert_ne!(
-            boxes_rows.iter().map(|r| r.text()).collect::<Vec<_>>(),
-            rails_rows.iter().map(|r| r.text()).collect::<Vec<_>>(),
-            "the two modes draw genuinely different diagrams"
-        );
-        assert!(
-            !rails_rows.iter().any(|r| r.text().contains('\u{250c}')),
-            "rails mode draws no boxes"
-        );
-        // Rendering in rails mode keeps the interactive surfaces alive.
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        assert!(app.layout.lineage_preview_area.is_some());
-        assert!(!app.layout.lineage_preview_box_hits.is_empty());
-
-        // The rails diagram is smaller, so the content-sized preview (and
-        // its toggle) moved — re-read the hit before clicking again.
-        let toggle = app
-            .layout
-            .lineage_preview_mode_toggle_hit
-            .expect("toggle still present in rails mode");
-        app.handle_left_click(toggle.x, toggle.y).await;
-        assert_eq!(
-            app.lineage_preview_mode,
-            crate::lineage::LineageViewMode::Boxes,
-            "clicking again switches back"
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn clicking_a_session_box_in_the_preview_jumps_to_that_session() {
-        let (mut app, _dir, server) = test_app_with_lineage().await;
-        app.select_session("s1".to_string());
-        app.lineage_preview_pinned.insert("s1".to_string());
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let fork_box = app
             .layout
-            .lineage_preview_box_hits
+            .lineage_box_hits
             .iter()
             .find(|h| h.session_id == "s1-fork")
             .cloned()
             .expect("fork box hit registered");
 
-        app.handle_left_click(fork_box.area.x + 1, fork_box.area.y + 1)
+        app.handle_left_click(fork_box.area.x, fork_box.area.y)
             .await;
         assert_eq!(
             app.selected_id().as_deref(),
@@ -27553,179 +26815,174 @@ mod tests {
             "clicking a session box jumps to that session"
         );
         assert!(
-            app.lineage_preview_focused.is_none() && !app.lineage_preview_pinned.contains("s1"),
-            "the click closes the preview, like Enter on the keyboard selection"
+            !app.lineage_focused,
+            "the jump hands keyboard focus back, like Enter on the selection"
+        );
+        assert_eq!(app.focus, PaneFocus::View);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn clicking_the_section_body_focuses_it() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        app.focus = PaneFocus::View;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let area = app.layout.lineage_area.expect("section area");
+        // A body cell that is neither the header nor a session box.
+        let mut target = None;
+        'outer: for y in (area.y + 1)..(area.y + area.height) {
+            for x in area.x..(area.x + area.width) {
+                if !app.layout.lineage_box_hits.iter().any(|h| h.contains(x, y)) {
+                    target = Some((x, y));
+                    break 'outer;
+                }
+            }
+        }
+        let (x, y) = target.expect("a non-box body cell exists");
+        app.handle_left_click(x, y).await;
+        assert!(app.lineage_focused, "a body click focuses the section");
+        assert_eq!(
+            app.focus,
+            PaneFocus::List,
+            "the section lives in the sidebar, so focusing it focuses the list pane"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn wheel_over_the_preview_scrolls_it_and_drag_on_its_border_resizes_it() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    async fn clicking_outside_the_section_clears_its_focus() {
+        use crossterm::event::MouseButton;
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
-        app.lineage_preview_pinned.insert("s1".to_string());
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let area = app.layout.lineage_preview_area.expect("preview area");
-
-        // Wheel down over the preview scrolls the preview, not the pane.
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: area.x + 2,
-            row: area.y + 2,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        })
-        .await;
-        assert_eq!(app.lineage_preview_scroll, 2);
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::ScrollRight,
-            column: area.x + 2,
-            row: area.y + 2,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        })
-        .await;
-        assert_eq!(app.lineage_preview_scroll_x, 4);
-        // Shift+wheel scrolls sideways too (terminals without a
-        // horizontal wheel).
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: area.x + 2,
-            row: area.y + 2,
-            modifiers: crossterm::event::KeyModifiers::SHIFT,
-        })
-        .await;
-        assert_eq!(app.lineage_preview_scroll_x, 8);
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: area.x + 2,
-            row: area.y + 2,
-            modifiers: crossterm::event::KeyModifiers::SHIFT,
-        })
-        .await;
-        assert_eq!(app.lineage_preview_scroll_x, 4);
-        assert_eq!(
-            app.lineage_preview_scroll, 2,
-            "shift+wheel must not move the vertical scroll"
-        );
-
-        // Dragging the left border widens the preview.
-        app.on_mouse(MouseEvent {
+        app.lineage_focused = true;
+        let view = app.layout.view_area.expect("view area");
+        app.on_mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: area.x,
-            row: area.y + 2,
-            modifiers: crossterm::event::KeyModifiers::empty(),
+            column: view.x + view.width / 2,
+            row: view.y + view.height / 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
         })
         .await;
-        assert!(app.resizing_lineage_preview.is_some());
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::Drag(MouseButton::Left),
-            column: area.x.saturating_sub(5),
-            row: area.y + 2,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        })
-        .await;
-        let (w, _h) = app.lineage_preview_size.expect("resize recorded");
-        assert_eq!(w, area.width + 5, "left-border drag widens by the delta");
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::Up(MouseButton::Left),
-            column: area.x.saturating_sub(5),
-            row: area.y + 2,
-            modifiers: crossterm::event::KeyModifiers::empty(),
-        })
-        .await;
-        assert!(app.resizing_lineage_preview.is_none());
+        assert!(
+            !app.lineage_focused,
+            "a click away blurs the section, before any child-forwarding path"
+        );
         server.abort();
     }
 
     #[tokio::test]
-    async fn lineage_preview_border_uses_the_default_text_color() {
+    async fn wheel_over_the_section_scrolls_it() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
-        app.lineage_preview_pinned.insert("s1".to_string());
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let area = app
-            .layout
-            .lineage_preview_area
-            .expect("preview area recorded while pinned");
-        let cell_style = |term: &ratatui::Terminal<ratatui::backend::TestBackend>| {
-            term.backend()
-                .buffer()
-                .cell((area.x, area.y))
-                .map(|c| c.style())
-                .expect("border cell")
-        };
-        let unfocused = cell_style(&term);
-        assert_eq!(
-            unfocused.fg,
-            Some(app.theme.text),
-            "the preview border uses the default foreground text color, \
-             distinct from session pane borders"
-        );
-        assert_ne!(unfocused.fg, Some(app.theme.border));
+        let area = app.layout.lineage_area.expect("section area");
+        let (cx, cy) = (area.x + area.width / 2, area.y + area.height - 1);
 
-        app.lineage_preview_focused = Some("s1".to_string());
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let focused = cell_style(&term);
-        assert_eq!(focused.fg, Some(app.theme.text));
-        assert!(
-            focused
-                .add_modifier
-                .contains(ratatui::style::Modifier::BOLD),
-            "keyboard focus brightens the border (bold)"
+        app.on_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: cx,
+            row: cy,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+        .await;
+        assert_eq!(
+            app.lineage_scroll, 2,
+            "wheel over the section scrolls it (clamped at next render)"
+        );
+
+        app.on_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: cx,
+            row: cy,
+            modifiers: crossterm::event::KeyModifiers::SHIFT,
+        })
+        .await;
+        assert_eq!(
+            app.lineage_scroll_x, 4,
+            "shift+wheel scrolls sideways (clamped at next render)"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn lineage_preview_trigger_survives_narrow_terminal_without_overlap() {
-        let (mut app, _dir, server) = test_app_with_lineage().await;
+    async fn boxes_past_the_section_right_edge_do_not_panic_the_render() {
+        // Regression test: a box starting right of the viewport used to
+        // subtract with overflow when clipping hit rects. A 4-level fork
+        // nest in the boxed-lane mode overflows the narrow sidebar.
+        use agentd_client::Client;
+        use tokio::net::UnixListener;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut sessions = vec![summary_with_kind(agentd_protocol::SessionKind::User)];
+        let mut parent = "s1".to_string();
+        for i in 0..4 {
+            let mut nested = summary_with_kind(agentd_protocol::SessionKind::User);
+            nested.id = format!("nested-{i}");
+            nested.title = Some(format!("a rather long fork title {i}"));
+            nested.forked_from = Some(agentd_protocol::ForkedFrom {
+                session_id: parent.clone(),
+                transcript_seq: 0,
+                at_ms: 0,
+                parent_busy_ms: 0,
+                parent_message_count: 0,
+            });
+            parent = nested.id.clone();
+            sessions.push(nested);
+        }
+        let mut app = test_app(client, sessions);
+        app.lineage_mode = crate::lineage::LineageViewMode::Boxes;
         app.select_session("s1".to_string());
-        let backend = ratatui::backend::TestBackend::new(40, 20);
+        let backend = ratatui::backend::TestBackend::new(90, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("render must not panic at a narrow terminal width");
-        if let Some(hit) = app
-            .layout
-            .harness_label_hits
-            .iter()
-            .find(|h| h.session_id == "s1")
-        {
-            // Close button occupies the final cells before the corner; the
-            // harness-label trigger must not spill into or past it, even at
-            // this width.
-            let view = app.layout.view_area.expect("view area");
-            let (close_start, _, _) = crate::ui::view_close_button_range(view);
+            .expect("render must not panic with boxes past the right edge");
+        let area = app.layout.lineage_area.expect("section area");
+        for hit in &app.layout.lineage_box_hits {
             assert!(
-                hit.end_col <= close_start,
-                "harness trigger {hit:?} must not overlap the close button starting at {close_start}"
+                hit.area.x >= area.x && hit.area.x + hit.area.width <= area.x + area.width,
+                "hit {hit:?} escapes the section {area:?}"
             );
-            assert!(hit.start_col < hit.end_col, "hit must have positive width");
         }
         server.abort();
     }
 
-    #[test]
-    fn harness_label_range_never_overlaps_the_close_button_at_narrow_width() {
-        let rect = Rect::new(0, 0, 30, 3);
-        let close_width = 3;
-        let harness_width = 10;
-        let (x_start, x_end, y) = crate::ui::harness_label_range(rect, close_width, harness_width);
-        assert_eq!(y, rect.y);
-        assert!(x_start < x_end, "harness span must have positive width");
+    #[tokio::test]
+    async fn forks_render_indented_under_their_parent_in_list_items() {
+        let (app, _dir, server) = test_app_with_lineage().await;
+        let items = app.list_items();
+        let rows: Vec<(String, bool)> = items
+            .iter()
+            .filter_map(|it| match it {
+                ListItem::Session {
+                    summary, indented, ..
+                } => Some((summary.id.clone(), *indented)),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            x_end - x_start,
-            harness_width,
-            "harness keeps its full width even when the pane is narrow"
+            rows,
+            vec![("s1".to_string(), false), ("s1-fork".to_string(), true)],
+            "a fork nests indented under its parent, like a subagent, and \
+             never appears as its own top-level row"
         );
-        let close_x_start = rect.x + rect.width - 1 - close_width;
-        assert!(
-            x_end <= close_x_start,
-            "harness (ends {x_end}) must not overlap the close button starting at {close_x_start}"
-        );
+        server.abort();
     }
 
     #[tokio::test]

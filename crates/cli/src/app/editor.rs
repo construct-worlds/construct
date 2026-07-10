@@ -208,35 +208,6 @@ impl App {
             }
             return true;
         }
-        // Clicking the harness label pins/unpins that session's lineage
-        // preview (spec 0080) — same shared geometry as the plain session
-        // view (`harness_label_hits`, registered by
-        // `apply_pane_title_right_cluster` only when the session has
-        // lineage to show).
-        if let Some(hit) = self
-            .layout
-            .harness_label_hits
-            .iter()
-            .find(|hit| hit.contains(ev.column, ev.row))
-            .cloned()
-        {
-            if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
-                self.toggle_lineage_preview_pin(hit.session_id);
-            }
-            return true;
-        }
-        // Clicking inside the preview's body (not the harness-label trigger
-        // above) gives it keyboard focus, pinning it open first if it wasn't
-        // already — same behavior as the plain session view's click path
-        // (spec 0080).
-        if let Some(hit) = self.layout.lineage_preview_body_hit.clone() {
-            if hit.contains(ev.column, ev.row) {
-                if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
-                    self.activate_lineage_preview_focus(hit.session_id);
-                }
-                return true;
-            }
-        }
         // Clicking a template button in the empty-program placeholder fills the
         // buffer with that template's Markdown — a starting point the user then
         // edits. Checked before the generic cursor-placement handler so the

@@ -143,11 +143,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.main_window_areas.clear();
     app.layout.main_window_dividers.clear();
     app.layout.session_title_name_hits.clear();
-    app.layout.harness_label_hits.clear();
-    app.layout.lineage_preview_area = None;
-    app.layout.lineage_preview_body_hit = None;
-    app.layout.lineage_preview_box_hits.clear();
-    app.layout.lineage_preview_mode_toggle_hit = None;
+    app.layout.lineage_area = None;
+    app.layout.lineage_header_hit = None;
+    app.layout.lineage_toggle_hit = None;
+    app.layout.lineage_box_hits.clear();
     app.window_pane_sizes.clear();
     app.terminal_replayed_sessions_this_frame.clear();
     app.layout.dynamic_ui_popover_area = None;
@@ -823,31 +822,6 @@ pub fn dynamic_ui_trigger_range(
         .saturating_sub(close_reserved)
         .saturating_sub(harness_reserved);
     (x_end.saturating_sub(label_width), x_end, view_area.y)
-}
-
-/// On-screen span of the harness label itself in a pane's title-bar right
-/// cluster (`apply_pane_title_right_cluster`). Returns
-/// `(x_start, x_end_exclusive, y)`. Unlike [`dynamic_ui_trigger_range`]
-/// (which positions an element with something else — the harness label —
-/// still to its right), the harness label is always the rightmost element
-/// before the close button, so its span is just "titles_right minus close's
-/// own reserved width", with no further reservation beyond that.
-pub fn harness_label_range(
-    view_area: Rect,
-    close_width: u16,
-    harness_width: u16,
-) -> (u16, u16, u16) {
-    let titles_right = view_area
-        .x
-        .saturating_add(view_area.width)
-        .saturating_sub(1);
-    let close_reserved = if close_width > 0 {
-        close_width.saturating_add(1)
-    } else {
-        0
-    };
-    let x_end = titles_right.saturating_sub(close_reserved);
-    (x_end.saturating_sub(harness_width), x_end, view_area.y)
 }
 
 fn session_sticky_widget_panels(app: &App, session_id: &str) -> Vec<agentd_protocol::UiPanel> {
@@ -1796,6 +1770,20 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     // can move the list viewport independently from the current selection.
     let (list_items_area, matrix_area) =
         split_list_pane(inner, app.matrix_rain_hidden, app.matrix_rain_h);
+    // Lineage section (spec 0081): the selected session's fork/subagent
+    // tree, carved from the bottom of the rows region so it sits between
+    // the session rows and the operator/matrix-rain panel.
+    let lineage = app
+        .lineage_section_session()
+        .map(|id| (id.clone(), app.lineage_section_diagram(&id)));
+    let (list_items_area, lineage_rect) = split_lineage_section(
+        list_items_area,
+        lineage
+            .as_ref()
+            .map(|(_, (rows, _))| rows.len())
+            .unwrap_or(0),
+        app.lineage_collapsed,
+    );
     let max_scroll = app_items
         .len()
         .saturating_sub(list_items_area.height as usize);
@@ -1829,7 +1817,267 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_scroll_offset = visible_start + state.offset();
     app.list_scroll_offset = app.layout.list_scroll_offset;
     clear_pane_side_borders(f, area, app);
+    if let (Some(rect), Some((id, (rows, boxes)))) = (lineage_rect, lineage) {
+        render_lineage_section(f, rect, app, &id, &rows, &boxes);
+    }
     render_matrix_rain(f, matrix_area, app);
+}
+
+/// Carve the sidebar's lineage section (spec 0081) from the bottom of the
+/// session-rows region: a 1-row header plus (when expanded) the diagram
+/// rows. The section never squeezes the rows below `SESSION_LIST_H_MIN`
+/// and never takes more than half the region, so a deep tree scrolls
+/// instead of crowding the list out. `content_rows == 0` (no lineage to
+/// show) yields no section at all.
+fn split_lineage_section(list: Rect, content_rows: usize, collapsed: bool) -> (Rect, Option<Rect>) {
+    if content_rows == 0 {
+        return (list, None);
+    }
+    let avail = list
+        .height
+        .saturating_sub(crate::app::SESSION_LIST_H_MIN)
+        .min(list.height / 2);
+    let want = if collapsed {
+        1
+    } else {
+        (content_rows as u16).saturating_add(1)
+    };
+    let h = want.min(avail.max(u16::from(avail >= 1)));
+    if h == 0 {
+        return (list, None);
+    }
+    let rows = Rect {
+        x: list.x,
+        y: list.y,
+        width: list.width,
+        height: list.height - h,
+    };
+    let section = Rect {
+        x: list.x,
+        y: list.y + list.height - h,
+        width: list.width,
+        height: h,
+    };
+    (rows, Some(section))
+}
+
+/// Render the sidebar's lineage section: a header row (`▾ ⑂ lineage` with a
+/// right-aligned view-mode toggle) above the selected session's lineage
+/// diagram. Reuses `App::lineage_section_diagram`
+/// (`crate::lineage::build_tree`/`flatten` underneath) for the tree and
+/// `render_lineage_row` for each row's formatting.
+///
+/// Highlighting: while the section owns keyboard focus
+/// (`App::lineage_focused`), the highlighted node follows its own row
+/// selection; otherwise it follows the LIST selection, so the section reads
+/// as a detail panel for the selected session. Hovering a node's box
+/// brightens its border; clicking it jumps to that session (`click_list`).
+fn render_lineage_section(
+    f: &mut Frame,
+    rect: Rect,
+    app: &mut App,
+    session_id: &str,
+    rows: &[crate::lineage::LineageRow],
+    boxes: &[crate::lineage::LineageBoxBounds],
+) {
+    use unicode_width::UnicodeWidthStr;
+    if rect.height == 0 || rect.width == 0 {
+        return;
+    }
+    app.layout.lineage_area = Some(rect);
+    let focused = app.lineage_focused;
+
+    // Header: disclosure + title left, current view mode + ⇄ right.
+    let header_rect = Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: 1,
+    };
+    app.layout.lineage_header_hit = Some(header_rect);
+    let title_style = if focused {
+        Style::default()
+            .fg(app.theme.text)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        session_list_secondary_style(&app.theme)
+    };
+    let disclosure = if app.lineage_collapsed { "▸" } else { "▾" };
+    let toggle_label = format!("{} ⇄ ", app.lineage_mode.short_label());
+    let toggle_w = UnicodeWidthStr::width(toggle_label.as_str()) as u16;
+    let title = format!("{disclosure} ⑂ lineage");
+    let title_w = UnicodeWidthStr::width(title.as_str()) as u16;
+    let gap = rect.width.saturating_sub(title_w).saturating_sub(toggle_w) as usize;
+    let mut spans = vec![Span::styled(title, title_style)];
+    if !app.lineage_collapsed && gap > 0 {
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(
+            toggle_label,
+            session_list_secondary_style(&app.theme),
+        ));
+        app.layout.lineage_toggle_hit = Some(Rect {
+            x: rect.x + rect.width - toggle_w,
+            y: rect.y,
+            width: toggle_w,
+            height: 1,
+        });
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), header_rect);
+    if rect.height == 1 {
+        return;
+    }
+
+    let body = Rect {
+        x: rect.x,
+        y: rect.y + 1,
+        width: rect.width,
+        height: rect.height - 1,
+    };
+    let content_w = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.text().as_str()))
+        .max()
+        .unwrap_or(0);
+    let visible = body.height as usize;
+    let scroll = if focused {
+        // Keyboard selection drags the viewport; wheel scrolling moved it
+        // too, so reconcile from whichever state is current.
+        let selectable = crate::lineage::selectable_indices(rows);
+        let selected_raw = selectable
+            .get(app.lineage_selected.min(selectable.len().saturating_sub(1)))
+            .copied();
+        lineage_row_scroll(rows.len(), selected_raw, app.lineage_scroll, visible)
+    } else {
+        app.lineage_scroll.min(rows.len().saturating_sub(visible))
+    };
+    app.lineage_scroll = scroll;
+    let max_scroll_x = content_w.saturating_sub(body.width as usize);
+    let scroll_x = app.lineage_scroll_x.min(max_scroll_x);
+    app.lineage_scroll_x = scroll_x;
+
+    // Box hit regions in screen coordinates (clipped to the viewport) —
+    // hover brightens a box's border, click jumps to its session. A box
+    // lying entirely outside the viewport on ANY side (including past the
+    // right edge, common when the diagram is wider than the sidebar) is
+    // skipped, and the arithmetic saturates so a clipped edge can never
+    // underflow.
+    let view_right = scroll_x + body.width as usize;
+    let view_bottom = scroll + visible;
+    for b in boxes {
+        let right = b.x + b.width;
+        let bottom = b.y + b.height;
+        if bottom <= scroll || b.y >= view_bottom || right <= scroll_x || b.x >= view_right {
+            continue;
+        }
+        let vis_x = b.x.max(scroll_x);
+        let vis_y = b.y.max(scroll);
+        let w = right.min(view_right).saturating_sub(vis_x);
+        let h = bottom.min(view_bottom).saturating_sub(vis_y);
+        if w == 0 || h == 0 {
+            continue;
+        }
+        app.layout.lineage_box_hits.push(crate::app::LineageBoxHit {
+            session_id: b.session_id.clone(),
+            area: Rect {
+                x: body.x + (vis_x - scroll_x) as u16,
+                y: body.y + (vis_y - scroll) as u16,
+                width: w as u16,
+                height: h as u16,
+            },
+        });
+    }
+    let hovered_session: Option<String> = app.mouse_pos.and_then(|(mx, my)| {
+        app.layout
+            .lineage_box_hits
+            .iter()
+            .find(|hit| hit.contains(mx, my))
+            .map(|hit| hit.session_id.clone())
+    });
+    let selected_session: Option<String> = if focused {
+        let selectable = crate::lineage::selectable_indices(rows);
+        selectable
+            .get(app.lineage_selected.min(selectable.len().saturating_sub(1)))
+            .and_then(|&idx| rows[idx].session_id().map(str::to_string))
+    } else {
+        // Unfocused, the section is a detail panel of the list selection.
+        Some(session_id.to_string())
+    };
+
+    let by_id: HashMap<&str, &SessionSummary> =
+        app.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+    let lines: Vec<Line<'static>> = rows
+        .iter()
+        .skip(scroll)
+        .take(visible)
+        .map(|row| {
+            clip_line_left(
+                render_lineage_row(
+                    row,
+                    &by_id,
+                    &app.theme,
+                    selected_session.as_deref(),
+                    hovered_session.as_deref(),
+                ),
+                scroll_x,
+            )
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), body);
+
+    // Scrollbars when the diagram overflows the viewport — background
+    // tints only (same opacity approximation as the terminal scrollbar),
+    // preserving the diagram glyphs underneath. Vertical along the right
+    // column, horizontal along the bottom row.
+    let track_color = blend_color(Color::Black, app.theme.text, 0.30);
+    let thumb_color = blend_color(Color::Black, app.theme.text, 0.80);
+    if rows.len() > visible && body.width > 0 {
+        let track_h = visible;
+        let thumb_h = (track_h * track_h / rows.len().max(1)).clamp(1, track_h);
+        let denom = rows.len() - visible;
+        let max_top = track_h - thumb_h;
+        let top = if denom == 0 {
+            0
+        } else {
+            (scroll * max_top + denom / 2) / denom
+        };
+        let x = body.x + body.width - 1;
+        for r in 0..track_h {
+            if let Some(cell) = f.buffer_mut().cell_mut(ratatui::layout::Position {
+                x,
+                y: body.y + r as u16,
+            }) {
+                cell.set_bg(if r >= top && r < top + thumb_h {
+                    thumb_color
+                } else {
+                    track_color
+                });
+            }
+        }
+    }
+    if content_w > body.width as usize && body.height > 0 {
+        let track_w = body.width as usize;
+        let thumb_w = (track_w * track_w / content_w.max(1)).clamp(1, track_w);
+        let denom = content_w - track_w;
+        let max_left = track_w - thumb_w;
+        let left = if denom == 0 {
+            0
+        } else {
+            (scroll_x * max_left + denom / 2) / denom
+        };
+        let y = body.y + body.height - 1;
+        for cidx in 0..track_w {
+            if let Some(cell) = f.buffer_mut().cell_mut(ratatui::layout::Position {
+                x: body.x + cidx as u16,
+                y,
+            }) {
+                cell.set_bg(if cidx >= left && cidx < left + thumb_w {
+                    thumb_color
+                } else {
+                    track_color
+                });
+            }
+        }
+    }
 }
 
 /// Split the list pane's inner area (the rect inside the borders)
@@ -3186,36 +3434,6 @@ fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
     render_node(f, area, app, &tree, &mut next_split_id);
 }
 
-/// Style for the pane title bar's harness label on a session with
-/// fork/subagent lineage to show (spec 0080). Two visibly different
-/// intensities, not just two hues:
-///
-/// - **Hover-only** (auto-hides once the grace window lapses): the "light"
-///   tier — bold text in `matrix_flash_good`.
-/// - **Pinned** (toggled on, persists until unpinned): the "strong" tier —
-///   bold `accent` PLUS `Modifier::REVERSED` (inverts fg/bg). This reuses
-///   this codebase's established convention for an emphatic,
-///   persistently-active interactive-text cue (see the action-link/URL
-///   hover styling elsewhere in this file) as the *persistent* tier here,
-///   rather than a hover-only flash.
-///
-/// Pinned wins over a simultaneous hover — the click outcome is
-/// authoritative (see `App::toggle_lineage_preview_pin`).
-fn harness_label_style(theme: &Theme, border_style: Style, pinned: bool, hovered: bool) -> Style {
-    if pinned {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-            .add_modifier(Modifier::REVERSED)
-    } else if hovered {
-        Style::default()
-            .fg(theme.matrix_flash_good)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        border_style
-    }
-}
-
 /// Build the shared right-side cluster of a pane title bar — session widget
 /// indicators, the harness label, and the close (` x `) button — and add them to
 /// `block` as right-aligned titles. Both the normal session view and the program
@@ -3228,12 +3446,6 @@ fn harness_label_style(theme: &Theme, border_style: Style, pinned: bool, hovered
 /// hit-tests the last 3 cells of the top border). Widget hit ranges are
 /// registered as a side effect of `render_session_widget_title` (into
 /// `dynamic_ui_widget_hits`); the close geometry is `view_close_button_range`.
-///
-/// On a session with fork/subagent lineage to show (spec 0080), the harness
-/// label doubles as the hover/click trigger for the session-attached lineage
-/// preview: its on-screen span is registered into `harness_label_hits` (via
-/// `harness_label_range`) and its style reacts to hover/pin state. Sessions
-/// with no lineage register no hit and render the label exactly as before.
 fn apply_pane_title_right_cluster<'a>(
     app: &mut App,
     area: Rect,
@@ -3265,47 +3477,7 @@ fn apply_pane_title_right_cluster<'a>(
     } else {
         0
     };
-    // Lineage preview trigger (spec 0080): on a session that actually has
-    // fork/subagent lineage to show, the harness label doubles as the
-    // hover/click trigger for a small, session-attached preview of that
-    // session's fork/subagent tree — hover reveals it (with a short grace so
-    // the pointer can travel down onto the preview body), a click pins it
-    // open. Ordinary sessions with no lineage get no hit-rect registered
-    // here and the label keeps rendering exactly as it always has (plain
-    // `border_style`, no hover/click behavior at all).
-    let mut harness_style = border_style;
-    if let Some(s) = summary {
-        if crate::lineage::has_lineage(&s.id, &app.sessions) {
-            let now = Instant::now();
-            if app
-                .lineage_preview_hover
-                .as_ref()
-                .is_some_and(|h| h.until <= now)
-            {
-                app.lineage_preview_hover = None;
-            }
-            let (x_start, x_end, y) = harness_label_range(area, close_width, harness_width);
-            let hovered = app
-                .mouse_pos
-                .is_some_and(|(mx, my)| my == y && mx >= x_start && mx < x_end);
-            if hovered {
-                app.lineage_preview_hover = Some(crate::app::LineagePreviewHover {
-                    session_id: s.id.clone(),
-                    until: now + Duration::from_millis(crate::app::LINEAGE_PREVIEW_HOVER_GRACE_MS),
-                });
-            }
-            app.layout
-                .harness_label_hits
-                .push(crate::app::HarnessLabelHit {
-                    session_id: s.id.clone(),
-                    row: y,
-                    start_col: x_start,
-                    end_col: x_end,
-                });
-            let pinned = app.lineage_preview_pinned.contains(&s.id);
-            harness_style = harness_label_style(&app.theme, border_style, pinned, hovered);
-        }
-    }
+    let harness_style = border_style;
     let harness_right = harness_label_text.as_ref().map(|text| {
         Line::from(Span::styled(text.clone(), harness_style))
             .alignment(ratatui::layout::Alignment::Right)
@@ -4202,7 +4374,6 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
         .any(|open_id| open_id == &id);
     if !program_open_for_session {
         render_visible_dynamic_ui_panels(f, area, app, &id, &sticky_panels);
-        render_lineage_preview(f, area, app, &id);
     }
     if app.dynamic_ui_popover_open.as_deref() == Some(id.as_str()) && !sticky_panels.is_empty() {
         render_dynamic_ui_dropdown(f, area, app, &sticky_panels);
@@ -7782,7 +7953,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-x r           rename selected session (clears title on empty submit)
     C-x f           fork selected session instantly (same harness, no prompt)
     C-x F           fork selected session into a different harness (picker)
-    C-x Tab         toggle lineage preview (fork/subagent tree) pin+focus
+    C-x Tab / Tab   focus lineage section (Tab: list pane only)
     C-x m           merge the selected fork (take result, or discard)
     C-c C-c         interrupt
 
@@ -7855,7 +8026,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     r               rename selected session (clears title on empty submit)
     f               fork selected session instantly (same harness, no prompt)
     O               fork selected session into a different harness (picker)
-    C-x Tab         toggle lineage preview (fork/subagent tree) pin+focus
+    C-x Tab / Tab   focus lineage section (Tab: list pane only)
     m               merge the selected fork (take result, or discard)
     C-c             interrupt
 
@@ -9400,324 +9571,6 @@ fn clip_line_left(line: Line<'static>, cols: usize) -> Line<'static> {
     Line::from(out)
 }
 
-/// Bounds of a session's lineage preview box: anchored top-right of its own
-/// pane content area, directly below the title bar — the same corner
-/// `dynamic_ui_stack_area` anchors the sticky-widget popover to, so both
-/// session-attached surfaces read as belonging to the same pane. `None` when
-/// the pane is too small to fit a useful box (mirrors `dynamic_ui_stack_area`).
-fn lineage_preview_rect(
-    session_area: Rect,
-    row_count: usize,
-    content_w: usize,
-    min_w: u16,
-    size_override: Option<(u16, u16)>,
-) -> Option<Rect> {
-    if session_area.width < 24 || session_area.height < 4 {
-        return None;
-    }
-    let max_w = session_area.width.saturating_sub(2).max(1);
-    let max_h = session_area.height.saturating_sub(1).max(4);
-    // Size to content by default: diagram width + borders + a right pad,
-    // diagram height + borders + one blank bottom-pad row. A user
-    // drag-resize overrides both. `min_w` keeps the top-border toggle
-    // button visible even for tiny diagrams.
-    let (want_w, want_h) = size_override.unwrap_or((
-        (content_w as u16).saturating_add(4),
-        (row_count as u16).saturating_add(3),
-    ));
-    let width = want_w.clamp(min_w.max(24).min(max_w), max_w);
-    let height = want_h.clamp(4.min(max_h), max_h);
-    Some(Rect {
-        x: session_area
-            .x
-            .saturating_add(session_area.width.saturating_sub(width + 1)),
-        y: session_area.y,
-        width,
-        height,
-    })
-}
-
-/// Render `session_id`'s lineage preview (spec 0080) if its hover/pin/focus
-/// state says it should show this frame — a small box anchored to
-/// `session_area` (that session's own pane). Reuses
-/// `App::lineage_preview_rows` (`crate::lineage::build_tree`/`flatten`
-/// underneath) for the tree and `render_lineage_row` for each row's
-/// formatting, rather than re-deriving either.
-///
-/// Two render modes, chosen by whether this session currently owns keyboard
-/// focus (`App::lineage_preview_focused`, spec 0080 — entered via `C-x Tab`
-/// or a click inside the body, replacing the deleted `C-x q` / `q` popup):
-/// - **Not focused** (hover or pin only): a plain `Paragraph` — no selection
-///   highlight, no scrolling beyond the box's own height.
-/// - **Focused**: a `List` with the selected row highlighted and scrolled
-///   into view (`lineage_row_scroll`), matching the keyboard vocabulary
-///   `App::handle_lineage_preview_focus_key` implements — the same
-///   rendering the deleted popup used, now attached to the session's own
-///   pane instead of a screen-centered dialog.
-///
-/// The border uses the lineage feature's own accent (the harness-label
-/// hover/pin highlight color) rather than the session panes' border color,
-/// so the widget reads as part of the lineage affordance; it brightens
-/// (bold) while keyboard-focused.
-fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, session_id: &str) {
-    use unicode_width::UnicodeWidthStr;
-    let now = Instant::now();
-    if app
-        .lineage_preview_hover
-        .as_ref()
-        .is_some_and(|h| h.until <= now)
-    {
-        app.lineage_preview_hover = None;
-    }
-    if !app.lineage_preview_visible(session_id) {
-        return;
-    }
-    let (rows, boxes) = app.lineage_preview_diagram(session_id);
-    if rows.iter().filter(|r| r.is_selectable()).count() <= 1 {
-        // Nothing beyond the session itself to show — e.g. its one fork was
-        // just discarded and pruned from `app.sessions` while pinned open.
-        // Render nothing rather than a lone box; the pin quietly goes
-        // stale until the user clicks it off.
-        return;
-    }
-    let content_w = rows
-        .iter()
-        .map(|r| UnicodeWidthStr::width(r.text().as_str()))
-        .max()
-        .unwrap_or(0);
-    let toggle_label = format!(" {} ⇄ ", app.lineage_preview_mode.label());
-    let toggle_w = toggle_label.chars().count() as u16;
-    let Some(area) = lineage_preview_rect(
-        session_area,
-        rows.len(),
-        content_w,
-        toggle_w + 6,
-        app.lineage_preview_size,
-    ) else {
-        return;
-    };
-    // Hovering the preview body itself (not just the harness-label trigger)
-    // holds the hover open, so the pointer can rest on it after sliding off
-    // the label — mirrors `render_visible_dynamic_ui_panels`'s identical
-    // widget-body hover-extend.
-    if let Some((mx, my)) = app.mouse_pos {
-        if contains_rect(area, mx, my) {
-            if let Some(hover) = app.lineage_preview_hover.as_mut() {
-                if hover.session_id == session_id {
-                    hover.until =
-                        now + Duration::from_millis(crate::app::LINEAGE_PREVIEW_HOVER_GRACE_MS);
-                }
-            }
-        }
-    }
-    let inner = Rect {
-        x: area.x.saturating_add(1),
-        y: area.y.saturating_add(1),
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-    let focused = app.lineage_preview_focused.as_deref() == Some(session_id);
-    f.render_widget(Clear, area);
-    // Default foreground text color — distinct from the session panes'
-    // border colors; keyboard focus brightens it (bold).
-    let border_style = if focused {
-        Style::default()
-            .fg(app.theme.text)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(app.theme.text)
-    };
-    f.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style),
-        area,
-    );
-    // View-mode toggle on the top border: shows the current mode, click
-    // switches to the other (boxed-lane diagram ⇄ compact rails).
-    if area.width > toggle_w + 4 {
-        let toggle_rect = Rect {
-            x: area.x + 2,
-            y: area.y,
-            width: toggle_w,
-            height: 1,
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                toggle_label,
-                border_style.add_modifier(Modifier::REVERSED),
-            ))),
-            toggle_rect,
-        );
-        app.layout.lineage_preview_mode_toggle_hit = Some(toggle_rect);
-    }
-
-    let by_id: HashMap<&str, &SessionSummary> =
-        app.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
-
-    // Visible content rows: keep one blank bottom-pad row inside the
-    // border so the last content line never touches it.
-    let visible = (inner.height as usize).saturating_sub(1).max(1);
-    let scroll = if focused {
-        // Keyboard selection drags the viewport; wheel scrolling moved it
-        // too, so reconcile from whichever state is current.
-        let selectable = crate::lineage::selectable_indices(&rows);
-        let selected_raw = selectable
-            .get(
-                app.lineage_preview_selected
-                    .min(selectable.len().saturating_sub(1)),
-            )
-            .copied();
-        lineage_row_scroll(
-            rows.len(),
-            selected_raw,
-            app.lineage_preview_scroll,
-            visible,
-        )
-    } else {
-        app.lineage_preview_scroll
-            .min(rows.len().saturating_sub(visible))
-    };
-    app.lineage_preview_scroll = scroll;
-    let max_scroll_x = content_w.saturating_sub(inner.width as usize);
-    let scroll_x = app.lineage_preview_scroll_x.min(max_scroll_x);
-    app.lineage_preview_scroll_x = scroll_x;
-
-    // Box hit regions in screen coordinates (clipped to the viewport) —
-    // hover brightens a box's border, click jumps to its session. A box
-    // lying entirely outside the viewport on ANY side (including past the
-    // right edge, common when the diagram is wider than the widget) is
-    // skipped, and the arithmetic saturates so a clipped edge can never
-    // underflow.
-    app.layout.lineage_preview_box_hits.clear();
-    let view_right = scroll_x + inner.width as usize;
-    let view_bottom = scroll + visible;
-    for b in &boxes {
-        let right = b.x + b.width;
-        let bottom = b.y + b.height;
-        if bottom <= scroll || b.y >= view_bottom || right <= scroll_x || b.x >= view_right {
-            continue;
-        }
-        let vis_x = b.x.max(scroll_x);
-        let vis_y = b.y.max(scroll);
-        let w = right.min(view_right).saturating_sub(vis_x);
-        let h = bottom.min(view_bottom).saturating_sub(vis_y);
-        if w == 0 || h == 0 {
-            continue;
-        }
-        app.layout
-            .lineage_preview_box_hits
-            .push(crate::app::LineageBoxHit {
-                session_id: b.session_id.clone(),
-                area: Rect {
-                    x: inner.x + (vis_x - scroll_x) as u16,
-                    y: inner.y + (vis_y - scroll) as u16,
-                    width: w as u16,
-                    height: h as u16,
-                },
-            });
-    }
-    let hovered_session: Option<String> = app.mouse_pos.and_then(|(mx, my)| {
-        app.layout
-            .lineage_preview_box_hits
-            .iter()
-            .find(|hit| hit.contains(mx, my))
-            .map(|hit| hit.session_id.clone())
-    });
-
-    let selected_session: Option<String> = if focused {
-        let selectable = crate::lineage::selectable_indices(&rows);
-        selectable
-            .get(
-                app.lineage_preview_selected
-                    .min(selectable.len().saturating_sub(1)),
-            )
-            .and_then(|&idx| rows[idx].session_id().map(str::to_string))
-    } else {
-        None
-    };
-
-    let lines: Vec<Line<'static>> = rows
-        .iter()
-        .skip(scroll)
-        .take(visible)
-        .map(|row| {
-            clip_line_left(
-                render_lineage_row(
-                    row,
-                    &by_id,
-                    &app.theme,
-                    selected_session.as_deref(),
-                    hovered_session.as_deref(),
-                ),
-                scroll_x,
-            )
-        })
-        .collect();
-    f.render_widget(Paragraph::new(lines), inner);
-
-    // Scrollbars when the diagram overflows the viewport — background
-    // tints only (same opacity approximation as the terminal scrollbar),
-    // preserving the diagram glyphs underneath. Vertical along the right
-    // inner column, horizontal along the bottom-pad row.
-    let track_color = blend_color(Color::Black, app.theme.text, 0.30);
-    let thumb_color = blend_color(Color::Black, app.theme.text, 0.80);
-    if rows.len() > visible && inner.width > 0 {
-        let track_h = visible;
-        let thumb_h = (track_h * track_h / rows.len().max(1)).clamp(1, track_h);
-        let denom = rows.len() - visible;
-        let max_top = track_h - thumb_h;
-        let top = if denom == 0 {
-            0
-        } else {
-            (scroll * max_top + denom / 2) / denom
-        };
-        let x = inner.x + inner.width - 1;
-        for r in 0..track_h {
-            if let Some(cell) = f.buffer_mut().cell_mut(ratatui::layout::Position {
-                x,
-                y: inner.y + r as u16,
-            }) {
-                cell.set_bg(if r >= top && r < top + thumb_h {
-                    thumb_color
-                } else {
-                    track_color
-                });
-            }
-        }
-    }
-    if content_w > inner.width as usize && inner.height > 0 {
-        let track_w = inner.width as usize;
-        let thumb_w = (track_w * track_w / content_w.max(1)).clamp(1, track_w);
-        let denom = content_w - track_w;
-        let max_left = track_w - thumb_w;
-        let left = if denom == 0 {
-            0
-        } else {
-            (scroll_x * max_left + denom / 2) / denom
-        };
-        let y = inner.y + inner.height - 1;
-        for cidx in 0..track_w {
-            if let Some(cell) = f.buffer_mut().cell_mut(ratatui::layout::Position {
-                x: inner.x + cidx as u16,
-                y,
-            }) {
-                cell.set_bg(if cidx >= left && cidx < left + thumb_w {
-                    thumb_color
-                } else {
-                    track_color
-                });
-            }
-        }
-    }
-
-    app.layout.lineage_preview_area = Some(area);
-    app.layout.lineage_preview_body_hit = Some(crate::app::LineagePreviewBodyHit {
-        session_id: session_id.to_string(),
-        area: inner,
-    });
-}
-
 struct ProgramPopupHoverOverlay {
     popup: crate::app::ProgramPopup,
     clip_bounds: Rect,
@@ -10514,14 +10367,6 @@ fn render_program_popup_at(
     // instead.
     let safe_inner = inner.intersection(buffer_area);
     let safe_block_inner = block_inner.intersection(buffer_area);
-    // The lineage preview must NOT slide with the popup when `C-x C-o`
-    // shifts terminal focus to the pane underneath (`program_popup_visible_rect`
-    // offsets `rect.x`, which `block_inner`/`safe_block_inner` inherit) — it
-    // stays anchored to the pane's own fixed boundary instead, computed from
-    // `base_rect` (the unslid rect) rather than the popup's current `rect`.
-    // `block` isn't consumed until further down (`block.render`/`render_widget`
-    // below), so it's still valid to call `.inner()` on again here.
-    let lineage_anchor = block.inner(base_rect).intersection(buffer_area);
     // Vertical scroll geometry: the body can exceed `inner.height` wrapped
     // rows. Clamp the popup's stored offset to the current geometry (content
     // edits or a resize may have shrunk the scrollable range).
@@ -10727,14 +10572,6 @@ fn render_program_popup_at(
                 &panels,
             );
         }
-        // Same reasoning as the sticky-widget re-render just above: the
-        // lineage preview is armed by the harness label
-        // `apply_pane_title_right_cluster` painted, but the program's own
-        // `Clear` wipes whatever the session view drew underneath it. Anchored
-        // to `lineage_anchor` (derived from `base_rect`, not `safe_block_inner`)
-        // so it stays fixed in place while the program itself slides right for
-        // terminal focus, rather than sliding along with it.
-        render_lineage_preview(f, lineage_anchor, app, &popup.program.session_id);
     }
     // Capture session-clip hitboxes for this program so hover can work for any
     // visible program, even when another split is focused. Only the active program
@@ -16078,46 +15915,6 @@ mod tests {
             assert!(hovered.add_modifier.contains(Modifier::BOLD));
             assert!(!hovered.add_modifier.contains(Modifier::DIM));
         }
-    }
-
-    #[test]
-    fn harness_label_pinned_is_a_stronger_tier_than_hover_only() {
-        // Spec 0080: hover-only is the "light" tier, pinned is the "strong"
-        // tier — the two must read as different intensities, not just
-        // different hues.
-        let theme = Theme::default();
-        let border = Style::default().fg(theme.border);
-
-        let plain = harness_label_style(&theme, border, false, false);
-        let hover_only = harness_label_style(&theme, border, false, true);
-        let pinned = harness_label_style(&theme, border, true, false);
-        // Pinned wins when both are true (the click outcome is
-        // authoritative — see `App::toggle_lineage_preview_pin`).
-        let pinned_and_hovered = harness_label_style(&theme, border, true, true);
-
-        assert_eq!(
-            plain, border,
-            "no hover/pin: label renders as plain border text"
-        );
-
-        assert!(hover_only.add_modifier.contains(Modifier::BOLD));
-        assert!(
-            !hover_only.add_modifier.contains(Modifier::REVERSED),
-            "hover-only must stay the lighter tier — no REVERSED"
-        );
-
-        assert!(pinned.add_modifier.contains(Modifier::BOLD));
-        assert!(
-            pinned.add_modifier.contains(Modifier::REVERSED),
-            "pinned must use REVERSED as the stronger, persistent tier"
-        );
-        assert_eq!(pinned.fg, Some(theme.accent));
-        assert_eq!(hover_only.fg, Some(theme.matrix_flash_good));
-
-        assert_eq!(
-            pinned_and_hovered, pinned,
-            "pinned wins over a simultaneous hover"
-        );
     }
 
     #[test]

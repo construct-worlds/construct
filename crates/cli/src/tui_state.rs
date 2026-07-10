@@ -58,13 +58,19 @@ pub struct TuiState {
     /// `[end tour]`.
     #[serde(default)]
     pub tutorial_step: Option<u8>,
-    /// Sessions whose lineage preview (spec 0080) was pinned open when the
-    /// TUI last quit — restored on launch so the widget reopens with them.
+    /// Whether the sidebar's lineage section (spec 0081) was collapsed to
+    /// just its header when the TUI last quit.
     #[serde(default)]
-    pub lineage_pinned_session_ids: Vec<String>,
-    /// Whether the lineage preview was in the compact (rails) view.
-    #[serde(default)]
+    pub lineage_collapsed: bool,
+    /// Whether the lineage section was in the compact (rails) view.
+    /// Defaults to compact — the narrow sidebar is what that mode is for;
+    /// state blobs that explicitly chose the boxed diagram keep it.
+    #[serde(default = "default_lineage_view_compact")]
     pub lineage_view_compact: bool,
+}
+
+fn default_lineage_view_compact() -> bool {
+    true
 }
 
 impl Default for TuiState {
@@ -84,8 +90,8 @@ impl Default for TuiState {
             open_program_session_ids: Vec::new(),
             widgets: HashMap::new(),
             tutorial_step: None,
-            lineage_pinned_session_ids: Vec::new(),
-            lineage_view_compact: false,
+            lineage_collapsed: false,
+            lineage_view_compact: true,
         }
     }
 }
@@ -201,22 +207,23 @@ mod tests {
     }
 
     #[test]
-    fn state_round_trips_lineage_pins_and_view_mode() {
+    fn state_round_trips_lineage_collapse_and_view_mode() {
         let state = TuiState {
-            lineage_pinned_session_ids: vec!["s1".into(), "s2".into()],
-            lineage_view_compact: true,
+            lineage_collapsed: true,
+            lineage_view_compact: false,
             ..TuiState::default()
         };
         let json = serde_json::to_string(&state).expect("serialize");
         let restored: TuiState = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.lineage_pinned_session_ids, vec!["s1", "s2"]);
-        assert!(restored.lineage_view_compact);
+        assert!(restored.lineage_collapsed);
+        assert!(!restored.lineage_view_compact);
 
-        // Legacy blobs default to no pins / boxes view.
+        // Legacy blobs default to an expanded section in the compact view
+        // (the mode built for the narrow sidebar).
         let legacy: TuiState =
             serde_json::from_str(r#"{"last_selected_session_id": "s1"}"#).expect("legacy");
-        assert!(legacy.lineage_pinned_session_ids.is_empty());
-        assert!(!legacy.lineage_view_compact);
+        assert!(!legacy.lineage_collapsed);
+        assert!(legacy.lineage_view_compact);
     }
 
     #[test]
