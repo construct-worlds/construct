@@ -1014,20 +1014,56 @@ fn layout_tree(
                 // under boxes and turn info — is allowed, which is what
                 // keeps the diagram narrow.
                 let (this_lo, this_hi) = (lanes[i].box_ms, lanes[i].close_ms);
+                let bw = box_content_w(&lanes[i]) + 4;
                 let mut x = lanes[p].lane_col + 7;
-                loop {
-                    let cand_lane = x + 2;
-                    let conflict = lanes.iter().enumerate().any(|(j, l)| {
-                        j != i
-                            && l.placed
-                            && l.lane_col == cand_lane
-                            && l.box_ms <= this_hi
-                            && this_lo <= l.close_ms
-                    });
-                    if !conflict {
-                        break;
+                // The lane may hang anywhere under the box's interior:
+                // pick the leftmost free column at least SPREAD_APART
+                // columns away from every lifetime-overlapping lane (or
+                // the best separation available), so concurrent vertical
+                // lines don't run side by side — without widening the
+                // diagram, since the box's own span bounds the choice.
+                const SPREAD_APART: usize = 6;
+                let lane_pick = loop {
+                    let lo = x + 2;
+                    let hi = (x + bw).saturating_sub(2).max(lo);
+                    let occupied: Vec<usize> = lanes
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, l)| {
+                            *j != i && l.placed && l.box_ms <= this_hi && this_lo <= l.close_ms
+                        })
+                        .map(|(_, l)| l.lane_col)
+                        .collect();
+                    let best = (lo..=hi)
+                        .filter(|cand| !occupied.contains(cand))
+                        .max_by_key(|cand| {
+                            let d = occupied
+                                .iter()
+                                .map(|o| o.abs_diff(*cand))
+                                .min()
+                                .unwrap_or(usize::MAX);
+                            (d.min(SPREAD_APART), std::cmp::Reverse(*cand))
+                        });
+                    if let Some(cand) = best {
+                        break cand;
                     }
+                    // Every column under the box is taken by a concurrent
+                    // lane — shift the box right and retry.
                     x += 2;
+                };
+                // If this box would sit directly on a live lane's very
+                // FIRST bar row (covering its whole visible start), give
+                // that lane one row of air so its timeline visibly begins
+                // under its own box before disappearing behind this one.
+                if lanes.iter().enumerate().any(|(j, l)| {
+                    j != i
+                        && l.placed
+                        && !l.ended
+                        && l.lane_col >= x
+                        && l.lane_col < x + bw
+                        && l.box_bottom >= cur
+                }) {
+                    cur += 1;
                 }
                 draw_box(c, &lanes[i], x, cur);
                 // Branch arrow into the box's label row, bridging over any
@@ -1070,7 +1106,7 @@ fn layout_tree(
                 c.put(ay, x - 1, "▸", &child_border);
                 lanes[p].last_row = lanes[p].last_row.max(ay);
                 lanes[i].x_abs = x;
-                lanes[i].lane_col = x + 2;
+                lanes[i].lane_col = lane_pick;
                 lanes[i].box_bottom = cur + h;
                 lanes[i].last_row = cur + h - 1;
                 lanes[i].placed = true;
@@ -2119,9 +2155,11 @@ mod tests {
             "a branched first, so its box renders first:\n{}",
             text.join("\n")
         );
-        assert!(
-            label_col("b") > label_col("a"),
-            "b shifts just right of a's lane (minimal-x placement):\n{}",
+        assert_eq!(
+            label_col("b"),
+            label_col("a"),
+            "both boxes pack at the arrow-minimum x (rows never collide); \
+             only their lanes differ:\n{}",
             text.join("\n")
         );
         // B's merge arrow crosses A's live lane and bridges over its bar.
@@ -2215,6 +2253,56 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_lanes_first_bar_gets_air_before_the_next_box_covers_it() {
+        // Fork A branches, then a subagent's box is drawn immediately
+        // after A's box, spanning A's lane column. Without a spacer row,
+        // A's lane would vanish behind that box with zero visible start —
+        // one row of air shows its timeline beginning under its own box.
+        // Concurrent lanes also spread apart under the shared box span
+        // instead of running side by side.
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 20);
+        let a = with_event_count(
+            with_created_at_ms(forked_from_at(base("a"), "root", 5, 1_000), 1_000),
+            3,
+        );
+        let sub = with_event_count(with_created_at_ms(subagent_of(base("s"), "root"), 1_500), 2);
+        let sessions = vec![root, a, sub];
+        let tree = build_tree("root", &sessions).unwrap();
+        let (rows, boxes) = flatten_with_boxes(&tree, &sessions, 9_000);
+        let text = diagram_text(&rows);
+        let a_box = boxes.iter().find(|b| b.session_id == "a").expect("a box");
+        let s_box = boxes.iter().find(|b| b.session_id == "s").expect("s box");
+        let a_lane_col = {
+            // A's lane shows on the spacer row between the two boxes.
+            let spacer = a_box.y + a_box.height;
+            assert!(
+                s_box.y > spacer,
+                "one row of air between a's box and the covering box:\n{}",
+                text.join("\n")
+            );
+            text[spacer]
+                .char_indices()
+                .filter(|(_, ch)| *ch == '│')
+                .map(|(idx, _)| text[spacer][..idx].chars().count())
+                .find(|col| *col >= a_box.x && *col < a_box.x + a_box.width)
+                .expect("a's bar visible under its own box on the spacer row")
+        };
+        // And the subagent's lane sits well apart from a's.
+        let s_rows_after = s_box.y + s_box.height;
+        let s_lane_col = text[s_rows_after]
+            .char_indices()
+            .filter(|(_, ch)| *ch == '│')
+            .map(|(idx, _)| text[s_rows_after][..idx].chars().count())
+            .find(|col| *col != a_lane_col && *col > 3)
+            .expect("s's own lane visible below its box");
+        assert!(
+            s_lane_col.abs_diff(a_lane_col) >= 6,
+            "concurrent lanes spread apart (a at {a_lane_col}, s at {s_lane_col}):\n{}",
+            text.join("\n")
+        );
+    }
+
+    #[test]
     fn a_late_open_fork_reuses_columns_freed_by_closed_lanes() {
         // The screenshot scenario: a merged fork (M) and an early open fork
         // (O1) force two slots — O1 must sit outside M because M's merge
@@ -2260,13 +2348,13 @@ mod tests {
         assert_eq!(
             label_col("o2"),
             label_col("m"),
-            "o2 reuses the column m freed (m closed before o2 branched):\n{}",
+            "boxes share the minimal column (rows never collide):\n{}",
             diagram_text(&rows).join("\n")
         );
-        assert!(
-            label_col("o1") < label_col("o2"),
-            "o1 branched first and takes the innermost column; overlapping \
-             lanes shift just past it:\n{}",
+        assert_eq!(
+            label_col("o1"),
+            label_col("o2"),
+            "all sibling boxes pack at the arrow-minimum x:\n{}",
             diagram_text(&rows).join("\n")
         );
     }
@@ -2398,7 +2486,13 @@ mod tests {
             }
             unreachable!()
         };
-        assert!(label_col(b_row) > label_col(a_row), "{}", text.join("\n"));
+        assert_eq!(
+            label_col(b_row),
+            label_col(a_row),
+            "concurrent boxes pack at the same minimal x; their lanes are \
+             what stay distinct: {}",
+            text.join("\n")
+        );
         // (With minimal-x placement B sits just right of A's lane, so its
         // branch arrow no longer crosses it — merge-arrow bridging is
         // covered by `merge_arrows_bridge_over_live_lanes_in_the_compact_

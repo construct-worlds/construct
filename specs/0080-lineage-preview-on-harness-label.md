@@ -170,8 +170,14 @@ uniqueness among lanes whose lifetimes overlap. Everything else
 overlaps freely: boxes reuse columns across different rows, vertical
 lines pass BEHIND boxes and turn info they cross (the bar gaps on those
 rows), and a merge arrow crossing a live lane bridges over its bar,
-exactly like git-graph merge lines do. The rails mode reuses columns by
-lifetime interval the same way.
+exactly like git-graph merge lines do. Two softeners keep it readable:
+a lane hangs anywhere under its box's span, placed to keep concurrent
+vertical lines several columns apart when the span allows (leftmost
+otherwise — never widening the diagram); and when a box would sit
+directly on a live lane's very first bar row, one spacer row is
+inserted so that lane's timeline visibly begins under its own box
+before passing behind the covering box. The rails mode reuses columns
+by lifetime interval the same way.
 
 Every rail glyph, lane bar, connector, and turn-info span is tagged with
 its owning session: selecting or hovering a session (its box in boxes
