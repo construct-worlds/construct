@@ -6094,11 +6094,23 @@ impl App {
                             .find(|s| s.id == id)
                             .map(|s| s.pinned)
                             .unwrap_or(false);
+                        let was_archived = self
+                            .sessions
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| s.archived)
+                            .unwrap_or(false);
                         let now_pinned = payload.session.pinned;
                         let has_pty = payload.session.has_pty;
-                        // Move focus before the session is hidden behind the
-                        // archive disclosure row.
-                        if payload.session.archived {
+                        // Move focus only on the transition into the archive
+                        // disclosure row, not on every update to an already-
+                        // archived session (e.g. a reorder swap between two
+                        // archived siblings) — otherwise a session that was
+                        // already archived and visible (its section expanded)
+                        // gets its focus yanked away on every unrelated STATE
+                        // broadcast, which looks like the reorder key did
+                        // nothing or jumped the selection elsewhere.
+                        if payload.session.archived && !was_archived {
                             self.focus_neighbor_of(&id);
                         }
                         if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
@@ -25145,6 +25157,53 @@ mod tests {
                 .as_deref(),
             Some("sub-9"),
             "unrelated subagents must not overwrite the tour's"
+        );
+        server.abort();
+    }
+
+    // Regression for "C-x C-p"/"C-x C-n" (MoveSelectedUp/Down) appearing to
+    // do nothing, or jump the selection somewhere unrelated, specifically
+    // when reordering a session inside an already-expanded archived
+    // disclosure section. `move_selected` only sends the daemon an RPC — the
+    // actual position swap arrives back as a STATE notification per moved
+    // session (see the comment in `move_selected`). The STATE handler used
+    // to yank focus off ANY archived session on EVERY update to it, not just
+    // the false->true transition into the archive row, so a reorder swap
+    // between two already-archived siblings looked identical to "this
+    // session just got archived" and stole the selection away — even though
+    // the session was already visible (its section's disclosure expanded)
+    // and nothing about its visibility changed.
+    #[tokio::test]
+    async fn archived_session_state_update_does_not_steal_focus_when_already_visible() {
+        let (mut app, _dir, server) = captured_app().await;
+        // s1 is already archived and its (ungrouped) archived section is
+        // expanded, so it's visible and selected in the list right now.
+        app.sessions
+            .iter_mut()
+            .find(|s| s.id == "s1")
+            .unwrap()
+            .archived = true;
+        app.show_archived_ungrouped = true;
+        app.selection = Selection::Session("s1".into());
+
+        // A STATE broadcast for the SAME still-archived session (e.g. the
+        // position update from swapping it with an archived sibling) must
+        // not move focus off of it.
+        let mut updated = app.sessions.iter().find(|s| s.id == "s1").unwrap().clone();
+        updated.position = 5;
+        app.on_notification(Notification {
+            jsonrpc: "2.0".into(),
+            method: agentd_protocol::ipc_notif::STATE.into(),
+            params: Some(
+                serde_json::to_value(StateNotificationPayload { session: updated }).unwrap(),
+            ),
+        })
+        .await;
+
+        assert_eq!(
+            app.selection,
+            Selection::Session("s1".into()),
+            "reordering an already-archived, already-visible session must not steal focus"
         );
         server.abort();
     }
