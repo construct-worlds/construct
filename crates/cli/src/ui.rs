@@ -147,6 +147,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.lineage_preview_area = None;
     app.layout.lineage_preview_body_hit = None;
     app.layout.lineage_preview_box_hits.clear();
+    app.layout.lineage_preview_mode_toggle_hit = None;
     app.window_pane_sizes.clear();
     app.terminal_replayed_sessions_this_frame.clear();
     app.layout.dynamic_ui_popover_area = None;
@@ -9469,6 +9470,26 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
             .border_style(border_style),
         area,
     );
+    // View-mode toggle on the top border: shows the current mode, click
+    // switches to the other (boxed-lane diagram ⇄ git-graph rails).
+    let toggle_label = format!(" {} ⇄ ", app.lineage_preview_mode.label());
+    let toggle_w = toggle_label.chars().count() as u16;
+    if area.width > toggle_w + 4 {
+        let toggle_rect = Rect {
+            x: area.x + 2,
+            y: area.y,
+            width: toggle_w,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                toggle_label,
+                border_style.add_modifier(Modifier::REVERSED),
+            ))),
+            toggle_rect,
+        );
+        app.layout.lineage_preview_mode_toggle_hit = Some(toggle_rect);
+    }
 
     let by_id: HashMap<&str, &SessionSummary> =
         app.sessions.iter().map(|s| (s.id.as_str(), s)).collect();

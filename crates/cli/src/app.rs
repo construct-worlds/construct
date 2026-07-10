@@ -1384,6 +1384,9 @@ pub struct App {
     /// resize_h)` — the anchored edges stay put while the left/bottom
     /// border follows the pointer.
     pub resizing_lineage_preview: Option<(u16, u16, bool, bool)>,
+    /// Which visualization the preview draws (boxed-lane diagram vs
+    /// git-graph-style rails) — toggled from the preview's top border.
+    pub lineage_preview_mode: crate::lineage::LineageViewMode,
     /// `/configure` onboarding dialog (spec 0069): `None` = closed. Opened by
     /// the command palette, or automatically on first run / when no agent
     /// harness is available. Captures all input while open.
@@ -2776,6 +2779,9 @@ pub struct LayoutSnapshot {
     /// screen coordinates — hover brightens a box's border, click jumps to
     /// that session. Rebuilt every frame the preview renders.
     pub lineage_preview_box_hits: Vec<LineageBoxHit>,
+    /// The view-mode toggle button on the preview's top border — click
+    /// switches between the boxed-lane diagram and git-graph-style rails.
+    pub lineage_preview_mode_toggle_hit: Option<ratatui::layout::Rect>,
     /// Program title-bar Run button bounds: `(x_start, x_end, y)`.
     pub program_title_run_hit: Option<(u16, u16, u16)>,
     /// Program title-bar mode toggle bounds: `(x_start, x_end, y)`.
@@ -3189,6 +3195,7 @@ async fn run_with_socket_initial_selection(
         lineage_preview_scroll_x: 0,
         lineage_preview_size: None,
         resizing_lineage_preview: None,
+        lineage_preview_mode: crate::lineage::LineageViewMode::default(),
         configure_popup: None,
         session_picker: None,
         program_popup: None,
@@ -7487,6 +7494,20 @@ impl App {
             self.toggle_lineage_preview_pin(hit.session_id);
             return;
         }
+        // The view-mode toggle on the preview's top border switches
+        // between the boxed-lane diagram and git-graph-style rails.
+        if self
+            .layout
+            .lineage_preview_mode_toggle_hit
+            .is_some_and(|r| Self::rect_contains(r, col, row))
+        {
+            self.lineage_preview_mode = self.lineage_preview_mode.toggled();
+            // The two modes have different geometries — stale scroll
+            // offsets from one would land nowhere in the other.
+            self.lineage_preview_scroll = 0;
+            self.lineage_preview_scroll_x = 0;
+            return;
+        }
         // Clicking a session box inside the preview jumps to that session —
         // and closes the preview, exactly like Enter on the keyboard
         // selection (leaving to go work in the picked session).
@@ -10886,6 +10907,7 @@ mod tests {
             lineage_preview_area: None,
             lineage_preview_body_hit: None,
             lineage_preview_box_hits: Vec::new(),
+            lineage_preview_mode_toggle_hit: None,
             program_title_run_hit: None,
             program_title_toggle_hit: None,
             program_title_close_hit: None,
@@ -11019,6 +11041,7 @@ mod tests {
             lineage_preview_scroll_x: 0,
             lineage_preview_size: None,
             resizing_lineage_preview: None,
+            lineage_preview_mode: crate::lineage::LineageViewMode::default(),
             configure_popup: None,
             session_picker: None,
             program_popup: None,
@@ -27416,6 +27439,60 @@ mod tests {
         assert!(
             !matches!(vbar_bg, Some(None) | None),
             "vertical scrollbar tints the right inner column: {vbar_bg:?}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn top_border_toggle_switches_between_boxes_and_rails_views() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        app.lineage_preview_pinned.insert("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert_eq!(
+            app.lineage_preview_mode,
+            crate::lineage::LineageViewMode::Boxes
+        );
+        let boxes_rows = app.lineage_preview_rows("s1");
+        let toggle = app
+            .layout
+            .lineage_preview_mode_toggle_hit
+            .expect("toggle button on the top border");
+
+        app.handle_left_click(toggle.x, toggle.y).await;
+        assert_eq!(
+            app.lineage_preview_mode,
+            crate::lineage::LineageViewMode::Rails,
+            "clicking the toggle switches to the rails view"
+        );
+        let rails_rows = app.lineage_preview_rows("s1");
+        assert_ne!(
+            boxes_rows.iter().map(|r| r.text()).collect::<Vec<_>>(),
+            rails_rows.iter().map(|r| r.text()).collect::<Vec<_>>(),
+            "the two modes draw genuinely different diagrams"
+        );
+        assert!(
+            !rails_rows.iter().any(|r| r.text().contains('\u{250c}')),
+            "rails mode draws no boxes"
+        );
+        // Rendering in rails mode keeps the interactive surfaces alive.
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.layout.lineage_preview_area.is_some());
+        assert!(!app.layout.lineage_preview_box_hits.is_empty());
+
+        // The rails diagram is smaller, so the content-sized preview (and
+        // its toggle) moved — re-read the hit before clicking again.
+        let toggle = app
+            .layout
+            .lineage_preview_mode_toggle_hit
+            .expect("toggle still present in rails mode");
+        app.handle_left_click(toggle.x, toggle.y).await;
+        assert_eq!(
+            app.lineage_preview_mode,
+            crate::lineage::LineageViewMode::Boxes,
+            "clicking again switches back"
         );
         server.abort();
     }

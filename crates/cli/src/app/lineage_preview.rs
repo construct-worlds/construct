@@ -145,14 +145,23 @@ impl App {
     }
 
     /// Rows plus every box's canvas bounds — the renderer maps the bounds
-    /// to screen rects for hover/click hit-testing.
+    /// to screen rects for hover/click hit-testing. Draws whichever
+    /// visualization `lineage_preview_mode` selects; both modes share the
+    /// same row/selection/hit model.
     pub(crate) fn lineage_preview_diagram(
         &self,
         session_id: &str,
     ) -> (Vec<LineageRow>, Vec<crate::lineage::LineageBoxBounds>) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         crate::lineage::build_tree(session_id, &self.sessions)
-            .map(|root| crate::lineage::flatten_with_boxes(&root, &self.sessions, now_ms))
+            .map(|root| match self.lineage_preview_mode {
+                crate::lineage::LineageViewMode::Boxes => {
+                    crate::lineage::flatten_with_boxes(&root, &self.sessions, now_ms)
+                }
+                crate::lineage::LineageViewMode::Rails => {
+                    crate::lineage::flatten_rails(&root, &self.sessions, now_ms)
+                }
+            })
             .unwrap_or_default()
     }
 

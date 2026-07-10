@@ -99,6 +99,18 @@ harness-label trigger highlights with on hover and while toggled, so the
 label and the widget it opens read as one affordance. Keyboard focus
 brightens the border (bold) rather than changing its hue.
 
+### Two visualization modes, toggled from the top border
+
+The preview draws the tree in one of two modes, switched by a toggle
+button on its top border (showing the current mode's name): the
+boxed-lane diagram described below, or a git-graph-style compact view —
+one two-column rail per session (columns reused once a lane closes),
+one-line entries in the same global time order, connectors curving
+between rails, and all text in a single left-aligned column right of the
+rails. Both modes share the same row/selection/hit model, so keyboard
+navigation, box hover/click, and scrolling behave identically; toggling
+resets the scroll offsets since the two geometries don't correspond.
+
 ### Sizing, scrolling, resizing
 
 The preview sizes itself to the diagram's content by default (width and

@@ -283,6 +283,37 @@ pub const MAX_BOX_CONTENT_W: usize = 28;
 /// Maximum wrapped label rows per box — content past this is ellipsized.
 pub const MAX_BOX_LINES: usize = 2;
 
+/// How the lineage preview draws the tree — toggled from the preview's
+/// top border.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineageViewMode {
+    /// Boxed-lane diagram: each session a bordered box with its own
+    /// vertical timeline lane below it (the concept-sketch layout).
+    #[default]
+    Boxes,
+    /// git-graph-style compact rails: one 2-column rail per session,
+    /// events as one-line entries with connectors curving between rails,
+    /// all text in a single left-aligned column right of the rails.
+    Rails,
+}
+
+impl LineageViewMode {
+    pub fn toggled(self) -> Self {
+        match self {
+            LineageViewMode::Boxes => LineageViewMode::Rails,
+            LineageViewMode::Rails => LineageViewMode::Boxes,
+        }
+    }
+
+    /// Short label for the top-border toggle button.
+    pub fn label(self) -> &'static str {
+        match self {
+            LineageViewMode::Boxes => "boxes",
+            LineageViewMode::Rails => "rails",
+        }
+    }
+}
+
 impl LineageRow {
     pub fn session_id(&self) -> Option<&str> {
         self.node_session_id.as_deref()
@@ -1284,6 +1315,283 @@ fn layout_tree(
     }
 }
 
+/// [`flatten_with_boxes`]'s git-graph-style sibling: one 2-column rail per
+/// session (columns reused once a lane closes), events as one-line entries
+/// in the same global time order the boxed layout uses, with connectors
+/// curving between rails and all text in one left-aligned column right of
+/// the rails. The returned "box" bounds are each session's label-row rect,
+/// so hover/click hit-testing works identically in both modes.
+pub fn flatten_rails(
+    root: &LineageNode,
+    sessions: &[SessionSummary],
+    now_ms: i64,
+) -> (Vec<LineageRow>, Vec<LineageBoxBounds>) {
+    use unicode_width::UnicodeWidthStr;
+    let by_id: HashMap<&str, &SessionSummary> =
+        sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut lanes: Vec<Lane> = Vec::new();
+    let root_idx = collect_lanes(root, &by_id, None, now_ms, &mut lanes);
+    let events = build_events(&lanes);
+
+    // Rail assignment: root owns rail 0 forever; every other lane takes
+    // the lowest rail whose previous occupant closed before it branched
+    // (classic git-graph column reuse). `rail_close[r]` tracks when rail
+    // r frees up.
+    let mut rail_of: Vec<usize> = vec![0; lanes.len()];
+    let mut rail_close: Vec<i64> = vec![i64::MAX];
+    let mut branch_order: Vec<usize> = (0..lanes.len()).filter(|&i| i != root_idx).collect();
+    branch_order.sort_by_key(|&i| (lanes[i].box_ms, i));
+    for &i in &branch_order {
+        let rail = (1..rail_close.len())
+            .find(|&r| rail_close[r] < lanes[i].box_ms)
+            .unwrap_or(rail_close.len());
+        if rail == rail_close.len() {
+            rail_close.push(lanes[i].close_ms);
+        } else {
+            rail_close[rail] = lanes[i].close_ms;
+        }
+        rail_of[i] = rail;
+    }
+    let nrails = rail_close.len();
+    let col = |r: usize| 1 + 2 * r;
+    let text_x = 1 + 2 * nrails + 1;
+
+    let mut c = Canvas::default();
+    let rail_span = LineageSpan::Rail;
+    // Per-lane row extents for the end-fill: (first row below its entry
+    // row, last row its rail reaches).
+    let mut first_row: Vec<usize> = vec![0; lanes.len()];
+    let mut last_row: Vec<usize> = vec![0; lanes.len()];
+    let mut ended: Vec<bool> = vec![false; lanes.len()];
+    let mut placed: Vec<bool> = vec![false; lanes.len()];
+
+    let put_label = |c: &mut Canvas, row: usize, lane: &Lane, edge_prefix: Option<&str>| {
+        let mut x = text_x;
+        if let Some(glyph) = edge_prefix {
+            c.put(row, x, glyph, &LineageSpan::Edge(lane.node.edge));
+            x += UnicodeWidthStr::width(glyph) + 1;
+        }
+        let label = lane.label_lines.join(" ");
+        c.put(
+            row,
+            x,
+            &label,
+            &LineageSpan::Node {
+                session_id: lane.node.session_id.clone(),
+            },
+        );
+        c.node_rows.push((row, lane.node.session_id.clone()));
+        c.boxes.push(LineageBoxBounds {
+            session_id: lane.node.session_id.clone(),
+            x: text_x,
+            y: row,
+            width: x - text_x + UnicodeWidthStr::width(label.as_str()),
+            height: 1,
+        });
+    };
+    let put_info = |c: &mut Canvas,
+                    row: usize,
+                    rail_col: usize,
+                    delta: u64,
+                    start: i64,
+                    end: Option<i64>,
+                    outcome: Option<bool>| {
+        match outcome {
+            Some(ok) => c.put(
+                row,
+                rail_col,
+                if ok { "✓" } else { "✗" },
+                &LineageSpan::SegmentOutcome { ok },
+            ),
+            None => c.put(row, rail_col, "•", &LineageSpan::SegmentBullet),
+        }
+        c.put(
+            row,
+            text_x,
+            &segment_label(delta, start, end, now_ms),
+            &LineageSpan::Segment {
+                delta_events: delta,
+                start_ms: start,
+                end_ms: end,
+            },
+        );
+    };
+    // Horizontal connector between two rails, breaking around live rails
+    // it crosses (their bar is painted first, dashes fill only empty
+    // cells).
+    let bridge_and_dash = |c: &mut Canvas,
+                           row: usize,
+                           from: usize,
+                           to: usize,
+                           lanes_placed: &[bool],
+                           lanes_ended: &[bool],
+                           rail_of: &[usize]| {
+        let (lo, hi) = (from.min(to), from.max(to));
+        for (i, &r) in rail_of.iter().enumerate() {
+            let rc = col(r);
+            if rc > lo && rc < hi && lanes_placed[i] && !lanes_ended[i] {
+                c.put_if_empty(row, rc, '│', &LineageSpan::Rail);
+            }
+        }
+        for x in (lo + 1)..hi {
+            c.put_if_empty(row, x, '─', &LineageSpan::Rail);
+        }
+    };
+
+    let mut cur = 0usize;
+    let mut gi = 0usize;
+    while gi < events.len() {
+        let (t, kind, i) = events[gi];
+        match kind {
+            EV_BOX => {
+                if lanes[i].parent.is_none() {
+                    c.put(cur, col(0), "●", &rail_span);
+                    put_label(&mut c, cur, &lanes[i], None);
+                    placed[i] = true;
+                    first_row[i] = cur + 1;
+                    last_row[i] = cur;
+                    cur += 1;
+                    gi += 1;
+                    continue;
+                }
+                let p = lanes[i].parent.expect("child lane has a parent");
+                if let Some(seq) = lanes[i].fork_seq {
+                    let d = seq.saturating_sub(lanes[p].cp_seq);
+                    if d > 0 {
+                        put_info(
+                            &mut c,
+                            cur,
+                            col(rail_of[p]),
+                            d,
+                            lanes[p].cp_ms,
+                            Some(lanes[i].box_ms),
+                            None,
+                        );
+                        last_row[p] = last_row[p].max(cur);
+                        cur += 1;
+                    }
+                    lanes[p].cp_seq = seq;
+                    lanes[p].cp_ms = lanes[i].box_ms;
+                }
+                let (pc, cc) = (col(rail_of[p]), col(rail_of[i]));
+                bridge_and_dash(&mut c, cur, pc, cc, &placed, &ended, &rail_of);
+                c.put(cur, pc, "├", &rail_span);
+                c.put(cur, cc, if cc > pc { "┐" } else { "┌" }, &rail_span);
+                let glyph = match lanes[i].node.edge {
+                    LineageEdge::Fork => "⑂",
+                    LineageEdge::Subagent => "▸",
+                    LineageEdge::Root => "",
+                };
+                put_label(&mut c, cur, &lanes[i], Some(glyph));
+                placed[i] = true;
+                first_row[i] = cur + 1;
+                last_row[i] = cur;
+                last_row[p] = last_row[p].max(cur);
+                cur += 1;
+                gi += 1;
+            }
+            EV_MERGE => {
+                let (at, mseq) = lanes[i].merge.expect("merge event has merge data");
+                let p = lanes[i].parent.expect("a merging fork has a parent");
+                let dp = mseq.saturating_sub(lanes[p].cp_seq);
+                if dp > 0 {
+                    put_info(
+                        &mut c,
+                        cur,
+                        col(rail_of[p]),
+                        dp,
+                        lanes[p].cp_ms,
+                        Some(at),
+                        None,
+                    );
+                    last_row[p] = last_row[p].max(cur);
+                    cur += 1;
+                }
+                let df = lanes[i]
+                    .summary
+                    .map(|s| s.event_count.saturating_sub(lanes[i].cp_seq))
+                    .unwrap_or(0);
+                if df > 0 {
+                    put_info(
+                        &mut c,
+                        cur,
+                        col(rail_of[i]),
+                        df,
+                        lanes[i].cp_ms,
+                        Some(at),
+                        Some(true),
+                    );
+                    last_row[i] = last_row[i].max(cur);
+                    cur += 1;
+                }
+                let (pc, cc) = (col(rail_of[p]), col(rail_of[i]));
+                bridge_and_dash(&mut c, cur, pc, cc, &placed, &ended, &rail_of);
+                c.put(cur, pc, "├", &rail_span);
+                c.put(cur, cc, if cc > pc { "┘" } else { "└" }, &rail_span);
+                c.put(cur, text_x, "↩ merge", &LineageSpan::Rail);
+                lanes[p].cp_seq = mseq;
+                lanes[p].cp_ms = at;
+                last_row[i] = last_row[i].max(cur);
+                last_row[p] = last_row[p].max(cur);
+                ended[i] = true;
+                cur += 1;
+                gi += 1;
+            }
+            EV_END => {
+                let mut group = vec![i];
+                while gi + 1 < events.len() && events[gi + 1].0 == t && events[gi + 1].1 == EV_END {
+                    gi += 1;
+                    group.push(events[gi].2);
+                }
+                for &j in &group {
+                    for n in std::mem::take(&mut lanes[j].more) {
+                        c.put(cur, col(rail_of[j]), "├", &rail_span);
+                        c.put(cur, text_x, &format!("+{n} more"), &LineageSpan::More(n));
+                        last_row[j] = last_row[j].max(cur);
+                        cur += 1;
+                    }
+                    let d = lanes[j]
+                        .summary
+                        .map(|s| s.event_count.saturating_sub(lanes[j].cp_seq))
+                        .unwrap_or(0);
+                    if d > 0 {
+                        let (_, label_end, outcome) = lanes[j].end.expect("end event has end data");
+                        put_info(
+                            &mut c,
+                            cur,
+                            col(rail_of[j]),
+                            d,
+                            lanes[j].cp_ms,
+                            label_end,
+                            outcome,
+                        );
+                        last_row[j] = last_row[j].max(cur);
+                        cur += 1;
+                    }
+                    ended[j] = true;
+                }
+                gi += 1;
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // End-fill: every rail runs unbroken from below its entry row to its
+    // last content row (an empty range when it has nothing below).
+    for i in 0..lanes.len() {
+        if !placed[i] {
+            continue;
+        }
+        let rc = col(rail_of[i]);
+        for yy in first_row[i]..=last_row[i] {
+            c.put_if_empty(yy, rc, '│', &LineageSpan::Rail);
+        }
+    }
+
+    let boxes = std::mem::take(&mut c.boxes);
+    (c.into_rows(), boxes)
+}
+
 /// Status glyph for a node — reuses [`SessionState::glyph`], the same
 /// vocabulary the session list and `/tasks` popup already use, rather than
 /// inventing a parallel icon set.
@@ -1799,6 +2107,84 @@ mod tests {
             label_col("a"),
             text.join("\n")
         );
+    }
+
+    #[test]
+    fn rails_mode_renders_the_git_graph_style_compact_view() {
+        // Same canonical scenario as the boxed-mode snapshot, in rails
+        // mode: one 2-column rail per session, one-line entries in global
+        // time order, connectors curving between rails, text in one
+        // left-aligned column.
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 20);
+        let fork = merged_at(
+            with_event_count(
+                with_created_at_ms(forked_from_at(base("f"), "root", 12, 300_000), 300_000),
+                2,
+            ),
+            ForkMergeMode::Result,
+            15,
+            500_000,
+        );
+        let sessions = vec![root, fork];
+        let tree = build_tree("root", &sessions).unwrap();
+        let (rows, boxes) = flatten_rails(&tree, &sessions, 800_000);
+        let g = status_glyph(SessionState::Running);
+        assert_eq!(
+            diagram_text(&rows),
+            vec![
+                format!(" \u{25cf}    {g} smith"),
+                " \u{2022}    12 msgs \u{b7} 5m00s".to_string(),
+                format!(" \u{251c}\u{2500}\u{2510}  \u{2442} {g} smith"),
+                " \u{2022} \u{2502}  3 msgs \u{b7} 3m20s".to_string(),
+                " \u{2502} \u{2713}  2 msgs \u{b7} 3m20s".to_string(),
+                " \u{251c}\u{2500}\u{2518}  \u{21a9} merge".to_string(),
+                " \u{2022}    5 msgs \u{b7} 5m00s".to_string(),
+            ]
+        );
+        // Selection and hit-testing work identically to boxed mode: the
+        // two label rows are selectable and report bounds.
+        let ids: Vec<_> = selectable_indices(&rows)
+            .into_iter()
+            .map(|i| rows[i].session_id().unwrap().to_string())
+            .collect();
+        assert_eq!(ids, vec!["root".to_string(), "f".to_string()]);
+        assert_eq!(boxes.len(), 2);
+        assert!(boxes.iter().all(|b| b.height == 1));
+    }
+
+    #[test]
+    fn rails_mode_reuses_a_rail_after_its_lane_closes() {
+        // Sequential forks share one rail; the diagram stays two rails
+        // wide — classic git-graph column reuse.
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 30);
+        let a = merged_at(
+            with_event_count(
+                with_created_at_ms(forked_from_at(base("a"), "root", 5, 1_000), 1_000),
+                4,
+            ),
+            ForkMergeMode::Result,
+            10,
+            3_000,
+        );
+        let b = with_event_count(
+            with_created_at_ms(forked_from_at(base("b"), "root", 15, 5_000), 5_000),
+            2,
+        );
+        let sessions = vec![root, a, b];
+        let tree = build_tree("root", &sessions).unwrap();
+        let rows = flatten_rails(&tree, &sessions, 9_000).0;
+        let label_col = |id: &str| {
+            let row = rows
+                .iter()
+                .find(|r| r.session_id() == Some(id))
+                .unwrap_or_else(|| panic!("{id} row"));
+            row.text()
+                .find('\u{2442}')
+                .unwrap_or_else(|| panic!("{id} glyph"))
+        };
+        // b branched after a merged, so both labels sit at the same text
+        // column and the diagram stays two rails wide.
+        assert_eq!(label_col("a"), label_col("b"));
     }
 
     #[test]
