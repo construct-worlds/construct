@@ -515,7 +515,11 @@ mod tests {
         let matches = model_completion_matches("/model codex-oauth:gpt-5.");
         assert_eq!(
             matches,
-            vec!["/model codex-oauth:gpt-5.5", "/model codex-oauth:gpt-5.4-mini", "/model codex-oauth:gpt-5.3-codex-spark"]
+            vec![
+                "/model codex-oauth:gpt-5.5",
+                "/model codex-oauth:gpt-5.4-mini",
+                "/model codex-oauth:gpt-5.3-codex-spark"
+            ]
         );
 
         let matches = model_completion_matches("/model claude-oauth:");

@@ -577,6 +577,9 @@ fn word_for_event(event: &SessionEvent) -> Option<(&'static str, FlashTone, u8)>
         | SessionEvent::BrowserPreview(_)
         | SessionEvent::UiPanel(_)
         | SessionEvent::UiDelete { .. }
+        | SessionEvent::NativeSubagentSnapshot { .. }
+        | SessionEvent::NativeSubagentRemoved { .. }
+        | SessionEvent::NativeSubagent { .. }
         | SessionEvent::AgentStatus(_) => None,
     }
 }

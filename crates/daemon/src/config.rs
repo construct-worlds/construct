@@ -280,8 +280,7 @@ pub fn set_smith_model_pin(paths: &Paths, model_spec: Option<&str>) -> Result<()
         }
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     std::fs::write(&path, doc.to_string()).with_context(|| format!("write {}", path.display()))
 }
@@ -639,7 +638,10 @@ mod tests {
             templates_dir = "/srv/program-templates"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        assert_eq!(cfg.program.templates_dir.as_deref(), Some("/srv/program-templates"));
+        assert_eq!(
+            cfg.program.templates_dir.as_deref(),
+            Some("/srv/program-templates")
+        );
     }
 
     /// Resolution precedence: env override > `[program].templates_dir` > default.

@@ -10,9 +10,9 @@
 //! `CONSTRUCT_SMITH_SANDBOX=auto|seatbelt|bwrap|none` (default `none` → `Noop`),
 //! so default behavior is unchanged while the first cut is validated.
 
-mod policy;
 #[cfg(target_os = "linux")]
 pub mod bubblewrap;
+mod policy;
 #[cfg(target_os = "macos")]
 pub mod seatbelt;
 
@@ -37,8 +37,12 @@ pub trait Sandbox: Send + Sync {
 
     /// Rewrite `(program, args)` to run under `policy`. `FullAccess` (an
     /// approved/escalated action) returns the command unchanged.
-    fn wrap_command(&self, policy: &SandboxPolicy, program: &str, args: &[String])
-        -> (String, Vec<String>);
+    fn wrap_command(
+        &self,
+        policy: &SandboxPolicy,
+        program: &str,
+        args: &[String],
+    ) -> (String, Vec<String>);
 
     /// Write `content` to `path` under `policy`. Default routes through a
     /// sandboxed `tee` subprocess so the kernel returns `EPERM` outside the
@@ -86,7 +90,12 @@ impl Sandbox for Noop {
     fn enforces(&self) -> bool {
         false
     }
-    fn wrap_command(&self, _p: &SandboxPolicy, program: &str, args: &[String]) -> (String, Vec<String>) {
+    fn wrap_command(
+        &self,
+        _p: &SandboxPolicy,
+        program: &str,
+        args: &[String],
+    ) -> (String, Vec<String>) {
         (program.to_string(), args.to_vec())
     }
 }

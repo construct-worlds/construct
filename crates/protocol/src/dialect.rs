@@ -214,7 +214,11 @@ mod tests {
     fn names_are_unique() {
         let mut seen = std::collections::HashSet::new();
         for ext in CONSTRUCT_MARKDOWN_EXTENSIONS {
-            assert!(seen.insert(ext.name), "duplicate extension name {}", ext.name);
+            assert!(
+                seen.insert(ext.name),
+                "duplicate extension name {}",
+                ext.name
+            );
         }
     }
 

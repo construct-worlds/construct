@@ -179,7 +179,9 @@ impl CredStore {
             }
         }
         if let Ok(home) = std::env::var("HOME") {
-            let p = PathBuf::from(&home).join(".claude").join(".credentials.json");
+            let p = PathBuf::from(&home)
+                .join(".claude")
+                .join(".credentials.json");
             if p.exists() {
                 return Ok(CredStore::File(p));
             }

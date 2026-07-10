@@ -88,8 +88,7 @@ pub fn load_all() -> Result<BTreeMap<String, ModelProfile>> {
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
-    let s =
-        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let s = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     parse(&s).with_context(|| format!("parse {}", path.display()))
 }
 

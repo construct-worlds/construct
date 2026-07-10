@@ -285,7 +285,10 @@ impl SessionManager {
 /// Returns the `group_id` of the region immediately above the given region
 /// in display order. `Some(None)` = ungrouped; `Some(Some(id))` = group N-1.
 /// `None` = there is nothing above (ungrouped is already at the top).
-pub(super) fn region_above(region: Option<&str>, groups: &[GroupSummary]) -> Option<Option<String>> {
+pub(super) fn region_above(
+    region: Option<&str>,
+    groups: &[GroupSummary],
+) -> Option<Option<String>> {
     match region {
         None => None,
         Some(id) => {
@@ -301,7 +304,10 @@ pub(super) fn region_above(region: Option<&str>, groups: &[GroupSummary]) -> Opt
 
 /// Returns the `group_id` of the region immediately below the given region
 /// in display order. `Some(Some(id))` = next group. `None` = nothing below.
-pub(super) fn region_below(region: Option<&str>, groups: &[GroupSummary]) -> Option<Option<String>> {
+pub(super) fn region_below(
+    region: Option<&str>,
+    groups: &[GroupSummary],
+) -> Option<Option<String>> {
     match region {
         None => groups.first().map(|g| Some(g.id.clone())),
         Some(id) => {

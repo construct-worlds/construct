@@ -42,8 +42,14 @@ fn main() {
         println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
         println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
     }
-    println!("cargo:rerun-if-changed={}", repo.join("Cargo.toml").display());
-    println!("cargo:rerun-if-changed={}", repo.join("Cargo.lock").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo.join("Cargo.toml").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo.join("Cargo.lock").display()
+    );
     println!("cargo:rerun-if-changed={}", repo.join("crates").display());
     println!("cargo:rustc-env=CONSTRUCT_BUILD_ID={version}+{hash}{dirty}");
 }

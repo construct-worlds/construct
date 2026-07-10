@@ -371,8 +371,10 @@ mod tests {
         // The synthetic result lands immediately after the orphaned call.
         let idx = ms
             .iter()
-            .position(|m| matches!(&m.content,
-                Content::AssistantToolCalls { calls, .. } if calls[0].id == "orphan-155"))
+            .position(|m| {
+                matches!(&m.content,
+                Content::AssistantToolCalls { calls, .. } if calls[0].id == "orphan-155")
+            })
             .unwrap();
         match &ms[idx + 1].content {
             Content::ToolResult {
@@ -400,15 +402,9 @@ mod tests {
         ];
         assert_eq!(sanitize_tool_pairing(&mut ms), 1);
         assert!(!needs_tool_pairing_repair(&ms));
-        let real = ms
-            .iter()
-            .find(|m| result_call_id(m) == Some("a"))
-            .unwrap();
+        let real = ms.iter().find(|m| result_call_id(m) == Some("a")).unwrap();
         assert!(matches!(&real.content, Content::ToolResult { is_error, .. } if !*is_error));
-        let synth = ms
-            .iter()
-            .find(|m| result_call_id(m) == Some("b"))
-            .unwrap();
+        let synth = ms.iter().find(|m| result_call_id(m) == Some("b")).unwrap();
         assert!(matches!(&synth.content, Content::ToolResult { is_error, .. } if *is_error));
     }
 

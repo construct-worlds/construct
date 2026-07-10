@@ -571,11 +571,7 @@ fn indexed_color_to_rgb(idx: u8) -> (u8, u8, u8) {
     if idx < 232 {
         let n = idx - 16;
         let component = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-        return (
-            component(n / 36),
-            component((n / 6) % 6),
-            component(n % 6),
-        );
+        return (component(n / 36), component((n / 6) % 6), component(n % 6));
     }
     let gray = 8 + (idx - 232) * 10;
     (gray, gray, gray)

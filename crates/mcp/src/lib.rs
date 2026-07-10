@@ -46,7 +46,11 @@ pub async fn run() -> Result<()> {
     run_inner(socket, client, session_id).await
 }
 
-async fn run_inner(socket: PathBuf, mut client: Arc<Client>, session_id: Option<String>) -> Result<()> {
+async fn run_inner(
+    socket: PathBuf,
+    mut client: Arc<Client>,
+    session_id: Option<String>,
+) -> Result<()> {
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
 

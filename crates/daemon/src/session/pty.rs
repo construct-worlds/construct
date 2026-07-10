@@ -56,7 +56,11 @@ impl SessionManager {
     /// ASCII + backspace + CR/LF; CSI/SS3 sequences skipped) and return every
     /// submitted non-empty line. The parser is intentionally small: it is for
     /// transcript/user-title capture, not full terminal editing semantics.
-    async fn capture_pty_input_lines(&self, entry: &Arc<SessionEntry>, bytes: &[u8]) -> Vec<String> {
+    async fn capture_pty_input_lines(
+        &self,
+        entry: &Arc<SessionEntry>,
+        bytes: &[u8],
+    ) -> Vec<String> {
         let mut cap = entry.pty_input_capture.lock().await;
         let mut lines = Vec::new();
         for &b in bytes {

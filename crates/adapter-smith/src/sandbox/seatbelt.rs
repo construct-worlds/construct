@@ -171,7 +171,10 @@ mod tests {
             !run(&format!("echo hi > {}", outside.display())),
             "write outside the writable roots must be blocked by the sandbox"
         );
-        assert!(!outside.exists(), "blocked write must not have created the file");
+        assert!(
+            !outside.exists(),
+            "blocked write must not have created the file"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

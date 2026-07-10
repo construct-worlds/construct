@@ -117,9 +117,7 @@ pub async fn emit_tool_result_events(
     (ok, output)
 }
 
-pub fn extract_tool_outcome(
-    outcome: &std::result::Result<ToolOutcome, String>,
-) -> (bool, String) {
+pub fn extract_tool_outcome(outcome: &std::result::Result<ToolOutcome, String>) -> (bool, String) {
     match outcome {
         Ok(o) => (o.ok, o.output.clone()),
         Err(reason) => (false, format!("({reason})")),

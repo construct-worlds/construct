@@ -225,7 +225,8 @@ impl App {
         let Some(area) = self.layout.list_items_area else {
             return false;
         };
-        if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height {
+        if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height
+        {
             return false;
         }
         self.adjust_list_scroll(delta);
