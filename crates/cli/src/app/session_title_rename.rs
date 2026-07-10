@@ -73,8 +73,7 @@ impl App {
         display_col: usize,
     ) {
         if let Some(rename) = self.session_title_rename.as_mut() {
-            rename.cursor =
-                edit_click_char_index(&rename.buffer, window_start_chars, display_col);
+            rename.cursor = edit_click_char_index(&rename.buffer, window_start_chars, display_col);
         }
     }
 
@@ -119,7 +118,11 @@ impl App {
 
     fn session_title_rename_cursor_to_edge(&mut self, end: bool) {
         if let Some(rename) = self.session_title_rename.as_mut() {
-            rename.cursor = if end { rename.buffer.chars().count() } else { 0 };
+            rename.cursor = if end {
+                rename.buffer.chars().count()
+            } else {
+                0
+            };
         }
     }
 
@@ -143,8 +146,16 @@ impl App {
             return;
         };
         let trimmed = rename.buffer.trim().to_string();
-        let new_title = if trimmed.is_empty() { None } else { Some(trimmed) };
-        match self.client.set_title(&rename.session_id, new_title.clone()).await {
+        let new_title = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        };
+        match self
+            .client
+            .set_title(&rename.session_id, new_title.clone())
+            .await
+        {
             Ok(()) => {
                 if let Some(i) = self.sessions.iter().position(|s| s.id == rename.session_id) {
                     self.sessions[i].title = new_title.clone();

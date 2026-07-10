@@ -25,9 +25,9 @@
 //! [`Item::PtyChunk`] for the entire stream and render identically
 //! to the old direct-parser pipeline.
 
+use crate::text_util::wrap_display_width;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
-use crate::text_util::wrap_display_width;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Kind of a structured chat [`Item::Message`], driving its styling.

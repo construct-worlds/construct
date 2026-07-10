@@ -1103,10 +1103,8 @@ mod tests {
 
     #[test]
     fn read_updated_session_id_detects_clear_style_rewrite() {
-        let dir = std::env::temp_dir().join(format!(
-            "construct-claude-sid-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("construct-claude-sid-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let sid_file = dir.join("claude_session_id.txt");
         std::fs::write(&sid_file, "old-id").expect("write old");
@@ -1125,10 +1123,8 @@ mod tests {
 
     #[test]
     fn session_id_capture_script_extracts_hook_json() {
-        let dir = std::env::temp_dir().join(format!(
-            "construct-claude-capture-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("construct-claude-capture-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let sid_file = dir.join("claude_session_id.txt");
         let script = dir.join("capture.sh");

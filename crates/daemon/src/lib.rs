@@ -327,7 +327,10 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             // persisted session state is left resumable (not marked
             // Done/Errored) — the restart path then respawns it, and the
             // stop path leaves it for the next `daemon start` to resume.
-            if matches!(cmd.action, RestartAction::RestartSessions | RestartAction::Stop) {
+            if matches!(
+                cmd.action,
+                RestartAction::RestartSessions | RestartAction::Stop
+            ) {
                 tracing::info!(
                     action = ?cmd.action,
                     "stopping adapters before daemon lifecycle action"

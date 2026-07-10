@@ -35,10 +35,10 @@ view.
 
 ## Reason
 
-Claude Code and Codex both persist stable child identities, parentage, semantic
-transcripts, and lifecycle signals. Showing that work makes delegation visible
-without duplicating a child process or claiming lifecycle authority Construct
-does not have.
+Claude Code, Codex, Antigravity, and Grok persist stable child identities,
+parentage, semantic transcripts, and lifecycle signals. Showing that work makes
+delegation visible without duplicating a child process or claiming lifecycle
+authority Construct does not have.
 
 Treating a mirror as an ordinary managed session would make controls
 misleading and could cause Construct to resume a second harness process for a
@@ -76,3 +76,9 @@ child that is already owned by its parent.
   under the Construct session associated with that parent rollout.
 - A native Codex child launches another child. The grandchild appears beneath
   the first native child and is independently focusable.
+- Antigravity reports a created child conversation and later delivers its
+  completion message. The mirror follows that conversation's transcript and
+  transitions from running to done.
+- Grok publishes child spawn and finish updates separately from chat history.
+  Construct consumes both logs so the mirror has lifecycle state and semantic
+  transcript events.

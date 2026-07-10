@@ -8903,7 +8903,10 @@ done
                 .archived
         );
 
-        manager.archive(&projected_id).await.expect("archive mirror");
+        manager
+            .archive(&projected_id)
+            .await
+            .expect("archive mirror");
         assert!(
             manager
                 .detail(&projected_id)

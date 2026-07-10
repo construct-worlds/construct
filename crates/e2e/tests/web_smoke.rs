@@ -14,9 +14,9 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agentd_e2e::{Daemon, artifact_dir};
-use base64::Engine as _;
+use agentd_e2e::{artifact_dir, Daemon};
 use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::page::{
     EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams,

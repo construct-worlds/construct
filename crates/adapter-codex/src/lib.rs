@@ -422,8 +422,7 @@ fn find_best_matching_rollout(
         let uuid = meta.id.clone().or_else(|| uuid_from_rollout_name(&name));
         let originator_matches = meta.originator.as_deref() == Some(expected_originator)
             && meta.parent_thread_id.is_none();
-        let uuid_matches = expected_uuid
-            .is_some_and(|want| uuid.as_deref() == Some(want));
+        let uuid_matches = expected_uuid.is_some_and(|want| uuid.as_deref() == Some(want));
         if !originator_matches && !uuid_matches {
             not_ours.insert(name);
             continue;
@@ -432,9 +431,7 @@ fn find_best_matching_rollout(
             not_ours.insert(name);
             continue;
         };
-        let mtime = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok();
+        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         let take = match best.as_ref().and_then(|(_, _, _, t)| *t) {
             Some(prev) => mtime.is_some_and(|cur| cur >= prev),
             None => true,
@@ -1105,18 +1102,10 @@ mod tests {
                  {{\"id\":\"{id}\",\"originator\":\"{originator}\"}}}}\n"
             )
         };
-        std::fs::write(
-            &old_path,
-            meta("019e32aa-014a-7ff0-9a3f-7ae773961a37"),
-        )
-        .unwrap();
+        std::fs::write(&old_path, meta("019e32aa-014a-7ff0-9a3f-7ae773961a37")).unwrap();
         // Ensure distinct mtimes so "newest" is well-defined.
         std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(
-            &new_path,
-            meta("019e32bb-014a-7ff0-9a3f-7ae773961a99"),
-        )
-        .unwrap();
+        std::fs::write(&new_path, meta("019e32bb-014a-7ff0-9a3f-7ae773961a99")).unwrap();
 
         // Unrelated originator must be ignored.
         std::fs::write(

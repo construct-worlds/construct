@@ -1104,9 +1104,9 @@ mod tests {
         assert!(got.contains("CONSTRUCT_SESSION_ID = \"s123\""));
         assert!(got.contains("CONSTRUCT_GLOBAL_MEMORY_FILE = \"/tmp/global.md\""));
         assert!(got.contains("CONSTRUCT_PROJECT_MEMORY_FILE = \"/tmp/project.md\""));
-        assert!(got.contains(
-            "CONSTRUCT_PROGRAM_RUN_CONTEXT_FILE = \"/tmp/program-run-context.json\""
-        ));
+        assert!(
+            got.contains("CONSTRUCT_PROGRAM_RUN_CONTEXT_FILE = \"/tmp/program-run-context.json\"")
+        );
         assert!(got.contains("CONSTRUCT_PROJECT_ID = \"g123\""));
     }
 

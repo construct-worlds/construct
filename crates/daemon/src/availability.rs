@@ -280,7 +280,9 @@ fn env_key_method(
 /// real auto-detect ladder consults absent a pin (spec 0071) — every other
 /// method here requires an explicit `<prefix>:<model>` pin to be selected
 /// (spec 0069).
-pub async fn smith_auth_methods(cache: &std::sync::Mutex<AvailabilityCache>) -> Vec<SmithAuthMethod> {
+pub async fn smith_auth_methods(
+    cache: &std::sync::Mutex<AvailabilityCache>,
+) -> Vec<SmithAuthMethod> {
     let anthropic = env_key_method(
         "anthropic_api_key",
         "Anthropic API key",
@@ -394,7 +396,10 @@ pub async fn smith_auth_methods(cache: &std::sync::Mutex<AvailabilityCache>) -> 
 /// (unset/empty) resolves to `"auto"`; a pin whose prefix doesn't match any
 /// known method (an `@profile` or hand-edited spec) resolves to `None` — the
 /// dialog then shows no row as the current pick.
-pub fn current_smith_auth_method(pinned: Option<&str>, methods: &[SmithAuthMethod]) -> Option<String> {
+pub fn current_smith_auth_method(
+    pinned: Option<&str>,
+    methods: &[SmithAuthMethod],
+) -> Option<String> {
     let Some(spec) = pinned.map(str::trim).filter(|s| !s.is_empty()) else {
         return Some("auto".to_string());
     };
@@ -520,7 +525,10 @@ mod tests {
             codex.available,
             "fixture ~/.codex/auth.json should be detected"
         );
-        let auto = methods.iter().find(|m| m.id == "auto").expect("auto entry present");
+        let auto = methods
+            .iter()
+            .find(|m| m.id == "auto")
+            .expect("auto entry present");
         assert!(
             !auto.available,
             "auto must not report available from a subscription-only credential"

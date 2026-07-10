@@ -346,7 +346,11 @@ mod tests {
             )
             .await
             .expect("run returns Ok");
-        assert!(out.ok, "write inside the worktree should succeed: {}", out.output);
+        assert!(
+            out.ok,
+            "write inside the worktree should succeed: {}",
+            out.output
+        );
         assert!(inside.exists());
 
         let outside = std::env::temp_dir().join(format!("smith-shell-OUT-{}", std::process::id()));
@@ -363,7 +367,10 @@ mod tests {
             "write outside the writable roots must be blocked by the sandbox: {}",
             out.output
         );
-        assert!(!outside.exists(), "blocked write must not have created the file");
+        assert!(
+            !outside.exists(),
+            "blocked write must not have created the file"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -405,10 +412,15 @@ mod tests {
             )
             .await
             .expect("run returns Ok");
-        assert!(out.ok, "write inside the worktree should succeed: {}", out.output);
+        assert!(
+            out.ok,
+            "write inside the worktree should succeed: {}",
+            out.output
+        );
         assert!(inside.exists());
 
-        let outside = std::env::temp_dir().join(format!("smith-shell-bwOUT-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("smith-shell-bwOUT-{}", std::process::id()));
         let _ = std::fs::remove_file(&outside);
         let out = Shell
             .run(
@@ -422,7 +434,10 @@ mod tests {
             "write outside the writable roots must be blocked by the sandbox: {}",
             out.output
         );
-        assert!(!outside.exists(), "blocked write must not have created the file");
+        assert!(
+            !outside.exists(),
+            "blocked write must not have created the file"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

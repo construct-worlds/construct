@@ -78,11 +78,22 @@ impl AntigravityOauth {
 
 fn keychain_read() -> Result<String> {
     let out = Command::new("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            KEYCHAIN_ACCOUNT,
+            "-w",
+        ])
         .output()
         .context("run security find-generic-password")?;
     if !out.status.success() {
-        anyhow::bail!("keychain item {}/{} not found or unreadable", KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+        anyhow::bail!(
+            "keychain item {}/{} not found or unreadable",
+            KEYCHAIN_SERVICE,
+            KEYCHAIN_ACCOUNT
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -92,11 +103,8 @@ fn keychain_read() -> Result<String> {
 fn extract_token_from_go_keyring(raw: &str) -> Result<String> {
     let s = raw.trim();
     let b64 = s.strip_prefix("go-keyring-base64:").unwrap_or(s);
-    let bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        b64,
-    )
-    .context("base64 decode keyring blob")?;
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+        .context("base64 decode keyring blob")?;
     let v: Value = serde_json::from_slice(&bytes).context("parse keyring JSON")?;
     let tok = v
         .pointer("/token/access_token")
@@ -117,11 +125,17 @@ fn try_file_fallback() -> Result<String> {
     for p in candidates {
         if let Ok(s) = std::fs::read_to_string(&p) {
             if let Ok(v) = serde_json::from_str::<Value>(&s) {
-                if let Some(t) = v.get("access_token").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                if let Some(t) = v
+                    .get("access_token")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                {
                     return Ok(t.to_string());
                 }
                 if let Some(t) = v.pointer("/token/access_token").and_then(|x| x.as_str()) {
-                    if !t.is_empty() { return Ok(t.to_string()); }
+                    if !t.is_empty() {
+                        return Ok(t.to_string());
+                    }
                 }
             }
         }
@@ -211,7 +225,11 @@ impl LlmProvider for AntigravityOauth {
             {
                 for part in parts {
                     if let Some(fc) = part.get("functionCall") {
-                        let name = fc.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                        let name = fc
+                            .get("name")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let input = fc.get("args").cloned().unwrap_or_else(|| json!({}));
                         let id = fc
                             .get("id")
@@ -227,7 +245,10 @@ impl LlmProvider for AntigravityOauth {
                     }
                 }
             }
-            if let Some(reason) = v.pointer("/candidates/0/finishReason").and_then(|s| s.as_str()) {
+            if let Some(reason) = v
+                .pointer("/candidates/0/finishReason")
+                .and_then(|s| s.as_str())
+            {
                 finish = match reason {
                     "MAX_TOKENS" => StopReason::MaxTokens,
                     _ => StopReason::EndTurn,
@@ -243,10 +264,18 @@ impl LlmProvider for AntigravityOauth {
             }
         }
 
-        let stop_reason = if tool_calls.is_empty() { finish } else { StopReason::ToolUse };
+        let stop_reason = if tool_calls.is_empty() {
+            finish
+        } else {
+            StopReason::ToolUse
+        };
 
         Ok(ProviderTurn {
-            text: if assistant_text.is_empty() { None } else { Some(assistant_text) },
+            text: if assistant_text.is_empty() {
+                None
+            } else {
+                Some(assistant_text)
+            },
             tool_calls,
             stop_reason,
             usage,
@@ -277,11 +306,20 @@ fn messages_to_antigravity(messages: &[Message]) -> Vec<Value> {
                     }
                 }
                 for c in calls {
-                    parts.push(json!({ "functionCall": { "name": c.name, "args": c.input, "id": c.id } }));
+                    parts.push(
+                        json!({ "functionCall": { "name": c.name, "args": c.input, "id": c.id } }),
+                    );
                 }
                 out.push(json!({ "role": "model", "parts": parts }));
             }
-            (_, Content::ToolResult { call_id, output, is_error }) => {
+            (
+                _,
+                Content::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                },
+            ) => {
                 // The internal surface expects functionResponse inside a user turn.
                 out.push(json!({
                     "role": "user",

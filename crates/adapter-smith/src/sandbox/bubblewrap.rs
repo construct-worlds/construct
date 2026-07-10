@@ -189,7 +189,10 @@ mod tests {
         );
         assert!(prog.ends_with("bwrap"), "prog should be bwrap: {prog}");
         // The wrapped command sits after the `--` separator.
-        let sep = args.iter().position(|x| x == "--").expect("has -- separator");
+        let sep = args
+            .iter()
+            .position(|x| x == "--")
+            .expect("has -- separator");
         assert_eq!(args[sep + 1], "bash");
         assert_eq!(args[sep + 2], "-lc");
         assert_eq!(args[sep + 3], "echo hi");
@@ -247,7 +250,10 @@ mod tests {
             !run(&format!("echo hi > {}", outside.display())),
             "write outside the writable roots must be blocked by the sandbox"
         );
-        assert!(!outside.exists(), "blocked write must not have created the file");
+        assert!(
+            !outside.exists(),
+            "blocked write must not have created the file"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

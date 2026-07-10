@@ -20,7 +20,7 @@ use agentd_protocol::{
 };
 use construct_adapter_common::{drive_turn, spawn_stderr_log, TurnOutcome};
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -134,7 +134,12 @@ fn url_encode_path(path: &Path) -> String {
     encoded
 }
 
+#[cfg(test)]
 fn find_session_id(cwd: &Path) -> Option<String> {
+    find_session_id_excluding(cwd, &HashSet::new())
+}
+
+fn find_session_id_excluding(cwd: &Path, excluded: &HashSet<String>) -> Option<String> {
     let sessions_dir = grok_home()?.join("sessions").join(url_encode_path(cwd));
     if !sessions_dir.exists() {
         return None;
@@ -145,7 +150,7 @@ fn find_session_id(cwd: &Path) -> Option<String> {
             if let Ok(file_type) = entry.file_type() {
                 if file_type.is_dir() {
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.len() == 36 {
+                    if name.len() == 36 && !excluded.contains(&name) {
                         if let Ok(metadata) = entry.metadata() {
                             if let Ok(modified) = metadata.modified() {
                                 if best.is_none() || modified > best.as_ref().unwrap().0 {
@@ -161,14 +166,21 @@ fn find_session_id(cwd: &Path) -> Option<String> {
     best.map(|(_, name)| name)
 }
 
-fn grok_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
+fn grok_session_dir(cwd: &Path, session_id: &str) -> Option<PathBuf> {
     Some(
         grok_home()?
             .join("sessions")
             .join(url_encode_path(cwd))
-            .join(session_id)
-            .join("chat_history.jsonl"),
+            .join(session_id),
     )
+}
+
+fn grok_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
+    Some(grok_session_dir(cwd, session_id)?.join("chat_history.jsonl"))
+}
+
+fn grok_updates_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
+    Some(grok_session_dir(cwd, session_id)?.join("updates.jsonl"))
 }
 
 fn count_jsonl_lines(path: &Path) -> usize {
@@ -177,11 +189,16 @@ fn count_jsonl_lines(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn emit_new_grok_transcript_lines(path: &Path, next_line: &mut usize, emit: &EventEmitter) {
+fn read_new_grok_jsonl_lines(
+    path: &Path,
+    next_line: &mut usize,
+    emit: &EventEmitter,
+) -> Vec<Value> {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return;
+        return Vec::new();
     };
     let mut seen = 0usize;
+    let mut values = Vec::new();
     for (idx, line) in text.lines().enumerate() {
         seen = idx + 1;
         if idx < *next_line {
@@ -191,15 +208,22 @@ fn emit_new_grok_transcript_lines(path: &Path, next_line: &mut usize, emit: &Eve
             continue;
         }
         match serde_json::from_str::<Value>(line) {
-            Ok(v) => emit_event_from_json(emit, v),
+            Ok(v) => values.push(v),
             Err(e) => emit.log(format!(
-                "grok transcript: failed to parse {} line {}: {e}",
+                "grok: failed to parse {} line {}: {e}",
                 path.display(),
                 idx + 1
             )),
         }
     }
     *next_line = seen;
+    values
+}
+
+fn emit_new_grok_transcript_lines(path: &Path, next_line: &mut usize, emit: &EventEmitter) {
+    for value in read_new_grok_jsonl_lines(path, next_line, emit) {
+        emit_event_from_json(emit, value);
+    }
 }
 
 fn emit_event_from_json(emit: &EventEmitter, v: Value) {
@@ -225,6 +249,17 @@ fn emit_event_from_json(emit: &EventEmitter, v: Value) {
 
 fn grok_events_from_json(v: &Value) -> Vec<SessionEvent> {
     match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "user" => grok_content_text(v)
+            .filter(|content| {
+                !content.is_empty() && !content.trim_start().starts_with("<system-reminder>")
+            })
+            .map(|text| {
+                vec![SessionEvent::Message {
+                    role: MessageRole::User,
+                    text,
+                }]
+            })
+            .unwrap_or_default(),
         "assistant" => {
             let mut out = Vec::new();
             if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
@@ -237,8 +272,13 @@ fn grok_events_from_json(v: &Value) -> Vec<SessionEvent> {
             }
             if let Some(tool_calls) = v.get("tool_calls").and_then(|tc| tc.as_array()) {
                 for call in tool_calls {
-                    let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                    let args = call.get("arguments")
+                    let name = call
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let args = call
+                        .get("arguments")
                         .and_then(|a| {
                             if let Some(s) = a.as_str() {
                                 serde_json::from_str::<Value>(s).ok()
@@ -258,8 +298,15 @@ fn grok_events_from_json(v: &Value) -> Vec<SessionEvent> {
             out
         }
         "tool_result" => {
-            let call_id = v.get("tool_call_id").and_then(|i| i.as_str()).map(String::from);
-            let output = v.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+            let call_id = v
+                .get("tool_call_id")
+                .and_then(|i| i.as_str())
+                .map(String::from);
+            let output = v
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
             let is_failed = output.contains("User cancelled") || output.contains("failed");
             vec![SessionEvent::ToolResult {
                 tool: "".to_string(),
@@ -268,11 +315,150 @@ fn grok_events_from_json(v: &Value) -> Vec<SessionEvent> {
                 call_id,
             }]
         }
-        _ => Vec::new()
+        _ => Vec::new(),
     }
 }
 
+fn grok_content_text(v: &Value) -> Option<String> {
+    let content = v.get("content")?.as_str()?;
+    let Ok(items) = serde_json::from_str::<Value>(content) else {
+        return Some(content.to_string());
+    };
+    let text = items
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GrokNativeSubagentUpdate {
+    Spawned {
+        id: String,
+        parent_id: Option<String>,
+        title: Option<String>,
+    },
+    Finished {
+        id: String,
+        state: SessionState,
+    },
+}
+
+fn grok_native_subagent_update(
+    value: &Value,
+    owner_native_id: &str,
+) -> Option<GrokNativeSubagentUpdate> {
+    if value.get("method").and_then(Value::as_str) != Some("_x.ai/session/update") {
+        return None;
+    }
+    let update = value.pointer("/params/update")?;
+    match update.get("sessionUpdate").and_then(Value::as_str)? {
+        "subagent_spawned" => {
+            let id = update
+                .get("child_session_id")
+                .or_else(|| update.get("subagent_id"))
+                .and_then(Value::as_str)?
+                .to_string();
+            let parent_id = update
+                .get("parent_session_id")
+                .and_then(Value::as_str)
+                .filter(|parent| *parent != owner_native_id)
+                .map(str::to_string);
+            let title = update
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|description| !description.trim().is_empty())
+                .map(str::to_string);
+            Some(GrokNativeSubagentUpdate::Spawned {
+                id,
+                parent_id,
+                title,
+            })
+        }
+        "subagent_finished" => {
+            let id = update
+                .get("child_session_id")
+                .or_else(|| update.get("subagent_id"))
+                .and_then(Value::as_str)?
+                .to_string();
+            let state = match update.get("status").and_then(Value::as_str).unwrap_or("") {
+                "failed" | "error" | "errored" | "cancelled" => SessionState::Errored,
+                "completed" | "done" | "success" => SessionState::Done,
+                _ => SessionState::Running,
+            };
+            Some(GrokNativeSubagentUpdate::Finished { id, state })
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug)]
+struct GrokNativeChild {
+    parent_id: Option<String>,
+    state: SessionState,
+    next_transcript_line: usize,
+}
+
+fn apply_grok_native_update(
+    update: GrokNativeSubagentUpdate,
+    cwd: &Path,
+    children: &mut HashMap<String, GrokNativeChild>,
+    emit: Option<&EventEmitter>,
+) {
+    match update {
+        GrokNativeSubagentUpdate::Spawned {
+            id,
+            parent_id,
+            title,
+        } => {
+            let next_transcript_line = children
+                .get(&id)
+                .map(|child| child.next_transcript_line)
+                .unwrap_or(0);
+            children.insert(
+                id.clone(),
+                GrokNativeChild {
+                    parent_id: parent_id.clone(),
+                    state: SessionState::Running,
+                    next_transcript_line,
+                },
+            );
+            if let Some(emit) = emit {
+                emit.emit(SessionEvent::NativeSubagent {
+                    id,
+                    parent_id,
+                    title,
+                    state: SessionState::Running,
+                    event: None,
+                });
+            }
+        }
+        GrokNativeSubagentUpdate::Finished { id, state } => {
+            let child = children
+                .entry(id.clone())
+                .or_insert_with(|| GrokNativeChild {
+                    parent_id: None,
+                    state,
+                    next_transcript_line: grok_transcript_path(cwd, &id)
+                        .as_deref()
+                        .map(count_jsonl_lines)
+                        .unwrap_or(0),
+                });
+            child.state = state;
+            if let Some(emit) = emit {
+                emit.emit(SessionEvent::NativeSubagent {
+                    id,
+                    parent_id: child.parent_id.clone(),
+                    title: None,
+                    state,
+                    event: None,
+                });
+            }
+        }
+    }
+}
 
 fn grok_allow_args() -> Vec<String> {
     let policy = agentd_protocol::adapter::policy::AutoApprovePolicy::from_env();
@@ -302,6 +488,9 @@ fn spawn_interactive_transcript_watcher(
         let mut path: Option<PathBuf> = current_id
             .as_ref()
             .and_then(|id| grok_transcript_path(&cwd, id));
+        let mut updates_path: Option<PathBuf> = current_id
+            .as_ref()
+            .and_then(|id| grok_updates_path(&cwd, id));
         // Only the initial resume attach skips prior history; mid-session
         // rebinds (after /clear) start at the top of the new transcript.
         let mut next_line = if skip_existing {
@@ -309,18 +498,75 @@ fn spawn_interactive_transcript_watcher(
         } else {
             0
         };
+        let mut next_update_line = if skip_existing {
+            updates_path.as_deref().map(count_jsonl_lines).unwrap_or(0)
+        } else {
+            0
+        };
+        let mut children = HashMap::new();
+        if skip_existing {
+            if let (Some(root_id), Some(updates_path)) =
+                (current_id.as_deref(), updates_path.as_deref())
+            {
+                let mut replay_line = 0;
+                for value in read_new_grok_jsonl_lines(updates_path, &mut replay_line, &emit) {
+                    if let Some(update) = grok_native_subagent_update(&value, root_id) {
+                        apply_grok_native_update(update, &cwd, &mut children, None);
+                    }
+                }
+            }
+            for (id, child) in &mut children {
+                child.next_transcript_line = grok_transcript_path(&cwd, id)
+                    .as_deref()
+                    .map(count_jsonl_lines)
+                    .unwrap_or(0);
+            }
+        }
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
+            if let Some(path) = path.as_deref().filter(|path| path.exists()) {
+                emit_new_grok_transcript_lines(path, &mut next_line, &emit);
+            }
+            if let (Some(root_id), Some(updates_path)) =
+                (current_id.as_deref(), updates_path.as_deref())
+            {
+                for value in read_new_grok_jsonl_lines(updates_path, &mut next_update_line, &emit) {
+                    if let Some(update) = grok_native_subagent_update(&value, root_id) {
+                        apply_grok_native_update(update, &cwd, &mut children, Some(&emit));
+                    }
+                }
+            }
+            for (id, child) in &mut children {
+                let Some(child_path) = grok_transcript_path(&cwd, id) else {
+                    continue;
+                };
+                for value in
+                    read_new_grok_jsonl_lines(&child_path, &mut child.next_transcript_line, &emit)
+                {
+                    for event in grok_events_from_json(&value) {
+                        emit.emit(SessionEvent::NativeSubagent {
+                            id: id.clone(),
+                            parent_id: child.parent_id.clone(),
+                            title: None,
+                            state: child.state,
+                            event: Some(Box::new(event)),
+                        });
+                    }
+                }
+            }
 
-            // Prefer the newest session dir under this cwd. First spawn
-            // discovers the id; after /clear a fresher dir appears and we
-            // rebind. (Same heuristic as first-discovery historically —
-            // concurrent grok sessions in one cwd can race on mtime.)
-            if let Some(id) = find_session_id(&cwd) {
+            // Prefer the newest non-child session dir under this cwd. First
+            // spawn discovers the id; after /clear a fresher root dir appears
+            // and we rebind both transcript streams.
+            let child_ids: HashSet<String> = children.keys().cloned().collect();
+            if let Some(id) = find_session_id_excluding(&cwd, &child_ids) {
                 if current_id.as_ref() != Some(&id) {
-                    if let Some(new_path) = grok_transcript_path(&cwd, &id) {
+                    if let (Some(new_path), Some(new_updates_path)) = (
+                        grok_transcript_path(&cwd, &id),
+                        grok_updates_path(&cwd, &id),
+                    ) {
                         if current_id.is_some() {
                             emit.log(format!(
                                 "grok: native session id changed {:?} -> {id}; \
@@ -331,18 +577,12 @@ fn spawn_interactive_transcript_watcher(
                         write_conv_id(&id);
                         current_id = Some(id);
                         path = Some(new_path);
+                        updates_path = Some(new_updates_path);
                         next_line = 0;
+                        next_update_line = 0;
                     }
                 }
             }
-
-            let Some(p) = path.as_ref() else {
-                continue;
-            };
-            if !p.exists() {
-                continue;
-            }
-            emit_new_grok_transcript_lines(p, &mut next_line, &emit);
         }
     });
 }
@@ -594,8 +834,9 @@ mod tests {
     #[test]
     fn parses_assistant_message() {
         let v: Value = serde_json::from_str(
-            r#"{"type":"assistant","content":"Creating file","tool_calls":[]}"#
-        ).unwrap();
+            r#"{"type":"assistant","content":"Creating file","tool_calls":[]}"#,
+        )
+        .unwrap();
         let events = grok_events_from_json(&v);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -615,7 +856,11 @@ mod tests {
         let events = grok_events_from_json(&v);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            SessionEvent::ToolUse { tool, args, call_id } => {
+            SessionEvent::ToolUse {
+                tool,
+                args,
+                call_id,
+            } => {
                 assert_eq!(tool, "Write");
                 assert_eq!(args["path"], "hello.txt");
                 assert_eq!(call_id.as_deref(), Some("call-1"));
@@ -627,12 +872,18 @@ mod tests {
     #[test]
     fn parses_tool_result() {
         let v: Value = serde_json::from_str(
-            r#"{"type":"tool_result","tool_call_id":"call-1","content":"file written"}"#
-        ).unwrap();
+            r#"{"type":"tool_result","tool_call_id":"call-1","content":"file written"}"#,
+        )
+        .unwrap();
         let events = grok_events_from_json(&v);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            SessionEvent::ToolResult { tool, ok, output, call_id } => {
+            SessionEvent::ToolResult {
+                tool,
+                ok,
+                output,
+                call_id,
+            } => {
                 assert_eq!(tool, "");
                 assert!(*ok);
                 assert_eq!(output, "file written");
@@ -650,7 +901,12 @@ mod tests {
         let events = grok_events_from_json(&v);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            SessionEvent::ToolResult { tool, ok, output, call_id } => {
+            SessionEvent::ToolResult {
+                tool,
+                ok,
+                output,
+                call_id,
+            } => {
                 assert_eq!(tool, "");
                 assert!(!*ok);
                 assert_eq!(output, "User cancelled the execution");
@@ -658,6 +914,91 @@ mod tests {
             }
             _ => panic!("expected tool result event"),
         }
+    }
+
+    #[test]
+    fn parses_native_subagent_spawn_and_finish_updates() {
+        let owner = "019f4ae5-dc29-7142-9c7c-34dac1017cbc";
+        let child = "019f4ae5-f3f4-7550-8182-39671f0959af";
+        let spawned = serde_json::json!({
+            "method": "_x.ai/session/update",
+            "params": {"update": {
+                "sessionUpdate": "subagent_spawned",
+                "subagent_id": child,
+                "parent_session_id": owner,
+                "child_session_id": child,
+                "description": "Print hello world"
+            }}
+        });
+        assert_eq!(
+            grok_native_subagent_update(&spawned, owner),
+            Some(GrokNativeSubagentUpdate::Spawned {
+                id: child.into(),
+                parent_id: None,
+                title: Some("Print hello world".into()),
+            })
+        );
+
+        let finished = serde_json::json!({
+            "method": "_x.ai/session/update",
+            "params": {"update": {
+                "sessionUpdate": "subagent_finished",
+                "child_session_id": child,
+                "status": "completed",
+                "output": "hello world"
+            }}
+        });
+        assert_eq!(
+            grok_native_subagent_update(&finished, owner),
+            Some(GrokNativeSubagentUpdate::Finished {
+                id: child.into(),
+                state: SessionState::Done,
+            })
+        );
+    }
+
+    #[test]
+    fn native_subagent_spawn_preserves_nested_parent() {
+        let spawned = serde_json::json!({
+            "method": "_x.ai/session/update",
+            "params": {"update": {
+                "sessionUpdate": "subagent_spawned",
+                "child_session_id": "grandchild",
+                "parent_session_id": "child"
+            }}
+        });
+        assert_eq!(
+            grok_native_subagent_update(&spawned, "owner"),
+            Some(GrokNativeSubagentUpdate::Spawned {
+                id: "grandchild".into(),
+                parent_id: Some("child".into()),
+                title: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_json_encoded_user_content_for_child_transcript() {
+        let value = serde_json::json!({
+            "type": "user",
+            "content": r#"[{"type":"text","text":"Print hello world"}]"#
+        });
+        match grok_events_from_json(&value).as_slice() {
+            [SessionEvent::Message { role, text }] => {
+                assert!(matches!(role, MessageRole::User));
+                assert_eq!(text, "Print hello world");
+            }
+            other => panic!("unexpected child user events: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn omits_internal_reminders_from_child_transcript() {
+        let value = serde_json::json!({
+            "type": "user",
+            "content": r#"[{"type":"text","text":"\n<system-reminder>internal context</system-reminder>"}]"#
+        });
+        assert!(grok_events_from_json(&value).is_empty());
     }
 
     #[test]
