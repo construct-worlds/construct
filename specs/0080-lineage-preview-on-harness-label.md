@@ -204,7 +204,7 @@ nothing below it — the lane ends there.
 
 ### Activity stats are per-segment, not per-node
 
-Activity stats (message/turn count, elapsed time) render as turn-info
+Activity stats (message count, compute time) render as turn-info
 lines ON the lanes — a marker sitting where the lane's bar would be,
 with the text to its right — positioned BETWEEN the markers that bound
 them, never on a node's own box label. The marker is `•` mid-timeline;
@@ -248,10 +248,19 @@ before compute-time tracking existed carry no snapshots; their windows
 fall back to the wall-clock span between boundary events (such a live
 lane's final window measures only up to the session's last activity,
 not idle ticking toward "now"). Either way, only the window's ROW
-position reflects event time on the timeline. A window with zero
-messages in it is skipped entirely rather than rendered as a "0 msgs"
-line — leaving just the lane bar. Diagram rows never wrap; a too-wide
-diagram clips at the preview's edge.
+position reflects event time on the timeline.
+
+A window's COUNT follows the same tracked-with-fallback shape: it is
+the number of actual chat messages within the window — the daemon
+keeps a message-only tally per session (self-healing on load by
+recounting the transcript) and snapshots it at the same fork/merge
+boundaries — NOT the raw transcript-event delta, which also advances
+on tool blocks, status rows, and output markers and so overstates the
+conversation. Windows on records without message tallies fall back to
+the raw transcript-event delta. A window with zero transcript events
+in it is skipped entirely rather than rendered as an empty line —
+leaving just the lane bar. Diagram rows never wrap; a too-wide diagram
+clips at the preview's edge.
 
 This is possible without any extra fetch because `SessionSummary::event_count`,
 `ForkedFrom::transcript_seq`, and `ForkMerge::merged_seq` are all the same
@@ -259,8 +268,9 @@ counter (the transcript's own sequence number) — a child's
 `forked_from.transcript_seq` is a precise, already-in-memory snapshot of the
 parent's position at fork time, and `ForkMerge::merged_seq` (stamped by the
 daemon from the parent's own `event_count` at the moment of merge) is the
-same for the merge-back point. The compute-time snapshots ride the same two
-records (fork stamp, merge stamp) plus a lifetime total on the summary.
+same for the merge-back point. The compute-time and message-count snapshots
+ride the same two records (fork stamp, merge stamp) plus lifetime totals on
+the summary.
 Segment math is therefore plain arithmetic over data already on
 `SessionSummary`, computed fresh on every render from live session state —
 never a stored/cached total.

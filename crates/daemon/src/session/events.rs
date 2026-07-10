@@ -31,6 +31,7 @@ impl SessionManager {
                 let mut s = entry.summary.write().await;
                 s.last_event_at = Some(now);
                 s.event_count = 0;
+                s.message_count = 0;
                 s.last_pty_at_ms = None;
                 crate::session::set_state_tracked(
                     &mut s,
@@ -318,6 +319,9 @@ impl SessionManager {
             let mut s = entry.summary.write().await;
             s.last_event_at = Some(now);
             s.event_count = seq;
+            if matches!(&event, SessionEvent::Message { .. }) {
+                s.message_count = s.message_count.saturating_add(1);
+            }
             let prev_state = s.state;
             match &event {
                 SessionEvent::Status { state, .. } => {

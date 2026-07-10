@@ -11264,6 +11264,7 @@ mod tests {
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
+            message_count: 0,
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind,
             archived: false,
@@ -26890,6 +26891,7 @@ mod tests {
             transcript_seq: 0,
             at_ms: 0,
             parent_busy_ms: 0,
+            parent_message_count: 0,
         });
         let mut app = test_app(client, vec![root, fork]);
         // An empty (but present) history takes `render_terminal_for_window`
@@ -27421,6 +27423,7 @@ mod tests {
                 transcript_seq: 0,
                 at_ms: 0,
                 parent_busy_ms: 0,
+                parent_message_count: 0,
             });
             app.sessions.push(nested);
         }

@@ -1153,23 +1153,36 @@ impl SessionManager {
             // Preserve the prior state in the entry. `resume_running_sessions`
             // (called from main after construction) tries to respawn each
             // resumable session and falls back to marking Errored on failure.
-            // Recover seq counter from transcript line count.
+            // Recover seq counter from transcript line count, and recount
+            // chat messages while we're at it — `message_count` then
+            // self-heals for summaries saved before the field existed (or
+            // that lagged a crash).
             let path = storage.transcript_path(&s.id);
-            let count = if path.exists() {
+            let (count, message_count) = if path.exists() {
                 let f = std::fs::File::open(&path)?;
                 let reader = std::io::BufReader::new(f);
                 use std::io::BufRead;
                 let mut n = 0u64;
+                let mut msgs = 0u64;
                 for line in reader.lines() {
                     let line = line?;
-                    if !line.trim().is_empty() {
-                        n += 1;
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    n += 1;
+                    if let Ok(ts) = serde_json::from_str::<agentd_protocol::TimestampedEvent>(&line)
+                    {
+                        if matches!(ts.event, SessionEvent::Message { .. }) {
+                            msgs += 1;
+                        }
                     }
                 }
-                n
+                (n, msgs)
             } else {
-                0
+                (0, 0)
             };
+            let mut s = s;
+            s.message_count = message_count;
             // Scrollback survives daemon restarts because `pty_replay`
             // serves it from the on-disk `pty.log` directly; no in-memory
             // rehydration needed.
@@ -2928,13 +2941,14 @@ impl SessionManager {
         // has since been deleted has no timeline left to mark; fall back to
         // 0 rather than failing the merge over it.
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let (merged_seq, merged_busy_ms) = match self.get_entry(&parent_id).await {
-            Some(parent) => {
-                let p = parent.summary().await;
-                (p.event_count, p.busy_ms_at(now_ms))
-            }
-            None => (0, 0),
-        };
+        let (merged_seq, merged_busy_ms, merged_message_count) =
+            match self.get_entry(&parent_id).await {
+                Some(parent) => {
+                    let p = parent.summary().await;
+                    (p.event_count, p.busy_ms_at(now_ms), p.message_count)
+                }
+                None => (0, 0, 0),
+            };
         let snapshot = {
             let mut summary = entry.summary.write().await;
             summary.merge = Some(agentd_protocol::ForkMerge {
@@ -2942,6 +2956,7 @@ impl SessionManager {
                 at_ms: now_ms,
                 merged_seq,
                 merged_busy_ms,
+                merged_message_count,
             });
             summary.clone()
         };
@@ -3783,6 +3798,7 @@ mod tests {
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
+            message_count: 0,
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind,
             archived: false,
@@ -4253,6 +4269,7 @@ mod tests {
                 last_pty_at_ms: None,
                 busy_ms: 0,
                 busy_running_since_ms: None,
+                message_count: 0,
                 approval_mode: agentd_protocol::ApprovalMode::Manual,
                 kind,
                 archived: false,
@@ -4521,6 +4538,7 @@ mod tests {
             let mut s = parent.summary.write().await;
             s.event_count = 17;
             s.busy_ms = 7_500;
+            s.message_count = 6;
         }
         mgr.sessions.write().await.insert("parent".into(), parent);
 
@@ -4530,6 +4548,7 @@ mod tests {
             transcript_seq: 5,
             at_ms: 0,
             parent_busy_ms: 0,
+            parent_message_count: 0,
         });
         fork.summary.write().await.event_count = 2;
         mgr.sessions.write().await.insert("fork".into(), fork);
@@ -4554,6 +4573,11 @@ mod tests {
             merge.merged_busy_ms, 7_500,
             "the merge boundary snapshots the PARENT's accumulated compute time \
              so lineage turn-info windows can label busy deltas"
+        );
+        assert_eq!(
+            merge.merged_message_count, 6,
+            "the merge boundary snapshots the PARENT's chat-message tally \
+             so lineage turn-info windows can count actual messages"
         );
 
         // The parent's own event_count is untouched by merge() itself — the
@@ -4591,6 +4615,7 @@ mod tests {
             transcript_seq: 3,
             at_ms: 0,
             parent_busy_ms: 0,
+            parent_message_count: 0,
         });
         mgr.sessions
             .write()
@@ -5269,6 +5294,7 @@ mod tests {
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
+            message_count: 0,
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind: agentd_protocol::SessionKind::User,
             forked_from: None,
@@ -5407,6 +5433,7 @@ mod tests {
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
+            message_count: 0,
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind: agentd_protocol::SessionKind::User,
             archived: false,
@@ -6020,6 +6047,67 @@ mod tests {
         assert_eq!(result.events.len(), 50);
         assert_eq!(result.events.first().unwrap().seq, 1185);
         assert_eq!(result.events.last().unwrap().seq, 1234);
+    }
+
+    /// Loading a session recounts chat messages from its transcript, so
+    /// `message_count` self-heals for summaries saved before the field
+    /// existed (they deserialize as 0) and for summaries that lagged a
+    /// crash. Only `Message` events count — other persisted transcript
+    /// events (reasoning, tool blocks, status rows) must not inflate it.
+    #[tokio::test]
+    async fn load_recounts_chat_messages_from_the_transcript() {
+        use chrono::Utc;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+
+        // Saved summary carries no message tally (a pre-field record)...
+        let summary = placement_summary("recount", 0, None, agentd_protocol::SessionKind::User);
+        storage.save_summary(&summary).expect("save summary");
+        // ...but its transcript holds 2 chat messages among 5 events.
+        let events = [
+            agentd_protocol::SessionEvent::Message {
+                role: agentd_protocol::MessageRole::User,
+                text: "hi".into(),
+            },
+            agentd_protocol::SessionEvent::Reasoning {
+                text: "thinking".into(),
+            },
+            agentd_protocol::SessionEvent::Message {
+                role: agentd_protocol::MessageRole::Assistant,
+                text: "hello".into(),
+            },
+            agentd_protocol::SessionEvent::Reasoning {
+                text: "more thinking".into(),
+            },
+            agentd_protocol::SessionEvent::Reasoning {
+                text: "even more".into(),
+            },
+        ];
+        for (i, event) in events.into_iter().enumerate() {
+            let ts = agentd_protocol::TimestampedEvent {
+                seq: i as u64 + 1,
+                at: Utc::now(),
+                event,
+            };
+            storage.append_event("recount", &ts).expect("append event");
+        }
+
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let loaded = mgr
+            .get_entry("recount")
+            .await
+            .expect("loaded entry")
+            .summary()
+            .await;
+        assert_eq!(loaded.message_count, 2, "only Message events count");
     }
 
     /// `SessionManager::search` must use the live, in-memory session list

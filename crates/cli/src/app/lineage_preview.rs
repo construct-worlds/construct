@@ -369,6 +369,7 @@ mod tests {
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
+            message_count: 0,
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind: agentd_protocol::SessionKind::User,
             archived: false,
@@ -406,6 +407,7 @@ mod tests {
             transcript_seq: 0,
             at_ms: 0,
             parent_busy_ms: 0,
+            parent_message_count: 0,
         });
         s
     }
@@ -588,6 +590,7 @@ mod tests {
             mode: agentd_protocol::ForkMergeMode::Result,
             at_ms: 0,
             merged_busy_ms: 0,
+            merged_message_count: 0,
             merged_seq: 0,
         });
         fork.archived = true;

@@ -722,10 +722,13 @@ struct Lane<'a> {
     /// `forked_from.parent_busy_ms` — the parent's compute time at
     /// fork-out (0 on records predating the field).
     fork_busy: u64,
+    /// The parent's `message_count` at fork time (`ForkedFrom::
+    /// parent_message_count`); 0 when untracked (legacy records).
+    fork_msgs: u64,
     /// `(at_ms, merged_seq, merged_busy_ms)` for forks that merged back
     /// (`Result`) — such a lane ends at its merge arrow instead of an
     /// `End` event.
-    merge: Option<(i64, u64, u64)>,
+    merge: Option<(i64, u64, u64, u64)>,
     /// `(at_ms, label end, outcome)` for every other lane's end: a
     /// discarded fork (at discard time), a session that went Done/Errored
     /// (at `last_event_at`), or a live session (at "now", open-ended).
@@ -743,10 +746,15 @@ struct Lane<'a> {
     /// transition). `0` means no busy data (legacy records): windows fall
     /// back to wall-clock spans.
     busy_total: u64,
+    /// The session's lifetime chat-message tally (`SessionSummary::
+    /// message_count`); 0 when untracked (legacy records).
+    msgs_total: u64,
     // Running state, filled in as the global walk proceeds.
     cp_seq: u64,
     cp_ms: i64,
     cp_busy: u64,
+    /// Message-count checkpoint mirroring `cp_seq`.
+    cp_msgs: u64,
     x_abs: usize,
     lane_col: usize,
     box_bottom: usize,
@@ -794,7 +802,14 @@ fn collect_lanes<'a>(
     let merge = if forked.is_some() {
         merge_rec
             .filter(|m| m.mode == ForkMergeMode::Result)
-            .map(|m| (m.at_ms.max(box_ms), m.merged_seq, m.merged_busy_ms))
+            .map(|m| {
+                (
+                    m.at_ms.max(box_ms),
+                    m.merged_seq,
+                    m.merged_busy_ms,
+                    m.merged_message_count,
+                )
+            })
     } else {
         None
     };
@@ -822,7 +837,7 @@ fn collect_lanes<'a>(
         Some((now_ms.max(box_ms), label_end, None))
     };
     let close_ms = merge
-        .map(|(at, _, _)| at)
+        .map(|(at, _, _, _)| at)
         .or(end.map(|(at, _, _)| at))
         .unwrap();
     let idx = lanes.len();
@@ -833,15 +848,18 @@ fn collect_lanes<'a>(
         box_ms,
         fork_seq: forked.map(|f| f.transcript_seq),
         fork_busy: forked.map(|f| f.parent_busy_ms).unwrap_or(0),
+        fork_msgs: forked.map(|f| f.parent_message_count).unwrap_or(0),
         merge,
         end,
         close_ms,
         more: Vec::new(),
         label_lines: wrap_box_label(&node_box_label(summary, &node.session_id)),
         busy_total: summary.map(|s| s.busy_ms_at(now_ms)).unwrap_or(0),
+        msgs_total: summary.map(|s| s.message_count).unwrap_or(0),
         cp_seq: 0,
         cp_ms: box_ms,
         cp_busy: 0,
+        cp_msgs: 0,
         x_abs: 0,
         lane_col: 0,
         box_bottom: 0,
@@ -871,7 +889,7 @@ fn build_events(lanes: &[Lane]) -> Vec<(i64, u8, usize)> {
     let mut events: Vec<(i64, u8, usize)> = Vec::new();
     for (i, lane) in lanes.iter().enumerate() {
         events.push((lane.box_ms, EV_BOX, i));
-        if let Some((at, _, _)) = lane.merge {
+        if let Some((at, _, _, _)) = lane.merge {
             events.push((at, EV_MERGE, i));
         }
         if let Some((at, _, _)) = lane.end {
@@ -1001,11 +1019,16 @@ fn layout_tree(
                         cur += 1;
                         let busy = (lanes[i].fork_busy > 0)
                             .then(|| lanes[i].fork_busy.saturating_sub(lanes[p].cp_busy));
+                        let shown = if lanes[i].fork_msgs > 0 {
+                            lanes[i].fork_msgs.saturating_sub(lanes[p].cp_msgs)
+                        } else {
+                            d
+                        };
                         put_segment(
                             c,
                             cur,
                             lanes[p].lane_col,
-                            d,
+                            shown,
                             lanes[p].cp_ms,
                             Some(lanes[i].box_ms),
                             now_ms,
@@ -1018,6 +1041,7 @@ fn layout_tree(
                     lanes[p].cp_seq = seq;
                     lanes[p].cp_ms = lanes[i].box_ms;
                     lanes[p].cp_busy = lanes[p].cp_busy.max(lanes[i].fork_busy);
+                    lanes[p].cp_msgs = lanes[p].cp_msgs.max(lanes[i].fork_msgs);
                 }
                 // Icon-only arrow label — the glyph alone (⑂ / ▸) marks the
                 // edge kind.
@@ -1138,7 +1162,7 @@ fn layout_tree(
                 gi += 1;
             }
             EV_MERGE => {
-                let (at, mseq, mbusy) = lanes[i].merge.expect("merge event has merge data");
+                let (at, mseq, mbusy, mmsgs) = lanes[i].merge.expect("merge event has merge data");
                 let p = lanes[i].parent.expect("a merging fork has a parent");
                 let dp = mseq.saturating_sub(lanes[p].cp_seq);
                 let df = lanes[i]
@@ -1158,11 +1182,16 @@ fn layout_tree(
                     let mut row = cur;
                     if dp > 0 {
                         let busy = (mbusy > 0).then(|| mbusy.saturating_sub(lanes[p].cp_busy));
+                        let shown = if mmsgs > 0 {
+                            mmsgs.saturating_sub(lanes[p].cp_msgs)
+                        } else {
+                            dp
+                        };
                         let end_x = put_segment(
                             c,
                             row,
                             lanes[p].lane_col,
-                            dp,
+                            shown,
                             lanes[p].cp_ms,
                             Some(at),
                             now_ms,
@@ -1177,11 +1206,16 @@ fn layout_tree(
                     if df > 0 {
                         let busy = (lanes[i].busy_total > 0)
                             .then(|| lanes[i].busy_total.saturating_sub(lanes[i].cp_busy));
+                        let shown = if lanes[i].msgs_total > 0 {
+                            lanes[i].msgs_total.saturating_sub(lanes[i].cp_msgs)
+                        } else {
+                            df
+                        };
                         put_segment(
                             c,
                             row,
                             lanes[i].lane_col,
-                            df,
+                            shown,
                             lanes[i].cp_ms,
                             Some(at),
                             now_ms,
@@ -1234,6 +1268,7 @@ fn layout_tree(
                 lanes[p].cp_seq = mseq;
                 lanes[p].cp_ms = at;
                 lanes[p].cp_busy = lanes[p].cp_busy.max(mbusy);
+                lanes[p].cp_msgs = lanes[p].cp_msgs.max(mmsgs);
                 lanes[p].last_row = lanes[p].last_row.max(cur);
                 lanes[i].last_row = cur;
                 lanes[i].ended = true;
@@ -1289,11 +1324,16 @@ fn layout_tree(
                         let owner = lanes[j].node.session_id.clone();
                         let busy = (lanes[j].busy_total > 0)
                             .then(|| lanes[j].busy_total.saturating_sub(lanes[j].cp_busy));
+                        let shown = if lanes[j].msgs_total > 0 {
+                            lanes[j].msgs_total.saturating_sub(lanes[j].cp_msgs)
+                        } else {
+                            d
+                        };
                         row_end_x = put_segment(
                             c,
                             cur,
                             lanes[j].lane_col,
-                            d,
+                            shown,
                             lanes[j].cp_ms,
                             label_end,
                             now_ms,
@@ -1528,11 +1568,16 @@ pub fn flatten_rails(
                         let owner = lanes[p].node.session_id.clone();
                         let busy = (lanes[i].fork_busy > 0)
                             .then(|| lanes[i].fork_busy.saturating_sub(lanes[p].cp_busy));
+                        let shown = if lanes[i].fork_msgs > 0 {
+                            lanes[i].fork_msgs.saturating_sub(lanes[p].cp_msgs)
+                        } else {
+                            d
+                        };
                         put_info(
                             &mut c,
                             cur,
                             col(rail_of[p]),
-                            d,
+                            shown,
                             lanes[p].cp_ms,
                             Some(lanes[i].box_ms),
                             None,
@@ -1545,6 +1590,7 @@ pub fn flatten_rails(
                     lanes[p].cp_seq = seq;
                     lanes[p].cp_ms = lanes[i].box_ms;
                     lanes[p].cp_busy = lanes[p].cp_busy.max(lanes[i].fork_busy);
+                    lanes[p].cp_msgs = lanes[p].cp_msgs.max(lanes[i].fork_msgs);
                 }
                 let (pc, cc) = (col(rail_of[p]), col(rail_of[i]));
                 let child_border = LineageSpan::Border {
@@ -1580,17 +1626,22 @@ pub fn flatten_rails(
                 gi += 1;
             }
             EV_MERGE => {
-                let (at, mseq, mbusy) = lanes[i].merge.expect("merge event has merge data");
+                let (at, mseq, mbusy, mmsgs) = lanes[i].merge.expect("merge event has merge data");
                 let p = lanes[i].parent.expect("a merging fork has a parent");
                 let dp = mseq.saturating_sub(lanes[p].cp_seq);
                 if dp > 0 {
                     let owner = lanes[p].node.session_id.clone();
                     let busy = (mbusy > 0).then(|| mbusy.saturating_sub(lanes[p].cp_busy));
+                    let shown = if mmsgs > 0 {
+                        mmsgs.saturating_sub(lanes[p].cp_msgs)
+                    } else {
+                        dp
+                    };
                     put_info(
                         &mut c,
                         cur,
                         col(rail_of[p]),
-                        dp,
+                        shown,
                         lanes[p].cp_ms,
                         Some(at),
                         None,
@@ -1608,11 +1659,16 @@ pub fn flatten_rails(
                     let owner = lanes[i].node.session_id.clone();
                     let busy = (lanes[i].busy_total > 0)
                         .then(|| lanes[i].busy_total.saturating_sub(lanes[i].cp_busy));
+                    let shown = if lanes[i].msgs_total > 0 {
+                        lanes[i].msgs_total.saturating_sub(lanes[i].cp_msgs)
+                    } else {
+                        df
+                    };
                     put_info(
                         &mut c,
                         cur,
                         col(rail_of[i]),
-                        df,
+                        shown,
                         lanes[i].cp_ms,
                         Some(at),
                         Some(true),
@@ -1639,6 +1695,7 @@ pub fn flatten_rails(
                 lanes[p].cp_seq = mseq;
                 lanes[p].cp_ms = at;
                 lanes[p].cp_busy = lanes[p].cp_busy.max(mbusy);
+                lanes[p].cp_msgs = lanes[p].cp_msgs.max(mmsgs);
                 last_row[i] = last_row[i].max(cur);
                 last_row[p] = last_row[p].max(cur);
                 ended[i] = true;
@@ -1670,11 +1727,16 @@ pub fn flatten_rails(
                         let owner = lanes[j].node.session_id.clone();
                         let busy = (lanes[j].busy_total > 0)
                             .then(|| lanes[j].busy_total.saturating_sub(lanes[j].cp_busy));
+                        let shown = if lanes[j].msgs_total > 0 {
+                            lanes[j].msgs_total.saturating_sub(lanes[j].cp_msgs)
+                        } else {
+                            d
+                        };
                         put_info(
                             &mut c,
                             cur,
                             col(rail_of[j]),
-                            d,
+                            shown,
                             lanes[j].cp_ms,
                             label_end,
                             outcome,
@@ -1791,6 +1853,7 @@ mod tests {
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
+            message_count: 0,
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind: SessionKind::User,
             archived: false,
@@ -1807,6 +1870,7 @@ mod tests {
             transcript_seq: 0,
             at_ms: 0,
             parent_busy_ms: 0,
+            parent_message_count: 0,
         });
         s
     }
@@ -1831,6 +1895,7 @@ mod tests {
             transcript_seq,
             at_ms,
             parent_busy_ms: 0,
+            parent_message_count: 0,
         });
         s
     }
@@ -1845,6 +1910,7 @@ mod tests {
             mode,
             at_ms,
             merged_busy_ms: 0,
+            merged_message_count: 0,
             merged_seq,
         });
         s
@@ -2019,6 +2085,7 @@ mod tests {
             mode: ForkMergeMode::Result,
             at_ms: 0,
             merged_busy_ms: 0,
+            merged_message_count: 0,
             merged_seq: 0,
         });
         assert_eq!(ForkStatus::of(&open), ForkStatus::Merged);
@@ -2027,6 +2094,7 @@ mod tests {
             mode: ForkMergeMode::Discard,
             at_ms: 0,
             merged_busy_ms: 0,
+            merged_message_count: 0,
             merged_seq: 0,
         });
         assert_eq!(ForkStatus::of(&open), ForkStatus::Discarded);
@@ -2142,9 +2210,57 @@ mod tests {
     }
 
     #[test]
+    fn turn_info_counts_only_chat_messages_when_tracked() {
+        // `event_count` advances on every persisted transcript event (tool
+        // blocks, status rows, PTY ordering markers) — but "N msgs" must
+        // count actual chat messages. Same scenario as the busy-time test,
+        // now with message tallies stamped at the same boundaries; every
+        // window's count must come from the message deltas (5/2/2/1), not
+        // the raw event deltas (12/3/2/5).
+        let mut root = with_event_count(with_created_at_ms(base("root"), 0), 20);
+        root.busy_ms = 400_000;
+        root.message_count = 8;
+        let mut fork = merged_at(
+            with_event_count(
+                with_created_at_ms(forked_from_at(base("f"), "root", 12, 300_000), 300_000),
+                2,
+            ),
+            ForkMergeMode::Result,
+            15,
+            500_000,
+        );
+        {
+            let ff = fork.forked_from.as_mut().unwrap();
+            ff.parent_busy_ms = 250_000;
+            ff.parent_message_count = 5;
+        }
+        {
+            let m = fork.merge.as_mut().unwrap();
+            m.merged_busy_ms = 310_000;
+            m.merged_message_count = 7;
+        }
+        fork.busy_ms = 90_000;
+        fork.message_count = 2;
+        let sessions = vec![root, fork];
+        let tree = build_tree("root", &sessions).unwrap();
+        let expect = vec![
+            "5 msgs · 4m10s".to_string(), // messages 0→5 while fork split off
+            "2 msgs · 1m00s".to_string(), // parent 5→7 while the fork ran
+            "2 msgs · 1m30s".to_string(), // the fork's own two messages
+            "1 msg · 1m30s".to_string(),  // parent 7→8 after merge (singular)
+        ];
+        assert_eq!(segment_texts(&flatten(&tree, &sessions, 800_000)), expect);
+        assert_eq!(
+            segment_texts(&flatten_rails(&tree, &sessions, 800_000).0),
+            expect
+        );
+    }
+
+    #[test]
     fn turn_info_falls_back_to_wall_clock_without_busy_stamps() {
         // Records written before busy tracking carry zero busy stamps; their
-        // windows keep the legacy wall-clock spans.
+        // windows keep the legacy wall-clock spans (and their counts fall
+        // back to raw transcript-event deltas).
         let root = with_event_count(with_created_at_ms(base("root"), 0), 20);
         let fork = merged_at(
             with_event_count(

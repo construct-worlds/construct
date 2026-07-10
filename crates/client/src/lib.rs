@@ -468,6 +468,10 @@ impl Client {
                             .unwrap_or_default()
                             .as_millis() as i64,
                     ),
+                    // The parent's chat-message tally so far — the
+                    // message-only counterpart to `transcript_seq`, so
+                    // lineage windows can count actual messages.
+                    parent_message_count: src.message_count,
                 }),
             })
             .await?;
@@ -1428,7 +1432,8 @@ mod fork_lineage_tests {
                                 "cwd": "/tmp",
                                 "state": "running",
                                 "created_at": "1970-01-01T00:00:00Z",
-                                "busy_ms": 4200
+                                "busy_ms": 4200,
+                                "message_count": 3
                             },
                             "events": []
                         }
@@ -1501,6 +1506,15 @@ mod fork_lineage_tests {
                 .and_then(|f| f.get("parent_busy_ms"))
                 .and_then(|v| v.as_u64()),
             Some(4200)
+        );
+        // Likewise the parent's chat-message tally, so window counts can be
+        // message-only deltas.
+        assert_eq!(
+            forked_from
+                .as_ref()
+                .and_then(|f| f.get("parent_message_count"))
+                .and_then(|v| v.as_u64()),
+            Some(3)
         );
 
         let _ = std::fs::remove_file(&sock);

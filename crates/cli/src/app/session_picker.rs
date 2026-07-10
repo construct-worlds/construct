@@ -829,6 +829,7 @@ mod tests {
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
+            message_count: 0,
             approval_mode: agentd_protocol::ApprovalMode::Manual,
             kind: agentd_protocol::SessionKind::User,
             archived: false,

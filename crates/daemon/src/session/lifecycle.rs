@@ -95,6 +95,7 @@ impl SessionManager {
             forked_from: params.forked_from.clone(),
             busy_ms: 0,
             busy_running_since_ms: None,
+            message_count: 0,
             merge: None,
         };
         self.storage.save_summary(&summary)?;

@@ -2272,6 +2272,7 @@ mod search_tests {
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
+            message_count: 0,
             approval_mode: ApprovalMode::Manual,
             kind: SessionKind::User,
             archived: false,

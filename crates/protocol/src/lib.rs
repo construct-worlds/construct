@@ -1799,6 +1799,14 @@ pub struct SessionSummary {
     /// alongside `busy_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub busy_running_since_ms: Option<i64>,
+    /// Count of chat `Message` events persisted to the transcript —
+    /// unlike `event_count` (the raw transcript sequence, which also
+    /// advances on tool blocks, status rows, and PTY ordering markers),
+    /// this counts only actual messages. Maintained by the daemon as
+    /// events persist and recounted from the transcript at load, so it
+    /// self-heals for sessions recorded before the field existed.
+    #[serde(default)]
+    pub message_count: u64,
     /// How adapters that gate tools handle Risky tool calls.
     #[serde(default)]
     pub approval_mode: ApprovalMode,
@@ -1856,6 +1864,12 @@ pub struct ForkedFrom {
     /// wall-clock spans. `#[serde(default)]` for records predating it.
     #[serde(default)]
     pub parent_busy_ms: u64,
+    /// The parent's `message_count` at the moment this fork branched —
+    /// the message-only counterpart to `transcript_seq`, letting lineage
+    /// windows count actual chat messages instead of raw transcript
+    /// events. `#[serde(default)]` for records predating it.
+    #[serde(default)]
+    pub parent_message_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1875,6 +1889,10 @@ pub struct ForkMerge {
     /// this fork merged back — the busy-time counterpart to `merged_seq`.
     #[serde(default)]
     pub merged_busy_ms: u64,
+    /// The parent's `message_count` at the moment this fork merged back —
+    /// the message-only counterpart to `merged_seq`.
+    #[serde(default)]
+    pub merged_message_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
