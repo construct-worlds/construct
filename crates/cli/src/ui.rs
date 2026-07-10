@@ -9225,42 +9225,61 @@ fn lineage_row_scroll(
 /// arrows, turn info — see `crate::lineage::flatten`) arrives fully
 /// composed as role-tagged text runs; this just maps each role to a theme
 /// style. A node's label is styled by that session's live state, dimmed
-/// when merged and struck through when discarded — same treatment its old
-/// flat-row rendering used.
+/// when merged and struck through when discarded.
+///
+/// `selected_session`: when the preview is keyboard-focused, the selected
+/// session's box — its border fragments and label, i.e. exactly the
+/// rectangle, across all three of its rows — takes the highlight style.
+/// Wiring and turn info sharing those rows stay unhighlighted, so the
+/// selection reads as a picked button rather than a full-width bar.
 fn render_lineage_row(
     row: &crate::lineage::LineageRow,
     by_id: &HashMap<&str, &SessionSummary>,
     theme: &Theme,
+    selected_session: Option<&str>,
 ) -> Line<'static> {
+    let highlight = Style::default()
+        .bg(theme.highlight_bg)
+        .fg(theme.highlight_fg)
+        .add_modifier(Modifier::BOLD);
     let spans: Vec<Span<'static>> = row
         .spans
         .iter()
         .map(|run| {
             let style = match &run.role {
-                crate::lineage::LineageSpan::Rail | crate::lineage::LineageSpan::Border => {
-                    Style::default().fg(theme.dim)
+                crate::lineage::LineageSpan::Rail => Style::default().fg(theme.dim),
+                crate::lineage::LineageSpan::Border { session_id } => {
+                    if selected_session == Some(session_id.as_str()) {
+                        highlight
+                    } else {
+                        Style::default().fg(theme.dim)
+                    }
                 }
-                crate::lineage::LineageSpan::Edge(edge) => match edge {
-                    crate::lineage::LineageEdge::Root => Style::default().fg(theme.accent),
-                    // Fork edges are lighter — mergeable siblings, not true
-                    // parent/child helpers (spec 0078 vs spec 0014).
-                    crate::lineage::LineageEdge::Fork => Style::default().fg(theme.dim),
-                    crate::lineage::LineageEdge::Subagent => Style::default().fg(theme.harness),
-                },
+                // Fork and subagent arrow labels render at the same
+                // brightness — the word already tells them apart.
+                crate::lineage::LineageSpan::Edge(_) => Style::default().fg(theme.dim),
                 crate::lineage::LineageSpan::Segment { .. } => Style::default().fg(theme.dim),
                 crate::lineage::LineageSpan::More(_) => Style::default()
                     .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
                 crate::lineage::LineageSpan::Node { session_id } => {
-                    match by_id.get(session_id.as_str()) {
-                        None => Style::default().fg(theme.dim),
-                        Some(summary) => match crate::lineage::ForkStatus::of(summary) {
-                            crate::lineage::ForkStatus::Merged => Style::default().fg(theme.dim),
-                            crate::lineage::ForkStatus::Discarded => Style::default()
-                                .fg(theme.dim)
-                                .add_modifier(Modifier::CROSSED_OUT),
-                            crate::lineage::ForkStatus::Open => state_style(theme, summary.state),
-                        },
+                    if selected_session == Some(session_id.as_str()) {
+                        highlight
+                    } else {
+                        match by_id.get(session_id.as_str()) {
+                            None => Style::default().fg(theme.dim),
+                            Some(summary) => match crate::lineage::ForkStatus::of(summary) {
+                                crate::lineage::ForkStatus::Merged => {
+                                    Style::default().fg(theme.dim)
+                                }
+                                crate::lineage::ForkStatus::Discarded => Style::default()
+                                    .fg(theme.dim)
+                                    .add_modifier(Modifier::CROSSED_OUT),
+                                crate::lineage::ForkStatus::Open => {
+                                    state_style(theme, summary.state)
+                                }
+                            },
+                        }
                     }
                 }
             };
@@ -9386,21 +9405,18 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
             visible,
         );
         app.lineage_preview_scroll = scroll;
-        let highlight_style = Style::default()
-            .bg(app.theme.highlight_bg)
-            .fg(app.theme.highlight_fg)
-            .add_modifier(Modifier::BOLD);
-        let items: Vec<ListItem> = rows
+        // The highlight is applied inside `render_lineage_row`, scoped to
+        // the selected session's box rectangle (its Border/Node spans, all
+        // three rows) rather than a full-width List bar.
+        let selected_session =
+            selected_raw.and_then(|idx| rows[idx].session_id().map(str::to_string));
+        let lines: Vec<Line<'static>> = rows
             .iter()
-            .enumerate()
             .skip(scroll)
             .take(visible)
-            .map(|(_, row)| ListItem::new(render_lineage_row(row, &by_id, &app.theme)))
+            .map(|row| render_lineage_row(row, &by_id, &app.theme, selected_session.as_deref()))
             .collect();
-        let mut state = ListState::default();
-        state.select(selected_raw.map(|sr| sr - scroll));
-        let list = List::new(items).highlight_style(highlight_style);
-        f.render_stateful_widget(list, inner, &mut state);
+        f.render_widget(Paragraph::new(lines), inner);
     } else {
         // No wrapping: these are diagram rows (boxes, lanes, arrows) —
         // wrapping would shear the drawing. A too-wide diagram clips at the
@@ -9408,7 +9424,7 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
         let lines: Vec<Line<'static>> = rows
             .iter()
             .take(inner.height as usize)
-            .map(|row| render_lineage_row(row, &by_id, &app.theme))
+            .map(|row| render_lineage_row(row, &by_id, &app.theme, None))
             .collect();
         f.render_widget(Paragraph::new(lines), inner);
     }
@@ -14117,7 +14133,7 @@ mod tests {
         let by_id: HashMap<&str, &SessionSummary> =
             sessions.iter().map(|s| (s.id.as_str(), s)).collect();
         rows.iter()
-            .map(|r| render_lineage_row(r, &by_id, theme))
+            .map(|r| render_lineage_row(r, &by_id, theme, None))
             .collect()
     }
 
@@ -14131,16 +14147,61 @@ mod tests {
             .iter()
             .find(|s| s.content.as_ref() == "⑂ fork")
             .expect("fork arrow label span");
-        assert_eq!(fork_span.style.fg, Some(theme.dim));
         let sub_span = all_spans
             .iter()
             .find(|s| s.content.as_ref() == "▸ subagent")
             .expect("subagent arrow label span");
+        assert_eq!(fork_span.style.fg, Some(theme.dim));
         assert_eq!(
-            sub_span.style.fg,
-            Some(theme.harness),
-            "subagent arrows keep the harness accent, distinct from fork arrows"
+            sub_span.style.fg, fork_span.style.fg,
+            "fork and subagent arrow labels render at the same brightness — \
+             the word already tells them apart"
         );
+    }
+
+    #[test]
+    fn lineage_selection_highlights_only_the_selected_box() {
+        // The keyboard selection highlights exactly the selected session's
+        // box rectangle (its border fragments and label) — never the lane
+        // wiring sharing those rows, and never another session's box.
+        let theme = Theme::default();
+        let (sessions, rows) = lineage_test_rows();
+        let by_id: HashMap<&str, &SessionSummary> =
+            sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+        let lines: Vec<Line<'static>> = rows
+            .iter()
+            .map(|r| render_lineage_row(r, &by_id, &theme, Some("f")))
+            .collect();
+        let highlighted: Vec<(&str, bool)> = rows
+            .iter()
+            .zip(lines.iter())
+            .flat_map(|(row, line)| row.spans.iter().zip(line.spans.iter()))
+            .map(|(run, span)| (run.text.as_str(), span.style.bg == Some(theme.highlight_bg)))
+            .collect();
+        assert!(
+            highlighted
+                .iter()
+                .any(|(text, hl)| *hl && text.contains('┌')),
+            "the selected box's top border must be highlighted"
+        );
+        for (i, (run, hl)) in highlighted.iter().enumerate() {
+            if *hl {
+                let role = rows
+                    .iter()
+                    .flat_map(|r| r.spans.iter())
+                    .nth(i)
+                    .map(|r| &r.role);
+                assert!(
+                    matches!(
+                        role,
+                        Some(crate::lineage::LineageSpan::Border { session_id })
+                            | Some(crate::lineage::LineageSpan::Node { session_id })
+                            if session_id == "f"
+                    ),
+                    "only f's box spans may carry the highlight, got {run:?} ({role:?})"
+                );
+            }
+        }
     }
 
     #[test]

@@ -105,45 +105,57 @@ language every other focused pane already uses.
 
 The preview draws each session as a small bordered box (status glyph +
 title/harness [+ terminal marker]) with that session's own timeline as a
-vertical lane hanging below the box, read top to bottom. A fork branches
-off the parent's lane with a labeled arrow (`├─⑂ fork ──▸`) into the
-child's box, placed to the right with its own lane below it; a fork that
-merged returns to the parent's lane with a labeled merge arrow
-(`│◂─ ↩ merge ──┘`). A subagent branches the same way (`▸ subagent`
-arrow) but never merges back. Keyboard selection lands on the box label
-rows; boxes are the only selectable rows.
+vertical lane hanging below the box — indented one column from the box's
+left edge — read top to bottom. A fork branches off the parent's lane
+with a labeled arrow (`├─ ⑂ fork ──▸`) into the child's box, placed to
+the right with its own lane below it; a fork that merged returns to the
+parent's lane with a labeled merge arrow (`│◂─ ↩ merge ──┘`). A subagent
+branches the same way (`▸ subagent` arrow, same brightness as the fork
+arrow — the word tells them apart) but never merges back.
+
+Rows follow the node's timeline in strict chronological (event) order:
+fork A, then fork B, then merge A renders exactly those three connectors
+top to bottom — a merge arrow is never grouped with its fork's block. A
+fork whose merge comes later keeps its lane column live: the lane runs
+down to its merge arrow, later branches stack to its right, and an arrow
+crossing a live lane breaks around its bar rather than erasing it.
+
+Keyboard selection lands on the box label rows; boxes are the only
+selectable rows. The selection highlight covers exactly the selected
+box's rectangle (its borders and label, all three rows) — never the full
+preview width, and never the wiring or turn info sharing those rows.
 
 ### Activity stats are per-segment, not per-node
 
 Activity stats (message/turn count, elapsed time) render as turn-info
-lines ON the lanes, positioned BETWEEN the markers that bound them —
-never on a node's own box label. The markers on a node's own timeline
-are: its own creation, each fork child's fork-out point, each fork
-child's merge-back point (only when it actually merged — a discard
-doesn't inject anything into the parent's transcript, so it isn't a
-boundary), and "now" (or the node's own terminal point, if it has one).
-Each gap between consecutive markers becomes one turn-info line
-describing exactly that window. The parent's activity WHILE a merged
-fork was out renders side-by-side with the fork's own lane — the two
-windows covered the same wall-clock span, so they sit level with each
-other:
+lines ON the lanes — outdented two columns from the lane, flowing over
+it — positioned BETWEEN the markers that bound them, never on a node's
+own box label. The markers on a node's own timeline are: its own
+creation, each fork child's fork-out point, each fork child's merge-back
+point (only when it actually merged — a discard doesn't inject anything
+into the parent's transcript, so it isn't a boundary), and "now" (or the
+node's own terminal point, if it has one). Each gap between consecutive
+markers becomes one turn-info line describing exactly that window,
+emitted at the row where the window's CLOSING marker renders:
 
 ```
 ┌───────────────────────────┐
 │ ● auth-refactor (claude)  │
 └───────────────────────────┘
-  │
-  12 msgs · 8m12s
-  │
-  │               ┌──────────────────────────────┐
-  ├─⑂ fork ──────▸│ ● idea A (claude)  ↩ merged  │
-  │               └──────────────────────────────┘
-  5 msgs · 3m40s    │
-  │                 2 msgs · 1m05s
-  │                 │
-  │◂─ ↩ merge ──────┘
-  │
-  3 msgs · 2m00s
+ │
+12 msgs · 8m12s
+ │
+ │              ┌─────────────────────────────┐
+ ├─ ⑂ fork ────▸│ ● idea A (claude)  ↩ merged │
+ │              └─────────────────────────────┘
+ │               │
+ │              2 msgs · 1m05s
+ │
+5 msgs · 3m40s   │
+ │               │
+ │◂─ ↩ merge ────┘
+ │
+3 msgs · 2m00s
 ```
 
 A childless node still gets exactly one window (its whole life, start to
