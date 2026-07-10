@@ -114,15 +114,23 @@ impl App {
         }
     }
 
-    /// Pin `session_id`'s preview open and give it keyboard focus, resetting
-    /// its selection to the top row. Shared by the `C-x Tab` keyboard toggle
-    /// and a click inside the preview's body — either path implies the user
-    /// wants to keep interacting with it, so a preview that's about to
-    /// auto-hide from a hover timeout shouldn't vanish out from under active
-    /// keyboard interaction.
+    /// Pin `session_id`'s preview open and give it keyboard focus. Shared
+    /// by the `C-x Tab` keyboard toggle and a click inside the preview's
+    /// body — either path implies the user wants to keep interacting with
+    /// it, so a preview that's about to auto-hide from a hover timeout
+    /// shouldn't vanish out from under active keyboard interaction.
+    ///
+    /// The selection starts ON the session the preview was opened from —
+    /// opening lineage from a fork or subagent highlights that session's
+    /// own box, not the tree's root.
     pub(super) fn activate_lineage_preview_focus(&mut self, session_id: String) {
         self.lineage_preview_pinned.insert(session_id.clone());
-        self.lineage_preview_selected = 0;
+        let rows = self.lineage_preview_rows(&session_id);
+        let selectable = crate::lineage::selectable_indices(&rows);
+        self.lineage_preview_selected = selectable
+            .iter()
+            .position(|&idx| rows[idx].session_id() == Some(session_id.as_str()))
+            .unwrap_or(0);
         self.lineage_preview_scroll = 0;
         self.lineage_preview_focused = Some(session_id);
     }
@@ -133,9 +141,18 @@ impl App {
     /// `App::sessions` on every call (no popup-owned copy to go stale), same
     /// approach the deleted modal's `lineage_rows` used.
     pub(crate) fn lineage_preview_rows(&self, session_id: &str) -> Vec<LineageRow> {
+        self.lineage_preview_diagram(session_id).0
+    }
+
+    /// Rows plus every box's canvas bounds — the renderer maps the bounds
+    /// to screen rects for hover/click hit-testing.
+    pub(crate) fn lineage_preview_diagram(
+        &self,
+        session_id: &str,
+    ) -> (Vec<LineageRow>, Vec<crate::lineage::LineageBoxBounds>) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         crate::lineage::build_tree(session_id, &self.sessions)
-            .map(|root| crate::lineage::flatten(&root, &self.sessions, now_ms))
+            .map(|root| crate::lineage::flatten_with_boxes(&root, &self.sessions, now_ms))
             .unwrap_or_default()
     }
 
@@ -179,10 +196,7 @@ impl App {
     /// pin for this preview — mirroring the deleted modal's
     /// enter-jumps-and-closes behavior (leaving the preview to go work in
     /// that session makes it stop owning the keyboard AND stop pinning
-    /// itself open). A *merged* fork instead jumps to its parent — the
-    /// merge point in the graph and the injected result message are the
-    /// same transcript event (spec 0078), so this links to where that event
-    /// actually lives instead of re-showing the now-archived fork.
+    /// itself open).
     fn confirm_lineage_preview_selection(&mut self) {
         let Some(session_id) = self.lineage_preview_focused.take() else {
             return;
@@ -191,15 +205,25 @@ impl App {
         let Some(target_id) = self.lineage_preview_selected_session_id(&session_id) else {
             return;
         };
+        self.jump_to_lineage_session(&target_id);
+    }
+
+    /// Switch to a session picked from a lineage diagram — shared by Enter
+    /// on the keyboard selection and a mouse click on a box. A *merged*
+    /// fork instead jumps to its parent — the merge point in the graph and
+    /// the injected result message are the same transcript event (spec
+    /// 0078), so this links to where that event actually lives instead of
+    /// re-showing the now-archived fork.
+    pub(super) fn jump_to_lineage_session(&mut self, target_id: &str) {
         let Some(summary) = self.sessions.iter().find(|s| s.id == target_id).cloned() else {
-            self.set_status(format!("session {} no longer exists", short_id(&target_id)));
+            self.set_status(format!("session {} no longer exists", short_id(target_id)));
             return;
         };
         let target = match (&summary.forked_from, &summary.merge) {
             (Some(f), Some(m)) if m.mode == agentd_protocol::ForkMergeMode::Result => {
                 f.session_id.clone()
             }
-            _ => target_id,
+            _ => target_id.to_string(),
         };
         self.select_session(target);
         self.sync_active_window_selection();
@@ -472,6 +496,26 @@ mod tests {
         ))
         .await;
         assert_eq!(app.lineage_preview_selected, 0);
+    }
+
+    #[tokio::test]
+    async fn opening_from_a_fork_starts_selection_on_that_fork_not_the_root() {
+        let fork = fork_of(summary("fork"), "root");
+        let (mut app, _dir, _server) = test_app_with_sessions(vec![summary("root"), fork]).await;
+        app.select_session("fork".to_string());
+        app.toggle_lineage_preview_focus();
+        assert_eq!(app.lineage_preview_focused.as_deref(), Some("fork"));
+        let rows = app.lineage_preview_rows("fork");
+        let selectable = crate::lineage::selectable_indices(&rows);
+        let selected_id = rows[selectable[app.lineage_preview_selected]]
+            .session_id()
+            .map(str::to_string);
+        assert_eq!(
+            selected_id.as_deref(),
+            Some("fork"),
+            "opening the preview from a fork must land the selection on \
+             the fork's own box, not the tree's root"
+        );
     }
 
     #[tokio::test]

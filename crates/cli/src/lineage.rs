@@ -265,6 +265,24 @@ pub struct LineageRow {
     pub node_session_id: Option<String>,
 }
 
+/// One session box's bounds within the diagram, in canvas (row/column)
+/// coordinates — the renderer maps these to screen cells for mouse
+/// hit-testing (hover highlights the border, click jumps to the session).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineageBoxBounds {
+    pub session_id: String,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// Maximum box interior width, in columns — longer labels wrap onto
+/// additional box rows.
+pub const MAX_BOX_CONTENT_W: usize = 28;
+/// Maximum wrapped label rows per box — content past this is ellipsized.
+pub const MAX_BOX_LINES: usize = 2;
+
 impl LineageRow {
     pub fn session_id(&self) -> Option<&str> {
         self.node_session_id.as_deref()
@@ -290,6 +308,8 @@ struct Canvas {
     cells: Vec<Vec<Option<(char, LineageSpan)>>>,
     /// `(row, session id)` for each node's box label row, in paint order.
     node_rows: Vec<(usize, String)>,
+    /// Every box's bounds, for mouse hit-testing.
+    boxes: Vec<LineageBoxBounds>,
 }
 
 impl Canvas {
@@ -465,18 +485,28 @@ pub fn selectable_indices(rows: &[LineageRow]) -> Vec<usize> {
 /// every node's activity is visible somewhere. A window with zero messages
 /// is skipped (no "0 msgs" line), leaving just the lane bar.
 pub fn flatten(root: &LineageNode, sessions: &[SessionSummary], now_ms: i64) -> Vec<LineageRow> {
+    flatten_with_boxes(root, sessions, now_ms).0
+}
+
+/// [`flatten`], plus every box's canvas bounds for mouse hit-testing.
+pub fn flatten_with_boxes(
+    root: &LineageNode,
+    sessions: &[SessionSummary],
+    now_ms: i64,
+) -> (Vec<LineageRow>, Vec<LineageBoxBounds>) {
     let by_id: HashMap<&str, &SessionSummary> =
         sessions.iter().map(|s| (s.id.as_str(), s)).collect();
     let mut canvas = Canvas::default();
     layout_tree(&mut canvas, root, &by_id, now_ms);
-    canvas.into_rows()
+    let boxes = std::mem::take(&mut canvas.boxes);
+    (canvas.into_rows(), boxes)
 }
 
-/// `"● name (harness)"` box text. The name is the session's title
-/// (truncated) when it has one; otherwise just the harness stands alone.
-/// A merged fork gets NO marker here — the merge arrow and the `✓` on its
-/// final turn-info line already carry that outcome. A discarded fork
-/// keeps its `✗ discarded` marker since a discard draws no arrow.
+/// `"● name (harness)"` box text. The name is the session's full title
+/// when it has one; otherwise just the harness stands alone. A merged
+/// fork gets NO marker here — the merge arrow and the `✓` on its final
+/// turn-info line already carry that outcome. A discarded fork keeps its
+/// `✗ discarded` marker since a discard draws no arrow.
 fn node_box_label(summary: Option<&SessionSummary>, session_id: &str) -> String {
     let Some(s) = summary else {
         let short: String = session_id.chars().take(8).collect();
@@ -485,20 +515,76 @@ fn node_box_label(summary: Option<&SessionSummary>, session_id: &str) -> String 
     let status = status_glyph(s.state);
     let title = s.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
     let mut label = match title {
-        Some(t) => {
-            let name: String = if t.chars().count() > 24 {
-                t.chars().take(23).chain(std::iter::once('…')).collect()
-            } else {
-                t.to_string()
-            };
-            format!("{status} {name} ({})", s.harness)
-        }
+        Some(t) => format!("{status} {t} ({})", s.harness),
         None => format!("{status} {}", s.harness),
     };
     if ForkStatus::of(s) == ForkStatus::Discarded {
         label.push_str("  ✗ discarded");
     }
     label
+}
+
+/// Greedy word-wrap of a box label to [`MAX_BOX_CONTENT_W`] columns and at
+/// most [`MAX_BOX_LINES`] lines; content past the last line is ellipsized.
+/// A word wider than a whole line hard-breaks.
+fn wrap_box_label(label: &str) -> Vec<String> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    let mut truncated = false;
+    'words: for word in label.split_whitespace() {
+        let ww = UnicodeWidthStr::width(word);
+        let sep = usize::from(!cur.is_empty());
+        if cur_w + sep + ww <= MAX_BOX_CONTENT_W {
+            if sep == 1 {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+            cur_w += sep + ww;
+            continue;
+        }
+        // Word doesn't fit on the current line.
+        if !cur.is_empty() {
+            if lines.len() + 1 == MAX_BOX_LINES {
+                truncated = true;
+                break 'words;
+            }
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        if ww <= MAX_BOX_CONTENT_W {
+            cur.push_str(word);
+            cur_w = ww;
+            continue;
+        }
+        // Hard-break an overlong word.
+        for ch in word.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            if cur_w + cw > MAX_BOX_CONTENT_W {
+                if lines.len() + 1 == MAX_BOX_LINES {
+                    truncated = true;
+                    break 'words;
+                }
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            cur.push(ch);
+            cur_w += cw;
+        }
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    if truncated {
+        // Make room for the ellipsis on the final kept line.
+        let last = lines.last_mut().expect("at least one line");
+        while UnicodeWidthStr::width(last.as_str()) + 1 > MAX_BOX_CONTENT_W {
+            last.pop();
+        }
+        last.push('…');
+    }
+    lines
 }
 
 /// Paint one turn-info line: a marker ON the lane — `•` mid-timeline, or
@@ -590,7 +676,8 @@ struct Lane<'a> {
     /// Widest turn-info label this lane can emit — later boxes must clear
     /// it so lane text never runs into a box.
     max_seg_w: usize,
-    label: String,
+    /// Wrapped box label lines (see `wrap_box_label`).
+    label_lines: Vec<String>,
     /// Box-left offset relative to the parent's box left edge, assigned
     /// upfront by `assign_offsets` (later-closing siblings further out).
     x_off: usize,
@@ -693,7 +780,7 @@ fn collect_lanes<'a>(
         children: Vec::new(),
         more: Vec::new(),
         max_seg_w: 0,
-        label: node_box_label(summary, &node.session_id),
+        label_lines: wrap_box_label(&node_box_label(summary, &node.session_id)),
         x_off: 0,
         cp_seq: 0,
         cp_ms: box_ms,
@@ -839,7 +926,7 @@ fn assign_offsets(lanes: &mut [Lane], i: usize) -> usize {
     }
 
     // Slot geometry, inner to outer.
-    let box_w = UnicodeWidthStr::width(lanes[i].label.as_str()) + 4;
+    let box_w = box_content_w(&lanes[i]) + 4;
     let own_reach = box_w.max(3 + lanes[i].max_seg_w);
     let mut edge = 0usize;
     for s in 0..nslots {
@@ -872,27 +959,56 @@ fn assign_offsets(lanes: &mut [Lane], i: usize) -> usize {
     own_reach.max(edge)
 }
 
-/// Paint one session box with its top-left at `(x, y)` and register its
-/// label row as selectable.
+/// Interior (content) width of a lane's box: its widest wrapped label line.
+fn box_content_w(lane: &Lane) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    lane.label_lines
+        .iter()
+        .map(|l| UnicodeWidthStr::width(l.as_str()))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Total box height: wrapped label lines plus the two border rows.
+fn box_rows(lane: &Lane) -> usize {
+    lane.label_lines.len() + 2
+}
+
+/// Paint one session box with its top-left at `(x, y)`, register its
+/// FIRST label row as the selectable anchor, and record its bounds for
+/// mouse hit-testing. Label lines are padded to the interior width so the
+/// whole rectangle interior belongs to the Node span (selection paints it
+/// uniformly).
 fn draw_box(c: &mut Canvas, lane: &Lane, x: usize, y: usize) {
     use unicode_width::UnicodeWidthStr;
-    let lw = UnicodeWidthStr::width(lane.label.as_str());
+    let lw = box_content_w(lane);
     let border = LineageSpan::Border {
         session_id: lane.node.session_id.clone(),
     };
     c.put(y, x, &format!("┌{}┐", "─".repeat(lw + 2)), &border);
-    c.put(y + 1, x, "│ ", &border);
-    c.put(
-        y + 1,
-        x + 2,
-        &lane.label,
-        &LineageSpan::Node {
-            session_id: lane.node.session_id.clone(),
-        },
-    );
-    c.put(y + 1, x + 2 + lw, " │", &border);
-    c.put(y + 2, x, &format!("└{}┘", "─".repeat(lw + 2)), &border);
+    for (li, line) in lane.label_lines.iter().enumerate() {
+        let pad = lw - UnicodeWidthStr::width(line.as_str());
+        c.put(y + 1 + li, x, "│ ", &border);
+        c.put(
+            y + 1 + li,
+            x + 2,
+            &format!("{line}{}", " ".repeat(pad)),
+            &LineageSpan::Node {
+                session_id: lane.node.session_id.clone(),
+            },
+        );
+        c.put(y + 1 + li, x + 2 + lw, " │", &border);
+    }
+    let h = box_rows(lane);
+    c.put(y + h - 1, x, &format!("└{}┘", "─".repeat(lw + 2)), &border);
     c.node_rows.push((y + 1, lane.node.session_id.clone()));
+    c.boxes.push(LineageBoxBounds {
+        session_id: lane.node.session_id.clone(),
+        x,
+        y,
+        width: lw + 4,
+        height: h,
+    });
 }
 
 /// Draw the diagram from one global, time-ordered event queue — every
@@ -919,23 +1035,28 @@ fn layout_tree(
         let (t, kind, i) = events[gi];
         match kind {
             EV_BOX => {
+                let h = box_rows(&lanes[i]);
                 let Some(p) = lanes[i].parent else {
                     // The root's box tops the diagram; its lane state
                     // starts right below.
                     draw_box(c, &lanes[i], 1, cur);
                     lanes[i].x_abs = 1;
                     lanes[i].lane_col = 2;
-                    lanes[i].box_bottom = cur + 3;
-                    lanes[i].last_row = cur + 2;
+                    lanes[i].box_bottom = cur + h;
+                    lanes[i].last_row = cur + h - 1;
                     lanes[i].placed = true;
-                    cur += 3;
+                    cur += h;
                     gi += 1;
                     continue;
                 };
-                // A fork-out closes a window on the parent's lane.
+                // A fork-out closes a window on the parent's lane. Every
+                // turn-info line gets a lane-bar row above it (the row is
+                // left blank here; the end-fill draws every live lane's
+                // bar through it).
                 if let Some(seq) = lanes[i].fork_seq {
                     let d = seq.saturating_sub(lanes[p].cp_seq);
                     if d > 0 {
+                        cur += 1;
                         put_segment(
                             c,
                             cur,
@@ -984,10 +1105,10 @@ fn layout_tree(
                 lanes[p].last_row = lanes[p].last_row.max(ay);
                 lanes[i].x_abs = x;
                 lanes[i].lane_col = x + 1;
-                lanes[i].box_bottom = cur + 3;
-                lanes[i].last_row = cur + 2;
+                lanes[i].box_bottom = cur + h;
+                lanes[i].last_row = cur + h - 1;
                 lanes[i].placed = true;
-                cur += 3;
+                cur += h;
                 gi += 1;
             }
             EV_MERGE => {
@@ -999,6 +1120,8 @@ fn layout_tree(
                     .map(|s| s.event_count.saturating_sub(lanes[i].cp_seq))
                     .unwrap_or(0);
                 if dp > 0 || df > 0 {
+                    // Lane-bar row above the turn info (filled later).
+                    cur += 1;
                     // Both windows close at this same instant — they share
                     // one row, each on its own lane (the concept sketch's
                     // side-by-side "(turn info)" pair). Merging IS the
@@ -1096,6 +1219,9 @@ fn layout_tree(
                     })
                     .collect();
                 if !closing.is_empty() {
+                    // Lane-bar row above the final turn info; nothing
+                    // below it — the lane ends here.
+                    cur += 1;
                     for &(j, d) in &closing {
                         let (_, label_end, outcome) = lanes[j].end.expect("end event has end data");
                         put_segment(
@@ -1460,10 +1586,16 @@ mod tests {
                 " ┌─────────┐".to_string(),
                 format!(" │ {g} smith │"),
                 " └─────────┘".to_string(),
+                // Every turn-info line gets a lane-bar row above it; the
+                // structural row below (box top, arrow) carries the bar
+                // for mid-timeline windows, and a terminal window gets
+                // nothing below — its lane ends there.
+                "  │".to_string(),
                 "  • 12 msgs · 5m00s".to_string(),
                 "  │                  ┌─────────┐".to_string(),
                 format!("  ├─ ⑂ fork ────────▸│ {g} smith │"),
                 "  │                  └─────────┘".to_string(),
+                "  │                   │".to_string(),
                 // Both windows close at the merge instant, so they share
                 // one row side by side — the concept sketch's paired
                 // "(turn info)  (turn info)". Merging IS the fork's
@@ -1471,6 +1603,7 @@ mod tests {
                 // box carries no "↩ merged" marker).
                 "  • 3 msgs · 3m20s    ✓ 2 msgs · 3m20s".to_string(),
                 "  │◂─ ↩ merge ────────┘".to_string(),
+                "  │".to_string(),
                 "  • 5 msgs · 5m00s".to_string(),
             ]
         );
@@ -2071,6 +2204,67 @@ mod tests {
                 .any(|s| matches!(s.role, LineageSpan::Segment { .. })),
             "sanity: this tree does have a turn-info row"
         );
+    }
+
+    #[test]
+    fn long_titles_wrap_the_box_and_cap_with_an_ellipsis() {
+        use unicode_width::UnicodeWidthStr;
+        // A title longer than one box line wraps onto a second row (box
+        // grows taller); content past MAX_BOX_LINES is ellipsized.
+        let mut root = with_event_count(with_created_at_ms(base("root"), 0), 1);
+        root.title = Some(
+            "a very long session title that cannot possibly fit on one single box line at all"
+                .to_string(),
+        );
+        let sessions = vec![root];
+        let tree = build_tree("root", &sessions).unwrap();
+        let (rows, boxes) = flatten_with_boxes(&tree, &sessions, 0);
+        let b = &boxes[0];
+        assert_eq!(
+            b.height,
+            MAX_BOX_LINES + 2,
+            "box grows to the line cap: {:#?}",
+            diagram_text(&rows)
+        );
+        assert!(
+            b.width <= MAX_BOX_CONTENT_W + 4,
+            "box width caps at the content limit plus borders/padding"
+        );
+        let text = diagram_text(&rows).join("\n");
+        assert!(
+            text.contains('…'),
+            "overflow past the cap ellipsizes: {text}"
+        );
+        // Every label row shares the same border columns (no shearing).
+        let widths: Vec<usize> = diagram_text(&rows)
+            .iter()
+            .take(b.height)
+            .map(|l| UnicodeWidthStr::width(l.as_str()))
+            .collect();
+        assert!(widths.windows(2).all(|w| w[0] == w[1]), "{widths:?}");
+    }
+
+    #[test]
+    fn boxes_report_their_bounds_for_hit_testing() {
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 20);
+        let fork = with_event_count(
+            with_created_at_ms(forked_from_at(base("f"), "root", 12, 500), 500),
+            2,
+        );
+        let sessions = vec![root, fork];
+        let tree = build_tree("root", &sessions).unwrap();
+        let (rows, boxes) = flatten_with_boxes(&tree, &sessions, 9_000);
+        assert_eq!(boxes.len(), 2);
+        let text = diagram_text(&rows);
+        for b in &boxes {
+            assert!(
+                text[b.y].contains('┌') && text[b.y + b.height - 1].contains('└'),
+                "bounds frame the border rows for {b:?}:\n{}",
+                text.join("\n")
+            );
+            assert!(b.width >= 4 && b.height >= 3);
+        }
+        assert_ne!(boxes[0].session_id, boxes[1].session_id);
     }
 
     #[test]

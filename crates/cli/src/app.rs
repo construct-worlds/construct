@@ -1368,11 +1368,22 @@ pub struct App {
     /// (re-)entered. Clamped at use, mirroring the deleted popup's identical
     /// field.
     pub lineage_preview_selected: usize,
-    /// First visible raw-row index of the focused preview, clamped at
-    /// render time — the focused-mode counterpart of `lineage_preview_selected`,
-    /// used to keep the highlighted row on screen when the tree is taller
-    /// than the preview box.
+    /// First visible raw-row index of the preview, clamped at render time.
+    /// While keyboard-focused the selection drags it (to keep the
+    /// highlighted box on screen); the mouse wheel moves it directly in
+    /// any mode.
     pub lineage_preview_scroll: usize,
+    /// First visible diagram column — the preview's horizontal scroll,
+    /// moved by horizontal wheel events. Clamped at render time.
+    pub lineage_preview_scroll_x: usize,
+    /// User drag-resize override for the preview's outer (width, height).
+    /// `None` = size to the diagram's content. Clamped to the pane at
+    /// render time.
+    pub lineage_preview_size: Option<(u16, u16)>,
+    /// In-flight preview border drag: `(right_col, top_row, resize_w,
+    /// resize_h)` — the anchored edges stay put while the left/bottom
+    /// border follows the pointer.
+    pub resizing_lineage_preview: Option<(u16, u16, bool, bool)>,
     /// `/configure` onboarding dialog (spec 0069): `None` = closed. Opened by
     /// the command palette, or automatically on first run / when no agent
     /// harness is available. Captures all input while open.
@@ -2669,6 +2680,21 @@ impl LineagePreviewBodyHit {
     }
 }
 
+/// One session box inside the last-rendered lineage preview, in screen
+/// coordinates (clipped to the preview's viewport). Hovering it brightens
+/// that box's border; clicking it jumps to the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineageBoxHit {
+    pub session_id: String,
+    pub area: ratatui::layout::Rect,
+}
+
+impl LineageBoxHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        App::rect_contains(self.area, col, row)
+    }
+}
+
 /// Last-frame geometry for hit-testing mouse clicks.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutSnapshot {
@@ -2746,6 +2772,10 @@ pub struct LayoutSnapshot {
     /// with its owning session — see `LineagePreviewBodyHit`. `None` when no
     /// preview is showing.
     pub lineage_preview_body_hit: Option<LineagePreviewBodyHit>,
+    /// Every session box inside the last-rendered lineage preview, in
+    /// screen coordinates — hover brightens a box's border, click jumps to
+    /// that session. Rebuilt every frame the preview renders.
+    pub lineage_preview_box_hits: Vec<LineageBoxHit>,
     /// Program title-bar Run button bounds: `(x_start, x_end, y)`.
     pub program_title_run_hit: Option<(u16, u16, u16)>,
     /// Program title-bar mode toggle bounds: `(x_start, x_end, y)`.
@@ -3156,6 +3186,9 @@ async fn run_with_socket_initial_selection(
         lineage_preview_focused: None,
         lineage_preview_selected: 0,
         lineage_preview_scroll: 0,
+        lineage_preview_scroll_x: 0,
+        lineage_preview_size: None,
+        resizing_lineage_preview: None,
         configure_popup: None,
         session_picker: None,
         program_popup: None,
@@ -6945,6 +6978,7 @@ impl App {
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
             && self.resizing_program_popup.is_none()
+            && self.resizing_lineage_preview.is_none()
             && self.dragging_terminal_scrollbar.is_none()
             && self.text_selection.is_none()
             && self.mouse_over_tutorial_card(ev.column, ev.row);
@@ -6973,6 +7007,7 @@ impl App {
             && self.resizing_orchestrator_panel.is_none()
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
+            && self.resizing_lineage_preview.is_none()
             && self.dragging_terminal_scrollbar.is_none()
             && self.text_selection.is_none()
             && !card_owns_event
@@ -6999,17 +7034,33 @@ impl App {
         }
         match ev.kind {
             MouseEventKind::ScrollUp => {
-                if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, -LIST_STEP)
+                if self.is_over_lineage_preview(ev.column, ev.row) {
+                    self.lineage_preview_scroll = self.lineage_preview_scroll.saturating_sub(2);
+                } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, -LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, -LIST_STEP)
                 {
                     self.adjust_mouse_scrollback(ev.column, ev.row, scrollback_step);
                 }
             }
             MouseEventKind::ScrollDown => {
-                if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, LIST_STEP)
+                if self.is_over_lineage_preview(ev.column, ev.row) {
+                    // Clamped to the diagram's height at render time.
+                    self.lineage_preview_scroll = self.lineage_preview_scroll.saturating_add(2);
+                } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, LIST_STEP)
                 {
                     self.adjust_mouse_scrollback(ev.column, ev.row, -scrollback_step);
+                }
+            }
+            MouseEventKind::ScrollLeft => {
+                if self.is_over_lineage_preview(ev.column, ev.row) {
+                    self.lineage_preview_scroll_x = self.lineage_preview_scroll_x.saturating_sub(4);
+                }
+            }
+            MouseEventKind::ScrollRight => {
+                if self.is_over_lineage_preview(ev.column, ev.row) {
+                    // Clamped to the diagram's width at render time.
+                    self.lineage_preview_scroll_x = self.lineage_preview_scroll_x.saturating_add(4);
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -7149,6 +7200,24 @@ impl App {
                 if self.is_over_dynamic_ui_overlay(ev.column, ev.row) {
                     return;
                 }
+                // Lineage preview resize handles: the preview is anchored
+                // top-right, so dragging its LEFT border adjusts width and
+                // its BOTTOM border adjusts height (the corner does both).
+                if let Some(area) = self.layout.lineage_preview_area {
+                    if area.width >= 2 && area.height >= 2 {
+                        let on_left = ev.column == area.x
+                            && ev.row >= area.y
+                            && ev.row < area.y + area.height;
+                        let on_bottom = ev.row == area.y + area.height - 1
+                            && ev.column >= area.x
+                            && ev.column < area.x + area.width;
+                        if on_left || on_bottom {
+                            self.resizing_lineage_preview =
+                                Some((area.x + area.width - 1, area.y, on_left, on_bottom));
+                            return;
+                        }
+                    }
+                }
                 if self.is_over_lineage_preview(ev.column, ev.row) {
                     return;
                 }
@@ -7235,6 +7304,22 @@ impl App {
                 } else if let Some((grab_offset, max_scrollback)) = self.dragging_terminal_scrollbar
                 {
                     self.drag_terminal_scrollbar_to_row(ev.row, grab_offset, max_scrollback);
+                } else if let Some((right, top, resize_w, resize_h)) = self.resizing_lineage_preview
+                {
+                    // The preview anchors top-right; the dragged border
+                    // follows the pointer, the opposite edges stay put.
+                    let area = self.layout.lineage_preview_area.unwrap_or_default();
+                    let w = if resize_w {
+                        right.saturating_sub(ev.column).saturating_add(1).max(16)
+                    } else {
+                        area.width
+                    };
+                    let h = if resize_h {
+                        ev.row.saturating_sub(top).saturating_add(1).max(4)
+                    } else {
+                        area.height
+                    };
+                    self.lineage_preview_size = Some((w, h));
                 } else if self.is_over_dynamic_ui_overlay(ev.column, ev.row)
                     || self.is_over_lineage_preview(ev.column, ev.row)
                 {
@@ -7254,13 +7339,15 @@ impl App {
                     || self.resizing_orchestrator_panel.is_some()
                     || self.dragging_terminal_scrollbar.is_some()
                     || self.resizing_matrix_rain.is_some()
-                    || self.resizing_main_window.is_some();
+                    || self.resizing_main_window.is_some()
+                    || self.resizing_lineage_preview.is_some();
                 self.resizing_list = None;
                 self.resizing_pin_strip = None;
                 self.resizing_orchestrator_panel = None;
                 self.dragging_terminal_scrollbar = None;
                 self.resizing_matrix_rain = None;
                 self.resizing_main_window = None;
+                self.resizing_lineage_preview = None;
                 if was_resizing {
                     self.text_selection = None;
                     return;
@@ -7388,10 +7475,27 @@ impl App {
             self.toggle_lineage_preview_pin(hit.session_id);
             return;
         }
+        // Clicking a session box inside the preview jumps to that session —
+        // and closes the preview, exactly like Enter on the keyboard
+        // selection (leaving to go work in the picked session).
+        if let Some(hit) = self
+            .layout
+            .lineage_preview_box_hits
+            .iter()
+            .find(|hit| hit.contains(col, row))
+            .cloned()
+        {
+            if let Some(owner) = self.layout.lineage_preview_body_hit.clone() {
+                self.lineage_preview_pinned.remove(&owner.session_id);
+            }
+            self.lineage_preview_focused = None;
+            self.jump_to_lineage_session(&hit.session_id);
+            return;
+        }
         // Clicking inside the preview's body (not the harness-label trigger
-        // above) gives it keyboard focus for j/k/Enter/m/d — pinning it open
-        // first if it wasn't already, since focusing implies wanting to keep
-        // interacting with it (spec 0080).
+        // above, not a session box) gives it keyboard focus for
+        // j/k/Enter/m/d — pinning it open first if it wasn't already, since
+        // focusing implies wanting to keep interacting with it (spec 0080).
         if let Some(hit) = self.layout.lineage_preview_body_hit.clone() {
             if hit.contains(col, row) {
                 self.activate_lineage_preview_focus(hit.session_id);
@@ -10769,6 +10873,7 @@ mod tests {
             harness_label_hits: Vec::new(),
             lineage_preview_area: None,
             lineage_preview_body_hit: None,
+            lineage_preview_box_hits: Vec::new(),
             program_title_run_hit: None,
             program_title_toggle_hit: None,
             program_title_close_hit: None,
@@ -10899,6 +11004,9 @@ mod tests {
             lineage_preview_focused: None,
             lineage_preview_selected: 0,
             lineage_preview_scroll: 0,
+            lineage_preview_scroll_x: 0,
+            lineage_preview_size: None,
+            resizing_lineage_preview: None,
             configure_popup: None,
             session_picker: None,
             program_popup: None,
@@ -27236,7 +27344,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lineage_preview_border_brightens_when_focused() {
+    async fn clicking_a_session_box_in_the_preview_jumps_to_that_session() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        app.lineage_preview_pinned.insert("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let fork_box = app
+            .layout
+            .lineage_preview_box_hits
+            .iter()
+            .find(|h| h.session_id == "s1-fork")
+            .cloned()
+            .expect("fork box hit registered");
+
+        app.handle_left_click(fork_box.area.x + 1, fork_box.area.y + 1)
+            .await;
+        assert_eq!(
+            app.selected_id().as_deref(),
+            Some("s1-fork"),
+            "clicking a session box jumps to that session"
+        );
+        assert!(
+            app.lineage_preview_focused.is_none() && !app.lineage_preview_pinned.contains("s1"),
+            "the click closes the preview, like Enter on the keyboard selection"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn wheel_over_the_preview_scrolls_it_and_drag_on_its_border_resizes_it() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        app.lineage_preview_pinned.insert("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let area = app.layout.lineage_preview_area.expect("preview area");
+
+        // Wheel down over the preview scrolls the preview, not the pane.
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: area.x + 2,
+            row: area.y + 2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert_eq!(app.lineage_preview_scroll, 2);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollRight,
+            column: area.x + 2,
+            row: area.y + 2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert_eq!(app.lineage_preview_scroll_x, 4);
+
+        // Dragging the left border widens the preview.
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x,
+            row: area.y + 2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert!(app.resizing_lineage_preview.is_some());
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: area.x.saturating_sub(5),
+            row: area.y + 2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        let (w, _h) = app.lineage_preview_size.expect("resize recorded");
+        assert_eq!(w, area.width + 5, "left-border drag widens by the delta");
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: area.x.saturating_sub(5),
+            row: area.y + 2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert!(app.resizing_lineage_preview.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lineage_preview_border_uses_the_lineage_accent_not_pane_colors() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
         app.lineage_preview_pinned.insert("s1".to_string());
@@ -27247,30 +27443,32 @@ mod tests {
             .layout
             .lineage_preview_area
             .expect("preview area recorded while pinned");
-        let unfocused_border_fg = term
-            .backend()
-            .buffer()
-            .cell((area.x, area.y))
-            .and_then(|c| c.style().fg)
-            .expect("border cell has a color");
+        let cell_style = |term: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            term.backend()
+                .buffer()
+                .cell((area.x, area.y))
+                .map(|c| c.style())
+                .expect("border cell")
+        };
+        let unfocused = cell_style(&term);
         assert_eq!(
-            unfocused_border_fg, app.theme.border,
-            "pinned-but-unfocused preview uses the dimmer pane_border_style"
+            unfocused.fg,
+            Some(app.theme.matrix_flash_good),
+            "the preview border uses the lineage accent (the harness-label \
+             highlight color), distinct from session pane borders"
         );
+        assert_ne!(unfocused.fg, Some(app.theme.border));
 
         app.lineage_preview_focused = Some("s1".to_string());
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let focused_border_fg = term
-            .backend()
-            .buffer()
-            .cell((area.x, area.y))
-            .and_then(|c| c.style().fg)
-            .expect("border cell has a color");
-        assert_eq!(
-            focused_border_fg, app.theme.border_focused,
-            "a keyboard-focused preview uses pane_border_style's focused color"
+        let focused = cell_style(&term);
+        assert_eq!(focused.fg, Some(app.theme.matrix_flash_good));
+        assert!(
+            focused
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "keyboard focus brightens the border (bold)"
         );
-        assert_ne!(unfocused_border_fg, focused_border_fg);
         server.abort();
     }
 

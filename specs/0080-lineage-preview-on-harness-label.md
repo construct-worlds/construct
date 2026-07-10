@@ -91,22 +91,38 @@ reused, never duplicated: the preview calls the same
 `crate::lineage::build_tree`/`flatten`, the same per-row rendering, and the
 same `App::apply_fork_merge` any other merge/discard path in this UI uses.
 
-### Border reacts to focus
+### The widget's border is the lineage accent, not the pane border color
 
-The preview's own border uses the same focus-reactive style any other pane
-border does (`theme.border_focused` vs. the dimmer `theme.border`) —
-`theme.border_focused` while this preview holds keyboard focus, `theme.border`
-otherwise (whether it's showing via hover, pin, or both). This reuses the
-existing theme colors rather than inventing a third lineage-specific hue,
-and gives a focused preview the same "this pane owns your keystrokes" visual
-language every other focused pane already uses.
+The preview's border deliberately does NOT reuse the session panes' border
+colors — it uses the lineage feature's own accent, the same color the
+harness-label trigger highlights with on hover and while toggled, so the
+label and the widget it opens read as one affordance. Keyboard focus
+brightens the border (bold) rather than changing its hue.
+
+### Sizing, scrolling, resizing
+
+The preview sizes itself to the diagram's content by default (width and
+height, clamped to its pane), keeping one blank padding row between the
+last content line and the bottom border. The mouse wheel scrolls it
+vertically and a horizontal wheel scrolls it sideways, in every mode
+(hover, pinned, focused); while keyboard-focused, moving the selection
+still pulls the viewport to keep the selected box visible. Dragging the
+preview's LEFT border resizes its width, the BOTTOM border its height
+(the corner does both — the preview is anchored top-right, so those are
+its free edges); a drag-resize overrides content sizing until the
+preview is closed.
 
 ### The preview renders as a boxed-lane diagram
 
 The preview draws each session as a small bordered box (status glyph +
 title/harness) with that session's own timeline as a vertical lane
 hanging below the box — indented one column from the box's left edge —
-read top to bottom. A fork branches off the parent's lane with a labeled
+read top to bottom. A long session name wraps onto additional box rows
+(the box grows taller) up to a small line cap, after which it
+ellipsizes; box width is capped so one verbose title can't stretch the
+whole diagram. Fork/subagent labels style exactly like any normal
+session's (by live state) — a session is never dimmed for being a fork;
+a discarded fork adds a strikethrough on top of its state color. A fork branches off the parent's lane with a labeled
 arrow (`├─ ⑂ fork ──▸`) into the child's box, placed to the right with
 its own lane below it; a fork that merged returns to the parent's lane
 with a labeled merge arrow (`│◂─ ↩ merge ──┘`). A subagent branches the
@@ -137,9 +153,20 @@ to its closing row, and an arrow crossing a live lane breaks around its
 bar rather than erasing it.
 
 Keyboard selection lands on the box label rows; boxes are the only
-selectable rows. The selection highlight covers exactly the selected
-box's rectangle (its borders and label, all three rows) — never the full
-preview width, and never the wiring or turn info sharing those rows.
+selectable rows, and opening the preview from a fork or subagent starts
+the selection on THAT session's box, not the tree's root. The selection
+fills exactly the selected box's INTERIOR with the highlight background
+and brightens its border LINE (fg only — border glyphs never get a
+background); nothing outside the box is touched. The boxes are also
+mouse targets: hovering one brightens its border the same way, and
+clicking it jumps to that session (closing the preview, exactly like
+Enter on the keyboard selection). A click on the preview's body outside
+any box still gives the preview keyboard focus.
+
+Turn-info lines always have a lane-bar row directly above them; below,
+the next structural row (a box side, a branch/merge arrow) carries the
+lane onward for mid-timeline windows, while a lane's FINAL window has
+nothing below it — the lane ends there.
 
 ### Activity stats are per-segment, not per-node
 
