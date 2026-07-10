@@ -1817,11 +1817,24 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     let lineage = app
         .lineage_section_session()
         .map(|id| (id.clone(), app.lineage_section_rows(&id)));
+    // Will the diagram overflow the sidebar's width? Then the section needs
+    // one more bottom row for the horizontal scrollbar to live on.
+    let lineage_h_scrollbar = lineage
+        .as_ref()
+        .map(|(_, rows)| {
+            rows.iter()
+                .map(|r| unicode_width::UnicodeWidthStr::width(r.text().as_str()))
+                .max()
+                .unwrap_or(0)
+                > list_items_area.width as usize
+        })
+        .unwrap_or(false);
     let (list_items_area, lineage_rect) = split_lineage_section(
         list_items_area,
         lineage.as_ref().map(|(_, rows)| rows.len()).unwrap_or(0),
         app.lineage_collapsed,
         app.lineage_h,
+        lineage_h_scrollbar,
     );
     let max_scroll = app_items
         .len()
@@ -1874,6 +1887,7 @@ fn split_lineage_section(
     content_rows: usize,
     collapsed: bool,
     override_h: Option<u16>,
+    h_scrollbar: bool,
 ) -> (Rect, Option<Rect>) {
     if content_rows == 0 {
         return (list, None);
@@ -1888,9 +1902,13 @@ fn split_lineage_section(
     let h = if collapsed {
         1
     } else {
-        // Header + top pad + diagram + bottom pad, unless the user dragged
-        // the header to an explicit height.
-        let content = (content_rows as u16).saturating_add(3);
+        // Header + top pad + diagram + bottom pad — plus one more bottom
+        // row when the horizontal scrollbar will show, so it gets its own
+        // row instead of tinting the last diagram row. A user drag-height
+        // overrides the content sizing either way.
+        let content = (content_rows as u16)
+            .saturating_add(3)
+            .saturating_add(u16::from(h_scrollbar));
         override_h.unwrap_or(content).max(2).min(avail)
     };
     let rows = Rect {
@@ -2031,13 +2049,24 @@ fn render_lineage_section(
         width: rect.width,
         height: rect.height - 1,
     };
-    // One blank padding row above and below the diagram, when there's room.
-    let inner = if body.height >= 3 {
+    // One blank padding row above and below the diagram, when there's
+    // room. A diagram wider than the section additionally reserves the
+    // section's BOTTOM row for the horizontal scrollbar, so the last
+    // diagram row never sits under it — the pad row stays blank between
+    // them.
+    let content_w = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.text().as_str()))
+        .max()
+        .unwrap_or(0);
+    let h_overflow = content_w > body.width as usize;
+    let bottom_pad = 1 + u16::from(h_overflow);
+    let inner = if body.height >= 2 + bottom_pad {
         Rect {
             x: body.x,
             y: body.y + 1,
             width: body.width,
-            height: body.height - 2,
+            height: body.height - 1 - bottom_pad,
         }
     } else {
         body
@@ -2084,11 +2113,6 @@ fn render_lineage_section(
         }
     }
 
-    let content_w = rows
-        .iter()
-        .map(|r| UnicodeWidthStr::width(r.text().as_str()))
-        .max()
-        .unwrap_or(0);
     let visible = (inner.height as usize).max(1);
     let scroll = if focused {
         // Keyboard selection drags the viewport; wheel scrolling moved it
@@ -2106,7 +2130,7 @@ fn render_lineage_section(
     let scroll_x = app.lineage_scroll_x.min(max_scroll_x);
     app.lineage_scroll_x = scroll_x;
     app.layout.lineage_v_overflow = rows.len() > visible;
-    app.layout.lineage_h_overflow = content_w > inner.width as usize;
+    app.layout.lineage_h_overflow = h_overflow;
 
     // Hit regions for every cell a session owns — box borders and labels,
     // lane bars, branch glyphs, turn-info markers and text — in screen
@@ -2205,7 +2229,7 @@ fn render_lineage_section(
             }
         }
     }
-    if content_w > inner.width as usize && inner.height > 0 {
+    if h_overflow && inner.height > 0 {
         let track_w = inner.width as usize;
         let thumb_w = (track_w * track_w / content_w.max(1)).clamp(1, track_w);
         let denom = content_w - track_w;
@@ -2215,7 +2239,7 @@ fn render_lineage_section(
         } else {
             (scroll_x * max_left + denom / 2) / denom
         };
-        let y = inner.y + inner.height - 1;
+        let y = body.y + body.height - 1;
         for cidx in 0..track_w {
             if let Some(cell) = f.buffer_mut().cell_mut(ratatui::layout::Position {
                 x: inner.x + cidx as u16,
