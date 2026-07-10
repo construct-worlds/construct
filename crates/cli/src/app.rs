@@ -4706,14 +4706,37 @@ impl App {
                     }
                 }
             }
-            if let Some(forks) = forks_by_parent.get(s.id.as_str()) {
-                for fork in forks.iter().copied().filter(|q| !q.archived) {
-                    out.push(ListItem::Session {
-                        summary: fork.clone(),
-                        indented: true,
-                        has_children: false,
-                        children_expanded: false,
-                    });
+            // Forks nest indented under their parent — recursively, so a
+            // fork of a fork still appears (depth-first, all at one indent
+            // level, matching the flat subagent convention). The depth cap
+            // is a cycle guard for malformed lineage, not an expected
+            // limit.
+            let mut stack: Vec<(&SessionSummary, usize)> = forks_by_parent
+                .get(s.id.as_str())
+                .map(|forks| {
+                    forks
+                        .iter()
+                        .rev()
+                        .copied()
+                        .filter(|q| !q.archived)
+                        .map(|q| (q, 1usize))
+                        .collect()
+                })
+                .unwrap_or_default();
+            while let Some((fork, depth)) = stack.pop() {
+                out.push(ListItem::Session {
+                    summary: fork.clone(),
+                    indented: true,
+                    has_children: false,
+                    children_expanded: false,
+                });
+                if depth >= 8 {
+                    continue;
+                }
+                if let Some(nested) = forks_by_parent.get(fork.id.as_str()) {
+                    for q in nested.iter().rev().copied().filter(|q| !q.archived) {
+                        stack.push((q, depth + 1));
+                    }
                 }
             }
         };
@@ -26965,7 +26988,20 @@ mod tests {
 
     #[tokio::test]
     async fn forks_render_indented_under_their_parent_in_list_items() {
-        let (app, _dir, server) = test_app_with_lineage().await;
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        // A fork of the fork must also appear (recursive nesting) — it used
+        // to vanish from the list entirely: excluded from the top level for
+        // having `forked_from`, but never pushed under its parent either.
+        let mut nested = summary_with_kind(agentd_protocol::SessionKind::User);
+        nested.id = "s1-fork-fork".into();
+        nested.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "s1-fork".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+        });
+        app.sessions.push(nested);
         let items = app.list_items();
         let rows: Vec<(String, bool)> = items
             .iter()
@@ -26978,9 +27014,13 @@ mod tests {
             .collect();
         assert_eq!(
             rows,
-            vec![("s1".to_string(), false), ("s1-fork".to_string(), true)],
-            "a fork nests indented under its parent, like a subagent, and \
-             never appears as its own top-level row"
+            vec![
+                ("s1".to_string(), false),
+                ("s1-fork".to_string(), true),
+                ("s1-fork-fork".to_string(), true),
+            ],
+            "forks nest indented under their parent, recursively, and \
+             never appear as their own top-level rows"
         );
         server.abort();
     }

@@ -54,8 +54,8 @@ drag-resize: the section sizes itself to content within its caps.
 
 Relatedly, the session list itself shows lineage structure ambiently: a
 fork renders as an indented child row under its parent (like subagent
-rows), never as its own top-level row, and a parent row badges its live
-fork count. The section provides the temporal detail (fork/merge order,
+rows) — recursively, so a fork of a fork still appears — never as its own
+top-level row, and a parent row badges its live fork count. The section provides the temporal detail (fork/merge order,
 per-window message counts and compute time) that list rows cannot.
 
 ## Reason
