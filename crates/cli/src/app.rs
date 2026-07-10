@@ -617,6 +617,9 @@ fn chat_scroll_kind(ev: &SessionEvent) -> ChatScrollKind {
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::NativeSubagentSnapshot { .. }
+        | SessionEvent::NativeSubagentRemoved { .. }
+        | SessionEvent::NativeSubagent { .. }
         | SessionEvent::AgentStatus(_) => ChatScrollKind::Hidden,
         SessionEvent::Message { role, text }
             if should_render_chat_message_for_scroll(*role, text) =>
@@ -4081,7 +4084,10 @@ impl App {
         // `dispatch_paste_text` below routes the paste to the minibuffer /
         // orchestrator instead; with focus on the list, it routes to the
         // selected session rather than editing the program.
-        if self.program_popup.is_some()
+        if self
+            .program_popup
+            .as_ref()
+            .is_some_and(|popup| !popup.terminal_focus)
             && self.minibuffer.is_none()
             && self.focus == PaneFocus::View
         {
@@ -4660,10 +4666,18 @@ impl App {
             forks.sort_by_key(|s| s.position);
         }
 
-        let push_session = |out: &mut Vec<ListItem>, s: &SessionSummary, indented: bool| {
+        fn push_session_tree<'a>(
+            out: &mut Vec<ListItem>,
+            s: &SessionSummary,
+            indented: bool,
+            subagents_by_parent: &HashMap<&'a str, Vec<&'a SessionSummary>>,
+            forks_by_parent: &HashMap<&'a str, Vec<&'a SessionSummary>>,
+            collapsed: &HashSet<String>,
+            show_archived: &HashSet<String>,
+        ) {
             let children = subagents_by_parent.get(s.id.as_str());
             let has_children = children.map(|v| !v.is_empty()).unwrap_or(false);
-            let children_expanded = has_children && !self.subagent_collapsed.contains(&s.id);
+            let children_expanded = has_children && !collapsed.contains(&s.id);
             out.push(ListItem::Session {
                 summary: s.clone(),
                 indented,
@@ -4677,16 +4691,19 @@ impl App {
                         Vec<&SessionSummary>,
                     ) = children.iter().copied().partition(|child| !child.archived);
                     for child in active_children {
-                        out.push(ListItem::Session {
-                            summary: child.clone(),
-                            indented: true,
-                            has_children: false,
-                            children_expanded: false,
-                        });
+                        push_session_tree(
+                            out,
+                            child,
+                            true,
+                            subagents_by_parent,
+                            forks_by_parent,
+                            collapsed,
+                            show_archived,
+                        );
                     }
                     if !archived_children.is_empty() {
                         let section = ArchiveSection::Subagents(s.id.clone());
-                        let expanded = self.show_archived_subagents.contains(&s.id);
+                        let expanded = show_archived.contains(&s.id);
                         out.push(ListItem::ArchivedRow {
                             section,
                             count: archived_children.len(),
@@ -4695,12 +4712,15 @@ impl App {
                         });
                         if expanded {
                             for child in archived_children {
-                                out.push(ListItem::Session {
-                                    summary: child.clone(),
-                                    indented: true,
-                                    has_children: false,
-                                    children_expanded: false,
-                                });
+                                push_session_tree(
+                                    out,
+                                    child,
+                                    true,
+                                    subagents_by_parent,
+                                    forks_by_parent,
+                                    collapsed,
+                                    show_archived,
+                                );
                             }
                         }
                     }
@@ -4739,6 +4759,18 @@ impl App {
                     }
                 }
             }
+        }
+
+        let push_session = |out: &mut Vec<ListItem>, s: &SessionSummary, indented: bool| {
+            push_session_tree(
+                out,
+                s,
+                indented,
+                &subagents_by_parent,
+                &forks_by_parent,
+                &self.subagent_collapsed,
+                &self.show_archived_subagents,
+            );
         };
 
         let mut ungrouped: Vec<&SessionSummary> = self
@@ -6198,11 +6230,23 @@ impl App {
                             .find(|s| s.id == id)
                             .map(|s| s.pinned)
                             .unwrap_or(false);
+                        let was_archived = self
+                            .sessions
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| s.archived)
+                            .unwrap_or(false);
                         let now_pinned = payload.session.pinned;
                         let has_pty = payload.session.has_pty;
-                        // Move focus before the session is hidden behind the
-                        // archive disclosure row.
-                        if payload.session.archived {
+                        // Move focus only on the transition into the archive
+                        // disclosure row, not on every update to an already-
+                        // archived session (e.g. a reorder swap between two
+                        // archived siblings) — otherwise a session that was
+                        // already archived and visible (its section expanded)
+                        // gets its focus yanked away on every unrelated STATE
+                        // broadcast, which looks like the reorder key did
+                        // nothing or jumped the selection elsewhere.
+                        if payload.session.archived && !was_archived {
                             self.focus_neighbor_of(&id);
                         }
                         if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
@@ -11070,6 +11114,7 @@ mod tests {
             position: 0,
             group_id: None,
             parent_session_id: None,
+            native_subagent: None,
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
@@ -13423,6 +13468,24 @@ mod tests {
         assert_eq!(search.matches, vec![(0, 5), (11, 16)]);
         assert_eq!(search.selected, 1);
         assert_eq!(popup.cursor, 11);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn terminal_focused_program_routes_paste_to_session_pty() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut popup = program_popup_for_test("s1", "draft", 5);
+        popup.set_terminal_focus(true);
+        app.program_popup = Some(popup);
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+
+        app.on_paste("pasted text".to_string()).await;
+
+        let job = rx.try_recv().expect("paste should reach the session PTY");
+        assert_eq!(job.session_id, "s1");
+        assert_eq!(job.bytes, b"pasted text");
+        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "draft");
         server.abort();
     }
 
@@ -17099,6 +17162,75 @@ mod tests {
         assert_eq!(
             popup.program.session_id, "s2",
             "the clicked pane's own program opened"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn resize_handle_hover_shows_directional_drag_glyph() {
+        let (mut app, _dir, server) = empty_app().await;
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+
+        // Render once to establish the live resize hit geometry, then hover
+        // the list's right border — the same cell that starts a list drag.
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("initial render");
+        let list = app.layout.list_area.expect("list area");
+        app.mouse_pos = Some((list.right().saturating_sub(1), list.y.saturating_add(2)));
+        assert_eq!(
+            app.resize_handle_glyph_at(list.right().saturating_sub(1), list.y.saturating_add(2)),
+            Some("↔")
+        );
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover render");
+        let y = list.y.saturating_add(2);
+        let x = list.right().saturating_sub(1);
+        let buffer = term.backend().buffer();
+        assert_eq!(buffer.cell((x.saturating_sub(1), y)).unwrap().symbol(), "←");
+        assert_eq!(buffer.cell((x, y)).unwrap().symbol(), "│");
+        assert_eq!(buffer.cell((x.saturating_add(1), y)).unwrap().symbol(), "→");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn program_title_uses_left_edge_status_spinner_with_program_color() {
+        use agentd_protocol::AgentStatus;
+
+        let (mut app, _dir, server) = two_session_app().await;
+        app.sessions[0].harness = "smith".into();
+        app.agent_statuses.insert(
+            "s1".into(),
+            AgentStatus {
+                active: true,
+                started_at_ms: 1,
+                status: "working".into(),
+            },
+        );
+        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.program_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program render");
+
+        let popup = app.layout.modal_area.expect("program area");
+        let glyph = term
+            .backend()
+            .buffer()
+            .cell((popup.x + 2, popup.y))
+            .expect("left title glyph");
+        assert!(
+            SPINNER_FRAMES.contains(&glyph.symbol()),
+            "active session should replace the Program rectangle with its status spinner"
+        );
+        assert_eq!(
+            glyph.style().fg,
+            Some(app.theme.accent_alt),
+            "the status spinner should retain the Program border color"
         );
         server.abort();
     }
@@ -25240,6 +25372,53 @@ mod tests {
         server.abort();
     }
 
+    // Regression for "C-x C-p"/"C-x C-n" (MoveSelectedUp/Down) appearing to
+    // do nothing, or jump the selection somewhere unrelated, specifically
+    // when reordering a session inside an already-expanded archived
+    // disclosure section. `move_selected` only sends the daemon an RPC — the
+    // actual position swap arrives back as a STATE notification per moved
+    // session (see the comment in `move_selected`). The STATE handler used
+    // to yank focus off ANY archived session on EVERY update to it, not just
+    // the false->true transition into the archive row, so a reorder swap
+    // between two already-archived siblings looked identical to "this
+    // session just got archived" and stole the selection away — even though
+    // the session was already visible (its section's disclosure expanded)
+    // and nothing about its visibility changed.
+    #[tokio::test]
+    async fn archived_session_state_update_does_not_steal_focus_when_already_visible() {
+        let (mut app, _dir, server) = captured_app().await;
+        // s1 is already archived and its (ungrouped) archived section is
+        // expanded, so it's visible and selected in the list right now.
+        app.sessions
+            .iter_mut()
+            .find(|s| s.id == "s1")
+            .unwrap()
+            .archived = true;
+        app.show_archived_ungrouped = true;
+        app.selection = Selection::Session("s1".into());
+
+        // A STATE broadcast for the SAME still-archived session (e.g. the
+        // position update from swapping it with an archived sibling) must
+        // not move focus off of it.
+        let mut updated = app.sessions.iter().find(|s| s.id == "s1").unwrap().clone();
+        updated.position = 5;
+        app.on_notification(Notification {
+            jsonrpc: "2.0".into(),
+            method: agentd_protocol::ipc_notif::STATE.into(),
+            params: Some(
+                serde_json::to_value(StateNotificationPayload { session: updated }).unwrap(),
+            ),
+        })
+        .await;
+
+        assert_eq!(
+            app.selection,
+            Selection::Session("s1".into()),
+            "reordering an already-archived, already-visible session must not steal focus"
+        );
+        server.abort();
+    }
+
     // Regression for the step-5 user report: "apply the Tasks template" and
     // "add a task under Todo" never ticked. Both are LOCAL edits to the
     // program popup's buffer — `apply_program_template` and typing mutate
@@ -27177,13 +27356,17 @@ mod tests {
         child.id = "schild".into();
         child.parent_session_id = Some("sparent".into());
         child.position = 1;
+        let mut grandchild = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        grandchild.id = "sgrandchild".into();
+        grandchild.parent_session_id = Some("schild".into());
+        grandchild.position = 2;
         let mut orphan = summary_with_kind(agentd_protocol::SessionKind::Subagent);
         orphan.id = "sorphan".into();
         orphan.position = -1;
 
-        let mut app = test_app(client, vec![orphan, child, parent]);
+        let mut app = test_app(client, vec![orphan, grandchild, child, parent]);
         let items = app.list_items();
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 3);
         match &items[0] {
             ListItem::Session {
                 summary,
@@ -27207,10 +27390,15 @@ mod tests {
             } => {
                 assert_eq!(summary.id, "schild");
                 assert!(*indented);
-                assert!(!has_children);
+                assert!(*has_children);
             }
             _ => panic!("expected subagent session"),
         }
+        assert!(matches!(
+            &items[2],
+            ListItem::Session { summary, indented: true, has_children: false, .. }
+                if summary.id == "sgrandchild"
+        ));
 
         app.selection = Selection::Session("sparent".into());
         app.focus = PaneFocus::List;
@@ -27218,7 +27406,7 @@ mod tests {
         let collapsed_by_key = app.list_items();
         assert_eq!(collapsed_by_key.len(), 1);
         app.run_action(KeyAction::ExpandGroup).await;
-        assert_eq!(app.list_items().len(), 2);
+        assert_eq!(app.list_items().len(), 3);
 
         app.subagent_collapsed.insert("sparent".into());
         let collapsed = app.list_items();

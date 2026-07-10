@@ -56,7 +56,7 @@ use agentd_protocol::{
 };
 use construct_adapter_common::{drive_turn, TurnOutcome};
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -172,10 +172,13 @@ fn write_conv_id(id: &str) {
 }
 
 /// Parse the `Created conversation <uuid>` line agy writes to its
-/// `--log-file`. Returns the first match. (`Conversation using project
-/// ID: <uuid>` is a *different* id — the project, not the conversation —
-/// so we anchor on the exact "Created conversation" wording.)
+/// `--log-file`. Returns the **last** match so a mid-session clear that
+/// creates a second conversation supersedes the original. (`Conversation
+/// using project ID: <uuid>` is a *different* id — the project, not the
+/// conversation — so we anchor on the exact "Created conversation"
+/// wording.)
 fn parse_conversation_id(log_text: &str) -> Option<String> {
+    let mut last: Option<String> = None;
     for line in log_text.lines() {
         if let Some(idx) = line.find("Created conversation ") {
             let rest = &line[idx + "Created conversation ".len()..];
@@ -185,11 +188,11 @@ fn parse_conversation_id(log_text: &str) -> Option<String> {
                 .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
                 .collect();
             if id.len() == 36 {
-                return Some(id);
+                last = Some(id);
             }
         }
     }
-    None
+    last
 }
 
 async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
@@ -263,18 +266,35 @@ fn spawn_interactive_transcript_watcher(
     tokio::spawn(async move {
         let mut conv_id = existing_id;
         let mut last_step = -1;
-        let mut initialized = false;
+        // First attach of a resumed id can skip prior transcript steps;
+        // every later rebind (post-/clear) starts fresh.
+        let mut skip_next_transcript = skip_existing && conv_id.is_some();
+        let mut children: HashMap<String, AntigravityNativeChild> = HashMap::new();
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
 
-            if conv_id.is_none() {
-                if let Some(lp) = &log_path {
-                    if let Ok(text) = std::fs::read_to_string(lp) {
-                        if let Some(id) = parse_conversation_id(&text) {
+            // Always re-scan the log. Agy appends another
+            // "Created conversation" after /clear; parse returns the last
+            // match so we track the active native id, not the first.
+            if let Some(lp) = &log_path {
+                if let Ok(text) = std::fs::read_to_string(lp) {
+                    if let Some(id) = parse_conversation_id(&text) {
+                        if conv_id.as_ref() != Some(&id) {
+                            if conv_id.is_some() {
+                                emit.log(format!(
+                                    "antigravity: native conversation id changed {:?} -> {id}; \
+                                     rebinding transcript watcher",
+                                    conv_id
+                                ));
+                            }
                             write_conv_id(&id);
                             conv_id = Some(id);
+                            last_step = -1;
+                            children.clear();
+                            // Only the initial resume attach skips history.
+                            skip_next_transcript = false;
                         }
                     }
                 }
@@ -286,13 +306,60 @@ fn spawn_interactive_transcript_watcher(
             let Some(tp) = transcript_path(id) else {
                 continue;
             };
-            if !initialized {
-                if skip_existing {
-                    last_step = max_step_index(&tp);
+            if skip_next_transcript {
+                last_step = max_step_index(&tp);
+                let (_, values) = read_new_transcript_steps(&tp, -1);
+                apply_antigravity_native_updates(
+                    values.iter().map(|value| (None, value)),
+                    &mut children,
+                    None,
+                );
+                for (child_id, child) in &mut children {
+                    child.last_step = transcript_path(child_id)
+                        .as_deref()
+                        .map(max_step_index)
+                        .unwrap_or(-1);
                 }
-                initialized = true;
+                skip_next_transcript = false;
             }
-            last_step = emit_new_transcript_steps(&tp, last_step, &emit);
+            let (next_step, root_values) = read_new_transcript_steps(&tp, last_step);
+            last_step = next_step;
+            for value in &root_values {
+                emit_step(value, &emit);
+            }
+
+            let mut lifecycle_values: Vec<(Option<String>, Value)> =
+                root_values.into_iter().map(|value| (None, value)).collect();
+            let child_ids: Vec<String> = children.keys().cloned().collect();
+            for child_id in child_ids {
+                let Some(child) = children.get_mut(&child_id) else {
+                    continue;
+                };
+                let Some(child_path) = transcript_path(&child_id) else {
+                    continue;
+                };
+                let (next_step, values) = read_new_transcript_steps(&child_path, child.last_step);
+                child.last_step = next_step;
+                for value in values {
+                    for event in antigravity_events_from_step(&value) {
+                        emit.emit(SessionEvent::NativeSubagent {
+                            id: child_id.clone(),
+                            parent_id: child.parent_id.clone(),
+                            title: None,
+                            state: child.state,
+                            event: Some(Box::new(event)),
+                        });
+                    }
+                    lifecycle_values.push((Some(child_id.clone()), value));
+                }
+            }
+            apply_antigravity_native_updates(
+                lifecycle_values
+                    .iter()
+                    .map(|(parent_id, value)| (parent_id.as_deref(), value)),
+                &mut children,
+                Some(&emit),
+            );
         }
     });
 }
@@ -423,12 +490,15 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         let outcome = drive_turn(&mut child, &mut inbox, &emit, &mut pending).await;
         let _ = child.wait().await;
 
-        // Learn the conversation id from this turn's log if we didn't
-        // have one yet, then emit the new transcript steps.
-        if conv_id.is_none() {
-            if let Ok(text) = std::fs::read_to_string(&log_path) {
-                if let Some(id) = parse_conversation_id(&text) {
+        // Learn / refresh the conversation id from this turn's log. A
+        // mid-run clear can mint a new id; subsequent turns must resume
+        // that one, not the first we ever saw.
+        if let Ok(text) = std::fs::read_to_string(&log_path) {
+            if let Some(id) = parse_conversation_id(&text) {
+                if conv_id.as_ref() != Some(&id) {
                     write_conv_id(&id);
+                    // New conversation → re-emit from the start of its transcript.
+                    last_step = -1;
                     conv_id = Some(id);
                 }
             }
@@ -480,6 +550,139 @@ where
     }
 }
 
+#[derive(Debug)]
+struct AntigravityNativeChild {
+    parent_id: Option<String>,
+    state: SessionState,
+    last_step: i64,
+}
+
+fn antigravity_spawned_subagent_ids(value: &Value) -> Vec<String> {
+    if value.get("type").and_then(Value::as_str) != Some("INVOKE_SUBAGENT") {
+        return Vec::new();
+    }
+    let Some(content) = value.get("content").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    json_objects_in_text(content)
+        .into_iter()
+        .filter_map(|object| {
+            object
+                .get("conversationId")
+                .and_then(Value::as_str)
+                .filter(|id| id.len() == 36)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn antigravity_message_sender(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("SYSTEM_MESSAGE") {
+        return None;
+    }
+    let content = value.get("content").and_then(Value::as_str)?;
+    let sender = content.split("sender=").nth(1)?;
+    let id: String = sender
+        .chars()
+        .take_while(|character| character.is_ascii_hexdigit() || *character == '-')
+        .collect();
+    (id.len() == 36).then_some(id)
+}
+
+fn json_objects_in_text(text: &str) -> Vec<Value> {
+    let mut values = Vec::new();
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' if start.is_some() => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = Some(index);
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(start) = start.take() {
+                        if let Ok(value) = serde_json::from_str(&text[start..=index]) {
+                            values.push(value);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    values
+}
+
+fn apply_antigravity_native_updates<'a>(
+    values: impl IntoIterator<Item = (Option<&'a str>, &'a Value)>,
+    children: &mut HashMap<String, AntigravityNativeChild>,
+    emit: Option<&EventEmitter>,
+) {
+    for (native_parent_id, value) in values {
+        for id in antigravity_spawned_subagent_ids(value) {
+            let parent_id = native_parent_id.map(str::to_string);
+            let is_new = !children.contains_key(&id);
+            let child = children
+                .entry(id.clone())
+                .or_insert(AntigravityNativeChild {
+                    parent_id: parent_id.clone(),
+                    state: SessionState::Running,
+                    last_step: -1,
+                });
+            child.parent_id = parent_id.clone();
+            child.state = SessionState::Running;
+            if is_new {
+                if let Some(emit) = emit {
+                    emit.emit(SessionEvent::NativeSubagent {
+                        id: id.clone(),
+                        parent_id,
+                        title: Some(format!("Antigravity subagent {}", &id[..8])),
+                        state: SessionState::Running,
+                        event: None,
+                    });
+                }
+            }
+        }
+
+        let Some(id) = antigravity_message_sender(value) else {
+            continue;
+        };
+        let Some(child) = children.get_mut(&id) else {
+            continue;
+        };
+        if child.state == SessionState::Done {
+            continue;
+        }
+        child.state = SessionState::Done;
+        if let Some(emit) = emit {
+            emit.emit(SessionEvent::NativeSubagent {
+                id,
+                parent_id: child.parent_id.clone(),
+                title: None,
+                state: SessionState::Done,
+                event: None,
+            });
+        }
+    }
+}
+
 /// Highest `step_index` currently in a transcript file, or -1 if the
 /// file is missing/empty/unparseable.
 fn max_step_index(path: &Path) -> i64 {
@@ -503,10 +706,19 @@ fn max_step_index(path: &Path) -> i64 {
 /// Read `path` and emit every step with `step_index > after` as the
 /// appropriate `SessionEvent`. Returns the new high-water step index.
 fn emit_new_transcript_steps(path: &Path, after: i64, emit: &EventEmitter) -> i64 {
+    let (high, values) = read_new_transcript_steps(path, after);
+    for value in values {
+        emit_step(&value, emit);
+    }
+    high
+}
+
+fn read_new_transcript_steps(path: &Path, after: i64) -> (i64, Vec<Value>) {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return after;
+        return (after, Vec::new());
     };
     let mut high = after;
+    let mut values = Vec::new();
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -522,9 +734,9 @@ fn emit_new_transcript_steps(path: &Path, after: i64, emit: &EventEmitter) -> i6
             continue;
         }
         high = high.max(idx);
-        emit_step(&v, emit);
+        values.push(v);
     }
-    high
+    (high, values)
 }
 
 /// Map one transcript step to a `SessionEvent`.
@@ -553,10 +765,7 @@ fn antigravity_events_from_step(v: &Value) -> Vec<SessionEvent> {
                     // Antigravity tool_call objects may carry an `id`; if not,
                     // there is no stable correlation key in this transcript
                     // format, so leave it None.
-                    let call_id = c
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
+                    let call_id = c.get("id").and_then(|v| v.as_str()).map(str::to_string);
                     out.push(SessionEvent::ToolUse {
                         tool: name,
                         args,
@@ -612,6 +821,18 @@ mod tests {
         assert_eq!(
             parse_conversation_id(log).as_deref(),
             Some("b6eae99e-b76c-4417-837f-ea8adae0a2ba")
+        );
+    }
+
+    #[test]
+    fn parse_conversation_id_prefers_last_after_clear() {
+        // Agy appends another "Created conversation" when the user clears;
+        // resume must follow the newest id, not the original spawn.
+        let log = "I0522 01:17:15.555 server.go:747] Created conversation b6eae99e-b76c-4417-837f-ea8adae0a2ba\n\
+                   I0522 01:20:00.000 server.go:747] Created conversation aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n";
+        assert_eq!(
+            parse_conversation_id(log).as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         );
     }
 
@@ -701,5 +922,40 @@ mod tests {
             }
             other => panic!("unexpected tool-result events: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_native_subagent_creation_result() {
+        let value = serde_json::json!({
+            "type": "INVOKE_SUBAGENT",
+            "status": "DONE",
+            "content": "Created the following subagents:\n{\n  \"conversationId\": \"825753eb-7780-4b85-a59b-f86fe4972dd9\",\n  \"workspaceUris\": [\"file:///tmp/worktree\"]\n}\nThe subagents will send a message when done."
+        });
+        assert_eq!(
+            antigravity_spawned_subagent_ids(&value),
+            vec!["825753eb-7780-4b85-a59b-f86fe4972dd9"]
+        );
+    }
+
+    #[test]
+    fn parses_native_subagent_completion_message() {
+        let value = serde_json::json!({
+            "type": "SYSTEM_MESSAGE",
+            "status": "DONE",
+            "content": "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-07-10T07:29:31Z sender=825753eb-7780-4b85-a59b-f86fe4972dd9 priority=MESSAGE_PRIORITY_HIGH content=hello world\n</SYSTEM_MESSAGE>"
+        });
+        assert_eq!(
+            antigravity_message_sender(&value).as_deref(),
+            Some("825753eb-7780-4b85-a59b-f86fe4972dd9")
+        );
+    }
+
+    #[test]
+    fn ignores_non_subagent_json_in_antigravity_output() {
+        let value = serde_json::json!({
+            "type": "RUN_COMMAND",
+            "content": "command output: {\"conversationId\":\"825753eb-7780-4b85-a59b-f86fe4972dd9\"}"
+        });
+        assert!(antigravity_spawned_subagent_ids(&value).is_empty());
     }
 }

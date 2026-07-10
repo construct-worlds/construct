@@ -8,13 +8,14 @@ use agentd_protocol::dialect;
 use agentd_protocol::{
     agent_context, ahp_method, ClientView, CreateSessionParams, DeletedNotificationPayload,
     EventNotificationPayload, GroupDeletedNotificationPayload, GroupStateNotificationPayload,
-    GroupSummary, HarnessInfo, MessageRole, MoveDirection, ProgramDocument, ProgramEditParams,
-    ProgramExecuteParams, ProgramExecuteResult, ProgramGetResult, ProgramListTemplatesResult,
-    ProgramRunProgress, ProgramStateNotificationPayload, ProgramUpdateParams, ProgramUpdateResult,
-    PtyReplayResult, PtySize, SearchParams, SearchResult, SessionAttachClipboardParams,
-    SessionAttachClipboardResult, SessionDetail, SessionEmitEventParams, SessionEvent,
-    SessionStartParams, SessionState, SessionSummary, SmithAuthMethodInfo, SmithAuthStatusResult,
-    SmithSetAuthMethodResult, StateNotificationPayload, TimestampedEvent, TranscriptResult,
+    GroupSummary, HarnessInfo, MessageRole, MoveDirection, NativeSubagentRef, ProgramDocument,
+    ProgramEditParams, ProgramExecuteParams, ProgramExecuteResult, ProgramGetResult,
+    ProgramListTemplatesResult, ProgramRunProgress, ProgramStateNotificationPayload,
+    ProgramUpdateParams, ProgramUpdateResult, PtyReplayResult, PtySize, SearchParams, SearchResult,
+    SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
+    SessionEmitEventParams, SessionEvent, SessionStartParams, SessionState, SessionSummary,
+    SmithAuthMethodInfo, SmithAuthStatusResult, SmithSetAuthMethodResult, StateNotificationPayload,
+    TimestampedEvent, TranscriptResult,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
@@ -876,6 +877,14 @@ impl SessionEntry {
     pub async fn snapshot_state(&self) -> agentd_protocol::SessionState {
         self.summary.read().await.state
     }
+}
+
+fn native_subagent_session_id(owner_session_id: &str, native_id: &str) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    format!(
+        "{owner_session_id}~native~{}",
+        URL_SAFE_NO_PAD.encode(native_id.as_bytes())
+    )
 }
 
 /// Per-session PTY metadata. Used to hold the last known PTY dimensions
@@ -2831,6 +2840,53 @@ impl SessionManager {
         ids
     }
 
+    async fn archive_native_mirror(&self, id: &str) -> Result<()> {
+        let entry = self
+            .get_entry(id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {id}"))?;
+        let children = self.child_subagent_ids(id).await;
+        let snapshot = {
+            let mut summary = entry.summary.write().await;
+            summary.archived = true;
+            summary.state = SessionState::Done;
+            summary.pending_input = false;
+            summary.clone()
+        };
+        entry.archived.store(true, Ordering::SeqCst);
+        self.storage.save_summary(&snapshot)?;
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::State(StateNotificationPayload {
+                session: snapshot,
+            }));
+        for child in children {
+            Box::pin(self.archive_native_mirror(&child)).await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_native_mirror(&self, id: &str) -> Result<()> {
+        let children = self.child_subagent_ids(id).await;
+        for child in children {
+            Box::pin(self.delete_native_mirror(&child)).await?;
+        }
+        let entry = self
+            .sessions
+            .write()
+            .await
+            .remove(id)
+            .ok_or_else(|| anyhow!("session not found: {id}"))?;
+        entry.deleted.store(true, Ordering::SeqCst);
+        self.storage.remove_session(id)?;
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::Deleted(DeletedNotificationPayload {
+                session_id: id.to_string(),
+            }));
+        Ok(())
+    }
+
     /// Archive a session: terminate its adapter (if any) but keep the
     /// transcript, worktree, and start params on disk so it can be restarted
     /// later. The session is marked `archived` (hidden from the list by
@@ -2846,6 +2902,12 @@ impl SessionManager {
             .get_entry(id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", id))?;
+        if entry.summary.read().await.native_subagent.is_some() {
+            // Archiving is a local visibility/history operation, not control
+            // of the harness-owned child. Keep resume/interrupt restrictions
+            // for native mirrors, but allow users to hide one explicitly.
+            return self.archive_native_mirror(id).await;
+        }
         // Snapshot the child subagents before we start mutating state so a
         // concurrently-finishing subagent can't slip out of the cascade.
         let child_subagents = self.child_subagent_ids(id).await;
@@ -2904,7 +2966,17 @@ impl SessionManager {
         // so nested subagents archive too. A failure on one child is logged but
         // never aborts the rest or the parent archive.
         for sid in &child_subagents {
-            if let Err(e) = Box::pin(self.archive(sid)).await {
+            let native = if let Some(entry) = self.get_entry(sid).await {
+                entry.summary.read().await.native_subagent.is_some()
+            } else {
+                false
+            };
+            let result = if native {
+                Box::pin(self.archive_native_mirror(sid)).await
+            } else {
+                Box::pin(self.archive(sid)).await
+            };
+            if let Err(e) = result {
                 tracing::warn!(
                     parent = %id,
                     subagent = %sid,
@@ -2977,6 +3049,13 @@ impl SessionManager {
     /// child subagents it spawned (recursively), so they don't linger as
     /// orphaned rows once their parent is gone.
     pub async fn delete(&self, id: &str) -> Result<()> {
+        if let Some(entry) = self.get_entry(id).await {
+            if entry.summary.read().await.native_subagent.is_some() {
+                return Err(anyhow!(
+                    "native harness subagents are read-only; manage them through their parent harness"
+                ));
+            }
+        }
         // Pull out the entry so the in-memory map releases the Arc; the
         // entry itself stays alive via our local Arc until the function ends.
         let entry = {
@@ -3050,7 +3129,17 @@ impl SessionManager {
         // so nested subagents are torn down too. A failure on one child is
         // logged but never aborts the rest or the parent delete.
         for sid in &child_subagents {
-            if let Err(e) = Box::pin(self.delete(sid)).await {
+            let native = if let Some(entry) = self.get_entry(sid).await {
+                entry.summary.read().await.native_subagent.is_some()
+            } else {
+                false
+            };
+            let result = if native {
+                Box::pin(self.delete_native_mirror(sid)).await
+            } else {
+                Box::pin(self.delete(sid)).await
+            };
+            if let Err(e) = result {
                 tracing::warn!(
                     parent = %id,
                     subagent = %sid,
@@ -3091,15 +3180,21 @@ impl SessionManager {
             .ok_or_else(|| anyhow!("session not found: {}", id))?;
 
         // Find neighbors in `me`'s visible reorder region (same group_id,
-        // user sessions only), sorted by position. The daemon list includes
-        // hidden orchestrator/subagent records so clients can render them in
-        // specialized places, but the TUI's session list filters those out. If
-        // reorder considers hidden records, a visible session surrounded by
-        // subagents can appear stuck or jump unpredictably because it swaps
-        // with rows the user cannot see.
+        // user sessions and archive partition only), sorted by position. The
+        // daemon list includes hidden orchestrator/subagent records so clients
+        // can render them in specialized places, but the TUI's session list
+        // filters those out. It also puts archived sessions behind a disclosure
+        // row. If reordering considers either kind of hidden record, a visible
+        // row can appear stuck because it swaps with a row the user cannot see.
+        //
+        // Keep archived sessions in their own partition as well: when their
+        // disclosure row is expanded, they can still be reordered among
+        // themselves without perturbing the active rows above it.
         let region: Vec<&SessionSummary> = all_sessions
             .iter()
-            .filter(|s| s.group_id == me.group_id && is_user_session_kind(s))
+            .filter(|s| {
+                s.group_id == me.group_id && is_user_session_kind(s) && s.archived == me.archived
+            })
             .collect();
         let pos_in_region = region.iter().position(|s| s.id == id).unwrap();
 
@@ -3795,6 +3890,7 @@ mod tests {
             position,
             group_id: group_id.map(str::to_string),
             parent_session_id: None,
+            native_subagent: None,
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
@@ -4266,6 +4362,7 @@ mod tests {
                 position,
                 group_id,
                 parent_session_id: None,
+                native_subagent: None,
                 last_pty_at_ms: None,
                 busy_ms: 0,
                 busy_running_since_ms: None,
@@ -4347,6 +4444,47 @@ mod tests {
         assert_eq!(b.position, 10);
         assert_eq!(a.position, 30);
         assert_eq!(hidden.position, 20);
+    }
+
+    #[tokio::test]
+    async fn move_session_ignores_hidden_archived_sessions_in_reorder_region() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        // The TUI shows active sessions directly but puts archived ones behind
+        // an initially-collapsed disclosure row. Moving `suser-b` up must swap
+        // with the visible `suser-a`, not only with invisible `sarchived`.
+        let active_a = synthetic_entry("suser-a", agentd_protocol::SessionKind::User, 0);
+        let archived = synthetic_entry("sarchived", agentd_protocol::SessionKind::User, 10);
+        archived.summary.write().await.archived = true;
+        let active_b = synthetic_entry("suser-b", agentd_protocol::SessionKind::User, 20);
+        for (id, entry) in [
+            ("suser-a", active_a),
+            ("sarchived", archived),
+            ("suser-b", active_b),
+        ] {
+            mgr.sessions.write().await.insert(id.into(), entry);
+        }
+
+        mgr.move_session("suser-b", agentd_protocol::MoveDirection::Up)
+            .await
+            .expect("move up");
+
+        let sessions = mgr.list().await;
+        let a = sessions.iter().find(|s| s.id == "suser-a").unwrap();
+        let archived = sessions.iter().find(|s| s.id == "sarchived").unwrap();
+        let b = sessions.iter().find(|s| s.id == "suser-b").unwrap();
+        assert_eq!(b.position, 0);
+        assert_eq!(a.position, 20);
+        assert_eq!(archived.position, 10);
     }
 
     /// Spec 0073: with a painted background reported, the daemon strips
@@ -5291,6 +5429,7 @@ mod tests {
             position: 0,
             group_id: None,
             parent_session_id: None,
+            native_subagent: None,
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
@@ -5430,6 +5569,7 @@ mod tests {
             position: 0,
             group_id: None,
             parent_session_id: None,
+            native_subagent: None,
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
@@ -8976,6 +9116,133 @@ done
         assert!(
             mgr.program_run_snapshot(&id).is_none(),
             "a terminal state clears a managed run"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_subagent_event_projects_read_only_child_and_transcript() {
+        use agentd_protocol::{MessageRole, NativeSubagentRef};
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage = Arc::new(Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(Config::default());
+        let (manager, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("manager");
+        let owner = synthetic_entry("owner", agentd_protocol::SessionKind::User, 0);
+        owner.summary.write().await.harness = "codex".into();
+        manager
+            .sessions
+            .write()
+            .await
+            .insert(owner.id.clone(), owner.clone());
+
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagent {
+                    id: "native-child".into(),
+                    parent_id: None,
+                    title: Some("Inspect parser".into()),
+                    state: SessionState::Running,
+                    event: Some(Box::new(SessionEvent::Message {
+                        role: MessageRole::Assistant,
+                        text: "found it".into(),
+                    })),
+                },
+            )
+            .await;
+
+        let projected_id = native_subagent_session_id("owner", "native-child");
+        let child = manager
+            .detail(&projected_id)
+            .await
+            .expect("projected child");
+        assert_eq!(child.summary.parent_session_id.as_deref(), Some("owner"));
+        assert_eq!(child.summary.title.as_deref(), Some("Inspect parser"));
+        assert_eq!(child.summary.harness, "codex");
+        assert_eq!(
+            child.summary.native_subagent,
+            Some(NativeSubagentRef {
+                owner_session_id: "owner".into(),
+                native_id: "native-child".into(),
+            })
+        );
+        assert!(matches!(
+            child.events.as_slice(),
+            [TimestampedEvent {
+                event: SessionEvent::Message { text, .. },
+                ..
+            }] if text == "found it"
+        ));
+
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagentSnapshot { ids: Vec::new() },
+            )
+            .await;
+        assert!(
+            manager
+                .detail(&projected_id)
+                .await
+                .expect("archived mirror")
+                .summary
+                .archived,
+            "a child absent from the authoritative snapshot is archived"
+        );
+
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagentSnapshot {
+                    ids: vec!["native-child".into()],
+                },
+            )
+            .await;
+        let restored = manager
+            .detail(&projected_id)
+            .await
+            .expect("restored mirror");
+        assert!(
+            restored.summary.archived,
+            "retained transcript files do not resurrect an archived native child"
+        );
+
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagent {
+                    id: "native-child".into(),
+                    parent_id: None,
+                    title: None,
+                    state: SessionState::Running,
+                    event: None,
+                },
+            )
+            .await;
+        assert!(
+            !manager
+                .detail(&projected_id)
+                .await
+                .expect("active mirror")
+                .summary
+                .archived
+        );
+
+        manager
+            .archive(&projected_id)
+            .await
+            .expect("archive mirror");
+        assert!(
+            manager
+                .detail(&projected_id)
+                .await
+                .expect("removed mirror")
+                .summary
+                .archived
         );
     }
 }

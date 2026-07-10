@@ -315,8 +315,7 @@ impl TutorialState {
         if self.completed || self.stalled {
             return;
         }
-        if matches!(self.step, 5 | 6) && now.duration_since(self.last_progress_at) > STALL_TIMEOUT
-        {
+        if matches!(self.step, 5 | 6) && now.duration_since(self.last_progress_at) > STALL_TIMEOUT {
             self.stalled = true;
             self.feedback =
                 Some("the agent is taking a while — you can keep waiting or skip ahead".into());
@@ -362,13 +361,19 @@ impl TutorialState {
     pub fn checklist(&self) -> Vec<(String, bool)> {
         match self.step {
             4 => vec![
-                ("switch focus (list <-> view)".to_string(), self.focus_switched),
+                (
+                    "switch focus (list <-> view)".to_string(),
+                    self.focus_switched,
+                ),
                 ("move the selection".to_string(), self.selection_moved),
             ],
             5 => {
                 let mut items = vec![
                     ("open the program".to_string(), self.program_opened),
-                    ("apply the Tasks template".to_string(), self.template_applied),
+                    (
+                        "apply the Tasks template".to_string(),
+                        self.template_applied,
+                    ),
                     ("add a task under Todo".to_string(), self.task_line_present),
                 ];
                 if !self.degraded {
@@ -491,14 +496,23 @@ fn step4_lines(profile: Profile, single_session: bool) -> Vec<TutorialLine> {
     let mut lines = vec![
         vec![
             t("1. "),
-            k(chord_label(KeyAction::SwitchFocus, profile), KeyAction::SwitchFocus),
+            k(
+                chord_label(KeyAction::SwitchFocus, profile),
+                KeyAction::SwitchFocus,
+            ),
             t(" — jump to the list."),
         ],
         vec![
             t("2. "),
-            k(chord_label(KeyAction::NextSession, profile), KeyAction::NextSession),
+            k(
+                chord_label(KeyAction::NextSession, profile),
+                KeyAction::NextSession,
+            ),
             t(" / "),
-            k(chord_label(KeyAction::PrevSession, profile), KeyAction::PrevSession),
+            k(
+                chord_label(KeyAction::PrevSession, profile),
+                KeyAction::PrevSession,
+            ),
             t(" — move the selection."),
         ],
     ];
@@ -515,7 +529,10 @@ fn step4_lines(profile: Profile, single_session: bool) -> Vec<TutorialLine> {
 fn step5_lines(profile: Profile, degraded: bool) -> Vec<TutorialLine> {
     let mut lines = vec![
         vec![
-            k(chord_label(KeyAction::OpenProgram, profile), KeyAction::OpenProgram),
+            k(
+                chord_label(KeyAction::OpenProgram, profile),
+                KeyAction::OpenProgram,
+            ),
             t(" opens the program board."),
         ],
         vec![t("Pick the built-in \"Tasks\" template, then")],
@@ -526,7 +543,10 @@ fn step5_lines(profile: Profile, degraded: bool) -> Vec<TutorialLine> {
         lines.push(vec![t("is editing-only — nothing to run yet.")]);
     } else {
         lines.push(vec![
-            k(chord_label(KeyAction::RunProgram, profile), KeyAction::RunProgram),
+            k(
+                chord_label(KeyAction::RunProgram, profile),
+                KeyAction::RunProgram,
+            ),
             t(" runs it, moves task to In Progress,"),
         ]);
         lines.push(vec![t("and hands it to a subagent.")]);
@@ -595,8 +615,8 @@ fn step6_lines(state: &TutorialState, ctx: TutorialCardCtx) -> Vec<TutorialLine>
     // `run_finished` covers both fast-model inverses: the task already sits
     // under ## Done, and/or the spawned subagent has already been archived
     // by the board's rule (observed once, no longer listed).
-    let run_finished = state.task_done
-        || (state.subagent_session_id.is_some() && !ctx.subagent_listed);
+    let run_finished =
+        state.task_done || (state.subagent_session_id.is_some() && !ctx.subagent_listed);
     if run_finished {
         lines.push(vec![t("The task is Done! Close the split:")]);
         lines.push(vec![
@@ -632,12 +652,18 @@ fn step7_lines(profile: Profile, list_focused: bool) -> Vec<TutorialLine> {
     let mut lines = vec![
         vec![
             t("1. "),
-            k(chord_label(KeyAction::SwitchFocus, profile), KeyAction::SwitchFocus),
+            k(
+                chord_label(KeyAction::SwitchFocus, profile),
+                KeyAction::SwitchFocus,
+            ),
             t(" — hop to the list, then"),
         ],
         vec![
             t("2. "),
-            k(chord_label(KeyAction::ToggleHelp, profile), KeyAction::ToggleHelp),
+            k(
+                chord_label(KeyAction::ToggleHelp, profile),
+                KeyAction::ToggleHelp,
+            ),
             t(" — open help (any key closes)."),
         ],
     ];
@@ -766,9 +792,7 @@ impl App {
         let selectable = self
             .sessions
             .iter()
-            .filter(|s| {
-                s.kind != agentd_protocol::SessionKind::Orchestrator && !s.archived
-            })
+            .filter(|s| s.kind != agentd_protocol::SessionKind::Orchestrator && !s.archived)
             .count();
         let subagent_listed = self
             .tutorial
@@ -801,7 +825,8 @@ impl App {
     pub fn tutorial_nudge(&mut self) {
         if let Some(t) = self.tutorial.as_mut() {
             if !t.completed && t.step == 1 {
-                t.feedback = Some("this one's for your fingers — try pressing the real keys".into());
+                t.feedback =
+                    Some("this one's for your fingers — try pressing the real keys".into());
             }
         }
     }
@@ -910,8 +935,10 @@ impl App {
         if t.completed || t.step != 1 {
             return;
         }
-        let is_ctrl_x = matches!(key.code, KeyCode::Char('x')) && key.modifiers == KeyModifiers::CONTROL;
-        let is_ctrl_g = matches!(key.code, KeyCode::Char('g')) && key.modifiers == KeyModifiers::CONTROL;
+        let is_ctrl_x =
+            matches!(key.code, KeyCode::Char('x')) && key.modifiers == KeyModifiers::CONTROL;
+        let is_ctrl_g =
+            matches!(key.code, KeyCode::Char('g')) && key.modifiers == KeyModifiers::CONTROL;
         match t.step1_phase {
             Step1Phase::AwaitCtrlX => {
                 if is_ctrl_x && matches!(res, KeymapResult::Pending(_)) {
@@ -1019,9 +1046,7 @@ impl App {
                 // practice session — that repairs the rest of the tour's
                 // scoped observers (Done detection, step 8's delete gate).
                 let is_tour_subagent = match t.practice_session_id.as_deref() {
-                    Some(practice) => {
-                        session.parent_session_id.as_deref() == Some(practice)
-                    }
+                    Some(practice) => session.parent_session_id.as_deref() == Some(practice),
                     None => session.kind == agentd_protocol::SessionKind::Subagent,
                 };
                 if is_tour_subagent {
@@ -1249,7 +1274,8 @@ mod tests {
         assert!(todo_section_has_task(md));
         assert!(!done_section_has_task(md));
 
-        let moved = "# Rule\n\n## Todo\n\n## In Progress\n\n- Test task\n\n## Done\n\n- Test task\n";
+        let moved =
+            "# Rule\n\n## Todo\n\n## In Progress\n\n- Test task\n\n## Done\n\n- Test task\n";
         assert!(!todo_section_has_task(moved));
         assert!(done_section_has_task(moved));
     }
@@ -1312,7 +1338,10 @@ mod tests {
             chord_label(KeyAction::SplitWindowBelow, Profile::Vim),
             "C-w s"
         );
-        assert_eq!(chord_label(KeyAction::OpenDeleteConfirm, Profile::Vim), "dd");
+        assert_eq!(
+            chord_label(KeyAction::OpenDeleteConfirm, Profile::Vim),
+            "dd"
+        );
         assert_eq!(chord_label(KeyAction::DeleteWindow, Profile::Vim), "C-w c");
         assert_eq!(
             chord_label(KeyAction::DeleteOtherWindows, Profile::Vim),
@@ -1439,7 +1468,9 @@ mod tests {
         );
         // Ordered: the focus hop is taught before the selection move.
         let jump = single.find("jump to the list").expect("step order line 1");
-        let sel = single.find("move the selection").expect("step order line 2");
+        let sel = single
+            .find("move the selection")
+            .expect("step order line 2");
         assert!(jump < sel, "C-x o must be taught before C-n/C-p");
 
         let multi = joined_text(&state.lines(TutorialCardCtx::default()));
@@ -1553,15 +1584,16 @@ mod tests {
             // Regardless of what the agent has done so far…
             state.subagent_session_id = Some("sub".into());
             state.task_done = true;
-            let labels: Vec<String> =
-                state.checklist().into_iter().map(|(l, _)| l).collect();
+            let labels: Vec<String> = state.checklist().into_iter().map(|(l, _)| l).collect();
             assert_eq!(
                 labels,
                 vec!["split the pane", "hop panes", "close the split"],
                 "step-6 checklist must list user actions only (degraded={degraded})"
             );
             assert!(
-                !labels.iter().any(|l| l.contains("subagent") || l.contains("Done")),
+                !labels
+                    .iter()
+                    .any(|l| l.contains("subagent") || l.contains("Done")),
                 "agent-driven progress must not render as a checkbox"
             );
         }
@@ -1620,8 +1652,7 @@ mod tests {
                                     state.step = step;
                                     state.step1_phase = phase;
                                     state.task_done = task_done;
-                                    state.subagent_session_id =
-                                        sub_seen.then(|| "sub".to_string());
+                                    state.subagent_session_id = sub_seen.then(|| "sub".to_string());
                                     for line in state.lines(ctx) {
                                         let text: String =
                                             line.iter().map(|(s, _)| s.as_str()).collect();

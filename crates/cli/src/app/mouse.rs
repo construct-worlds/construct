@@ -3,6 +3,43 @@ use crossterm::event::{MouseEvent, MouseEventKind};
 use super::*;
 
 impl App {
+    /// Directional glyph for a border that the current mouse dispatch treats
+    /// as a resize handle. Kept alongside the hit-test helpers so the cursor
+    /// affordance cannot drift from the actual drag behavior.
+    pub(crate) fn resize_handle_glyph_at(&self, col: u16, row: u16) -> Option<&'static str> {
+        if self.is_on_list_divider(col, row) {
+            return Some("↔");
+        }
+
+        // A program-toggle glyph on a horizontal split divider is clickable;
+        // mouse-down deliberately lets it through instead of starting a drag.
+        let on_pane_program_toggle = self.layout.main_window_areas.iter().any(|pane| {
+            let (x_start, x_end, y) = crate::ui::view_program_toggle_button_range(pane.area);
+            row == y && col >= x_start && col < x_end
+        });
+        if !on_pane_program_toggle {
+            if let Some(hit) = self
+                .layout
+                .main_window_dividers
+                .iter()
+                .find(|hit| Self::rect_contains(hit.area, col, row))
+            {
+                return Some(match hit.direction {
+                    WindowSplitDirection::Right => "↔",
+                    WindowSplitDirection::Below => "↕",
+                });
+            }
+        }
+
+        (self.is_on_pin_strip_divider(col, row)
+            || self.is_on_orchestrator_panel_divider(col, row)
+            || self.is_on_matrix_rain_title_bar(col, row)
+            || self
+                .layout
+                .program_resize_hit
+                .is_some_and(|hit| Self::rect_contains(hit, col, row)))
+        .then_some("↕")
+    }
     pub(super) fn selection_bounds_at(&self, col: u16, row: u16) -> Option<ratatui::layout::Rect> {
         let pinned_count = self
             .list_items()
@@ -188,7 +225,8 @@ impl App {
         let Some(area) = self.layout.list_items_area else {
             return false;
         };
-        if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height {
+        if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height
+        {
             return false;
         }
         self.adjust_list_scroll(delta);

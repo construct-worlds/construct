@@ -293,6 +293,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_modeline_theme_tooltip(f, app);
     app.sync_program_popup_with_selection();
     render_program_popup(f, app);
+    render_resize_handle_cursor(f, app);
     render_tasks_popup(f, app);
     render_remote_control_popup(f, app);
     if app.help_visible {
@@ -670,6 +671,38 @@ fn render_tooltip_rect(f: &mut Frame, theme: &Theme, label: &str, rect: Rect) {
     let p = Paragraph::new(label).block(block).style(theme.text_style());
     f.render_widget(Clear, rect);
     f.render_widget(p, rect);
+}
+
+/// Paint a three-cell directional resize handle around the pointer. Terminals
+/// cannot change the native pointer shape; putting arrowheads either side of
+/// the pointer keeps the cue visible even when the OS I-beam covers its cell.
+fn render_resize_handle_cursor(f: &mut Frame, app: &App) {
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    let Some(glyph) = app.resize_handle_glyph_at(mx, my) else {
+        return;
+    };
+    let style = app.theme.text_style().add_modifier(Modifier::BOLD);
+    let paint = |f: &mut Frame, x: u16, y: u16, glyph: &str| {
+        let cell = Rect::new(x, y, 1, 1).intersection(f.area());
+        if cell.width > 0 && cell.height > 0 {
+            f.render_widget(Paragraph::new(Span::styled(glyph, style)), cell);
+        }
+    };
+    match glyph {
+        "↔" => {
+            paint(f, mx.saturating_sub(1), my, "←");
+            paint(f, mx, my, "│");
+            paint(f, mx.saturating_add(1), my, "→");
+        }
+        "↕" => {
+            paint(f, mx, my.saturating_sub(1), "↑");
+            paint(f, mx, my, "─");
+            paint(f, mx, my.saturating_add(1), "↓");
+        }
+        _ => {}
+    }
 }
 
 fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
@@ -3629,16 +3662,10 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         .as_ref()
         .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()))
         .unwrap_or(0);
-    let program_open = summary
-        .as_ref()
-        .is_some_and(|s| app.open_program_session_ids().iter().any(|id| id == &s.id));
-    let mode_glyph = summary.as_ref().map(|s| {
-        if program_open {
-            session_mode_glyph(app, s, program_mode_glyph())
-        } else {
-            session_status_glyph(app, s)
-        }
-    });
+    // The exposed session pane remains a session pane even when its Program
+    // is slid aside. Keep its ordinary lifecycle glyph/color; the Program
+    // popup owns the distinct square, program-colored glyph.
+    let mode_glyph = summary.as_ref().map(|s| session_status_glyph(app, s));
     // Label budget = total − 2 corners − right-side blocks − fixed
     // title scaffolding (` <glyph> <label> ` is 3 spaces + glyph
     // width + label).
@@ -3663,7 +3690,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
     });
     let title: Line<'static> = match (summary.as_ref(), group.as_ref()) {
         (Some(s), _) => {
-            let glyph_style = session_title_glyph_style(&app.theme, program_open, focused);
+            let glyph_style = session_title_glyph_style(&app.theme, false, focused);
             let (rendered_label, cursor_col, window_start_chars) = match active_rename {
                 Some(rename) => visible_edit_window(&rename.buffer, rename.cursor, label_budget),
                 None => (truncate_to_width(&primary_label(s), label_budget), 0, 0),
@@ -8088,6 +8115,9 @@ fn chat_event_kind(ev: &SessionEvent) -> ChatEventKind {
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::NativeSubagentSnapshot { .. }
+        | SessionEvent::NativeSubagentRemoved { .. }
+        | SessionEvent::NativeSubagent { .. }
         | SessionEvent::AgentStatus(_) => ChatEventKind::Hidden,
         SessionEvent::Message { role, text } if should_render_chat_message(*role, text) => {
             if *role == MessageRole::Assistant {
@@ -8274,6 +8304,9 @@ fn format_chat_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::NativeSubagentSnapshot { .. }
+        | SessionEvent::NativeSubagentRemoved { .. }
+        | SessionEvent::NativeSubagent { .. }
         | SessionEvent::AgentStatus(_) => Vec::new(),
         SessionEvent::Message { role, text } => {
             let role_label = match role {
@@ -9055,6 +9088,13 @@ fn shorten(s: &str, max: usize) -> String {
 
 pub fn short_event_label(ev: &SessionEvent) -> String {
     match ev {
+        SessionEvent::NativeSubagentSnapshot { ids } => {
+            format!("native-subagent-snapshot {}", ids.len())
+        }
+        SessionEvent::NativeSubagentRemoved { id } => format!("native-subagent-removed {id}"),
+        SessionEvent::NativeSubagent { id, state, .. } => {
+            format!("native-subagent {id} {state:?}")
+        }
         SessionEvent::PtyResize { cols, rows } => format!("pty_resize {cols}x{rows}"),
         SessionEvent::ToolApprovalResolved { call_id } => {
             format!("approval-resolved {call_id}")
@@ -9141,7 +9181,9 @@ pub fn is_headless(s: &agentd_protocol::SessionSummary) -> bool {
 }
 
 fn harness_label(s: &agentd_protocol::SessionSummary) -> String {
-    if is_headless(s) {
+    if s.native_subagent.is_some() {
+        format!("(native) {}", s.harness)
+    } else if is_headless(s) {
         format!("(headless) {}", s.harness)
     } else {
         s.harness.clone()
@@ -11599,7 +11641,17 @@ fn program_title_line<'a>(
     left: &ProgramTitleLeft,
 ) -> Line<'a> {
     let dirty = popup.buffer != popup.saved_markdown;
-    let toggle_glyph = program_mode_glyph();
+    // The program's left-edge mode glyph is the same live status indicator as
+    // a session pane: while the owning session is working it becomes the
+    // spinner, otherwise it remains the static Program rectangle. Keeping it
+    // in this left slot makes the two title bars agree, while
+    // `program_toggle_style` preserves the Program frame's accent color.
+    let toggle_glyph = app
+        .sessions
+        .iter()
+        .find(|s| s.id == popup.program.session_id)
+        .map(|s| session_mode_glyph(app, s, program_mode_glyph()))
+        .unwrap_or_else(program_mode_glyph);
     let border_style = program_border_style(&app.theme, focused);
     // Title spans patch onto the border cells already painted underneath, so
     // a bright label over a dimmed frame must explicitly subtract DIM — an
@@ -14805,6 +14857,7 @@ mod tests {
             position: 0,
             group_id: None,
             parent_session_id: None,
+            native_subagent: None,
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,

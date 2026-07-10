@@ -27,7 +27,7 @@ use agentd_protocol::{
 };
 use construct_adapter_common::{drive_turn, spawn_stderr_log, TurnOutcome};
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -80,38 +80,92 @@ fn resolve_mode(params: &SessionStartParams) -> Mode {
     }
 }
 
-/// Generate a minimal Claude `--settings` file registering the AskUserQuestion
-/// chat-gate `PreToolUse` hook, and return its path. The hook shells out to
-/// `construct ask-gate`, which degrades the picker to a plain-text question only
-/// when a chat viewer is active for this session (otherwise it allows, so the
-/// native picker behaves normally for terminal viewers).
+/// Generate a minimal Claude `--settings` file for adapter bookkeeping hooks
+/// and return its path. Always includes a `SessionStart` hook that rewrites
+/// `claude_session_id.txt` whenever Claude mints a new native id (startup,
+/// resume, `/clear`, compact). Optionally also registers the AskUserQuestion
+/// chat-gate `PreToolUse` hook (shells out to `construct ask-gate`) unless
+/// disabled via `CONSTRUCT_CLAUDE_ASKGATE=0`.
 ///
-/// Returns `None` — no injection — when the `agent` binary or session data dir
-/// can't be located, or when disabled via `CONSTRUCT_CLAUDE_ASKGATE=0`. Verified
-/// that `--settings` *merges* with the user's existing settings/hooks, so this
+/// Returns `None` when the session data dir can't be located. Verified that
+/// `--settings` *merges* with the user's existing settings/hooks, so this
 /// never clobbers their setup.
-fn askgate_settings_path() -> Option<PathBuf> {
-    if std::env::var("CONSTRUCT_CLAUDE_ASKGATE").as_deref() == Ok("0") {
-        return None;
-    }
-    let client = agentd_protocol::paths::locate_sibling_binary("construct")?;
+fn adapter_settings_path() -> Option<PathBuf> {
     let dir = std::env::var("CONSTRUCT_SESSION_DATA_DIR")
         .ok()
-        .filter(|s| !s.is_empty())?;
-    let path = PathBuf::from(dir).join("agentd-askgate-settings.json");
-    let settings = serde_json::json!({
-        "hooks": {
-            "PreToolUse": [{
-                "matcher": "AskUserQuestion",
-                "hooks": [{
-                    "type": "command",
-                    "command": format!("\"{}\" ask-gate", client.display()),
-                }],
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)?;
+    std::fs::create_dir_all(&dir).ok()?;
+
+    let sid_file = dir.join("claude_session_id.txt");
+    let capture_script = dir.join("capture-claude-session-id.sh");
+    write_session_id_capture_script(&capture_script, &sid_file)?;
+
+    let mut hooks = serde_json::Map::new();
+    // No matcher → fires on every SessionStart (startup | resume | clear | compact).
+    // After `/clear` Claude assigns a fresh native id; we must persist it so
+    // daemon restart / same-harness fork resume the active conversation, not
+    // the pre-clear one.
+    hooks.insert(
+        "SessionStart".into(),
+        serde_json::json!([{
+            "hooks": [{
+                "type": "command",
+                "command": capture_script.to_string_lossy(),
             }],
+        }]),
+    );
+
+    if std::env::var("CONSTRUCT_CLAUDE_ASKGATE").as_deref() != Ok("0") {
+        if let Some(client) = agentd_protocol::paths::locate_sibling_binary("construct") {
+            hooks.insert(
+                "PreToolUse".into(),
+                serde_json::json!([{
+                    "matcher": "AskUserQuestion",
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("\"{}\" ask-gate", client.display()),
+                    }],
+                }]),
+            );
         }
-    });
+    }
+
+    let path = dir.join("agentd-adapter-settings.json");
+    let settings = serde_json::json!({ "hooks": hooks });
     std::fs::write(&path, serde_json::to_vec_pretty(&settings).ok()?).ok()?;
     Some(path)
+}
+
+/// Write a tiny POSIX shell script that extracts `session_id` from Claude's
+/// SessionStart hook JSON on stdin and persists it to `sid_file`. Avoids a
+/// python/jq dependency so the hook works in minimal environments.
+fn write_session_id_capture_script(script: &Path, sid_file: &Path) -> Option<()> {
+    let body = format!(
+        r#"#!/bin/sh
+# Written by construct's claude adapter. Persists the active Claude native
+# session id so resume/fork track /clear and /branch switches.
+set -eu
+SID_FILE="{sid}"
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+cat >"$tmp"
+sid=$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp" | head -n1)
+if [ -n "$sid" ]; then
+  printf '%s' "$sid" >"$SID_FILE"
+fi
+"#,
+        sid = sid_file.display()
+    );
+    std::fs::write(script, body).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(script).ok()?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(script, perms).ok()?;
+    }
+    Some(())
 }
 
 async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
@@ -133,9 +187,10 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
         args.push("--mcp-config".into());
         args.push(cfg.to_string_lossy().to_string());
     }
-    // Inject the AskUserQuestion chat-gate hook (degrades the picker to text
-    // when a chat viewer is active). Merges with the user's settings.
-    if let Some(p) = askgate_settings_path() {
+    // Inject adapter bookkeeping hooks (native session-id capture after
+    // /clear etc., plus the optional AskUserQuestion chat-gate). Merges
+    // with the user's settings.
+    if let Some(p) = adapter_settings_path() {
         args.push("--settings".into());
         args.push(p.to_string_lossy().to_string());
     }
@@ -209,6 +264,7 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     if let Some(session_id) = watch_session_id {
         spawn_interactive_transcript_watcher(
             session_id,
+            sid_file.clone(),
             PathBuf::from(&params.cwd),
             ctx.emit.clone(),
             resuming,
@@ -269,27 +325,167 @@ fn truncate_initial_prompt_arg(prompt: &str) -> String {
 
 fn spawn_interactive_transcript_watcher(
     session_id: String,
+    sid_file: Option<PathBuf>,
     cwd: PathBuf,
     emit: EventEmitter,
     skip_existing: bool,
 ) {
-    let Some(path) = claude_transcript_path(&cwd, &session_id) else {
+    let Some(initial_path) = claude_transcript_path(&cwd, &session_id) else {
         emit.log("claude: no CLAUDE_HOME or HOME — cannot watch native transcript");
         return;
     };
     tokio::spawn(async move {
+        let mut current_id = session_id;
+        let mut path = initial_path;
+        // On resume we skip history already in the transcript; after a mid-
+        // session native id change (/clear, /branch, /resume) we always start
+        // at the top of the new file so chat mode sees the fresh conversation.
         let mut next_line = if skip_existing {
             count_jsonl_lines(&path)
         } else {
             0
         };
+        let mut subagents_dir = path.parent().map(|p| {
+            p.join(path.file_stem().unwrap_or_default())
+                .join("subagents")
+        });
+        let mut child_lines: HashMap<String, usize> = HashMap::new();
+        let mut child_states: HashMap<String, SessionState> = HashMap::new();
+        let mut child_parents: HashMap<String, String> = HashMap::new();
+        let mut last_snapshot: Option<Vec<String>> = None;
+        let mut initial_scan = true;
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            emit_new_claude_transcript_lines(&path, &mut next_line, &emit);
+            if let Some(new_id) = read_updated_session_id(sid_file.as_deref(), &current_id) {
+                if let Some(new_path) = claude_transcript_path(&cwd, &new_id) {
+                    emit.log(format!(
+                        "claude: native session id changed {current_id} -> {new_id}; \
+                         rebinding transcript watcher"
+                    ));
+                    current_id = new_id;
+                    path = new_path;
+                    next_line = 0;
+                    subagents_dir = path.parent().map(|p| {
+                        p.join(path.file_stem().unwrap_or_default())
+                            .join("subagents")
+                    });
+                    child_lines.clear();
+                    child_states.clear();
+                    child_parents.clear();
+                    initial_scan = true;
+                }
+            }
+            let root_values = emit_new_claude_transcript_lines(&path, &mut next_line, &emit);
+            for value in root_values {
+                if let Some((id, state, title)) = claude_native_subagent_update(&value) {
+                    child_states.insert(id.clone(), state);
+                    emit.emit(SessionEvent::NativeSubagent {
+                        id: id.clone(),
+                        parent_id: None,
+                        title,
+                        state,
+                        event: None,
+                    });
+                    if matches!(state, SessionState::Done | SessionState::Errored) {
+                        emit.emit(SessionEvent::NativeSubagentRemoved { id });
+                    }
+                }
+            }
+            let this_is_initial_scan = initial_scan;
+            initial_scan = false;
+            let Some(dir) = subagents_dir.as_ref() else {
+                continue;
+            };
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if last_snapshot.as_ref().is_some_and(|ids| !ids.is_empty()) {
+                        emit.emit(SessionEvent::NativeSubagentSnapshot { ids: Vec::new() });
+                        last_snapshot = Some(Vec::new());
+                    }
+                    continue;
+                }
+                Err(_) => continue,
+            };
+            let mut retained_native_ids = Vec::new();
+            for entry in entries.flatten() {
+                let child_path = entry.path();
+                let Some(native_id) = claude_subagent_id_from_path(&child_path) else {
+                    continue;
+                };
+                retained_native_ids.push(native_id.clone());
+                let first_seen = !child_lines.contains_key(&native_id);
+                let next = child_lines.entry(native_id.clone()).or_insert_with(|| {
+                    if skip_existing && this_is_initial_scan {
+                        count_jsonl_lines(&child_path)
+                    } else {
+                        0
+                    }
+                });
+                let state = child_states
+                    .get(&native_id)
+                    .copied()
+                    .unwrap_or(SessionState::Running);
+                if first_seen {
+                    emit.emit(SessionEvent::NativeSubagent {
+                        id: native_id.clone(),
+                        parent_id: child_parents.get(&native_id).cloned(),
+                        title: Some(format!("Claude subagent {}", short_native_id(&native_id))),
+                        state,
+                        event: None,
+                    });
+                }
+                for value in read_new_claude_values(&child_path, next, &emit) {
+                    if let Some((nested_id, nested_state, title)) =
+                        claude_native_subagent_update(&value)
+                    {
+                        child_states.insert(nested_id.clone(), nested_state);
+                        child_parents.insert(nested_id.clone(), native_id.clone());
+                        emit.emit(SessionEvent::NativeSubagent {
+                            id: nested_id.clone(),
+                            parent_id: Some(native_id.clone()),
+                            title,
+                            state: nested_state,
+                            event: None,
+                        });
+                        if matches!(nested_state, SessionState::Done | SessionState::Errored) {
+                            emit.emit(SessionEvent::NativeSubagentRemoved { id: nested_id });
+                        }
+                    }
+                    for event in claude_events_from_json(&value) {
+                        emit.emit(SessionEvent::NativeSubagent {
+                            id: native_id.clone(),
+                            parent_id: child_parents.get(&native_id).cloned(),
+                            title: None,
+                            state,
+                            event: Some(Box::new(event)),
+                        });
+                    }
+                }
+            }
+            retained_native_ids.sort();
+            retained_native_ids.dedup();
+            if last_snapshot.as_ref() != Some(&retained_native_ids) {
+                emit.emit(SessionEvent::NativeSubagentSnapshot {
+                    ids: retained_native_ids.clone(),
+                });
+                last_snapshot = Some(retained_native_ids);
+            }
         }
     });
+}
+
+/// If `sid_file` holds a non-empty id different from `current`, return it.
+fn read_updated_session_id(sid_file: Option<&Path>, current: &str) -> Option<String> {
+    let path = sid_file?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let next = raw.trim();
+    if next.is_empty() || next == current {
+        return None;
+    }
+    Some(next.to_string())
 }
 
 fn claude_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
@@ -319,10 +515,15 @@ fn count_jsonl_lines(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn emit_new_claude_transcript_lines(path: &Path, next_line: &mut usize, emit: &EventEmitter) {
+fn emit_new_claude_transcript_lines(
+    path: &Path,
+    next_line: &mut usize,
+    emit: &EventEmitter,
+) -> Vec<Value> {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return;
+        return Vec::new();
     };
+    let mut values = Vec::new();
     let mut seen = 0usize;
     for (idx, line) in text.lines().enumerate() {
         seen = idx + 1;
@@ -333,7 +534,10 @@ fn emit_new_claude_transcript_lines(path: &Path, next_line: &mut usize, emit: &E
             continue;
         }
         match serde_json::from_str::<Value>(line) {
-            Ok(v) => emit_event_from_json(emit, v),
+            Ok(v) => {
+                emit_event_from_json(emit, v.clone());
+                values.push(v);
+            }
             Err(e) => emit.log(format!(
                 "claude transcript: failed to parse {} line {}: {e}",
                 path.display(),
@@ -342,6 +546,94 @@ fn emit_new_claude_transcript_lines(path: &Path, next_line: &mut usize, emit: &E
         }
     }
     *next_line = seen;
+    values
+}
+
+fn read_new_claude_values(path: &Path, next_line: &mut usize, emit: &EventEmitter) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut seen = 0usize;
+    let mut values = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        seen = idx + 1;
+        if idx < *next_line || line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(value) => values.push(value),
+            Err(error) => emit.log(format!(
+                "claude subagent transcript: failed to parse {} line {}: {error}",
+                path.display(),
+                idx + 1
+            )),
+        }
+    }
+    *next_line = seen;
+    values
+}
+
+fn claude_native_subagent_update(value: &Value) -> Option<(String, SessionState, Option<String>)> {
+    let raw = serde_json::to_string(value).ok()?;
+    let id = value
+        .pointer("/toolUseResult/agentId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| xml_tag(&raw, "task-id"))
+        .or_else(|| agent_id_from_text(&raw))?;
+    let id = normalize_claude_agent_id(&id);
+    let status = value
+        .pointer("/toolUseResult/status")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| xml_tag(&raw, "status"))
+        .unwrap_or_else(|| "running".into());
+    let state = match status.as_str() {
+        "completed" => SessionState::Done,
+        "failed" | "errored" => SessionState::Errored,
+        "running" => SessionState::Running,
+        _ => return None,
+    };
+    let title = xml_tag(&raw, "summary");
+    Some((id, state, title))
+}
+
+fn normalize_claude_agent_id(id: &str) -> String {
+    id.trim()
+        .strip_prefix("agent-")
+        .unwrap_or(id.trim())
+        .to_string()
+}
+
+fn claude_subagent_id_from_path(path: &Path) -> Option<String> {
+    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    stem.starts_with("agent-")
+        .then(|| normalize_claude_agent_id(stem))
+}
+
+fn agent_id_from_text(raw: &str) -> Option<String> {
+    let marker = "agentId: ";
+    let start = raw.find(marker)? + marker.len();
+    let id: String = raw[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+fn xml_tag(raw: &str, tag: &str) -> Option<String> {
+    let start_tag = format!("<{tag}>");
+    let end_tag = format!("</{tag}>");
+    let start = raw.find(&start_tag)? + start_tag.len();
+    let end = raw[start..].find(&end_tag)? + start;
+    Some(raw[start..end].replace("\\n", " ").trim().to_string())
+}
+
+fn short_native_id(id: &str) -> &str {
+    id.get(..id.len().min(8)).unwrap_or(id)
 }
 
 /// Seed the headless run queue from the session's initial prompt.
@@ -425,7 +717,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
             child_args.push("--mcp-config".into());
             child_args.push(cfg.to_string_lossy().to_string());
         }
-        if let Some(p) = askgate_settings_path() {
+        if let Some(p) = adapter_settings_path() {
             child_args.push("--settings".into());
             child_args.push(p.to_string_lossy().to_string());
         }
@@ -491,8 +783,17 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         // Make sure the child is fully reaped.
         let _ = child.wait().await;
 
-        if session_id.is_none() {
-            session_id = captured_sid.lock().unwrap().clone();
+        // Always adopt the latest native id. A turn can report a new id (e.g.
+        // after the interactive equivalent of a context reset); subsequent
+        // turns must --resume that id, not the first one we ever saw.
+        if let Some(sid) = captured_sid.lock().unwrap().clone() {
+            if session_id.as_ref() != Some(&sid) {
+                if let Ok(dir) = std::env::var("CONSTRUCT_SESSION_DATA_DIR") {
+                    let p = PathBuf::from(dir).join("claude_session_id.txt");
+                    let _ = std::fs::write(p, &sid);
+                }
+                session_id = Some(sid);
+            }
         }
 
         match outcome {
@@ -549,9 +850,8 @@ where
                 Ok(v) => {
                     if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
                         let mut g = captured_sid.lock().unwrap();
-                        if g.is_none() {
-                            *g = Some(sid.to_string());
-                        }
+                        // Keep the most recently observed id (not only the first).
+                        *g = Some(sid.to_string());
                     }
                     emit_event_from_json(&emit, v);
                 }
@@ -742,11 +1042,115 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_subagent_updates_parse_launch_and_completion() {
+        let launch = serde_json::json!({
+            "type": "user",
+            "message": {"content": "Async agent launched successfully.\nagentId: abc123"}
+        });
+        assert_eq!(
+            claude_native_subagent_update(&launch),
+            Some(("abc123".into(), SessionState::Running, None))
+        );
+
+        let complete = serde_json::json!({
+            "type": "queue-operation",
+            "content": "<task-notification><task-id>abc123</task-id><status>completed</status><summary>Inspect parser</summary></task-notification>"
+        });
+        assert_eq!(
+            claude_native_subagent_update(&complete),
+            Some((
+                "abc123".into(),
+                SessionState::Done,
+                Some("Inspect parser".into())
+            ))
+        );
+
+        let foreground_complete = serde_json::json!({
+            "type": "user",
+            "toolUseResult": {"status": "completed", "agentId": "agent-def456"}
+        });
+        assert_eq!(
+            claude_native_subagent_update(&foreground_complete),
+            Some(("def456".into(), SessionState::Done, None))
+        );
+        assert_eq!(normalize_claude_agent_id("abc123"), "abc123");
+        assert_eq!(normalize_claude_agent_id("agent-abc123"), "abc123");
+        assert_eq!(
+            claude_subagent_id_from_path(Path::new("agent-abc123.jsonl")),
+            Some("abc123".into())
+        );
+        assert_eq!(
+            claude_subagent_id_from_path(Path::new("agent-abc123.meta.json")),
+            None
+        );
+
+        let prefixed_complete = serde_json::json!({
+            "content": "<task-notification><task-id>agent-abc123</task-id><status>completed</status></task-notification>"
+        });
+        assert_eq!(
+            claude_native_subagent_update(&prefixed_complete).map(|(id, _, _)| id),
+            Some("abc123".into())
+        );
+    }
+
+    #[test]
     fn claude_project_slug_matches_project_dir_encoding() {
         assert_eq!(
             claude_project_slug(Path::new("/Users/moon/agentd/.claude/worktrees/test")),
             "-Users-moon-agentd--claude-worktrees-test"
         );
+    }
+
+    #[test]
+    fn read_updated_session_id_detects_clear_style_rewrite() {
+        let dir =
+            std::env::temp_dir().join(format!("construct-claude-sid-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let sid_file = dir.join("claude_session_id.txt");
+        std::fs::write(&sid_file, "old-id").expect("write old");
+        assert_eq!(
+            read_updated_session_id(Some(&sid_file), "old-id"),
+            None,
+            "same id is not an update"
+        );
+        std::fs::write(&sid_file, "new-id-after-clear").expect("write new");
+        assert_eq!(
+            read_updated_session_id(Some(&sid_file), "old-id").as_deref(),
+            Some("new-id-after-clear")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_id_capture_script_extracts_hook_json() {
+        let dir =
+            std::env::temp_dir().join(format!("construct-claude-capture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let sid_file = dir.join("claude_session_id.txt");
+        let script = dir.join("capture.sh");
+        write_session_id_capture_script(&script, &sid_file).expect("write script");
+
+        let hook_json = r#"{"session_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","cwd":"/tmp","source":"clear"}"#;
+        let status = std::process::Command::new("sh")
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(hook_json.as_bytes())?;
+                }
+                child.wait()
+            })
+            .expect("run capture script");
+        assert!(status.success(), "capture script exit: {status}");
+        assert_eq!(
+            std::fs::read_to_string(&sid_file).expect("read sid").trim(),
+            "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

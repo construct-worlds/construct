@@ -2260,8 +2260,8 @@ pub async fn run(
     // Runtime toggle: `/operator enable|disable` flips this without restart.
     // Seeded from the env var the daemon re-injects on respawn so the choice
     // survives daemon restarts.
-    let mut ambient_loop_enabled = is_orchestrator
-        && std::env::var("CONSTRUCT_OPERATOR_LOOP_DISABLED").as_deref() != Ok("1");
+    let mut ambient_loop_enabled =
+        is_orchestrator && std::env::var("CONSTRUCT_OPERATOR_LOOP_DISABLED").as_deref() != Ok("1");
     // Operator's own id (to exclude from the ambient fleet snapshot) and the
     // prior-tick session states (for the per-tick delta).
     let self_id_for_ambient = session_id.clone();
@@ -2506,17 +2506,12 @@ pub async fn run(
                                             Some(p) => format!("{p}:{new_model}"),
                                             None => format!("{new_name}:{new_model}"),
                                         };
-                                        emit.emit(SessionEvent::ModelChanged {
-                                            model: spec,
-                                        });
+                                        emit.emit(SessionEvent::ModelChanged { model: spec });
                                         provider = new.provider;
                                         provider_name = new_name;
                                         display_name = new_display;
                                         model = new_model;
-                                        term.note(&format!(
-                                            "(model → {}:{})",
-                                            display_name, model
-                                        ));
+                                        term.note(&format!("(model → {}:{})", display_name, model));
                                         emit.emit(SessionEvent::Status {
                                             state: SessionState::Running,
                                             detail: Some(format!(
@@ -4367,18 +4362,15 @@ async fn run_safe_call_silent(
         tool: call.name.clone(),
         args_summary: args_summary_for_event.clone(),
     });
-    let tool = registry.get(&call.name).expect("tool exists after preflight");
+    let tool = registry
+        .get(&call.name)
+        .expect("tool exists after preflight");
     let outcome = tool
         .run(call.input.clone(), ctx)
         .await
         .map_err(|e| format!("tool error: {e}"));
     let (_ok, _output) = crate::tools::execution::emit_tool_result_events(
-        &call.id,
-        &call.name,
-        emit,
-        &outcome,
-        true,
-        None,
+        &call.id, &call.name, emit, &outcome, true, None,
     )
     .await;
     crate::tools::execution::emit_post_tool_use(

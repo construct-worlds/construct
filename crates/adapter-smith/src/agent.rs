@@ -1406,12 +1406,7 @@ async fn run_one_tool(
     };
     let outcome = run_with_interrupt(tool, call.input.clone(), run_ctx, inbox).await;
     crate::tools::execution::emit_tool_result_events(
-        &call.id,
-        &call.name,
-        emit,
-        &outcome,
-        false,
-        None,
+        &call.id, &call.name, emit, &outcome, false, None,
     )
     .await;
     crate::tools::execution::emit_post_tool_use(
@@ -1607,18 +1602,14 @@ pub fn resolve_model_from_spec(spec_str: &str) -> Result<ResolvedModel> {
         }
         provider::routing::Provider::Gemini => Box::new(provider::gemini::Gemini::from_env()?),
         provider::routing::Provider::Ollama => Box::new(provider::ollama::Ollama::from_env()?),
-        provider::routing::Provider::Grok => {
-            Box::new(provider::openai::OpenAi::with_config(
-                Some(GROK_BASE_URL.to_string()),
-                grok_api_key()?,
-            )?)
-        }
-        provider::routing::Provider::GrokOauth => {
-            Box::new(provider::openai::OpenAi::with_config(
-                Some(GROK_BASE_URL.to_string()),
-                grok_oauth_token()?,
-            )?)
-        }
+        provider::routing::Provider::Grok => Box::new(provider::openai::OpenAi::with_config(
+            Some(GROK_BASE_URL.to_string()),
+            grok_api_key()?,
+        )?),
+        provider::routing::Provider::GrokOauth => Box::new(provider::openai::OpenAi::with_config(
+            Some(GROK_BASE_URL.to_string()),
+            grok_oauth_token()?,
+        )?),
         provider::routing::Provider::CodexOauth => {
             Box::new(provider::codex_oauth::CodexOauth::from_env()?)
         }
@@ -1756,11 +1747,7 @@ fn profile_api_key(
 fn grok_api_key() -> Result<String> {
     std::env::var("GROK_API_KEY")
         .or_else(|_| std::env::var("XAI_API_KEY"))
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "grok provider requires GROK_API_KEY or XAI_API_KEY"
-            )
-        })
+        .map_err(|_| anyhow::anyhow!("grok provider requires GROK_API_KEY or XAI_API_KEY"))
 }
 
 fn grok_auth_path() -> Result<PathBuf> {
@@ -1775,7 +1762,9 @@ fn grok_auth_path() -> Result<PathBuf> {
 }
 
 fn parse_expires_at(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::parse_from_rfc3339(ts).ok().map(|v| v.with_timezone(&chrono::Utc))
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|v| v.with_timezone(&chrono::Utc))
 }
 
 pub(crate) fn grok_oauth_token() -> Result<String> {
@@ -1802,7 +1791,10 @@ pub(crate) fn grok_oauth_token() -> Result<String> {
             continue;
         }
 
-        let expiry = obj.get("expires_at").and_then(|v| v.as_str()).and_then(parse_expires_at);
+        let expiry = obj
+            .get("expires_at")
+            .and_then(|v| v.as_str())
+            .and_then(parse_expires_at);
         if let Some(expiry) = expiry {
             if expiry > now {
                 match selected_token {
@@ -1888,8 +1880,8 @@ mod tests {
 
     #[test]
     fn profile_supports_grok_provider() {
-        let r = build_profile_model("x", &profile("grok", Some("grok-2-latest")), None)
-            .expect("build");
+        let r =
+            build_profile_model("x", &profile("grok", Some("grok-2-latest")), None).expect("build");
         assert_eq!(r.provider_name(), "grok");
         assert_eq!(r.kind, provider::routing::Provider::Grok);
     }
@@ -1973,7 +1965,10 @@ mod tests {
             let (emit, mut rx) = EventEmitter::channel("s");
             let sb = announce_sandbox(&emit);
             if sb.enforces() {
-                assert!(rx.try_recv().is_err(), "an enforcing backend needs no notice");
+                assert!(
+                    rx.try_recv().is_err(),
+                    "an enforcing backend needs no notice"
+                );
             }
         }
 
@@ -2019,7 +2014,10 @@ mod tests {
             !p.contains("ambient operator loop tick"),
             "stale ambient observation string is back"
         );
-        assert!(p.contains("ambient fleet monitor"), "ambient string not updated");
+        assert!(
+            p.contains("ambient fleet monitor"),
+            "ambient string not updated"
+        );
         // The text-vs-widget principle: monolog is FYI-only; anything needing a
         // response is a widget.
         assert!(p.contains("SURFACING"), "missing surfacing guidance");
@@ -2041,15 +2039,20 @@ mod tests {
         assert!(AUTO_REVIEW_SYSTEM_PROMPT
             .contains("git makes those changes inspectable and reversible"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("build, format, lint, and test loops"));
-        assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("rg"), "grep-like discovery");
-        assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("Do not ask the user merely because a shell command chains"));
+        assert!(
+            AUTO_REVIEW_SYSTEM_PROMPT.contains("rg"),
+            "grep-like discovery"
+        );
+        assert!(AUTO_REVIEW_SYSTEM_PROMPT
+            .contains("Do not ask the user merely because a shell command chains"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("broad/unscoped paths"));
         assert!(AUTO_REVIEW_SYSTEM_PROMPT.contains("secrets or credentials"));
     }
 
     #[test]
     fn routine_dev_shell_command_is_auto_approved_by_decision_logic() {
-        let input = serde_json::json!({"command":"git status && cargo test --all-targets && rg TODO src"});
+        let input =
+            serde_json::json!({"command":"git status && cargo test --all-targets && rg TODO src"});
         assert!(is_auto_review_routine_shell_command("shell", &input));
         let noisy_input = serde_json::json!({
             "command":"git status && cargo test --all-targets && rg TODO src",
@@ -2175,8 +2178,7 @@ mod tests {
         env::set_var("HOME", "/does/not/matter");
         env::set_var("GROK_HOME", grok_home);
 
-        let resolved =
-            resolve_model_from_spec("grok-oauth:grok-2-latest").expect("resolve");
+        let resolved = resolve_model_from_spec("grok-oauth:grok-2-latest").expect("resolve");
         if let Some(v) = old_grok_home {
             env::set_var("GROK_HOME", v);
         } else {

@@ -161,7 +161,10 @@ async fn tui_reconnects_after_orchestrator_typed_construct_restart() {
         model: None,
         title: Some("orchestrator".to_string()),
         mode: Some("interactive".to_string()),
-        pty_size: Some(agentd_protocol::PtySize { cols: 100, rows: 20 }),
+        pty_size: Some(agentd_protocol::PtySize {
+            cols: 100,
+            rows: 20,
+        }),
         worktree: false,
         env: Default::default(),
         args: Vec::new(),
@@ -179,8 +182,8 @@ async fn tui_reconnects_after_orchestrator_typed_construct_restart() {
         }
     };
 
-    let mut tui = Tui::spawn_with_recording(&d.socket, "restart_orchestrator_typed")
-        .expect("spawn TUI");
+    let mut tui =
+        Tui::spawn_with_recording(&d.socket, "restart_orchestrator_typed").expect("spawn TUI");
     tui.wait_for("focus:", Duration::from_secs(15))
         .await
         .expect("modeline never rendered");

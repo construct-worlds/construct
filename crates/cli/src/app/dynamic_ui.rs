@@ -4,9 +4,7 @@ use agentd_protocol;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::App;
-use super::{
-    adjusted_scroll_offset, markdown_actions, markdown_display_rows, open_url,
-};
+use super::{adjusted_scroll_offset, markdown_actions, markdown_display_rows, open_url};
 
 impl App {
     pub(super) fn is_over_dynamic_ui_overlay(&self, col: u16, row: u16) -> bool {
@@ -202,7 +200,12 @@ impl App {
         false
     }
 
-    pub(super) fn adjust_mouse_dynamic_ui_scroll(&mut self, col: u16, row: u16, delta: i32) -> bool {
+    pub(super) fn adjust_mouse_dynamic_ui_scroll(
+        &mut self,
+        col: u16,
+        row: u16,
+        delta: i32,
+    ) -> bool {
         let Some(area) = self.layout.dynamic_ui_popover_area else {
             return false;
         };

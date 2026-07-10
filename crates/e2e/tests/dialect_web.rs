@@ -117,7 +117,10 @@ async fn shared_dialect_web_surfaces() {
         .into_value()
         .expect("json");
     assert_eq!(widget_chip["chipMounted"], true, "{widget_chip:?}");
-    assert_eq!(widget_chip["chipRaw"], "@{session:s-work}", "{widget_chip:?}");
+    assert_eq!(
+        widget_chip["chipRaw"], "@{session:s-work}",
+        "{widget_chip:?}"
+    );
     assert_eq!(widget_chip["chipStatus"], "running", "{widget_chip:?}");
     assert_eq!(widget_chip["chipLabelHasTitle"], true, "{widget_chip:?}");
     assert_eq!(widget_chip["actionButton"], true, "{widget_chip:?}");
@@ -203,7 +206,9 @@ async fn shared_dialect_web_surfaces() {
     assert_eq!(projection["fetches"], 1, "{projection:?}");
     let projected = projection["projected"].as_str().unwrap_or_default();
     assert!(
-        projected.contains("step one") && projected.contains("Progress") && !projected.contains("later"),
+        projected.contains("step one")
+            && projected.contains("Progress")
+            && !projected.contains("later"),
         "projection extracts only the named section: {projection:?}"
     );
     assert!(
@@ -304,16 +309,25 @@ async fn shared_dialect_web_surfaces() {
     );
     assert_eq!(editor["tableDelimDim"], 1, "{editor:?}");
     assert_eq!(editor["sessionChip"], true, "{editor:?}");
-    let markers = editor["checkMarkers"].as_array().cloned().unwrap_or_default();
+    let markers = editor["checkMarkers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert!(
-        markers.iter().any(|m| m[0] == "[x]" && m[1].as_str().unwrap_or("").contains("done"))
-            && markers.iter().any(|m| m[0] == "[~]" && m[1].as_str().unwrap_or("").contains("active")),
+        markers
+            .iter()
+            .any(|m| m[0] == "[x]" && m[1].as_str().unwrap_or("").contains("done"))
+            && markers
+                .iter()
+                .any(|m| m[0] == "[~]" && m[1].as_str().unwrap_or("").contains("active")),
         "checklist markers styled with exact source text: {editor:?}"
     );
     assert_eq!(editor["dispatchSession"], "s-owner2", "{editor:?}");
     let text = editor["dispatchText"].as_str().unwrap_or_default();
     assert!(
-        text.starts_with("OBSERVATION: ui.action ") && text.contains("\"action_id\":\"re-run\"") && !text.contains("panel_id"),
+        text.starts_with("OBSERVATION: ui.action ")
+            && text.contains("\"action_id\":\"re-run\"")
+            && !text.contains("panel_id"),
         "action chip dispatches ui.action without panel_id: {editor:?}"
     );
 

@@ -619,7 +619,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&inside).unwrap(), "BETA\n");
 
         // Out-of-root edit is blocked by the kernel; content unchanged.
-        let outside = std::env::temp_dir().join(format!("smith-edit-OUT-{}.txt", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("smith-edit-OUT-{}.txt", std::process::id()));
         std::fs::write(&outside, "alpha\n").unwrap();
         let out = EditFile
             .run(

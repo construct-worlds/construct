@@ -2269,6 +2269,7 @@ mod search_tests {
             position: 0,
             group_id: None,
             parent_session_id: None,
+            native_subagent: None,
             last_pty_at_ms: None,
             busy_ms: 0,
             busy_running_since_ms: None,
