@@ -191,8 +191,62 @@ async fn web_client_loads_and_websocket_connects() {
         .expect("json value");
     assert_eq!(inherited_project["group_id"], "project-123");
 
+    // Every WebUI xterm paints a concrete background, even for Matrix/Basic.
+    // Theme changes must report that RGB value so the daemon remains the sole
+    // authority answering live child OSC 11 probes.
+    let web_terminal_background: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const savedWs = state.ws;
+              const savedTheme = loadWebThemeName();
+              const calls = [];
+              try {
+                state.ws = {
+                  readyState: 1,
+                  send(raw) {
+                    const msg = JSON.parse(raw);
+                    calls.push(msg);
+                    const pending = state.pending.get(msg.id);
+                    state.pending.delete(msg.id);
+                    queueMicrotask(() => pending.resolve(null));
+                  },
+                };
+                applyWebTheme('light', { persist: false });
+                await new Promise((resolve) => queueMicrotask(resolve));
+                return {
+                  matrix: webTerminalBackground('matrix'),
+                  light: webTerminalBackground('light'),
+                  report: calls.find((c) => c.method === 'client.set_terminal_background') || null,
+                };
+              } finally {
+                applyWebTheme(savedTheme, { persist: false });
+                state.ws = savedWs;
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate web terminal background report")
+        .into_value()
+        .expect("json value");
+    assert_eq!(
+        web_terminal_background["matrix"],
+        serde_json::json!([2, 8, 5])
+    );
+    assert_eq!(
+        web_terminal_background["light"],
+        serde_json::json!([246, 248, 251])
+    );
+    assert_eq!(
+        web_terminal_background["report"]["params"]["background"],
+        serde_json::json!([246, 248, 251])
+    );
+
     // Terminal fast-open hydrates only a small recent PTY tail first;
-    // older history is explicit/lazy and remains bounded.
+    // older history is explicit/lazy and remains bounded. The replay payload
+    // includes a historical OSC 11 query: xterm must not route its generated
+    // response into the live child as PTY input.
     let fast_open: serde_json::Value = page
         .evaluate(
             r#"
@@ -208,7 +262,7 @@ async fn web_client_loads_and_websocket_connects() {
               };
               const calls = [];
               const pendingInitialReplay = [];
-              const tailText = Array.from({ length: 80 }, (_, i) => `tail line ${i}`).join('\r\n') + '\r\n';
+              const tailText = '\x1b]11;?\x07' + Array.from({ length: 80 }, (_, i) => `tail line ${i}`).join('\r\n') + '\r\n';
               const tick = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
               try {
                 state.sessions = [{
@@ -240,7 +294,7 @@ async fn web_client_loads_and_websocket_connects() {
                         pendingInitialReplay.push({ resolve: pending.resolve, result });
                         return;
                       }
-                    } else if (msg.method === 'session.pty_resize') {
+                    } else if (msg.method === 'session.pty_resize' || msg.method === 'session.pty_input') {
                       result = {};
                     }
                     queueMicrotask(() => pending.resolve(result));
@@ -262,6 +316,7 @@ async fn web_client_loads_and_websocket_connects() {
                 const replayCalls = calls.filter((c) => c.method === 'session.pty_replay');
                 return {
                   replayCalls: replayCalls.map((c) => c.params),
+                  replayPtyInputCalls: calls.filter((c) => c.method === 'session.pty_input').length,
                   afterInitialHidden,
                   afterOlderHidden: terminalHistoryBtn.hidden,
                   hiddenDuringInitialReplay,
@@ -323,6 +378,10 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(
         fast_open["initialViewportAtBottom"], true,
         "initial terminal replay should land at the latest page: {fast_open:?}"
+    );
+    assert_eq!(
+        fast_open["replayPtyInputCalls"], 0,
+        "historical terminal queries must not generate live PTY input: {fast_open:?}"
     );
 
     // Claude Code's full-screen mode enters the terminal alternate screen
