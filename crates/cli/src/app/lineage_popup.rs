@@ -166,11 +166,17 @@ impl App {
                 self.lineage_popup = None;
                 true
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            // `C-p`/`C-n` mirror the session-list's own emacs-style
+            // NextSession/PrevSession bindings so navigation muscle memory
+            // carries into this popup; `key.code` alone (crossterm reports
+            // Ctrl+letter as `Char` with a CONTROL modifier, not a distinct
+            // code) means these arms also accept bare `p`/`n`, same as `k`/`j`
+            // below accept bare Up/Down without checking modifiers.
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('p') => {
                 self.move_lineage_selection(-1);
                 true
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('n') => {
                 self.move_lineage_selection(1);
                 true
             }
@@ -276,6 +282,26 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].session_id(), Some("root"));
         assert_eq!(rows[1].session_id(), Some("fork"));
+    }
+
+    #[tokio::test]
+    async fn ctrl_n_and_ctrl_p_navigate_like_j_and_k() {
+        let mut fork = summary("fork");
+        fork.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "root".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+        });
+        let (mut app, _dir, _server) = test_app_with_sessions(vec![summary("root"), fork]).await;
+        app.select_session("root".to_string());
+        app.open_lineage_popup();
+        assert_eq!(app.lineage_popup.as_ref().unwrap().selected, 0);
+        app.handle_lineage_popup_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.lineage_popup.as_ref().unwrap().selected, 1);
+        app.handle_lineage_popup_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.lineage_popup.as_ref().unwrap().selected, 0);
     }
 
     #[tokio::test]
