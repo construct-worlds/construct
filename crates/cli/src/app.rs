@@ -16962,15 +16962,12 @@ mod tests {
 
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("hover render");
-        assert_eq!(
-            term.backend()
-                .buffer()
-                .cell((list.right().saturating_sub(1), list.y.saturating_add(2)))
-                .expect("resize cell")
-                .symbol(),
-            "↔",
-            "a vertical divider should advertise horizontal resizing"
-        );
+        let y = list.y.saturating_add(2);
+        let x = list.right().saturating_sub(1);
+        let buffer = term.backend().buffer();
+        assert_eq!(buffer.cell((x.saturating_sub(1), y)).unwrap().symbol(), "←");
+        assert_eq!(buffer.cell((x, y)).unwrap().symbol(), "│");
+        assert_eq!(buffer.cell((x.saturating_add(1), y)).unwrap().symbol(), "→");
         server.abort();
     }
 

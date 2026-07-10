@@ -669,24 +669,35 @@ fn render_tooltip_rect(f: &mut Frame, theme: &Theme, label: &str, rect: Rect) {
     f.render_widget(p, rect);
 }
 
-/// Replace the border cell under the pointer with a directional drag glyph.
-/// Terminals cannot change the native pointer shape, so this keeps the resize
-/// affordance compact and directly under the cursor.
+/// Paint a three-cell directional resize handle around the pointer. Terminals
+/// cannot change the native pointer shape; putting arrowheads either side of
+/// the pointer keeps the cue visible even when the OS I-beam covers its cell.
 fn render_resize_handle_cursor(f: &mut Frame, app: &App) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
-    if let Some(glyph) = app.resize_handle_glyph_at(mx, my) {
-        let cell = Rect::new(mx, my, 1, 1).intersection(f.area());
+    let Some(glyph) = app.resize_handle_glyph_at(mx, my) else {
+        return;
+    };
+    let style = app.theme.text_style().add_modifier(Modifier::BOLD);
+    let paint = |f: &mut Frame, x: u16, y: u16, glyph: &str| {
+        let cell = Rect::new(x, y, 1, 1).intersection(f.area());
         if cell.width > 0 && cell.height > 0 {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    glyph,
-                    app.theme.text_style().add_modifier(Modifier::BOLD),
-                )),
-                cell,
-            );
+            f.render_widget(Paragraph::new(Span::styled(glyph, style)), cell);
         }
+    };
+    match glyph {
+        "↔" => {
+            paint(f, mx.saturating_sub(1), my, "←");
+            paint(f, mx, my, "│");
+            paint(f, mx.saturating_add(1), my, "→");
+        }
+        "↕" => {
+            paint(f, mx, my.saturating_sub(1), "↑");
+            paint(f, mx, my, "─");
+            paint(f, mx, my.saturating_add(1), "↓");
+        }
+        _ => {}
     }
 }
 
