@@ -134,12 +134,12 @@ read top to bottom. A long session name wraps onto additional box rows
 ellipsizes; box width is capped so one verbose title can't stretch the
 whole diagram. Fork/subagent labels style exactly like any normal
 session's (by live state) — a session is never dimmed for being a fork;
-a discarded fork adds a strikethrough on top of its state color. A fork branches off the parent's lane with a labeled
-arrow (`├─ ⑂ fork ──▸`) into the child's box, placed to the right with
-its own lane below it; a fork that merged returns to the parent's lane
-with a labeled merge arrow (`│◂─ ↩ merge ──┘`). A subagent branches the
-same way (`▸ subagent` arrow, same brightness as the fork arrow — the
-word tells them apart) but never merges back. A merged fork's box
+a discarded fork adds a strikethrough on top of its state color. A fork branches off the parent's lane with an
+arrow (`├─⑂──▸`, icon-only — the glyph alone marks the edge kind) into
+the child's box, placed to the right with its own lane below it; a fork
+that merged returns to the parent's lane with an icon-only merge arrow
+(`│◂─↩──┘`). A subagent branches the same way (`▸` arrow, same
+brightness) but never merges back. A merged fork's box
 carries NO marker (the merge arrow and its ✓'d final window already say
 it); a discarded fork's box keeps `✗ discarded`, since a discard draws
 no arrow. Rows pack tight — no blank spacer rows between elements.
@@ -155,14 +155,18 @@ info above that fork's arrow. A turn-info window renders at the row where
 its CLOSING event lands, on its own lane — so windows closing at the same
 instant share one row side by side (a merged fork's life next to its
 parent's while-it-was-out window at the merge; all live lanes' trailing
-windows together on the final "now" row). Lane columns nest by CLOSE
-time: overlapping sibling lanes stack outward with the later-terminating
-one further out (regardless of branch order), so an inner lane's
-merge/end arrow never crosses an outer lane that is still running —
-closing arrows nest instead of crossing; sequential siblings whose
-lifetimes don't overlap reuse the inner column. A lane stays live down
-to its closing row, and an arrow crossing a live lane breaks around its
-bar rather than erasing it.
+windows together on the final "now" row). Lane columns use
+git-graph-style interval reuse in BOTH modes: each lane takes the
+innermost column whose occupants its lifetime doesn't overlap, keeping
+the diagram as narrow as the intervals allow; a merge arrow crossing a
+live lane placed inside it bridges over that lane's bar, exactly like
+git-graph merge lines do. A lane stays live down to its closing row.
+
+Every rail glyph, lane bar, connector, and turn-info span is tagged with
+its owning session: selecting or hovering a session (its box in boxes
+mode, its label row in rails mode) brightens that session's entire
+timeline — rails, arrows, and windows — leaving every other lane
+untouched.
 
 Keyboard selection lands on the box label rows; boxes are the only
 selectable rows, and opening the preview from a fork or subagent starts
