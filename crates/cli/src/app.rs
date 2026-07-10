@@ -27224,6 +27224,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn horizontal_scrollbar_gets_its_own_row_below_the_diagram() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        // A long fork title overflows the sidebar's width, so the
+        // horizontal scrollbar shows.
+        if let Some(f) = app.sessions.iter_mut().find(|s| s.id == "s1-fork") {
+            f.title = Some("a rather long fork title that overflows the sidebar".into());
+        }
+        app.select_session("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.layout.lineage_h_overflow, "premise: width overflows");
+        let area = app.layout.lineage_area.expect("section area");
+        let rows = app.lineage_section_rows("s1");
+        assert_eq!(
+            area.height as usize,
+            rows.len() + 4,
+            "content sizing reserves the scrollbar's row: header + pad + \
+             diagram + pad + scrollbar"
+        );
+        let buf = term.backend().buffer();
+        let row_syms = |y: u16| -> String {
+            (area.x..area.x + area.width)
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                .collect()
+        };
+        let bottom = area.y + area.height - 1;
+        assert_eq!(
+            row_syms(bottom).trim(),
+            "",
+            "the scrollbar row carries no diagram content"
+        );
+        assert!(
+            (area.x..area.x + area.width).any(|x| {
+                buf.cell((x, bottom))
+                    .map(|c| c.style().bg.is_some())
+                    .unwrap_or(false)
+            }),
+            "the bottom row shows the scrollbar tint"
+        );
+        assert_eq!(
+            row_syms(bottom - 1).trim(),
+            "",
+            "one blank padding row sits between the diagram and the scrollbar"
+        );
+        assert_ne!(
+            row_syms(bottom - 2).trim(),
+            "",
+            "the last diagram row renders fully above the scrollbar, \
+             never under it"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn horizontal_wheel_events_scroll_the_section_sideways() {
         use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
         let (mut app, _dir, server) = test_app_with_lineage().await;

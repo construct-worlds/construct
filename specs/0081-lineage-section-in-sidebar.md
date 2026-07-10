@@ -26,7 +26,9 @@ tree. The section never squeezes the session rows below their minimum
 height and never takes more than half the rows region — a deep tree
 scrolls (vertically and horizontally) inside the section instead of
 crowding the list out — and keeps one blank padding row above and below
-the diagram.
+the diagram. When the diagram overflows the section's width, the
+horizontal scrollbar gets its own row at the section's bottom (below the
+padding row), so the last diagram row never renders underneath it.
 
 The section's header is a one-row horizontal rule carrying its label and
 controls — the same visual furniture as the operator panel's title bar
