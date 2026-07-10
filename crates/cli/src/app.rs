@@ -27344,6 +27344,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn boxes_past_the_preview_right_edge_do_not_panic_the_render() {
+        // Regression test: the box-hit viewport clip skipped boxes above,
+        // below, and left of the viewport but NOT ones starting past its
+        // RIGHT edge, so `right.min(view_right) - vis_x` underflowed
+        // whenever the diagram was wider than the widget (a nested fork's
+        // box starts deep to the right) — an immediate panic on render.
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        let mut nested = summary_with_kind(agentd_protocol::SessionKind::User);
+        nested.id = "s1-fork-fork".into();
+        nested.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "s1-fork".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+        });
+        app.sessions.push(nested);
+        app.select_session("s1".to_string());
+        app.lineage_preview_pinned.insert("s1".to_string());
+        // Force a viewport far narrower than the nested diagram so the
+        // deepest box lies entirely past the right edge.
+        app.lineage_preview_size = Some((24, 12));
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        // The fully-clipped box must simply register no hit.
+        assert!(
+            !app.layout
+                .lineage_preview_box_hits
+                .iter()
+                .any(|h| h.session_id == "s1-fork-fork"),
+            "a box entirely past the right edge registers no hit rect"
+        );
+        // And every registered hit stays inside the preview's inner rect.
+        let area = app.layout.lineage_preview_area.expect("preview area");
+        for hit in &app.layout.lineage_preview_box_hits {
+            assert!(
+                hit.area.x >= area.x + 1
+                    && hit.area.x + hit.area.width <= area.x + area.width - 1,
+                "hit {hit:?} escapes the preview {area:?}"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn clicking_a_session_box_in_the_preview_jumps_to_that_session() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());

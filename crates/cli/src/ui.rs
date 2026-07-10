@@ -9502,18 +9502,24 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
     app.lineage_preview_scroll_x = scroll_x;
 
     // Box hit regions in screen coordinates (clipped to the viewport) —
-    // hover brightens a box's border, click jumps to its session.
+    // hover brightens a box's border, click jumps to its session. A box
+    // lying entirely outside the viewport on ANY side (including past the
+    // right edge, common when the diagram is wider than the widget) is
+    // skipped, and the arithmetic saturates so a clipped edge can never
+    // underflow.
     app.layout.lineage_preview_box_hits.clear();
+    let view_right = scroll_x + inner.width as usize;
+    let view_bottom = scroll + visible;
     for b in &boxes {
         let right = b.x + b.width;
         let bottom = b.y + b.height;
-        if bottom <= scroll || b.y >= scroll + visible || right <= scroll_x {
+        if bottom <= scroll || b.y >= view_bottom || right <= scroll_x || b.x >= view_right {
             continue;
         }
         let vis_x = b.x.max(scroll_x);
         let vis_y = b.y.max(scroll);
-        let w = right.min(scroll_x + inner.width as usize) - vis_x;
-        let h = bottom.min(scroll + visible) - vis_y;
+        let w = right.min(view_right).saturating_sub(vis_x);
+        let h = bottom.min(view_bottom).saturating_sub(vis_y);
         if w == 0 || h == 0 {
             continue;
         }
