@@ -32,7 +32,6 @@ use tokio::sync::mpsc;
 mod configure;
 mod dynamic_ui;
 mod editor;
-mod lineage_popup;
 mod lineage_preview;
 mod matrix_clicks;
 mod minibuffer;
@@ -46,7 +45,6 @@ pub use configure::{
     harness_guidance, no_agent_harness_available, smith_method_guidance, ConfigurePopup,
     ConfigureTab, CONFIGURE_TABS,
 };
-pub use lineage_popup::LineagePopup;
 pub use lineage_preview::LineagePreviewHover;
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
@@ -1340,22 +1338,41 @@ pub struct App {
     /// /tasks popup state: `None` = closed, `Some(...)` = open with
     /// a snapshot of the session's task registry.
     pub tasks_popup: Option<TasksPopup>,
-    /// Fork + subagent lineage view popup (`C-x q` / `q`): `None` = closed.
-    /// Unlike `tasks_popup`, its rows are rebuilt from live `self.sessions`
-    /// on every render/key handling call rather than snapshotted at open
-    /// time — see `lineage_popup::App::lineage_rows`.
-    pub lineage_popup: Option<LineagePopup>,
     /// Session-attached lineage preview shown transiently because the cursor
     /// is over a session's harness label (the pane title bar's right
     /// cluster, `apply_pane_title_right_cluster`). At most one across the
-    /// fleet at a time — see `lineage_preview::LineagePreviewHover`. Distinct
-    /// from `lineage_popup`: this is a small, ambient, read-only surface, not
-    /// the full-screen modal.
+    /// fleet at a time — see `lineage_preview::LineagePreviewHover`.
     pub lineage_preview_hover: Option<LineagePreviewHover>,
     /// Session ids whose lineage preview is pinned open via a harness-label
-    /// click. Mirrors `dynamic_ui_selected`'s pin-by-click shape, but keyed
+    /// click (or via entering keyboard focus — see `lineage_preview_focused`
+    /// below). Mirrors `dynamic_ui_selected`'s pin-by-click shape, but keyed
     /// only by session id (one lineage preview per session, not per panel).
     pub lineage_preview_pinned: HashSet<String>,
+    /// The session id whose lineage preview currently owns keyboard input,
+    /// or `None` when no preview is keyboard-focused. Entered by clicking
+    /// inside a visible preview's body, or via `C-x Tab` (spec 0080) — the
+    /// keyboard-only replacement for the old `C-x q` / `q` full-screen popup
+    /// (spec 0079, superseded), which this project deleted in favor of
+    /// making the per-session preview itself keyboard-interactive rather
+    /// than keeping a second, architecturally distinct global dialog.
+    /// Entering focus also inserts the session into `lineage_preview_pinned`
+    /// (see `App::activate_lineage_preview_focus`) so a preview that's about
+    /// to auto-hide from a hover timeout doesn't vanish out from under
+    /// active keyboard interaction. While `Some`, `App::on_key` routes
+    /// navigation/merge/discard/jump keys to
+    /// `App::handle_lineage_preview_focus_key` before ordinary dispatch.
+    pub lineage_preview_focused: Option<String>,
+    /// Logical index into the focused preview's current flattened,
+    /// selectable (non-`More`) rows — meaningful only while
+    /// `lineage_preview_focused` is `Some`. Reset to `0` every time focus is
+    /// (re-)entered. Clamped at use, mirroring the deleted popup's identical
+    /// field.
+    pub lineage_preview_selected: usize,
+    /// First visible raw-row index of the focused preview, clamped at
+    /// render time — the focused-mode counterpart of `lineage_preview_selected`,
+    /// used to keep the highlighted row on screen when the tree is taller
+    /// than the preview box.
+    pub lineage_preview_scroll: usize,
     /// `/configure` onboarding dialog (spec 0069): `None` = closed. Opened by
     /// the command palette, or automatically on first run / when no agent
     /// harness is available. Captures all input while open.
@@ -2631,6 +2648,27 @@ impl HarnessLabelHit {
     }
 }
 
+/// The last-rendered lineage preview's body (rows/content area, i.e. the
+/// block's inner rect) tagged with the session it belongs to — distinct
+/// from `HarnessLabelHit` (the trigger that opens/pins it) and from
+/// `LayoutSnapshot::lineage_preview_area` (the full bordered box, used only
+/// to swallow stray clicks/drags so they don't fall through to the pane
+/// underneath). Clicking inside this rect gives that session's preview
+/// keyboard focus (`App::activate_lineage_preview_focus`) — pinning it open
+/// first if it wasn't already, since focusing implies wanting to keep
+/// interacting with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineagePreviewBodyHit {
+    pub session_id: String,
+    pub area: ratatui::layout::Rect,
+}
+
+impl LineagePreviewBodyHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        App::rect_contains(self.area, col, row)
+    }
+}
+
 /// Last-frame geometry for hit-testing mouse clicks.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutSnapshot {
@@ -2697,14 +2735,17 @@ pub struct LayoutSnapshot {
     /// every frame by `render_detail`.
     pub session_title_name_hits: Vec<SessionTitleNameHit>,
     /// Clickable harness-label hitboxes from the last frame — only populated
-    /// for sessions with lineage to show (see `HarnessLabelHit`). Hover/click
-    /// drives the session-attached lineage preview; the `C-x q`/`q` modal is
-    /// unaffected.
+    /// for sessions with lineage to show (see `HarnessLabelHit`). Hover
+    /// reveals the session-attached lineage preview; click toggles its pin.
     pub harness_label_hits: Vec<HarnessLabelHit>,
     /// Bounds of the last-rendered lineage preview box (at most one across
     /// the fleet, mirroring `dynamic_ui_popover_area`). `None` when no
     /// preview is showing.
     pub lineage_preview_area: Option<ratatui::layout::Rect>,
+    /// The last-rendered lineage preview's body (rows/content) rect, tagged
+    /// with its owning session — see `LineagePreviewBodyHit`. `None` when no
+    /// preview is showing.
+    pub lineage_preview_body_hit: Option<LineagePreviewBodyHit>,
     /// Program title-bar Run button bounds: `(x_start, x_end, y)`.
     pub program_title_run_hit: Option<(u16, u16, u16)>,
     /// Program title-bar mode toggle bounds: `(x_start, x_end, y)`.
@@ -3110,9 +3151,11 @@ async fn run_with_socket_initial_selection(
         matrix_reveal_hits: Vec::new(),
         orchestrator_desired_size: None,
         tasks_popup: None,
-        lineage_popup: None,
         lineage_preview_hover: None,
         lineage_preview_pinned: HashSet::new(),
+        lineage_preview_focused: None,
+        lineage_preview_selected: 0,
+        lineage_preview_scroll: 0,
         configure_popup: None,
         session_picker: None,
         program_popup: None,
@@ -3372,16 +3415,19 @@ async fn run_loop(
     let mut reconnect: Option<ReconnectState> = None;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
-    // Lineage view popup (spec 0079): its per-node elapsed-time/cost stats
+    // Lineage preview, keyboard-focused mode (spec 0080; supersedes the old
+    // `C-x q` / `q` popup, spec 0079): its per-node elapsed-time/cost stats
     // are recomputed at render time from `SessionSummary` fields that are
     // already kept live by the ordinary STATE broadcast subscription (same
     // path the branch-rail fork badge uses) — this ticker's only job is a
-    // defensive re-`list()` while the popup is open, so a missed broadcast
-    // (a reconnect blip, e.g.) can't leave its stats stale for the rest of
-    // the session. Scoped strictly to "popup open" — never runs otherwise —
-    // so it's not a new always-on background polling loop.
-    let mut lineage_popup_refresh = tokio::time::interval(Duration::from_secs(1));
-    lineage_popup_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // defensive re-`list()` while a preview is keyboard-focused (the
+    // interactive case that most benefits from staying current), so a
+    // missed broadcast (a reconnect blip, e.g.) can't leave its stats stale
+    // for the rest of the session. Scoped strictly to "a preview is
+    // focused" — never runs otherwise — so it's not a new always-on
+    // background polling loop.
+    let mut lineage_preview_refresh = tokio::time::interval(Duration::from_secs(1));
+    lineage_preview_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Re-probe harness availability while the welcome card (no session
     // selected) or the `/configure` dialog is showing, so installing a CLI
     // or exporting an API key updates the live status without a TUI
@@ -3893,7 +3939,7 @@ async fn run_loop(
                     app.harnesses = list;
                 }
             }
-            _ = lineage_popup_refresh.tick(), if app.connected && app.lineage_popup.is_some() => {
+            _ = lineage_preview_refresh.tick(), if app.connected && app.lineage_preview_focused.is_some() => {
                 app.refresh_sessions().await;
             }
         }
@@ -7293,7 +7339,7 @@ impl App {
             return;
         }
         // Clicking a session's harness label toggles its lineage preview pin
-        // (spec 0079) — only registered as a hit for sessions that actually
+        // (spec 0080) — only registered as a hit for sessions that actually
         // have lineage to show (see `apply_pane_title_right_cluster`).
         if let Some(hit) = self
             .layout
@@ -7305,10 +7351,19 @@ impl App {
             self.toggle_lineage_preview_pin(hit.session_id);
             return;
         }
-        // A click elsewhere inside the lineage preview body is consumed
-        // rather than falling through to pane content underneath it (cursor
-        // placement, block toggling, session switch) — the preview is a
-        // read-only surface, so there is nothing there to act on.
+        // Clicking inside the preview's body (not the harness-label trigger
+        // above) gives it keyboard focus for j/k/Enter/m/d — pinning it open
+        // first if it wasn't already, since focusing implies wanting to keep
+        // interacting with it (spec 0080).
+        if let Some(hit) = self.layout.lineage_preview_body_hit.clone() {
+            if hit.contains(col, row) {
+                self.activate_lineage_preview_focus(hit.session_id);
+                return;
+            }
+        }
+        // A click elsewhere inside the lineage preview box (its border) is
+        // consumed rather than falling through to pane content underneath it
+        // (cursor placement, block toggling, session switch).
         if self.is_over_lineage_preview(col, row) {
             return;
         }
@@ -7540,9 +7595,6 @@ impl App {
             return;
         }
         if self.tasks_popup.take().is_some() {
-            return;
-        }
-        if self.lineage_popup.take().is_some() {
             return;
         }
         if self.remote_control_popup.take().is_some() {
@@ -7918,10 +7970,14 @@ impl App {
         if self.configure_popup.is_some() && self.handle_configure_key(key).await {
             return;
         }
-        // Lineage view popup (`C-x q` / `q`): owns navigation/merge/discard/
-        // jump keys while open; anything else closes it and falls through to
-        // ordinary routing on the SAME key, exactly like `/configure` above.
-        if self.lineage_popup.is_some() && self.handle_lineage_popup_key(key).await {
+        // Lineage preview, keyboard-focused mode (`C-x Tab`, spec 0080 —
+        // supersedes the old `C-x q` / `q` popup, spec 0079): owns
+        // navigation/merge/discard/jump keys while focused; anything else
+        // clears focus and falls through to ordinary routing on the SAME
+        // key, exactly like `/configure` above.
+        if self.lineage_preview_focused.is_some()
+            && self.handle_lineage_preview_focus_key(key).await
+        {
             return;
         }
         if self.tasks_popup.is_some() {
@@ -8387,11 +8443,11 @@ impl App {
                     self.set_status("merge: select a fork".into());
                 }
             }
-            OpenForkLog => {
-                // spec 0079: the fork log grew from a flat "N forks" status
-                // line into a live tree/graph popup unifying fork lineage
-                // and subagent parent/child relationships.
-                self.open_lineage_popup();
+            ToggleLineagePreviewFocus => {
+                // spec 0080: `C-x Tab` is the keyboard-only entry point for
+                // the per-session lineage preview, replacing the old
+                // full-screen fork-log popup (spec 0079, superseded).
+                self.toggle_lineage_preview_focus();
             }
             OpenRename => match self.selection.clone() {
                 Selection::Session(id) => {
@@ -10665,6 +10721,7 @@ mod tests {
             session_title_name_hits: Vec::new(),
             harness_label_hits: Vec::new(),
             lineage_preview_area: None,
+            lineage_preview_body_hit: None,
             program_title_run_hit: None,
             program_title_toggle_hit: None,
             program_title_close_hit: None,
@@ -10790,9 +10847,11 @@ mod tests {
             resizing_program_popup: None,
             list_collapsed: false,
             tasks_popup: None,
-            lineage_popup: None,
             lineage_preview_hover: None,
             lineage_preview_pinned: HashSet::new(),
+            lineage_preview_focused: None,
+            lineage_preview_selected: 0,
+            lineage_preview_scroll: 0,
             configure_popup: None,
             session_picker: None,
             program_popup: None,
@@ -26805,6 +26864,87 @@ mod tests {
             !app.lineage_preview_pinned.contains("s1"),
             "clicking the harness label again should un-pin it"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn clicking_the_preview_body_focuses_and_pins_it() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let hit = app
+            .layout
+            .harness_label_hits
+            .iter()
+            .find(|h| h.session_id == "s1")
+            .cloned()
+            .expect("harness label hit registered");
+
+        // Hover (not pinned) so the preview renders and registers a body hit.
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.lineage_preview_visible("s1"));
+        assert!(!app.lineage_preview_pinned.contains("s1"));
+
+        let body = app
+            .layout
+            .lineage_preview_body_hit
+            .clone()
+            .expect("preview body hit registered while visible");
+        assert_eq!(body.session_id, "s1");
+
+        app.handle_left_click(body.area.x, body.area.y).await;
+        assert_eq!(
+            app.lineage_preview_focused.as_deref(),
+            Some("s1"),
+            "clicking inside the preview body should give it keyboard focus"
+        );
+        assert!(
+            app.lineage_preview_pinned.contains("s1"),
+            "entering focus should pin the preview open so a hover-timeout \
+             can't yank it away mid-interaction"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lineage_preview_border_brightens_when_focused() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        app.lineage_preview_pinned.insert("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let area = app
+            .layout
+            .lineage_preview_area
+            .expect("preview area recorded while pinned");
+        let unfocused_border_fg = term
+            .backend()
+            .buffer()
+            .cell((area.x, area.y))
+            .and_then(|c| c.style().fg)
+            .expect("border cell has a color");
+        assert_eq!(
+            unfocused_border_fg, app.theme.border,
+            "pinned-but-unfocused preview uses the dimmer pane_border_style"
+        );
+
+        app.lineage_preview_focused = Some("s1".to_string());
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let focused_border_fg = term
+            .backend()
+            .buffer()
+            .cell((area.x, area.y))
+            .and_then(|c| c.style().fg)
+            .expect("border cell has a color");
+        assert_eq!(
+            focused_border_fg, app.theme.border_focused,
+            "a keyboard-focused preview uses pane_border_style's focused color"
+        );
+        assert_ne!(unfocused_border_fg, focused_border_fg);
         server.abort();
     }
 

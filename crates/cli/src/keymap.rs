@@ -31,10 +31,13 @@ pub enum KeyAction {
     /// focus moves straight to the new session. Bound to `C-x F` (emacs) /
     /// `O` (vim).
     OpenForkCrossHarness,
-    /// Open the lineage view: a live tree of the selected session's fork
-    /// lineage (`forked_from`) and subagent parent/child relationships,
-    /// replacing the old flat "N forks" status line.
-    OpenForkLog,
+    /// Toggle the selected session's lineage preview (spec 0080) between
+    /// closed and "pinned + keyboard-focused" in one keystroke — the
+    /// keyboard-only entry point for the per-session fork/subagent tree
+    /// preview, replacing the old `C-x q` / `q` full-screen popup (spec
+    /// 0079, superseded). No-op when the selected session has no
+    /// fork/subagent lineage to show.
+    ToggleLineagePreviewFocus,
     /// Merge or discard the selected fork.
     OpenMerge,
     /// Zoom: the session view fills the screen (list / pin strip / modeline
@@ -335,8 +338,15 @@ fn emacs() -> Keymap {
         // `C-x F` is the explicit cross-harness fork (harness picker),
         // mirroring the `C-x A` → ToggleAutomode shifted-letter pattern.
         (Chord(vec![ctrl('x'), shift('F')]), OpenForkCrossHarness),
-        (Chord(vec![ctrl('x'), ch('q')]), OpenForkLog),
         (Chord(vec![ctrl('x'), ch('m')]), OpenMerge),
+        // Toggle the selected session's lineage preview open (pinned +
+        // keyboard-focused) or closed. Bare `Tab` is intentionally left
+        // unbound above (see focus + view), so `C-x Tab` is a fresh
+        // compound chord, not a conflict with it.
+        (
+            Chord(vec![ctrl('x'), key(KeyCode::Tab)]),
+            ToggleLineagePreviewFocus,
+        ),
         // Pin / unpin selected session (or all members of a selected group)
         (Chord(vec![ctrl('x'), ch('p')]), TogglePin),
         (Chord(vec![ch(' ')]), TogglePin),
@@ -412,8 +422,12 @@ fn vim() -> Keymap {
         // (it used to be a redundant alias of bare `f`).
         (Chord(vec![ch('f')]), OpenFork),
         (Chord(vec![shift('O')]), OpenForkCrossHarness),
-        (Chord(vec![ch('q')]), OpenForkLog),
         (Chord(vec![ch('m')]), OpenMerge),
+        // Shared with the emacs profile — see its binding for the rationale.
+        (
+            Chord(vec![ctrl('x'), key(KeyCode::Tab)]),
+            ToggleLineagePreviewFocus,
+        ),
         (Chord(vec![ch('v')]), ToggleView),
         (Chord(vec![ch('z')]), ToggleZoom),
         (Chord(vec![shift('Z'), shift('Z')]), Quit),
@@ -776,6 +790,21 @@ mod tests {
     }
 
     #[test]
+    fn c_x_tab_toggles_lineage_preview_focus_in_both_profiles() {
+        for profile in [Profile::Emacs, Profile::Vim] {
+            let km = default_for(profile);
+            assert!(
+                matches!(
+                    resolve(&km, vec![ctrl('x'), key(KeyCode::Tab)]),
+                    KeymapResult::Action(KeyAction::ToggleLineagePreviewFocus)
+                ),
+                "C-x Tab should toggle the lineage preview's keyboard focus in {profile:?} \
+                 — the keyboard entry point that replaced the old C-x q / q popup"
+            );
+        }
+    }
+
+    #[test]
     fn vim_phase2_chords_resolve_to_expected_actions() {
         let km = default_for(Profile::Vim);
 
@@ -785,7 +814,6 @@ mod tests {
         assert_action(&km, vec![ch('n')], KeyAction::OpenNewSession);
         assert_action(&km, vec![shift('O')], KeyAction::OpenForkCrossHarness);
         assert_action(&km, vec![ch('f')], KeyAction::OpenFork);
-        assert_action(&km, vec![ch('q')], KeyAction::OpenForkLog);
         assert_action(&km, vec![ch('m')], KeyAction::OpenMerge);
         assert_action(&km, vec![shift('J')], KeyAction::MoveSelectedDown);
         assert_action(&km, vec![shift('K')], KeyAction::MoveSelectedUp);

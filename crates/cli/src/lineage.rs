@@ -255,6 +255,21 @@ impl LineageRow {
     }
 }
 
+/// Indices of the selectable (non-`More`) rows within a flattened row list,
+/// in on-screen order — the shared "which rows can the cursor land on"
+/// logic behind keyboard navigation. Kept here, next to `flatten`, so both
+/// the lineage preview's rendering (`ui.rs::render_lineage_preview`, to
+/// highlight the selected row) and its keyboard navigation
+/// (`app/lineage_preview.rs`, to move/clamp the selection) share one
+/// definition rather than re-deriving it.
+pub fn selectable_indices(rows: &[LineageRow]) -> Vec<usize> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, r)| r.is_selectable())
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Flatten a tree into renderable rows in depth-first, top-to-bottom order —
 /// the order a `git log --graph`-style rail expects.
 pub fn flatten(root: &LineageNode) -> Vec<LineageRow> {
@@ -573,6 +588,25 @@ mod tests {
     fn has_lineage_is_false_for_an_unknown_session_id() {
         let sessions = vec![base("root")];
         assert!(!has_lineage("ghost", &sessions));
+    }
+
+    #[test]
+    fn selectable_indices_skips_more_markers() {
+        let mut sessions = vec![base("root")];
+        for i in 0..(MAX_SIBLINGS + 2) {
+            sessions.push(forked_from(base(&format!("f{i}")), "root"));
+        }
+        let tree = build_tree("root", &sessions).unwrap();
+        let rows = flatten(&tree);
+        let selectable = selectable_indices(&rows);
+        assert_eq!(
+            selectable.len(),
+            MAX_SIBLINGS + 1,
+            "the collapsed +N more row must not count as selectable"
+        );
+        for idx in selectable {
+            assert!(rows[idx].is_selectable());
+        }
     }
 
     #[test]

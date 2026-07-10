@@ -145,6 +145,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.session_title_name_hits.clear();
     app.layout.harness_label_hits.clear();
     app.layout.lineage_preview_area = None;
+    app.layout.lineage_preview_body_hit = None;
     app.window_pane_sizes.clear();
     app.terminal_replayed_sessions_this_frame.clear();
     app.layout.dynamic_ui_popover_area = None;
@@ -310,7 +311,6 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     // already up), so render order between them doesn't matter.
     render_session_picker(f, app);
     render_configure_popup(f, app);
-    render_lineage_popup(f, app);
     capture_frame_text(f, app);
     render_hovered_url(f, app);
     render_text_selection(f, app);
@@ -3184,6 +3184,36 @@ fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
     render_node(f, area, app, &tree, &mut next_split_id);
 }
 
+/// Style for the pane title bar's harness label on a session with
+/// fork/subagent lineage to show (spec 0080). Two visibly different
+/// intensities, not just two hues:
+///
+/// - **Hover-only** (auto-hides once the grace window lapses): the "light"
+///   tier — bold text in `matrix_flash_good`.
+/// - **Pinned** (toggled on, persists until unpinned): the "strong" tier —
+///   bold `accent` PLUS `Modifier::REVERSED` (inverts fg/bg). This reuses
+///   this codebase's established convention for an emphatic,
+///   persistently-active interactive-text cue (see the action-link/URL
+///   hover styling elsewhere in this file) as the *persistent* tier here,
+///   rather than a hover-only flash.
+///
+/// Pinned wins over a simultaneous hover — the click outcome is
+/// authoritative (see `App::toggle_lineage_preview_pin`).
+fn harness_label_style(theme: &Theme, border_style: Style, pinned: bool, hovered: bool) -> Style {
+    if pinned {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::REVERSED)
+    } else if hovered {
+        Style::default()
+            .fg(theme.matrix_flash_good)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        border_style
+    }
+}
+
 /// Build the shared right-side cluster of a pane title bar — session widget
 /// indicators, the harness label, and the close (` x `) button — and add them to
 /// `block` as right-aligned titles. Both the normal session view and the program
@@ -3197,7 +3227,7 @@ fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
 /// registered as a side effect of `render_session_widget_title` (into
 /// `dynamic_ui_widget_hits`); the close geometry is `view_close_button_range`.
 ///
-/// On a session with fork/subagent lineage to show (spec 0079), the harness
+/// On a session with fork/subagent lineage to show (spec 0080), the harness
 /// label doubles as the hover/click trigger for the session-attached lineage
 /// preview: its on-screen span is registered into `harness_label_hits` (via
 /// `harness_label_range`) and its style reacts to hover/pin state. Sessions
@@ -3233,14 +3263,14 @@ fn apply_pane_title_right_cluster<'a>(
     } else {
         0
     };
-    // Lineage preview trigger (spec 0079): on a session that actually has
+    // Lineage preview trigger (spec 0080): on a session that actually has
     // fork/subagent lineage to show, the harness label doubles as the
-    // hover/click trigger for a small, session-attached preview of the same
-    // tree the `C-x q`/`q` modal renders — hover reveals it (with a short
-    // grace so the pointer can travel down onto the preview body), a click
-    // pins it open. Ordinary sessions with no lineage get no hit-rect
-    // registered here and the label keeps rendering exactly as it always
-    // has (plain `border_style`, no hover/click behavior at all).
+    // hover/click trigger for a small, session-attached preview of that
+    // session's fork/subagent tree — hover reveals it (with a short grace so
+    // the pointer can travel down onto the preview body), a click pins it
+    // open. Ordinary sessions with no lineage get no hit-rect registered
+    // here and the label keeps rendering exactly as it always has (plain
+    // `border_style`, no hover/click behavior at all).
     let mut harness_style = border_style;
     if let Some(s) = summary {
         if crate::lineage::has_lineage(&s.id, &app.sessions) {
@@ -3271,17 +3301,7 @@ fn apply_pane_title_right_cluster<'a>(
                     end_col: x_end,
                 });
             let pinned = app.lineage_preview_pinned.contains(&s.id);
-            harness_style = if pinned {
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else if hovered {
-                Style::default()
-                    .fg(app.theme.matrix_flash_good)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                border_style
-            };
+            harness_style = harness_label_style(&app.theme, border_style, pinned, hovered);
         }
     }
     let harness_right = harness_label_text.as_ref().map(|text| {
@@ -7760,7 +7780,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-x r           rename selected session (clears title on empty submit)
     C-x f           fork selected session instantly (same harness, no prompt)
     C-x F           fork selected session into a different harness (picker)
-    C-x q           fork log: forks of the selected session
+    C-x Tab         toggle lineage preview (fork/subagent tree) pin+focus
     C-x m           merge the selected fork (take result, or discard)
     C-c C-c         interrupt
 
@@ -7833,7 +7853,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     r               rename selected session (clears title on empty submit)
     f               fork selected session instantly (same harness, no prompt)
     O               fork selected session into a different harness (picker)
-    q               fork log: forks of the selected session
+    C-x Tab         toggle lineage preview (fork/subagent tree) pin+focus
     m               merge the selected fork (take result, or discard)
     C-c             interrupt
 
@@ -9178,10 +9198,12 @@ fn render_tasks_popup(f: &mut Frame, app: &mut App) {
 
 /// Keep `selected_raw` on screen within `visible` rows, scrolling the
 /// window just far enough in either direction. Simpler than
-/// `session_picker_scroll` because the lineage popup has no non-selectable
+/// `session_picker_scroll` because a lineage tree has no non-selectable
 /// header rows to keep visible above the selection — every row (including
-/// "+N more" markers) is a plain content line.
-fn lineage_popup_scroll(
+/// "+N more" markers) is a plain content line. Shared by the lineage
+/// preview's keyboard-focused rendering (the deleted `C-x q` / `q` popup
+/// used this same logic before it was folded into the preview).
+fn lineage_row_scroll(
     total: usize,
     selected_raw: Option<usize>,
     prev_scroll: usize,
@@ -9288,13 +9310,27 @@ fn lineage_preview_rect(session_area: Rect, row_count: usize) -> Option<Rect> {
     })
 }
 
-/// Render `session_id`'s lineage preview (spec 0079) if its hover/pin state
-/// says it should show this frame — a small, read-only box anchored to
-/// `session_area` (that session's own pane), NOT the full-screen `C-x q`/`q`
-/// modal. Reuses `crate::lineage::build_tree`/`flatten` for the tree and
-/// `render_lineage_row` for each row's formatting directly, rather than
-/// re-deriving either — the preview and the modal render the exact same
-/// data, just at different scales.
+/// Render `session_id`'s lineage preview (spec 0080) if its hover/pin/focus
+/// state says it should show this frame — a small box anchored to
+/// `session_area` (that session's own pane). Reuses
+/// `App::lineage_preview_rows` (`crate::lineage::build_tree`/`flatten`
+/// underneath) for the tree and `render_lineage_row` for each row's
+/// formatting, rather than re-deriving either.
+///
+/// Two render modes, chosen by whether this session currently owns keyboard
+/// focus (`App::lineage_preview_focused`, spec 0080 — entered via `C-x Tab`
+/// or a click inside the body, replacing the deleted `C-x q` / `q` popup):
+/// - **Not focused** (hover or pin only): a plain `Paragraph` — no selection
+///   highlight, no scrolling beyond the box's own height.
+/// - **Focused**: a `List` with the selected row highlighted and scrolled
+///   into view (`lineage_row_scroll`), matching the keyboard vocabulary
+///   `App::handle_lineage_preview_focus_key` implements — the same
+///   rendering the deleted popup used, now attached to the session's own
+///   pane instead of a screen-centered dialog.
+///
+/// The border reacts to focus the same way `pane_border_style` does for any
+/// other pane: `theme.border_focused` while focused, the dimmer
+/// `theme.border` otherwise.
 fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, session_id: &str) {
     let now = Instant::now();
     if app
@@ -9307,10 +9343,7 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
     if !app.lineage_preview_visible(session_id) {
         return;
     }
-    let Some(root) = crate::lineage::build_tree(session_id, &app.sessions) else {
-        return;
-    };
-    let rows = crate::lineage::flatten(&root);
+    let rows = app.lineage_preview_rows(session_id);
     if rows.len() <= 1 {
         // Nothing beyond the session itself to show — e.g. its one fork was
         // just discarded and pruned from `app.sessions` while pinned open.
@@ -9341,118 +9374,64 @@ fn render_lineage_preview(f: &mut Frame, session_area: Rect, app: &mut App, sess
         width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
     };
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let by_id: HashMap<&str, &SessionSummary> =
-        app.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
-    let lines: Vec<Line<'static>> = rows
-        .iter()
-        .take(inner.height as usize)
-        .map(|row| render_lineage_row(row, &by_id, &app.theme, now_ms))
-        .collect();
+    let focused = app.lineage_preview_focused.as_deref() == Some(session_id);
     f.render_widget(Clear, area);
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(app.theme.dim)),
+            .border_style(pane_border_style(&app.theme, focused)),
         area,
     );
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-    app.layout.lineage_preview_area = Some(area);
-}
-
-/// Fork + subagent lineage view popup (`C-x q` / `q`, spec
-/// 0079-fork-and-subagent-lineage-view): a live `git log --graph`-style tree
-/// unifying fork lineage (spec 0078, `⑂`) and subagent parent/child edges
-/// (spec 0014, `▸`) for the selected session. Rows are rebuilt from live
-/// `App::sessions` on every frame (see `App::lineage_rows`), so a fork
-/// completing, merging, or a subagent finishing while the popup is open
-/// updates immediately.
-fn render_lineage_popup(f: &mut Frame, app: &mut App) {
-    let Some(popup) = app.lineage_popup.clone() else {
-        return;
-    };
-    let rows = app.lineage_rows();
-    let total = f.area();
-    let w = total.width.saturating_sub(6).min(100);
-    let h = total
-        .height
-        .saturating_sub(4)
-        .min((rows.len() as u16 + 4).max(8));
-    if w < 30 || h < 6 {
-        return;
-    }
-    let x = total.x + (total.width.saturating_sub(w)) / 2;
-    let y = total.y + (total.height.saturating_sub(h)) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-    app.layout.modal_area = Some(rect);
-    let title = format!(
-        " lineage — {} — j/k move · Enter jump · m merge · d discard · Esc close ",
-        short_id(&popup.focus_id)
-    );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border_focused))
-        .title(Line::from(Span::styled(
-            title,
-            Style::default()
-                .fg(app.theme.info)
-                .add_modifier(Modifier::BOLD),
-        )));
-    let inner = block.inner(rect);
-    f.render_widget(Clear, rect);
-    f.render_widget(block, rect);
-
-    if rows.is_empty() {
-        let p =
-            Paragraph::new("(session no longer exists)").style(Style::default().fg(app.theme.dim));
-        f.render_widget(p, inner);
-        return;
-    }
-
-    let selectable_positions: Vec<usize> = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| r.is_selectable())
-        .map(|(i, _)| i)
-        .collect();
-    let selected_raw = selectable_positions
-        .get(
-            popup
-                .selected
-                .min(selectable_positions.len().saturating_sub(1)),
-        )
-        .copied();
-
-    let visible = inner.height as usize;
-    let scroll = lineage_popup_scroll(rows.len(), selected_raw, popup.scroll, visible);
-    if let Some(p) = app.lineage_popup.as_mut() {
-        p.scroll = scroll;
-    }
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let by_id: HashMap<&str, &SessionSummary> =
         app.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
 
-    let highlight_style = Style::default()
-        .bg(app.theme.highlight_bg)
-        .fg(app.theme.highlight_fg)
-        .add_modifier(Modifier::BOLD);
-    let items: Vec<ListItem> = rows
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(visible)
-        .map(|(_, row)| ListItem::new(render_lineage_row(row, &by_id, &app.theme, now_ms)))
-        .collect();
-    let mut state = ListState::default();
-    state.select(selected_raw.map(|sr| sr - scroll));
-    let list = List::new(items).highlight_style(highlight_style);
-    f.render_stateful_widget(list, inner, &mut state);
+    if focused {
+        let selectable = crate::lineage::selectable_indices(&rows);
+        let selected_raw = selectable
+            .get(
+                app.lineage_preview_selected
+                    .min(selectable.len().saturating_sub(1)),
+            )
+            .copied();
+        let visible = inner.height as usize;
+        let scroll = lineage_row_scroll(
+            rows.len(),
+            selected_raw,
+            app.lineage_preview_scroll,
+            visible,
+        );
+        app.lineage_preview_scroll = scroll;
+        let highlight_style = Style::default()
+            .bg(app.theme.highlight_bg)
+            .fg(app.theme.highlight_fg)
+            .add_modifier(Modifier::BOLD);
+        let items: Vec<ListItem> = rows
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(visible)
+            .map(|(_, row)| ListItem::new(render_lineage_row(row, &by_id, &app.theme, now_ms)))
+            .collect();
+        let mut state = ListState::default();
+        state.select(selected_raw.map(|sr| sr - scroll));
+        let list = List::new(items).highlight_style(highlight_style);
+        f.render_stateful_widget(list, inner, &mut state);
+    } else {
+        let lines: Vec<Line<'static>> = rows
+            .iter()
+            .take(inner.height as usize)
+            .map(|row| render_lineage_row(row, &by_id, &app.theme, now_ms))
+            .collect();
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+
+    app.layout.lineage_preview_area = Some(area);
+    app.layout.lineage_preview_body_hit = Some(crate::app::LineagePreviewBodyHit {
+        session_id: session_id.to_string(),
+        area: inner,
+    });
 }
 
 struct ProgramPopupHoverOverlay {
@@ -14210,15 +14189,15 @@ mod tests {
     }
 
     #[test]
-    fn lineage_popup_scroll_keeps_selection_on_screen() {
+    fn lineage_row_scroll_keeps_selection_on_screen() {
         // Selection below the window pulls the window down just enough.
-        assert_eq!(lineage_popup_scroll(20, Some(10), 0, 5), 6);
+        assert_eq!(lineage_row_scroll(20, Some(10), 0, 5), 6);
         // Selection above the window pulls the window up to it.
-        assert_eq!(lineage_popup_scroll(20, Some(2), 8, 5), 2);
+        assert_eq!(lineage_row_scroll(20, Some(2), 8, 5), 2);
         // Already visible: scroll untouched.
-        assert_eq!(lineage_popup_scroll(20, Some(4), 2, 5), 2);
+        assert_eq!(lineage_row_scroll(20, Some(4), 2, 5), 2);
         // Fewer rows than the viewport: no scroll.
-        assert_eq!(lineage_popup_scroll(3, Some(1), 0, 5), 0);
+        assert_eq!(lineage_row_scroll(3, Some(1), 0, 5), 0);
     }
 
     #[test]
@@ -15515,6 +15494,46 @@ mod tests {
             assert!(hovered.add_modifier.contains(Modifier::BOLD));
             assert!(!hovered.add_modifier.contains(Modifier::DIM));
         }
+    }
+
+    #[test]
+    fn harness_label_pinned_is_a_stronger_tier_than_hover_only() {
+        // Spec 0080: hover-only is the "light" tier, pinned is the "strong"
+        // tier — the two must read as different intensities, not just
+        // different hues.
+        let theme = Theme::default();
+        let border = Style::default().fg(theme.border);
+
+        let plain = harness_label_style(&theme, border, false, false);
+        let hover_only = harness_label_style(&theme, border, false, true);
+        let pinned = harness_label_style(&theme, border, true, false);
+        // Pinned wins when both are true (the click outcome is
+        // authoritative — see `App::toggle_lineage_preview_pin`).
+        let pinned_and_hovered = harness_label_style(&theme, border, true, true);
+
+        assert_eq!(
+            plain, border,
+            "no hover/pin: label renders as plain border text"
+        );
+
+        assert!(hover_only.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            !hover_only.add_modifier.contains(Modifier::REVERSED),
+            "hover-only must stay the lighter tier — no REVERSED"
+        );
+
+        assert!(pinned.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            pinned.add_modifier.contains(Modifier::REVERSED),
+            "pinned must use REVERSED as the stronger, persistent tier"
+        );
+        assert_eq!(pinned.fg, Some(theme.accent));
+        assert_eq!(hover_only.fg, Some(theme.matrix_flash_good));
+
+        assert_eq!(
+            pinned_and_hovered, pinned,
+            "pinned wins over a simultaneous hover"
+        );
     }
 
     #[test]

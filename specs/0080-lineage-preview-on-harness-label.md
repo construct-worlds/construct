@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-07-09
 Area: tui
-Scope: The pane title bar's harness label doubles as a hover/click trigger for a small, session-attached preview of that session's fork/subagent lineage.
+Scope: The pane title bar's harness label doubles as a hover/click trigger for a small, session-attached preview of that session's fork/subagent lineage, and that preview can itself be given keyboard focus to navigate, merge, discard, and jump — there is no separate full-screen lineage dialog.
 
 ## Decision
 
@@ -11,48 +11,110 @@ A session that has fork/subagent lineage to show (it was itself forked from a
 parent, or it has at least one live fork/subagent descendant) gets an
 additional behavior on its pane title bar's existing harness label (the
 right-aligned harness name in `apply_pane_title_right_cluster`): hovering it
-reveals a small, read-only preview box anchored to that session's own pane,
-rendering the same tree data the `C-x q` / `q` lineage popup shows. Clicking
-the label toggles a persistent pin, keeping the preview open regardless of
-hover. Ordinary sessions with no lineage get no hit-rect on the label at all
-— it renders exactly as it always has, with no hover/click behavior and no
-visual change.
+reveals a small preview box anchored to that session's own pane, rendering
+the same tree data a fork/subagent lineage graph shows (edge glyphs,
+status, compact stats). Clicking the label toggles a persistent pin, keeping
+the preview open regardless of hover. Ordinary sessions with no lineage get
+no hit-rect on the label at all — it renders exactly as it always has, with
+no hover/click behavior and no visual change.
 
-This preview is intentionally a second, lighter-weight presentation of the
-same data the modal shows, not a replacement:
+This preview is the ONLY lineage UI. An earlier iteration of this feature
+(spec 0079) had a second, architecturally distinct surface — a full-screen
+`C-x q` / `q` modal with its own global `App` slot — presented as the
+"real" interactive view while this preview stayed read-only. That modal has
+been deleted. Its interaction vocabulary was ported onto the preview itself
+rather than kept as a second surface, because a session's lineage is
+inherently a per-session concern; a global dialog for it was an unnecessary
+architectural split, not a distinct need.
 
-- **The modal (`C-x q` / `q`) is unchanged.** It stays the full-screen,
-  fully interactive dialog — keyboard navigation, merge/discard, jump-in.
-- **The preview is session-attached, not a global dialog.** It renders next
-  to the specific session's own pane the same way a sticky widget's
-  hover/pinned body attaches to its owning pane — never a large, centered,
-  screen-wide overlay independent of which pane it belongs to.
-- **The preview is read-only.** No keyboard navigation, no merge/discard, no
-  row selection in v1. `C-x q` / `q` remains the only way to act on the
-  graph.
-- **Tree construction and row formatting are reused, not duplicated.** The
-  preview calls the same `crate::lineage::build_tree`/`flatten` and the same
-  per-row rendering the modal uses, so the two surfaces can never drift into
-  showing different shapes for the same data.
+### Two visibility states, two label intensities
 
-Visibility, hover-grace, and pin state mirror the shape of the (separately
-deprecated, spec 0003) session-widget hover/pin system —
-`{session_id, until}` hover state with a short grace period so the pointer
-can travel from the trigger down onto the preview body without it
-vanishing, and pinned-OR-unexpired-hover as the combined visibility rule —
-but as independent state, not a dependency on that system.
+- **Hover-only** (the pointer is over the label, or has been recently — a
+  short grace period lets it travel down onto the preview body without the
+  preview vanishing mid-move): the "light" tier. The label bolds in a
+  hover-flash color.
+- **Pinned** (toggled on by a click, persists until unpinned): the "strong"
+  tier. The label bolds in the accent color AND gains `Modifier::REVERSED`
+  (inverts fg/bg) — this codebase's established convention for an emphatic,
+  persistently-active interactive-text cue (the same modifier the
+  action-link/URL hover styling uses, applied here to the *persistent*
+  state rather than a hover flash). The two states must read as visibly
+  different intensities, not just different hues, since the pinned state
+  means "this stays here" while hover means "this is a transient glance."
+
+Visibility itself (pinned-OR-unexpired-hover) and the hover-grace timing
+mirror the shape of the (separately deprecated, spec 0003) session-widget
+hover/pin system, kept as independent state rather than a dependency on it.
+
+### Keyboard focus
+
+A visible preview can be given keyboard focus two ways:
+
+- Clicking inside the preview's body (its rows/content area — not the
+  harness label itself, which only ever toggles the pin).
+- Pressing `C-x Tab` on the selected session (a no-op if it has no lineage
+  to show, same gate the harness label's own hover/click affordance uses).
+  A second press on the same session's preview closes it — un-pins and
+  clears focus, a single-keystroke open/close toggle.
+
+Either entry path also pins the preview open if it wasn't already —
+focusing something implies wanting to keep interacting with it, so a
+preview about to auto-hide from a hover timeout shouldn't vanish out from
+under active keyboard interaction.
+
+While a preview holds focus, it owns the keyboard for its own vocabulary —
+the same vocabulary the deleted modal used to own exclusively:
+
+- `j`/`k`/arrows/`C-n`/`C-p`: move the row selection.
+- `Enter`: jump into the selected session (a *merged* fork jumps to its
+  parent instead, since the merge point in the graph and the transcript
+  message it injected are the same event — spec 0078). Jumping in also
+  clears both focus and the pin for this preview: leaving to go work in
+  that session means the preview has served its purpose.
+- `m` / `d`: merge or discard the selected row, via the exact same
+  merge/discard path the `C-x m` minibuffer menu uses — a direct-key
+  shortcut for it, not a second implementation.
+- `Esc`: clears focus ONLY. It does not un-pin. A preview the user
+  explicitly pinned stays visible after they're done navigating it — Esc
+  backs out one level (stop owning the keyboard), it doesn't dismiss
+  unrelated state, matching what Esc means everywhere else in this UI.
+
+Any other key clears focus and is reported as unhandled, so the caller
+re-dispatches the SAME keystroke through ordinary routing — the same
+"a closing overlay never eats a live keystroke" rule other dismissable
+overlays in this UI follow (e.g. `/configure`), so `C-x C-c` still quits
+and `C-x b` still switches sessions while a preview is focused.
+
+Tree construction, row formatting, and the merge/discard action are all
+reused, never duplicated: the preview calls the same
+`crate::lineage::build_tree`/`flatten`, the same per-row rendering, and the
+same `App::apply_fork_merge` any other merge/discard path in this UI uses.
+
+### Border reacts to focus
+
+The preview's own border uses the same focus-reactive style any other pane
+border does (`theme.border_focused` vs. the dimmer `theme.border`) —
+`theme.border_focused` while this preview holds keyboard focus, `theme.border`
+otherwise (whether it's showing via hover, pin, or both). This reuses the
+existing theme colors rather than inventing a third lineage-specific hue,
+and gives a focused preview the same "this pane owns your keystrokes" visual
+language every other focused pane already uses.
 
 ## Reason
 
-The full lineage graph (spec 0079) answers "what's this session's fork/
-subagent shape" in detail, but opening it requires a deliberate keystroke and
-takes over the whole screen. Most of the time a user just wants a quick
-glance — "does this session have any lineage, and what does it look like" —
-without leaving whatever they're doing. Putting that glance on the harness
-label (an element already sitting in the title bar, already inert on
-ordinary sessions) gives ambient discoverability for free: the label simply
-starts reacting to the mouse exactly where a user's eye already rests, only
-on the sessions where there's something to show.
+A session's fork/subagent lineage is a per-session fact, not a
+fleet-wide or otherwise global one — asking "what's this session's lineage
+shape, and can I act on it" never has a reason to open a screen-centered
+dialog disconnected from the session's own pane. The original two-surface
+design (read-only preview + a separate fully-interactive modal) existed
+because the preview shipped first as a lighter-weight glance and the modal
+predated it as the only interactive surface; once the preview existed,
+maintaining two places that both render the same tree — one visually
+anchored to the session, one not — was duplication with no upside. Folding
+the modal's interaction vocabulary into the preview keeps exactly one
+lineage UI: ambient and glanceable by default (hover), pinnable for a longer
+look, and keyboard-interactive on demand without ever leaving the session's
+own pane.
 
 ## Consequences
 
@@ -60,20 +122,29 @@ on the sessions where there's something to show.
   (widgets, harness label, close button) — this feature adds no new column
   to the cluster, only new behavior on the harness label's existing span.
 - `LayoutSnapshot` gained `harness_label_hits` (populated only for sessions
-  with lineage) and `lineage_preview_area` (the last-rendered preview box),
-  following this codebase's per-frame hit-rect convention.
-- `App` gained independent `lineage_preview_hover` /
-  `lineage_preview_pinned` state, mirroring but not reusing the session-
-  widget hover/pin fields.
-- A future removal of the session-widget system (spec 0003) does not need to
-  touch this feature — it was built to mirror that system's shape, not
+  with lineage), `lineage_preview_area` (the last-rendered preview box, used
+  to swallow stray clicks so they don't fall through to the pane
+  underneath), and `lineage_preview_body_hit` (the rows/content area alone,
+  tagged with its owning session — clicking here enters focus).
+- `App` gained `lineage_preview_hover` / `lineage_preview_pinned` (mirroring
+  but not reusing the session-widget hover/pin fields) plus
+  `lineage_preview_focused` and its selection/scroll state for the
+  keyboard-focused mode.
+- There is exactly one `KeyAction` for keyboard entry into lineage
+  (`C-x Tab`, both keymap profiles) instead of a dedicated fork-log-popup
+  action — a single compound chord toggles the whole interactive
+  experience on and off.
+- A future removal of the session-widget system (spec 0003) does not need
+  to touch this feature — it was built to mirror that system's shape, not
   depend on its code.
 
 ## Non-Goals
 
 - Does not change what counts as fork or subagent lineage, or how the graph
-  is built/capped (spec 0078, spec 0079 still govern that).
-- Does not add keyboard navigation, merge/discard, or row-click-to-jump to
-  the preview — those remain modal-only in this iteration.
-- Does not change the modal's own behavior, keybindings, or rendering in any
-  way.
+  is built/capped (spec 0078 still governs that; spec 0079's tree-
+  construction rules are unchanged, only its "second global dialog"
+  delivery mechanism was removed).
+- Does not add a docked/always-visible panel — the preview is still
+  hover/pin/focus-triggered, never rendered unconditionally.
+- Does not change what merge/discard or jump-in DO (spec 0078 governs
+  those); it only changes where the keys that trigger them live.

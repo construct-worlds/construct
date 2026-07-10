@@ -1,10 +1,22 @@
 # 0079-fork-and-subagent-lineage-view
 
-Status: accepted
+Status: superseded by spec 0080
 Date: 2026-07-09
 Area: tui
 Scope: The `C-x q` / `q` popup renders a session's full fork lineage and
 subagent tree as one live graph, instead of a flat fork count.
+
+> **Superseded.** The global `C-x q` / `q` popup described in this document
+> was deleted — there is no longer a second, screen-centered lineage
+> dialog. Its tree-construction rules (fork vs. subagent edges, depth/
+> breadth capping, merge/discard reuse) and its full keyboard vocabulary
+> (`j`/`k`/arrows/`C-n`/`C-p` navigate, `Enter` jumps in, `m`/`d`
+> merge/discard, `Esc` backs out) all still apply, unchanged — they simply
+> moved onto the per-session lineage preview (spec 0080), which can now be
+> given keyboard focus (`C-x Tab`, or a click inside its body) instead of a
+> separate modal owning them. The rest of this document is kept as a
+> historical record of the interaction design that was ported; read spec
+> 0080 for the current architecture.
 
 ## Decision
 
