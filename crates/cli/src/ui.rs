@@ -3383,9 +3383,6 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         .as_ref()
         .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()))
         .unwrap_or(0);
-    let program_open = summary
-        .as_ref()
-        .is_some_and(|s| app.open_program_session_ids().iter().any(|id| id == &s.id));
     // The exposed session pane remains a session pane even when its Program
     // is slid aside. Keep its ordinary lifecycle glyph/color; the Program
     // popup owns the distinct square, program-colored glyph.
