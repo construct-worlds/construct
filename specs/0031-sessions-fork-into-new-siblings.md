@@ -16,7 +16,12 @@ source in the session list. If the source is a terminal session, the fork starts
 as a terminal session too; headless sources fork as headless sessions. Unless
 seeding is disabled or the target harness takes commands rather than
 conversation (`shell`), the fork's initial prompt is seeded with a rendered
-summary of the source transcript.
+summary of the source transcript — EXCEPT when the fork is same-harness into
+a harness that forks natively: there the harness already receives the full
+source conversation with better fidelity, so the transcript seed is skipped
+entirely (no seed text, no oversized-prompt file, no "read the initial
+prompt" first turn). A prompt the user typed for the fork still goes
+through on its own.
 
 Context transfer across different harnesses is **best-effort and limited to the
 harness-agnostic transcript**. A same-harness fork may use that harness's
