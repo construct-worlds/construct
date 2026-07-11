@@ -23537,7 +23537,7 @@ mod tests {
     // for the hit-geometry check), and `ApproveTool` — previously a hard
     // no-op on click, now real per-choice dispatch.
 
-    /// Mock daemon for these tests: accepts one connection, echoes back
+    /// Mock daemon for these tests: accepts connections, echoes back
     /// `null` for every request (fine for the RPCs exercised here —
     /// delete/restart/tool_decision all deserialize their result into a
     /// generic `serde_json::Value`), and records every `(method, params)`
@@ -23559,37 +23559,39 @@ mod tests {
         let listener = UnixListener::bind(&sock).expect("bind mock daemon");
         let (calls_tx, calls_rx) = mpsc::unbounded_channel::<(String, Value)>();
         let server = tokio::spawn(async move {
-            let Ok((stream, _)) = listener.accept().await else {
-                return;
-            };
-            let (reader, mut writer) = stream.into_split();
-            let mut reader = BufReader::new(reader);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                let Ok(n) = reader.read_line(&mut line).await else {
-                    break;
-                };
-                if n == 0 {
-                    break;
-                }
-                let req: Value = serde_json::from_str(&line).expect("json request");
-                let id = req.get("id").cloned().unwrap_or(Value::Null);
-                let method = req
-                    .get("method")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                let params = req.get("params").cloned().unwrap_or(Value::Null);
-                let _ = calls_tx.send((method, params));
-                let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": Value::Null });
-                if writer
-                    .write_all((resp.to_string() + "\n").as_bytes())
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let calls_tx = calls_tx.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut reader = BufReader::new(reader);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        let Ok(n) = reader.read_line(&mut line).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        let req: Value = serde_json::from_str(&line).expect("json request");
+                        let id = req.get("id").cloned().unwrap_or(Value::Null);
+                        let method = req
+                            .get("method")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let params = req.get("params").cloned().unwrap_or(Value::Null);
+                        let _ = calls_tx.send((method, params));
+                        let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": Value::Null });
+                        if writer
+                            .write_all((resp.to_string() + "\n").as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
             }
         });
         let client = Client::connect(&sock).await.expect("client connects");
@@ -23829,7 +23831,12 @@ mod tests {
         };
         app.run_minibuffer_submit(intent, "d".to_string()).await;
 
-        let calls = drain_calls(&mut calls);
+        let calls = vec![
+            tokio::time::timeout(Duration::from_secs(1), calls.recv())
+                .await
+                .expect("background delete should reach mock daemon")
+                .expect("mock daemon call channel should stay open"),
+        ];
         assert!(
             calls
                 .iter()
@@ -23872,7 +23879,12 @@ mod tests {
             app.minibuffer.is_none(),
             "clicking d should close the prompt"
         );
-        let calls = drain_calls(&mut calls);
+        let calls = vec![
+            tokio::time::timeout(Duration::from_secs(1), calls.recv())
+                .await
+                .expect("background delete should reach mock daemon")
+                .expect("mock daemon call channel should stay open"),
+        ];
         assert!(
             calls
                 .iter()
