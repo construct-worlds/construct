@@ -8,7 +8,7 @@ your phone when you're in motion.
 
 ![construct lineage and program run](https://raw.githubusercontent.com/construct-worlds/construct/52849f56c902397d6729ec286293064c5b15bcfe/demos/lineage-program-run.gif)
 
-![construct TUI demo](https://raw.githubusercontent.com/construct-worlds/construct/73525a653d1969474f02f0ac699867a68565ac99/demos/browser-thumbnail.gif)
+More screenshots and demos: [gallery](gallery.md).
 
 ## Why construct?
 
@@ -161,6 +161,7 @@ For an optimized build, use `cargo build --workspace --release` and replace
 
 ## Documentation
 
+- [Gallery](gallery.md) — screenshots and demo clips of the TUI and web client.
 - [Architecture](docs/architecture.md) — daemon/client split, crates, and the
   Agent Harness Protocol (AHP).
 - [Harnesses and session modes](docs/harnesses.md) — supported adapters,
