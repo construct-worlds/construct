@@ -152,6 +152,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.lineage_v_overflow = false;
     app.layout.lineage_h_overflow = false;
     app.layout.lineage_hscroll_hit = None;
+    app.layout.lineage_vscrollbar = None;
+    app.layout.lineage_hscrollbar = None;
     app.layout.lineage_box_hits.clear();
     app.layout.lineage_subagent_toggle_hits.clear();
     app.window_pane_sizes.clear();
@@ -1353,27 +1355,40 @@ fn minibuffer_choice_suffix(intent: &MinibufferIntent) -> Option<Vec<PromptPart>
             });
             parts
         }
-        // Typed-then-submit path, three choices with per-choice
-        // descriptions. Canonical letters only (`d`, not the `y` alias) —
-        // typing `y` still works, it just isn't a separate click target.
-        DeleteConfirm { .. } => vec![
-            PromptPart::Text("["),
-            PromptPart::Choice {
-                label: "d",
-                action: Submit("d".to_string()),
-            },
-            PromptPart::Text("] delete (drop transcript + worktree) / ["),
-            PromptPart::Choice {
-                label: "a",
-                action: Submit("a".to_string()),
-            },
-            PromptPart::Text("] archive (terminate, keep, hide) / ["),
-            PromptPart::Choice {
+        // Typed-then-submit path. Canonical letters only (`d`, not the `y`
+        // alias) — typing `y` still works, it just isn't a separate click
+        // target. Forks get an extra `[m] merge and archive` choice; non-forks
+        // keep the classic delete / archive / cancel cluster.
+        DeleteConfirm { is_fork, .. } => {
+            let mut parts = vec![
+                PromptPart::Text("["),
+                PromptPart::Choice {
+                    label: "d",
+                    action: Submit("d".to_string()),
+                },
+                PromptPart::Text("] delete (drop transcript + worktree) / ["),
+                PromptPart::Choice {
+                    label: "a",
+                    action: Submit("a".to_string()),
+                },
+                PromptPart::Text("] archive (terminate, keep, hide)"),
+            ];
+            if *is_fork {
+                parts.push(PromptPart::Text(" / ["));
+                parts.push(PromptPart::Choice {
+                    label: "m",
+                    action: Submit("m".to_string()),
+                });
+                parts.push(PromptPart::Text("] merge and archive"));
+            }
+            parts.push(PromptPart::Text(" / ["));
+            parts.push(PromptPart::Choice {
                 label: "N",
                 action: Submit("N".to_string()),
-            },
-            PromptPart::Text("] cancel: "),
-        ],
+            });
+            parts.push(PromptPart::Text("] cancel: "));
+            parts
+        }
         // Typed-then-submit path, three choices (orphan / cascade-delete /
         // cancel). `all` requires the full word so a stray keystroke can't
         // trigger the cascade — same click target.
@@ -2272,6 +2287,22 @@ fn render_lineage_section(
             (scroll * max_top + denom / 2) / denom
         };
         let x = inner.x + inner.width - 1;
+        app.layout.lineage_vscrollbar = Some(crate::app::LineageScrollbarHit {
+            area: Rect {
+                x,
+                y: inner.y,
+                width: 1,
+                height: track_h as u16,
+            },
+            thumb: Rect {
+                x,
+                y: inner.y + top as u16,
+                width: 1,
+                height: thumb_h as u16,
+            },
+            max_scroll: denom,
+            horizontal: false,
+        });
         for r in 0..track_h {
             if let Some(cell) = f.buffer_mut().cell_mut(ratatui::layout::Position {
                 x,
@@ -2302,6 +2333,22 @@ fn render_lineage_section(
             (scroll_x * max_left + denom / 2) / denom
         };
         let y = body.y + body.height - 1;
+        app.layout.lineage_hscrollbar = Some(crate::app::LineageScrollbarHit {
+            area: Rect {
+                x: inner.x,
+                y,
+                width: track_w as u16,
+                height: 1,
+            },
+            thumb: Rect {
+                x: inner.x + left as u16,
+                y,
+                width: thumb_w as u16,
+                height: 1,
+            },
+            max_scroll: denom,
+            horizontal: true,
+        });
         for cidx in 0..track_w {
             if let Some(cell) = f.buffer_mut().cell_mut(ratatui::layout::Position {
                 x: inner.x + cidx as u16,
@@ -8192,7 +8239,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-x r           rename selected session (clears title on empty submit)
     C-x f           fork selected session (harness picker; same is default)
     Tab (on list)   focus lineage section
-    C-x m           merge the selected fork (take result, or discard)
+    C-x k [m]       on a fork: merge result into parent and archive
     C-c C-c         interrupt
 
   scrollback

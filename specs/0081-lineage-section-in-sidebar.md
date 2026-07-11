@@ -50,10 +50,11 @@ Keyboard focus:
   collapsed section on entry.
 - While focused, the section owns the row vocabulary carried over from the
   preview: `j`/`k`/arrows/`C-n`/`C-p` move the node selection, `Enter`
-  jumps into the selected session — merged, discarded, or live alike —
-  `m`/`d` merge or discard via the same path as `C-x m`, `Esc` backs out
-  to the session rows. Any other key clears focus and re-enters ordinary
-  routing with the same keystroke.
+  jumps into the selected session — merged, discarded, or live alike, its
+  own content shown, never a redirect to the parent — `m` merge-and-archives
+  via the same path as the fork session-end / title-menu merge action,
+  `Esc` backs out to the session rows. Any other key clears focus and
+  re-enters ordinary routing with the same keystroke.
 - Focusing the section counts as sidebar (list-pane) focus; jumping into a
   session moves focus to the view pane.
 - The sidebar REMEMBERS its sub-focus: leaving it (jumping into a session,
