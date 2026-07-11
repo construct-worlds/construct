@@ -422,9 +422,12 @@ impl Client {
                 .flatten()
         });
 
+        // Text prefix rather than ⑂: the TUI list already shows ⑂ for
+        // forked sessions via `forked_from`, so embedding the glyph in the
+        // title would double-mark the row (e.g. "⑂  ⑂ name").
         let title = Some(match &src.title {
-            Some(t) => format!("⑂ {t}"),
-            None => format!("⑂ fork of {}", short_id(&src.id)),
+            Some(t) => format!("(fork) {t}"),
+            None => format!("(fork) fork of {}", short_id(&src.id)),
         });
         let source_is_terminal = src.has_pty && src.mode.as_deref() != Some("headless");
         let pty_size = source_is_terminal.then(|| {
@@ -1533,6 +1536,12 @@ mod fork_lineage_tests {
                 .and_then(|f| f.get("parent_message_count"))
                 .and_then(|v| v.as_u64()),
             Some(3)
+        );
+        // Untitled sources get a textual "(fork)" prefix — not the ⑂ glyph,
+        // which the list view already draws from `forked_from`.
+        assert_eq!(
+            params.get("title").and_then(|t| t.as_str()),
+            Some("(fork) fork of src-1")
         );
 
         let _ = std::fs::remove_file(&sock);
