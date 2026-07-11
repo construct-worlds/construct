@@ -413,6 +413,14 @@ pub(crate) fn list_session_indent_cells(
     }
 }
 
+pub(crate) fn list_archive_indent_cells(section: &ArchiveSection, indented: bool) -> u16 {
+    match section {
+        ArchiveSection::Subagents(_) => 4,
+        _ if indented => 2,
+        _ => 0,
+    }
+}
+
 impl ListItem {
     pub fn matches(&self, sel: &Selection) -> bool {
         match (self, sel) {
@@ -4894,7 +4902,7 @@ impl App {
                 section: ArchiveSection::Ungrouped,
                 count: ungrouped_archived.len(),
                 expanded,
-                indented: false,
+                indented: true,
             });
             if expanded {
                 for s in ungrouped_archived {
@@ -28532,46 +28540,55 @@ mod tests {
         archived.id = "archived".into();
         archived.position = 1;
         archived.archived = true;
+        let mut subagent = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        subagent.id = "subagent".into();
+        subagent.parent_session_id = Some("active".into());
 
-        let mut app = test_app(client, vec![active, archived]);
+        let mut app = test_app(client, vec![active, archived, subagent]);
 
-        // Collapsed by default: the active session plus a "1 archived" row.
+        // Children stay attached to their parent and precede the containing
+        // section's archive disclosure.
         let items = app.list_items();
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 3);
         assert!(
             matches!(&items[0], ListItem::Session { summary, .. } if summary.id == "active"),
             "active session should render directly",
         );
-        match &items[1] {
+        assert!(
+            matches!(&items[1], ListItem::Session { summary, indented: true, .. } if summary.id == "subagent"),
+            "subagent should render indented before the archive disclosure",
+        );
+        match &items[2] {
             ListItem::ArchivedRow {
                 section,
                 count,
                 expanded,
-                ..
+                indented,
             } => {
                 assert_eq!(*section, ArchiveSection::Ungrouped);
                 assert_eq!(*count, 1);
                 assert!(!*expanded, "archived row starts collapsed");
+                assert!(*indented, "archive disclosure is nested under its section");
             }
             other => panic!("expected an archived row, got {other:?}"),
         }
 
-        // Reveal: active session, the open row, then the archived session.
+        // Reveal: active session, its subagent, the open row, then archive.
         app.toggle_archive_section(&ArchiveSection::Ungrouped);
         let items = app.list_items();
-        assert_eq!(items.len(), 3);
+        assert_eq!(items.len(), 4);
         assert!(matches!(
-            &items[1],
+            &items[2],
             ListItem::ArchivedRow { expanded: true, .. }
         ));
         assert!(
-            matches!(&items[2], ListItem::Session { summary, .. } if summary.id == "archived"),
+            matches!(&items[3], ListItem::Session { summary, .. } if summary.id == "archived"),
             "revealed archived session should follow its row",
         );
 
         // Toggle back off: collapsed again.
         app.toggle_archive_section(&ArchiveSection::Ungrouped);
-        assert_eq!(app.list_items().len(), 2);
+        assert_eq!(app.list_items().len(), 3);
     }
 
     #[tokio::test]
@@ -28818,6 +28835,18 @@ mod tests {
         assert_eq!(list_session_indent_cells(&user, true, false), 2);
         assert_eq!(list_session_indent_cells(&user, true, true), 1);
         assert_eq!(list_session_indent_cells(&subagent, true, false), 4);
+        assert_eq!(
+            list_archive_indent_cells(&ArchiveSection::Ungrouped, true),
+            2
+        );
+        assert_eq!(
+            list_archive_indent_cells(&ArchiveSection::Group("group".into()), true),
+            2
+        );
+        assert_eq!(
+            list_archive_indent_cells(&ArchiveSection::Subagents("parent".into()), true),
+            4
+        );
     }
 
     #[tokio::test]

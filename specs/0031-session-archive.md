@@ -19,7 +19,10 @@ view `x` button), alongside delete and cancel:
   expandable "N archived" row. Activating that row reveals/hides only that
   section's archived sessions; while shown, their names render dimmed. The reveal
   state is per-section and not persisted (archived sessions default to hidden on
-  each launch). The row is a first-class list entry: keyboard navigation lands on
+  each launch). Session children render before their parent's archived disclosure,
+  and both subagent rows and that disclosure are indented beneath the parent. All
+  other archived disclosures are indented beneath their containing run or project.
+  The row is a first-class list entry: keyboard navigation lands on
   it (it is not skipped), the list expand/collapse keys reveal/hide it like a
   project header, and a slash command toggles the section the current selection
   lives in.
