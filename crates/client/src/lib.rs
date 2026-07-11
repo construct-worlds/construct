@@ -373,6 +373,12 @@ impl Client {
     /// `shell` harness (which takes a command, not conversation context), the
     /// fork's initial prompt is seeded with a rendered summary of the source
     /// transcript so an agent harness can pick up where the original left off.
+    /// A SAME-harness fork into a harness that forks natively
+    /// ([`harness_forks_natively`]) skips the seed entirely: the daemon hands
+    /// the adapter the source's native conversation to fork byte-for-byte
+    /// (spec 0078), so the rendered transcript would be redundant context —
+    /// delivered, worse, as a noisy "read the initial prompt file" first
+    /// turn. A typed fork prompt still flows through either way.
     /// The source's Program document is copied to the fork as durable
     /// orchestration state; active execution/run state is not copied.
     /// Returns the new session id.
@@ -386,7 +392,8 @@ impl Client {
 
         let mut prompt_parts: Vec<String> = Vec::new();
         let transcript_seq = self.transcript(source_id, 0, None).await.ok();
-        if opts.seed && harness != "shell" {
+        let native_fork = harness == src.harness && harness_forks_natively(harness);
+        if opts.seed && !native_fork && harness != "shell" {
             // Full transcript from the start (seq 0) so the original objective
             // — usually stated in the opening message — is carried, not just
             // the recent tail.
@@ -1158,6 +1165,17 @@ impl Default for ForkOptions {
 /// (objective) comes first. Returns `None` when there's nothing worth
 /// seeding. When `max_bytes > 0` and the body exceeds it, keeps the opening
 /// and the most-recent activity and elides the middle (see [`elide_middle`]).
+/// Whether a SAME-harness fork of `harness` continues the source
+/// conversation natively instead of via the portable transcript seed
+/// (spec 0078): the daemon hands the adapter the source's native session
+/// id and the harness forks it byte-for-byte (claude: `--resume <id>
+/// --fork-session`, wired through the daemon's session lifecycle). For
+/// these, `fork_session` skips the rendered seed — the harness already
+/// holds the full context with better fidelity.
+fn harness_forks_natively(harness: &str) -> bool {
+    harness == "claude"
+}
+
 fn render_fork_seed(
     events: &[agentd_protocol::TimestampedEvent],
     max_bytes: usize,
@@ -1517,6 +1535,165 @@ mod fork_lineage_tests {
             Some(3)
         );
 
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// Mock daemon whose source session runs `harness` and whose transcript
+    /// holds one recognizable message; serves requests until the socket
+    /// closes and captures every `session.create`'s params.
+    async fn fork_capture_daemon(
+        harness: &'static str,
+    ) -> (
+        std::path::PathBuf,
+        Arc<StdMutex<Vec<serde_json::Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+            % 1_000_000;
+        let sock =
+            std::path::PathBuf::from(format!("/tmp/afc{}{}.sock", std::process::id(), nanos));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon socket");
+        let captured = Arc::new(StdMutex::new(Vec::<serde_json::Value>::new()));
+        let captured_srv = captured.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = split(stream);
+            let mut reader = BufReader::new(r);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    break;
+                }
+                let req: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let resp = match method {
+                    ipc_method::SESSION_GET => serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": {
+                            "summary": {
+                                "id": "src-1",
+                                "harness": harness,
+                                "cwd": "/tmp",
+                                "state": "running",
+                                "created_at": "1970-01-01T00:00:00Z"
+                            },
+                            "events": []
+                        }
+                    }),
+                    ipc_method::SESSION_TRANSCRIPT => serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": { "events": [
+                            {"seq": 1, "at": "1970-01-01T00:00:01Z", "event": {
+                                "type": "message", "role": "user",
+                                "text": "SEED_MARKER: original objective"
+                            }}
+                        ], "total": 1 }
+                    }),
+                    ipc_method::PROGRAM_GET => serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": {
+                            "program": {
+                                "session_id": "src-1",
+                                "markdown": "",
+                                "version": 0,
+                                "updated_at_ms": 0
+                            },
+                            "revisions": []
+                        }
+                    }),
+                    ipc_method::SESSION_CREATE => {
+                        captured_srv
+                            .lock()
+                            .unwrap()
+                            .push(req.get("params").cloned().unwrap_or_default());
+                        serde_json::json!({
+                            "jsonrpc": "2.0", "id": id, "result": { "session_id": "new-1" }
+                        })
+                    }
+                    _ => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null}),
+                };
+                let s = resp.to_string() + "\n";
+                let _ = w.write_all(s.as_bytes()).await;
+            }
+        });
+        (sock, captured, server)
+    }
+
+    /// A same-harness fork of a natively-forking harness (claude) must NOT
+    /// seed the prompt with the rendered transcript — the daemon hands the
+    /// adapter the source's native conversation (spec 0078), so the seed
+    /// would be redundant context delivered as a noisy "read the initial
+    /// prompt file" first turn. A typed fork prompt still goes through, and
+    /// cross-harness forks keep the portable seed.
+    #[tokio::test]
+    async fn same_harness_claude_fork_skips_the_transcript_seed() {
+        let (sock, captured, _server) = fork_capture_daemon("claude").await;
+        let client = Client::connect(&sock).await.expect("connect");
+
+        client
+            .fork_session("src-1", "claude", ForkOptions::default())
+            .await
+            .expect("same-harness fork");
+        let mut opts = ForkOptions::default();
+        opts.prompt = Some("try the other approach".into());
+        client
+            .fork_session("src-1", "claude", opts)
+            .await
+            .expect("same-harness fork with typed prompt");
+        client
+            .fork_session("src-1", "smith", ForkOptions::default())
+            .await
+            .expect("cross-harness fork");
+
+        let calls = captured.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3);
+        assert!(
+            calls[0].get("prompt").map(|p| p.is_null()).unwrap_or(true),
+            "no seed, no prompt: {:?}",
+            calls[0].get("prompt")
+        );
+        assert_eq!(
+            calls[1].get("prompt").and_then(|p| p.as_str()),
+            Some("try the other approach"),
+            "the typed prompt flows through alone, without the seed"
+        );
+        let cross = calls[2]
+            .get("prompt")
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        assert!(
+            cross.contains("SEED_MARKER"),
+            "a cross-harness fork keeps the portable transcript seed: {cross:?}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A same-harness fork of a harness WITHOUT native forking (smith) must
+    /// keep the seed — it is the only context carrier there.
+    #[tokio::test]
+    async fn same_harness_smith_fork_keeps_the_transcript_seed() {
+        let (sock, captured, _server) = fork_capture_daemon("smith").await;
+        let client = Client::connect(&sock).await.expect("connect");
+        client
+            .fork_session("src-1", "smith", ForkOptions::default())
+            .await
+            .expect("same-harness smith fork");
+        let calls = captured.lock().unwrap().clone();
+        let prompt = calls[0]
+            .get("prompt")
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        assert!(
+            prompt.contains("SEED_MARKER"),
+            "smith has no native fork; the seed is the only context: {prompt:?}"
+        );
         let _ = std::fs::remove_file(&sock);
     }
 }
