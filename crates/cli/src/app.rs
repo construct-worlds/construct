@@ -8768,9 +8768,25 @@ impl App {
                 self.open_session_picker(SessionPickerPurpose::Switch);
             }
             FocusList => {
-                // Direct jump to the session list — `focus_pane_by_index(0)`
-                // owns the semantics (vim reset, zoom flip, status note).
-                self.focus_pane_by_index(0);
+                if self.focus == PaneFocus::List {
+                    // Second press toggles back to the split pane you came
+                    // from: the active window is untouched while the list
+                    // is focused, so this returns to the same pane — now
+                    // showing whatever session the list selection pointed
+                    // it at. A plain refocus, deliberately without Enter's
+                    // drill-in extras (restart prompt, archive toggles).
+                    if matches!(self.zoom, ZoomMode::List) {
+                        self.zoom = ZoomMode::View;
+                    }
+                    self.collapse_orchestrator_panel_on_focus_change();
+                    self.focus = PaneFocus::View;
+                    self.set_vim_insert_if_captured();
+                    self.set_status("focus: view".into());
+                } else {
+                    // Jump to the session list — `focus_pane_by_index(0)`
+                    // owns the semantics (vim reset, zoom flip, status).
+                    self.focus_pane_by_index(0);
+                }
             }
             FocusView => {
                 // Enter on an "N archived" disclosure row expands/collapses it
@@ -22187,7 +22203,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn c_x_l_chord_jumps_focus_to_the_session_list() {
+    async fn c_x_l_toggles_between_the_list_and_the_same_split_pane() {
         // The works-in-every-terminal counterpart to C-1: a C-x chord
         // escapes PTY capture and needs no keyboard-protocol support.
         let (mut app, _dir, server) = captured_app().await;
@@ -22203,6 +22219,22 @@ mod tests {
             app.focus,
             PaneFocus::List,
             "C-x l jumps straight to the session list from any split window"
+        );
+        assert_eq!(
+            app.active_window_id, 2,
+            "the pane you came from stays the active window while listed"
+        );
+
+        // Second press returns to the SAME pane — the switch-and-return
+        // loop: C-x l, pick a session, C-x l back.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.focus, PaneFocus::View);
+        assert_eq!(
+            app.active_window_id, 2,
+            "C-x l from the list returns to the split pane it came from"
         );
         server.abort();
     }

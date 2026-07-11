@@ -77,11 +77,15 @@ pub enum KeyAction {
     /// Cycle keyboard focus across the panes (list ↔ view). Bound to `C-x o`
     /// in the emacs profile, matching `other-window`.
     SwitchFocus,
-    /// Jump keyboard focus straight to the session list from anywhere —
-    /// the direct counterpart to `SwitchFocus`'s cycle. Bound to `C-x l`
-    /// ("l" = list) in both profiles: a chord, so it works in every
-    /// terminal — unlike the `C-1` accelerator, which needs the kitty
-    /// keyboard protocol (spec 0082) that e.g. macOS Terminal.app lacks.
+    /// Toggle keyboard focus between the session list and the focused
+    /// split pane — the direct counterpart to `SwitchFocus`'s cycle. From
+    /// any pane it jumps to the list; from the list it returns to the SAME
+    /// pane it came from (whose session the list selection may have just
+    /// re-pointed), so `C-x l` … pick … `C-x l` is the switch-and-return
+    /// loop. Bound to `C-x l` ("l" = list) in both profiles: a chord, so
+    /// it works in every terminal — unlike the `C-1` accelerator, which
+    /// needs the kitty keyboard protocol (spec 0082) that e.g. macOS
+    /// Terminal.app lacks.
     FocusList,
     /// Move keyboard focus to the spatially adjacent split window in a
     /// direction (emacs `windmove`). Reachable via the `C-x` prefix
