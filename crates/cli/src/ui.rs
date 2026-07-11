@@ -3800,10 +3800,16 @@ fn render_session_title_menu(f: &mut Frame, app: &App) {
         if row >= area.y.saturating_add(area.height).saturating_sub(1) {
             break;
         }
-        let hovered = app.mouse_pos.is_some_and(|(mx, my)| {
-            my == row && mx > area.x && mx < area.x.saturating_add(area.width).saturating_sub(1)
-        });
-        let style = if hovered {
+        let enabled = menu.action_enabled(action);
+        let hovered = enabled
+            && app.mouse_pos.is_some_and(|(mx, my)| {
+                my == row && mx > area.x && mx < area.x.saturating_add(area.width).saturating_sub(1)
+            });
+        let style = if !enabled {
+            Style::default()
+                .fg(app.theme.border)
+                .add_modifier(Modifier::DIM)
+        } else if hovered {
             Style::default()
                 .fg(app.theme.text)
                 .bg(app.theme.inactive_highlight_bg)
