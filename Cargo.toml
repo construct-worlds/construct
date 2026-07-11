@@ -21,7 +21,7 @@ version = "0.13.3"
 edition = "2021"
 license = "MIT"
 authors = ["construct contributors"]
-repository = "https://github.com/zarvis-ai/construct"
+repository = "https://github.com/construct-worlds/construct"
 description = "Cross-harness agent fleet TUI and daemon"
 rust-version = "1.75"
 

@@ -17,7 +17,7 @@ use construct_client::Client;
 use construct_protocol::paths::Paths;
 
 /// GitHub `owner/repo` the release assets and installer come from.
-const REPO: &str = "zarvis-ai/construct";
+const REPO: &str = "construct-worlds/construct";
 /// The installer, baked in at build time so `construct upgrade` and `install.sh`
 /// can never drift apart.
 const INSTALL_SH: &str = include_str!("../../../install.sh");
