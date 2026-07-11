@@ -321,6 +321,11 @@ impl App {
                     .await;
                 true
             }
+            // Preserve every `C-x` chord while the section is focused. The
+            // prefix itself is not a lineage command, and clearing focus
+            // before its second key arrives would prevent global focus and
+            // session commands such as `C-x o` from completing.
+            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
             // Bare Tab hands focus back to the session rows.
             KeyCode::Tab => {
                 self.lineage_focused = false;
