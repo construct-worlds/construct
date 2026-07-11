@@ -6061,10 +6061,26 @@ impl App {
                 _ => None,
             }
         };
-        let candidate = items[pos + 1..]
-            .iter()
-            .find_map(pick_active)
-            .or_else(|| items[..pos].iter().rev().find_map(pick_active));
+        let candidate = if let Some(session) = self.sessions.iter().find(|s| s.id == id) {
+            if let Some(forked_from) = &session.forked_from {
+                let parent_id = &forked_from.session_id;
+                if self.sessions.iter().any(|s| s.id == *parent_id) {
+                    Some(Selection::Session(parent_id.clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let candidate = candidate.or_else(|| {
+            items[pos + 1..]
+                .iter()
+                .find_map(pick_active)
+                .or_else(|| items[..pos].iter().rev().find_map(pick_active))
+        });
         let replacement = candidate.unwrap_or(Selection::None);
         self.main_windows
             .replace_session_selection(id, &replacement);
@@ -22344,6 +22360,36 @@ mod tests {
         assert!(app.transcript.is_empty());
         assert_eq!(app.transcript_session, None);
         assert_eq!(app.scrollback_for_window(Some(2)), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn focus_neighbor_of_prioritizes_parent_of_fork() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut second = summary_with_kind(construct_protocol::SessionKind::User);
+        second.id = "s2".into();
+        second.position = 1;
+        second.forked_from = Some(construct_protocol::ForkedFrom {
+            session_id: "s1".into(),
+            transcript_seq: 0,
+            parent_busy_ms: 0,
+            at_ms: 0,
+            parent_message_count: 0,
+        });
+        app.sessions.push(second);
+
+        let mut third = summary_with_kind(construct_protocol::SessionKind::User);
+        third.id = "s3".into();
+        third.position = 2;
+        app.sessions.push(third);
+
+        app.main_windows = MainWindowTree::single(1, Selection::Session("s2".into()));
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s2".into());
+
+        app.focus_neighbor_of("s2");
+
+        assert_eq!(app.selection, Selection::Session("s1".into()));
         server.abort();
     }
 
