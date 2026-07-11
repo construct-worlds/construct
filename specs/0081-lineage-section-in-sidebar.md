@@ -50,11 +50,11 @@ Keyboard focus:
   collapsed section on entry.
 - While focused, the section owns the row vocabulary carried over from the
   preview: `j`/`k`/arrows/`C-n`/`C-p` move the node selection, `Enter`
-  jumps into the selected session (a merged fork jumps to its parent, spec
-  0078), `m` merge-and-archives via the same path as the fork
-  session-end / title-menu merge action, `Esc`
-  backs out to the session rows. Any other key clears focus and re-enters
-  ordinary routing with the same keystroke.
+  jumps into the selected session — merged, discarded, or live alike, its
+  own content shown, never a redirect to the parent — `m` merge-and-archives
+  via the same path as the fork session-end / title-menu merge action,
+  `Esc` backs out to the session rows. Any other key clears focus and
+  re-enters ordinary routing with the same keystroke.
 - Focusing the section counts as sidebar (list-pane) focus; jumping into a
   session moves focus to the view pane.
 - The sidebar REMEMBERS its sub-focus: leaving it (jumping into a session,
@@ -105,6 +105,17 @@ fork renders as an indented child row under its parent (like subagent
 rows) — recursively, so a fork of a fork still appears — never as its own
 top-level row, and a parent row badges its live fork count. The section provides the temporal detail (fork/merge order,
 per-window message counts and compute time) that list rows cannot.
+
+Archiving a fork (merge or discard both auto-archive, spec 0078) never
+deletes it — the transcript stays on disk and the fork remains fully
+selectable and viewable in the lineage section's tree, ✓/✗ outcome and
+all (jumping to it shows ITS OWN content, not a redirect to the parent —
+the parent only ever received a compact summary message, not the fork's
+full history). The plain session list mirrors that: a parent's archived
+forks — any generation, fork-of-a-fork included — collapse into one "N
+archived" row directly under it, the same disclosure convention archived
+subagents already use, expandable to reveal each one as an ordinary,
+selectable row.
 
 ## Reason
 

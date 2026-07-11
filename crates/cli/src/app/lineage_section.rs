@@ -223,23 +223,19 @@ impl App {
     }
 
     /// Switch to a session picked from the lineage diagram — shared by Enter
-    /// on the keyboard selection and a mouse click on a box. A *merged*
-    /// fork instead jumps to its parent — the merge point in the graph and
-    /// the injected result message are the same transcript event (spec
-    /// 0078), so this links to where that event actually lives instead of
-    /// re-showing the now-archived fork.
+    /// on the keyboard selection and a mouse click on a box. Selects the
+    /// clicked node itself, merged/discarded/live alike: a merged fork used
+    /// to redirect to its parent (the merge point and the injected result
+    /// message are the same transcript event, spec 0078), but that hid the
+    /// fork's own — often much more detailed — transcript with no way back
+    /// to it. Archiving never deletes anything (spec 0078/0081), so the
+    /// fork's full history is still there to show.
     pub(super) fn jump_to_lineage_session(&mut self, target_id: &str) {
-        let Some(summary) = self.sessions.iter().find(|s| s.id == target_id).cloned() else {
+        if !self.sessions.iter().any(|s| s.id == target_id) {
             self.set_status(format!("session {} no longer exists", short_id(target_id)));
             return;
-        };
-        let target = match (&summary.forked_from, &summary.merge) {
-            (Some(f), Some(m)) if m.mode == construct_protocol::ForkMergeMode::Result => {
-                f.session_id.clone()
-            }
-            _ => target_id.to_string(),
-        };
-        self.select_session(target);
+        }
+        self.select_session(target_id.to_string());
         self.sync_active_window_selection();
         self.focus = PaneFocus::View;
     }
@@ -629,10 +625,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_on_a_merged_fork_jumps_to_the_parent_instead() {
+    async fn enter_on_a_merged_or_discarded_fork_selects_the_fork_itself() {
+        // A merged/discarded fork is archived but never deleted (spec
+        // 0078/0081) — Enter on its lineage node must show that fork's OWN
+        // transcript, not redirect away to the parent. Regression test for
+        // the earlier merge-only redirect, which left a merged fork's
+        // content permanently unreachable from the TUI.
+        for mode in [
+            construct_protocol::ForkMergeMode::Result,
+            construct_protocol::ForkMergeMode::Discard,
+        ] {
+            let mut fork = fork_of(summary("fork"), "root");
+            fork.merge = Some(construct_protocol::ForkMerge {
+                mode,
+                at_ms: 0,
+                merged_busy_ms: 0,
+                merged_message_count: 0,
+                merged_seq: 0,
+            });
+            fork.archived = true;
+            let (mut app, _dir, _server) =
+                test_app_with_sessions(vec![summary("root"), fork]).await;
+            app.select_session("root".to_string());
+            app.toggle_lineage_focus();
+            app.handle_lineage_focus_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                .await;
+            app.handle_lineage_focus_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .await;
+            assert_eq!(
+                app.selected_id().as_deref(),
+                Some("fork"),
+                "{mode:?}: Enter must select the fork itself, not redirect to root"
+            );
+            assert_eq!(app.focus, PaneFocus::View);
+        }
+    }
+
+    #[tokio::test]
+    async fn clicking_an_archived_fork_box_shows_its_own_content() {
+        // Same fix via the mouse path (`click_list` → box hit →
+        // `jump_to_lineage_session`), driven through a real render so the
+        // box hit-region comes from the actual layout, not a hand-picked
+        // coordinate.
         let mut fork = fork_of(summary("fork"), "root");
         fork.merge = Some(construct_protocol::ForkMerge {
-            mode: construct_protocol::ForkMergeMode::Result,
+            mode: construct_protocol::ForkMergeMode::Discard,
             at_ms: 0,
             merged_busy_ms: 0,
             merged_message_count: 0,
@@ -641,12 +678,18 @@ mod tests {
         fork.archived = true;
         let (mut app, _dir, _server) = test_app_with_sessions(vec![summary("root"), fork]).await;
         app.select_session("root".to_string());
-        app.toggle_lineage_focus();
-        app.handle_lineage_focus_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
-            .await;
-        app.handle_lineage_focus_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .await;
-        assert_eq!(app.selected_id().as_deref(), Some("root"));
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let hit = app
+            .layout
+            .lineage_box_hits
+            .iter()
+            .find(|h| h.session_id == "fork")
+            .cloned()
+            .expect("the discarded fork's node still registers a click target");
+        app.handle_left_click(hit.area.x, hit.area.y).await;
+        assert_eq!(app.selected_id().as_deref(), Some("fork"));
     }
 
     #[tokio::test]

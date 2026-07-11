@@ -325,7 +325,9 @@ impl App {
                     // created "inside" a project stays in it.
                     Selection::ArchivedRow(ArchiveSection::Group(gid)) => Some(gid.clone()),
                     Selection::ArchivedRow(
-                        ArchiveSection::Ungrouped | ArchiveSection::Subagents(_),
+                        ArchiveSection::Ungrouped
+                        | ArchiveSection::Subagents(_)
+                        | ArchiveSection::Forks(_),
                     )
                     | Selection::None => None,
                 };
@@ -738,10 +740,7 @@ impl App {
                         let title = fork.title.as_deref().unwrap_or("fork");
                         if let Err(e) = self
                             .client
-                            .send_input(
-                                &parent,
-                                fork_result_input(title, &session_id, &summary),
-                            )
+                            .send_input(&parent, fork_result_input(title, &session_id, &summary))
                             .await
                         {
                             self.set_status(format!("merge input failed: {e}"));
@@ -776,9 +775,7 @@ impl App {
 /// The parent receives a compact fork result as ordinary input, plus a stable
 /// session reference it can use to request or inspect the full fork history.
 fn fork_result_input(title: &str, session_id: &str, summary: &str) -> String {
-    format!(
-        "⑂ fork result ({title}; fork session: {session_id}): {summary}"
-    )
+    format!("⑂ fork result ({title}; fork session: {session_id}): {summary}")
 }
 
 #[cfg(test)]

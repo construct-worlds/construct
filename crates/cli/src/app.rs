@@ -2,12 +2,12 @@
 
 use crate::keymap::{self, ChordState, KeyAction, Keymap, KeymapResult, Profile};
 use crate::ui;
+use anyhow::{Context, Result};
 use construct_client::Client;
 use construct_protocol::{
     EventNotificationPayload, GroupSummary, HarnessInfo, MessageRole, Notification, Request,
     SessionEvent, SessionSummary, StateNotificationPayload, TimestampedEvent,
 };
-use anyhow::{Context, Result};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
@@ -131,6 +131,37 @@ pub enum ArchiveSection {
     Ungrouped,
     Group(String),
     Subagents(String),
+    /// A parent session's archived forks — merged or discarded — bundled
+    /// into one row regardless of nesting depth (a fork of a fork sits at
+    /// the same flat indent as a direct fork, mirroring the active-forks
+    /// list; see `push_session_tree`).
+    Forks(String),
+}
+
+/// Every archived fork DESCENDANT of `parent_id` — direct forks and forks
+/// of forks alike, arbitrarily deep — since the list bundles all of a
+/// session's archived forks into one flat "N archived" row regardless of
+/// nesting (mirroring the active-forks walk in `push_session_tree`). A
+/// `seen` set guards against a malformed cycle; a well-formed lineage graph
+/// never has one.
+fn archived_fork_descendants(sessions: &[SessionSummary], parent_id: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut frontier = vec![parent_id.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(id) = frontier.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        for s in sessions {
+            if s.forked_from.as_ref().map(|f| f.session_id.as_str()) == Some(id.as_str()) {
+                if s.archived {
+                    out.push(s.id.clone());
+                }
+                frontier.push(s.id.clone());
+            }
+        }
+    }
+    out
 }
 
 fn is_user_list_session(s: &SessionSummary) -> bool {
@@ -165,6 +196,9 @@ fn selection_is_valid_for_sessions(
                     && s.archived
                     && s.parent_session_id.as_deref() == Some(parent_id.as_str())
             }),
+            ArchiveSection::Forks(parent_id) => {
+                !archived_fork_descendants(sessions, parent_id).is_empty()
+            }
         },
     }
 }
@@ -428,8 +462,10 @@ pub(crate) fn list_archive_indent_cells(
     parent_grouped: bool,
 ) -> u16 {
     match section {
-        // Align the disclosure triangle with the parent session's name.
-        ArchiveSection::Subagents(_) => 5 + u16::from(parent_grouped),
+        // Align the disclosure triangle with the parent session's name —
+        // forks and subagents share the same indent alignment
+        // (`list_session_indent_cells` gives both the same formula).
+        ArchiveSection::Subagents(_) | ArchiveSection::Forks(_) => 5 + u16::from(parent_grouped),
         _ if indented => 2,
         _ => 0,
     }
@@ -1557,6 +1593,10 @@ pub struct App {
     /// Parent session ids whose archived subagents are currently revealed.
     /// Ephemeral, like the other archived disclosure state.
     pub show_archived_subagents: HashSet<String>,
+    /// Parent session ids whose archived (merged/discarded) forks are
+    /// currently revealed. Ephemeral, like the other archived disclosure
+    /// state.
+    pub show_archived_forks: HashSet<String>,
     /// Hide left, right, and bottom border lines for list/view/pin panes.
     pub hide_pane_side_borders: bool,
     /// Last rendered frame, one string per terminal row. Mouse drag
@@ -3302,6 +3342,7 @@ async fn run_with_socket_initial_selection(
         show_archived_ungrouped: false,
         show_archived_groups: HashSet::new(),
         show_archived_subagents: HashSet::new(),
+        show_archived_forks: HashSet::new(),
         hide_pane_side_borders: persisted.hide_pane_side_borders,
         frame_text: Vec::new(),
         text_selection: None,
@@ -4567,6 +4608,9 @@ impl App {
                 .filter(|s| s.parent_session_id.as_deref() == Some(parent_id.as_str()))
                 .map(|s| s.id.clone())
                 .collect(),
+            ArchiveSection::Forks(parent_id) => {
+                archived_fork_descendants(&self.sessions, parent_id)
+            }
         }
     }
 
@@ -4604,6 +4648,9 @@ impl App {
                 .unwrap_or_else(|| "project".to_string()),
             ArchiveSection::Subagents(parent_id) => {
                 format!("subagents of {}", short_id(parent_id))
+            }
+            ArchiveSection::Forks(parent_id) => {
+                format!("forks of {}", short_id(parent_id))
             }
         }
     }
@@ -4877,6 +4924,31 @@ impl App {
             forks.sort_by_key(|s| s.position);
         }
 
+        fn archived_fork_descendants_of<'a>(
+            parent_id: &str,
+            forks_by_parent: &HashMap<&'a str, Vec<&'a SessionSummary>>,
+        ) -> Vec<&'a SessionSummary> {
+            let mut out = Vec::new();
+            let mut stack: Vec<(&SessionSummary, usize)> = forks_by_parent
+                .get(parent_id)
+                .map(|forks| forks.iter().rev().copied().map(|q| (q, 1usize)).collect())
+                .unwrap_or_default();
+            while let Some((fork, depth)) = stack.pop() {
+                if fork.archived {
+                    out.push(fork);
+                }
+                if depth >= 8 {
+                    continue;
+                }
+                if let Some(nested) = forks_by_parent.get(fork.id.as_str()) {
+                    for q in nested.iter().rev().copied() {
+                        stack.push((q, depth + 1));
+                    }
+                }
+            }
+            out
+        }
+
         fn push_session_tree<'a>(
             out: &mut Vec<ListItem>,
             s: &SessionSummary,
@@ -4885,6 +4957,7 @@ impl App {
             forks_by_parent: &HashMap<&'a str, Vec<&'a SessionSummary>>,
             collapsed: &HashSet<String>,
             show_archived: &HashSet<String>,
+            show_archived_forks: &HashSet<String>,
         ) {
             let children = subagents_by_parent.get(s.id.as_str());
             let has_children = children.map(|v| !v.is_empty()).unwrap_or(false);
@@ -4910,6 +4983,7 @@ impl App {
                             forks_by_parent,
                             collapsed,
                             show_archived,
+                            show_archived_forks,
                         );
                     }
                 }
@@ -4947,6 +5021,31 @@ impl App {
                     }
                 }
             }
+            // Archived forks — merged or discarded — bundle into one flat
+            // "N archived" row directly under `s`, same as the active-forks
+            // walk above: every generation (fork of a fork included)
+            // collapses into this single count, not a row per level.
+            let archived_forks = archived_fork_descendants_of(s.id.as_str(), forks_by_parent);
+            if !archived_forks.is_empty() {
+                let section = ArchiveSection::Forks(s.id.clone());
+                let expanded = show_archived_forks.contains(&s.id);
+                out.push(ListItem::ArchivedRow {
+                    section,
+                    count: archived_forks.len(),
+                    expanded,
+                    indented: true,
+                });
+                if expanded {
+                    for fork in archived_forks {
+                        out.push(ListItem::Session {
+                            summary: fork.clone(),
+                            indented: true,
+                            has_children: false,
+                            children_expanded: false,
+                        });
+                    }
+                }
+            }
             // The archive disclosure is the parent's final child row: active
             // subagents first, then forks, then archived subagents.
             if !archived_children.is_empty() {
@@ -4968,6 +5067,7 @@ impl App {
                             forks_by_parent,
                             collapsed,
                             show_archived,
+                            show_archived_forks,
                         );
                     }
                 }
@@ -4983,6 +5083,7 @@ impl App {
                 &forks_by_parent,
                 &self.subagent_collapsed,
                 &self.show_archived_subagents,
+                &self.show_archived_forks,
             );
         };
 
@@ -5071,6 +5172,7 @@ impl App {
             ArchiveSection::Ungrouped => self.show_archived_ungrouped,
             ArchiveSection::Group(id) => self.show_archived_groups.contains(id),
             ArchiveSection::Subagents(id) => self.show_archived_subagents.contains(id),
+            ArchiveSection::Forks(id) => self.show_archived_forks.contains(id),
         }
     }
 
@@ -5099,6 +5201,13 @@ impl App {
                     self.show_archived_subagents.insert(id.clone())
                 } else {
                     self.show_archived_subagents.remove(id)
+                }
+            }
+            ArchiveSection::Forks(id) => {
+                if revealed {
+                    self.show_archived_forks.insert(id.clone())
+                } else {
+                    self.show_archived_forks.remove(id)
                 }
             }
         }
@@ -6516,8 +6625,9 @@ impl App {
             }
             m if m == construct_protocol::ipc_notif::GROUP_STATE => {
                 if let Some(p) = n.params {
-                    if let Ok(payload) =
-                        serde_json::from_value::<construct_protocol::GroupStateNotificationPayload>(p)
+                    if let Ok(payload) = serde_json::from_value::<
+                        construct_protocol::GroupStateNotificationPayload,
+                    >(p)
                     {
                         self.on_group_state(payload.group).await;
                     }
@@ -6555,8 +6665,9 @@ impl App {
             }
             m if m == construct_protocol::ipc_notif::REMOTE_STATE => {
                 if let Some(p) = n.params {
-                    if let Ok(payload) =
-                        serde_json::from_value::<construct_protocol::RemoteStateNotificationPayload>(p)
+                    if let Ok(payload) = serde_json::from_value::<
+                        construct_protocol::RemoteStateNotificationPayload,
+                    >(p)
                     {
                         self.remote_clients = payload.clients;
                     }
@@ -6961,9 +7072,15 @@ impl App {
         };
         let id = s.id.clone();
         let next = match s.approval_mode {
-            construct_protocol::ApprovalMode::Manual => construct_protocol::ApprovalMode::AutoReview,
-            construct_protocol::ApprovalMode::AutoReview => construct_protocol::ApprovalMode::UnsafeAuto,
-            construct_protocol::ApprovalMode::UnsafeAuto => construct_protocol::ApprovalMode::Manual,
+            construct_protocol::ApprovalMode::Manual => {
+                construct_protocol::ApprovalMode::AutoReview
+            }
+            construct_protocol::ApprovalMode::AutoReview => {
+                construct_protocol::ApprovalMode::UnsafeAuto
+            }
+            construct_protocol::ApprovalMode::UnsafeAuto => {
+                construct_protocol::ApprovalMode::Manual
+            }
         };
         match self.client.set_approval_mode(&id, next).await {
             Ok(()) if show_status => self.set_status(format!(
@@ -11266,6 +11383,7 @@ mod tests {
             show_archived_ungrouped: false,
             show_archived_groups: HashSet::new(),
             show_archived_subagents: HashSet::new(),
+            show_archived_forks: HashSet::new(),
             hide_pane_side_borders: true,
             frame_text: Vec::new(),
             text_selection: None,
@@ -23403,8 +23521,10 @@ mod tests {
     async fn restart_confirm_keypress_y_restarts_session_baseline() {
         // Baseline for the click-parity test below: `y` through the
         // single-keypress fast path restarts and closes the prompt.
-        let (mut app, _dir, server, mut calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(Minibuffer {
             prompt: "Restart session s1? ".into(),
             input: String::new(),
@@ -23424,10 +23544,10 @@ mod tests {
         );
         let calls = drain_calls(&mut calls);
         assert!(
-            calls
-                .iter()
-                .any(|(m, p)| m == construct_protocol::ipc_method::SESSION_RESTART
-                    && p.get("session_id").and_then(|v| v.as_str()) == Some("s1")),
+            calls.iter().any(
+                |(m, p)| m == construct_protocol::ipc_method::SESSION_RESTART
+                    && p.get("session_id").and_then(|v| v.as_str()) == Some("s1")
+            ),
             "restart RPC should fire for s1, got {calls:?}"
         );
         server.abort();
@@ -23435,8 +23555,10 @@ mod tests {
 
     #[tokio::test]
     async fn restart_confirm_click_y_matches_keypress_outcome() {
-        let (mut app, _dir, server, mut calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(Minibuffer {
             prompt: "Restart session s1? ".into(),
             input: String::new(),
@@ -23465,10 +23587,10 @@ mod tests {
         );
         let calls = drain_calls(&mut calls);
         assert!(
-            calls
-                .iter()
-                .any(|(m, p)| m == construct_protocol::ipc_method::SESSION_RESTART
-                    && p.get("session_id").and_then(|v| v.as_str()) == Some("s1")),
+            calls.iter().any(
+                |(m, p)| m == construct_protocol::ipc_method::SESSION_RESTART
+                    && p.get("session_id").and_then(|v| v.as_str()) == Some("s1")
+            ),
             "clicking y should fire the same restart RPC the keypress does, got {calls:?}"
         );
         server.abort();
@@ -23476,8 +23598,10 @@ mod tests {
 
     #[tokio::test]
     async fn restart_confirm_click_n_cancels_without_restart() {
-        let (mut app, _dir, server, mut calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(Minibuffer {
             prompt: "Restart session s1? ".into(),
             input: String::new(),
@@ -23516,8 +23640,10 @@ mod tests {
 
     #[tokio::test]
     async fn delete_confirm_render_has_three_non_overlapping_choice_hits() {
-        let (mut app, _dir, server, _calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, _calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(Minibuffer {
             prompt: "Session s1: ".into(),
             input: String::new(),
@@ -23587,8 +23713,10 @@ mod tests {
     async fn delete_confirm_typed_submit_d_deletes_session_baseline() {
         // Baseline for the click-parity test below: typing "d" then Enter
         // goes through `run_minibuffer_submit` (family B's keyboard path).
-        let (mut app, _dir, server, mut calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         let intent = MinibufferIntent::DeleteConfirm {
             session_id: "s1".into(),
             is_fork: false,
@@ -23608,8 +23736,10 @@ mod tests {
 
     #[tokio::test]
     async fn delete_confirm_click_d_matches_typed_submit_outcome() {
-        let (mut app, _dir, server, mut calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(Minibuffer {
             prompt: "Session s1: ".into(),
             input: String::new(),
@@ -23649,8 +23779,10 @@ mod tests {
 
     #[tokio::test]
     async fn delete_confirm_click_n_cancels_without_delete() {
-        let (mut app, _dir, server, mut calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(Minibuffer {
             prompt: "Session s1: ".into(),
             input: String::new(),
@@ -23707,8 +23839,10 @@ mod tests {
 
     #[tokio::test]
     async fn approve_tool_render_shows_all_choices_when_auto_review_allowed() {
-        let (mut app, _dir, server, _calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, _calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(approve_tool_minibuffer(true));
 
         let mb_area = render_minibuffer_for_test(&mut app);
@@ -23729,8 +23863,10 @@ mod tests {
 
     #[tokio::test]
     async fn approve_tool_hides_auto_review_choice_when_disallowed() {
-        let (mut app, _dir, server, _calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, _calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(approve_tool_minibuffer(false));
 
         render_minibuffer_for_test(&mut app);
@@ -23751,8 +23887,10 @@ mod tests {
         // Before spec 0075, `click_minibuffer` explicitly no-op'd on every
         // click while an `ApproveTool` prompt was open. Regression guard:
         // clicking "n=deny" must now actually deny the call.
-        let (mut app, _dir, server, mut calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(approve_tool_minibuffer(true));
 
         let mb_area = render_minibuffer_for_test(&mut app);
@@ -23786,8 +23924,10 @@ mod tests {
     async fn group_delete_confirm_click_all_deletes_members() {
         // Covers the third distinct choice-cluster shape (3 choices, none
         // of them plain y/N: `y`/`all`/`N`).
-        let (mut app, _dir, server, mut calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(Minibuffer {
             prompt: "Delete project 'demo'? ".into(),
             input: String::new(),
@@ -23830,8 +23970,10 @@ mod tests {
         // Covers the shared plain-y/N typed-submit cluster used by
         // `ArchivedDeleteConfirm` / `MenuArchiveConfirm` /
         // `MenuUnarchiveConfirm` / `MenuDeleteConfirm`.
-        let (mut app, _dir, server, mut calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(Minibuffer {
             prompt: "Archive session s1? ".into(),
             input: String::new(),
@@ -23859,10 +24001,10 @@ mod tests {
         );
         let calls = drain_calls(&mut calls);
         assert!(
-            calls
-                .iter()
-                .any(|(m, p)| m == construct_protocol::ipc_method::SESSION_ARCHIVE
-                    && p.get("session_id").and_then(|v| v.as_str()) == Some("s1")),
+            calls.iter().any(
+                |(m, p)| m == construct_protocol::ipc_method::SESSION_ARCHIVE
+                    && p.get("session_id").and_then(|v| v.as_str()) == Some("s1")
+            ),
             "clicking y should archive the session, got {calls:?}"
         );
         server.abort();
@@ -28482,6 +28624,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archived_forks_collapse_behind_an_n_archived_row() {
+        // A merged/discarded fork is archived, never deleted — it must not
+        // just vanish from the list: it collapses behind a "N archived" row
+        // (mirroring subagents' own archived disclosure), expandable on
+        // click/Enter to reveal the fork itself.
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        if let Some(fork) = app.sessions.iter_mut().find(|s| s.id == "s1-fork") {
+            fork.archived = true;
+            fork.merge = Some(construct_protocol::ForkMerge {
+                mode: construct_protocol::ForkMergeMode::Result,
+                at_ms: 0,
+                merged_busy_ms: 0,
+                merged_message_count: 0,
+                merged_seq: 0,
+            });
+        }
+
+        let items = app.list_items();
+        assert!(
+            !items.iter().any(|it| matches!(
+                it,
+                ListItem::Session { summary, .. } if summary.id == "s1-fork"
+            )),
+            "collapsed by default — the archived fork itself has no row yet"
+        );
+        let (section, count) = items
+            .iter()
+            .find_map(|it| match it {
+                ListItem::ArchivedRow {
+                    section: s @ ArchiveSection::Forks(_),
+                    count,
+                    expanded,
+                    ..
+                } => Some((s.clone(), *count, *expanded)),
+                _ => None,
+            })
+            .map(|(s, c, e)| {
+                assert!(!e, "starts collapsed");
+                (s, c)
+            })
+            .expect("an archived-forks disclosure row exists");
+        assert_eq!(section, ArchiveSection::Forks("s1".into()));
+        assert_eq!(count, 1);
+
+        app.toggle_archive_section(&section);
+        let items = app.list_items();
+        assert!(
+            items.iter().any(|it| matches!(
+                it,
+                ListItem::Session { summary, indented: true, .. } if summary.id == "s1-fork"
+            )),
+            "expanding the row reveals the fork's own row"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn selecting_an_archived_fork_from_its_disclosure_row_shows_its_content() {
+        // End-to-end: reveal the row, select the fork it names, and confirm
+        // the fork's own transcript is what ends up on screen — not a
+        // redirect to the parent (companion to the lineage-jump fix).
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        if let Some(fork) = app.sessions.iter_mut().find(|s| s.id == "s1-fork") {
+            fork.archived = true;
+            fork.merge = Some(construct_protocol::ForkMerge {
+                mode: construct_protocol::ForkMergeMode::Discard,
+                at_ms: 0,
+                merged_busy_ms: 0,
+                merged_message_count: 0,
+                merged_seq: 0,
+            });
+        }
+        app.toggle_archive_section(&ArchiveSection::Forks("s1".into()));
+        let items = app.list_items();
+        let row = items
+            .iter()
+            .find_map(|it| match it {
+                ListItem::Session { summary, .. } if summary.id == "s1-fork" => {
+                    Some(summary.id.clone())
+                }
+                _ => None,
+            })
+            .expect("expanded row exposes the fork");
+        app.select_session(row);
+        assert_eq!(app.selected_id().as_deref(), Some("s1-fork"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn matrix_rain_paints_browser_preview_wallpaper() {
         use construct_client::Client;
         use tokio::net::UnixListener;
@@ -29099,6 +29330,10 @@ mod tests {
             app.archive_section_label(&ArchiveSection::Ungrouped),
             "ungrouped",
         );
+        assert_eq!(
+            app.archive_section_label(&ArchiveSection::Forks("s_abcdef01".into())),
+            format!("forks of {}", short_id("s_abcdef01")),
+        );
     }
 
     #[test]
@@ -29144,6 +29379,16 @@ mod tests {
                 true,
                 true
             ),
+            6
+        );
+        // Forks align identically to subagents — both share the same
+        // formula in `list_session_indent_cells` above.
+        assert_eq!(
+            list_archive_indent_cells(&ArchiveSection::Forks("parent".into()), true, false),
+            5
+        );
+        assert_eq!(
+            list_archive_indent_cells(&ArchiveSection::Forks("grouped-parent".into()), true, true),
             6
         );
     }
@@ -29229,9 +29474,9 @@ mod tests {
 
     #[tokio::test]
     async fn large_tui_paste_uploads_attachment_and_inserts_reference() {
+        use base64::Engine as _;
         use construct_client::Client;
         use construct_protocol::ipc_method;
-        use base64::Engine as _;
         use serde_json::Value;
         use tempfile::tempdir;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -29742,8 +29987,8 @@ mod tests {
     /// raw chat with no synthesized blocks at any scroll position.
     #[test]
     fn task_start_in_transcript_creates_tool_block() {
-        use construct_protocol::{AgentStatus, SessionEvent, TimestampedEvent};
         use chrono::Utc;
+        use construct_protocol::{AgentStatus, SessionEvent, TimestampedEvent};
         fn ev(seq: u64, event: SessionEvent) -> TimestampedEvent {
             TimestampedEvent {
                 seq,
@@ -29816,8 +30061,8 @@ mod tests {
     /// it's PTY-backed (the prose is already in the PTY stream there).
     #[test]
     fn transcript_replay_renders_messages_only_when_headless() {
-        use construct_protocol::{MessageRole, SessionEvent, TimestampedEvent};
         use chrono::Utc;
+        use construct_protocol::{MessageRole, SessionEvent, TimestampedEvent};
         fn ev(seq: u64, event: SessionEvent) -> TimestampedEvent {
             TimestampedEvent {
                 seq,
@@ -29887,8 +30132,8 @@ mod tests {
 
     #[test]
     fn transcript_replay_preserves_answer_after_tool_order() {
-        use construct_protocol::{SessionEvent, TimestampedEvent};
         use chrono::Utc;
+        use construct_protocol::{SessionEvent, TimestampedEvent};
 
         fn ev(seq: u64, event: SessionEvent) -> TimestampedEvent {
             TimestampedEvent {
@@ -29963,8 +30208,8 @@ mod tests {
 
     #[test]
     fn transcript_replay_restores_completed_turn_status_line() {
-        use construct_protocol::{AgentStatus, SessionEvent, TimestampedEvent};
         use chrono::Utc;
+        use construct_protocol::{AgentStatus, SessionEvent, TimestampedEvent};
 
         let started_at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -30026,8 +30271,8 @@ mod tests {
 
     #[test]
     fn ui_panel_replay_tracks_create_patch_delete() {
-        use construct_protocol::{SessionEvent, TimestampedEvent, UiPanel, UiPlacement};
         use chrono::Utc;
+        use construct_protocol::{SessionEvent, TimestampedEvent, UiPanel, UiPlacement};
         fn ev(seq: u64, event: SessionEvent) -> TimestampedEvent {
             TimestampedEvent {
                 seq,
@@ -30149,8 +30394,8 @@ mod tests {
     /// `AgentStatus`) from the transcript fixes it.
     #[test]
     fn apply_transcript_replays_latest_editor_state_for_bootstrap() {
-        use construct_protocol::SessionEvent;
         use chrono::TimeZone;
+        use construct_protocol::SessionEvent;
 
         fn ev(seq: u64, e: SessionEvent) -> TimestampedEvent {
             TimestampedEvent {
