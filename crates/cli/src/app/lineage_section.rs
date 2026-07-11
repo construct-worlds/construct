@@ -125,10 +125,11 @@ impl App {
             .iter()
             .position(|&idx| rows[idx].session_id() == Some(id.as_str()))
             .unwrap_or(0);
-        self.lineage_scroll = 0;
         self.focus = PaneFocus::List;
         self.lineage_focused = true;
-        self.lineage_follow_selection = true;
+        if !self.restore_lineage_scroll_for_selected_session() {
+            self.lineage_follow_selection = true;
+        }
         true
     }
 

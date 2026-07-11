@@ -1391,6 +1391,11 @@ pub struct App {
     /// First visible diagram column — the section's horizontal scroll,
     /// moved by horizontal wheel events. Clamped at render time.
     pub lineage_scroll_x: usize,
+    /// Per-lineage viewport offsets, keyed by the topmost fork/subagent
+    /// ancestor. This is deliberately TUI-only state: it lets navigation
+    /// restore a diagram's viewport during this run without making scroll
+    /// position part of persisted session state.
+    lineage_scroll_memory: HashMap<String, (usize, usize)>,
     /// Which visualization the section draws (boxed-lane diagram vs
     /// git-graph-style rails) — toggled from the section header.
     pub lineage_mode: crate::lineage::LineageViewMode,
@@ -3194,6 +3199,7 @@ async fn run_with_socket_initial_selection(
         lineage_selected: 0,
         lineage_scroll: 0,
         lineage_scroll_x: 0,
+        lineage_scroll_memory: HashMap::new(),
         lineage_mode: crate::lineage::LineageViewMode::Boxes,
         lineage_h: None,
         resizing_lineage: None,
@@ -4336,11 +4342,18 @@ impl App {
 
     fn select_session_inner(&mut self, id: String, transition: bool) {
         self.reset_vim_mode();
+        let previous_id = self.selection.session_id().map(str::to_owned);
         if transition && self.selection.session_id() != Some(id.as_str()) {
             self.start_session_transition();
         }
+        if previous_id.as_deref() != Some(id.as_str()) {
+            if let Some(previous_id) = previous_id.as_deref() {
+                self.remember_lineage_scroll(previous_id);
+            }
+        }
         // Switching to a session consumes its "needs you" marker.
         self.selection = Selection::Session(id);
+        self.restore_lineage_scroll_for_selected_session();
         self.report_focused_sessions();
         self.transcript.clear();
         self.transcript_session = None;
@@ -4360,6 +4373,61 @@ impl App {
         // and the incoming one revealed (if it has a program open). Navigation
         // never *closes* a program — only its title-glyph toggle / C-x Space do.
         self.sync_program_popup_with_selection();
+    }
+
+    /// Topmost ancestor of a session's fork/subagent lineage. Keeping this
+    /// separate from the selected node means every member of one lineage
+    /// shares one viewport.
+    fn lineage_scroll_key(&self, session_id: &str) -> Option<String> {
+        let mut current = session_id;
+        let mut seen = HashSet::new();
+        while seen.insert(current.to_owned()) {
+            let session = self.sessions.iter().find(|session| session.id == current)?;
+            let parent = session
+                .forked_from
+                .as_ref()
+                .map(|fork| fork.session_id.as_str())
+                .or(session.parent_session_id.as_deref());
+            match parent.and_then(|parent| {
+                self.sessions
+                    .iter()
+                    .any(|session| session.id == parent)
+                    .then_some(parent)
+            }) {
+                Some(parent) => current = parent,
+                None => return Some(current.to_owned()),
+            }
+        }
+        Some(current.to_owned())
+    }
+
+    fn remember_lineage_scroll(&mut self, session_id: &str) {
+        if let Some(key) = self.lineage_scroll_key(session_id) {
+            self.lineage_scroll_memory
+                .insert(key, (self.lineage_scroll, self.lineage_scroll_x));
+        }
+    }
+
+    /// Restores a cached viewport for the newly selected lineage. New
+    /// lineages start at their natural origin. Selection should not pull a
+    /// restored viewport back to its highlighted row.
+    fn restore_lineage_scroll_for_selected_session(&mut self) -> bool {
+        let Some(session_id) = self.selected_id() else {
+            return false;
+        };
+        let Some(key) = self.lineage_scroll_key(&session_id) else {
+            return false;
+        };
+        if let Some(&(scroll, scroll_x)) = self.lineage_scroll_memory.get(&key) {
+            self.lineage_scroll = scroll;
+            self.lineage_scroll_x = scroll_x;
+            self.lineage_follow_selection = false;
+            true
+        } else {
+            self.lineage_scroll = 0;
+            self.lineage_scroll_x = 0;
+            false
+        }
     }
 
     /// Tell the daemon which surface we're showing the focused session through
@@ -11121,6 +11189,7 @@ mod tests {
             lineage_selected: 0,
             lineage_scroll: 0,
             lineage_scroll_x: 0,
+            lineage_scroll_memory: HashMap::new(),
             lineage_mode: crate::lineage::LineageViewMode::Boxes,
             lineage_h: None,
             resizing_lineage: None,
@@ -27293,6 +27362,51 @@ mod tests {
         app.histories
             .insert("s1".into(), crate::pty_render::ItemHistory::new());
         (app, dir, server)
+    }
+
+    #[tokio::test]
+    async fn lineage_scroll_is_restored_per_lineage_root() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        let mut other_root = summary_with_kind(construct_protocol::SessionKind::User);
+        other_root.id = "s2".into();
+        let mut other_fork = summary_with_kind(construct_protocol::SessionKind::User);
+        other_fork.id = "s2-fork".into();
+        other_fork.forked_from = Some(construct_protocol::ForkedFrom {
+            session_id: "s2".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+        });
+        app.sessions.extend([other_root, other_fork]);
+
+        app.select_session("s1".into());
+        app.lineage_scroll = 3;
+        app.lineage_scroll_x = 7;
+
+        app.select_session("s2".into());
+        assert_eq!(
+            (app.lineage_scroll, app.lineage_scroll_x),
+            (0, 0),
+            "a newly visited lineage starts at its natural origin"
+        );
+        app.lineage_scroll = 11;
+        app.lineage_scroll_x = 13;
+
+        app.select_session("s1-fork".into());
+        assert_eq!(
+            (app.lineage_scroll, app.lineage_scroll_x),
+            (3, 7),
+            "a sibling in the first lineage restores its shared viewport"
+        );
+
+        app.select_session("s2-fork".into());
+        assert_eq!(
+            (app.lineage_scroll, app.lineage_scroll_x),
+            (11, 13),
+            "the second lineage retains an independent viewport"
+        );
+        server.abort();
     }
 
     #[tokio::test]
