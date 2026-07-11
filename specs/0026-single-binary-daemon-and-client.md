@@ -75,14 +75,7 @@ multiple daemons.
   unlinking and stealing the live socket. The lock is held for the process
   lifetime and released across the restart `exec()` (CLOEXEC fd), so the
   re-execed image re-acquires it. Daemons on *different* sockets don't contend.
-- **The release tarball keeps its historical `constructd-<target>` name** even
-  though it no longer contains a `constructd` binary, because already-released
-  `install.sh` / `construct upgrade` builds fetch that exact asset name.
-  Renaming it would break the upgrade path. Dropping `constructd` from the
-  packaged binary set is itself a one-time upgrade break: an `install.sh` baked
-  into an older binary lists `constructd` in its `BINS` and aborts when it's
-  absent from the new tarball, so that single hop must re-run the install
-  one-liner instead of `construct upgrade`.
+- **The release tarball uses the `construct-<target>` name** now that all functionality is consolidated into the single `construct` binary.
 
 ## Non-Goals
 

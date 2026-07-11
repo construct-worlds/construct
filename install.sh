@@ -13,7 +13,7 @@
 #   CONSTRUCT_BIN_DIR   install directory.       Default: $HOME/.local/bin.
 #   CONSTRUCT_BASE_URL  download base URL (mirror / testing). Default: the
 #                       GitHub release for CONSTRUCT_VERSION. The script fetches
-#                       <base>/constructd-<target>.tar.gz and <base>/SHA256SUMS.
+#                       <base>/construct-<target>.tar.gz and <base>/SHA256SUMS.
 set -eu
 
 REPO="zarvis-ai/construct"
@@ -68,7 +68,7 @@ else
 fi
 
 # --- resolve URLs ---------------------------------------------------------
-asset="constructd-${target}.tar.gz"
+asset="construct-${target}.tar.gz"
 if [ -n "${CONSTRUCT_BASE_URL:-}" ]; then
   base="${CONSTRUCT_BASE_URL%/}"
 elif [ "$VERSION" = "latest" ]; then
@@ -100,8 +100,8 @@ say "Checksum OK"
 
 # --- install --------------------------------------------------------------
 tar -xzf "${tmp}/${asset}" -C "$tmp"
-src="${tmp}/constructd-${target}"
-[ -d "$src" ] || err "unexpected archive layout (no constructd-${target}/ inside ${asset})"
+src="${tmp}/construct-${target}"
+[ -d "$src" ] || err "unexpected archive layout (no construct-${target}/ inside ${asset})"
 
 mkdir -p "$BIN_DIR"
 # Validate the whole set before touching anything (all-or-nothing-ish).
