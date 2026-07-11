@@ -1366,6 +1366,12 @@ pub struct App {
     /// In-flight header-bar drag: `(anchor_row, anchor_h)` — the pointer's
     /// starting row and the section height at drag start.
     pub resizing_lineage: Option<(u16, u16)>,
+    /// Whether the focused section's viewport should pull itself to keep
+    /// the row selection visible on the next render. Set by keyboard
+    /// navigation (and on entering focus); cleared by a wheel scroll, so
+    /// the wheel can roam the full diagram without the selection yanking
+    /// the viewport back every frame.
+    pub lineage_follow_selection: bool,
     /// `/configure` onboarding dialog (spec 0069): `None` = closed. Opened by
     /// the command palette, or automatically on first run / when no agent
     /// harness is available. Captures all input while open.
@@ -2723,6 +2729,11 @@ pub struct LayoutSnapshot {
     /// can actually move when only one overflows.
     pub lineage_v_overflow: bool,
     pub lineage_h_overflow: bool,
+    /// The horizontal scrollbar's own row (the section's reserved bottom
+    /// row), when it rendered — a wheel over it scrolls sideways, giving
+    /// horizontal scrolling a guaranteed mouse path even when both axes
+    /// overflow.
+    pub lineage_hscroll_hit: Option<ratatui::layout::Rect>,
     /// Every session box inside the last-rendered lineage section, in
     /// screen coordinates — hover brightens a box's border, click jumps to
     /// that session. Rebuilt every frame the section renders.
@@ -3140,6 +3151,7 @@ async fn run_with_socket_initial_selection(
         lineage_mode: crate::lineage::LineageViewMode::Boxes,
         lineage_h: None,
         resizing_lineage: None,
+        lineage_follow_selection: false,
         configure_popup: None,
         session_picker: None,
         program_popup: None,
@@ -7053,14 +7065,20 @@ impl App {
                 if self.is_over_lineage_section(ev.column, ev.row) {
                     // Shift+wheel scrolls sideways — the common convention
                     // in terminals without a horizontal wheel. A plain wheel
-                    // also goes sideways when sideways is the only axis with
-                    // anything to scroll (few rows, wide diagram).
+                    // also goes sideways over the horizontal scrollbar's own
+                    // row (a guaranteed mouse path when both axes overflow),
+                    // and when sideways is the only axis with anything to
+                    // scroll (few rows, wide diagram).
                     if ev.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
+                        || self.is_over_lineage_hscrollbar(ev.column, ev.row)
                         || (!self.layout.lineage_v_overflow && self.layout.lineage_h_overflow)
                     {
                         self.lineage_scroll_x = self.lineage_scroll_x.saturating_sub(4);
                     } else {
                         self.lineage_scroll = self.lineage_scroll.saturating_sub(2);
+                        // The wheel roams freely; keyboard navigation
+                        // re-anchors the viewport to the selection.
+                        self.lineage_follow_selection = false;
                     }
                 } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, -LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, -LIST_STEP)
@@ -7072,11 +7090,13 @@ impl App {
                 if self.is_over_lineage_section(ev.column, ev.row) {
                     // Clamped to the diagram's extents at render time.
                     if ev.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
+                        || self.is_over_lineage_hscrollbar(ev.column, ev.row)
                         || (!self.layout.lineage_v_overflow && self.layout.lineage_h_overflow)
                     {
                         self.lineage_scroll_x = self.lineage_scroll_x.saturating_add(4);
                     } else {
                         self.lineage_scroll = self.lineage_scroll.saturating_add(2);
+                        self.lineage_follow_selection = false;
                     }
                 } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, LIST_STEP)
@@ -10869,6 +10889,7 @@ mod tests {
             lineage_toggle_hit: None,
             lineage_v_overflow: false,
             lineage_h_overflow: false,
+            lineage_hscroll_hit: None,
             lineage_box_hits: Vec::new(),
             program_title_run_hit: None,
             program_title_toggle_hit: None,
@@ -11003,6 +11024,7 @@ mod tests {
             lineage_mode: crate::lineage::LineageViewMode::Boxes,
             lineage_h: None,
             resizing_lineage: None,
+            lineage_follow_selection: false,
             configure_popup: None,
             session_picker: None,
             program_popup: None,
@@ -27274,6 +27296,132 @@ mod tests {
             "",
             "the last diagram row renders fully above the scrollbar, \
              never under it"
+        );
+        server.abort();
+    }
+
+    /// A tall AND wide tree: root plus four long-titled forks overflows the
+    /// section on both axes at a 120x28 terminal.
+    async fn test_app_with_tall_wide_lineage(
+    ) -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        let (mut app, dir, server) = test_app_with_lineage().await;
+        for i in 0..4 {
+            let mut fork = summary_with_kind(agentd_protocol::SessionKind::User);
+            fork.id = format!("wide-{i}");
+            fork.title = Some(format!(
+                "a rather long fork title that overflows the sidebar {i}"
+            ));
+            fork.forked_from = Some(agentd_protocol::ForkedFrom {
+                session_id: "s1".into(),
+                transcript_seq: 0,
+                at_ms: 0,
+                parent_busy_ms: 0,
+                parent_message_count: 0,
+            });
+            app.sessions.push(fork);
+        }
+        (app, dir, server)
+    }
+
+    #[tokio::test]
+    async fn wheel_over_the_horizontal_scrollbar_row_scrolls_sideways() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = test_app_with_tall_wide_lineage().await;
+        app.select_session("s1".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 28);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.layout.lineage_v_overflow && app.layout.lineage_h_overflow,
+            "premise: both axes overflow"
+        );
+        let hbar = app.layout.lineage_hscroll_hit.expect("h-scrollbar row");
+
+        // Plain wheel over the scrollbar's own row goes sideways — the
+        // guaranteed mouse path when both axes overflow.
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: hbar.x + hbar.width / 2,
+            row: hbar.y,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        assert_eq!(
+            (app.lineage_scroll, app.lineage_scroll_x),
+            (0, 4),
+            "wheel over the horizontal scrollbar scrolls sideways, not down"
+        );
+
+        // Anywhere else in the section, the plain wheel stays vertical.
+        let area = app.layout.lineage_area.expect("area");
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: area.x + 2,
+            row: area.y + 2,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        assert_eq!(app.lineage_scroll, 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn focused_wheel_scrolling_reaches_the_whole_diagram() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = test_app_with_tall_wide_lineage().await;
+        app.select_session("s1".to_string());
+        // Focus the section: the selection sits on the root (row 0-ish).
+        app.toggle_lineage_focus();
+        let backend = ratatui::backend::TestBackend::new(120, 28);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.layout.lineage_v_overflow, "premise: rows overflow");
+        let area = app.layout.lineage_area.expect("area");
+        let (cx, cy) = (area.x + 2, area.y + 2);
+
+        // Wheel all the way down while focused: the viewport must reach
+        // the diagram's bottom even though the selection stays at the top
+        // (it used to get yanked back every frame to keep the selection
+        // visible, pinning the scroll at 0).
+        for _ in 0..30 {
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: cx,
+                row: cy,
+                modifiers: KeyModifiers::NONE,
+            })
+            .await;
+            term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        }
+        let bottom = app.lineage_scroll;
+        assert!(
+            bottom > 2,
+            "a focused wheel scroll roams free of the selection anchor \
+             (reached {bottom})"
+        );
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: cx,
+            row: cy,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert_eq!(app.lineage_scroll, bottom, "clamped at the diagram's end");
+
+        // Keyboard navigation re-anchors the viewport to the selection
+        // (root at the top, next node just below it — far above `bottom`).
+        app.handle_lineage_focus_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('j'),
+            KeyModifiers::NONE,
+        ))
+        .await;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.lineage_scroll < bottom,
+            "moving the selection pulls the viewport back to it \
+             ({} vs {bottom})",
+            app.lineage_scroll
         );
         server.abort();
     }

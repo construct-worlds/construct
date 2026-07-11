@@ -61,8 +61,12 @@ Mouse: every cell a session owns — its box, lane bar, branch glyph, or
 turn-info text — is a hover/click target: hovering brightens that session
 across the diagram, clicking jumps to it. Clicking empty body cells
 focuses the section; clicking outside blurs it. The wheel scrolls
-vertically (shift, or a horizontal-wheel event, scrolls sideways — and a
-plain wheel goes sideways when sideways is the only axis with overflow).
+vertically (shift, or a horizontal-wheel event, scrolls sideways; a plain
+wheel goes sideways when sideways is the only axis with overflow, and
+over the horizontal scrollbar's own row — the guaranteed mouse path when
+both axes overflow). While the section is keyboard-focused, a wheel
+scroll roams the whole diagram freely; the viewport re-anchors to the row
+selection only when keyboard navigation moves it.
 
 Liveness: node status glyphs animate with the same shared spinner and the
 same gate as the session list's rows, and a working session's LIVE
