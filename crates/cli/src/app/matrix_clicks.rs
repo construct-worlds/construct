@@ -198,6 +198,18 @@ impl App {
         }
         if let Some(hit) = self
             .layout
+            .lineage_subagent_toggle_hits
+            .iter()
+            .find(|hit| hit.contains(col, row))
+            .cloned()
+        {
+            if !self.lineage_subagents_expanded.remove(&hit.session_id) {
+                self.lineage_subagents_expanded.insert(hit.session_id);
+            }
+            return;
+        }
+        if let Some(hit) = self
+            .layout
             .lineage_box_hits
             .iter()
             .find(|hit| hit.contains(col, row))

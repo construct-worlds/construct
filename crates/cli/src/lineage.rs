@@ -69,6 +69,18 @@ pub enum LineageChild {
     /// is a node's only child) its direct children, dropped because
     /// [`MAX_DEPTH`] was reached.
     More(usize),
+    /// This node's `count` subagent children as a collapsible group
+    /// (spec 0081): sessions spawn a LOT of (native) subagents, and the
+    /// lineage a user manages by hand is the fork structure — so subagent
+    /// children collapse into one "▸ N subagents · M running" toggle row
+    /// by default, expanding (▾, children materialized after this marker)
+    /// per parent on click. Only present when the tree was built with
+    /// expansion tracking ([`build_tree_with_expansions`]).
+    Subagents {
+        count: usize,
+        running: usize,
+        expanded: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,12 +120,55 @@ pub fn has_lineage(session_id: &str, sessions: &[SessionSummary]) -> bool {
 /// when `focus_id` isn't among `sessions` (e.g. it was deleted while the
 /// popup was open).
 pub fn build_tree(focus_id: &str, sessions: &[SessionSummary]) -> Option<LineageNode> {
+    build_tree_with_expansions(focus_id, sessions, None)
+}
+
+/// Like [`build_tree`], but with subagent-group expansion tracking
+/// (spec 0081): `expanded` names the parents whose subagent children
+/// materialize; every other node's subagent children collapse into a
+/// [`LineageChild::Subagents`] toggle marker. `None` disables the feature
+/// entirely (everything materializes, no markers — [`build_tree`]'s
+/// behavior). The focus session's own ancestor chain is always expanded,
+/// so the session the section is showing can never be hidden inside a
+/// collapsed group.
+pub fn build_tree_with_expansions(
+    focus_id: &str,
+    sessions: &[SessionSummary],
+    expanded: Option<&HashSet<String>>,
+) -> Option<LineageNode> {
     let by_id: HashMap<&str, &SessionSummary> =
         sessions.iter().map(|s| (s.id.as_str(), s)).collect();
     by_id.get(focus_id)?;
     let root_id = root_of(focus_id, &by_id);
+    let effective: Option<HashSet<String>> = expanded.map(|set| {
+        let mut e = set.clone();
+        let mut cur = focus_id.to_string();
+        let mut seen = HashSet::new();
+        while seen.insert(cur.clone()) {
+            let Some(s) = by_id.get(cur.as_str()) else {
+                break;
+            };
+            if matches!(s.kind, SessionKind::Subagent) {
+                if let Some(pid) = s.parent_session_id.as_deref() {
+                    e.insert(pid.to_string());
+                }
+            }
+            match parent_of(s).filter(|p| by_id.contains_key(p)) {
+                Some(p) => cur = p.to_string(),
+                None => break,
+            }
+        }
+        e
+    });
     let mut visited = HashSet::new();
-    build_subtree(&root_id, &by_id, LineageEdge::Root, 0, &mut visited)
+    build_subtree(
+        &root_id,
+        &by_id,
+        LineageEdge::Root,
+        0,
+        &mut visited,
+        effective.as_ref(),
+    )
 }
 
 fn parent_of(s: &SessionSummary) -> Option<&str> {
@@ -144,6 +199,7 @@ fn build_subtree(
     edge: LineageEdge,
     depth: usize,
     visited: &mut HashSet<String>,
+    expanded: Option<&HashSet<String>>,
 ) -> Option<LineageNode> {
     // Defensive cycle guard: a well-formed lineage graph is a tree (every
     // session has at most one parent edge), so this should never trip. It
@@ -185,15 +241,39 @@ fn build_subtree(
         // than silently truncating one branch and not another.
         vec![LineageChild::More(total)]
     } else {
-        let mut out: Vec<LineageChild> = kids
+        // Subagent grouping (spec 0081): with expansion tracking on, this
+        // node's subagent children sit behind a toggle marker — collapsed
+        // (not materialized) unless the node is in the expanded set. Forks
+        // always materialize: they're the structure the user built by hand.
+        let sub_total = kids
             .iter()
-            .take(MAX_SIBLINGS)
-            .filter_map(|(s, e)| {
-                build_subtree(&s.id, by_id, *e, depth + 1, visited).map(LineageChild::Node)
-            })
+            .filter(|(_, e)| matches!(e, LineageEdge::Subagent))
+            .count();
+        let sub_expanded = expanded.map_or(true, |set| set.contains(id));
+        let mut out: Vec<LineageChild> = Vec::new();
+        if expanded.is_some() && sub_total > 0 {
+            let running = kids
+                .iter()
+                .filter(|(s, e)| {
+                    matches!(e, LineageEdge::Subagent) && matches!(s.state, SessionState::Running)
+                })
+                .count();
+            out.push(LineageChild::Subagents {
+                count: sub_total,
+                running,
+                expanded: sub_expanded,
+            });
+        }
+        let materialized: Vec<&(&SessionSummary, LineageEdge)> = kids
+            .iter()
+            .filter(|(_, e)| sub_expanded || !matches!(e, LineageEdge::Subagent))
             .collect();
-        if total > MAX_SIBLINGS {
-            out.push(LineageChild::More(total - MAX_SIBLINGS));
+        let m_total = materialized.len();
+        out.extend(materialized.iter().take(MAX_SIBLINGS).filter_map(|(s, e)| {
+            build_subtree(&s.id, by_id, *e, depth + 1, visited, expanded).map(LineageChild::Node)
+        }));
+        if m_total > MAX_SIBLINGS {
+            out.push(LineageChild::More(m_total - MAX_SIBLINGS));
         }
         out
     };
@@ -260,6 +340,10 @@ pub enum LineageSpan {
     Node { session_id: String },
     /// "+N more" collapse marker.
     More(usize),
+    /// The collapsed/expanded subagent-group toggle row for `session_id`'s
+    /// node: "▸ N subagents · M running" / "▾ N subagents". Click toggles
+    /// the group.
+    SubagentsToggle { session_id: String, expanded: bool },
 }
 
 /// One styled run of text within a row.
@@ -345,7 +429,9 @@ impl LineageSpan {
     /// highlights and jumps to its session.
     pub fn owner(&self) -> Option<&str> {
         match self {
-            LineageSpan::Rail | LineageSpan::More(_) => None,
+            // The subagents toggle is deliberately owner-less: clicking it
+            // must toggle the group, never jump to the parent session.
+            LineageSpan::Rail | LineageSpan::More(_) | LineageSpan::SubagentsToggle { .. } => None,
             LineageSpan::Border { session_id }
             | LineageSpan::Edge { session_id, .. }
             | LineageSpan::Segment { session_id, .. }
@@ -771,6 +857,9 @@ struct Lane<'a> {
     close_ms: i64,
     /// Collapsed "+N more" markers among this lane's children.
     more: Vec<usize>,
+    /// This node's subagent-group toggle marker `(count, running,
+    /// expanded)`, rendered as its own row right under the node.
+    subagent_marker: Option<(usize, usize, bool)>,
     /// Wrapped box label lines (see `wrap_box_label`).
     label_lines: Vec<String>,
     /// This lane's own total compute time as of "now" (frozen naturally
@@ -888,6 +977,7 @@ fn collect_lanes<'a>(
         end,
         close_ms,
         more: Vec::new(),
+        subagent_marker: None,
         label_lines: wrap_box_label(&node_box_label(summary, &node.session_id)),
         busy_total: summary.map(|s| s.busy_ms_at(now_ms)).unwrap_or(0),
         msgs_total: summary.map(|s| s.message_count).unwrap_or(0),
@@ -905,12 +995,53 @@ fn collect_lanes<'a>(
     for child in &node.children {
         match child {
             LineageChild::More(n) => lanes[idx].more.push(*n),
+            LineageChild::Subagents {
+                count,
+                running,
+                expanded,
+            } => {
+                lanes[idx].subagent_marker = Some((*count, *running, *expanded));
+            }
             LineageChild::Node(cn) => {
                 collect_lanes(cn, by_id, Some(idx), now_ms, lanes);
             }
         }
     }
     idx
+}
+
+/// The subagent-group toggle row's text: `▸ N subagents · M running`
+/// collapsed (running part only when M > 0), `▾ N subagents` expanded.
+fn subagent_marker_text(count: usize, running: usize, expanded: bool) -> String {
+    let noun = if count == 1 { "subagent" } else { "subagents" };
+    if expanded {
+        format!("▾ {count} {noun}")
+    } else if running > 0 {
+        format!("▸ {count} {noun} · {running} running")
+    } else {
+        format!("▸ {count} {noun}")
+    }
+}
+
+/// Boxes mode: emit the lane's subagent-group toggle row (if any) at `y`,
+/// directly under its box — `├─ ▸ N subagents · M running` on the lane.
+/// Returns the next free row.
+fn put_subagent_marker_box(c: &mut Canvas, y: usize, lane: &mut Lane) -> usize {
+    let Some((count, running, expanded)) = lane.subagent_marker else {
+        return y;
+    };
+    c.put(y, lane.lane_col, "├─ ", &LineageSpan::Rail);
+    c.put(
+        y,
+        lane.lane_col + 3,
+        &subagent_marker_text(count, running, expanded),
+        &LineageSpan::SubagentsToggle {
+            session_id: lane.node.session_id.clone(),
+            expanded,
+        },
+    );
+    lane.last_row = lane.last_row.max(y);
+    y + 1
 }
 
 fn node_outcome_of(summary: Option<&SessionSummary>) -> Option<bool> {
@@ -1041,6 +1172,7 @@ fn layout_tree(
                     lanes[i].last_row = cur + h - 1;
                     lanes[i].placed = true;
                     cur += h;
+                    cur = put_subagent_marker_box(c, cur, &mut lanes[i]);
                     gi += 1;
                     continue;
                 };
@@ -1194,6 +1326,7 @@ fn layout_tree(
                 lanes[i].last_row = cur + h - 1;
                 lanes[i].placed = true;
                 cur += h;
+                cur = put_subagent_marker_box(c, cur, &mut lanes[i]);
                 gi += 1;
             }
             EV_MERGE => {
@@ -1593,6 +1726,20 @@ pub fn flatten_rails(
                     first_row[i] = cur + 1;
                     last_row[i] = cur;
                     cur += 1;
+                    if let Some((count, running, expanded)) = lanes[i].subagent_marker {
+                        c.put(cur, col(rail_of[i]), "├", &border);
+                        c.put(
+                            cur,
+                            text_x,
+                            &subagent_marker_text(count, running, expanded),
+                            &LineageSpan::SubagentsToggle {
+                                session_id: lanes[i].node.session_id.clone(),
+                                expanded,
+                            },
+                        );
+                        last_row[i] = cur;
+                        cur += 1;
+                    }
                     gi += 1;
                     continue;
                 }
@@ -1658,6 +1805,20 @@ pub fn flatten_rails(
                 last_row[i] = cur;
                 last_row[p] = last_row[p].max(cur);
                 cur += 1;
+                if let Some((count, running, expanded)) = lanes[i].subagent_marker {
+                    c.put(cur, col(rail_of[i]), "├", &child_border);
+                    c.put(
+                        cur,
+                        text_x,
+                        &subagent_marker_text(count, running, expanded),
+                        &LineageSpan::SubagentsToggle {
+                            session_id: lanes[i].node.session_id.clone(),
+                            expanded,
+                        },
+                    );
+                    last_row[i] = cur;
+                    cur += 1;
+                }
                 gi += 1;
             }
             EV_MERGE => {
@@ -2226,6 +2387,127 @@ mod tests {
         rows.iter()
             .rposition(|r| r.spans.iter().any(|sp| sp.role.owner() == Some(owner)))
             .expect("owner appears somewhere")
+    }
+
+    #[test]
+    fn subagents_collapse_behind_a_toggle_marker_by_default() {
+        // With expansion tracking on (the section's mode), subagent
+        // children sit behind one "▸ N subagents · M running" row; forks
+        // always materialize — they're the structure the user built.
+        let root = base("root");
+        let mut sub_a = base("sub-a");
+        sub_a.kind = SessionKind::Subagent;
+        sub_a.parent_session_id = Some("root".into());
+        let mut sub_b = base("sub-b");
+        sub_b.kind = SessionKind::Subagent;
+        sub_b.parent_session_id = Some("root".into());
+        sub_b.state = SessionState::Done;
+        let fork = forked_from(base("fork"), "root");
+        let sessions = vec![root, sub_a, sub_b, fork];
+
+        let none = HashSet::new();
+        let tree = build_tree_with_expansions("root", &sessions, Some(&none)).unwrap();
+        assert_eq!(
+            tree.children.len(),
+            2,
+            "marker + the fork; the subagent nodes are not materialized"
+        );
+        assert_eq!(
+            tree.children[0],
+            LineageChild::Subagents {
+                count: 2,
+                running: 1,
+                expanded: false
+            },
+            "sub-a is Running, sub-b is Done — one of two running"
+        );
+        let LineageChild::Node(f) = &tree.children[1] else {
+            panic!("fork materializes");
+        };
+        assert_eq!(f.session_id, "fork");
+        // The marker row renders with the running tally, in both layouts.
+        for text in [
+            flatten(&tree, &sessions, 9_000)
+                .iter()
+                .map(|r| r.text())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            flatten_rails(&tree, &sessions, 9_000)
+                .0
+                .iter()
+                .map(|r| r.text())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ] {
+            assert!(
+                text.contains("▸ 2 subagents · 1 running"),
+                "collapsed marker with running tally: {text}"
+            );
+        }
+
+        // Expanding the parent materializes the group after a ▾ marker.
+        let mut expanded = HashSet::new();
+        expanded.insert("root".to_string());
+        let tree = build_tree_with_expansions("root", &sessions, Some(&expanded)).unwrap();
+        assert_eq!(
+            tree.children[0],
+            LineageChild::Subagents {
+                count: 2,
+                running: 1,
+                expanded: true
+            }
+        );
+        let ids: Vec<&str> = tree
+            .children
+            .iter()
+            .filter_map(|c| match c {
+                LineageChild::Node(n) => Some(n.session_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["sub-a", "sub-b", "fork"]);
+        let text = flatten(&tree, &sessions, 9_000)
+            .iter()
+            .map(|r| r.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("▾ 2 subagents"),
+            "expanded marker keeps the collapse affordance: {text}"
+        );
+
+        // Without tracking (legacy build_tree), no markers — everything
+        // materializes, exactly as before.
+        let tree = build_tree("root", &sessions).unwrap();
+        assert!(tree
+            .children
+            .iter()
+            .all(|c| matches!(c, LineageChild::Node(_))));
+    }
+
+    #[test]
+    fn the_focused_sessions_chain_is_always_expanded() {
+        // The section shows the SELECTED session's tree — a subagent must
+        // stay visible even while every group defaults to collapsed.
+        let root = base("root");
+        let mut sub = base("sub");
+        sub.kind = SessionKind::Subagent;
+        sub.parent_session_id = Some("root".into());
+        let mut nested = base("nested");
+        nested.kind = SessionKind::Subagent;
+        nested.parent_session_id = Some("sub".into());
+        let sessions = vec![root, sub, nested];
+
+        let none = HashSet::new();
+        let tree = build_tree_with_expansions("nested", &sessions, Some(&none)).unwrap();
+        let LineageChild::Node(sub_node) = &tree.children[1] else {
+            panic!("focus ancestor materializes: {:?}", tree.children);
+        };
+        assert_eq!(sub_node.session_id, "sub");
+        let LineageChild::Node(nested_node) = &sub_node.children[1] else {
+            panic!("focus itself materializes: {:?}", sub_node.children);
+        };
+        assert_eq!(nested_node.session_id, "nested");
     }
 
     #[test]

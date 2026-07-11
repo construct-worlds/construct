@@ -1366,6 +1366,11 @@ pub struct App {
     /// In-flight header-bar drag: `(anchor_row, anchor_h)` — the pointer's
     /// starting row and the section height at drag start.
     pub resizing_lineage: Option<(u16, u16)>,
+    /// Parents whose subagent-group is expanded in the lineage section
+    /// (spec 0081) — subagent children collapse behind a "▸ N subagents"
+    /// toggle by default; clicking it inserts/removes the parent here.
+    /// In-memory only (a fresh TUI starts re-collapsed).
+    pub lineage_subagents_expanded: HashSet<String>,
     /// Whether the focused section's viewport should pull itself to keep
     /// the row selection visible on the next render. Set by keyboard
     /// navigation (and on entering focus); cleared by a wheel scroll, so
@@ -2738,6 +2743,9 @@ pub struct LayoutSnapshot {
     /// screen coordinates — hover brightens a box's border, click jumps to
     /// that session. Rebuilt every frame the section renders.
     pub lineage_box_hits: Vec<LineageBoxHit>,
+    /// The "▸/▾ N subagents" group-toggle rows — click toggles that
+    /// parent's group between collapsed and expanded.
+    pub lineage_subagent_toggle_hits: Vec<LineageBoxHit>,
     /// Program title-bar Run button bounds: `(x_start, x_end, y)`.
     pub program_title_run_hit: Option<(u16, u16, u16)>,
     /// Program title-bar mode toggle bounds: `(x_start, x_end, y)`.
@@ -3152,6 +3160,7 @@ async fn run_with_socket_initial_selection(
         lineage_h: None,
         resizing_lineage: None,
         lineage_follow_selection: false,
+        lineage_subagents_expanded: HashSet::new(),
         configure_popup: None,
         session_picker: None,
         program_popup: None,
@@ -10891,6 +10900,7 @@ mod tests {
             lineage_h_overflow: false,
             lineage_hscroll_hit: None,
             lineage_box_hits: Vec::new(),
+            lineage_subagent_toggle_hits: Vec::new(),
             program_title_run_hit: None,
             program_title_toggle_hit: None,
             program_title_close_hit: None,
@@ -11025,6 +11035,7 @@ mod tests {
             lineage_h: None,
             resizing_lineage: None,
             lineage_follow_selection: false,
+            lineage_subagents_expanded: HashSet::new(),
             configure_popup: None,
             session_picker: None,
             program_popup: None,
@@ -27580,6 +27591,89 @@ mod tests {
         assert!(
             bullets >= 1,
             "earlier windows keep the plain bullet while the live one spins"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn clicking_the_subagents_marker_expands_and_recollapses_the_group() {
+        use agentd_client::Client;
+        use tokio::net::UnixListener;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let server = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let root = summary_with_kind(agentd_protocol::SessionKind::User);
+        let mut sub = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        sub.id = "s1-sub".into();
+        sub.parent_session_id = Some("s1".into());
+        let mut app = test_app(client, vec![root, sub]);
+        app.select_session("s1".to_string());
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.layout.lineage_area.is_some(),
+            "a subagent-only session still gets a section — otherwise the \
+             collapsed group could never be expanded"
+        );
+        let rows_text = app
+            .lineage_section_rows("s1")
+            .iter()
+            .map(|r| r.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rows_text.contains("▸ 1 subagent · 1 running") && !rows_text.contains("s1-sub"),
+            "collapsed by default: {rows_text}"
+        );
+        let toggle = app
+            .layout
+            .lineage_subagent_toggle_hits
+            .first()
+            .cloned()
+            .expect("toggle hit registered");
+
+        app.handle_left_click(toggle.area.x + 1, toggle.area.y)
+            .await;
+        assert!(app.lineage_subagents_expanded.contains("s1"));
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let rows_text = app
+            .lineage_section_rows("s1")
+            .iter()
+            .map(|r| r.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rows_text.contains("▾ 1 subagent"),
+            "expanded marker: {rows_text}"
+        );
+        assert!(
+            app.lineage_section_rows("s1")
+                .iter()
+                .any(|r| r.session_id() == Some("s1-sub")),
+            "the subagent node materializes after expanding"
+        );
+
+        let toggle = app
+            .layout
+            .lineage_subagent_toggle_hits
+            .first()
+            .cloned()
+            .expect("toggle hit re-registered");
+        app.handle_left_click(toggle.area.x + 1, toggle.area.y)
+            .await;
+        assert!(
+            !app.lineage_subagents_expanded.contains("s1"),
+            "clicking the ▾ marker collapses the group again"
         );
         server.abort();
     }
