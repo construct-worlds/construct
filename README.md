@@ -2,9 +2,8 @@
 
 **A terminal-native agentic development environment.**
 
-Create Codex, Claude Code, Antigravity, Grok, and smith sessions all in one
-place — or let an agent coordinate them from a focused TUI. Remote control from
-your phone when you're in motion.
+Manage Codex, Claude Code, Antigravity, Grok, and smith sessions from your
+terminal — or let an agent coordinate them.
 
 ![construct lineage and program run](https://raw.githubusercontent.com/construct-worlds/construct/52849f56c902397d6729ec286293064c5b15bcfe/demos/lineage-program-run.gif)
 
@@ -12,17 +11,18 @@ More screenshots and demos: [gallery](gallery.md).
 
 ## Why construct?
 
-- **One cockpit for every agent** — attach to Claude Code, Codex, Antigravity,
-  smith, or a shell process from one focused workspace that rewards attention.
+- **tmux for agent fleets** — multiple coding harnesses in one terminal session.
+  CLI-only; no desktop app to install.
+- **Fork / merge** — fork a session when you need a parallel attempt
+  (new idea, side quest, or a long shot). Supports cross-harness forks and
+  merging results back.
 
-  <img src="https://raw.githubusercontent.com/construct-worlds/construct/f8fae6e5227ccd0b2140c35ce6e2ad16349da848/demos/new-session.gif" alt="construct new session demo" width="50%">
-- **A delightful way to manage multiple Claude Code and Codex sessions** —
-  switch sessions instantly, pin multiple sessions to monitor, or let an agent
-  observe all your sessions across different harnesses.
-- **Program: a shared board you and the agent run together** — every session
-  owns a durable Markdown document ([docs/program.md](docs/program.md)) that
-  human and agent co-edit live and execute: select a task, hit Run, and watch
-  per-block progress shimmer as workers report back.
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/9de1982e7ec4ae9ad71c32f3f3e3f2f58fbe93ca/demos/fork-merge.gif" alt="construct fork and merge demo" width="50%">
+- **Program** — collaborative, executable Markdown
+  ([docs/program.md](docs/program.md)): co-develop workflows, tasks, and ideas
+  with the agent, then run them from the same document.
+
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/90d02bd2c1e6108eaa5c763bde9e2d78f8786691/demos/program.gif" alt="construct program demo" width="50%">
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
   output, spawn helpers, send input, inspect diffs, and drive Chrome.
 - **ACP (Agent Client Protocol) server** — point Agent Client Protocol clients at
