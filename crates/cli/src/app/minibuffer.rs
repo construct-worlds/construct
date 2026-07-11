@@ -351,28 +351,23 @@ impl App {
                     position_after_session_id: None,
                     forked_from: None,
                 };
-                match self.client.create(params).await {
-                    Ok(id) => {
-                        self.set_status(format!("created {}", short_id(&id)));
-                        self.refresh_sessions().await;
-                        // Pre-insert an empty PTY parser so the subsequent
-                        // `refresh_selected_transcript → bootstrap_terminal`
-                        // short-circuits (parser already present). Our live
-                        // subscription will deliver every byte the adapter
-                        // emits; without this short-circuit, pty_replay
-                        // would race the subscription and the banner ends
-                        // up rendered twice (once from the ring, once from
-                        // the live broadcast that was already in flight).
-                        if !self.histories.contains_key(&id) {
-                            self.histories
-                                .insert(id.clone(), crate::pty_render::ItemHistory::new());
-                        }
-                        self.select_session(id);
-                        self.sync_active_window_selection();
-                        self.focus = PaneFocus::View;
-                    }
-                    Err(e) => self.set_status(format!("create failed: {e}")),
-                }
+                let socket = self.client.socket_path().to_path_buf();
+                let tx = self.session_mutation_tx.clone();
+                self.set_status("creating session…".into());
+                tokio::spawn(async move {
+                    let result = match construct_client::Client::connect(&socket).await {
+                        Ok(client) => client.create(params).await,
+                        Err(e) => Err(e),
+                    };
+                    let event = match result {
+                        Ok(id) => SessionMutationResult::Created { id },
+                        Err(e) => SessionMutationResult::Failed {
+                            operation: "create",
+                            error: e.to_string(),
+                        },
+                    };
+                    let _ = tx.send(event);
+                });
             }
             MinibufferIntent::ForkSessionHarness { source_session_id } => {
                 let harness = input.trim().to_string();
@@ -387,31 +382,33 @@ impl App {
                     cols: cols.max(20),
                     rows: rows.max(5),
                 });
-                match self
-                    .client
-                    .fork_session(&source_session_id, &harness, opts)
-                    .await
-                {
-                    Ok(id) => {
-                        self.set_status(format!(
-                            "forked {} → {} ({harness})",
-                            short_id(&source_session_id),
-                            short_id(&id),
-                        ));
-                        self.refresh_sessions().await;
-                        // Mirror the new-session path: pre-insert an empty PTY
-                        // parser so the transcript bootstrap short-circuits and
-                        // the live subscription isn't raced into a double banner.
-                        if !self.histories.contains_key(&id) {
-                            self.histories
-                                .insert(id.clone(), crate::pty_render::ItemHistory::new());
+                let socket = self.client.socket_path().to_path_buf();
+                let tx = self.session_mutation_tx.clone();
+                let source_for_result = source_session_id.clone();
+                let harness_for_result = harness.clone();
+                self.set_status("forking session…".into());
+                tokio::spawn(async move {
+                    let result = match construct_client::Client::connect(&socket).await {
+                        Ok(client) => {
+                            client
+                                .fork_session(&source_session_id, &harness, opts)
+                                .await
                         }
-                        self.select_session(id);
-                        self.sync_active_window_selection();
-                        self.focus = PaneFocus::View;
-                    }
-                    Err(e) => self.set_status(format!("fork failed: {e}")),
-                }
+                        Err(e) => Err(e),
+                    };
+                    let event = match result {
+                        Ok(id) => SessionMutationResult::Forked {
+                            id,
+                            source_id: source_for_result,
+                            harness: harness_for_result,
+                        },
+                        Err(e) => SessionMutationResult::Failed {
+                            operation: "fork",
+                            error: e.to_string(),
+                        },
+                    };
+                    let _ = tx.send(event);
+                });
             }
             MinibufferIntent::GroupDeleteConfirm { group_id } => {
                 let choice = parse_group_delete_choice(&input);
@@ -490,32 +487,24 @@ impl App {
             MinibufferIntent::DeleteConfirm {
                 session_id,
                 is_fork,
-            } => {
-                match parse_session_end_choice(&input) {
-                    SessionEndChoice::Delete => match self.client.delete(&session_id).await {
-                        Ok(()) => self.set_status(format!("deleted {}", short_id(&session_id))),
-                        Err(e) => self.set_status(format!("delete failed: {e}")),
-                    },
-                    SessionEndChoice::Archive => match self.client.archive(&session_id).await {
-                        Ok(()) => self.set_status(format!("archived {}", short_id(&session_id))),
-                        Err(e) => self.set_status(format!("archive failed: {e}")),
-                    },
-                    SessionEndChoice::MergeAndArchive => {
-                        if !is_fork {
-                            self.set_status("merge: select a fork".into());
-                            return;
-                        }
-                        self.apply_fork_merge(
-                            session_id,
-                            construct_protocol::ForkMergeMode::Result,
-                        )
+            } => match parse_session_end_choice(&input) {
+                SessionEndChoice::Delete => self.spawn_session_delete(session_id),
+                SessionEndChoice::Archive => match self.client.archive(&session_id).await {
+                    Ok(()) => self.set_status(format!("archived {}", short_id(&session_id))),
+                    Err(e) => self.set_status(format!("archive failed: {e}")),
+                },
+                SessionEndChoice::MergeAndArchive => {
+                    if !is_fork {
+                        self.set_status("merge: select a fork".into());
+                        return;
+                    }
+                    self.apply_fork_merge(session_id, construct_protocol::ForkMergeMode::Result)
                         .await;
-                    }
-                    SessionEndChoice::Cancel => {
-                        self.set_status("cancelled".to_string());
-                    }
                 }
-            }
+                SessionEndChoice::Cancel => {
+                    self.set_status("cancelled".to_string());
+                }
+            },
             MinibufferIntent::ArchivedDeleteConfirm { section } => {
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
                 if !yes {
@@ -582,10 +571,7 @@ impl App {
                     self.set_status("delete cancelled".to_string());
                     return;
                 }
-                match self.client.delete(&session_id).await {
-                    Ok(()) => self.set_status(format!("deleted {}", short_id(&session_id))),
-                    Err(e) => self.set_status(format!("delete failed: {e}")),
-                }
+                self.spawn_session_delete(session_id);
             }
             MinibufferIntent::MenuUnarchiveConfirm { session_id } => {
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
@@ -678,6 +664,32 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Dispatch deletion away from the event loop. A dedicated connection is
+    /// important because daemon request handling is sequential per connection;
+    /// a recursive cascade must not queue ordinary TUI RPCs behind it.
+    fn spawn_session_delete(&mut self, session_id: String) {
+        let socket = self.client.socket_path().to_path_buf();
+        let tx = self.session_mutation_tx.clone();
+        let id_for_result = session_id.clone();
+        self.set_status(format!("deleting {}…", short_id(&session_id)));
+        tokio::spawn(async move {
+            let result = match construct_client::Client::connect(&socket).await {
+                Ok(client) => client.delete(&session_id).await,
+                Err(e) => Err(e),
+            };
+            let event = match result {
+                Ok(()) => SessionMutationResult::Deleted {
+                    session_id: id_for_result,
+                },
+                Err(e) => SessionMutationResult::Failed {
+                    operation: "delete",
+                    error: e.to_string(),
+                },
+            };
+            let _ = tx.send(event);
+        });
     }
 
     async fn run_palette_command(&mut self, cmd: &str) {

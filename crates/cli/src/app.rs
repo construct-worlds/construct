@@ -58,6 +58,28 @@ pub(crate) const DYNAMIC_UI_AUTOHIDE_SECS: u64 = 15;
 /// distinct from the 15s create/update auto-reveal above.
 pub(crate) const DYNAMIC_UI_HOVER_GRACE_MS: u64 = 1000;
 
+/// Completion events for session mutations deliberately run on a dedicated
+/// IPC connection. Creating a harness session may wait for adapter startup,
+/// and a delete can cascade across a large subagent tree; neither belongs on
+/// the TUI's input/render loop.
+pub(crate) enum SessionMutationResult {
+    Created {
+        id: String,
+    },
+    Forked {
+        id: String,
+        source_id: String,
+        harness: String,
+    },
+    Deleted {
+        session_id: String,
+    },
+    Failed {
+        operation: &'static str,
+        error: String,
+    },
+}
+
 /// Which pane currently owns the keyboard. `View` covers both the transcript
 /// and the terminal renderer — when the view shows a PTY-backed session and
 /// View has focus, keystrokes are captured by the PTY (with `C-x` as the
@@ -1192,6 +1214,8 @@ pub struct App {
     /// `spawn_detached_upgrade`); the event loop drains the paired receiver
     /// and surfaces each message via `set_status`.
     pub upgrade_status_tx: mpsc::UnboundedSender<String>,
+    /// Results from create/fork/delete work performed outside the render loop.
+    pub session_mutation_tx: mpsc::UnboundedSender<SessionMutationResult>,
     pub last_diff: Option<String>,
     pub should_quit: bool,
     pub connected: bool,
@@ -3197,6 +3221,7 @@ async fn run_with_socket_initial_selection(
     let program_templates_tx = mpsc::unbounded_channel().0;
     let program_projection_tx = mpsc::unbounded_channel().0;
     let upgrade_status_tx = mpsc::unbounded_channel().0;
+    let session_mutation_tx = mpsc::unbounded_channel().0;
     let mut app = App {
         client: client.clone(),
         last_reported_view: None,
@@ -3236,6 +3261,7 @@ async fn run_with_socket_initial_selection(
         latest_version: None,
         daemon_build_id: None,
         upgrade_status_tx,
+        session_mutation_tx,
         last_diff: None,
         should_quit: false,
         connected: true,
@@ -3543,6 +3569,9 @@ async fn run_loop(
     // it via `set_status`.
     let (upgrade_status_tx, mut upgrade_status_rx) = mpsc::unbounded_channel::<String>();
     app.upgrade_status_tx = upgrade_status_tx;
+    let (session_mutation_tx, mut session_mutation_rx) =
+        mpsc::unbounded_channel::<SessionMutationResult>();
+    app.session_mutation_tx = session_mutation_tx;
     // Tier-2 session-picker content search (spec 0076): the debounced
     // `session.search` call fired below is spawned entirely within this
     // loop (no key handler needs to reach it directly), so unlike the
@@ -4028,6 +4057,36 @@ async fn run_loop(
             msg = upgrade_status_rx.recv() => {
                 if let Some(msg) = msg {
                     app.set_status(msg);
+                }
+            }
+            mutation = session_mutation_rx.recv() => {
+                if let Some(mutation) = mutation {
+                    match mutation {
+                        SessionMutationResult::Created { id } => {
+                            app.set_status(format!("created {}", short_id(&id)));
+                            if !app.histories.contains_key(&id) {
+                                app.histories.insert(id.clone(), crate::pty_render::ItemHistory::new());
+                            }
+                            app.select_session(id);
+                            app.sync_active_window_selection();
+                            app.focus = PaneFocus::View;
+                        }
+                        SessionMutationResult::Forked { id, source_id, harness } => {
+                            app.set_status(format!("forked {} → {} ({harness})", short_id(&source_id), short_id(&id)));
+                            if !app.histories.contains_key(&id) {
+                                app.histories.insert(id.clone(), crate::pty_render::ItemHistory::new());
+                            }
+                            app.select_session(id);
+                            app.sync_active_window_selection();
+                            app.focus = PaneFocus::View;
+                        }
+                        SessionMutationResult::Deleted { session_id } => {
+                            app.set_status(format!("deleted {}", short_id(&session_id)));
+                        }
+                        SessionMutationResult::Failed { operation, error } => {
+                            app.set_status(format!("{operation} failed: {error}"));
+                        }
+                    }
                 }
             }
             searched = content_search_rx.recv() => {
@@ -11302,6 +11361,7 @@ mod tests {
             // this explicitly.
             daemon_build_id: Some(crate::BUILD_ID.to_string()),
             upgrade_status_tx: mpsc::unbounded_channel().0,
+            session_mutation_tx: mpsc::unbounded_channel().0,
             last_diff: None,
             should_quit: false,
             connected: true,
@@ -23686,10 +23746,8 @@ mod tests {
 
     #[tokio::test]
     async fn delete_confirm_render_has_three_non_overlapping_choice_hits() {
-        let (mut app, _dir, server, _calls) = choice_click_app(vec![summary_with_kind(
-            construct_protocol::SessionKind::User,
-        )])
-        .await;
+        let (mut app, _dir, server, _calls) =
+            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
         app.minibuffer = Some(Minibuffer {
             prompt: "Session s1: ".into(),
             input: String::new(),
@@ -23727,8 +23785,10 @@ mod tests {
 
     #[tokio::test]
     async fn delete_confirm_fork_render_includes_merge_and_archive_choice() {
-        let (mut app, _dir, server, _calls) =
-            choice_click_app(vec![summary_with_kind(construct_protocol::SessionKind::User)]).await;
+        let (mut app, _dir, server, _calls) = choice_click_app(vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )])
+        .await;
         app.minibuffer = Some(Minibuffer {
             prompt: "Session s1: ".into(),
             input: String::new(),
