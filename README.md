@@ -6,6 +6,8 @@ Create Codex, Claude Code, Antigravity, and smith sessions all in one place. Or
 let your agent coordinate them in a terminal crafted for hardcore hackers like
 you. Remote control from your phone when you're in motion.
 
+![construct lineage and program run](https://raw.githubusercontent.com/construct-worlds/construct/52849f56c902397d6729ec286293064c5b15bcfe/demos/lineage-program-run.gif)
+
 ![construct TUI demo](https://raw.githubusercontent.com/construct-worlds/construct/73525a653d1969474f02f0ac699867a68565ac99/demos/browser-thumbnail.gif)
 
 ## Why construct?
