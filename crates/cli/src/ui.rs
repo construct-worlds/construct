@@ -9731,12 +9731,17 @@ fn render_lineage_row(
                     }
                 }
                 crate::lineage::LineageSpan::BoxPad { session_id } => {
-                    if selected_session == Some(session_id.as_str())
+                    let fill_bg = if selected_session == Some(session_id.as_str())
                         || hovered_session == Some(session_id.as_str())
                     {
-                        Style::default().bg(theme.highlight_bg)
+                        theme.highlight_bg
                     } else {
-                        Style::default().bg(theme.inactive_highlight_bg)
+                        theme.inactive_highlight_bg
+                    };
+                    if run.text.contains('▄') || run.text.contains('▀') {
+                        Style::default().fg(fill_bg).bg(Color::Reset)
+                    } else {
+                        Style::default().bg(fill_bg)
                     }
                 }
                 // Mirrors the session list: only the status glyph carries
@@ -14588,6 +14593,12 @@ mod tests {
         {
             let has_bg = span.style.bg == Some(theme.highlight_bg);
             match &run.role {
+                crate::lineage::LineageSpan::BoxPad { session_id }
+                    if session_id == "f" && (run.text.contains('▄') || run.text.contains('▀')) =>
+                {
+                    assert_eq!(span.style.bg, Some(Color::Reset));
+                    assert_eq!(span.style.fg, Some(theme.highlight_bg));
+                }
                 crate::lineage::LineageSpan::Node { session_id }
                 | crate::lineage::LineageSpan::NodeStatus { session_id }
                 | crate::lineage::LineageSpan::BoxPad { session_id }
@@ -14624,6 +14635,12 @@ mod tests {
             .flat_map(|(row, line)| row.spans.iter().zip(line.spans.iter()))
         {
             match &run.role {
+                crate::lineage::LineageSpan::BoxPad { session_id }
+                    if session_id == "f" && (run.text.contains('▄') || run.text.contains('▀')) =>
+                {
+                    assert_eq!(span.style.bg, Some(Color::Reset));
+                    assert_eq!(span.style.fg, Some(theme.highlight_bg));
+                }
                 crate::lineage::LineageSpan::Node { session_id }
                 | crate::lineage::LineageSpan::NodeStatus { session_id }
                 | crate::lineage::LineageSpan::BoxPad { session_id }

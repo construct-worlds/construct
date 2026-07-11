@@ -1103,7 +1103,7 @@ fn draw_box(c: &mut Canvas, lane: &Lane, x: usize, y: usize) {
     let pad_span = LineageSpan::BoxPad {
         session_id: lane.node.session_id.clone(),
     };
-    c.put(y, x, &" ".repeat(lw + 4), &pad_span);
+    c.put(y, x, &"▄".repeat(lw + 4), &pad_span);
     let status = lane.summary.map(|s| status_glyph(s.state));
     for (li, line) in lane.label_lines.iter().enumerate() {
         let pad = lw - UnicodeWidthStr::width(line.as_str());
@@ -1139,7 +1139,7 @@ fn draw_box(c: &mut Canvas, lane: &Lane, x: usize, y: usize) {
         c.put(y + 1 + li, x + 2 + lw, "  ", &pad_span);
     }
     let h = box_rows(lane);
-    c.put(y + h - 1, x, &" ".repeat(lw + 4), &pad_span);
+    c.put(y + h - 1, x, &"▀".repeat(lw + 4), &pad_span);
     c.node_rows.push((y + 1, lane.node.session_id.clone()));
     c.boxes.push(LineageBoxBounds {
         session_id: lane.node.session_id.clone(),
@@ -2333,18 +2333,18 @@ mod tests {
         assert_eq!(
             diagram_text(&rows),
             vec![
-                "".to_string(),
+                " ▄▄▄▄▄▄▄▄▄▄▄".to_string(),
                 format!("   {g} smith"),
-                "".to_string(),
+                " ▀▀▀▀▀▀▀▀▀▀▀".to_string(),
                 // Every turn-info line gets a lane-bar row above it; the
                 // structural row below (box top, arrow) carries the bar
                 // for mid-timeline windows, and a terminal window gets
                 // nothing below — its lane ends there.
                 "   │".to_string(),
                 "   • 12 msgs · 5m00s".to_string(),
-                "   │".to_string(),
+                "   │      ▄▄▄▄▄▄▄▄▄▄▄".to_string(),
                 format!("   ├─ ⑂ ─▸  {g} smith"),
-                "   │".to_string(),
+                "   │      ▀▀▀▀▀▀▀▀▀▀▀".to_string(),
                 "   │        │".to_string(),
                 // Labels reserve no columns: the parent's window text runs
                 // underneath the fork's lane (the bar shows a gap on that
