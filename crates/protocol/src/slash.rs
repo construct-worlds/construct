@@ -384,27 +384,39 @@ pub fn popup_names() -> impl Iterator<Item = &'static str> {
 /// models that are not listed here yet.
 pub const MODEL_COMPLETIONS: &[&str] = &[
     // ChatGPT subscription / Codex CLI OAuth path.
+    "codex-oauth:gpt-5.6-sol",
+    "codex-oauth:gpt-5.6-terra",
+    "codex-oauth:gpt-5.6-luna",
     "codex-oauth:gpt-5.5",
     "codex-oauth:gpt-5.4-mini",
     "codex-oauth:gpt-5.3-codex-spark",
     // OpenAI platform API path.
+    "openai:gpt-5.6-sol",
+    "openai:gpt-5.6-terra",
+    "openai:gpt-5.6-luna",
     "openai:gpt-5.5",
     "openai:gpt-5",
     "openai:gpt-5-mini",
     // Claude Code subscription OAuth path.
     "claude-oauth:sonnet",
     "claude-oauth:opus",
+    "claude-oauth:fable",
     // Anthropic API path.
+    "anthropic:claude-sonnet-5",
+    "anthropic:claude-fable-5",
     "anthropic:claude-opus-4-8",
     "anthropic:claude-sonnet-4-6",
     "anthropic:claude-haiku-4-5",
     // Google Gemini API path.
+    "gemini:gemini-3.1-pro",
+    "gemini:gemini-3.5-flash",
     "gemini:gemini-2.5-pro",
     "gemini:gemini-2.5-flash",
     // Local Ollama examples.
     "ollama:llama3.1",
     "ollama:qwen3-coder",
     // Grok / xAI OAuth path.
+    "grok-oauth:grok-4.5",
     "grok-oauth:grok-4.3",
     "grok-oauth:grok-build-0.1",
 ];
@@ -516,6 +528,9 @@ mod tests {
         assert_eq!(
             matches,
             vec![
+                "/model codex-oauth:gpt-5.6-sol",
+                "/model codex-oauth:gpt-5.6-terra",
+                "/model codex-oauth:gpt-5.6-luna",
                 "/model codex-oauth:gpt-5.5",
                 "/model codex-oauth:gpt-5.4-mini",
                 "/model codex-oauth:gpt-5.3-codex-spark"
@@ -525,6 +540,7 @@ mod tests {
         let matches = model_completion_matches("/model claude-oauth:");
         assert!(matches.contains(&"/model claude-oauth:sonnet".to_string()));
         assert!(matches.contains(&"/model claude-oauth:opus".to_string()));
+        assert!(matches.contains(&"/model claude-oauth:fable".to_string()));
     }
 
     /// The leak fix in action: a `/zoom` ClientCommand event is hidden from
