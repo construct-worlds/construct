@@ -23,6 +23,10 @@ pub struct WidgetState {
     pub visible: Vec<String>,
 }
 
+fn default_matrix_rain_hidden() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiState {
     #[serde(default)]
@@ -39,7 +43,7 @@ pub struct TuiState {
     pub matrix_rain_h: Option<u16>,
     #[serde(default)]
     pub list_collapsed: bool,
-    #[serde(default)]
+    #[serde(default = "default_matrix_rain_hidden")]
     pub matrix_rain_hidden: bool,
     #[serde(default = "default_hide_pane_side_borders")]
     pub hide_pane_side_borders: bool,
@@ -86,7 +90,7 @@ impl Default for TuiState {
             orchestrator_panel_h: None,
             matrix_rain_h: None,
             list_collapsed: false,
-            matrix_rain_hidden: false,
+            matrix_rain_hidden: true,
             hide_pane_side_borders: default_hide_pane_side_borders(),
             main_windows: None,
             active_window_id: None,

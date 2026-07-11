@@ -176,6 +176,12 @@ impl SessionManager {
             .to_string(),
         );
         self.install_memory_env(&mut env_with_meta, params.group_id.as_deref());
+        if summary.operator_loop_disabled {
+            env_with_meta.insert(
+                "CONSTRUCT_OPERATOR_LOOP_DISABLED".to_string(),
+                "1".to_string(),
+            );
+        }
 
         let (adapter, info) = Adapter::spawn_reconnectable(
             harness.to_string(),
