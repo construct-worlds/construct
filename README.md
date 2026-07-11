@@ -52,9 +52,11 @@ first:
 - **Codex** — install the `codex` CLI and complete its OAuth login.
 - **Claude Code** — install the `claude` CLI and complete its OAuth login.
 - **Antigravity** — install the `agy` CLI and complete its OAuth login.
-- **smith** — built in to construct. Talks to OpenAI, Anthropic, or Google
-  Gemini via API key, a local Ollama, a ChatGPT subscription via Codex OAuth,
-  or a Claude subscription via the authenticated Claude Code CLI.
+- **Grok** — install the `grok` CLI and complete its OAuth login.
+- **smith** — built in to construct. Talks to OpenAI, Anthropic, Google Gemini,
+  or xAI Grok via API key, a local Ollama, a ChatGPT subscription via Codex
+  OAuth, a Claude subscription via the authenticated Claude Code CLI, or a Grok
+  subscription via the authenticated Grok CLI.
 
 Once those CLIs are available and authenticated, `construct` can create and resume
 their sessions from the fleet TUI.
