@@ -38,15 +38,13 @@ never publish a mislabelled binary.
 3. The workflow runs. When it finishes, a GitHub Release for `v0.2.0` exists
    with these assets:
 
-   - `constructd-aarch64-apple-darwin.tar.gz`     (macOS, Apple Silicon)
-   - `constructd-x86_64-apple-darwin.tar.gz`      (macOS, Intel)
-   - `constructd-x86_64-unknown-linux-musl.tar.gz` (Linux x86_64, static)
-   - `constructd-aarch64-unknown-linux-gnu.tar.gz` (Linux arm64)
+   - `construct-aarch64-apple-darwin.tar.gz`     (macOS, Apple Silicon)
+   - `construct-x86_64-apple-darwin.tar.gz`      (macOS, Intel)
+   - `construct-x86_64-unknown-linux-musl.tar.gz` (Linux x86_64, static)
+   - `construct-aarch64-unknown-linux-gnu.tar.gz` (Linux arm64)
    - `SHA256SUMS`
 
-   The tarballs keep their historical `constructd-<target>` name (the download
-   URL `install.sh` and `construct upgrade` expect) even though there is no
-   longer a `constructd` binary inside.
+   The tarballs use `construct-<target>` names (which `install.sh` and `construct upgrade` expect).
 
    Each tarball contains the single `construct` binary plus `README.md` and `LICENSE`. All adapter and MCP functionality is built into `construct` (`construct __adapter <name>`, `construct __mcp`).
 

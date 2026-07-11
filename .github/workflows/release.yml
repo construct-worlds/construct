@@ -90,7 +90,7 @@ jobs:
       - name: Package tarball + checksum
         run: |
           set -eu
-          stage="constructd-${{ matrix.target }}"
+          stage="construct-${{ matrix.target }}"
           mkdir -p "$stage"
           for b in $BINS; do
             cp "target/${{ matrix.target }}/release/$b" "$stage/"
@@ -106,10 +106,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: constructd-${{ matrix.target }}
+          name: construct-${{ matrix.target }}
           path: |
-            constructd-${{ matrix.target }}.tar.gz
-            constructd-${{ matrix.target }}.tar.gz.sha256
+            construct-${{ matrix.target }}.tar.gz
+            construct-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
 
   release:
