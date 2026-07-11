@@ -27330,8 +27330,12 @@ mod tests {
             "expanded by default"
         );
 
+        // Manually adjust height to Some value first
+        app.lineage_h = Some(15);
+
         app.handle_left_click(button.x + 1, button.y).await;
         assert!(app.lineage_collapsed);
+        assert_eq!(app.lineage_h, None, "collapsing clears the manual height");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         assert_eq!(
             app.layout.lineage_area.expect("area").height,
@@ -27342,6 +27346,7 @@ mod tests {
         let button = app.layout.lineage_collapse_hit.expect("collapse button");
         app.handle_left_click(button.x + 1, button.y).await;
         assert!(!app.lineage_collapsed, "clicking `+` expands it again");
+        assert_eq!(app.lineage_h, None, "expanding keeps it in fit/auto-adjust mode");
         server.abort();
     }
 

@@ -193,6 +193,7 @@ impl App {
             self.lineage_collapsed = !self.lineage_collapsed;
             if self.lineage_collapsed {
                 self.lineage_focused = false;
+                self.lineage_h = None;
             }
             return;
         }
