@@ -10,6 +10,11 @@ impl App {
             .saturating_add(view.width)
             .saturating_sub(width.saturating_add(1));
         self.session_title_menu = Some(SessionTitleMenu {
+            merge_enabled: self
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .is_some_and(|session| session.forked_from.is_some()),
             session_id,
             area: ratatui::layout::Rect {
                 x,
@@ -33,6 +38,12 @@ impl App {
         match action {
             SessionTitleMenuAction::Rename => {
                 self.run_action(crate::keymap::KeyAction::OpenRename).await
+            }
+            SessionTitleMenuAction::Fork => {
+                self.run_action(crate::keymap::KeyAction::OpenFork).await
+            }
+            SessionTitleMenuAction::Merge => {
+                self.run_action(crate::keymap::KeyAction::OpenMerge).await;
             }
             SessionTitleMenuAction::SplitHorizontal => {
                 self.split_active_window(WindowSplitDirection::Right)

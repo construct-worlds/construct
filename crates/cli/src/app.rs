@@ -948,6 +948,8 @@ pub struct DynamicUiHover {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTitleMenuAction {
     Rename,
+    Fork,
+    Merge,
     SplitHorizontal,
     SplitVertical,
     CloseSplit,
@@ -956,8 +958,10 @@ pub enum SessionTitleMenuAction {
 }
 
 impl SessionTitleMenuAction {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::Rename,
+        Self::Fork,
+        Self::Merge,
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::CloseSplit,
@@ -968,6 +972,8 @@ impl SessionTitleMenuAction {
     pub fn label(self) -> &'static str {
         match self {
             Self::Rename => "rename",
+            Self::Fork => "fork conversation",
+            Self::Merge => "merge result",
             Self::SplitHorizontal => "split horizontal",
             Self::SplitVertical => "split vertical",
             Self::CloseSplit => "close split",
@@ -981,6 +987,10 @@ impl SessionTitleMenuAction {
 pub struct SessionTitleMenu {
     pub session_id: String,
     pub area: ratatui::layout::Rect,
+    /// Only forks can merge back into a parent. Keep the unavailable action
+    /// visible on parents so the menu teaches the workflow without allowing a
+    /// dead-end click.
+    pub merge_enabled: bool,
 }
 
 /// In-progress inline rename of a session's title, edited directly in its
@@ -1030,7 +1040,12 @@ impl SessionTitleMenu {
             return None;
         }
         let idx = row.saturating_sub(self.area.y).saturating_sub(1) as usize;
-        SessionTitleMenuAction::ALL.get(idx).copied()
+        let action = SessionTitleMenuAction::ALL.get(idx).copied()?;
+        (action != SessionTitleMenuAction::Merge || self.merge_enabled).then_some(action)
+    }
+
+    pub fn action_enabled(&self, action: SessionTitleMenuAction) -> bool {
+        action != SessionTitleMenuAction::Merge || self.merge_enabled
     }
 
     pub fn contains(&self, col: u16, row: u16) -> bool {
@@ -20615,6 +20630,38 @@ mod tests {
         );
         assert_eq!(app.leaf_window_ids().len(), 2);
         server.abort();
+    }
+
+    #[test]
+    fn session_menu_only_activates_merge_for_forks() {
+        let area = ratatui::layout::Rect::new(10, 5, 26, 10);
+        let merge_row = area.y
+            + 1
+            + SessionTitleMenuAction::ALL
+                .iter()
+                .position(|action| *action == SessionTitleMenuAction::Merge)
+                .expect("merge menu row") as u16;
+
+        let parent_menu = SessionTitleMenu {
+            session_id: "parent".into(),
+            area,
+            merge_enabled: false,
+        };
+        assert_eq!(
+            parent_menu.item_at(area.x + 2, merge_row),
+            None,
+            "the parent shows Merge result but cannot activate it"
+        );
+
+        let fork_menu = SessionTitleMenu {
+            session_id: "fork".into(),
+            area,
+            merge_enabled: true,
+        };
+        assert_eq!(
+            fork_menu.item_at(area.x + 2, merge_row),
+            Some(SessionTitleMenuAction::Merge)
+        );
     }
 
     #[tokio::test]

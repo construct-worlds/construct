@@ -52,6 +52,10 @@ transcript seeding, but it no longer requires separate keybindings or flows.
   0031). Both are lineage-tracked identically.
 - The merge menu (result/discard) and its auto-archive-after-either behavior
   apply to any fork, regardless of which entry point created it.
+- Every session title actions menu exposes **Fork conversation**, including on
+  a fork. It also exposes **Merge result** as an inactive affordance on a
+  parent and an active action only on a fork, making the branch workflow
+  discoverable without suggesting that a parent can merge into itself.
 
 ## Non-Goals
 
