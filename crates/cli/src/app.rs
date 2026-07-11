@@ -403,7 +403,16 @@ pub(crate) fn list_session_indent_cells(
     has_children: bool,
 ) -> u16 {
     if is_subagent_session(s) || s.forked_from.is_some() {
-        4
+        // Align the child's STATUS glyph with its parent session's name.
+        // A grouped parent starts one cell later. Account for the child's
+        // own disclosure, optional lineage marker, pin marker, and the
+        // leading space before its status glyph.
+        let parent_name_col = 5 + u16::from(s.group_id.is_some());
+        let child_prefix = u16::from(has_children)
+            + 1 // pin marker
+            + u16::from(s.forked_from.is_some())
+            + 1; // leading space before status
+        parent_name_col.saturating_sub(child_prefix)
     } else if indented && has_children {
         1
     } else if indented {
@@ -413,9 +422,14 @@ pub(crate) fn list_session_indent_cells(
     }
 }
 
-pub(crate) fn list_archive_indent_cells(section: &ArchiveSection, indented: bool) -> u16 {
+pub(crate) fn list_archive_indent_cells(
+    section: &ArchiveSection,
+    indented: bool,
+    parent_grouped: bool,
+) -> u16 {
     match section {
-        ArchiveSection::Subagents(_) => 4,
+        // Align the disclosure triangle with the parent session's name.
+        ArchiveSection::Subagents(_) => 5 + u16::from(parent_grouped),
         _ if indented => 2,
         _ => 0,
     }
@@ -28842,19 +28856,34 @@ mod tests {
         assert_eq!(list_session_indent_cells(&user, false, false), 0);
         assert_eq!(list_session_indent_cells(&user, true, false), 2);
         assert_eq!(list_session_indent_cells(&user, true, true), 1);
-        assert_eq!(list_session_indent_cells(&subagent, true, false), 4);
-        assert_eq!(list_session_indent_cells(&fork, true, false), 4);
+        assert_eq!(list_session_indent_cells(&subagent, true, false), 3);
+        assert_eq!(list_session_indent_cells(&fork, true, false), 2);
+        let mut grouped_subagent = subagent.clone();
+        grouped_subagent.group_id = Some("group".into());
+        let mut grouped_fork = fork.clone();
+        grouped_fork.group_id = Some("group".into());
+        assert_eq!(list_session_indent_cells(&grouped_subagent, true, false), 4);
+        assert_eq!(list_session_indent_cells(&grouped_fork, true, false), 3);
+        assert_eq!(list_session_indent_cells(&subagent, true, true), 2);
         assert_eq!(
-            list_archive_indent_cells(&ArchiveSection::Ungrouped, true),
+            list_archive_indent_cells(&ArchiveSection::Ungrouped, true, false),
             2
         );
         assert_eq!(
-            list_archive_indent_cells(&ArchiveSection::Group("group".into()), true),
+            list_archive_indent_cells(&ArchiveSection::Group("group".into()), true, false),
             2
         );
         assert_eq!(
-            list_archive_indent_cells(&ArchiveSection::Subagents("parent".into()), true),
-            4
+            list_archive_indent_cells(&ArchiveSection::Subagents("parent".into()), true, false),
+            5
+        );
+        assert_eq!(
+            list_archive_indent_cells(
+                &ArchiveSection::Subagents("grouped-parent".into()),
+                true,
+                true
+            ),
+            6
         );
     }
 

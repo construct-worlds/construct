@@ -1801,11 +1801,22 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 } => {
                     // Expandable footer: "▸ N archived" (collapsed) /
                     // "▾ N archived" (open). Indented to sit under a project's
-                    // members. Subagent archive rows use the same deeper
-                    // indentation as the subagent sessions above them.
+                    // members. A subagent archive triangle aligns with the
+                    // parent name, matching the child status glyphs above it.
                     let disclosure = if *expanded { "▾" } else { "▸" };
-                    let indent = " "
-                        .repeat(crate::app::list_archive_indent_cells(section, *indented) as usize);
+                    let parent_grouped = match section {
+                        crate::app::ArchiveSection::Subagents(parent_id) => app
+                            .sessions
+                            .iter()
+                            .find(|s| s.id == *parent_id)
+                            .is_some_and(|s| s.group_id.is_some()),
+                        _ => false,
+                    };
+                    let indent = " ".repeat(crate::app::list_archive_indent_cells(
+                        section,
+                        *indented,
+                        parent_grouped,
+                    ) as usize);
                     ListItem::new(Line::from(Span::styled(
                         format!("{indent}{disclosure} {count} archived"),
                         session_list_secondary_style(&app.theme),

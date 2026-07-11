@@ -22,6 +22,9 @@ view `x` button), alongside delete and cancel:
   each launch). Session children render before their parent's archived disclosure,
   and both subagent rows and that disclosure are indented beneath the parent. All
   other archived disclosures are indented beneath their containing run or project.
+  A parent's archived-subagent disclosure triangle and its child sessions' status
+  glyphs align with the start of the parent session's name, regardless of whether
+  that parent belongs to a project.
   The row is a first-class list entry: keyboard navigation lands on
   it (it is not skipped), the list expand/collapse keys reveal/hide it like a
   project header, and a slash command toggles the section the current selection
