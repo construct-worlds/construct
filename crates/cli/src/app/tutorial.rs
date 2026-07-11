@@ -671,6 +671,10 @@ fn step7_lines(profile: Profile, list_focused: bool) -> Vec<TutorialLine> {
         lines.push(vec![t("(focus is in the view now, so ? would")]);
         lines.push(vec![t("just be typed there — C-x o first)")]);
     }
+    lines.push(vec![t("Need a parallel path? Open the title-bar ☰")]);
+    lines.push(vec![t("menu, then choose Fork conversation.")]);
+    lines.push(vec![t("On a fork, that same menu's Merge result")]);
+    lines.push(vec![t("brings its result back, or discard it.")]);
     lines.push(vec![t(format!(
         "{} quits — don't press it now!",
         chord_label(KeyAction::Quit, profile)
@@ -1620,6 +1624,19 @@ mod tests {
         let hop = on_list.find("hop to the list").expect("order line 1");
         let help = on_list.find("open help").expect("order line 2");
         assert!(hop < help);
+    }
+
+    #[test]
+    fn step7_explains_fork_and_merge_from_the_session_menu() {
+        let mut state = TutorialState::start(false, Profile::Emacs);
+        state.step = 7;
+        let text = joined_text(&state.lines(TutorialCardCtx {
+            list_focused: true,
+            ..Default::default()
+        }));
+        assert!(text.contains("Fork conversation"));
+        assert!(text.contains("Merge result"));
+        assert!(text.contains("title-bar ☰"));
     }
 
     // Card body lines are authored to fit the 44-col inner width without
