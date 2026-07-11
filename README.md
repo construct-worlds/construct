@@ -16,10 +16,9 @@ More screenshots and demos: [gallery](gallery.md).
 - **Fork / merge** — fork a session when you need a parallel attempt
   (new idea, side quest, or a long shot). Supports cross-harness forks and
   merging results back.
-- **Program: a shared board you and the agent run together** — every session
-  owns a durable Markdown document ([docs/program.md](docs/program.md)) that
-  human and agent co-edit live and execute: select a task, hit Run, and watch
-  per-block progress shimmer as workers report back.
+- **Program** — collaborative, executable Markdown
+  ([docs/program.md](docs/program.md)): co-develop workflows, tasks, and ideas
+  with the agent, then run them from the same document.
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
   output, spawn helpers, send input, inspect diffs, and drive Chrome.
 - **ACP (Agent Client Protocol) server** — point Agent Client Protocol clients at
