@@ -12,7 +12,9 @@ use crate::app::{
 use crate::keymap::{KeyAction, Profile};
 use crate::text_util::wrap_to_width;
 use crate::theme::Theme;
-use construct_protocol::{MessageRole, SessionEvent, SessionState, SessionSummary, TimestampedEvent};
+use construct_protocol::{
+    MessageRole, SessionEvent, SessionState, SessionSummary, TimestampedEvent,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -1809,7 +1811,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     // parent name, matching the child status glyphs above it.
                     let disclosure = if *expanded { "▾" } else { "▸" };
                     let parent_grouped = match section {
-                        crate::app::ArchiveSection::Subagents(parent_id) => app
+                        crate::app::ArchiveSection::Subagents(parent_id)
+                        | crate::app::ArchiveSection::Forks(parent_id) => app
                             .sessions
                             .iter()
                             .find(|s| s.id == *parent_id)
@@ -4650,7 +4653,9 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
     }
 }
 
-fn latest_inline_panel(panels: &[construct_protocol::UiPanel]) -> Option<construct_protocol::UiPanel> {
+fn latest_inline_panel(
+    panels: &[construct_protocol::UiPanel],
+) -> Option<construct_protocol::UiPanel> {
     panels
         .iter()
         .filter(|panel| panel.placement == construct_protocol::UiPlacement::Inline)
