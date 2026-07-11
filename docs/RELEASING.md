@@ -59,7 +59,7 @@ never publish a mislabelled binary.
      produce clean notes. This is also why we squash-merge — one tidy line per
      change.
    - **You can edit after publishing.** Open the release on the
-     [releases page](https://github.com/zarvis-ai/agentd/releases), click
+     [releases page](https://github.com/construct-worlds/construct/releases), click
      _Edit_, and add a summary, highlights, breaking-change callouts, or upgrade
      notes on top of the generated list.
 

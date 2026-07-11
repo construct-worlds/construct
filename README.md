@@ -6,14 +6,14 @@ Create Codex, Claude Code, Antigravity, and smith sessions all in one place. Or
 let your agent coordinate them in a terminal crafted for hardcore hackers like
 you. Remote control from your phone when you're in motion.
 
-![construct TUI demo](https://raw.githubusercontent.com/zarvis-ai/agentd/73525a653d1969474f02f0ac699867a68565ac99/demos/browser-thumbnail.gif)
+![construct TUI demo](https://raw.githubusercontent.com/construct-worlds/construct/73525a653d1969474f02f0ac699867a68565ac99/demos/browser-thumbnail.gif)
 
 ## Why construct?
 
 - **One cockpit for every agent** — attach to Claude Code, Codex, Antigravity,
   smith, or a shell process from one focused workspace that rewards attention.
 
-  <img src="https://raw.githubusercontent.com/zarvis-ai/agentd/f8fae6e5227ccd0b2140c35ce6e2ad16349da848/demos/new-session.gif" alt="construct new session demo" width="50%">
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/f8fae6e5227ccd0b2140c35ce6e2ad16349da848/demos/new-session.gif" alt="construct new session demo" width="50%">
 - **A delightful way to manage multiple Claude Code and Codex sessions** —
   switch sessions instantly, pin multiple sessions to monitor, or let an agent
   observe all your sessions across different harnesses.
@@ -30,12 +30,12 @@ you. Remote control from your phone when you're in motion.
   so you can track progress, review outputs, and take action without leaving
   the TUI or web client.
 
-  <img src="https://raw.githubusercontent.com/zarvis-ai/agentd/0b9df04fb1fb40b2cea5f7e42b2e249a649b0ec2/demos/generative-widgets.gif" alt="construct generative widgets demo" width="50%">
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/0b9df04fb1fb40b2cea5f7e42b2e249a649b0ec2/demos/generative-widgets.gif" alt="construct generative widgets demo" width="50%">
 - **[Remote control](docs/remote-control.md) when you step away** — `/remote-control`
   opens a browser-accessible web client with a QR code. Connect from your phone,
   no service signup, no setup required.
 
-  <img src="https://raw.githubusercontent.com/zarvis-ai/agentd/31239874073db9fee79d78eb98ea1e7f434d051b/demos/remote-control.gif" alt="construct remote control demo" width="50%" align="middle"> &nbsp;&nbsp;&nbsp;&nbsp;→&nbsp;&nbsp;&nbsp;&nbsp; <img src="https://raw.githubusercontent.com/zarvis-ai/agentd/91d88b514b602fb313aa82b9783d68b8ca1ab5a9/demos/webui-phone.jpg" alt="construct web client on a phone" width="180" align="middle">
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/31239874073db9fee79d78eb98ea1e7f434d051b/demos/remote-control.gif" alt="construct remote control demo" width="50%" align="middle"> &nbsp;&nbsp;&nbsp;&nbsp;→&nbsp;&nbsp;&nbsp;&nbsp; <img src="https://raw.githubusercontent.com/construct-worlds/construct/91d88b514b602fb313aa82b9783d68b8ca1ab5a9/demos/webui-phone.jpg" alt="construct web client on a phone" width="180" align="middle">
 - **Extensible harness protocol** — adapters are separate processes speaking
   JSON-RPC over stdio, so new tools can plug in without changing the daemon.
 
@@ -63,7 +63,7 @@ The installer downloads the right prebuilt binary for your platform, verifies it
 SHA-256 checksum, and drops every binary into one directory on your PATH:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zarvis-ai/agentd/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/construct-worlds/construct/main/install.sh | sh
 ```
 
 Pin a version or change the directory with `CONSTRUCT_VERSION=v0.2.0` /
@@ -140,8 +140,8 @@ defaults for `session/new` requests that omit those fields.
 ## Building from source
 
 ```sh
-git clone https://github.com/zarvis-ai/agentd.git
-cd agentd
+git clone https://github.com/construct-worlds/construct.git
+cd construct
 cargo build --workspace
 ```
 
