@@ -539,6 +539,10 @@ fn session_list_markers(summary: &SessionSummary) -> (&'static str, &'static str
     (lineage, pin)
 }
 
+fn session_list_marker_width(summary: &SessionSummary) -> usize {
+    1 + usize::from(summary.forked_from.is_some())
+}
+
 /// Hover hit-test: if the mouse cursor is currently sitting on the
 /// pin-diamond cell of a session row, return that row's info. Returns
 /// `None` on terminals that don't forward motion events (Terminal.app),
@@ -566,12 +570,16 @@ fn hovered_diamond(app: &App) -> Option<(u16, u16, &SessionSummary)> {
         _ => return None,
     };
     let indent = crate::app::list_session_indent_cells(&summary, indented, has_children);
-    // Hit zone is the 4-cell gutter to the left of the session name, after
-    // the disclosure and lineage columns:
-    //   [disclosure][lineage][diamond][ ][status-circle][ ] ← name
+    // Hit zone is the 4-cell gutter to the left of the session name. Forks
+    // alone add a lineage column before the pin marker:
+    //   [disclosure][lineage?][diamond][ ][status-circle][ ] ← name
     // Wider than the bare diamond glyph so it's easier to click —
     // the visual overlay still anchors on the diamond cell itself.
-    let zone_start = list_area.x + 1 + indent + u16::from(has_children) + 1;
+    let zone_start = list_area.x
+        + 1
+        + indent
+        + u16::from(has_children)
+        + session_list_marker_width(&summary).saturating_sub(1) as u16;
     let zone_end = zone_start + 4; // exclusive
     if mx < zone_start || mx >= zone_end {
         return None;
@@ -1684,9 +1692,13 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         *has_children,
                     ) as usize);
                     // Fixed-width left side: indent + optional disclosure (1)
-                    // + lineage (1) + pin (1) + " glyph " (3).
-                    let prefix_w =
-                        indent_prefix.chars().count() + usize::from(expand_glyph.is_some()) + 2 + 3;
+                    // + optional lineage (1) + pin (1) + " glyph " (3).
+                    // Only forks reserve the lineage cell, keeping ordinary
+                    // project members at their established position.
+                    let prefix_w = indent_prefix.chars().count()
+                        + usize::from(expand_glyph.is_some())
+                        + session_list_marker_width(s)
+                        + 3;
                     let harness = harness_label(s);
                     let harness_w = harness.chars().count();
                     // Reserve room for the trailing unblock marker (" ●") so the
@@ -1742,11 +1754,13 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                             Style::default().fg(app.theme.group),
                         ));
                     }
-                    spans.extend([
-                        Span::styled(
+                    if s.forked_from.is_some() {
+                        spans.push(Span::styled(
                             lineage_glyph.to_string(),
                             Style::default().fg(app.theme.info),
-                        ),
+                        ));
+                    }
+                    spans.extend([
                         Span::styled(pin_glyph.to_string(), Style::default().fg(app.theme.info)),
                         Span::styled(
                             format!(" {} ", session_status_glyph(app, s)),
@@ -15086,6 +15100,15 @@ mod tests {
         });
 
         assert_eq!(session_list_markers(&fork), ("⑂", "★"));
+        assert_eq!(session_list_marker_width(&fork), 2);
+
+        let project_member = clip_test_session(
+            "project-member",
+            Some("project member"),
+            "codex",
+            SessionState::Running,
+        );
+        assert_eq!(session_list_marker_width(&project_member), 1);
     }
 
     #[test]
