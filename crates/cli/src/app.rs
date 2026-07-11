@@ -755,10 +755,10 @@ pub enum MinibufferIntent {
     GroupDeleteConfirm {
         group_id: String,
     },
-    /// Confirmation prompt for cascade-deleting every archived session a
-    /// "N archived" disclosure row stands in for. `y`/`yes` deletes each
-    /// archived session in the section (drops transcript + worktree, with
-    /// the subagent cascade applied per session); anything else cancels.
+    /// Confirmation prompt for cascade-deleting every managed archived
+    /// session a "N archived" disclosure row stands in for. Harness-owned
+    /// native mirrors are skipped because their lifecycle is read-only.
+    /// `y`/`yes` deletes each target; anything else cancels.
     ArchivedDeleteConfirm {
         section: ArchiveSection,
     },
@@ -4449,6 +4449,28 @@ impl App {
                 .map(|s| s.id.clone())
                 .collect(),
         }
+    }
+
+    /// Split an archived disclosure row into sessions Construct may delete
+    /// and harness-owned native mirrors that must remain read-only. Native
+    /// mirrors still contribute to the row's visible count, but bulk actions
+    /// must not send lifecycle requests for them.
+    fn archived_delete_targets_in_section(&self, section: &ArchiveSection) -> (Vec<String>, usize) {
+        let mut deletable = Vec::new();
+        let mut native_mirrors = 0usize;
+        for id in self.archived_sessions_in_section(section) {
+            let is_native = self
+                .sessions
+                .iter()
+                .find(|session| session.id == id)
+                .is_some_and(|session| session.native_subagent.is_some());
+            if is_native {
+                native_mirrors += 1;
+            } else {
+                deletable.push(id);
+            }
+        }
+        (deletable, native_mirrors)
     }
 
     /// Human-readable name for an archive section, used in confirm prompts.
@@ -8668,16 +8690,29 @@ impl App {
                 // archived session it stands in for (each with the subagent
                 // cascade applied daemon-side).
                 Selection::ArchivedRow(section) => {
-                    let ids = self.archived_sessions_in_section(&section);
+                    let (ids, native_mirrors) = self.archived_delete_targets_in_section(&section);
                     if ids.is_empty() {
-                        self.set_status("no archived sessions to delete".to_string());
+                        if native_mirrors > 0 {
+                            self.set_status(
+                                "native harness subagents are read-only; manage them through their parent harness"
+                                    .to_string(),
+                            );
+                        } else {
+                            self.set_status("no archived sessions to delete".to_string());
+                        }
                     } else {
                         let label = self.archive_section_label(&section);
+                        let skipped = if native_mirrors == 0 {
+                            String::new()
+                        } else {
+                            format!(", skips {native_mirrors} native mirror(s)")
+                        };
                         self.minibuffer = Some(Minibuffer {
                             prompt: format!(
-                                "Delete all {} archived session(s) in {}? (drops transcript + worktree) ",
+                                "Delete all {} managed archived session(s) in {}{}? (drops transcript + worktree) ",
                                 ids.len(),
-                                label
+                                label,
+                                skipped,
                             ),
                             input: String::new(),
                             cursor: 0,
@@ -28698,10 +28733,28 @@ mod tests {
         sub_arch.parent_session_id = Some("ung_active".into());
         sub_arch.archived = true;
 
+        // Archived native mirrors remain visible in their disclosure row but
+        // are not valid lifecycle targets for Construct.
+        let mut native_arch = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        native_arch.id = "native_arch".into();
+        native_arch.parent_session_id = Some("native_owner".into());
+        native_arch.archived = true;
+        native_arch.native_subagent = Some(agentd_protocol::NativeSubagentRef {
+            owner_session_id: "native_owner".into(),
+            native_id: "child-1".into(),
+            projected_seq: 0,
+        });
+
         let mut app = test_app(
             client,
             vec![
-                ung_active, ung_arch, grp_active, grp_arch, sub_active, sub_arch,
+                ung_active,
+                ung_arch,
+                grp_active,
+                grp_arch,
+                sub_active,
+                sub_arch,
+                native_arch,
             ],
         );
         app.groups = vec![GroupSummary {
@@ -28725,6 +28778,24 @@ mod tests {
         assert_eq!(
             app.archived_sessions_in_section(&ArchiveSection::Subagents("ung_active".into())),
             vec!["sub_arch".to_string()],
+        );
+        assert_eq!(
+            app.archived_delete_targets_in_section(&ArchiveSection::Subagents(
+                "native_owner".into()
+            )),
+            (Vec::new(), 1),
+        );
+
+        // Opening delete on a native-only archive row stops at a safe status
+        // instead of issuing requests that the daemon must reject (and that
+        // previously wrote warnings over the alternate-screen TUI).
+        app.selection = Selection::ArchivedRow(ArchiveSection::Subagents("native_owner".into()));
+        app.run_action(KeyAction::OpenDeleteConfirm).await;
+        assert!(app.minibuffer.is_none());
+        assert!(
+            app.status.as_ref().is_some_and(
+                |(message, _)| message.contains("native harness subagents are read-only")
+            )
         );
 
         // The label distinguishes a project by name from the ungrouped run.
