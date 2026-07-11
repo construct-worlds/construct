@@ -11128,7 +11128,7 @@ mod tests {
             matrix_rain_active_drops: HashMap::new(),
             matrix_widget_pinned: None,
             matrix_widget_hover: None,
-            matrix_rain_hidden: false,
+            matrix_rain_hidden: true,
             show_archived_ungrouped: false,
             show_archived_groups: HashSet::new(),
             show_archived_subagents: HashSet::new(),
