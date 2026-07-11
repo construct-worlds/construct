@@ -20,7 +20,8 @@ control characters — `Ctrl+digit` pane focus (`C-1` = the session list,
 distinct key events in terminals that can express them. Terminals without
 support keep the legacy encoding and those bindings remain silently
 unreachable there; every such binding must have the behavior reachable
-another way (`C-x o` cycling covers pane focus).
+another way (`C-x l` jumps to the session list and `C-x o` cycles panes in
+any terminal).
 
 ## Reason
 

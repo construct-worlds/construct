@@ -8777,6 +8777,11 @@ impl App {
             OpenSwitchSession => {
                 self.open_session_picker(SessionPickerPurpose::Switch);
             }
+            FocusList => {
+                // Direct jump to the session list — `focus_pane_by_index(0)`
+                // owns the semantics (vim reset, zoom flip, status note).
+                self.focus_pane_by_index(0);
+            }
             FocusView => {
                 // Enter on an "N archived" disclosure row expands/collapses it
                 // (it has no view to drill into).
@@ -22187,6 +22192,27 @@ mod tests {
             app.focus,
             PaneFocus::List,
             "C-1 jumps straight to the session list from any split window"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn c_x_l_chord_jumps_focus_to_the_session_list() {
+        // The works-in-every-terminal counterpart to C-1: a C-x chord
+        // escapes PTY capture and needs no keyboard-protocol support.
+        let (mut app, _dir, server) = captured_app().await;
+        app.main_windows = three_window_tree();
+        app.focus = PaneFocus::View;
+        app.active_window_id = 2;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.focus,
+            PaneFocus::List,
+            "C-x l jumps straight to the session list from any split window"
         );
         server.abort();
     }

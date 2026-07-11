@@ -77,6 +77,12 @@ pub enum KeyAction {
     /// Cycle keyboard focus across the panes (list ↔ view). Bound to `C-x o`
     /// in the emacs profile, matching `other-window`.
     SwitchFocus,
+    /// Jump keyboard focus straight to the session list from anywhere —
+    /// the direct counterpart to `SwitchFocus`'s cycle. Bound to `C-x l`
+    /// ("l" = list) in both profiles: a chord, so it works in every
+    /// terminal — unlike the `C-1` accelerator, which needs the kitty
+    /// keyboard protocol (spec 0082) that e.g. macOS Terminal.app lacks.
+    FocusList,
     /// Move keyboard focus to the spatially adjacent split window in a
     /// direction (emacs `windmove`). Reachable via the `C-x` prefix
     /// (`C-x <arrow>`) so it works even when the terminal reserves
@@ -285,6 +291,7 @@ fn emacs() -> Keymap {
         // Enter from the list "drills in" to the session view; Tab is
         // intentionally left unbound for future use (e.g. completion).
         (Chord(vec![ctrl('x'), ch('o')]), SwitchFocus),
+        (Chord(vec![ctrl('x'), ch('l')]), FocusList),
         // Directional pane focus (emacs `windmove`). `Shift+<arrow>` is the
         // fast path, but terminals reserve `Shift+Up`/`Shift+Down` for
         // scrollback (iTerm2, macOS Terminal.app, GNOME Terminal) and never
@@ -450,6 +457,7 @@ fn vim() -> Keymap {
         // PTY-mode escape: C-x is the universal prefix here too, so `C-x o`
         // cycles focus and `C-x C-c` quits even when the PTY is capturing.
         (Chord(vec![ctrl('x'), ch('o')]), SwitchFocus),
+        (Chord(vec![ctrl('x'), ch('l')]), FocusList),
         // Directional pane focus, `C-x <arrow>` — reliable alias for
         // `Shift+<arrow>` where the terminal eats `Shift+Up`/`Shift+Down`
         // (see the emacs profile for the rationale).
