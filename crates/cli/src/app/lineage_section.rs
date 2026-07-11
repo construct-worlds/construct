@@ -245,7 +245,7 @@ impl App {
     }
 
     /// `m` / `d`: merge or discard the focused section's highlighted fork,
-    /// reusing the exact merge/discard path the `C-x m` minibuffer menu uses
+    /// reusing the exact merge/discard path the session-end / title-menu uses
     /// ([`App::apply_fork_merge`], spec 0078) — a direct-key shortcut for
     /// it, not a second implementation. A no-op with a status note when the
     /// highlighted row isn't an open (unmerged, undiscarded) fork.
