@@ -3337,12 +3337,33 @@ async fn run_with_socket_initial_selection(
         EnableBracketedPaste
     )
     .context("enter alternate screen / enable mouse")?;
+    // Progressive enhancement: ask the terminal to disambiguate escape
+    // codes (kitty keyboard protocol) so modified keys that legacy
+    // encodings fold onto control characters — Ctrl+digit pane focus
+    // (`C-1`..`C-5`) chief among them — actually arrive as distinct key
+    // events. Terminals without support answer the query negatively and
+    // keep the legacy encoding; the flag is popped at teardown.
+    let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    if keyboard_enhanced {
+        let _ = execute!(
+            std::io::stdout(),
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        );
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
     let result = run_loop(&mut terminal, &mut app, socket).await;
 
     // Teardown — best effort.
+    if keyboard_enhanced {
+        let _ = execute!(
+            terminal.backend_mut(),
+            crossterm::event::PopKeyboardEnhancementFlags
+        );
+    }
     let _ = disable_raw_mode();
     let _ = execute!(
         terminal.backend_mut(),
@@ -3957,7 +3978,7 @@ async fn run_loop(
                     app.harnesses = list;
                 }
             }
-            _ = lineage_refresh.tick(), if app.connected && app.lineage_focused => {
+            _ = lineage_refresh.tick(), if app.connected && app.lineage_focused && app.focus == PaneFocus::List => {
                 app.refresh_sessions().await;
             }
         }
@@ -5424,7 +5445,8 @@ impl App {
     /// ordering that `C-x o` cycles through: index 0 is the session list,
     /// index `k >= 1` is the `(k - 1)`th split window. Returns `false`
     /// (a no-op) when the requested pane doesn't exist — e.g. `C-5` with
-    /// only two split windows open. Bound to `C-2`..`C-5` (so `C-2`
+    /// only two split windows open. Bound to `C-1`..`C-5` (`C-1` = the
+    /// session list, so `C-2`
     /// focuses the first split window).
     fn focus_pane_by_index(&mut self, index: usize) -> bool {
         if index == 0 {
@@ -7000,19 +7022,6 @@ impl App {
                 }
             }
         }
-        // A focused lineage section (spec 0081) loses keyboard focus on any
-        // click outside it — the same "blur on click away" principle as the
-        // title-rename commit just above, and for the same reason: this must
-        // run before `forward_mouse_to_child` below, since a click on a
-        // mouse-grabbing pane is forwarded and never reaches
-        // `handle_left_click`. A side effect only — the click still proceeds
-        // normally afterward.
-        if matches!(ev.kind, MouseEventKind::Down(_))
-            && self.lineage_focused
-            && !self.is_over_lineage_section(ev.column, ev.row)
-        {
-            self.lineage_focused = false;
-        }
         // If the cursor is over a pane whose child has grabbed the mouse
         // (e.g. Claude Code in fullscreen), forward the event into that PTY and
         // stop — construct becomes a transparent mouse pipe for the pane, so
@@ -8140,7 +8149,10 @@ impl App {
         // navigation/merge/discard/jump keys while focused; anything else
         // clears focus and falls through to ordinary routing on the SAME
         // key, exactly like `/configure` above.
-        if self.lineage_focused && self.handle_lineage_focus_key(key).await {
+        if self.focus == PaneFocus::List
+            && self.lineage_focused
+            && self.handle_lineage_focus_key(key).await
+        {
             return;
         }
         if self.tasks_popup.is_some() {
@@ -8244,11 +8256,15 @@ impl App {
         // otherwise we fall through and the key keeps its normal meaning
         // (PTY input / list reorder / unbound).
         if self.chord_state.is_empty() {
-            // `C-2`..`C-5` focus a pane directly (pane 1 = list, pane 2 = the
-            // first split window, …). Terminals that don't deliver Ctrl+digit
-            // (some legacy ones fold it onto Ctrl+@) simply never reach here.
+            // `C-1`..`C-5` focus a pane directly: `C-1` jumps to the
+            // session list from anywhere (including any split window),
+            // `C-2`..`C-5` to split windows 1..4. Terminals that don't
+            // deliver Ctrl+digit (legacy encodings fold it onto control
+            // chars) never reach here — which is why startup requests the
+            // kitty keyboard protocol's disambiguation when the terminal
+            // supports it.
             if key.modifiers == KeyModifiers::CONTROL {
-                if let KeyCode::Char(c @ '2'..='5') = key.code {
+                if let KeyCode::Char(c @ '1'..='5') = key.code {
                     let pane_index = c as usize - '1' as usize; // '2' -> 1 … '5' -> 4
                     if self.focus_pane_by_index(pane_index) {
                         self.chord_label.clear();
@@ -8734,6 +8750,27 @@ impl App {
             }
             OpenSwitchSession => {
                 self.open_session_picker(SessionPickerPurpose::Switch);
+            }
+            FocusList => {
+                if self.focus == PaneFocus::List {
+                    // Second press toggles back to the split pane you came
+                    // from: the active window is untouched while the list
+                    // is focused, so this returns to the same pane — now
+                    // showing whatever session the list selection pointed
+                    // it at. A plain refocus, deliberately without Enter's
+                    // drill-in extras (restart prompt, archive toggles).
+                    if matches!(self.zoom, ZoomMode::List) {
+                        self.zoom = ZoomMode::View;
+                    }
+                    self.collapse_orchestrator_panel_on_focus_change();
+                    self.focus = PaneFocus::View;
+                    self.set_vim_insert_if_captured();
+                    self.set_status("focus: view".into());
+                } else {
+                    // Jump to the session list — `focus_pane_by_index(0)`
+                    // owns the semantics (vim reset, zoom flip, status).
+                    self.focus_pane_by_index(0);
+                }
             }
             FocusView => {
                 // Enter on an "N archived" disclosure row expands/collapses it
@@ -22134,6 +22171,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ctrl_1_keystroke_jumps_focus_to_the_session_list() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.main_windows = three_window_tree();
+        app.focus = PaneFocus::View;
+        app.active_window_id = 2;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(
+            app.focus,
+            PaneFocus::List,
+            "C-1 jumps straight to the session list from any split window"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn c_x_l_toggles_between_the_list_and_the_same_split_pane() {
+        // The works-in-every-terminal counterpart to C-1: a C-x chord
+        // escapes PTY capture and needs no keyboard-protocol support.
+        let (mut app, _dir, server) = captured_app().await;
+        app.main_windows = three_window_tree();
+        app.focus = PaneFocus::View;
+        app.active_window_id = 2;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.focus,
+            PaneFocus::List,
+            "C-x l jumps straight to the session list from any split window"
+        );
+        assert_eq!(
+            app.active_window_id, 2,
+            "the pane you came from stays the active window while listed"
+        );
+
+        // Second press returns to the SAME pane — the switch-and-return
+        // loop: C-x l, pick a session, C-x l back.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.focus, PaneFocus::View);
+        assert_eq!(
+            app.active_window_id, 2,
+            "C-x l from the list returns to the split pane it came from"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn shift_arrow_focuses_spatially_adjacent_window() {
         let (mut app, _dir, server) = captured_app().await;
         // A 2x2 grid of panes:
@@ -27919,7 +28010,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clicking_outside_the_section_clears_its_focus() {
+    async fn clicking_outside_the_sidebar_dims_the_section_but_keeps_the_memory() {
         use crossterm::event::MouseButton;
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
@@ -27927,6 +28018,7 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         app.lineage_focused = true;
+        app.focus = PaneFocus::List;
         let view = app.layout.view_area.expect("view area");
         app.on_mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -27935,9 +28027,25 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::NONE,
         })
         .await;
+        app.on_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: view.x + view.width / 2,
+            row: view.y + view.height / 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+        .await;
+        assert_ne!(app.focus, PaneFocus::List, "the pane click took focus");
+        assert!(
+            app.lineage_focused,
+            "the sub-focus memory survives, dormant, for the next C-x l"
+        );
+
+        // Clicking the ROWS region of the sidebar settles sub-focus there.
+        let rows = app.layout.list_items_area.expect("rows area");
+        app.handle_left_click(rows.x + 2, rows.y).await;
         assert!(
             !app.lineage_focused,
-            "a click away blurs the section, before any child-forwarding path"
+            "a rows click hands the sidebar's sub-focus back to the rows"
         );
         server.abort();
     }

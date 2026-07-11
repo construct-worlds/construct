@@ -1957,7 +1957,7 @@ fn render_lineage_section(
         return;
     }
     app.layout.lineage_area = Some(rect);
-    let focused = app.lineage_focused;
+    let focused = app.lineage_focused && app.focus == PaneFocus::List;
 
     // Header bar: a full-width `─` rule (the operator panel's visual
     // language), label at the left, mode toggle + collapse button at the
@@ -8122,7 +8122,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
 
   focus + view
     C-x o           other window (list → windows → list)
-    C-2 .. C-5      focus split window 1..4 directly (C-2 = first window)
+    C-x l           toggle session list ⇄ split view (C-1..C-5: direct pane focus)
     Shift+arrow     focus the adjacent split window (in a split layout)
     C-x arrow       same — reliable alias where the terminal eats Shift+up/down
     RET (on list)   focus the selected session's view
@@ -8195,7 +8195,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
 
   focus + view
     C-x o / C-w w   other window (list → windows → list)
-    C-2 .. C-5      focus split window 1..4 directly (C-2 = first window)
+    C-x l           toggle session list ⇄ split view (C-1..C-5: direct pane focus)
     Shift+arrow     focus adjacent split (C-x arrow is reliable alias)
     C-w h/j/k/l     focus split window left/down/up/right
     i / a / RET     enter INSERT when the selected view is a live terminal
