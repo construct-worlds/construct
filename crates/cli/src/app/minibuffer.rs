@@ -521,9 +521,16 @@ impl App {
                 // Re-resolve members at confirm time so a session that
                 // un-archived or moved out of the section since the prompt
                 // opened isn't deleted out from under the user.
-                let ids = self.archived_sessions_in_section(&section);
+                let (ids, native_mirrors) = self.archived_delete_targets_in_section(&section);
                 if ids.is_empty() {
-                    self.set_status("no archived sessions to delete".to_string());
+                    if native_mirrors > 0 {
+                        self.set_status(
+                            "native harness subagents are read-only; manage them through their parent harness"
+                                .to_string(),
+                        );
+                    } else {
+                        self.set_status("no archived sessions to delete".to_string());
+                    }
                     return;
                 }
                 let mut deleted = 0usize;
@@ -531,17 +538,26 @@ impl App {
                 for id in &ids {
                     match self.client.delete(id).await {
                         Ok(()) => deleted += 1,
-                        Err(e) => {
+                        Err(_) => {
                             failed += 1;
-                            tracing::warn!(session = %id, error = %e, "archived cascade-delete failed");
                         }
                     }
                 }
                 if failed == 0 {
-                    self.set_status(format!("deleted {deleted} archived session(s)"));
+                    let skipped = if native_mirrors == 0 {
+                        String::new()
+                    } else {
+                        format!(", skipped {native_mirrors} native mirror(s)")
+                    };
+                    self.set_status(format!("deleted {deleted} archived session(s){skipped}"));
                 } else {
+                    let skipped = if native_mirrors == 0 {
+                        String::new()
+                    } else {
+                        format!(", {native_mirrors} native mirror(s) skipped")
+                    };
                     self.set_status(format!(
-                        "deleted {deleted} archived session(s), {failed} failed"
+                        "deleted {deleted} archived session(s), {failed} failed{skipped}"
                     ));
                 }
             }

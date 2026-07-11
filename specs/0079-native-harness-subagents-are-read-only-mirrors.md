@@ -76,6 +76,10 @@ child that is already owned by its parent.
   of whether the harness also publishes an explicit removal signal.
 - Clients visibly label native children and must support recursive child
   traversal.
+- Client bulk lifecycle actions exclude native mirrors. If an archived
+  disclosure contains only native mirrors, delete reports the read-only
+  constraint without sending lifecycle requests or writing warnings into an
+  interactive terminal.
 - Harness transcript formats are discovery inputs, not a lifecycle ownership
   transfer. Missing or changed upstream metadata may temporarily reduce native
   child visibility without affecting the parent session.
