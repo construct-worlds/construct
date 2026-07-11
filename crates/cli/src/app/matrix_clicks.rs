@@ -180,9 +180,11 @@ impl App {
         {
             self.lineage_mode = self.lineage_mode.toggled();
             // The two modes have different geometries — stale scroll
-            // offsets from one would land nowhere in the other.
+            // offsets from one would land nowhere in the other, including
+            // cached viewports for lineages not currently selected.
             self.lineage_scroll = 0;
             self.lineage_scroll_x = 0;
+            self.lineage_scroll_memory.clear();
             return;
         }
         if self
