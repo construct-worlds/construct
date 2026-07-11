@@ -4066,7 +4066,10 @@ async fn run_loop(
                             if !app.histories.contains_key(&id) {
                                 app.histories.insert(id.clone(), crate::pty_render::ItemHistory::new());
                             }
-                            app.select_session(id);
+                            // A create result can arrive before the session's
+                            // state notification. Select the interactive
+                            // terminal without waiting for `has_pty`.
+                            app.select_created_session(id);
                             app.sync_active_window_selection();
                             app.focus = PaneFocus::View;
                         }
@@ -4447,6 +4450,17 @@ impl App {
 
     pub fn select_session(&mut self, id: String) {
         self.select_session_inner(id, true);
+    }
+
+    /// Select a session immediately after creation. The create RPC can finish
+    /// before the daemon's state notification reaches this client, so the
+    /// session summary (and its `has_pty` flag) may not be available yet.
+    /// New sessions are interactive PTY sessions, so choose the terminal
+    /// explicitly rather than allowing that brief gap to persist Chat as this
+    /// pane's view preference.
+    pub fn select_created_session(&mut self, id: String) {
+        self.select_session(id);
+        self.set_active_view(ViewMode::Terminal);
     }
 
     fn select_session_without_transition(&mut self, id: String) {
@@ -22351,6 +22365,22 @@ mod tests {
             app.selection_for_window(2),
             Some(Selection::Session("s1".into()))
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn created_session_opens_terminal_before_state_notification() {
+        let (mut app, _dir, server) = captured_app().await;
+        // Model the create-RPC race: the response names the new session before
+        // its STATE notification has added its summary to `app.sessions`.
+        app.view = ViewMode::Chat;
+        app.window_views.insert(1, ViewMode::Chat);
+
+        app.select_created_session("new-session".into());
+
+        assert_eq!(app.selection, Selection::Session("new-session".into()));
+        assert_eq!(app.view, ViewMode::Terminal);
+        assert_eq!(app.view_for_window(Some(1)), ViewMode::Terminal);
         server.abort();
     }
 
