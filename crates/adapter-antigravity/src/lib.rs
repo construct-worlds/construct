@@ -750,8 +750,22 @@ fn emit_step(v: &Value, emit: &EventEmitter) {
 fn antigravity_events_from_step(v: &Value) -> Vec<SessionEvent> {
     let ty = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
     match ty {
-        // Structural / already-known-to-daemon — skip.
-        "USER_INPUT" | "CONVERSATION_HISTORY" => Vec::new(),
+        // Conversation-history records are structural, but user input is a
+        // real chat message. Keeping it gives Antigravity sessions (and their
+        // native subagent mirrors) the same message-count lineage stats as
+        // every other harness.
+        "CONVERSATION_HISTORY" => Vec::new(),
+        "USER_INPUT" => v
+            .get("content")
+            .and_then(|s| s.as_str())
+            .filter(|content| !content.is_empty())
+            .map(|content| {
+                vec![SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: content.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
         "PLANNER_RESPONSE" => {
             // Either a tool-call decision or assistant prose.
             if let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) {
@@ -866,9 +880,22 @@ mod tests {
     }
 
     #[test]
-    fn structural_steps_do_not_emit_chat_events() {
-        let v: Value = serde_json::from_str(r#"{"type":"USER_INPUT","content":"x"}"#).unwrap();
+    fn conversation_history_steps_do_not_emit_chat_events() {
+        let v: Value =
+            serde_json::from_str(r#"{"type":"CONVERSATION_HISTORY","content":"x"}"#).unwrap();
         assert!(antigravity_events_from_step(&v).is_empty());
+    }
+
+    #[test]
+    fn user_input_emits_user_message_for_lineage_counts() {
+        let v: Value = serde_json::from_str(r#"{"type":"USER_INPUT","content":"x"}"#).unwrap();
+        match antigravity_events_from_step(&v).as_slice() {
+            [SessionEvent::Message { role, text }] => {
+                assert!(matches!(role, MessageRole::User));
+                assert_eq!(text, "x");
+            }
+            other => panic!("unexpected message events: {other:?}"),
+        }
     }
 
     #[test]

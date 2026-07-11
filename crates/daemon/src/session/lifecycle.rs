@@ -241,17 +241,22 @@ impl SessionManager {
         });
 
         // Record the user's initial prompt as the first transcript event so
-        // the transcript reads coherently (user → assistant) for every adapter.
+        // the transcript reads coherently (user → assistant). Antigravity
+        // mirrors its own USER_INPUT transcript steps, including this first
+        // prompt, so letting the adapter own that record avoids counting it
+        // twice in the lineage view.
         // Auto-title is triggered inside handle_event for any User message.
-        if let Some(p) = params.prompt.as_ref().filter(|s| !s.trim().is_empty()) {
-            self.handle_event(
-                &entry,
-                SessionEvent::Message {
-                    role: MessageRole::User,
-                    text: p.clone(),
-                },
-            )
-            .await;
+        if harness != "antigravity" {
+            if let Some(p) = params.prompt.as_ref().filter(|s| !s.trim().is_empty()) {
+                self.handle_event(
+                    &entry,
+                    SessionEvent::Message {
+                        role: MessageRole::User,
+                        text: p.clone(),
+                    },
+                )
+                .await;
+            }
         }
 
         adapter
