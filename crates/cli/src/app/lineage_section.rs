@@ -33,7 +33,14 @@ impl App {
             return None;
         }
         let rows = self.lineage_section_rows(&id);
-        (rows.iter().filter(|r| r.is_selectable()).count() > 1).then_some(id)
+        // More than the session's own node — or a collapsed subagent group
+        // (which must stay reachable so it can be expanded at all).
+        let has_content = rows.iter().filter(|r| r.is_selectable()).count() > 1
+            || rows
+                .iter()
+                .flat_map(|r| r.spans.iter())
+                .any(|sp| matches!(sp.role, crate::lineage::LineageSpan::SubagentsToggle { .. }));
+        has_content.then_some(id)
     }
 
     /// Whether `(col, row)` lands inside the last-rendered lineage section
@@ -147,16 +154,20 @@ impl App {
         session_id: &str,
     ) -> (Vec<LineageRow>, Vec<crate::lineage::LineageBoxBounds>) {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        crate::lineage::build_tree(session_id, &self.sessions)
-            .map(|root| match self.lineage_mode {
-                crate::lineage::LineageViewMode::Boxes => {
-                    crate::lineage::flatten_with_boxes(&root, &self.sessions, now_ms)
-                }
-                crate::lineage::LineageViewMode::Rails => {
-                    crate::lineage::flatten_rails(&root, &self.sessions, now_ms)
-                }
-            })
-            .unwrap_or_default()
+        crate::lineage::build_tree_with_expansions(
+            session_id,
+            &self.sessions,
+            Some(&self.lineage_subagents_expanded),
+        )
+        .map(|root| match self.lineage_mode {
+            crate::lineage::LineageViewMode::Boxes => {
+                crate::lineage::flatten_with_boxes(&root, &self.sessions, now_ms)
+            }
+            crate::lineage::LineageViewMode::Rails => {
+                crate::lineage::flatten_rails(&root, &self.sessions, now_ms)
+            }
+        })
+        .unwrap_or_default()
     }
 
     /// The session id of the currently-highlighted row in the focused

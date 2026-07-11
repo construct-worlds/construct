@@ -73,6 +73,17 @@ same gate as the session list's rows, and a working session's LIVE
 turn-info bullet (its last window's marker — earlier windows are history)
 spins in phase with its status glyph.
 
+Subagent children collapse by default: sessions spawn many (native)
+subagents, and the lineage a user manages by hand is the fork structure —
+so each node's subagent children sit behind one "▸ N subagents · M
+running" toggle row (M shown while any are running), clicked to expand
+(▾) or re-collapse, per parent. Forks always render. The selected
+session's own ancestor chain is always expanded so the section can never
+hide the session it is describing, and a session whose only lineage is a
+collapsed group still shows the section (otherwise the group could never
+be expanded). Expansion state is in-memory only — a fresh TUI starts
+re-collapsed.
+
 A session in a terminal state (done/errored — a native subagent that
 exited included) is a CLOSED lane: it ends on the timeline at its last
 recorded activity (falling back to its own start when none was recorded),

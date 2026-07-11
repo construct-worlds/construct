@@ -151,6 +151,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.lineage_h_overflow = false;
     app.layout.lineage_hscroll_hit = None;
     app.layout.lineage_box_hits.clear();
+    app.layout.lineage_subagent_toggle_hits.clear();
     app.window_pane_sizes.clear();
     app.terminal_replayed_sessions_this_frame.clear();
     app.layout.dynamic_ui_popover_area = None;
@@ -2146,22 +2147,33 @@ fn render_lineage_section(
             let start = x;
             let end = start + UnicodeWidthStr::width(span.text.as_str());
             x = end;
-            let Some(owner) = span.role.owner() else {
-                continue;
-            };
             let vis_start = start.max(scroll_x);
             let vis_end = end.min(view_right);
             if vis_start >= vis_end {
                 continue;
             }
+            let area = Rect {
+                x: inner.x + (vis_start - scroll_x) as u16,
+                y,
+                width: (vis_end - vis_start) as u16,
+                height: 1,
+            };
+            if let crate::lineage::LineageSpan::SubagentsToggle { session_id, .. } = &span.role {
+                // Click toggles the parent's subagent group — never a jump.
+                app.layout
+                    .lineage_subagent_toggle_hits
+                    .push(crate::app::LineageBoxHit {
+                        session_id: session_id.clone(),
+                        area,
+                    });
+                continue;
+            }
+            let Some(owner) = span.role.owner() else {
+                continue;
+            };
             app.layout.lineage_box_hits.push(crate::app::LineageBoxHit {
                 session_id: owner.to_string(),
-                area: Rect {
-                    x: inner.x + (vis_start - scroll_x) as u16,
-                    y,
-                    width: (vis_end - vis_start) as u16,
-                    height: 1,
-                },
+                area,
             });
         }
     }
@@ -9671,6 +9683,12 @@ fn render_lineage_row(
                 crate::lineage::LineageSpan::More(_) => Style::default()
                     .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
+                // The subagent-group toggle reads as an affordance, not
+                // content: muted like the +N more marker, un-italic so its
+                // ▸/▾ disclosure matches the list's collapse rows.
+                crate::lineage::LineageSpan::SubagentsToggle { .. } => {
+                    Style::default().fg(theme.muted)
+                }
                 // Mirrors the session list: only the status glyph carries
                 // the live-state color; the name itself stays the default
                 // text color.
