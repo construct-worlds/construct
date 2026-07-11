@@ -19,8 +19,9 @@ view `x` button), alongside delete and cancel:
   expandable "N archived" row. Activating that row reveals/hides only that
   section's archived sessions; while shown, their names render dimmed. The reveal
   state is per-section and not persisted (archived sessions default to hidden on
-  each launch). Session children render before their parent's archived disclosure,
-  and both subagent rows and that disclosure are indented beneath the parent. All
+  each launch). Active subagents and forks render before their parent's archived
+  disclosure, which is the final child row beneath that parent. Subagent rows,
+  fork rows, and that disclosure are indented beneath the parent. All
   other archived disclosures are indented beneath their containing run or project.
   A parent's archived-subagent disclosure triangle and its child sessions' status
   glyphs align with the start of the parent session's name, regardless of whether
