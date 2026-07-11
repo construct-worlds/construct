@@ -529,6 +529,20 @@ fn normalized_points(a: ScreenPoint, b: ScreenPoint) -> (ScreenPoint, ScreenPoin
     }
 }
 
+fn session_list_markers(summary: &SessionSummary) -> (&'static str, &'static str) {
+    let lineage = if summary.forked_from.is_some() {
+        "⑂"
+    } else {
+        " "
+    };
+    let pin = if summary.pinned { "★" } else { " " };
+    (lineage, pin)
+}
+
+fn session_list_marker_width(summary: &SessionSummary) -> usize {
+    1 + usize::from(summary.forked_from.is_some())
+}
+
 /// Hover hit-test: if the mouse cursor is currently sitting on the
 /// pin-diamond cell of a session row, return that row's info. Returns
 /// `None` on terminals that don't forward motion events (Terminal.app),
@@ -556,12 +570,16 @@ fn hovered_diamond(app: &App) -> Option<(u16, u16, &SessionSummary)> {
         _ => return None,
     };
     let indent = crate::app::list_session_indent_cells(&summary, indented, has_children);
-    // Hit zone is the 4-cell gutter to the left of the session name, after
-    // the disclosure column when this row has one:
-    //   [disclosure][diamond][ ][status-circle][ ]   ← then the name starts
+    // Hit zone is the 4-cell gutter to the left of the session name. Forks
+    // alone add a lineage column before the pin marker:
+    //   [disclosure][lineage?][diamond][ ][status-circle][ ] ← name
     // Wider than the bare diamond glyph so it's easier to click —
     // the visual overlay still anchors on the diamond cell itself.
-    let zone_start = list_area.x + 1 + indent + u16::from(has_children);
+    let zone_start = list_area.x
+        + 1
+        + indent
+        + u16::from(has_children)
+        + session_list_marker_width(&summary).saturating_sub(1) as u16;
     let zone_end = zone_start + 4; // exclusive
     if mx < zone_start || mx >= zone_end {
         return None;
@@ -1667,22 +1685,20 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     } else {
                         None
                     };
-                    let pin_glyph = if s.forked_from.is_some() {
-                        "⑂"
-                    } else if s.pinned {
-                        "★"
-                    } else {
-                        " "
-                    };
+                    let (lineage_glyph, pin_glyph) = session_list_markers(s);
                     let indent_prefix = " ".repeat(crate::app::list_session_indent_cells(
                         s,
                         *indented,
                         *has_children,
                     ) as usize);
                     // Fixed-width left side: indent + optional disclosure (1)
-                    // + pin (1) + " glyph " (3).
-                    let prefix_w =
-                        indent_prefix.chars().count() + usize::from(expand_glyph.is_some()) + 1 + 3;
+                    // + optional lineage (1) + pin (1) + " glyph " (3).
+                    // Only forks reserve the lineage cell, keeping ordinary
+                    // project members at their established position.
+                    let prefix_w = indent_prefix.chars().count()
+                        + usize::from(expand_glyph.is_some())
+                        + session_list_marker_width(s)
+                        + 3;
                     let harness = harness_label(s);
                     let harness_w = harness.chars().count();
                     // Reserve room for the trailing unblock marker (" ●") so the
@@ -1738,6 +1754,12 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                             Style::default().fg(app.theme.group),
                         ));
                     }
+                    if s.forked_from.is_some() {
+                        spans.push(Span::styled(
+                            lineage_glyph.to_string(),
+                            Style::default().fg(app.theme.info),
+                        ));
+                    }
                     spans.extend([
                         Span::styled(pin_glyph.to_string(), Style::default().fg(app.theme.info)),
                         Span::styled(
@@ -1779,13 +1801,22 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 } => {
                     // Expandable footer: "▸ N archived" (collapsed) /
                     // "▾ N archived" (open). Indented to sit under a project's
-                    // members; flush-left for the ungrouped section.
+                    // members. A subagent archive triangle aligns with the
+                    // parent name, matching the child status glyphs above it.
                     let disclosure = if *expanded { "▾" } else { "▸" };
-                    let indent = match section {
-                        crate::app::ArchiveSection::Subagents(_) => "    ",
-                        crate::app::ArchiveSection::Group(_) if *indented => "  ",
-                        _ => "",
+                    let parent_grouped = match section {
+                        crate::app::ArchiveSection::Subagents(parent_id) => app
+                            .sessions
+                            .iter()
+                            .find(|s| s.id == *parent_id)
+                            .is_some_and(|s| s.group_id.is_some()),
+                        _ => false,
                     };
+                    let indent = " ".repeat(crate::app::list_archive_indent_cells(
+                        section,
+                        *indented,
+                        parent_grouped,
+                    ) as usize);
                     ListItem::new(Line::from(Span::styled(
                         format!("{indent}{disclosure} {count} archived"),
                         session_list_secondary_style(&app.theme),
@@ -15065,6 +15096,30 @@ mod tests {
             forked_from: None,
             merge: None,
         }
+    }
+
+    #[test]
+    fn pinned_fork_keeps_separate_lineage_and_pin_markers() {
+        let mut fork = clip_test_session("fork", Some("fork"), "codex", SessionState::Running);
+        fork.pinned = true;
+        fork.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "parent".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+        });
+
+        assert_eq!(session_list_markers(&fork), ("⑂", "★"));
+        assert_eq!(session_list_marker_width(&fork), 2);
+
+        let project_member = clip_test_session(
+            "project-member",
+            Some("project member"),
+            "codex",
+            SessionState::Running,
+        );
+        assert_eq!(session_list_marker_width(&project_member), 1);
     }
 
     #[test]

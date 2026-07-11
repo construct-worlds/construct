@@ -402,14 +402,36 @@ pub(crate) fn list_session_indent_cells(
     indented: bool,
     has_children: bool,
 ) -> u16 {
-    if is_subagent_session(s) {
-        4
+    if is_subagent_session(s) || s.forked_from.is_some() {
+        // Align the child's STATUS glyph with its parent session's name.
+        // A grouped parent starts one cell later. Account for the child's
+        // own disclosure, optional lineage marker, pin marker, and the
+        // leading space before its status glyph.
+        let parent_name_col = 5 + u16::from(s.group_id.is_some());
+        let child_prefix = u16::from(has_children)
+            + 1 // pin marker
+            + u16::from(s.forked_from.is_some())
+            + 1; // leading space before status
+        parent_name_col.saturating_sub(child_prefix)
     } else if indented && has_children {
         1
     } else if indented {
         2
     } else {
         0
+    }
+}
+
+pub(crate) fn list_archive_indent_cells(
+    section: &ArchiveSection,
+    indented: bool,
+    parent_grouped: bool,
+) -> u16 {
+    match section {
+        // Align the disclosure triangle with the parent session's name.
+        ArchiveSection::Subagents(_) => 5 + u16::from(parent_grouped),
+        _ if indented => 2,
+        _ => 0,
     }
 }
 
@@ -4776,12 +4798,12 @@ impl App {
                 has_children,
                 children_expanded,
             });
+            let mut archived_children = Vec::new();
             if children_expanded {
                 if let Some(children) = children {
-                    let (active_children, archived_children): (
-                        Vec<&SessionSummary>,
-                        Vec<&SessionSummary>,
-                    ) = children.iter().copied().partition(|child| !child.archived);
+                    let (active_children, archived): (Vec<&SessionSummary>, Vec<&SessionSummary>) =
+                        children.iter().copied().partition(|child| !child.archived);
+                    archived_children = archived;
                     for child in active_children {
                         push_session_tree(
                             out,
@@ -4792,29 +4814,6 @@ impl App {
                             collapsed,
                             show_archived,
                         );
-                    }
-                    if !archived_children.is_empty() {
-                        let section = ArchiveSection::Subagents(s.id.clone());
-                        let expanded = show_archived.contains(&s.id);
-                        out.push(ListItem::ArchivedRow {
-                            section,
-                            count: archived_children.len(),
-                            expanded,
-                            indented: true,
-                        });
-                        if expanded {
-                            for child in archived_children {
-                                push_session_tree(
-                                    out,
-                                    child,
-                                    true,
-                                    subagents_by_parent,
-                                    forks_by_parent,
-                                    collapsed,
-                                    show_archived,
-                                );
-                            }
-                        }
                     }
                 }
             }
@@ -4848,6 +4847,31 @@ impl App {
                 if let Some(nested) = forks_by_parent.get(fork.id.as_str()) {
                     for q in nested.iter().rev().copied().filter(|q| !q.archived) {
                         stack.push((q, depth + 1));
+                    }
+                }
+            }
+            // The archive disclosure is the parent's final child row: active
+            // subagents first, then forks, then archived subagents.
+            if !archived_children.is_empty() {
+                let section = ArchiveSection::Subagents(s.id.clone());
+                let expanded = show_archived.contains(&s.id);
+                out.push(ListItem::ArchivedRow {
+                    section,
+                    count: archived_children.len(),
+                    expanded,
+                    indented: true,
+                });
+                if expanded {
+                    for child in archived_children {
+                        push_session_tree(
+                            out,
+                            child,
+                            true,
+                            subagents_by_parent,
+                            forks_by_parent,
+                            collapsed,
+                            show_archived,
+                        );
                     }
                 }
             }
@@ -4894,7 +4918,7 @@ impl App {
                 section: ArchiveSection::Ungrouped,
                 count: ungrouped_archived.len(),
                 expanded,
-                indented: false,
+                indented: true,
             });
             if expanded {
                 for s in ungrouped_archived {
@@ -28460,10 +28484,19 @@ mod tests {
         archived_child.parent_session_id = Some("sparent".into());
         archived_child.position = 1;
         archived_child.archived = true;
+        let mut fork = summary_with_kind(agentd_protocol::SessionKind::User);
+        fork.id = "sfork".into();
+        fork.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "sparent".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+        });
 
-        let mut app = test_app(client, vec![archived_child, active_child, parent]);
+        let mut app = test_app(client, vec![archived_child, fork, active_child, parent]);
         let items = app.list_items();
-        assert_eq!(items.len(), 3);
+        assert_eq!(items.len(), 4);
         assert!(
             matches!(&items[0], ListItem::Session { summary, has_children: true, children_expanded: true, .. } if summary.id == "sparent")
         );
@@ -28471,7 +28504,11 @@ mod tests {
             matches!(&items[1], ListItem::Session { summary, indented: true, .. } if summary.id == "sactive-child"),
             "active subagent should remain ungrouped under its parent",
         );
-        match &items[2] {
+        assert!(
+            matches!(&items[2], ListItem::Session { summary, indented: true, .. } if summary.id == "sfork"),
+            "fork should follow active subagents and precede the archive disclosure",
+        );
+        match &items[3] {
             ListItem::ArchivedRow {
                 section,
                 count,
@@ -28490,18 +28527,18 @@ mod tests {
         app.selection = Selection::ArchivedRow(ArchiveSection::Subagents("sparent".into()));
         app.run_action(KeyAction::ExpandGroup).await;
         let expanded = app.list_items();
-        assert_eq!(expanded.len(), 4);
+        assert_eq!(expanded.len(), 5);
         assert!(matches!(
-            &expanded[2],
+            &expanded[3],
             ListItem::ArchivedRow { expanded: true, .. }
         ));
         assert!(
-            matches!(&expanded[3], ListItem::Session { summary, indented: true, .. } if summary.id == "sarchived-child" && summary.archived),
+            matches!(&expanded[4], ListItem::Session { summary, indented: true, .. } if summary.id == "sarchived-child" && summary.archived),
             "expanded archived subagent should follow its disclosure row",
         );
 
         app.run_action(KeyAction::CollapseGroup).await;
-        assert_eq!(app.list_items().len(), 3);
+        assert_eq!(app.list_items().len(), 4);
         assert_eq!(
             app.selection,
             Selection::ArchivedRow(ArchiveSection::Subagents("sparent".into()))
@@ -28532,46 +28569,55 @@ mod tests {
         archived.id = "archived".into();
         archived.position = 1;
         archived.archived = true;
+        let mut subagent = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        subagent.id = "subagent".into();
+        subagent.parent_session_id = Some("active".into());
 
-        let mut app = test_app(client, vec![active, archived]);
+        let mut app = test_app(client, vec![active, archived, subagent]);
 
-        // Collapsed by default: the active session plus a "1 archived" row.
+        // Children stay attached to their parent and precede the containing
+        // section's archive disclosure.
         let items = app.list_items();
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 3);
         assert!(
             matches!(&items[0], ListItem::Session { summary, .. } if summary.id == "active"),
             "active session should render directly",
         );
-        match &items[1] {
+        assert!(
+            matches!(&items[1], ListItem::Session { summary, indented: true, .. } if summary.id == "subagent"),
+            "subagent should render indented before the archive disclosure",
+        );
+        match &items[2] {
             ListItem::ArchivedRow {
                 section,
                 count,
                 expanded,
-                ..
+                indented,
             } => {
                 assert_eq!(*section, ArchiveSection::Ungrouped);
                 assert_eq!(*count, 1);
                 assert!(!*expanded, "archived row starts collapsed");
+                assert!(*indented, "archive disclosure is nested under its section");
             }
             other => panic!("expected an archived row, got {other:?}"),
         }
 
-        // Reveal: active session, the open row, then the archived session.
+        // Reveal: active session, its subagent, the open row, then archive.
         app.toggle_archive_section(&ArchiveSection::Ungrouped);
         let items = app.list_items();
-        assert_eq!(items.len(), 3);
+        assert_eq!(items.len(), 4);
         assert!(matches!(
-            &items[1],
+            &items[2],
             ListItem::ArchivedRow { expanded: true, .. }
         ));
         assert!(
-            matches!(&items[2], ListItem::Session { summary, .. } if summary.id == "archived"),
+            matches!(&items[3], ListItem::Session { summary, .. } if summary.id == "archived"),
             "revealed archived session should follow its row",
         );
 
         // Toggle back off: collapsed again.
         app.toggle_archive_section(&ArchiveSection::Ungrouped);
-        assert_eq!(app.list_items().len(), 2);
+        assert_eq!(app.list_items().len(), 3);
     }
 
     #[tokio::test]
@@ -28813,11 +28859,47 @@ mod tests {
     fn list_session_indent_policy_distinguishes_subagents_and_grouped_parents() {
         let user = summary_with_kind(agentd_protocol::SessionKind::User);
         let subagent = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        let mut fork = summary_with_kind(agentd_protocol::SessionKind::User);
+        fork.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "parent".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+        });
 
         assert_eq!(list_session_indent_cells(&user, false, false), 0);
         assert_eq!(list_session_indent_cells(&user, true, false), 2);
         assert_eq!(list_session_indent_cells(&user, true, true), 1);
-        assert_eq!(list_session_indent_cells(&subagent, true, false), 4);
+        assert_eq!(list_session_indent_cells(&subagent, true, false), 3);
+        assert_eq!(list_session_indent_cells(&fork, true, false), 2);
+        let mut grouped_subagent = subagent.clone();
+        grouped_subagent.group_id = Some("group".into());
+        let mut grouped_fork = fork.clone();
+        grouped_fork.group_id = Some("group".into());
+        assert_eq!(list_session_indent_cells(&grouped_subagent, true, false), 4);
+        assert_eq!(list_session_indent_cells(&grouped_fork, true, false), 3);
+        assert_eq!(list_session_indent_cells(&subagent, true, true), 2);
+        assert_eq!(
+            list_archive_indent_cells(&ArchiveSection::Ungrouped, true, false),
+            2
+        );
+        assert_eq!(
+            list_archive_indent_cells(&ArchiveSection::Group("group".into()), true, false),
+            2
+        );
+        assert_eq!(
+            list_archive_indent_cells(&ArchiveSection::Subagents("parent".into()), true, false),
+            5
+        );
+        assert_eq!(
+            list_archive_indent_cells(
+                &ArchiveSection::Subagents("grouped-parent".into()),
+                true,
+                true
+            ),
+            6
+        );
     }
 
     #[tokio::test]
