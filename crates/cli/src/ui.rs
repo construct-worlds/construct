@@ -149,6 +149,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.lineage_toggle_hit = None;
     app.layout.lineage_v_overflow = false;
     app.layout.lineage_h_overflow = false;
+    app.layout.lineage_hscroll_hit = None;
     app.layout.lineage_box_hits.clear();
     app.window_pane_sizes.clear();
     app.terminal_replayed_sessions_this_frame.clear();
@@ -2114,9 +2115,10 @@ fn render_lineage_section(
     }
 
     let visible = (inner.height as usize).max(1);
-    let scroll = if focused {
-        // Keyboard selection drags the viewport; wheel scrolling moved it
-        // too, so reconcile from whichever state is current.
+    let scroll = if focused && app.lineage_follow_selection {
+        // Keyboard navigation just moved the selection — pull the viewport
+        // to keep it on screen. A wheel scroll clears the flag so it can
+        // roam the whole diagram without the selection yanking it back.
         let selectable = crate::lineage::selectable_indices(rows);
         let selected_raw = selectable
             .get(app.lineage_selected.min(selectable.len().saturating_sub(1)))
@@ -2230,6 +2232,12 @@ fn render_lineage_section(
         }
     }
     if h_overflow && inner.height > 0 {
+        app.layout.lineage_hscroll_hit = Some(Rect {
+            x: body.x,
+            y: body.y + body.height - 1,
+            width: body.width,
+            height: 1,
+        });
         let track_w = inner.width as usize;
         let thumb_w = (track_w * track_w / content_w.max(1)).clamp(1, track_w);
         let denom = content_w - track_w;

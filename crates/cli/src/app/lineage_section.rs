@@ -45,6 +45,14 @@ impl App {
             .is_some_and(|area| Self::rect_contains(area, col, row))
     }
 
+    /// Whether `(col, row)` lands on the horizontal scrollbar's row (the
+    /// section's reserved bottom row) — a wheel there scrolls sideways.
+    pub(super) fn is_over_lineage_hscrollbar(&self, col: u16, row: u16) -> bool {
+        self.layout
+            .lineage_hscroll_hit
+            .is_some_and(|r| Self::rect_contains(r, col, row))
+    }
+
     /// Whether `(col, row)` lands on the section header's bare bar — the
     /// height drag handle. The header's own buttons (collapse, mode toggle)
     /// are excluded so their clicks stay clicks, mirroring
@@ -118,6 +126,7 @@ impl App {
         self.lineage_scroll = 0;
         self.focus = PaneFocus::List;
         self.lineage_focused = true;
+        self.lineage_follow_selection = true;
         true
     }
 
@@ -175,6 +184,9 @@ impl App {
         }
         let count = selectable.len();
         let current = self.lineage_selected.min(count - 1);
+        // Keyboard navigation re-anchors the viewport to the selection
+        // (a wheel scroll may have roamed away from it).
+        self.lineage_follow_selection = true;
         self.lineage_selected = if delta < 0 {
             current
                 .saturating_add(count)
