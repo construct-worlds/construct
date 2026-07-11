@@ -15,9 +15,6 @@ More screenshots and demos: [gallery](gallery.md).
   CLI-only; no desktop app to install.
 
   <img src="https://raw.githubusercontent.com/construct-worlds/construct/f8fae6e5227ccd0b2140c35ce6e2ad16349da848/demos/new-session.gif" alt="construct new session demo" width="50%">
-- **A delightful way to manage multiple Claude Code and Codex sessions** —
-  switch sessions instantly, pin multiple sessions to monitor, or let an agent
-  observe all your sessions across different harnesses.
 - **Program: a shared board you and the agent run together** — every session
   owns a durable Markdown document ([docs/program.md](docs/program.md)) that
   human and agent co-edit live and execute: select a task, hit Run, and watch
