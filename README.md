@@ -21,6 +21,8 @@ More screenshots and demos: [gallery](gallery.md).
 - **Program** — collaborative, executable Markdown
   ([docs/program.md](docs/program.md)): co-develop workflows, tasks, and ideas
   with the agent, then run them from the same document.
+
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/90d02bd2c1e6108eaa5c763bde9e2d78f8786691/demos/program.gif" alt="construct program demo" width="50%">
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
   output, spawn helpers, send input, inspect diffs, and drive Chrome.
 - **ACP (Agent Client Protocol) server** — point Agent Client Protocol clients at
