@@ -570,7 +570,13 @@ impl SessionManager {
                 }),
                 last_pty_at_ms: None,
                 busy_ms: 0,
-                busy_running_since_ms: None,
+                // Native mirrors are born in the adapter-reported state.
+                // Starting the clock here is essential when that state is
+                // already Running: a later same-state transcript event does
+                // not create a transition, and otherwise the lineage view
+                // would show 0s of compute time for the whole subagent.
+                busy_running_since_ms: (state == SessionState::Running)
+                    .then_some(now.timestamp_millis()),
                 message_count: 0,
                 approval_mode: owner_summary.approval_mode,
                 kind: agentd_protocol::SessionKind::Subagent,
