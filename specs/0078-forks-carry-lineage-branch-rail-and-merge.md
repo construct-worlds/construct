@@ -42,8 +42,8 @@ transcript seeding, but it no longer requires separate keybindings or flows.
 
 - Lineage is session data, so every client can render a branch rail or fork
   log without a separate UI-owned store.
-- Forks remain visible top-level user sessions, merely grouped beneath their
-  parent in clients that choose to render lineage.
+- Forks remain visible user sessions, grouped and indented beneath their parent
+  in clients that choose to render lineage.
 - Same-harness adapters may use native fork state for full context fidelity;
   cross-harness forks retain the portable transcript-seed behavior (spec
   0031). Both are lineage-tracked identically.

@@ -402,7 +402,7 @@ pub(crate) fn list_session_indent_cells(
     indented: bool,
     has_children: bool,
 ) -> u16 {
-    if is_subagent_session(s) {
+    if is_subagent_session(s) || s.forked_from.is_some() {
         4
     } else if indented && has_children {
         1
@@ -28830,11 +28830,20 @@ mod tests {
     fn list_session_indent_policy_distinguishes_subagents_and_grouped_parents() {
         let user = summary_with_kind(agentd_protocol::SessionKind::User);
         let subagent = summary_with_kind(agentd_protocol::SessionKind::Subagent);
+        let mut fork = summary_with_kind(agentd_protocol::SessionKind::User);
+        fork.forked_from = Some(agentd_protocol::ForkedFrom {
+            session_id: "parent".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+        });
 
         assert_eq!(list_session_indent_cells(&user, false, false), 0);
         assert_eq!(list_session_indent_cells(&user, true, false), 2);
         assert_eq!(list_session_indent_cells(&user, true, true), 1);
         assert_eq!(list_session_indent_cells(&subagent, true, false), 4);
+        assert_eq!(list_session_indent_cells(&fork, true, false), 4);
         assert_eq!(
             list_archive_indent_cells(&ArchiveSection::Ungrouped, true),
             2
