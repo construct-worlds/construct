@@ -1899,7 +1899,7 @@ mod tests {
         let mut ed = editor();
         ed.feed_bytes(b"/model codex-oauth:gpt-5.");
         ed.feed_bytes(&[0x09]);
-        // gpt-5.5 and gpt-5.4-mini share the prefix gpt-5. — already at common prefix, no-op
+        // gpt-5.6-*, gpt-5.5, gpt-5.4-mini share the prefix gpt-5. — already at common prefix, no-op
         assert_eq!(ed.buf, "/model codex-oauth:gpt-5.");
         let mut ed = editor();
         // `/` has 3 matches with no shared chars beyond `/` — Tab is a no-op.
