@@ -71,10 +71,12 @@ Tree construction and `git log --graph`-style layout are a self-contained,
 out) so the same logic can back a future pinnable/dockable panel without a
 rewrite — the popup itself is a thin adapter wiring that module to live
 session data, keyboard navigation, and the existing merge/discard action.
-Merge and discard reuse the exact code path the session-end prompt
+Merge-and-archive reuses the exact code path the session-end prompt
 (`[m] merge and archive` on a fork via `C-x k`) and the title-menu
-"merge and archive" action already use; the popup's `m`/`d` keys are a
-direct-key shortcut for that path, not a second implementation.
+"merge and archive" action already use; the popup's `m` key is a
+direct-key shortcut for that path, not a second implementation. There is
+no discard action on these surfaces — archive alone closes a fork without
+merging.
 
 Keys the popup doesn't handle close it and re-dispatch the same keystroke
 through ordinary routing, the same rule the `/configure` dialog follows —
