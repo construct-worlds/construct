@@ -1209,14 +1209,16 @@ fn render_harness_unavailable_tooltip(f: &mut Frame, app: &App) {
     );
 }
 
-/// Cap on how many rows of a harness's captured usage-panel output the
-/// hover tooltip will render (spec 0085). The probe's PTY is sized
-/// generously so a big usage panel isn't clipped mid-capture, but the
-/// tooltip itself must stay small enough not to dominate the screen. The
-/// important summary is conventionally at the top of these panels, so
-/// showing the first N rows — not the last, unlike `render_pty_tail`'s
-/// scrollback view — is the useful truncation.
-const HARNESS_USAGE_TOOLTIP_MAX_ROWS: u16 = 12;
+/// Sanity ceiling on how many rows of a harness's captured usage-panel
+/// output the hover tooltip will render (spec 0085). The daemon's probe
+/// captures at a fixed 40-row PTY, so real content can never exceed that —
+/// this constant exists only as a safety bound distinct from that daemon
+/// implementation detail, not as the primary size control. The tooltip's
+/// actual height auto-adjusts to the captured content's real (trimmed)
+/// bounding box (see `non_blank_row_bounds`) and is separately clamped to
+/// the current terminal's available height, so this ceiling only matters
+/// for a pathologically tall capture.
+const HARNESS_USAGE_TOOLTIP_MAX_ROWS: u16 = 40;
 
 /// Which portion of the harness hover tooltip's usage panel to render,
 /// decided purely from the cached `usage.query` result (spec 0085) so the
@@ -1325,14 +1327,27 @@ fn render_harness_hover_tooltip(f: &mut Frame, app: &App) {
             };
             let mut parser = vt100::Parser::new(info.rows, info.cols, 0);
             parser.process(&bytes);
-            // Trim to the screen's actual non-blank content height (same
-            // helper the chat pane uses to gapless-align short smith
-            // output) rather than always reserving the probe's full PTY
-            // height — the probe is sized generously so a big usage panel
-            // isn't clipped, but most harnesses' usage output is much
-            // shorter than that, and a tooltip full of trailing blank rows
-            // looks broken.
-            let usage_rows = non_empty_row_span(parser.screen()).min(HARNESS_USAGE_TOOLTIP_MAX_ROWS);
+            // Trim to the screen's actual non-blank content *bounding box*,
+            // not just its height from row 0: a harness's usage/status
+            // panel is a full-screen TUI dialog that can start well below
+            // the top of the capture (confirmed live — codex's real panel
+            // starts around row 11, claude's around row 2), so rendering a
+            // fixed window from row 0 showed only the leading blank margin
+            // above the panel (or a stray leftover line) instead of the
+            // panel itself. `non_blank_row_bounds` finds where the real
+            // content actually starts; height then auto-sizes to fit it
+            // (capped only by the sanity ceiling and the terminal's actual
+            // available space — see `HARNESS_USAGE_TOOLTIP_MAX_ROWS`).
+            let Some((first_row, last_row)) = non_blank_row_bounds(parser.screen()) else {
+                // Fully blank capture (shouldn't normally happen — an empty
+                // capture isn't cached as a snapshot in the first place —
+                // but degrade gracefully rather than rendering a blank box).
+                let rect = harness_hover_tooltip_rect(hit.x_start, hit.y, model_w + 2, 3, total);
+                render_tooltip_rect(f, &app.theme, model_label.as_str(), rect);
+                return;
+            };
+            let content_height = last_row - first_row + 1;
+            let usage_rows = content_height.min(HARNESS_USAGE_TOOLTIP_MAX_ROWS);
             let inner_w = model_w.max(info.cols);
             let w = (inner_w + 2).min(total.width.max(1));
             let h = (1 + usage_rows + 2).min(total.height.max(1));
@@ -1361,7 +1376,18 @@ fn render_harness_hover_tooltip(f: &mut Frame, app: &App) {
                     width: inner.width,
                     height: inner.height - 1,
                 };
-                render_vt100_screen_rows(f, usage_area, parser.screen(), &app.theme, 0, usage_rows);
+                // `render_vt100_screen_rows` independently clamps
+                // `visible_h` to `usage_area.height`, so it self-corrects
+                // if `h` above got clamped smaller by the terminal-height
+                // bound — no need to recompute `usage_rows` here.
+                render_vt100_screen_rows(
+                    f,
+                    usage_area,
+                    parser.screen(),
+                    &app.theme,
+                    first_row,
+                    usage_rows,
+                );
             }
         }
     }
@@ -9470,6 +9496,30 @@ fn non_empty_row_span(screen: &vt100::Screen) -> u16 {
     0
 }
 
+fn row_has_contents(screen: &vt100::Screen, row: u16, cols: u16) -> bool {
+    (0..cols).any(|c| screen.cell(row, c).is_some_and(|cell| cell.has_contents()))
+}
+
+/// Tight bounding box of non-blank content: `(first_row, last_row_inclusive)`.
+/// `None` when the whole screen is blank. Unlike `non_empty_row_span` (which
+/// assumes content is gapless from row 0 — true for `render_pty_tail`'s
+/// chat-pane use case, where output always starts printing at the top), a
+/// harness's usage/status panel is a full-screen TUI dialog that can be
+/// positioned starting at any row — confirmed live for spec 0085's hover
+/// tooltip: codex's real panel starts around row 11, claude's around row 2,
+/// with unrelated blank rows above. Rendering from a hardcoded row 0 showed
+/// only that leading blank margin (or, worse, whatever stray content sat
+/// there), never the actual panel.
+fn non_blank_row_bounds(screen: &vt100::Screen) -> Option<(u16, u16)> {
+    let (rows, cols) = screen.size();
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    let first = (0..rows).find(|&r| row_has_contents(screen, r, cols))?;
+    let last = (0..rows).rev().find(|&r| row_has_contents(screen, r, cols))?;
+    Some((first, last))
+}
+
 fn render_pty_tail(f: &mut Frame, area: Rect, screen: &vt100::Screen, theme: &Theme) {
     let (rows, _cols) = screen.size();
     // End of window is exclusive; always show the bottom `visible_h` rows.
@@ -15500,24 +15550,29 @@ mod tests {
 
     #[test]
     fn harness_hover_tooltip_rect_taller_box_still_sits_fully_above_anchor() {
-        let total = Rect::new(0, 0, 80, 40);
-        // A snapshot-case tooltip: 1 model row + up to 12 usage rows + 2
-        // border rows.
+        // A snapshot-case tooltip: 1 model row + up to
+        // `HARNESS_USAGE_TOOLTIP_MAX_ROWS` usage rows + 2 border rows. Sized
+        // for a screen tall enough to actually fit it above the anchor —
+        // this is testing the flip/fit logic, not the separate
+        // too-tall-for-the-whole-screen degenerate case (see
+        // `_clamps_within_screen_height` below for that).
+        let total = Rect::new(0, 0, 80, 60);
         let h = 1 + HARNESS_USAGE_TOOLTIP_MAX_ROWS + 2;
-        let rect = harness_hover_tooltip_rect(20, 20, 30, h, total);
+        let rect = harness_hover_tooltip_rect(20, 50, 30, h, total);
         assert_eq!(rect.height, h);
         assert!(
-            rect.y + rect.height <= 20,
+            rect.y + rect.height <= 50,
             "taller tooltip must never cover the anchor row: {rect:?}"
         );
     }
 
     #[test]
     fn harness_hover_tooltip_rect_taller_box_flips_below_near_top() {
-        let total = Rect::new(0, 0, 80, 40);
+        let total = Rect::new(0, 0, 80, 60);
         let h = 1 + HARNESS_USAGE_TOOLTIP_MAX_ROWS + 2;
-        // Anchor close enough to the top that a 15-tall box can't fit
-        // above without going off-screen.
+        // Anchor close enough to the top that the tall box can't fit above
+        // without going off-screen, but the screen is still tall enough to
+        // fit it below once flipped.
         let rect = harness_hover_tooltip_rect(20, 5, 30, h, total);
         assert!(
             rect.y > 5,
@@ -15614,6 +15669,41 @@ mod tests {
         // Render nothing extra until the next poll shows `refreshing`.
         let r = usage_result(true, false, false);
         assert_eq!(harness_usage_tooltip_case(Some(&r)), HarnessUsageTooltipCase::None);
+    }
+
+    // -- `non_blank_row_bounds` (spec 0085): regression coverage for the
+    // hover-tooltip bug where a harness's usage/status panel positioned
+    // below row 0 (codex ~row 11, claude ~row 2) rendered as a blank/wrong
+    // leading margin instead of the actual panel, because the tooltip
+    // always rendered a fixed window starting at a hardcoded row 0.
+
+    #[test]
+    fn non_blank_row_bounds_finds_content_that_starts_below_row_zero() {
+        let mut parser = vt100::Parser::new(10, 20, 0);
+        // Move to row 3 before printing — mirrors a full-screen TUI dialog
+        // (like codex's /status panel) whose content starts several rows
+        // below the top of the capture, with unrelated blank rows above it.
+        parser.process(b"\x1b[4;1Hhello\r\n\r\nworld");
+        let (first, last) = non_blank_row_bounds(parser.screen()).expect("some content");
+        assert_eq!(first, 3, "must find the real start row, not assume 0");
+        assert_eq!(last, 5);
+    }
+
+    #[test]
+    fn non_blank_row_bounds_content_starting_at_row_zero_is_unaffected() {
+        // Regression guard: agy's usage panel happens to start at row 0
+        // already — this must keep working exactly as before.
+        let mut parser = vt100::Parser::new(5, 20, 0);
+        parser.process(b"top\r\nrow");
+        let (first, last) = non_blank_row_bounds(parser.screen()).expect("some content");
+        assert_eq!(first, 0);
+        assert_eq!(last, 1);
+    }
+
+    #[test]
+    fn non_blank_row_bounds_blank_screen_is_none() {
+        let parser = vt100::Parser::new(5, 20, 0);
+        assert_eq!(non_blank_row_bounds(parser.screen()), None);
     }
 
     #[test]

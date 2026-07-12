@@ -110,7 +110,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # parsed into token counts or other structured fields.
 #
 # Unset (the default): the harness's built-in usage command runs —
-#   claude -> "/usage", codex -> "/status", agy -> "/usage", grok -> "/usage".
+#   claude -> "/usage", codex -> "/status", agy -> "/usage", grok -> "/usage show".
 # Empty string: disables the probe entirely for this harness.
 # Any other string: sent verbatim instead of the built-in default.
 #
@@ -504,7 +504,11 @@ const DEFAULT_USAGE_PROBE: &[(&str, &str)] = &[
     ("claude", "/usage"),
     ("codex", "/status"),
     ("agy", "/usage"),
-    ("grok", "/usage"),
+    // Bare "/usage" opens grok's usage menu without picking an action;
+    // "show" is the subcommand that actually renders the limits panel
+    // (confirmed live: an invalid `/usage <x>` argument error message
+    // points at exactly "/usage show" or "/usage manage").
+    ("grok", "/usage show"),
 ];
 
 fn default_usage_probe(harness: &str) -> Option<&'static str> {
@@ -745,7 +749,7 @@ mod tests {
         assert_eq!(cfg.effective_usage_probe("claude"), Some("/usage"));
         assert_eq!(cfg.effective_usage_probe("codex"), Some("/status"));
         assert_eq!(cfg.effective_usage_probe("agy"), Some("/usage"));
-        assert_eq!(cfg.effective_usage_probe("grok"), Some("/usage"));
+        assert_eq!(cfg.effective_usage_probe("grok"), Some("/usage show"));
         // No built-in default and no override -> disabled.
         assert_eq!(cfg.effective_usage_probe("shell"), None);
         assert_eq!(cfg.effective_usage_probe("smith"), None);
