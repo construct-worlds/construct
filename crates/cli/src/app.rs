@@ -1703,6 +1703,33 @@ pub struct App {
     pub tutorial: Option<TutorialState>,
 }
 
+/// Keep only collapse preferences that still point at an existing session with at
+/// least one subagent or fork. Besides avoiding unbounded stale state, this
+/// makes a deleted-and-recreated session start from the normal expanded
+/// default even if an old id lingers in `tui-state.json`.
+fn valid_collapsed_session_ids(
+    sessions: &[SessionSummary],
+    candidates: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let session_ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    let parents_with_children: HashSet<&str> = sessions
+        .iter()
+        .filter_map(|s| {
+            s.parent_session_id
+                .as_deref()
+                .or_else(|| s.forked_from.as_ref().map(|fork| fork.session_id.as_str()))
+        })
+        .filter(|parent_id| session_ids.contains(parent_id))
+        .collect();
+    let mut ids: Vec<String> = candidates
+        .into_iter()
+        .filter(|id| parents_with_children.contains(id.as_str()))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 struct ReconnectState {
     next_attempt: Instant,
     backoff: Duration,
@@ -3311,6 +3338,10 @@ async fn run_with_socket_initial_selection(
     let program_projection_tx = mpsc::unbounded_channel().0;
     let upgrade_status_tx = mpsc::unbounded_channel().0;
     let session_mutation_tx = mpsc::unbounded_channel().0;
+    let initial_children_collapsed =
+        valid_collapsed_session_ids(&sessions, persisted.collapsed_session_ids.iter().cloned())
+            .into_iter()
+            .collect();
     let mut app = App {
         client: client.clone(),
         last_reported_view: None,
@@ -3324,7 +3355,7 @@ async fn run_with_socket_initial_selection(
         next_window_id: initial_main_windows.max_id().saturating_add(1),
         active_window_id: initial_active_window_id,
         main_windows: initial_main_windows,
-        children_collapsed: HashSet::new(),
+        children_collapsed: initial_children_collapsed,
         transcript: Vec::new(),
         transcript_session: None,
         transcript_scroll: 0,
@@ -3619,6 +3650,10 @@ async fn run_with_socket_initial_selection(
         main_windows: Some(app.main_windows.clone()),
         active_window_id: Some(app.active_window_id),
         open_program_session_ids: app.open_program_session_ids(),
+        collapsed_session_ids: valid_collapsed_session_ids(
+            &app.sessions,
+            app.children_collapsed.iter().cloned(),
+        ),
         widgets,
         tutorial_step: app
             .tutorial
@@ -11898,6 +11933,36 @@ mod tests {
             forked_from: None,
             merge: None,
         }
+    }
+
+    #[test]
+    fn persisted_session_collapse_ids_are_pruned_to_live_parents() {
+        let mut parent = summary_with_kind(construct_protocol::SessionKind::User);
+        parent.id = "parent".into();
+        let mut fork_parent = summary_with_kind(construct_protocol::SessionKind::User);
+        fork_parent.id = "fork-parent".into();
+        let mut child = summary_with_kind(construct_protocol::SessionKind::Subagent);
+        child.id = "child".into();
+        child.parent_session_id = Some(parent.id.clone());
+        let mut fork = summary_with_kind(construct_protocol::SessionKind::User);
+        fork.id = "fork".into();
+        fork.forked_from = Some(construct_protocol::ForkedFrom {
+            session_id: fork_parent.id.clone(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+            is_reset_snapshot: false,
+        });
+
+        let restored = valid_collapsed_session_ids(
+            &[parent, fork_parent, child, fork],
+            ["parent", "stale", "fork-parent", "parent"]
+                .into_iter()
+                .map(str::to_string),
+        );
+
+        assert_eq!(restored, vec!["fork-parent", "parent"]);
     }
 
     fn program_popup_for_test(session_id: &str, markdown: &str, cursor: usize) -> ProgramPopup {
