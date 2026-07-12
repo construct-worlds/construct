@@ -101,6 +101,25 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # [adapters.codex.env]
 # CONSTRUCT_CODEX_CMD = "exec codex"        # also: CONSTRUCT_CLAUDE_CMD, CONSTRUCT_SHELL_CMD, CONSTRUCT_ANTIGRAVITY_CMD
 
+# Usage-probe command ────────────────────────────────────────────────────────
+#
+# `usage_probe` is the interactive slash command the daemon sends to a
+# short-lived ephemeral session to capture this harness's own usage/status
+# panel (spec 0086), cached for 10 minutes and surfaced as a hover tooltip.
+# The raw rendered output is captured and redisplayed verbatim — never
+# parsed into token counts or other structured fields.
+#
+# Unset (the default): the harness's built-in usage command runs —
+#   claude -> "/usage", codex -> "/status", agy -> "/usage", grok -> "/usage show".
+# Empty string: disables the probe entirely for this harness.
+# Any other string: sent verbatim instead of the built-in default.
+#
+# [adapters.claude]
+# usage_probe = "/usage"     # same as the built-in default; shown for discoverability
+#
+# [adapters.codex]
+# usage_probe = ""           # disable the usage probe for codex
+
 # Community / custom adapters — any binary that speaks the AHP protocol:
 #
 # [adapters.aider]
@@ -413,6 +432,16 @@ pub struct AdapterConfig {
     /// ```
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// The interactive slash command a usage-probe session sends to capture
+    /// this harness's own usage/status panel (spec 0086). TOML has no
+    /// `null` literal, so "absent" and "explicitly unset" collapse to the
+    /// same state; the three-way split is: absent (`None` here) → the
+    /// built-in default command for this harness; explicit `""` → probe
+    /// disabled; any other string → sent verbatim instead of the default.
+    /// Resolve via [`Config::effective_usage_probe`], never this field
+    /// directly.
+    #[serde(default)]
+    pub usage_probe: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -467,7 +496,43 @@ pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
     },
 ];
 
+/// Built-in usage-probe command for each harness that has an interactive
+/// usage/status slash command (spec 0086). Harnesses not listed here
+/// (`shell`, `smith`) have no probe unless an operator sets `usage_probe`
+/// explicitly in `config.toml`.
+const DEFAULT_USAGE_PROBE: &[(&str, &str)] = &[
+    ("claude", "/usage"),
+    ("codex", "/status"),
+    ("agy", "/usage"),
+    // Bare "/usage" opens grok's usage menu without picking an action;
+    // "show" is the subcommand that actually renders the limits panel
+    // (confirmed live: an invalid `/usage <x>` argument error message
+    // points at exactly "/usage show" or "/usage manage").
+    ("grok", "/usage show"),
+];
+
+fn default_usage_probe(harness: &str) -> Option<&'static str> {
+    DEFAULT_USAGE_PROBE
+        .iter()
+        .find(|(name, _)| *name == harness)
+        .map(|(_, cmd)| *cmd)
+}
+
 impl Config {
+    /// The command a usage-probe session should send for `harness`
+    /// (spec 0086), or `None` when probing is disabled for it. Mirrors the
+    /// empty-string-means-unset convention `OrchestratorConfig::effective_harness`
+    /// uses: an explicit `usage_probe = ""` disables the probe, an absent
+    /// field falls back to the harness's built-in default command (see
+    /// [`DEFAULT_USAGE_PROBE`]), and any other string is sent verbatim.
+    pub fn effective_usage_probe(&self, harness: &str) -> Option<&str> {
+        match self.adapters.get(harness).and_then(|a| a.usage_probe.as_deref()) {
+            Some(s) if !s.is_empty() => Some(s),
+            Some(_) => None, // explicit "" -> disabled
+            None => default_usage_probe(harness),
+        }
+    }
+
     pub fn load_or_default(paths: &Paths) -> Result<Self> {
         let path = paths.config_file();
         let mut cfg = if path.exists() {
@@ -673,5 +738,47 @@ mod tests {
         );
         cfg.program.templates_dir = Some("  ".to_string());
         assert_eq!(resolve_program_templates_dir(&cfg, Some("")), None);
+    }
+
+    /// `Config::effective_usage_probe` (spec 0086): absent `usage_probe`
+    /// falls back to the harness's built-in default command; a harness with
+    /// no built-in default (and no override) has probing disabled.
+    #[test]
+    fn effective_usage_probe_absent_falls_back_to_builtin_default() {
+        let cfg = Config::default();
+        assert_eq!(cfg.effective_usage_probe("claude"), Some("/usage"));
+        assert_eq!(cfg.effective_usage_probe("codex"), Some("/status"));
+        assert_eq!(cfg.effective_usage_probe("agy"), Some("/usage"));
+        assert_eq!(cfg.effective_usage_probe("grok"), Some("/usage show"));
+        // No built-in default and no override -> disabled.
+        assert_eq!(cfg.effective_usage_probe("shell"), None);
+        assert_eq!(cfg.effective_usage_probe("smith"), None);
+    }
+
+    /// Explicit `usage_probe = ""` disables the probe even though the
+    /// harness has a built-in default — TOML has no null literal, so this
+    /// is the only way to represent "explicitly off".
+    #[test]
+    fn effective_usage_probe_empty_string_disables() {
+        let toml = r#"
+            [adapters.claude]
+            usage_probe = ""
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.effective_usage_probe("claude"), None);
+    }
+
+    /// Any other string overrides the built-in default verbatim.
+    #[test]
+    fn effective_usage_probe_override_string_wins() {
+        let toml = r#"
+            [adapters.codex]
+            usage_probe = "/status --verbose"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            cfg.effective_usage_probe("codex"),
+            Some("/status --verbose")
+        );
     }
 }

@@ -32,6 +32,7 @@ mod groups;
 mod lifecycle;
 mod program_run;
 mod pty;
+mod usage_probe;
 mod widgets;
 
 #[cfg(test)]
@@ -1009,6 +1010,13 @@ pub struct SessionManager {
     /// critical section is a tiny read/write, never held across an
     /// `.await`.
     availability_cache: std::sync::Mutex<crate::availability::AvailabilityCache>,
+    /// Cache of the most recent harness usage-probe capture per harness
+    /// (spec 0086), plus the in-flight refresh guard — see
+    /// `crate::usage`. `std::sync::Mutex` deliberately: every critical
+    /// section is a tiny read/write, never held across an `.await` (the
+    /// probe itself — session create/submit-command/sleep/delete — all runs
+    /// outside the lock, in `session::usage_probe`).
+    usage_cache: std::sync::Mutex<crate::usage::UsageCache>,
 }
 
 /// What the main loop should do when it receives a [`RestartCommand`].
@@ -1287,6 +1295,7 @@ impl SessionManager {
                 availability_cache: std::sync::Mutex::new(
                     crate::availability::AvailabilityCache::default(),
                 ),
+                usage_cache: std::sync::Mutex::new(crate::usage::UsageCache::default()),
             },
             remote_rx,
             restart_rx,

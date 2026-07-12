@@ -4,6 +4,13 @@ use construct_protocol::adapter::{AdapterInboxMsg, EventEmitter};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::sync::mpsc;
 
+mod transcript_paths;
+pub use transcript_paths::{
+    antigravity_conversation_dir, antigravity_transcript_path, claude_project_slug,
+    claude_transcript_path, codex_sessions_root, codex_transcript_path, grok_session_dir,
+    grok_transcript_path,
+};
+
 #[derive(Debug)]
 pub enum TurnOutcome {
     Completed,

@@ -445,6 +445,7 @@ name = "construct-adapter-common"
 version = "0.13.7"
 dependencies = [
  "construct-protocol",
+ "tempfile",
  "tokio",
 ]
 
@@ -561,6 +562,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "construct-adapter-common",
  "construct-protocol",
  "futures",
  "httparse",

@@ -312,7 +312,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_list_title_button_tooltips(f, app);
     render_view_uncollapse_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
-    render_harness_model_tooltip(f, app);
+    render_harness_hover_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
     render_modeline_version_notice_tooltip(f, app);
     render_modeline_theme_tooltip(f, app);
@@ -1209,13 +1209,77 @@ fn render_harness_unavailable_tooltip(f: &mut Frame, app: &App) {
     );
 }
 
-/// Tooltip showing a session's current model when hovering its harness
-/// name — either its session-list row or a session view's title bar (both
-/// push into the same `app.layout.session_harness_hits`). Shows "unknown"
-/// rather than nothing when the harness hasn't reported a model — only
-/// `smith`/`grok` (and agy, best effort) track it live today; others show
-/// whatever was requested at spawn, if anything.
-fn render_harness_model_tooltip(f: &mut Frame, app: &App) {
+/// Sanity ceiling on how many rows of a harness's captured usage-panel
+/// output the hover tooltip will render (spec 0086). The daemon's probe
+/// captures at a fixed 40-row PTY, so real content can never exceed that —
+/// this constant exists only as a safety bound distinct from that daemon
+/// implementation detail, not as the primary size control. The tooltip's
+/// actual height auto-adjusts to the captured content's real (trimmed)
+/// bounding box (see `non_blank_row_bounds`) and is separately clamped to
+/// the current terminal's available height, so this ceiling only matters
+/// for a pathologically tall capture.
+const HARNESS_USAGE_TOOLTIP_MAX_ROWS: u16 = 40;
+
+/// Which portion of the harness hover tooltip's usage panel to render,
+/// decided purely from the cached `usage.query` result (spec 0086) so the
+/// decision is unit-testable without a live `Frame`. The model line above
+/// it is unconditional — this only governs what (if anything) appears
+/// below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HarnessUsageTooltipCase {
+    /// No cached entry yet, or the harness has usage probing disabled
+    /// (`enabled: false`) — show only the model line, exactly as it
+    /// rendered before this feature existed. No "probing…" flicker for a
+    /// harness that will never have usage data.
+    None,
+    /// A probe is in flight and no snapshot has ever landed yet.
+    Probing,
+    /// A snapshot is cached — render it. This wins even when a background
+    /// refresh is also in flight: falling back to "probing…" over a still
+    /// -valid snapshot would just flicker.
+    Snapshot,
+}
+
+fn harness_usage_tooltip_case(
+    usage: Option<&construct_protocol::UsageQueryResult>,
+) -> HarnessUsageTooltipCase {
+    let Some(usage) = usage else {
+        return HarnessUsageTooltipCase::None;
+    };
+    if !usage.enabled {
+        return HarnessUsageTooltipCase::None;
+    }
+    if usage.snapshot.is_some() {
+        return HarnessUsageTooltipCase::Snapshot;
+    }
+    if usage.refreshing {
+        return HarnessUsageTooltipCase::Probing;
+    }
+    HarnessUsageTooltipCase::None
+}
+
+/// Style for the model (+ effort) header line when the harness hover
+/// tooltip also shows usage-probe content underneath it (spec 0086) — bold
+/// + the theme's accent color, so the header reads as visually distinct
+/// from the usage panel below it rather than blending into a wall of text.
+/// Only used when there's a second section to stand out *from*; the
+/// plain model-only tooltip (no usage data) keeps the shared
+/// `render_tooltip_rect` styling unchanged.
+fn harness_hover_tooltip_header_style(theme: &Theme) -> Style {
+    theme.accent_style().add_modifier(Modifier::BOLD)
+}
+
+/// Tooltip shown when hovering a session's harness name — either its
+/// session-list row or a session view's title bar (both push into the same
+/// `app.layout.session_harness_hits`). Always shows the current model (+
+/// reasoning effort, when known) on the first line — "unknown" rather than
+/// nothing when the harness hasn't reported a model, since only
+/// `smith`/`grok` (and agy, best effort) track it live today. When a
+/// usage-probe snapshot is cached for that harness (spec 0086), the same
+/// box grows to show it underneath (highlighted header, a blank separator
+/// row, then the panel), redisplayed verbatim (color/layout intact, never
+/// parsed into text) rather than as a second, competing tooltip.
+fn render_harness_hover_tooltip(f: &mut Frame, app: &App) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
@@ -1231,23 +1295,134 @@ fn render_harness_model_tooltip(f: &mut Frame, app: &App) {
         return;
     };
     let model = s.model.as_deref().unwrap_or("unknown");
-    let label = match s.effort.as_deref() {
+    let model_label = match s.effort.as_deref() {
         Some(effort) => format!(" model: {model} ({effort}) "),
         None => format!(" model: {model} "),
     };
+    let model_w = UnicodeWidthStr::width(model_label.as_str()) as u16;
     let total = f.area();
-    let inner_w = UnicodeWidthStr::width(label.as_str()) as u16;
-    let rect = harness_model_tooltip_rect(hit.x_start, hit.y, inner_w + 2, 3, total);
-    render_tooltip_rect(f, &app.theme, label.as_str(), rect);
+    let usage = app.harness_usage.get(&s.harness);
+
+    match harness_usage_tooltip_case(usage) {
+        HarnessUsageTooltipCase::None => {
+            let rect = harness_hover_tooltip_rect(hit.x_start, hit.y, model_w + 2, 3, total);
+            render_tooltip_rect(f, &app.theme, model_label.as_str(), rect);
+        }
+        HarnessUsageTooltipCase::Probing => {
+            let usage_label = " usage: probing… ";
+            let usage_w = UnicodeWidthStr::width(usage_label) as u16;
+            let w = (model_w.max(usage_w) + 2).min(total.width.max(1));
+            // model line + blank separator + probing line + 2 border rows.
+            let h: u16 = 5;
+            let rect = harness_hover_tooltip_rect(hit.x_start, hit.y, w, h, total);
+            f.render_widget(Clear, rect);
+            let block = app.theme.themed_block("");
+            let inner = block.inner(rect);
+            f.render_widget(block, rect);
+            let lines = vec![
+                Line::styled(model_label, harness_hover_tooltip_header_style(&app.theme)),
+                Line::raw(""),
+                Line::styled(usage_label, app.theme.dim_style()),
+            ];
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+        HarnessUsageTooltipCase::Snapshot => {
+            let Some(info) = usage.and_then(|u| u.snapshot.as_ref()) else {
+                return;
+            };
+            use base64::Engine as _;
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&info.bytes) else {
+                // Corrupt/undecodable snapshot — degrade to the model-only
+                // tooltip rather than showing garbage or nothing at all.
+                let rect = harness_hover_tooltip_rect(hit.x_start, hit.y, model_w + 2, 3, total);
+                render_tooltip_rect(f, &app.theme, model_label.as_str(), rect);
+                return;
+            };
+            let mut parser = vt100::Parser::new(info.rows, info.cols, 0);
+            parser.process(&bytes);
+            // Trim to the screen's actual non-blank content *bounding box*,
+            // not just its height from row 0: a harness's usage/status
+            // panel is a full-screen TUI dialog that can start well below
+            // the top of the capture (confirmed live — codex's real panel
+            // starts around row 11, claude's around row 2), so rendering a
+            // fixed window from row 0 showed only the leading blank margin
+            // above the panel (or a stray leftover line) instead of the
+            // panel itself. `non_blank_row_bounds` finds where the real
+            // content actually starts; height then auto-sizes to fit it
+            // (capped only by the sanity ceiling and the terminal's actual
+            // available space — see `HARNESS_USAGE_TOOLTIP_MAX_ROWS`).
+            let Some((first_row, last_row)) = non_blank_row_bounds(parser.screen()) else {
+                // Fully blank capture (shouldn't normally happen — an empty
+                // capture isn't cached as a snapshot in the first place —
+                // but degrade gracefully rather than rendering a blank box).
+                let rect = harness_hover_tooltip_rect(hit.x_start, hit.y, model_w + 2, 3, total);
+                render_tooltip_rect(f, &app.theme, model_label.as_str(), rect);
+                return;
+            };
+            let content_height = last_row - first_row + 1;
+            let usage_rows = content_height.min(HARNESS_USAGE_TOOLTIP_MAX_ROWS);
+            let inner_w = model_w.max(info.cols);
+            let w = (inner_w + 2).min(total.width.max(1));
+            // model line + blank separator + usage rows + 2 border rows.
+            let h = (1 + 1 + usage_rows + 2).min(total.height.max(1));
+            let rect = harness_hover_tooltip_rect(hit.x_start, hit.y, w, h, total);
+            f.render_widget(Clear, rect);
+            let block = app.theme.themed_block("");
+            let inner = block.inner(rect);
+            f.render_widget(block, rect);
+            if inner.height == 0 {
+                return;
+            }
+            let model_area = Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Line::styled(
+                    model_label,
+                    harness_hover_tooltip_header_style(&app.theme),
+                )),
+                model_area,
+            );
+            // Row `inner.y + 1` is the blank separator — deliberately left
+            // unpainted (the `Clear` above already cleared the whole rect
+            // to the theme's background), so the model line reads as a
+            // distinct header rather than running straight into the usage
+            // panel's own first row.
+            if inner.height > 2 {
+                let usage_area = Rect {
+                    x: inner.x,
+                    y: inner.y + 2,
+                    width: inner.width,
+                    height: inner.height - 2,
+                };
+                // `render_vt100_screen_rows` independently clamps
+                // `visible_h` to `usage_area.height`, so it self-corrects
+                // if `h` above got clamped smaller by the terminal-height
+                // bound — no need to recompute `usage_rows` here.
+                render_vt100_screen_rows(
+                    f,
+                    usage_area,
+                    parser.screen(),
+                    &app.theme,
+                    first_row,
+                    usage_rows,
+                );
+            }
+        }
+    }
 }
 
-/// Placement for the harness-model tooltip: fully above the hovered
+/// Placement for the harness hover tooltip: fully above the hovered
 /// row/label when there's room, flipping to fully below when there isn't
 /// (e.g. hovering the top row of the session list, or a title bar at the
 /// very top of the screen). Unlike `render_button_tooltip`'s generic
-/// 1-row offset — fine for a 1-cell button, but a 3-row-tall box offset by
-/// only 1 row still overlaps the anchor — this never covers `anchor_y`.
-fn harness_model_tooltip_rect(anchor_x: u16, anchor_y: u16, w: u16, h: u16, total: Rect) -> Rect {
+/// 1-row offset — fine for a 1-cell button, but a taller box offset by only
+/// 1 row still overlaps the anchor — this never covers `anchor_y`, no
+/// matter how tall `h` grows to fit a usage panel (spec 0086).
+fn harness_hover_tooltip_rect(anchor_x: u16, anchor_y: u16, w: u16, h: u16, total: Rect) -> Rect {
     let mut x = anchor_x;
     if x + w > total.x + total.width {
         x = total.x + total.width.saturating_sub(w);
@@ -1998,7 +2173,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_scroll_offset = visible_start + state.offset();
     app.list_scroll_offset = app.layout.list_scroll_offset;
     // Hover zones for the harness label of each visible row, for
-    // `render_harness_model_tooltip`. A deliberate second pass (rather than
+    // `render_harness_hover_tooltip`. A deliberate second pass (rather than
     // threading a push through the item-building closure above) — recomputes
     // the harness width already computed there, mirroring the same tradeoff
     // `hovered_diamond` already makes for its own hit zone.
@@ -4013,7 +4188,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()))
         .unwrap_or(0);
     // Hover zone for the harness label itself, for
-    // `render_harness_model_tooltip`.
+    // `render_harness_hover_tooltip`.
     if let Some(s) = summary.as_ref() {
         let (x_start, x_end, y) = harness_title_range(area, close_w as u16, harness_w as u16);
         app.layout
@@ -9343,16 +9518,60 @@ fn non_empty_row_span(screen: &vt100::Screen) -> u16 {
     0
 }
 
+fn row_has_contents(screen: &vt100::Screen, row: u16, cols: u16) -> bool {
+    (0..cols).any(|c| screen.cell(row, c).is_some_and(|cell| cell.has_contents()))
+}
+
+/// Tight bounding box of non-blank content: `(first_row, last_row_inclusive)`.
+/// `None` when the whole screen is blank. Unlike `non_empty_row_span` (which
+/// assumes content is gapless from row 0 — true for `render_pty_tail`'s
+/// chat-pane use case, where output always starts printing at the top), a
+/// harness's usage/status panel is a full-screen TUI dialog that can be
+/// positioned starting at any row — confirmed live for spec 0086's hover
+/// tooltip: codex's real panel starts around row 11, claude's around row 2,
+/// with unrelated blank rows above. Rendering from a hardcoded row 0 showed
+/// only that leading blank margin (or, worse, whatever stray content sat
+/// there), never the actual panel.
+fn non_blank_row_bounds(screen: &vt100::Screen) -> Option<(u16, u16)> {
+    let (rows, cols) = screen.size();
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    let first = (0..rows).find(|&r| row_has_contents(screen, r, cols))?;
+    let last = (0..rows).rev().find(|&r| row_has_contents(screen, r, cols))?;
+    Some((first, last))
+}
+
 fn render_pty_tail(f: &mut Frame, area: Rect, screen: &vt100::Screen, theme: &Theme) {
+    let (rows, _cols) = screen.size();
+    // End of window is exclusive; always show the bottom `visible_h` rows.
+    let visible_h = area.height.min(rows);
+    let start_row = rows.saturating_sub(visible_h);
+    render_vt100_screen_rows(f, area, screen, theme, start_row, visible_h);
+}
+
+/// Shared cell-painting loop behind `render_pty_tail`'s bottom-anchored
+/// scrollback view and the harness-usage hover tooltip's top-anchored
+/// snapshot view (spec 0086): paints up to `visible_h` rows of `screen`
+/// starting at `start_row`, cell for cell, preserving vt100 color and
+/// attributes. Needs no live session state — `screen` can come from a
+/// throwaway parser fed a captured byte buffer.
+fn render_vt100_screen_rows(
+    f: &mut Frame,
+    area: Rect,
+    screen: &vt100::Screen,
+    theme: &Theme,
+    start_row: u16,
+    visible_h: u16,
+) {
     let (rows, cols) = screen.size();
     if rows == 0 || cols == 0 || area.width == 0 || area.height == 0 {
         return;
     }
-    let visible_h = area.height.min(rows);
+    let visible_h = visible_h
+        .min(area.height)
+        .min(rows.saturating_sub(start_row));
     let visible_w = area.width.min(cols);
-    // End of window is exclusive; always show the bottom `visible_h` rows.
-    let end_row = rows;
-    let start_row = end_row.saturating_sub(visible_h);
     let buf = f.buffer_mut();
     for r in 0..visible_h {
         for c in 0..visible_w {
@@ -15312,9 +15531,9 @@ mod tests {
     }
 
     #[test]
-    fn harness_model_tooltip_rect_sits_fully_above_the_anchor_row() {
+    fn harness_hover_tooltip_rect_sits_fully_above_the_anchor_row() {
         let total = Rect::new(0, 0, 80, 40);
-        let rect = harness_model_tooltip_rect(20, 10, 16, 3, total);
+        let rect = harness_hover_tooltip_rect(20, 10, 16, 3, total);
         assert_eq!(rect.y + rect.height, 10, "bottom edge must stop at the anchor row");
         assert!(
             rect.y + rect.height <= 10,
@@ -15323,12 +15542,12 @@ mod tests {
     }
 
     #[test]
-    fn harness_model_tooltip_rect_flips_below_when_no_room_above() {
+    fn harness_hover_tooltip_rect_flips_below_when_no_room_above() {
         // Anchor near the top of the screen (row 1) — a 3-tall tooltip
         // can't fit above without going off-screen, so it must flip below
         // instead of covering (or clipping through) the anchor row.
         let total = Rect::new(0, 0, 80, 40);
-        let rect = harness_model_tooltip_rect(20, 1, 16, 3, total);
+        let rect = harness_hover_tooltip_rect(20, 1, 16, 3, total);
         assert!(
             rect.y > 1,
             "tooltip must start below the anchor row when flipped: {rect:?}"
@@ -15336,13 +15555,177 @@ mod tests {
     }
 
     #[test]
-    fn harness_model_tooltip_rect_clamps_within_screen_width() {
+    fn harness_hover_tooltip_rect_clamps_within_screen_width() {
         let total = Rect::new(0, 0, 80, 40);
-        let rect = harness_model_tooltip_rect(75, 10, 16, 3, total);
+        let rect = harness_hover_tooltip_rect(75, 10, 16, 3, total);
         assert!(
             rect.x + rect.width <= total.width,
             "tooltip must not spill past the right edge: {rect:?}"
         );
+    }
+
+    // -- Variable-height coverage (spec 0086): the geometry function itself
+    // already took `h` as a parameter before the usage panel existed, but
+    // it was only ever called with a hardcoded `3`. These exercise the
+    // same above/below-flip and width-clamp logic at the taller heights a
+    // usage panel now produces.
+
+    #[test]
+    fn harness_hover_tooltip_rect_taller_box_still_sits_fully_above_anchor() {
+        // A snapshot-case tooltip: 1 model row + up to
+        // `HARNESS_USAGE_TOOLTIP_MAX_ROWS` usage rows + 2 border rows. Sized
+        // for a screen tall enough to actually fit it above the anchor —
+        // this is testing the flip/fit logic, not the separate
+        // too-tall-for-the-whole-screen degenerate case (see
+        // `_clamps_within_screen_height` below for that).
+        let total = Rect::new(0, 0, 80, 60);
+        let h = 1 + HARNESS_USAGE_TOOLTIP_MAX_ROWS + 2;
+        let rect = harness_hover_tooltip_rect(20, 50, 30, h, total);
+        assert_eq!(rect.height, h);
+        assert!(
+            rect.y + rect.height <= 50,
+            "taller tooltip must never cover the anchor row: {rect:?}"
+        );
+    }
+
+    #[test]
+    fn harness_hover_tooltip_rect_taller_box_flips_below_near_top() {
+        let total = Rect::new(0, 0, 80, 60);
+        let h = 1 + HARNESS_USAGE_TOOLTIP_MAX_ROWS + 2;
+        // Anchor close enough to the top that the tall box can't fit above
+        // without going off-screen, but the screen is still tall enough to
+        // fit it below once flipped.
+        let rect = harness_hover_tooltip_rect(20, 5, 30, h, total);
+        assert!(
+            rect.y > 5,
+            "tooltip must start below the anchor row when flipped: {rect:?}"
+        );
+        assert!(
+            rect.y + rect.height <= total.y + total.height,
+            "flipped tooltip must still fit on screen: {rect:?}"
+        );
+    }
+
+    #[test]
+    fn harness_hover_tooltip_rect_taller_box_clamps_within_screen_height() {
+        // A box taller than the whole screen must still produce a rect
+        // that doesn't panic and stays within bounds — callers are
+        // expected to have already clamped `h` (as the render fn does),
+        // but the geometry helper itself must degrade gracefully too.
+        let total = Rect::new(0, 0, 80, 10);
+        let rect = harness_hover_tooltip_rect(20, 5, 30, 50, total);
+        assert!(rect.y + rect.height >= rect.y, "no overflow panic");
+    }
+
+    // -- `harness_usage_tooltip_case` (spec 0086): pure decision logic for
+    // which of the three tooltip states to render, factored out so it's
+    // testable without a live `Frame` (mirrors the daemon-side
+    // `usage_probe_wait_outcome` style of extracting the decision into a
+    // pure fn).
+
+    fn usage_result(
+        enabled: bool,
+        refreshing: bool,
+        snapshot: bool,
+    ) -> construct_protocol::UsageQueryResult {
+        construct_protocol::UsageQueryResult {
+            snapshot: snapshot.then(|| construct_protocol::UsageSnapshotInfo {
+                bytes: String::new(),
+                cols: 10,
+                rows: 5,
+                captured_at_ms: 0,
+            }),
+            refreshing,
+            enabled,
+        }
+    }
+
+    #[test]
+    fn harness_usage_tooltip_case_no_entry_yet_is_none() {
+        assert_eq!(harness_usage_tooltip_case(None), HarnessUsageTooltipCase::None);
+    }
+
+    #[test]
+    fn harness_usage_tooltip_case_disabled_harness_is_none_even_while_refreshing() {
+        // `enabled: false` means the daemon will never populate a
+        // snapshot for this harness — never show a "probing…" flicker for
+        // it, even if some stale `refreshing` bit were somehow still set.
+        let r = usage_result(false, true, false);
+        assert_eq!(harness_usage_tooltip_case(Some(&r)), HarnessUsageTooltipCase::None);
+    }
+
+    #[test]
+    fn harness_usage_tooltip_case_refreshing_with_no_snapshot_yet_is_probing() {
+        let r = usage_result(true, true, false);
+        assert_eq!(
+            harness_usage_tooltip_case(Some(&r)),
+            HarnessUsageTooltipCase::Probing
+        );
+    }
+
+    #[test]
+    fn harness_usage_tooltip_case_snapshot_present_wins_over_refreshing() {
+        // A background refresh in flight while a snapshot is already
+        // cached must keep showing the snapshot, not flicker back to
+        // "probing…".
+        let r = usage_result(true, true, true);
+        assert_eq!(
+            harness_usage_tooltip_case(Some(&r)),
+            HarnessUsageTooltipCase::Snapshot
+        );
+    }
+
+    #[test]
+    fn harness_usage_tooltip_case_snapshot_present_without_refreshing() {
+        let r = usage_result(true, false, true);
+        assert_eq!(
+            harness_usage_tooltip_case(Some(&r)),
+            HarnessUsageTooltipCase::Snapshot
+        );
+    }
+
+    #[test]
+    fn harness_usage_tooltip_case_enabled_but_not_yet_queried_is_none() {
+        // Enabled, no snapshot, not (yet) marked refreshing — the brief
+        // window before the first hover-triggered fetch reports back.
+        // Render nothing extra until the next poll shows `refreshing`.
+        let r = usage_result(true, false, false);
+        assert_eq!(harness_usage_tooltip_case(Some(&r)), HarnessUsageTooltipCase::None);
+    }
+
+    // -- `non_blank_row_bounds` (spec 0086): regression coverage for the
+    // hover-tooltip bug where a harness's usage/status panel positioned
+    // below row 0 (codex ~row 11, claude ~row 2) rendered as a blank/wrong
+    // leading margin instead of the actual panel, because the tooltip
+    // always rendered a fixed window starting at a hardcoded row 0.
+
+    #[test]
+    fn non_blank_row_bounds_finds_content_that_starts_below_row_zero() {
+        let mut parser = vt100::Parser::new(10, 20, 0);
+        // Move to row 3 before printing — mirrors a full-screen TUI dialog
+        // (like codex's /status panel) whose content starts several rows
+        // below the top of the capture, with unrelated blank rows above it.
+        parser.process(b"\x1b[4;1Hhello\r\n\r\nworld");
+        let (first, last) = non_blank_row_bounds(parser.screen()).expect("some content");
+        assert_eq!(first, 3, "must find the real start row, not assume 0");
+        assert_eq!(last, 5);
+    }
+
+    #[test]
+    fn non_blank_row_bounds_content_starting_at_row_zero_is_unaffected() {
+        // Regression guard: agy's usage panel happens to start at row 0
+        // already — this must keep working exactly as before.
+        let mut parser = vt100::Parser::new(5, 20, 0);
+        parser.process(b"top\r\nrow");
+        let (first, last) = non_blank_row_bounds(parser.screen()).expect("some content");
+        assert_eq!(first, 0);
+        assert_eq!(last, 1);
+    }
+
+    #[test]
+    fn non_blank_row_bounds_blank_screen_is_none() {
+        let parser = vt100::Parser::new(5, 20, 0);
+        assert_eq!(non_blank_row_bounds(parser.screen()), None);
     }
 
     #[test]

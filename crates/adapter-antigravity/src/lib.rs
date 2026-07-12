@@ -54,7 +54,9 @@ use construct_protocol::{
     Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
     SessionState,
 };
-use construct_adapter_common::{drive_turn, next_native_seq, TurnOutcome};
+use construct_adapter_common::{
+    antigravity_transcript_path, drive_turn, next_native_seq, TurnOutcome,
+};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -133,23 +135,16 @@ fn session_data_dir() -> Option<PathBuf> {
 /// (and their `.system_generated/logs/transcript.jsonl`) live. Defaults
 /// to `$HOME/.gemini/antigravity-cli`; override with
 /// `CONSTRUCT_ANTIGRAVITY_HOME`.
+///
+/// Only used locally for [`conversation_db_path`] now — the transcript
+/// path itself is resolved via `construct_adapter_common::antigravity_transcript_path`,
+/// which has its own equivalent env-aware resolution.
 fn antigravity_home() -> Option<PathBuf> {
     if let Ok(h) = std::env::var("CONSTRUCT_ANTIGRAVITY_HOME") {
         return Some(PathBuf::from(h));
     }
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".gemini").join("antigravity-cli"))
-}
-
-fn transcript_path(conversation_id: &str) -> Option<PathBuf> {
-    Some(
-        antigravity_home()?
-            .join("brain")
-            .join(conversation_id)
-            .join(".system_generated")
-            .join("logs")
-            .join("transcript.jsonl"),
-    )
 }
 
 /// Agy's own per-conversation sqlite database. Unlike `transcript.jsonl`
@@ -505,7 +500,7 @@ fn spawn_interactive_transcript_watcher(
             let Some(id) = conv_id.as_ref() else {
                 continue;
             };
-            let Some(tp) = transcript_path(id) else {
+            let Some(tp) = antigravity_transcript_path(id, &HashMap::new()) else {
                 continue;
             };
             if skip_next_transcript {
@@ -531,7 +526,7 @@ fn spawn_interactive_transcript_watcher(
                 let Some(child) = children.get_mut(&child_id) else {
                     continue;
                 };
-                let Some(child_path) = transcript_path(&child_id) else {
+                let Some(child_path) = antigravity_transcript_path(&child_id, &HashMap::new()) else {
                     continue;
                 };
                 let (next_step, values) = read_new_transcript_steps(&child_path, child.last_step);
@@ -621,7 +616,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
     let mut last_step: i64 = -1;
     if let Some(id) = &conv_id {
         // On resume, skip everything already in the transcript.
-        if let Some(tp) = transcript_path(id) {
+        if let Some(tp) = antigravity_transcript_path(id, &HashMap::new()) {
             last_step = max_step_index(&tp);
         }
     }
@@ -737,7 +732,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
             }
         }
         if let Some(id) = &conv_id {
-            if let Some(tp) = transcript_path(id) {
+            if let Some(tp) = antigravity_transcript_path(id, &HashMap::new()) {
                 last_step = emit_new_transcript_steps(&tp, last_step, &emit);
             }
         }

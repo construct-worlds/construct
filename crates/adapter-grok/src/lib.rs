@@ -18,7 +18,9 @@ use construct_protocol::{
     Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
     SessionState,
 };
-use construct_adapter_common::{drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome};
+use construct_adapter_common::{
+    drive_turn, grok_transcript_path, next_native_seq, spawn_stderr_log, TurnOutcome,
+};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -195,10 +197,6 @@ fn grok_session_dir(cwd: &Path, session_id: &str) -> Option<PathBuf> {
             .join(url_encode_path(cwd))
             .join(session_id),
     )
-}
-
-fn grok_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    Some(grok_session_dir(cwd, session_id)?.join("chat_history.jsonl"))
 }
 
 fn grok_updates_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
@@ -563,7 +561,7 @@ fn spawn_interactive_transcript_watcher(
         let mut current_id = initial_id;
         let mut path: Option<PathBuf> = current_id
             .as_ref()
-            .and_then(|id| grok_transcript_path(&cwd, id));
+            .and_then(|id| grok_transcript_path(&cwd, id, &HashMap::new()));
         let mut updates_path: Option<PathBuf> = current_id
             .as_ref()
             .and_then(|id| grok_updates_path(&cwd, id));
@@ -618,7 +616,7 @@ fn spawn_interactive_transcript_watcher(
                 }
             }
             for (id, child) in &mut children {
-                let Some(child_path) = grok_transcript_path(&cwd, id) else {
+                let Some(child_path) = grok_transcript_path(&cwd, id, &HashMap::new()) else {
                     continue;
                 };
                 for value in
@@ -648,7 +646,7 @@ fn spawn_interactive_transcript_watcher(
             if let Some(id) = find_session_id_excluding(&cwd, &excluded) {
                 if current_id.as_ref() != Some(&id) {
                     if let (Some(new_path), Some(new_updates_path)) = (
-                        grok_transcript_path(&cwd, &id),
+                        grok_transcript_path(&cwd, &id, &HashMap::new()),
                         grok_updates_path(&cwd, &id),
                     ) {
                         if let Some(prior) = current_id.as_ref() {

@@ -25,7 +25,11 @@ use construct_protocol::{
     Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
     SessionState,
 };
-use construct_adapter_common::{drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome};
+use construct_adapter_common::{
+    claude_transcript_path, drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
+};
+#[cfg(test)]
+use construct_adapter_common::claude_project_slug;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -334,7 +338,7 @@ fn spawn_interactive_transcript_watcher(
     initial_model: Option<String>,
     expect_immediate_rebind: bool,
 ) {
-    let Some(initial_path) = claude_transcript_path(&cwd, &session_id) else {
+    let Some(initial_path) = claude_transcript_path(&cwd, &session_id, &HashMap::new()) else {
         emit.log("claude: no CLAUDE_HOME or HOME — cannot watch native transcript");
         return;
     };
@@ -373,7 +377,7 @@ fn spawn_interactive_transcript_watcher(
         loop {
             tick.tick().await;
             if let Some(new_id) = read_updated_session_id(sid_file.as_deref(), &current_id) {
-                if let Some(new_path) = claude_transcript_path(&cwd, &new_id) {
+                if let Some(new_path) = claude_transcript_path(&cwd, &new_id, &HashMap::new()) {
                     if should_emit_reset_for_id_change(&mut suppress_next_reset_event) {
                         emit.log(format!(
                             "claude: native session id changed {current_id} -> {new_id}; \
@@ -535,27 +539,6 @@ fn should_emit_reset_for_id_change(suppress_next: &mut bool) -> bool {
     } else {
         true
     }
-}
-
-fn claude_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    let home = std::env::var("CONSTRUCT_CLAUDE_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("CLAUDE_HOME").ok().filter(|s| !s.is_empty()))
-        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.claude")))?;
-    Some(
-        PathBuf::from(home)
-            .join("projects")
-            .join(claude_project_slug(cwd))
-            .join(format!("{session_id}.jsonl")),
-    )
-}
-
-fn claude_project_slug(cwd: &Path) -> String {
-    cwd.to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
 }
 
 fn count_jsonl_lines(path: &Path) -> usize {

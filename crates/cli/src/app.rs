@@ -118,6 +118,11 @@ pub(crate) const PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS: i64 = 2 * 1000;
 pub(crate) const PROGRAM_WHEEL_SCROLL_ROWS: usize = 3;
 const PROGRAM_UNDO_STACK_LIMIT: usize = 100;
 const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
+/// Minimum spacing between `usage.query` fetches for the same harness while
+/// its name is continuously hovered (spec 0086's tooltip). The daemon's own
+/// probe cache is separately gated to 10 minutes server-side; this just
+/// bounds client-side IPC chatter, so it can stay short.
+const HARNESS_USAGE_QUERY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// A row in the rendered list view. Sessions and group headers share the
 /// list; key dispatch and selection are typed.
@@ -1221,6 +1226,24 @@ pub struct App {
     /// Background channel delivering `(session_id, program_markdown)` fetch
     /// results into the event loop; drained alongside the template channel.
     pub program_projection_tx: mpsc::UnboundedSender<(String, String)>,
+    /// Last `usage.query` result per harness *name* (spec 0086) — usage is
+    /// per-subscription, shared across every session running that harness,
+    /// so this is keyed by harness rather than session id. Populated by a
+    /// background fetch kicked off while a harness-name hover is active
+    /// (see the main loop's pre-`select!` block); read by
+    /// `render_harness_hover_tooltip` to decide what, if anything, to show
+    /// below the model line.
+    pub harness_usage: HashMap<String, construct_protocol::UsageQueryResult>,
+    /// Harness names with a `usage.query` fetch currently in flight, so a
+    /// continuous hover doesn't spawn a new IPC call every loop iteration.
+    pub harness_usage_inflight: HashSet<String>,
+    /// Wall-clock of the last time a `usage.query` fetch was *initiated*
+    /// for a harness (regardless of outcome), used to throttle the
+    /// hover-driven fetch loop to roughly once every couple of seconds per
+    /// harness. The daemon's own probe cache is separately gated to 10
+    /// minutes server-side (spec 0086); this only bounds client-side IPC
+    /// chatter while continuously hovering.
+    pub harness_usage_last_query: HashMap<String, Instant>,
     pub theme: crate::theme::Theme,
     pub theme_name: crate::theme::ThemeName,
     terminal_background_is_light: Option<bool>,
@@ -2794,10 +2817,11 @@ impl SessionTitleNameHit {
 
 /// Hover hit zone for a harness-name span — the session list's right-aligned
 /// per-row label, or a session view's title-bar label. Hit-tested against
-/// `app.mouse_pos` to show `render_harness_model_tooltip`'s current-model
-/// tooltip; not a click target, so (unlike `SessionTitleNameHit`) there's no
-/// need to track which pane it belongs to — on-screen geometry alone
-/// disambiguates which row/pane the pointer is over.
+/// `app.mouse_pos` to show `render_harness_hover_tooltip`'s current-model
+/// (+ usage-probe, spec 0086) tooltip; not a click target, so (unlike
+/// `SessionTitleNameHit`) there's no need to track which pane it belongs to
+/// — on-screen geometry alone disambiguates which row/pane the pointer is
+/// over.
 #[derive(Debug, Clone)]
 pub struct SessionHarnessHit {
     pub session_id: String,
@@ -2894,8 +2918,9 @@ pub struct LayoutSnapshot {
     /// every frame by `render_detail`.
     pub session_title_name_hits: Vec<SessionTitleNameHit>,
     /// Hover zones for harness-name labels — session-list rows plus each
-    /// rendered session view's title bar — so `render_harness_model_tooltip`
-    /// can show the session's current model on hover.
+    /// rendered session view's title bar — so `render_harness_hover_tooltip`
+    /// can show the session's current model (and cached usage-probe data,
+    /// spec 0086) on hover.
     pub session_harness_hits: Vec<SessionHarnessHit>,
     /// Bounds of the sidebar's lineage section from the last frame (header
     /// row included). `None` when the selected session has no lineage to
@@ -3313,6 +3338,9 @@ async fn run_with_socket_initial_selection(
         program_markdown_cache: HashMap::new(),
         program_projection_pending: HashSet::new(),
         program_projection_tx,
+        harness_usage: HashMap::new(),
+        harness_usage_inflight: HashSet::new(),
+        harness_usage_last_query: HashMap::new(),
         theme,
         theme_name: theme_config.active_name(None),
         terminal_background_is_light: None,
@@ -3645,6 +3673,14 @@ async fn run_loop(
     // channels above this one stays local instead of living on `App`.
     let (content_search_tx, mut content_search_rx) =
         mpsc::unbounded_channel::<(u64, anyhow::Result<construct_protocol::SearchResult>)>();
+    // Harness usage-probe hover tooltip (spec 0086): the throttled
+    // `usage.query` call fired below (while a harness-name hover is
+    // active) is spawned entirely within this loop, so like tier-2
+    // content search this channel stays local instead of living on `App`.
+    let (harness_usage_tx, mut harness_usage_rx) = mpsc::unbounded_channel::<(
+        String,
+        anyhow::Result<construct_protocol::UsageQueryResult>,
+    )>();
     let mut reconnect: Option<ReconnectState> = None;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
@@ -3900,6 +3936,49 @@ async fn run_loop(
                                 Err(e) => Err(e),
                             };
                             let _ = tx.send((generation, result));
+                        });
+                    }
+                }
+            }
+            // Harness usage-probe hover tooltip (spec 0086): while the
+            // cursor sits over a harness-name hit (just populated by the
+            // draw call above), keep its cached `usage.query` result warm.
+            // Throttled per-harness rather than per-frame — see
+            // `HARNESS_USAGE_QUERY_INTERVAL` — so a continuous hover fires
+            // at most one IPC call every couple of seconds, not one per
+            // loop iteration.
+            if let Some((mx, my)) = app.mouse_pos {
+                let harness = app
+                    .layout
+                    .session_harness_hits
+                    .iter()
+                    .find(|h| h.contains(mx, my))
+                    .and_then(|hit| app.sessions.iter().find(|s| s.id == hit.session_id))
+                    .map(|s| s.harness.clone());
+                if let Some(harness) = harness {
+                    // `UsageQueryResult::enabled` docs: once a harness is
+                    // known disabled (`usage_probe = ""` for it), the
+                    // snapshot will never populate — stop polling instead
+                    // of re-querying it every throttle window forever.
+                    let known_disabled = app
+                        .harness_usage
+                        .get(&harness)
+                        .is_some_and(|r| !r.enabled);
+                    let due = app
+                        .harness_usage_last_query
+                        .get(&harness)
+                        .map(|at| at.elapsed() >= HARNESS_USAGE_QUERY_INTERVAL)
+                        .unwrap_or(true);
+                    if !known_disabled && due && !app.harness_usage_inflight.contains(&harness) {
+                        app.harness_usage_inflight.insert(harness.clone());
+                        app.harness_usage_last_query
+                            .insert(harness.clone(), Instant::now());
+                        let client = app.client.clone();
+                        let tx = harness_usage_tx.clone();
+                        let harness_for_task = harness.clone();
+                        tokio::spawn(async move {
+                            let result = client.usage_query(&harness_for_task, true).await;
+                            let _ = tx.send((harness_for_task, result));
                         });
                     }
                 }
@@ -4184,6 +4263,19 @@ async fn run_loop(
                                 app.set_status(format!("content search failed: {e}"));
                             }
                         }
+                    }
+                }
+            }
+            fetched = harness_usage_rx.recv() => {
+                // A hover-triggered `usage.query` landed. Clear the
+                // in-flight marker regardless of outcome — a failed fetch
+                // is naturally retried on the next hover tick once
+                // `HARNESS_USAGE_QUERY_INTERVAL` has passed, same as any
+                // other transient IPC hiccup elsewhere in this loop.
+                if let Some((harness, result)) = fetched {
+                    app.harness_usage_inflight.remove(&harness);
+                    if let Ok(result) = result {
+                        app.harness_usage.insert(harness, result);
                     }
                 }
             }
@@ -11508,6 +11600,9 @@ mod tests {
             program_markdown_cache: HashMap::new(),
             program_projection_pending: HashSet::new(),
             program_projection_tx: mpsc::unbounded_channel().0,
+            harness_usage: HashMap::new(),
+            harness_usage_inflight: HashSet::new(),
+            harness_usage_last_query: HashMap::new(),
             theme: crate::theme::Theme::default(),
             theme_name: crate::theme::ThemeName::Matrix,
             terminal_background_is_light: None,

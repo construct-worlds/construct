@@ -17,7 +17,7 @@ use construct_protocol::{
     SessionSetFocusedParams, SessionSetGroupParams, SessionSetPinnedParams,
     SessionSetProjectParams, SessionSetTitleParams, SessionSetViewParams, SessionToolActionParams,
     SessionToolDecisionParams, SetTerminalBackgroundParams, SmithSetAuthMethodParams,
-    SubscribeParams, TranscriptParams, IPC_VERSION,
+    SubscribeParams, TranscriptParams, UsageQueryParams, IPC_VERSION,
 };
 use anyhow::{Context, Result};
 use futures::{SinkExt as _, StreamExt as _};
@@ -1095,6 +1095,10 @@ async fn dispatch(
             Ok(result) => ok!(req, &result),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
+    });
+    dispatch_entry!(ipc_method::USAGE_QUERY, {
+        let p = params!(req, UsageQueryParams);
+        ok!(req, &manager.usage_query(&p.harness, p.allow_refresh).await)
     });
     dispatch_entry!(ipc_method::PROGRAM_GET, {
         let p = params!(req, ProgramGetParams);

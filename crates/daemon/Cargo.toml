@@ -13,6 +13,7 @@ description = "construct daemon: supervises agent sessions across harnesses"
 
 [dependencies]
 construct-protocol = { workspace = true }
+construct-adapter-common = { workspace = true }
 tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true

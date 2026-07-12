@@ -180,6 +180,7 @@ impl SessionManager {
                 construct_protocol::SessionKind::User => "user",
                 construct_protocol::SessionKind::Orchestrator => "orchestrator",
                 construct_protocol::SessionKind::Subagent => "subagent",
+                construct_protocol::SessionKind::UsageProbe => "usage_probe",
             }
             .to_string(),
         );
