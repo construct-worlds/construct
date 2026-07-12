@@ -30,6 +30,13 @@ const USAGE_PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 /// client to negotiate a real size against.
 const USAGE_PROBE_COLS: u16 = 100;
 const USAGE_PROBE_ROWS: u16 = 40;
+/// Last-resort ceiling on one probe attempt's total wall-clock time, in
+/// [`SessionManager::refresh_usage`] — comfortably above the legitimate
+/// worst case (adapter spawn's own 60s request timeout plus the 10s/15s
+/// quiescence waits above, ≈90s) so a harness can never be stuck showing
+/// "probing…" indefinitely even if something not covered by those
+/// individual bounds goes wrong.
+const PROBE_HARD_CEILING: Duration = Duration::from_secs(120);
 
 impl SessionManager {
     /// `usage.query` (spec 0085). Read-mostly: never blocks on the probe
@@ -99,13 +106,52 @@ impl SessionManager {
     /// failure — so a later query just retries; no snapshot is stored on
     /// failure, which is exactly "not cached" from `usage_query`'s view.
     async fn refresh_usage(self: Arc<Self>, harness: String, command: String) {
-        let result = self.run_usage_probe(&harness, &command).await;
+        // `finish_refresh` (clearing the in-flight guard) MUST run no
+        // matter what happens inside the probe — otherwise a harness gets
+        // permanently stuck showing "probing…" until the next daemon
+        // restart, since `usage_query` never spawns a second attempt while
+        // the guard is still set. Two distinct failure modes are guarded
+        // against here, neither of which the individual timeouts inside
+        // `run_usage_probe` cover on their own:
+        //
+        // 1. A panic anywhere inside `run_usage_probe` (or a callee it
+        //    `.await`s) would otherwise silently kill this async fn before
+        //    it ever reaches the `finish_refresh` call below — a bare
+        //    `.await` propagates a panic, it doesn't turn into an `Err`.
+        //    Isolated the standard way: run the probe in its own spawned
+        //    task and await the `JoinHandle`, which turns a panic into an
+        //    `Err` instead of propagating it here.
+        // 2. Every individual wait inside `run_usage_probe` has its own
+        //    bound (10s/15s quiescence waits, 60s adapter request
+        //    timeout), but nothing bounds their *sum*, and a bug not yet
+        //    found could still block somewhere uncovered. `PROBE_HARD_CEILING`
+        //    is a last-resort ceiling comfortably above the legitimate
+        //    worst case (~90s) so a harness can never be stuck longer than
+        //    this even if something above is wrong. On timeout the
+        //    spawned task is left to finish (and clean up its ephemeral
+        //    session) on its own rather than aborted mid-flight; its
+        //    eventual result is simply not waited for.
+        let mgr = self.clone();
+        let harness_for_probe = harness.clone();
+        let command_for_probe = command.clone();
+        let probe = tokio::spawn(async move {
+            mgr.run_usage_probe(&harness_for_probe, &command_for_probe)
+                .await
+        });
+        let outcome = tokio::time::timeout(PROBE_HARD_CEILING, probe).await;
         let mut cache = self
             .usage_cache
             .lock()
             .expect("usage_cache mutex poisoned");
-        if let Some(snapshot) = result {
-            cache.store(&harness, snapshot);
+        match outcome {
+            Ok(Ok(Some(snapshot))) => cache.store(&harness, snapshot),
+            Ok(Ok(None)) => {}
+            Ok(Err(join_err)) => {
+                tracing::warn!(%harness, error = %join_err, "usage probe: task panicked; discarding");
+            }
+            Err(_) => {
+                tracing::warn!(%harness, "usage probe: exceeded hard ceiling; discarding");
+            }
         }
         cache.finish_refresh(&harness);
     }
@@ -635,6 +681,26 @@ fn usage_probe_wait_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Proves the exact `tokio::spawn` + `timeout` + `JoinHandle` pattern
+    /// `refresh_usage` relies on: a panic inside the spawned probe task
+    /// must turn into an `Err` when the handle is awaited, not propagate
+    /// and kill the awaiting task — otherwise `finish_refresh` (clearing
+    /// the in-flight guard) would never run, and the harness would be
+    /// stuck showing "probing…" until the next daemon restart. This is a
+    /// real bug found live: a race can leave a probe task in an unexpected
+    /// state, and without this isolation any panic there — not just this
+    /// specific one — would wedge the harness forever.
+    #[tokio::test]
+    async fn spawned_panic_becomes_a_join_error_not_a_propagated_panic() {
+        let handle = tokio::spawn(async { panic!("simulated probe panic") });
+        let outcome = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(
+            matches!(outcome, Ok(Err(_))),
+            "a panic in the spawned task must surface as Ok(Err(JoinError)), \
+             not hang or propagate: {outcome:?}"
+        );
+    }
 
     /// The settle gate: keep polling while the probe session is still
     /// drawing (recent output) or hasn't drawn at all, settle once it goes
