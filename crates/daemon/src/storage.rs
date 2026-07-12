@@ -87,6 +87,69 @@ const INVESTIGATION_PROGRAM: &str = concat!(
     "\n",
     "Closed-out work and the final answer to the Question.\n",
 );
+const SPEC_PROGRAM: &str = concat!(
+    "# Specification\n",
+    "\n",
+    "Run this program to turn the idea in Context into an implementation-ready ",
+    "specification. The agent resolves what it can, records genuine ",
+    "unknowns in Open Questions, and keeps every section consistent as the ",
+    "document evolves. Type @ to embed a live session or harness as supporting ",
+    "context.\n",
+    "\n",
+    "## Context\n",
+    "\n",
+    "The idea, relevant background, and evidence already available.\n",
+    "\n",
+    "## Problem\n",
+    "\n",
+    "Who has the problem, what they struggle with, and why solving it matters.\n",
+    "\n",
+    "## Goals\n",
+    "\n",
+    "- \n",
+    "\n",
+    "## Non-Goals\n",
+    "\n",
+    "- \n",
+    "\n",
+    "## Users and Use Cases\n",
+    "\n",
+    "- \n",
+    "\n",
+    "## Requirements\n",
+    "\n",
+    "Prioritized, testable product behavior.\n",
+    "\n",
+    "- \n",
+    "\n",
+    "## Design\n",
+    "\n",
+    "The proposed behavior, boundaries, and important technical decisions.\n",
+    "\n",
+    "## User Experience\n",
+    "\n",
+    "The key journey, states, and edge cases from the user's perspective.\n",
+    "\n",
+    "## Success Metrics\n",
+    "\n",
+    "- \n",
+    "\n",
+    "## Acceptance Criteria\n",
+    "\n",
+    "- \n",
+    "\n",
+    "## Constraints and Dependencies\n",
+    "\n",
+    "- \n",
+    "\n",
+    "## Open Questions\n",
+    "\n",
+    "- \n",
+    "\n",
+    "## Rollout\n",
+    "\n",
+    "How the product will be delivered, validated, and expanded.\n",
+);
 
 #[derive(Debug, Default)]
 struct WidgetFrontmatter {
@@ -553,6 +616,16 @@ impl Storage {
                     "Question, context, plan, findings, and done — run to investigate".to_string(),
                 ),
                 markdown: INVESTIGATION_PROGRAM.to_string(),
+                built_in: true,
+            },
+            ProgramTemplate {
+                id: "spec".to_string(),
+                name: "Spec".to_string(),
+                description: Some(
+                    "Implementation-ready problem, goals, requirements, design, and acceptance criteria"
+                        .to_string(),
+                ),
+                markdown: SPEC_PROGRAM.to_string(),
                 built_in: true,
             },
         ];
@@ -2129,6 +2202,36 @@ mod program_tests {
         assert_eq!(review.description, None);
         assert!(!review.built_in);
         assert!(templates.iter().any(|t| t.id == "tasks" && t.built_in));
+    }
+
+    #[test]
+    fn program_templates_include_spec_builtin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+
+        let templates = storage.program_templates().unwrap();
+        let spec = templates.iter().find(|t| t.id == "spec").unwrap();
+
+        assert_eq!(spec.name, "Spec");
+        assert!(spec.built_in);
+        assert!(spec.description.is_some());
+        for heading in [
+            "## Context",
+            "## Problem",
+            "## Goals",
+            "## Non-Goals",
+            "## Users and Use Cases",
+            "## Requirements",
+            "## Design",
+            "## User Experience",
+            "## Success Metrics",
+            "## Acceptance Criteria",
+            "## Constraints and Dependencies",
+            "## Open Questions",
+            "## Rollout",
+        ] {
+            assert!(spec.markdown.contains(heading), "missing {heading}");
+        }
     }
 
     #[test]
