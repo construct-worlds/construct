@@ -5421,12 +5421,20 @@ impl App {
             }
         }
         // If this session has a PTY, prefer the live terminal view and
-        // bootstrap the local emulator from the daemon's replay snapshot.
-        if self.in_pty_session() {
-            self.set_active_view(ViewMode::Terminal);
+        // bootstrap the local emulator from the daemon's replay snapshot —
+        // except a reset-synthesized archived snapshot (spec 0085), which
+        // carries has_pty from the live session purely so *forking* it
+        // spawns interactive, not headless; it has no PTY replay of its own
+        // to bootstrap, so `natural_view_mode` (the same decision
+        // `select_session_inner` already makes) is the one to defer to here
+        // too, not the bare has_pty check `in_pty_session()` performs.
+        let natural = self
+            .selected_session()
+            .map(natural_view_mode)
+            .unwrap_or(ViewMode::Chat);
+        self.set_active_view(natural);
+        if natural == ViewMode::Terminal {
             self.bootstrap_terminal(&id).await;
-        } else {
-            self.set_active_view(ViewMode::Chat);
         }
         if self.selection.session_id() == Some(id.as_str()) {
             self.start_session_transition();
