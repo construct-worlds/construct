@@ -577,7 +577,7 @@ simple_write_tool!(
         };
         let c = c.clone();
         let sid = sid.to_string();
-        Box::pin(async move { c.move_session(&sid, dir).await })
+        Box::pin(async move { c.move_session(&sid, dir).await.map(|_| ()) })
             as std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
     },
     "direction"

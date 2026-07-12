@@ -1976,6 +1976,14 @@ pub struct SessionMoveParams {
     pub direction: MoveDirection,
 }
 
+/// `false` means the session was already at the edge of its reorder
+/// region (top/bottom of the list, or — for a forked session — the edge
+/// of its sibling forks) and nothing moved.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SessionMoveResult {
+    pub moved: bool,
+}
+
 /// Move a session into a group (or ungroup it by passing
 /// `group_id: None`). `position` controls where in the target region
 /// the session lands — `Top` of the list or `Bottom`. Default is

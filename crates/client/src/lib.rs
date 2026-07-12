@@ -886,8 +886,11 @@ impl Client {
             .await?;
         Ok(())
     }
-    pub async fn move_session(&self, id: &str, direction: MoveDirection) -> Result<()> {
-        let _: serde_json::Value = self
+    /// Returns whether the session actually moved — `false` means it was
+    /// already at the edge of its reorder region (top/bottom of the list,
+    /// or a forked session at the edge of its sibling forks).
+    pub async fn move_session(&self, id: &str, direction: MoveDirection) -> Result<bool> {
+        let r: construct_protocol::SessionMoveResult = self
             .request(
                 ipc_method::SESSION_MOVE,
                 &SessionMoveParams {
@@ -896,7 +899,7 @@ impl Client {
                 },
             )
             .await?;
-        Ok(())
+        Ok(r.moved)
     }
     /// Change a session's group membership. `group_id: None` ungroups
     /// the session. `position` controls where in the target region

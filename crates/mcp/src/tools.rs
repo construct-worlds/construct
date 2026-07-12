@@ -755,8 +755,8 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                     ))
                 }
             };
-            client.move_session(&sid, direction).await?;
-            json!({ "ok": true })
+            let moved = client.move_session(&sid, direction).await?;
+            json!({ "ok": true, "moved": moved })
         }
         "construct_subagent_create" => {
             let parent_id = require_session_id(session_id)?;

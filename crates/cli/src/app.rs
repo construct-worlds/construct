@@ -5578,10 +5578,25 @@ impl App {
         };
         match self.selection.clone() {
             Selection::Session(id) => {
-                if let Err(e) = self.client.move_session(&id, dir).await {
-                    self.set_status(format!("move failed: {e}"));
+                let is_fork = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .is_some_and(|s| s.forked_from.is_some());
+                match self.client.move_session(&id, dir).await {
+                    Ok(true) => {} // Daemon broadcasts will reconcile positions/groups.
+                    Ok(false) => self.set_status(if is_fork {
+                        // Forks nest under their parent at the same flat
+                        // indent as any deeper fork-of-a-fork, so hitting
+                        // this edge looks identical to a stuck keybinding
+                        // otherwise — the row simply has no sibling fork
+                        // left to swap with in that direction.
+                        "no sibling fork to swap with".into()
+                    } else {
+                        "nothing to reorder past".into()
+                    }),
+                    Err(e) => self.set_status(format!("move failed: {e}")),
                 }
-                // Daemon broadcasts will reconcile positions/groups.
             }
             Selection::Group(id) => {
                 if let Err(e) = self.client.move_project(&id, dir).await {
