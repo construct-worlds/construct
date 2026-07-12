@@ -87,6 +87,32 @@ const INVESTIGATION_PROGRAM: &str = concat!(
     "\n",
     "Closed-out work and the final answer to the Question.\n",
 );
+const GOAL_PROGRAM: &str = concat!(
+    "# Goal\n",
+    "\n",
+    "Run this program to complete the Goal. The agent uses Context and ",
+    "Requirements to execute the work, verifies the result, and records the ",
+    "outcome in Done. Ask only when a missing decision blocks safe progress. ",
+    "Type @ to embed a live session or harness.\n",
+    "\n",
+    "What should be true when this goal is done.\n",
+    "\n",
+    "## Context\n",
+    "\n",
+    "Relevant background, constraints, and starting points.\n",
+    "\n",
+    "## Requirements\n",
+    "\n",
+    "- \n",
+    "\n",
+    "## Verification\n",
+    "\n",
+    "- \n",
+    "\n",
+    "## Done\n",
+    "\n",
+    "The completed result and any follow-up work.\n",
+);
 
 #[derive(Debug, Default)]
 struct WidgetFrontmatter {
@@ -553,6 +579,15 @@ impl Storage {
                     "Question, context, plan, findings, and done — run to investigate".to_string(),
                 ),
                 markdown: INVESTIGATION_PROGRAM.to_string(),
+                built_in: true,
+            },
+            ProgramTemplate {
+                id: "goal".to_string(),
+                name: "Goal".to_string(),
+                description: Some(
+                    "Goal, context, requirements, and verification — run to execute".to_string(),
+                ),
+                markdown: GOAL_PROGRAM.to_string(),
                 built_in: true,
             },
         ];
@@ -2129,6 +2164,28 @@ mod program_tests {
         assert_eq!(review.description, None);
         assert!(!review.built_in);
         assert!(templates.iter().any(|t| t.id == "tasks" && t.built_in));
+    }
+
+    #[test]
+    fn program_templates_include_goal_builtin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+
+        let templates = storage.program_templates().unwrap();
+        let goal = templates.iter().find(|t| t.id == "goal").unwrap();
+
+        assert_eq!(goal.name, "Goal");
+        assert!(goal.built_in);
+        assert!(goal.description.is_some());
+        for heading in [
+            "# Goal",
+            "## Context",
+            "## Requirements",
+            "## Verification",
+            "## Done",
+        ] {
+            assert!(goal.markdown.contains(heading), "missing {heading}");
+        }
     }
 
     #[test]
