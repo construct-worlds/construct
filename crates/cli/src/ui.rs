@@ -1258,6 +1258,17 @@ fn harness_usage_tooltip_case(
     HarnessUsageTooltipCase::None
 }
 
+/// Style for the model (+ effort) header line when the harness hover
+/// tooltip also shows usage-probe content underneath it (spec 0085) — bold
+/// + the theme's accent color, so the header reads as visually distinct
+/// from the usage panel below it rather than blending into a wall of text.
+/// Only used when there's a second section to stand out *from*; the
+/// plain model-only tooltip (no usage data) keeps the shared
+/// `render_tooltip_rect` styling unchanged.
+fn harness_hover_tooltip_header_style(theme: &Theme) -> Style {
+    theme.accent_style().add_modifier(Modifier::BOLD)
+}
+
 /// Tooltip shown when hovering a session's harness name — either its
 /// session-list row or a session view's title bar (both push into the same
 /// `app.layout.session_harness_hits`). Always shows the current model (+
@@ -1265,9 +1276,9 @@ fn harness_usage_tooltip_case(
 /// nothing when the harness hasn't reported a model, since only
 /// `smith`/`grok` (and agy, best effort) track it live today. When a
 /// usage-probe snapshot is cached for that harness (spec 0085), the same
-/// box grows to show it underneath, redisplayed verbatim (color/layout
-/// intact, never parsed into text) rather than as a second, competing
-/// tooltip.
+/// box grows to show it underneath (highlighted header, a blank separator
+/// row, then the panel), redisplayed verbatim (color/layout intact, never
+/// parsed into text) rather than as a second, competing tooltip.
 fn render_harness_hover_tooltip(f: &mut Frame, app: &App) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
@@ -1301,14 +1312,16 @@ fn render_harness_hover_tooltip(f: &mut Frame, app: &App) {
             let usage_label = " usage: probing… ";
             let usage_w = UnicodeWidthStr::width(usage_label) as u16;
             let w = (model_w.max(usage_w) + 2).min(total.width.max(1));
-            let h: u16 = 4;
+            // model line + blank separator + probing line + 2 border rows.
+            let h: u16 = 5;
             let rect = harness_hover_tooltip_rect(hit.x_start, hit.y, w, h, total);
             f.render_widget(Clear, rect);
             let block = app.theme.themed_block("");
             let inner = block.inner(rect);
             f.render_widget(block, rect);
             let lines = vec![
-                Line::styled(model_label, app.theme.text_style()),
+                Line::styled(model_label, harness_hover_tooltip_header_style(&app.theme)),
+                Line::raw(""),
                 Line::styled(usage_label, app.theme.dim_style()),
             ];
             f.render_widget(Paragraph::new(lines), inner);
@@ -1350,7 +1363,8 @@ fn render_harness_hover_tooltip(f: &mut Frame, app: &App) {
             let usage_rows = content_height.min(HARNESS_USAGE_TOOLTIP_MAX_ROWS);
             let inner_w = model_w.max(info.cols);
             let w = (inner_w + 2).min(total.width.max(1));
-            let h = (1 + usage_rows + 2).min(total.height.max(1));
+            // model line + blank separator + usage rows + 2 border rows.
+            let h = (1 + 1 + usage_rows + 2).min(total.height.max(1));
             let rect = harness_hover_tooltip_rect(hit.x_start, hit.y, w, h, total);
             f.render_widget(Clear, rect);
             let block = app.theme.themed_block("");
@@ -1366,15 +1380,23 @@ fn render_harness_hover_tooltip(f: &mut Frame, app: &App) {
                 height: 1,
             };
             f.render_widget(
-                Paragraph::new(Line::styled(model_label, app.theme.text_style())),
+                Paragraph::new(Line::styled(
+                    model_label,
+                    harness_hover_tooltip_header_style(&app.theme),
+                )),
                 model_area,
             );
-            if inner.height > 1 {
+            // Row `inner.y + 1` is the blank separator — deliberately left
+            // unpainted (the `Clear` above already cleared the whole rect
+            // to the theme's background), so the model line reads as a
+            // distinct header rather than running straight into the usage
+            // panel's own first row.
+            if inner.height > 2 {
                 let usage_area = Rect {
                     x: inner.x,
-                    y: inner.y + 1,
+                    y: inner.y + 2,
                     width: inner.width,
-                    height: inner.height - 1,
+                    height: inner.height - 2,
                 };
                 // `render_vt100_screen_rows` independently clamps
                 // `visible_h` to `usage_area.height`, so it self-corrects

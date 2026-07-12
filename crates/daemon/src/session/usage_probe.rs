@@ -226,6 +226,25 @@ impl SessionManager {
             tracing::warn!(%harness, session = %id, "usage probe: capture was empty; not caching");
             return None;
         }
+        if !capture_shows_command_ran(&bytes, command) {
+            // Empirically observed race: the startup-quiescence wait (step
+            // 4) can declare "settled" while the harness is still doing
+            // async startup work of its own (confirmed live for claude —
+            // an MCP-server auth check still in flight after the PTY had
+            // already gone quiet for the settle window). The probe command
+            // then gets sent into a screen that's about to redraw and never
+            // actually lands, and the harness's *own* continued startup
+            // output during the response wait (step 6) gets mistaken for
+            // "the command's response" — in practice, claude's plain idle
+            // welcome screen with an empty prompt, captured as if it were
+            // real usage data. See `capture_shows_command_ran`.
+            tracing::warn!(
+                %harness, session = %id,
+                "usage probe: capture shows no trace of the probe command — \
+                 likely raced the harness's own startup activity; discarding",
+            );
+            return None;
+        }
         Some(crate::usage::UsageSnapshot {
             bytes,
             cols: USAGE_PROBE_COLS,
@@ -524,6 +543,58 @@ fn read_native_id_file(path: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// First whitespace-delimited token of a probe `command` (e.g. `"/usage"`
+/// from `"/usage show"` or from an operator override like `"/usage
+/// --verbose-test-override"`). [`capture_shows_command_ran`] checks for
+/// only this token, not the whole command string, because a harness
+/// commonly renders a command keyword and its trailing arguments as
+/// separately styled spans — an ANSI color-change/cursor-move escape sits
+/// between them (confirmed live for grok's `/usage --arg` rendering) — so
+/// the full command string is not reliably one contiguous run in the raw
+/// capture even when everything worked correctly.
+fn command_first_token(command: &str) -> &str {
+    command.split_whitespace().next().unwrap_or(command)
+}
+
+/// Whether `bytes` (the newly-captured PTY output) shows any trace of
+/// `command` having actually been typed/rendered at some point during the
+/// capture window. Guards against a real, empirically observed race: the
+/// startup-quiescence wait (step 4) can declare a harness "settled" while
+/// it's still doing async startup work of its own — confirmed live for
+/// claude, where an MCP-server auth check was still in flight after the
+/// PTY had already gone quiet for the settle window. The probe command
+/// then gets sent into a screen that's about to redraw and never actually
+/// lands, and the harness's *own* continued startup output during the
+/// response wait (step 6) gets mistaken for "the command's response" —
+/// captured and cached as if it were real usage data, when it's actually
+/// just the harness's idle welcome screen. If the command's own text never
+/// appears anywhere in the capture, nothing legitimate could have rendered
+/// in response to it.
+fn capture_shows_command_ran(bytes: &[u8], command: &str) -> bool {
+    let token = command_first_token(command);
+    if token.is_empty() {
+        return true; // nothing meaningful to check against
+    }
+    let text = String::from_utf8_lossy(bytes);
+    // A bare substring search isn't enough: a probe command starting with
+    // "/" (every real one does) can coincidentally appear inside an
+    // unrelated path — this repo's own worktree happens to be named
+    // "usage-probe-backend", so ".../worktrees/usage-probe-backend"
+    // contains the literal substring "/usage" without the command ever
+    // having run (caught by this exact regression test against a real
+    // captured failure). Require the character immediately after the
+    // matched token to be neither alphanumeric nor `-`, so a genuine
+    // command echo (followed by whitespace, a newline, or another ANSI
+    // escape byte) still matches, but a path continuing into
+    // "-probe-backend" does not.
+    text.match_indices(token).any(|(idx, matched)| {
+        match text[idx + matched.len()..].chars().next() {
+            None => true,
+            Some(c) => !c.is_alphanumeric() && c != '-',
+        }
+    })
+}
+
 /// Pure decision step for [`SessionManager::wait_for_pty_settle`]'s poll
 /// loop, mirroring `lifecycle::resume_redraw_ready`'s shape (checked on an
 /// interval against a session's `last_pty_at_ms`) but distinguishing
@@ -679,5 +750,44 @@ mod tests {
         assert_eq!(read_native_id_file(&blank), None);
 
         assert_eq!(read_native_id_file(&tmp.path().join("missing.txt")), None);
+    }
+
+    // -- `capture_shows_command_ran` (spec 0085): regression coverage for
+    // the live-observed startup-quiescence race where a probe's command
+    // never actually landed, and the harness's own idle welcome screen got
+    // captured and cached as if it were a real response.
+
+    #[test]
+    fn command_first_token_strips_trailing_arguments() {
+        assert_eq!(command_first_token("/usage show"), "/usage");
+        assert_eq!(command_first_token("/usage --verbose-test-override"), "/usage");
+        assert_eq!(command_first_token("/status"), "/status");
+    }
+
+    #[test]
+    fn capture_shows_command_ran_true_when_token_present() {
+        // Shape of a real successful claude capture: the command appears
+        // in an autocomplete-dropdown help line before the real panel.
+        let bytes = b"\x1b[38;2;177;185;249m/usage    Show session cost, plan usage stats";
+        assert!(capture_shows_command_ran(bytes, "/usage"));
+    }
+
+    #[test]
+    fn capture_shows_command_ran_false_on_raced_startup_screen() {
+        // Shape of the real observed failure: claude's idle welcome screen
+        // and cwd banner, with the probe command never actually typed —
+        // the only "usage" substring is the unrelated directory name.
+        let bytes = b"Claude Code v2.1.207\n~/agentd/.claude/worktrees/usage-probe-backend\n1 MCP server needs authentication";
+        assert!(!capture_shows_command_ran(bytes, "/usage"));
+    }
+
+    #[test]
+    fn capture_shows_command_ran_finds_first_token_even_with_styled_arguments() {
+        // Shape of a real grok override capture: "/usage" and its argument
+        // render as separately styled spans with an ANSI escape between
+        // them, so the full command string isn't one contiguous run even
+        // on success — only the first token is checked.
+        let bytes = b"\x1b[1m/usage\x1b[14G\x1b[2m--verify-override-test";
+        assert!(capture_shows_command_ran(bytes, "/usage --verify-override-test"));
     }
 }
