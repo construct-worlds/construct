@@ -293,7 +293,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_program_popup(f, app);
     render_resize_handle_cursor(f, app);
     render_tasks_popup(f, app);
-    render_reset_segment_popup(f, app);
     render_remote_control_popup(f, app);
     if app.help_visible {
         let help_popup = render_help(f, area, app);
@@ -9813,76 +9812,6 @@ fn render_tasks_popup(f: &mut Frame, app: &mut App) {
     f.render_widget(para, inner);
 }
 
-/// Read-only popup for one archived context-reset segment (spec 0085) —
-/// opened by selecting a `LineageEdge::Reset` node in the lineage view.
-/// Reuses `chat_lines`, the same formatter the live chat pane paints with,
-/// so an archived segment renders identically to how it looked live;
-/// modeled on `render_help`'s scroll-clamp/scrollbar shape rather than
-/// `render_tasks_popup`'s (a transcript can run far longer than a task
-/// list ever does).
-fn render_reset_segment_popup(f: &mut Frame, app: &mut App) {
-    let Some(popup) = app.reset_segment_popup.clone() else {
-        return;
-    };
-    let total = f.area();
-    let width = total.width.saturating_sub(8).min(100).max(30);
-    let lines = chat_lines(&app.theme, &popup.events);
-    let total_rows = lines.len();
-    let max_height = total.height.saturating_sub(4);
-    let height = ((total_rows as u16).saturating_add(4)).min(max_height).max(6);
-    if width < 30 || height < 6 {
-        return;
-    }
-    let viewport_rows = height.saturating_sub(4) as usize;
-    let max_scroll = total_rows.saturating_sub(viewport_rows);
-    let scroll = popup.scroll.min(max_scroll);
-    if let Some(p) = app.reset_segment_popup.as_mut() {
-        p.scroll = scroll;
-    }
-    let x = total.x + (total.width.saturating_sub(width)) / 2;
-    let y = total.y + (total.height.saturating_sub(height)) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-    app.layout.modal_area = Some(rect);
-    let at = chrono::DateTime::from_timestamp_millis(popup.at_ms)
-        .map(|d| d.format("%H:%M:%S").to_string())
-        .unwrap_or_default();
-    let title = format!(
-        " ↺ archived — cleared {at} — [f] fork from here, Esc to close ",
-        at = at,
-    );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border_focused))
-        .title(Line::from(Span::styled(
-            title,
-            Style::default()
-                .fg(app.theme.info)
-                .add_modifier(Modifier::BOLD),
-        )));
-    let inner = block.inner(rect);
-    f.render_widget(Clear, rect);
-    f.render_widget(block, rect);
-
-    if popup.events.is_empty() {
-        let p = Paragraph::new("(no events recorded in this window)")
-            .style(Style::default().fg(app.theme.dim));
-        f.render_widget(p, inner);
-        return;
-    }
-
-    let para = Paragraph::new(lines)
-        .style(Style::default().fg(app.theme.text))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll.min(u16::MAX as usize) as u16, 0));
-    f.render_widget(para, inner);
-    render_program_scroll_indicator(f, &app.theme, rect, inner, scroll, total_rows, viewport_rows);
-}
-
 /// Keep `selected_raw` on screen within `visible` rows, scrolling the
 /// window just far enough in either direction. Simpler than
 /// `session_picker_scroll` because a lineage tree has no non-selectable
@@ -9949,10 +9878,11 @@ fn render_lineage_row(
                         Style::default().fg(theme.dim)
                     }
                 }
-                // Fork, subagent, and reset (spec 0085) arrow glyphs render
-                // at the same brightness, and light up with their branching
-                // session (a reset segment's synthetic id, distinct per
-                // segment, so hover/select never light more than one box).
+                // Fork and subagent arrow glyphs render at the same
+                // brightness, and light up with their branching session — a
+                // reset-synthesized fork (spec 0085) is still an ordinary
+                // Fork edge with a real session id, just drawn with a
+                // distinct glyph (`↺`, chosen in `lineage.rs`).
                 crate::lineage::LineageSpan::Edge { session_id, .. } => {
                     if selected_session == Some(session_id.as_str())
                         || hovered_session == Some(session_id.as_str())
@@ -14796,7 +14726,7 @@ mod tests {
             at_ms: 1_000,
             parent_busy_ms: 0,
             parent_message_count: 0,
-            reset_native_id: None,
+            is_reset_snapshot: false,
         });
         let mut sub = lineage_test_summary("s");
         sub.kind = construct_protocol::SessionKind::Subagent;
@@ -14999,7 +14929,7 @@ mod tests {
             at_ms: 1_000,
             parent_busy_ms: 0,
             parent_message_count: 0,
-            reset_native_id: None,
+            is_reset_snapshot: false,
         });
         let sessions = vec![root, fork];
         let by_id: HashMap<&str, &SessionSummary> =
@@ -15108,7 +15038,7 @@ mod tests {
                 at_ms: 0,
                 parent_busy_ms: 0,
                 parent_message_count: 0,
-                reset_native_id: None,
+                is_reset_snapshot: false,
             });
             sessions.push(f);
         }
@@ -15380,7 +15310,6 @@ mod tests {
             needs_attention: false,
             forked_from: None,
             merge: None,
-            resets: Vec::new(),
         }
     }
 
@@ -15394,7 +15323,7 @@ mod tests {
             at_ms: 0,
             parent_busy_ms: 0,
             parent_message_count: 0,
-            reset_native_id: None,
+            is_reset_snapshot: false,
         });
 
         assert_eq!(session_list_markers(&fork), ("⑂", "★"));

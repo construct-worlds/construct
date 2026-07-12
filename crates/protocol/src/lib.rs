@@ -536,12 +536,12 @@ pub enum SessionEvent {
     /// Adapter detected that the wrapped harness minted a fresh native
     /// conversation id mid-session (Claude `/clear`/`/branch`/in-session
     /// `/resume`, Codex `/clear`/`/new`, and equivalent flows in Antigravity
-    /// and Grok — see spec 0079). The daemon snapshots the session's current
-    /// `transcript_seq`/`busy_ms`/`message_count` and appends a
-    /// [`ContextReset`] to [`SessionSummary::resets`] so the pre-reset
-    /// conversation stays addressable (spec 0085). Durable per-session
-    /// state, like [`ModelChanged`](Self::ModelChanged): never written to
-    /// the transcript.
+    /// and Grok — see spec 0079). The daemon synthesizes a real, archived
+    /// child session holding a copy of the transcript up to this point,
+    /// forked from this session, so the pre-reset conversation stays
+    /// addressable through the ordinary fork/archive machinery (spec 0085).
+    /// Durable per-session state, like [`ModelChanged`](Self::ModelChanged):
+    /// never written to the transcript.
     NativeIdChanged {
         prior_native_id: String,
         new_native_id: String,
@@ -1898,13 +1898,6 @@ pub struct SessionSummary {
     pub forked_from: Option<ForkedFrom>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<ForkMerge>,
-    /// Harness-native context resets (`/clear` and equivalents) observed
-    /// over this session's life, oldest first. Each entry snapshots this
-    /// session's own transcript position at the moment of reset, letting
-    /// lineage rendering carve the session's own timeline into segments —
-    /// see [`ContextReset`] and spec 0085.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub resets: Vec<ContextReset>,
 }
 
 impl SessionSummary {
@@ -1951,29 +1944,13 @@ pub struct ForkedFrom {
     /// events. `#[serde(default)]` for records predating it.
     #[serde(default)]
     pub parent_message_count: u64,
-    /// Set only when this fork was spawned from an archived reset segment
-    /// (spec 0085) rather than the parent's current native conversation:
-    /// the specific harness-native id (`ContextReset::prior_native_id`) the
-    /// new session should resume from. `None` for an ordinary fork, which
-    /// resumes whatever native id the parent is currently on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reset_native_id: Option<String>,
-}
-
-/// One harness-native context reset (`/clear` and equivalents) observed
-/// mid-session. Mirrors [`ForkedFrom`]/[`ForkMerge`]'s snapshot-counter
-/// shape: `transcript_seq`/`busy_ms`/`message_count` are this session's own
-/// values at the moment of reset, letting a reset chain be addressed by
-/// plain arithmetic the same way fork lineage windows already are. See
-/// spec 0085.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ContextReset {
-    pub at_ms: i64,
-    pub transcript_seq: u64,
-    pub busy_ms: u64,
-    pub message_count: u64,
-    pub prior_native_id: String,
-    pub new_native_id: String,
+    /// Set when this fork was synthesized automatically by a harness-native
+    /// context reset (`/clear` and equivalents, spec 0085) rather than
+    /// created by a user picking a harness and forking on purpose. Lineage
+    /// rendering uses this to show a distinct edge glyph (`↺` vs `⑂`) so the
+    /// two are never confused at a glance.
+    #[serde(default)]
+    pub is_reset_snapshot: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

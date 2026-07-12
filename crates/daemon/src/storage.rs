@@ -2279,7 +2279,6 @@ mod search_tests {
             archived: false,
             forked_from: None,
             merge: None,
-            resets: Vec::new(),
             operator_loop_disabled: false,
             needs_attention: false,
         }

@@ -3,54 +3,48 @@
 Status: accepted
 Date: 2026-07-11
 Area: harness, protocol, tui
-Scope: A harness-native context reset (`/clear`, `/branch`, `/new`, and equivalents) becomes a third lineage edge, and the pre-reset conversation becomes a selectable, readable, forkable node in the same graph as fork/subagent edges.
+Scope: A harness-native context reset (`/clear`, `/branch`, `/new`, and equivalents) synthesizes a real, archived fork of the pre-reset conversation, so it stays selectable, readable, and forkable through construct's existing fork/archive machinery.
 
 ## Decision
 
-A session's `SessionSummary` gains a `resets: Vec<ContextReset>` list. Each entry is recorded the moment an adapter observes a mid-session native id change — the change spec 0079 already detects and rebinds its transcript watcher to, but previously only logged:
+The live session never changes identity across a reset: its own native conversation id is rewritten in place (`x → y → ...`) exactly as spec 0079 already implements — that part is unchanged. What's new is the *other* half: on each detected native-id change, construct synthesizes a real, ordinary child session holding a frozen copy of the pre-reset conversation — "reset is fork-and-archive, plus switching the live session's own resume id," not a new kind of node.
 
-```
-ContextReset {
-    at_ms: i64,
-    transcript_seq: u64,      // this session's event_count at the moment of reset
-    busy_ms: u64,             // this session's busy_ms_at() at the moment of reset
-    message_count: u64,       // this session's message_count at the moment of reset
-    prior_native_id: String,  // the native conversation id that was retired
-    new_native_id: String,    // the native conversation id that replaced it
-}
-```
+Concretely, when an adapter emits `SessionEvent::NativeIdChanged { prior_native_id, new_native_id }` (still the same event spec 0079's detection point produces — only what the daemon does with it changes), the daemon:
 
-This mirrors `ForkedFrom`/`ForkMerge`'s existing snapshot-counter pattern: taking a transcript-position snapshot at a lineage boundary and using it to carve a timeline into segments after the fact, with plain arithmetic and no extra fetch.
+1. Snapshots the live session's current transcript (`event_count`/`busy_ms`/`message_count`) and reads its full transcript up to that point.
+2. Mints a new session id and builds a `SessionSummary` for it: `forked_from: Some(ForkedFrom { session_id: <live session's id>, transcript_seq, at_ms, parent_busy_ms, parent_message_count, is_reset_snapshot: true })` — an ordinary fork record, using the same struct every user-initiated fork already uses, just with one new flag set.
+3. Born already `archived: true`, `state: Done`, titled `"(cleared) <title-or-harness>"` (mirroring the existing `"(fork) <title>"` convention).
+4. Writes the new session's *own* native-id file (`claude_session_id.txt` and equivalents) to `prior_native_id` — the id that's about to be retired on the live session.
+5. Copies the live session's transcript events verbatim into the new session's own transcript.
+6. Persists and broadcasts it, the same "daemon builds a `SessionSummary`/`SessionEntry` directly, no adapter, save + insert + broadcast" shape `SessionEvent::NativeSubagent` projection already uses.
 
-`crate::lineage` (the CLI's pure fork/subagent tree module) gains `LineageEdge::Reset`. Unlike `Fork`/`Subagent`, a reset edge does not connect two distinct `SessionSummary` rows — it connects a session to a frozen segment of *its own* transcript. Each entry in `resets` materializes one synthetic node (session id `"{owner}#reset{n}"`, distinct per segment so hover/selection/hit-testing never conflate two segments or a segment with the live session), chained in front of wherever the live session already sits in the tree: `root → reset-segment-1 → reset-segment-2 → ... → live node`. This chain is spliced in as a separate pass *after* the ordinary fork/subagent tree is built — the ordinary tree walk only knows how to follow `forked_from`/`parent_session_id`, and a reset isn't backed by either. The segment nodes are always closed — never "open" the way an unresolved fork is — since a reset is instantaneous and irreversible; they render with a distinct glyph (`↺`) and dimmed styling, distinguished from a discarded fork's strikethrough treatment so a reset boundary is never mistaken for an abandoned fork.
+Because the archived snapshot is a real session with its own real, never-again-overwritten native-id file, every downstream concern is already-existing, unmodified machinery:
 
-**Read**: opening a reset-segment node fetches a windowed slice of the *same construct session's own transcript* — `[previous boundary, this reset's transcript_seq)` — via the existing offset+count transcript RPC. No harness-native transcript parsing is needed: construct's own event log is untouched by a clear (only the adapter's native-file tail cursor moves), so the pre-reset conversation is already sitting in the existing transcript store. The TUI renders it in a read-only popup reusing the same chat-line formatter the live chat pane uses, so an archived segment looks the same as it did live.
+- **Selecting it** in the lineage view is an ordinary session jump — no synthetic node, no popup, no windowing math. Archived sessions were already fully visible/walkable in the lineage tree and session list (`session.list()` has no `archived` filter) before this feature existed.
+- **Reading it** is an ordinary transcript view of an ordinary (archived) session.
+- **Forking from it** is the existing, unmodified same-harness-fork-resume path (`lifecycle.rs`'s native-fork spawn logic reads *the fork source's own* current native-id file — which, for an archived snapshot, is permanently `prior_native_id`, since nothing ever overwrites it again).
 
-**Fork**: forking a reset-segment node spawns a new session using the segment's `prior_native_id` as the resume target, through the same same-harness-fork-resume path spec 0079 already built for forking the *current* native id — parameterized on an archived id instead of the live one (`ForkedFrom.reset_native_id`).
+The one visible difference from a user-initiated fork: `ForkedFrom.is_reset_snapshot` drives a distinct lineage edge glyph (`↺` instead of `⑂`), checked before the ordinary `LineageEdge::Fork`/`Subagent`/`Root` match rather than added as a new edge variant — it *is* an ordinary fork edge, just one a user didn't create on purpose.
 
 ## Reason
 
-The daemon already detects every native id change (spec 0079) and already has a proven pattern (`ForkedFrom`/`ForkMerge`) for snapshotting transcript position at a lineage boundary and slicing a timeline after the fact. A reset is structurally closer to a fork's terminal state (irreversible, timestamped, transcript-seq-anchored) than to a wholly separate object — modeling it as a same-graph edge type, rather than a second graph, keeps one place to look for "how did this session get here" and reuses the tree-construction, rendering, and cap rules already built for fork/subagent edges instead of standing up a parallel view.
+`session.list()`/the lineage tree walk already have zero archived-session filtering, and `SessionEvent::NativeSubagent` handling already establishes the "daemon synthesizes a `SessionSummary`/`SessionEntry` directly, no adapter, persist + insert + broadcast" pattern. Reusing fork + archive as the reset primitive, rather than inventing a synthetic third node type with its own windowed-read and popup machinery, means almost every consumer (selection, reading, forking, merge-eligibility, session-list rendering) needs zero new code — it already knows how to handle an ordinary archived, forked session. The only genuinely new logic is the synthesis step itself (transcript copy + native-id-file write), which has no existing precedent to reuse but is a small, self-contained daemon-side operation.
 
 ## Consequences
 
-- All four adapters spec 0079 covers (Claude, Codex, Antigravity, Grok) turn their native-id-change detection from a log line into a persisted `SessionEvent::NativeIdChanged` emission at the same code point.
-- The daemon's `handle_event` gains a `NativeIdChanged` arm (alongside `ModelChanged`/`ApprovalModeChanged`) that snapshots the session's current `transcript_seq`/`busy_ms`/`message_count` and appends a `ContextReset` — durable per-session metadata, not a transcript row.
-- `crate::lineage`'s `LineageNode` carries an optional `reset: Option<ResetSegment>`, populated only for synthetic reset nodes; ordinary nodes are unaffected, and a session that was never cleared produces a byte-for-byte identical tree to before this feature existed.
-- Reset chains are capped at `MAX_RESET_SEGMENTS`, separately from the fork/subagent tree's `MAX_DEPTH`/`MAX_SIBLINGS` (the splice runs after that cap already applied), collapsing older resets into a visible "+N earlier" note on the oldest segment shown rather than a silent truncation.
-- `ForkedFrom` gains `reset_native_id: Option<String>` — `None` for an ordinary fork (unchanged behavior: the daemon reads the parent's current native-id file at spawn time), `Some(id)` when forking from an archived reset segment (the daemon uses it directly, skipping the file read).
-- Transcript read for a reset segment is a windowed read of the existing per-session event log — no new storage format, no dependency on harness-native transcript files staying on disk.
+- All four adapters spec 0079 covers (Claude, Codex, Antigravity, Grok) emit `SessionEvent::NativeIdChanged` at their existing native-id-change detection point — unchanged from the harness-integration side; only the daemon's handling of that event changed.
+- `ForkedFrom` gains one field, `is_reset_snapshot: bool` (`#[serde(default)]`) — no new struct, no new protocol surface beyond that.
+- `crate::lineage` needs no new `LineageEdge` variant, no new node field, no new tree-construction pass: the ordinary `Fork`-edge derivation already reads `forked_from.{transcript_seq,at_ms,parent_busy_ms,parent_message_count}` to place the branch arrow and size the live session's pre-branch window, and `SessionState::Done` already renders a completed lane's final turn-info line correctly. The only lineage.rs change is the glyph check.
+- The merge-eligibility guard (`m` in the lineage section) excludes archived forks (`!s.archived`), not just merged/discarded ones — a reset snapshot is `merge: None` but will never be mergeable, and this closes the same gap for any other archived-but-unmerged fork.
+- Antigravity has no native fork primitive (per spec 0079/0078), so a reset snapshot for it is still created and fully readable, just not natively-forkable — the same limitation an ordinary Antigravity fork already has.
 
 ## Non-Goals
 
-- Does not change what a fork or subagent edge is (specs 0078, 0014 unchanged).
-- Does not persist or expose harness-native transcript files directly; all reads go through construct's own transcript store.
-- Does not support merging a reset segment back into the live session — a reset segment is read/fork-only, same as a discarded fork has no merge action.
-- Does not retroactively backfill `resets` for clears that happened before this lands; only clears observed after adapters start emitting `NativeIdChanged` are recorded.
-- Does not distinguish *which* slash command triggered a reset (`/clear` vs `/branch` vs `/new`) — adapters other than Claude can't reliably tell apart the cause of a native-id change, so `ContextReset` is cause-agnostic by design.
-- Does not fix the pre-existing race between the client's fork-request-time snapshot and the daemon's spawn-time native-id-file read for *ordinary* (non-archived) forks — a separate, unrelated issue, out of scope here.
-- Does not expose `reset_native_id` through the MCP `construct_fork_session` tool — TUI-only for now; the field is general enough that exposing it there later is a small, independent follow-up.
+- Does not change what a fork or subagent edge fundamentally is (specs 0078, 0014 unchanged) — a reset snapshot is a fork, distinguished only by a flag.
+- Does not retroactively backfill snapshots for clears that happened before this lands; only clears observed after adapters start emitting `NativeIdChanged` are recorded.
+- Does not distinguish *which* slash command triggered a reset (`/clear` vs `/branch` vs `/new`) — adapters other than Claude can't reliably tell the cause of a native-id change apart, so the event stays cause-agnostic.
+- Does not expose any new MCP/CLI parameter for this — synthesis is entirely daemon-internal, triggered only by the adapter event; forking from an archived snapshot uses the plain, existing fork call with no special parameter needed.
 
 ## Examples
 
-A user runs Claude, works for a while, types `/clear`, keeps working, then `/clear`s again. The session's lineage node now shows two dimmed `↺` segments chained before the live node. Selecting the first opens a popup replaying the transcript from session start up to the first clear; selecting the second replays from the first clear to the second. Pressing `f` inside either popup forks a new Claude session resuming from that segment's `prior_native_id`, landing as an ordinary fork sibling with its own `forked_from` pointing at the live session (not at the archived segment) — a fork born from history still fits the existing fork model once it exists as a real session.
+A user runs Claude, works for a while, types `/clear`, keeps working, then `/clear`s again. The live session's lineage node now shows two `↺`-glyph, archived fork siblings hanging off it — each an ordinary session, titled `"(cleared) <title>"`, each holding a real copy of the transcript up to its own clear point. Selecting either jumps to it exactly like selecting any archived session; forking from either resumes that snapshot's own frozen native id, through the same fork action used everywhere else, landing as an ordinary new fork of *that* snapshot.

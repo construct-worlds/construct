@@ -216,21 +216,22 @@ impl SessionManager {
             return;
         }
         // NativeIdChanged records a harness-native context reset (spec
-        // 0085). Like ApprovalModeChanged/ModelChanged, this is durable
-        // per-session metadata, not a transcript row.
+        // 0085) by synthesizing an archived fork snapshot of the
+        // pre-reset conversation. `entry` itself (the live session) is
+        // untouched here — its own native id file was already rewritten by
+        // the adapter's hook independently of this handler.
         if let SessionEvent::NativeIdChanged {
-            prior_native_id,
-            new_native_id,
+            prior_native_id, ..
         } = &event
         {
             if let Err(e) = self
-                .persist_context_reset(entry, prior_native_id.clone(), new_native_id.clone())
+                .synthesize_reset_snapshot(entry, prior_native_id.clone())
                 .await
             {
                 tracing::warn!(
                     session = %entry.id,
                     error = ?e,
-                    "persist context reset from adapter event failed"
+                    "synthesize reset snapshot from adapter event failed"
                 );
             }
             return;
@@ -606,7 +607,6 @@ impl SessionManager {
                 needs_attention: false,
                 forked_from: None,
                 merge: None,
-                resets: Vec::new(),
             };
             let created = Arc::new(SessionEntry {
                 id: id.clone(),
