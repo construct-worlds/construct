@@ -16,16 +16,26 @@ use std::path::Path;
 /// Poll interval while waiting for a probe session's PTY to go quiet.
 const USAGE_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// How long the PTY must stay quiet before the startup draw (step 4) or
-/// the usage command's response (step 6) is considered finished.
-const USAGE_PROBE_SETTLE: Duration = Duration::from_millis(500);
+/// the usage command's response (step 6) is considered finished. Must stay
+/// meaningfully smaller than both `USAGE_PROBE_STARTUP_TIMEOUT` and
+/// `USAGE_PROBE_COMMAND_TIMEOUT` — `usage_probe_wait_outcome` can only ever
+/// report "settled" if a full `settle` window of quiet fits *before* its
+/// `max_wait` cap, so a settle duration too close to either cap turns that
+/// wait into a fixed timeout in practice rather than genuine quiescence
+/// detection (confirmed live for grok: its own screen took several
+/// seconds, well past the old 500ms, to finish redrawing after `/usage
+/// show` before the real usage numbers ever appeared).
+const USAGE_PROBE_SETTLE: Duration = Duration::from_secs(10);
 /// Hard cap on waiting for the harness to finish its own startup draw
 /// before giving up on the whole probe — a hung/slow-starting harness must
-/// not wedge the probe forever.
-const USAGE_PROBE_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// not wedge the probe forever. Kept above `USAGE_PROBE_SETTLE` with real
+/// margin (see that constant's doc comment) rather than raised to the same
+/// value as the settle window.
+const USAGE_PROBE_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 /// Hard cap on waiting for the usage/status command's response. Longer
 /// than the startup cap since some harnesses' usage panels fetch live
 /// account data over the network.
-const USAGE_PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+const USAGE_PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Fixed PTY size for probe sessions — generous, since there's no live
 /// client to negotiate a real size against.
 const USAGE_PROBE_COLS: u16 = 100;
@@ -48,12 +58,12 @@ const USAGE_PROBE_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 const USAGE_PROBE_SUBMIT_ATTEMPTS: u32 = 3;
 /// Last-resort ceiling on one probe attempt's total wall-clock time, in
 /// [`SessionManager::refresh_usage`] — comfortably above the legitimate
-/// worst case (adapter spawn's own 60s request timeout, the 10s startup
-/// wait, up to `USAGE_PROBE_SUBMIT_ATTEMPTS` rounds of a 15s response wait
-/// plus growing backoff between them, ≈150s) so a harness can never be
+/// worst case (adapter spawn's own 60s request timeout, the 20s startup
+/// wait, up to `USAGE_PROBE_SUBMIT_ATTEMPTS` rounds of a 30s response wait
+/// plus growing backoff between them, ≈176s) so a harness can never be
 /// stuck showing "probing…" indefinitely even if something not covered by
 /// those individual bounds goes wrong.
-const PROBE_HARD_CEILING: Duration = Duration::from_secs(180);
+const PROBE_HARD_CEILING: Duration = Duration::from_secs(240);
 
 impl SessionManager {
     /// `usage.query` (spec 0086). Read-mostly: never blocks on the probe
@@ -763,7 +773,12 @@ mod tests {
         let now = 1_000_000i64;
         let since = 0i64; // no floor for this test
         let settle = USAGE_PROBE_SETTLE;
-        let max_wait = Duration::from_secs(10);
+        // Deliberately derived from `settle`, not a bare literal: this wait
+        // can only ever report "settled" if a full `settle` window fits
+        // before `max_wait` (see `USAGE_PROBE_SETTLE`'s own doc comment), so
+        // a hardcoded `max_wait` would silently stop exercising that once
+        // `settle` grew to meet or exceed it.
+        let max_wait = settle + Duration::from_secs(5);
 
         // Nothing drawn yet, well under the cap -> keep polling.
         assert_eq!(
@@ -797,7 +812,7 @@ mod tests {
         // Quiet well past settle -> settled.
         assert_eq!(
             usage_probe_wait_outcome(
-                Some(now - 5_000),
+                Some(now - settle.as_millis() as i64 - 5_000),
                 since,
                 now,
                 Duration::from_secs(1),
@@ -827,7 +842,7 @@ mod tests {
         let now = 1_000_000i64;
         let since = now; // command was just sent "now"
         let settle = USAGE_PROBE_SETTLE;
-        let max_wait = Duration::from_secs(10);
+        let max_wait = settle + Duration::from_secs(5);
 
         // last_pty_at_ms is from well before `since` and long "quiet" by
         // wall-clock terms, but it predates the thing we're waiting for ->
