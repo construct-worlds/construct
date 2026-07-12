@@ -1,7 +1,7 @@
 ---
 name: crystallize
 label: Crystallize spec
-description: Rewrite loose prose into a goal, constraints, and acceptance criteria.
+description: restructure loose prose into a goal, constraints, and acceptance criteria.
 effect: rewrite
 interaction: single-shot
 order: 30

@@ -1,7 +1,7 @@
 ---
 name: challenge-assumptions
 label: Challenge assumptions
-description: Surface load-bearing assumptions in the selection and what breaks if they're wrong.
+description: surface load-bearing assumptions in the selection and what breaks if they're wrong.
 effect: annotate
 interaction: single-shot
 order: 10

@@ -15502,12 +15502,17 @@ mod tests {
         server.abort();
     }
 
-    fn test_verb_with_description(name: &str, label: &str, description: &str) -> construct_protocol::ProgramVerb {
+    fn test_verb_with_description(
+        name: &str,
+        label: &str,
+        effect: construct_protocol::ProgramVerbEffect,
+        description: &str,
+    ) -> construct_protocol::ProgramVerb {
         construct_protocol::ProgramVerb {
             name: name.to_string(),
             label: label.to_string(),
             description: Some(description.to_string()),
-            effect: construct_protocol::ProgramVerbEffect::Rewrite,
+            effect,
             interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
             order: 0,
             built_in: true,
@@ -15534,7 +15539,8 @@ mod tests {
         app.program_verbs = vec![test_verb_with_description(
             "simplify",
             "Simplify",
-            "Rewrite to the minimum that preserves intent.",
+            construct_protocol::ProgramVerbEffect::Rewrite,
+            "reduce to the minimum that preserves intent.",
         )];
         app.begin_program_selection();
         app.move_program_cursor(5);
@@ -15545,7 +15551,7 @@ mod tests {
             .expect("program should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            !text.contains("Rewrite to the minimum")
+            !text.contains("reduce to the minimum")
                 && !text.contains("Execute the selection")
                 && !text.contains("Free-text guidance"),
             "no description shows before Tab focuses the menu: {text:?}"
@@ -15572,9 +15578,15 @@ mod tests {
             test_verb_with_description(
                 "simplify",
                 "Simplify",
-                "Rewrite to the minimum that preserves intent.",
+                construct_protocol::ProgramVerbEffect::Rewrite,
+                "reduce to the minimum that preserves intent.",
             ),
-            test_verb_with_description("crystallize", "Crystallize spec", "Rewrite into a goal."),
+            test_verb_with_description(
+                "crystallize",
+                "Crystallize spec",
+                construct_protocol::ProgramVerbEffect::Rewrite,
+                "restructure into a goal.",
+            ),
         ];
         app.begin_program_selection();
         app.move_program_cursor(5);
@@ -15600,7 +15612,7 @@ mod tests {
             .expect("program should render after navigating to verb 0");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            text.contains("Rewrite to the minimum"),
+            text.contains("reduce to the minimum"),
             "verb 0's own description shows once highlighted: {text:?}"
         );
         assert!(
@@ -15614,12 +15626,125 @@ mod tests {
             .expect("program should render after navigating to verb 1");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            text.contains("Rewrite into a goal"),
+            text.contains("restructure into a goal"),
             "verb 1's own description shows once highlighted: {text:?}"
         );
         assert!(
-            !text.contains("Rewrite to the minimum"),
+            !text.contains("reduce to the minimum"),
             "verb 0's description must not linger once highlight moved to verb 1: {text:?}"
+        );
+        server.abort();
+    }
+
+    /// The verb's declared `effect` prefixes its shown description
+    /// ("Annotate: " / "Rewrite: "), derived from the structured field —
+    /// never trusted to appear correctly in the author's own text — so the
+    /// user always sees exactly what the verb is about to do to the
+    /// document, regardless of how its `description` frontmatter is worded.
+    #[tokio::test]
+    async fn program_selection_menu_description_prefixed_by_declared_effect() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_verbs = vec![
+            test_verb_with_description(
+                "challenge-assumptions",
+                "Challenge assumptions",
+                construct_protocol::ProgramVerbEffect::Annotate,
+                "surface hidden assumptions.",
+            ),
+            test_verb_with_description(
+                "simplify",
+                "Simplify",
+                construct_protocol::ProgramVerbEffect::Rewrite,
+                "reduce to the minimum.",
+            ),
+        ];
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: true,
+            selected_action: ProgramSelectionAction::Verb(0),
+            ..Default::default()
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("Annotate: surface hidden assumptions"),
+            "an annotate-effect verb's description is prefixed 'Annotate: ': {text:?}"
+        );
+
+        app.program_popup.as_mut().unwrap().selection_menu.as_mut().unwrap().selected_action =
+            ProgramSelectionAction::Verb(1);
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render after navigating to verb 1");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("Rewrite: reduce to the minimum"),
+            "a rewrite-effect verb's description is prefixed 'Rewrite: ': {text:?}"
+        );
+        server.abort();
+    }
+
+    /// A description longer than one line wraps across multiple rows
+    /// instead of being cut with an ellipsis — the full text must remain
+    /// readable, including its tail.
+    #[tokio::test]
+    async fn program_selection_menu_description_wraps_instead_of_truncating() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_verbs = vec![test_verb_with_description(
+            "crystallize",
+            "Crystallize spec",
+            construct_protocol::ProgramVerbEffect::Rewrite,
+            // A single trailing token (no internal spaces) so it can never
+            // itself be split across a wrapped line boundary — makes the
+            // "still present after wrapping" assertion below unambiguous.
+            "restructure this rather long selection into a goal statement, a list of hard \
+             constraints, and a handful of acceptance criteria that reach all the way to \
+             TAILMARKERWORD.",
+        )];
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: true,
+            selected_action: ProgramSelectionAction::Verb(0),
+            ..Default::default()
+        });
+
+        // Wide enough backend that the menu isn't itself squeezed by the
+        // outer program area, only by its own fixed width.
+        let backend = ratatui::backend::TestBackend::new(140, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            !text.contains('…'),
+            "a long description must wrap, never truncate with an ellipsis: {text:?}"
+        );
+        assert!(
+            text.contains("TAILMARKERWORD"),
+            "the description's tail must still be visible once wrapped: {text:?}"
         );
         server.abort();
     }
@@ -16051,7 +16176,7 @@ mod tests {
             "first wrapped row should contain the start of the comment: {first_row:?}"
         );
         assert!(
-            second_row.contains("epsilon"),
+            second_row.contains("eta theta"),
             "long comment should wrap onto a second row: {second_row:?}"
         );
         assert_eq!(

@@ -1,7 +1,7 @@
 ---
 name: interview
 label: Interview
-description: Ask questions to resolve ambiguity, then hand back a decision digest.
+description: ask questions to resolve ambiguity, then hand back a decision digest.
 effect: annotate
 interaction: interactive
 order: 40

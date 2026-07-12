@@ -1,7 +1,7 @@
 ---
 name: simplify
 label: Simplify
-description: Rewrite the selection to the minimum that preserves its core intent.
+description: reduce the selection to the minimum that preserves its core intent.
 effect: rewrite
 interaction: single-shot
 order: 20
