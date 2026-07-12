@@ -12904,9 +12904,17 @@ fn render_program_selection_context_menu(
         inner_y,
     );
     app.layout.program_selection_run_hit = Some(hit);
-    let hovered = app
-        .mouse_pos
-        .is_some_and(|(mx, my)| my == hit.2 && mx >= hit.0 && mx < hit.1);
+    // Gated on pointer-enter, not mere position (spec 0057/0089): a pointer
+    // left resting from an earlier action can coincide with the Run
+    // button's or a verb row's fixed position the instant the menu appears,
+    // which must not read as already-hovered. Only a pointer that actually
+    // moves after the menu was created arms these highlights; the keyboard
+    // `selected_action` highlight below is unaffected.
+    let hover_armed = app.mouse_moved_at.is_some_and(|at| at > menu.shown_at);
+    let hovered = hover_armed
+        && app
+            .mouse_pos
+            .is_some_and(|(mx, my)| my == hit.2 && mx >= hit.0 && mx < hit.1);
     let row_style = |selected: bool| {
         if selected {
             Style::default()
@@ -12994,9 +13002,10 @@ fn render_program_selection_context_menu(
         let mut verb_hits = Vec::with_capacity(verb_rows);
         for (idx, verb) in verbs.iter().take(verb_rows).enumerate() {
             let y = inner_y.saturating_add(comment_lines.len() as u16).saturating_add(idx as u16);
-            let verb_hovered = app
-                .mouse_pos
-                .is_some_and(|(mx, my)| my == y && mx >= inner_x && mx < inner_x.saturating_add(inner_width as u16));
+            let verb_hovered = hover_armed
+                && app.mouse_pos.is_some_and(|(mx, my)| {
+                    my == y && mx >= inner_x && mx < inner_x.saturating_add(inner_width as u16)
+                });
             let verb_key_selected = menu.focused
                 && menu.selected_action == crate::app::ProgramSelectionAction::Verb(idx);
             let label = format!("▸ {}", verb.label);

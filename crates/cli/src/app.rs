@@ -2586,6 +2586,15 @@ pub struct ProgramSelectionMenu {
     /// Enter activates whichever row this is. Typing/comment-editing keys
     /// only take effect while this is `Comment`.
     pub selected_action: ProgramSelectionAction,
+    /// When this menu was created. Gates the Run button's and each verb
+    /// row's *mouse*-hover highlight: a resting pointer that merely happens
+    /// to coincide with a fixed row the instant the menu appears must not
+    /// look pre-selected — only a pointer that actually moves onto the row
+    /// after the menu exists arms the highlight (`App::mouse_moved_at`
+    /// compared against this). Same pointer-enter-not-mere-position
+    /// discipline as the shimmer hover tooltip (spec 0057); does not gate
+    /// the separate keyboard `selected_action` highlight.
+    pub shown_at: Instant,
 }
 
 impl Default for ProgramSelectionMenu {
@@ -2595,6 +2604,7 @@ impl Default for ProgramSelectionMenu {
             comment: String::new(),
             cursor: 0,
             selected_action: ProgramSelectionAction::Comment,
+            shown_at: Instant::now(),
         }
     }
 }
@@ -15492,6 +15502,100 @@ mod tests {
         server.abort();
     }
 
+    /// spec 0089/0057: a stale pointer position that merely happens to
+    /// coincide with a verb row (or the Run button) the instant the
+    /// selection menu appears must NOT render as hovered — only a pointer
+    /// that actually moves after the menu was created arms the highlight.
+    /// Reproduces the reported bug: a verb row (e.g. "Crystallize spec")
+    /// showing pre-highlighted the moment the menu opens, with no genuine
+    /// hover from the user.
+    #[tokio::test]
+    async fn program_selection_menu_ignores_stale_mouse_position_on_first_render() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_verbs = vec![construct_protocol::ProgramVerb {
+            name: "crystallize".to_string(),
+            label: "Crystallize spec".to_string(),
+            description: None,
+            effect: construct_protocol::ProgramVerbEffect::Rewrite,
+            interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+            order: 0,
+            built_in: true,
+            prompt: "test".to_string(),
+        }];
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        // First render: compute where the verb row and Run button will land,
+        // then plant a stale mouse position exactly on the verb row — as if
+        // the pointer had been resting there from some earlier action, with
+        // no genuine hover event ever delivered (`mouse_moved_at` stays
+        // unset, mirroring a pointer that hasn't moved since before the menu
+        // existed).
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let verb_hit = app.layout.program_selection_verb_hits[0].clone();
+        let run_hit = app
+            .layout
+            .program_selection_run_hit
+            .expect("run hit registered");
+        assert!(app.mouse_moved_at.is_none(), "no genuine pointer move yet");
+        app.mouse_pos = Some((verb_hit.0, verb_hit.2));
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render with stale mouse position");
+        let buf = term.backend().buffer();
+        let verb_cell = buf
+            .cell((verb_hit.0, verb_hit.2))
+            .expect("verb row cell");
+        assert_ne!(
+            verb_cell.style().bg,
+            Some(app.theme.accent),
+            "a verb row must not appear hovered from a stale, unmoved pointer position"
+        );
+
+        // Also plant one on the Run button, for the same reason.
+        app.mouse_pos = Some((run_hit.0, run_hit.2));
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render with stale mouse over Run");
+        let buf = term.backend().buffer();
+        let run_cell = buf.cell((run_hit.0, run_hit.2)).expect("Run cell");
+        assert_ne!(
+            run_cell.style().bg,
+            Some(app.theme.accent),
+            "the Run button must not appear hovered from a stale, unmoved pointer position"
+        );
+
+        // Now a genuine pointer move onto the verb row arms the highlight.
+        app.on_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: verb_hit.0,
+            row: verb_hit.2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render after a genuine move");
+        let buf = term.backend().buffer();
+        let verb_cell = buf.cell((verb_hit.0, verb_hit.2)).expect("verb row cell");
+        assert_eq!(
+            verb_cell.style().bg,
+            Some(app.theme.accent),
+            "a pointer that genuinely moves onto the row after the menu appeared does highlight it"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn program_selection_comment_text_is_underlined_not_highlighted() {
         let (mut app, _dir, server) = empty_app().await;
@@ -15511,6 +15615,8 @@ mod tests {
             comment: "focus".into(),
             cursor: 5,
             selected_action: ProgramSelectionAction::Comment,
+        
+            ..Default::default()
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -15567,6 +15673,8 @@ mod tests {
             // highlighted appearance, which now depends on Run specifically
             // being the keyboard-selected row (spec 0089).
             selected_action: ProgramSelectionAction::Run,
+        
+            ..Default::default()
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -15718,6 +15826,8 @@ mod tests {
             comment: "alpha beta gamma delta epsilon zeta eta theta".into(),
             cursor: 45,
             selected_action: ProgramSelectionAction::Comment,
+        
+            ..Default::default()
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -18300,6 +18410,8 @@ mod tests {
             comment: "focus tests".to_string(),
             cursor: "focus tests".chars().count(),
             selected_action: ProgramSelectionAction::Comment,
+        
+            ..Default::default()
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
