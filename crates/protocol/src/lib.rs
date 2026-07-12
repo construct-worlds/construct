@@ -546,6 +546,16 @@ pub enum SessionEvent {
         prior_native_id: String,
         new_native_id: String,
     },
+    /// Adapter detected the session's active reasoning-effort tier (e.g.
+    /// `"high"` / `"medium"` / `"low"`). Best-effort, like `ModelChanged` for
+    /// the harnesses that don't self-report (grok, codex): scraped from
+    /// on-disk transcript state the adapter already tails, not guaranteed to
+    /// track every live change (see each adapter's own doc comments for its
+    /// specific caveats). Durable per-session state, like
+    /// [`ModelChanged`](Self::ModelChanged): never written to the transcript.
+    EffortChanged {
+        effort: String,
+    },
     /// Tool lifecycle: adapter started running a tool. Carries the
     /// canonical `call_id` (unlike [`ToolUse`] which doesn't) so the
     /// daemon's per-session task registry can match this against the
@@ -1798,6 +1808,11 @@ pub struct SessionSummary {
     pub cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Best-effort reasoning-effort tier (e.g. `"high"`/`"medium"`/`"low"`),
+    /// set by [`SessionEvent::EffortChanged`]. `None` when the harness has
+    /// no such concept or none has been observed yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     #[serde(default)]

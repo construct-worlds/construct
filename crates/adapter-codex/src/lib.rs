@@ -189,6 +189,7 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
             resuming_existing,
             captured_id.clone(),
             fork_from.clone(),
+            params.model.clone(),
         );
     }
     let label = command.argv_preview();
@@ -231,6 +232,7 @@ fn spawn_interactive_transcript_watcher(
     skip_existing: bool,
     expected_uuid: Option<String>,
     expected_fork_parent: Option<String>,
+    initial_model: Option<String>,
 ) {
     let Some(sessions_root) = codex_sessions_root(&session_env) else {
         emit.log("codex: no CODEX_HOME or HOME — cannot watch native transcript");
@@ -244,6 +246,8 @@ fn spawn_interactive_transcript_watcher(
         let mut selected: Option<(String, PathBuf)> = None;
         let mut selected_mtime: Option<std::time::SystemTime> = None;
         let mut next_line: usize = 0;
+        let mut last_model = initial_model;
+        let mut last_effort: Option<String> = None;
         let mut known: HashMap<String, (PathBuf, SessionMeta)> = HashMap::new();
         let mut child_lines: HashMap<String, usize> = HashMap::new();
         let mut child_seq: HashMap<String, u64> = HashMap::new();
@@ -328,7 +332,13 @@ fn spawn_interactive_transcript_watcher(
             let Some((_, path)) = selected.as_ref() else {
                 continue;
             };
-            emit_new_codex_rollout_lines(path, &mut next_line, &emit);
+            emit_new_codex_rollout_lines(
+                path,
+                &mut next_line,
+                &emit,
+                &mut last_model,
+                &mut last_effort,
+            );
 
             let Some(root_id) = selected
                 .as_ref()
@@ -490,7 +500,13 @@ fn count_jsonl_lines(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn emit_new_codex_rollout_lines(path: &Path, next_line: &mut usize, emit: &EventEmitter) {
+fn emit_new_codex_rollout_lines(
+    path: &Path,
+    next_line: &mut usize,
+    emit: &EventEmitter,
+    last_model: &mut Option<String>,
+    last_effort: &mut Option<String>,
+) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
@@ -504,7 +520,7 @@ fn emit_new_codex_rollout_lines(path: &Path, next_line: &mut usize, emit: &Event
             continue;
         }
         match serde_json::from_str::<Value>(line) {
-            Ok(v) => emit_codex_rollout_event(emit, &v),
+            Ok(v) => emit_codex_rollout_event(emit, &v, last_model, last_effort),
             Err(e) => emit.log(format!(
                 "codex transcript: failed to parse {} line {}: {e}",
                 path.display(),
@@ -515,10 +531,56 @@ fn emit_new_codex_rollout_lines(path: &Path, next_line: &mut usize, emit: &Event
     *next_line = seen;
 }
 
-fn emit_codex_rollout_event(emit: &EventEmitter, v: &Value) {
+fn emit_codex_rollout_event(
+    emit: &EventEmitter,
+    v: &Value,
+    last_model: &mut Option<String>,
+    last_effort: &mut Option<String>,
+) {
+    if let Some(model) = codex_model_change(v, last_model) {
+        *last_model = Some(model.clone());
+        emit.emit(SessionEvent::ModelChanged { model });
+    }
+    if let Some(effort) = codex_effort_change(v, last_effort) {
+        *last_effort = Some(effort.clone());
+        emit.emit(SessionEvent::EffortChanged { effort });
+    }
     for event in codex_rollout_events(v) {
         emit.emit(event);
     }
+}
+
+/// The root session's active model, if `v` is a `turn_context` rollout
+/// record carrying `payload.model` that differs from what we last saw.
+/// Scoped to `emit_codex_rollout_event` (root-only — the subagent mirroring
+/// path calls `codex_rollout_events` directly, bypassing this) rather than
+/// inside `codex_rollout_events` itself, which gates on `response_item` and
+/// would never see a `turn_context` record anyway.
+///
+/// Verified against 1849 real codex rollouts on this machine: `turn_context`
+/// repeats every turn (up to 737 times in one file) and 19 rollouts had more
+/// than one distinct `payload.model` value within a single session,
+/// confirming this field tracks a live model switch (unlike grok's
+/// `model_id`, which turned out to be frozen per session).
+fn codex_model_change(v: &Value, last_model: &Option<String>) -> Option<String> {
+    if v.get("type").and_then(Value::as_str) != Some("turn_context") {
+        return None;
+    }
+    let model = v.pointer("/payload/model")?.as_str()?;
+    (last_model.as_deref() != Some(model)).then(|| model.to_string())
+}
+
+/// Same signal as `codex_model_change`, for `payload.effort` (e.g.
+/// `"high"`/`"medium"`/`"low"`) in the same `turn_context` record. Verified
+/// against the same 1849 real rollouts: 14 had more than one distinct effort
+/// value within a session, confirming it's live like `model`, not frozen
+/// like grok's fields.
+fn codex_effort_change(v: &Value, last_effort: &Option<String>) -> Option<String> {
+    if v.get("type").and_then(Value::as_str) != Some("turn_context") {
+        return None;
+    }
+    let effort = v.pointer("/payload/effort")?.as_str()?;
+    (last_effort.as_deref() != Some(effort)).then(|| effort.to_string())
 }
 
 fn codex_rollout_events(v: &Value) -> Vec<SessionEvent> {
@@ -1375,5 +1437,80 @@ mod tests {
             }
             other => panic!("unexpected tool-result events: {other:?}"),
         }
+    }
+
+    #[test]
+    fn model_change_ignored_for_non_turn_context_records() {
+        let v = serde_json::json!({"type": "response_item", "payload": {"model": "gpt-5.6-terra"}});
+        assert_eq!(codex_model_change(&v, &None), None);
+    }
+
+    #[test]
+    fn model_change_ignored_when_payload_model_absent() {
+        let v = serde_json::json!({"type": "turn_context", "payload": {"effort": "medium"}});
+        assert_eq!(codex_model_change(&v, &None), None);
+    }
+
+    #[test]
+    fn model_change_fires_on_first_observation() {
+        let v = serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-5.6-terra"}});
+        assert_eq!(
+            codex_model_change(&v, &None).as_deref(),
+            Some("gpt-5.6-terra")
+        );
+    }
+
+    #[test]
+    fn model_change_silent_when_unchanged() {
+        let v = serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-5.6-terra"}});
+        assert_eq!(
+            codex_model_change(&v, &Some("gpt-5.6-terra".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn model_change_fires_on_switch() {
+        let v = serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-5.3-codex-spark"}});
+        assert_eq!(
+            codex_model_change(&v, &Some("gpt-5.6-terra".to_string())).as_deref(),
+            Some("gpt-5.3-codex-spark")
+        );
+    }
+
+    #[test]
+    fn effort_change_ignored_for_non_turn_context_records() {
+        let v = serde_json::json!({"type": "response_item", "payload": {"effort": "high"}});
+        assert_eq!(codex_effort_change(&v, &None), None);
+    }
+
+    #[test]
+    fn effort_change_ignored_when_payload_effort_absent() {
+        let v = serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-5.6-terra"}});
+        assert_eq!(codex_effort_change(&v, &None), None);
+    }
+
+    #[test]
+    fn effort_change_fires_on_first_observation() {
+        let v = serde_json::json!({"type": "turn_context", "payload": {"effort": "medium"}});
+        assert_eq!(codex_effort_change(&v, &None).as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn effort_change_silent_when_unchanged() {
+        let v = serde_json::json!({"type": "turn_context", "payload": {"effort": "medium"}});
+        assert_eq!(
+            codex_effort_change(&v, &Some("medium".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn effort_change_fires_on_switch() {
+        let v = serde_json::json!({"type": "turn_context", "payload": {"effort": "high"}});
+        assert_eq!(
+            codex_effort_change(&v, &Some("medium".to_string())).as_deref(),
+            Some("high")
+        );
     }
 }

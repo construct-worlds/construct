@@ -574,6 +574,7 @@ fn word_for_event(event: &SessionEvent) -> Option<(&'static str, FlashTone, u8)>
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::EffortChanged { .. }
         | SessionEvent::EditorState { .. }
         | SessionEvent::BrowserPreview(_)
         | SessionEvent::UiPanel(_)
