@@ -4204,7 +4204,9 @@ fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
             ]));
         }
     }
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let para = Paragraph::new(lines)
+        .style(Style::default().fg(app.theme.text))
+        .wrap(Wrap { trim: false });
     f.render_widget(para, card);
 }
 
