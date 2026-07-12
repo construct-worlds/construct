@@ -15,22 +15,20 @@ use std::path::Path;
 
 /// Poll interval while waiting for a probe session's PTY to go quiet.
 const USAGE_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(200);
-/// How long the PTY must stay quiet before the startup draw (step 4) or
-/// the usage command's response (step 6) is considered finished. Must stay
-/// meaningfully smaller than both `USAGE_PROBE_STARTUP_TIMEOUT` and
-/// `USAGE_PROBE_COMMAND_TIMEOUT` — `usage_probe_wait_outcome` can only ever
-/// report "settled" if a full `settle` window of quiet fits *before* its
-/// `max_wait` cap, so a settle duration too close to either cap turns that
-/// wait into a fixed timeout in practice rather than genuine quiescence
-/// detection (confirmed live for grok: its own screen took several
-/// seconds, well past the old 500ms, to finish redrawing after `/usage
-/// show` before the real usage numbers ever appeared).
-const USAGE_PROBE_SETTLE: Duration = Duration::from_secs(10);
+/// How long the PTY must stay quiet before the harness's startup draw is
+/// stable enough to accept input. This deliberately stays short: several
+/// interactive harnesses keep emitting periodic idle-screen updates, so a
+/// long silence requirement prevents the probe command from ever being
+/// sent. Command output has its own longer settle window below.
+const USAGE_PROBE_STARTUP_SETTLE: Duration = Duration::from_millis(500);
+/// How long the PTY must stay quiet before the usage command's response is
+/// considered finished. This is intentionally much longer than the startup
+/// threshold: grok's usage panel can take several seconds to replace its
+/// initial draw with the real usage numbers.
+const USAGE_PROBE_COMMAND_SETTLE: Duration = Duration::from_secs(10);
 /// Hard cap on waiting for the harness to finish its own startup draw
 /// before giving up on the whole probe — a hung/slow-starting harness must
-/// not wedge the probe forever. Kept above `USAGE_PROBE_SETTLE` with real
-/// margin (see that constant's doc comment) rather than raised to the same
-/// value as the settle window.
+/// not wedge the probe forever.
 const USAGE_PROBE_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 /// Hard cap on waiting for the usage/status command's response. Longer
 /// than the startup cap since some harnesses' usage panels fetch live
@@ -237,7 +235,7 @@ impl SessionManager {
             .wait_for_pty_settle(
                 &id,
                 created_at_ms,
-                USAGE_PROBE_SETTLE,
+                USAGE_PROBE_STARTUP_SETTLE,
                 USAGE_PROBE_STARTUP_TIMEOUT,
             )
             .await
@@ -308,7 +306,7 @@ impl SessionManager {
                 .wait_for_pty_settle(
                     &id,
                     sent_at_ms,
-                    USAGE_PROBE_SETTLE,
+                    USAGE_PROBE_COMMAND_SETTLE,
                     USAGE_PROBE_COMMAND_TIMEOUT,
                 )
                 .await;
@@ -772,10 +770,10 @@ mod tests {
     fn usage_probe_wait_outcome_settle_gate() {
         let now = 1_000_000i64;
         let since = 0i64; // no floor for this test
-        let settle = USAGE_PROBE_SETTLE;
+        let settle = USAGE_PROBE_COMMAND_SETTLE;
         // Deliberately derived from `settle`, not a bare literal: this wait
         // can only ever report "settled" if a full `settle` window fits
-        // before `max_wait` (see `USAGE_PROBE_SETTLE`'s own doc comment), so
+        // before `max_wait`, so
         // a hardcoded `max_wait` would silently stop exercising that once
         // `settle` grew to meet or exceed it.
         let max_wait = settle + Duration::from_secs(5);
@@ -833,6 +831,42 @@ mod tests {
         );
     }
 
+    /// Regression: idle-screen repaints from claude, codex, and grok can
+    /// arrive more often than the command-response settle window. Startup
+    /// must still become ready during a shorter quiet interval, while the
+    /// same interval remains insufficient to finish a response capture.
+    #[test]
+    fn startup_and_command_use_distinct_settle_windows() {
+        let now = 1_000_000i64;
+        let last_output = Some(now - 1_000);
+        let elapsed = Duration::from_secs(1);
+
+        assert_eq!(
+            usage_probe_wait_outcome(
+                last_output,
+                0,
+                now,
+                elapsed,
+                USAGE_PROBE_STARTUP_SETTLE,
+                USAGE_PROBE_STARTUP_TIMEOUT,
+            ),
+            Some(true),
+            "one second of quiet is enough to send the probe command",
+        );
+        assert_eq!(
+            usage_probe_wait_outcome(
+                last_output,
+                0,
+                now,
+                elapsed,
+                USAGE_PROBE_COMMAND_SETTLE,
+                USAGE_PROBE_COMMAND_TIMEOUT,
+            ),
+            None,
+            "one second of quiet is not enough to truncate a slow usage panel",
+        );
+    }
+
     /// The `since_ms` floor: a stale, already-quiet timestamp from *before*
     /// `since_ms` must not read as settled — this is exactly the step-4-vs-
     /// step-6 reuse bug the floor exists to prevent. Only a PTY update at
@@ -841,7 +875,7 @@ mod tests {
     fn usage_probe_wait_outcome_ignores_stale_timestamp_before_since() {
         let now = 1_000_000i64;
         let since = now; // command was just sent "now"
-        let settle = USAGE_PROBE_SETTLE;
+        let settle = USAGE_PROBE_COMMAND_SETTLE;
         let max_wait = settle + Duration::from_secs(5);
 
         // last_pty_at_ms is from well before `since` and long "quiet" by
