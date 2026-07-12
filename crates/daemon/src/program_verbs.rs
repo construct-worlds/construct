@@ -85,7 +85,11 @@ pub fn render_verb_prompt(prompt: &str, vars: &[(&str, &str)]) -> String {
 }
 
 /// Parse one verb definition file (frontmatter + body) into a [`ProgramVerb`].
-/// `None` means the file is missing a required field (`name`, `effect`, or
+/// `default_name` is used as the verb's `name` when the frontmatter omits
+/// the field — the file's own stem for a user file, the built-in's fixed
+/// key for a built-in (see [`load_verbs`]) — so authoring a verb typically
+/// needs no `name:` line at all: the filename already is the name.
+/// `None` means the file is missing a required field (`effect` or
 /// `interaction`), has an unrecognized `effect`/`interaction` value, or its
 /// body contains a `{{ ... }}` placeholder naming anything other than a
 /// known template variable (a typo'd variable must fail loudly at load, not
@@ -95,7 +99,7 @@ pub fn render_verb_prompt(prompt: &str, vars: &[(&str, &str)]) -> String {
 /// The optional `comment` frontmatter field is deliberately not read: it is
 /// documentation for people reading the file (provenance, attribution,
 /// notes) and never becomes part of the verb or its prompt.
-fn parse_verb_definition(raw: &str, built_in: bool) -> Option<ProgramVerb> {
+fn parse_verb_definition(raw: &str, built_in: bool, default_name: &str) -> Option<ProgramVerb> {
     let (frontmatter, body) = split_frontmatter(raw);
     if let Some(unknown) = template_placeholders(&body)
         .iter()
@@ -105,7 +109,10 @@ fn parse_verb_definition(raw: &str, built_in: bool) -> Option<ProgramVerb> {
         return None;
     }
     let fields = parse_frontmatter_fields(&frontmatter);
-    let name = fields.get("name")?.clone();
+    let name = fields
+        .get("name")
+        .cloned()
+        .unwrap_or_else(|| default_name.to_string());
     let effect = match fields.get("effect")?.as_str() {
         "annotate" => ProgramVerbEffect::Annotate,
         "rewrite" => ProgramVerbEffect::Rewrite,
@@ -178,12 +185,17 @@ fn parse_frontmatter_fields(frontmatter: &str) -> BTreeMap<String, String> {
 
 /// Load every verb: built-ins first, then every `*.md` file in `dir` (if it
 /// exists), with a user file's `name` replacing a built-in of the same name.
-/// Malformed or unreadable files are skipped with a `tracing::warn!`, never a
-/// hard failure — one broken user file must not take down the whole list.
+/// A file's `name` is optional — it defaults to the file's own stem (a user
+/// file `threat-model.md` needs no `name:` line to be named `threat-model`;
+/// a built-in defaults to its fixed key below). An explicit `name:` field
+/// still wins when present, e.g. to override a built-in from a
+/// differently-named file. Malformed or unreadable files are skipped with a
+/// `tracing::warn!`, never a hard failure — one broken user file must not
+/// take down the whole list.
 pub fn load_verbs(dir: &Path) -> Vec<ProgramVerb> {
     let mut by_name: BTreeMap<String, ProgramVerb> = BTreeMap::new();
     for (name, raw) in BUILT_INS {
-        match parse_verb_definition(raw, true) {
+        match parse_verb_definition(raw, true, name) {
             Some(verb) => {
                 by_name.insert(verb.name.clone(), verb);
             }
@@ -198,6 +210,10 @@ pub fn load_verbs(dir: &Path) -> Vec<ProgramVerb> {
                     if path.extension().and_then(|e| e.to_str()) != Some("md") {
                         continue;
                     }
+                    let Some(default_name) = path.file_stem().and_then(|s| s.to_str()) else {
+                        tracing::warn!(path = %path.display(), "skip program verb with non-UTF-8 filename");
+                        continue;
+                    };
                     let raw = match std::fs::read_to_string(&path) {
                         Ok(raw) => raw,
                         Err(e) => {
@@ -205,12 +221,12 @@ pub fn load_verbs(dir: &Path) -> Vec<ProgramVerb> {
                             continue;
                         }
                     };
-                    match parse_verb_definition(&raw, false) {
+                    match parse_verb_definition(&raw, false, default_name) {
                         Some(verb) => {
                             by_name.insert(verb.name.clone(), verb);
                         }
                         None => {
-                            tracing::warn!(path = %path.display(), "skip malformed program verb (missing name/effect/interaction)")
+                            tracing::warn!(path = %path.display(), "skip malformed program verb (missing/unrecognized effect or interaction)")
                         }
                     }
                 }
@@ -350,6 +366,47 @@ mod tests {
             ],
         );
         assert_eq!(rendered, "Doc: DOC\nSel: SEL\nExtra: EXTRA");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn user_file_name_defaults_to_filename_stem() {
+        let dir =
+            std::env::temp_dir().join(format!("agentd-verb-test-fname-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // No `name:` field at all — the file's own stem must supply it.
+        std::fs::write(
+            dir.join("threat-model.md"),
+            "---\nlabel: Threat model\neffect: annotate\ninteraction: single-shot\n---\n\nList abuse cases.\n",
+        )
+        .unwrap();
+        let verbs = load_verbs(&dir);
+        let verb = verbs
+            .iter()
+            .find(|v| v.name == "threat-model")
+            .expect("filename stem supplies the name");
+        assert_eq!(verb.label, "Threat model");
+        assert!(!verb.built_in);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explicit_name_field_still_overrides_filename_stem() {
+        let dir =
+            std::env::temp_dir().join(format!("agentd-verb-test-fname-ovr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Filename says "my-simplify", but an explicit `name:` still wins —
+        // this is how a differently-named file overrides a built-in.
+        std::fs::write(
+            dir.join("my-simplify.md"),
+            "---\nname: simplify\nlabel: My Simplify\neffect: rewrite\ninteraction: single-shot\n---\n\nCustom body.\n",
+        )
+        .unwrap();
+        let verbs = load_verbs(&dir);
+        assert_eq!(verbs.len(), 4, "explicit name overrides the built-in, not adds alongside it");
+        let simplify = verbs.iter().find(|v| v.name == "simplify").unwrap();
+        assert_eq!(simplify.label, "My Simplify");
+        assert!(!simplify.built_in);
         std::fs::remove_dir_all(&dir).ok();
     }
 
