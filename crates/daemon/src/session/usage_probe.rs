@@ -30,13 +30,30 @@ const USAGE_PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 /// client to negotiate a real size against.
 const USAGE_PROBE_COLS: u16 = 100;
 const USAGE_PROBE_ROWS: u16 = 40;
+/// Extra idle wait inserted before each retry beyond the first, scaled by
+/// attempt number (2s before attempt 2, 4s before attempt 3, ...). See the
+/// submit-retry loop's own doc comment in `run_usage_probe` for why real
+/// additional elapsed time — not just re-trying — is what actually
+/// recovers a harness whose startup interference is consistent rather than
+/// occasional.
+const USAGE_PROBE_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+/// How many times to (re-)submit the probe command in the same session
+/// before giving up. Confirmed live this needs to be more than 1: a fresh
+/// `SessionKind::UsageProbe` session cold-starts the harness from scratch,
+/// so a harness whose own startup work consistently outlasts
+/// `USAGE_PROBE_SETTLE` races identically on every single attempt — 402
+/// consecutive failures, 0 successes, over 46 minutes, confirmed live
+/// before this retry loop existed (spec 0086). Retrying in the *same*
+/// session with backoff is what breaks that determinism.
+const USAGE_PROBE_SUBMIT_ATTEMPTS: u32 = 3;
 /// Last-resort ceiling on one probe attempt's total wall-clock time, in
 /// [`SessionManager::refresh_usage`] — comfortably above the legitimate
-/// worst case (adapter spawn's own 60s request timeout plus the 10s/15s
-/// quiescence waits above, ≈90s) so a harness can never be stuck showing
-/// "probing…" indefinitely even if something not covered by those
-/// individual bounds goes wrong.
-const PROBE_HARD_CEILING: Duration = Duration::from_secs(120);
+/// worst case (adapter spawn's own 60s request timeout, the 10s startup
+/// wait, up to `USAGE_PROBE_SUBMIT_ATTEMPTS` rounds of a 15s response wait
+/// plus growing backoff between them, ≈150s) so a harness can never be
+/// stuck showing "probing…" indefinitely even if something not covered by
+/// those individual bounds goes wrong.
+const PROBE_HARD_CEILING: Duration = Duration::from_secs(180);
 
 impl SessionManager {
     /// `usage.query` (spec 0086). Read-mostly: never blocks on the probe
@@ -221,47 +238,94 @@ impl SessionManager {
         }
         tracing::debug!(%harness, session = %id, "usage probe: startup settled");
 
-        // Step 5: record the current PTY log offset, then send the probe
-        // command as a bracketed paste + separate Enter
-        // (`program_submit_typed_prompt`) — the same delivery the program
-        // Run path uses for these exact harnesses. Plain `send_input`
-        // (ahp `SESSION_INPUT`, "type it and append \n") is NOT equivalent
-        // here: claude/codex/antigravity's rich interactive TUIs only
-        // treat a real bracketed paste as one atomic submission, so a bulk
-        // raw write lands the text in the input box without ever
-        // submitting it — see `program_submit_typed_prompt`'s own doc
-        // comment for the same lesson learned once already for the
-        // program Run path.
-        let before_offset = self.pty_log_len(&id);
-        let sent_at_ms = Utc::now().timestamp_millis();
-        if let Err(e) = self.program_submit_typed_prompt(&id, command).await {
-            tracing::warn!(%harness, session = %id, error = %e, "usage probe: submitting command failed");
-            self.cleanup_usage_probe_session(harness, &id).await;
-            return None;
+        // Steps 5-7: submit the command and capture the response, retrying
+        // in the *same* still-live session (not a fresh one) if validation
+        // fails. Empirically necessary, not just a nice-to-have: a fresh
+        // `SessionKind::UsageProbe` session cold-starts the harness from
+        // scratch every time, so if a harness's own async startup work
+        // (confirmed live for claude — an MCP-server auth check) reliably
+        // takes longer than `USAGE_PROBE_SETTLE` to finish in a given
+        // environment, *every* fresh attempt races identically and no
+        // amount of client-triggered retrying (a new probe every ~2s while
+        // hovering) ever succeeds — confirmed live: 402 consecutive
+        // attempts, 0 successes, over 46 minutes, before this loop existed
+        // (see spec 0086). Reusing the session and just waiting longer
+        // between attempts breaks that determinism: the harness's startup
+        // work keeps progressing in real time regardless of how many times
+        // we retry, so a later attempt in the same session has strictly
+        // more real time behind it than the first one did.
+        let mut bytes = Vec::new();
+        for attempt in 0..USAGE_PROBE_SUBMIT_ATTEMPTS {
+            if attempt > 0 {
+                let backoff = USAGE_PROBE_RETRY_BACKOFF * attempt;
+                tracing::warn!(
+                    %harness, session = %id, attempt, backoff_ms = backoff.as_millis() as u64,
+                    "usage probe: retrying command submission in the same session after extra settle wait",
+                );
+                tokio::time::sleep(backoff).await;
+            }
+
+            // Record the current PTY log offset, then send the probe
+            // command as a bracketed paste + separate Enter
+            // (`program_submit_typed_prompt`) — the same delivery the
+            // program Run path uses for these exact harnesses. Plain
+            // `send_input` (ahp `SESSION_INPUT`, "type it and append \n")
+            // is NOT equivalent here: claude/codex/antigravity's rich
+            // interactive TUIs only treat a real bracketed paste as one
+            // atomic submission, so a bulk raw write lands the text in the
+            // input box without ever submitting it — see
+            // `program_submit_typed_prompt`'s own doc comment for the same
+            // lesson learned once already for the program Run path.
+            let before_offset = self.pty_log_len(&id);
+            let sent_at_ms = Utc::now().timestamp_millis();
+            if let Err(e) = self.program_submit_typed_prompt(&id, command).await {
+                tracing::warn!(%harness, session = %id, error = %e, "usage probe: submitting command failed");
+                self.cleanup_usage_probe_session(harness, &id).await;
+                return None;
+            }
+            tracing::debug!(%harness, session = %id, before_offset, command, "usage probe: command sent");
+
+            // Wait for the response to settle. Unlike the startup wait, a
+            // timeout here still proceeds to capture whatever was produced
+            // — partial usage output beats nothing. `since_ms` is critical:
+            // the startup wait (or a prior attempt in this same loop)
+            // already left `last_pty_at_ms` sitting on an old,
+            // already-quiet timestamp, so without a floor this would
+            // immediately (and wrongly) read as "settled" before this
+            // attempt's response ever arrives — only a PTY update at-or-
+            // after this attempt's own submit counts as real evidence.
+            let command_settled = self
+                .wait_for_pty_settle(
+                    &id,
+                    sent_at_ms,
+                    USAGE_PROBE_SETTLE,
+                    USAGE_PROBE_COMMAND_TIMEOUT,
+                )
+                .await;
+            tracing::debug!(%harness, session = %id, command_settled, attempt, "usage probe: command wait done");
+
+            bytes = self.capture_pty_since(&id, before_offset).await;
+            tracing::debug!(%harness, session = %id, captured_bytes = bytes.len(), attempt, "usage probe: captured");
+
+            if !bytes.is_empty() && capture_shows_command_ran(&bytes, command) {
+                break;
+            }
+            // Empirically observed race (see the loop's own doc comment
+            // above): the startup-quiescence wait can declare "settled"
+            // while the harness is still doing async startup work of its
+            // own, so the probe command lands in a screen that's about to
+            // redraw and never actually registers, and the harness's *own*
+            // continued startup output gets mistaken for "the command's
+            // response" — in practice, claude's plain idle welcome screen
+            // with an empty prompt, captured as if it were real usage data.
+            // See `capture_shows_command_ran`. Falls through to retry
+            // (with backoff) unless this was the last attempt.
+            tracing::warn!(
+                %harness, session = %id, attempt, captured_bytes = bytes.len(),
+                "usage probe: capture shows no trace of the probe command — \
+                 likely raced the harness's own startup activity",
+            );
         }
-        tracing::debug!(%harness, session = %id, before_offset, command, "usage probe: command sent");
-
-        // Step 6: wait for the response to settle. Unlike step 4, a
-        // timeout here still proceeds to capture whatever was produced —
-        // partial usage output beats nothing. `since_ms` is critical here:
-        // step 4 already left `last_pty_at_ms` sitting on an old,
-        // already-quiet timestamp, so without a floor this would
-        // immediately (and wrongly) read as "settled" before the command's
-        // response ever arrives — only a PTY update at-or-after the moment
-        // the command was sent counts as evidence of a real response.
-        let command_settled = self
-            .wait_for_pty_settle(
-                &id,
-                sent_at_ms,
-                USAGE_PROBE_SETTLE,
-                USAGE_PROBE_COMMAND_TIMEOUT,
-            )
-            .await;
-        tracing::debug!(%harness, session = %id, command_settled, "usage probe: command wait done");
-
-        // Step 7: capture only the bytes produced since the command was sent.
-        let bytes = self.capture_pty_since(&id, before_offset).await;
-        tracing::debug!(%harness, session = %id, captured_bytes = bytes.len(), "usage probe: captured");
 
         // Steps 8-10: hard-kill the adapter, best-effort unlink the native
         // transcript file it caused to exist, delete construct's own
@@ -269,25 +333,14 @@ impl SessionManager {
         self.cleanup_usage_probe_session(harness, &id).await;
 
         if bytes.is_empty() {
-            tracing::warn!(%harness, session = %id, "usage probe: capture was empty; not caching");
+            tracing::warn!(%harness, session = %id, "usage probe: capture was empty after all attempts; not caching");
             return None;
         }
         if !capture_shows_command_ran(&bytes, command) {
-            // Empirically observed race: the startup-quiescence wait (step
-            // 4) can declare "settled" while the harness is still doing
-            // async startup work of its own (confirmed live for claude —
-            // an MCP-server auth check still in flight after the PTY had
-            // already gone quiet for the settle window). The probe command
-            // then gets sent into a screen that's about to redraw and never
-            // actually lands, and the harness's *own* continued startup
-            // output during the response wait (step 6) gets mistaken for
-            // "the command's response" — in practice, claude's plain idle
-            // welcome screen with an empty prompt, captured as if it were
-            // real usage data. See `capture_shows_command_ran`.
             tracing::warn!(
                 %harness, session = %id,
-                "usage probe: capture shows no trace of the probe command — \
-                 likely raced the harness's own startup activity; discarding",
+                "usage probe: still no trace of the probe command after {} attempts; discarding",
+                USAGE_PROBE_SUBMIT_ATTEMPTS,
             );
             return None;
         }
