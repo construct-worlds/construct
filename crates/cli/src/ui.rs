@@ -12678,7 +12678,8 @@ fn render_program_selection_context_menu(
             Style::default().fg(app.theme.accent)
         }
     };
-    let run_selected = hovered || menu.focused;
+    let run_selected = hovered
+        || (menu.focused && menu.selected_action == crate::app::ProgramSelectionAction::Run);
     let comment_gap = usize::from(inner_width > run_button_width);
     let comment_width = inner_width
         .saturating_sub(run_button_width)
@@ -12695,9 +12696,11 @@ fn render_program_selection_context_menu(
     let verb_rows = verbs.len().min(rect.height.saturating_sub(2) as usize);
     let visible_comment_rows = (rect.height.saturating_sub(2) as usize).saturating_sub(verb_rows);
     comment_lines.truncate(visible_comment_rows.max(1));
+    let comment_selected =
+        menu.focused && menu.selected_action == crate::app::ProgramSelectionAction::Comment;
     let comment_style = if menu.comment.is_empty() {
         Style::default().fg(app.theme.muted)
-    } else if menu.focused {
+    } else if comment_selected {
         Style::default()
             .fg(app.theme.text)
             .add_modifier(Modifier::UNDERLINED)
@@ -12735,7 +12738,7 @@ fn render_program_selection_context_menu(
                 },
             );
         }
-        if menu.focused {
+        if comment_selected {
             let prefix: String = menu.comment.chars().take(menu.cursor).collect();
             let cursor_lines = wrap_to_width(&prefix, comment_width);
             let cursor_row = cursor_lines.len().saturating_sub(1);
@@ -12755,12 +12758,14 @@ fn render_program_selection_context_menu(
             let verb_hovered = app
                 .mouse_pos
                 .is_some_and(|(mx, my)| my == y && mx >= inner_x && mx < inner_x.saturating_add(inner_width as u16));
+            let verb_key_selected = menu.focused
+                && menu.selected_action == crate::app::ProgramSelectionAction::Verb(idx);
             let label = format!("▸ {}", verb.label);
             let truncated = truncate_to_width(&label, inner_width);
             let text_width = UnicodeWidthStr::width(truncated.as_str());
             let pad = inner_width.saturating_sub(text_width);
             let spans = vec![
-                Span::styled(truncated, row_style(verb_hovered)),
+                Span::styled(truncated, row_style(verb_hovered || verb_key_selected)),
                 Span::raw(" ".repeat(pad)),
             ];
             f.render_widget(

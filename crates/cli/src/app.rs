@@ -2482,6 +2482,11 @@ pub struct ProgramSelectionMenu {
     pub focused: bool,
     pub comment: String,
     pub cursor: usize,
+    /// Which row of the focused menu Up/Down (and C-p/C-n) navigation is on
+    /// (spec 0087): Comment, then Run, then each advertised verb in order.
+    /// Enter activates whichever row this is. Typing/comment-editing keys
+    /// only take effect while this is `Comment`.
+    pub selected_action: ProgramSelectionAction,
 }
 
 impl Default for ProgramSelectionMenu {
@@ -2490,8 +2495,20 @@ impl Default for ProgramSelectionMenu {
             focused: false,
             comment: String::new(),
             cursor: 0,
+            selected_action: ProgramSelectionAction::Comment,
         }
     }
+}
+
+/// One keyboard-navigable row of the Program selection context menu (spec
+/// 0087). Ordered `Comment, Run, Verb(0), Verb(1), ...` — the same order the
+/// menu renders in, and the order Up/Down/C-p/C-n cycle through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramSelectionAction {
+    Comment,
+    Run,
+    /// Index into `App::program_verbs`.
+    Verb(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -14593,6 +14610,7 @@ mod tests {
             focused: true,
             comment: "focus".into(),
             cursor: 5,
+            selected_action: ProgramSelectionAction::Comment,
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -14645,6 +14663,10 @@ mod tests {
             focused: true,
             comment: "focus".into(),
             cursor: 5,
+            // Run, not Comment: this test asserts the Run button's own
+            // highlighted appearance, which now depends on Run specifically
+            // being the keyboard-selected row (spec 0087).
+            selected_action: ProgramSelectionAction::Run,
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -14706,7 +14728,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_selection_run_button_is_plain_until_menu_focus() {
+    async fn program_selection_run_button_highlights_after_navigating_down_from_comment() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
@@ -14747,13 +14769,32 @@ mod tests {
             .layout
             .program_selection_run_hit
             .expect("selection menu hit registered");
+        let tab_focused_run_cell = buf
+            .cell((hit.1.saturating_sub(3), hit.2))
+            .expect("Run text cell right after Tab");
+        assert_ne!(
+            tab_focused_run_cell.style().bg,
+            Some(app.theme.accent),
+            "Tab focuses the comment row by default (spec 0087) — Run stays plain until Down selects it"
+        );
+
+        // Down moves keyboard selection off Comment onto Run (spec 0087).
+        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render after down");
+        let buf = term.backend().buffer();
+        let hit = app
+            .layout
+            .program_selection_run_hit
+            .expect("selection menu hit registered");
         let focused_run_cell = buf
             .cell((hit.1.saturating_sub(3), hit.2))
             .expect("focused Run text cell");
         assert_eq!(
             focused_run_cell.style().bg,
             Some(app.theme.accent),
-            "Run button should highlight once Tab focuses the menu"
+            "Run button should highlight once Down selects it"
         );
         server.abort();
     }
@@ -14776,6 +14817,7 @@ mod tests {
             focused: true,
             comment: "alpha beta gamma delta epsilon zeta eta theta".into(),
             cursor: 45,
+            selected_action: ProgramSelectionAction::Comment,
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -17172,6 +17214,7 @@ mod tests {
             focused: false,
             comment: "focus tests".to_string(),
             cursor: "focus tests".chars().count(),
+            selected_action: ProgramSelectionAction::Comment,
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -17458,74 +17501,90 @@ mod tests {
         server.abort();
     }
 
+    /// spec 0087: Up/Down (and C-p/C-n) no longer move the cursor within a
+    /// wrapped multi-line comment — they cycle the menu's keyboard-selected
+    /// row through Comment, Run, then each advertised verb in order, wrapping
+    /// at both ends. Only Comment accepts typed/editing keys.
     #[tokio::test]
-    async fn program_selection_comment_editor_supports_wrapped_vertical_motion() {
+    async fn program_selection_up_down_cycle_actions_instead_of_comment_cursor() {
         let (mut app, _dir, server) = empty_app().await;
         app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.program_verbs = vec![
+            construct_protocol::ProgramVerb {
+                name: "simplify".to_string(),
+                label: "Simplify".to_string(),
+                description: None,
+                effect: construct_protocol::ProgramVerbEffect::Rewrite,
+                interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+                order: 0,
+                built_in: true,
+                prompt: "test".to_string(),
+            },
+            construct_protocol::ProgramVerb {
+                name: "crystallize".to_string(),
+                label: "Crystallize spec".to_string(),
+                description: None,
+                effect: construct_protocol::ProgramVerbEffect::Rewrite,
+                interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+                order: 1,
+                built_in: true,
+                prompt: "test".to_string(),
+            },
+        ];
         app.begin_program_selection();
         app.move_program_cursor(5);
 
+        let selected_action = |app: &App| {
+            app.program_popup
+                .as_ref()
+                .and_then(|popup| popup.selection_menu.as_ref())
+                .expect("selection menu remains open")
+                .selected_action
+        };
+
         app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
-        for ch in "abcdefghijklmnopqrstuvwxyzabcdefghi".chars() {
-            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
-                .await;
-        }
-        let start_cursor = app
-            .program_popup
-            .as_ref()
-            .and_then(|popup| popup.selection_menu.as_ref())
-            .expect("selection menu remains open")
-            .cursor;
-        assert_eq!(start_cursor, 35);
-
-        app.handle_program_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
-            .await;
-        let menu = app
-            .program_popup
-            .as_ref()
-            .and_then(|popup| popup.selection_menu.as_ref())
-            .expect("selection menu remains open");
-        assert!(
-            menu.cursor < start_cursor,
-            "Up should move the cursor to the previous wrapped row"
+        assert_eq!(
+            selected_action(&app),
+            ProgramSelectionAction::Comment,
+            "Tab focuses the menu with Comment selected by default"
         );
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(selected_action(&app), ProgramSelectionAction::Run);
 
         app.handle_program_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
-        let menu = app
-            .program_popup
-            .as_ref()
-            .and_then(|popup| popup.selection_menu.as_ref())
-            .expect("selection menu remains open");
-        assert_eq!(
-            menu.cursor, start_cursor,
-            "C-n should return to the next wrapped row at the same visual column"
-        );
+        assert_eq!(selected_action(&app), ProgramSelectionAction::Verb(0));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
-            .await;
-        let after_cp = app
-            .program_popup
-            .as_ref()
-            .and_then(|popup| popup.selection_menu.as_ref())
-            .expect("selection menu remains open")
-            .cursor;
         app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
+        assert_eq!(selected_action(&app), ProgramSelectionAction::Verb(1));
+
+        // Past the last verb, Down wraps back around to Comment.
+        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(selected_action(&app), ProgramSelectionAction::Comment);
+
+        // And Up/C-p from Comment wraps to the last verb.
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(selected_action(&app), ProgramSelectionAction::Verb(1));
+
+        // Typing only edits the comment while Comment itself is selected.
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await;
         let menu = app
             .program_popup
             .as_ref()
             .and_then(|popup| popup.selection_menu.as_ref())
             .expect("selection menu remains open");
         assert_eq!(
-            menu.cursor, start_cursor,
-            "Down should mirror C-n on wrapped comment text"
+            menu.comment, "",
+            "typing while a non-Comment row is selected must not edit the comment"
         );
-        assert!(
-            after_cp < start_cursor,
-            "C-p should move the cursor to the previous wrapped row"
-        );
+
         server.abort();
     }
 

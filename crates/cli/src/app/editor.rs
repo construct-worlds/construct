@@ -611,6 +611,16 @@ impl App {
             return false;
         }
 
+        // Text-editing keys (cursor movement within the comment, insert,
+        // delete) only take effect while Comment is the selected row (spec
+        // 0087) — otherwise a keyboard-navigated Run/verb row would silently
+        // eat keystrokes meant to move a cursor that isn't showing.
+        let comment_active = self
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .is_some_and(|menu| menu.selected_action == ProgramSelectionAction::Comment);
+
         match key.code {
             KeyCode::Esc => {
                 if let Some(menu) = self
@@ -630,17 +640,40 @@ impl App {
                 self.layout.program_selection_verb_hits.clear();
                 self.set_status("program selection canceled".to_string());
             }
-            KeyCode::Up => self.move_program_selection_comment_cursor_vertical(-1),
-            KeyCode::Down => self.move_program_selection_comment_cursor_vertical(1),
+            KeyCode::Up => self.move_program_selection_action(-1),
+            KeyCode::Down => self.move_program_selection_action(1),
             KeyCode::Tab | KeyCode::BackTab => {}
             KeyCode::Enter => {
-                let comment = self.program_popup.as_ref().and_then(|popup| {
-                    let menu = popup.selection_menu.as_ref()?;
-                    Some(menu.comment.clone())
-                });
-                self.execute_program_selected_text(comment).await;
+                let action = self
+                    .program_popup
+                    .as_ref()
+                    .and_then(|popup| popup.selection_menu.as_ref())
+                    .map(|menu| menu.selected_action)
+                    .unwrap_or(ProgramSelectionAction::Comment);
+                match action {
+                    ProgramSelectionAction::Verb(idx) => {
+                        // Out-of-range only if the verb list shrank (live
+                        // reload) while this row was selected — fall back to
+                        // Run rather than silently doing nothing.
+                        if let Some(verb) = self.program_verbs.get(idx).cloned() {
+                            self.execute_program_selected_verb(verb.name).await;
+                        } else {
+                            let comment = self.program_popup.as_ref().and_then(|popup| {
+                                Some(popup.selection_menu.as_ref()?.comment.clone())
+                            });
+                            self.execute_program_selected_text(comment).await;
+                        }
+                    }
+                    ProgramSelectionAction::Comment | ProgramSelectionAction::Run => {
+                        let comment = self
+                            .program_popup
+                            .as_ref()
+                            .and_then(|popup| Some(popup.selection_menu.as_ref()?.comment.clone()));
+                        self.execute_program_selected_text(comment).await;
+                    }
+                }
             }
-            KeyCode::Left => {
+            KeyCode::Left if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -649,7 +682,7 @@ impl App {
                     menu.cursor = menu.cursor.saturating_sub(1);
                 }
             }
-            KeyCode::Right => {
+            KeyCode::Right if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -658,7 +691,7 @@ impl App {
                     menu.cursor = (menu.cursor + 1).min(menu.comment.chars().count());
                 }
             }
-            KeyCode::Home => {
+            KeyCode::Home if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -667,7 +700,7 @@ impl App {
                     menu.cursor = 0;
                 }
             }
-            KeyCode::End => {
+            KeyCode::End if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -676,7 +709,7 @@ impl App {
                     menu.cursor = menu.comment.chars().count();
                 }
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -690,7 +723,7 @@ impl App {
                     }
                 }
             }
-            KeyCode::Delete => {
+            KeyCode::Delete if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -704,7 +737,7 @@ impl App {
                     }
                 }
             }
-            _ if ctrl_char == Some('a') => {
+            _ if ctrl_char == Some('a') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -713,7 +746,7 @@ impl App {
                     menu.cursor = 0;
                 }
             }
-            _ if ctrl_char == Some('e') => {
+            _ if ctrl_char == Some('e') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -722,7 +755,7 @@ impl App {
                     menu.cursor = menu.comment.chars().count();
                 }
             }
-            _ if ctrl_char == Some('b') => {
+            _ if ctrl_char == Some('b') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -731,7 +764,7 @@ impl App {
                     menu.cursor = menu.cursor.saturating_sub(1);
                 }
             }
-            _ if ctrl_char == Some('f') => {
+            _ if ctrl_char == Some('f') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -740,7 +773,7 @@ impl App {
                     menu.cursor = (menu.cursor + 1).min(menu.comment.chars().count());
                 }
             }
-            _ if ctrl_char == Some('d') => {
+            _ if ctrl_char == Some('d') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -754,7 +787,7 @@ impl App {
                     }
                 }
             }
-            _ if ctrl_char == Some('k') => {
+            _ if ctrl_char == Some('k') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -768,7 +801,9 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char(c) if ctrl_char.is_none() && !ctrl && !alt && !super_mod => {
+            KeyCode::Char(c)
+                if comment_active && ctrl_char.is_none() && !ctrl && !alt && !super_mod =>
+            {
                 if c != '\n' && c != '\r' {
                     if let Some(menu) = self
                         .program_popup
@@ -781,16 +816,19 @@ impl App {
                     }
                 }
             }
-            _ if ctrl_char == Some('p') => self.move_program_selection_comment_cursor_vertical(-1),
-            _ if ctrl_char == Some('n') => self.move_program_selection_comment_cursor_vertical(1),
+            _ if ctrl_char == Some('p') => self.move_program_selection_action(-1),
+            _ if ctrl_char == Some('n') => self.move_program_selection_action(1),
             _ => {}
         }
         true
     }
 
-    fn move_program_selection_comment_cursor_vertical(&mut self, delta: isize) {
-        let width =
-            crate::ui::program_selection_comment_width(crate::ui::PROGRAM_SELECTION_RUN_MENU_W);
+    /// Move the selection menu's keyboard focus among its rows — Comment,
+    /// Run, then each advertised verb in order — wrapping at both ends
+    /// (spec 0087). `delta` is `-1` for Up/C-p, `1` for Down/C-n.
+    fn move_program_selection_action(&mut self, delta: isize) {
+        let verb_count = self.program_verbs.len();
+        let count = 2 + verb_count;
         let Some(menu) = self
             .program_popup
             .as_mut()
@@ -798,31 +836,17 @@ impl App {
         else {
             return;
         };
-        let prefix: String = menu.comment.chars().take(menu.cursor).collect();
-        let prefix_lines = crate::text_util::wrap_to_width(&prefix, width);
-        let current_row = prefix_lines.len().saturating_sub(1);
-        let current_col = prefix_lines
-            .last()
-            .map(|line| unicode_width::UnicodeWidthStr::width(line.as_str()))
-            .unwrap_or(0);
-        let lines = crate::text_util::wrap_to_width(&menu.comment, width);
-        let target_row = if delta < 0 {
-            current_row.saturating_sub(delta.unsigned_abs())
-        } else {
-            current_row
-                .saturating_add(delta as usize)
-                .min(lines.len().saturating_sub(1))
+        let current = match menu.selected_action {
+            ProgramSelectionAction::Comment => 0,
+            ProgramSelectionAction::Run => 1,
+            ProgramSelectionAction::Verb(i) => 2 + i,
         };
-        let chars_before_target: usize = lines
-            .iter()
-            .take(target_row)
-            .map(|line| line.chars().count())
-            .sum();
-        let target_line = lines.get(target_row).map(String::as_str).unwrap_or("");
-        let line_cursor = char_index_for_display_col(target_line, current_col);
-        menu.cursor = chars_before_target
-            .saturating_add(line_cursor)
-            .min(menu.comment.chars().count());
+        let next = (current as isize + delta).rem_euclid(count as isize) as usize;
+        menu.selected_action = match next {
+            0 => ProgramSelectionAction::Comment,
+            1 => ProgramSelectionAction::Run,
+            i => ProgramSelectionAction::Verb(i - 2),
+        };
     }
 
     pub(super) async fn execute_program_selected_text(&mut self, comment: Option<String>) -> bool {
@@ -2327,16 +2351,3 @@ fn program_anchored_live_edit(before: &str, after: &str) -> Option<construct_pro
     })
 }
 
-fn char_index_for_display_col(line: &str, target_col: usize) -> usize {
-    let mut col = 0usize;
-    for (idx, ch) in line.chars().enumerate() {
-        if col >= target_col {
-            return idx;
-        }
-        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if col > target_col {
-            return idx;
-        }
-    }
-    line.chars().count()
-}
