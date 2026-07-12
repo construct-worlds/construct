@@ -662,6 +662,17 @@ pub fn flatten_with_boxes(
     (canvas.into_rows(), boxes)
 }
 
+/// Whether `lane`'s incoming edge is a fork synthesized automatically by a
+/// harness-native context reset (`ForkedFrom::is_reset_snapshot`, spec
+/// 0085) rather than a user picking a harness and forking on purpose.
+/// `false` for anything without a `SessionSummary` (deleted mid-render) or
+/// without `forked_from` at all (root/subagent edges).
+fn is_reset_snapshot_edge(lane: &Lane) -> bool {
+    lane.summary
+        .and_then(|s| s.forked_from.as_ref())
+        .is_some_and(|f| f.is_reset_snapshot)
+}
+
 /// `"● name (harness)"` box text. The name is the session's full title
 /// when it has one; otherwise just the harness stands alone. A merged
 /// fork gets NO marker here — the merge arrow and the `✓` on its final
@@ -1218,12 +1229,21 @@ fn layout_tree(
                     lanes[p].cp_busy = lanes[p].cp_busy.max(lanes[i].fork_busy);
                     lanes[p].cp_msgs = lanes[p].cp_msgs.max(lanes[i].fork_msgs);
                 }
-                // Icon-only arrow label — the glyph alone (⑂ / ▸) marks the
-                // edge kind.
-                let edge_word = match lanes[i].node.edge {
-                    LineageEdge::Fork => "⑂",
-                    LineageEdge::Subagent => "▸",
-                    LineageEdge::Root => "",
+                // Icon-only arrow label — the glyph alone (⑂ / ▸ / ↺) marks
+                // the edge kind. A fork synthesized automatically by a
+                // context reset (spec 0085) gets a distinct glyph so it's
+                // never confused with a fork the user made on purpose,
+                // checked before the edge-kind match rather than as a
+                // separate `LineageEdge` variant — it IS an ordinary fork
+                // edge, just one `ForkedFrom` marks as auto-created.
+                let edge_word = if is_reset_snapshot_edge(&lanes[i]) {
+                    "↺"
+                } else {
+                    match lanes[i].node.edge {
+                        LineageEdge::Fork => "⑂",
+                        LineageEdge::Subagent => "▸",
+                        LineageEdge::Root => "",
+                    }
                 };
                 let ew = UnicodeWidthStr::width(edge_word);
                 // Minimal-x placement: boxes only need THEIR OWN rows
@@ -1802,10 +1822,14 @@ pub fn flatten_rails(
                 );
                 c.put(cur, pc, "├", &parent_border);
                 c.put(cur, cc, if cc > pc { "┐" } else { "┌" }, &child_border);
-                let glyph = match lanes[i].node.edge {
-                    LineageEdge::Fork => "⑂",
-                    LineageEdge::Subagent => "▸",
-                    LineageEdge::Root => "",
+                let glyph = if is_reset_snapshot_edge(&lanes[i]) {
+                    "↺"
+                } else {
+                    match lanes[i].node.edge {
+                        LineageEdge::Fork => "⑂",
+                        LineageEdge::Subagent => "▸",
+                        LineageEdge::Root => "",
+                    }
                 };
                 put_label(&mut c, cur, &lanes[i], Some(glyph));
                 placed[i] = true;
@@ -2077,6 +2101,7 @@ mod tests {
             at_ms: 0,
             parent_busy_ms: 0,
             parent_message_count: 0,
+            is_reset_snapshot: false,
         });
         s
     }
@@ -2084,6 +2109,22 @@ mod tests {
     fn subagent_of(mut s: SessionSummary, parent: &str) -> SessionSummary {
         s.kind = SessionKind::Subagent;
         s.parent_session_id = Some(parent.to_string());
+        s
+    }
+
+    /// Like `forked_from`, but marked as a fork synthesized automatically
+    /// by a harness-native context reset (spec 0085) rather than a
+    /// user-initiated fork — drives the distinct `↺` edge glyph.
+    fn reset_snapshot_of(mut s: SessionSummary, parent: &str) -> SessionSummary {
+        s.archived = true;
+        s.forked_from = Some(ForkedFrom {
+            session_id: parent.to_string(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+            is_reset_snapshot: true,
+        });
         s
     }
 
@@ -2102,6 +2143,7 @@ mod tests {
             at_ms,
             parent_busy_ms: 0,
             parent_message_count: 0,
+            is_reset_snapshot: false,
         });
         s
     }
@@ -2181,6 +2223,57 @@ mod tests {
     fn unknown_focus_session_returns_none() {
         let sessions = vec![base("a")];
         assert!(build_tree("ghost", &sessions).is_none());
+    }
+
+    // -- spec 0085: reset = fork-and-archive, distinct edge glyph --------
+
+    #[test]
+    fn reset_synthesized_fork_renders_a_distinct_glyph() {
+        // "b" is an ordinary, user-initiated fork of "a"; "c" is a fork
+        // synthesized automatically by a context reset. Both are plain
+        // Fork edges — only `forked_from.is_reset_snapshot` tells them
+        // apart, and only the glyph should differ.
+        let sessions = vec![
+            base("a"),
+            forked_from(base("b"), "a"),
+            reset_snapshot_of(base("c"), "a"),
+        ];
+        let tree = build_tree("a", &sessions).expect("tree");
+        assert_eq!(tree.children.len(), 2);
+
+        let rows = flatten(&tree, &sessions, 9_000);
+        let text = diagram_text(&rows).join("\n");
+        assert!(
+            text.contains('⑂'),
+            "expected the ordinary fork glyph in:\n{text}"
+        );
+        assert!(
+            text.contains('↺'),
+            "expected the reset-snapshot glyph in:\n{text}"
+        );
+
+        let (rail_rows, _) = flatten_rails(&tree, &sessions, 9_000);
+        let rail_text = diagram_text(&rail_rows).join("\n");
+        assert!(
+            rail_text.contains('⑂'),
+            "expected the ordinary fork glyph in rails mode:\n{rail_text}"
+        );
+        assert!(
+            rail_text.contains('↺'),
+            "expected the reset-snapshot glyph in rails mode:\n{rail_text}"
+        );
+    }
+
+    #[test]
+    fn plain_fork_without_reset_flag_is_unaffected() {
+        // No `ForkedFrom` in this tree sets `is_reset_snapshot` — must be a
+        // complete no-op versus the pre-0085 glyph selection.
+        let sessions = vec![base("a"), forked_from(base("b"), "a")];
+        let tree = build_tree("a", &sessions).expect("tree");
+        let rows = flatten(&tree, &sessions, 9_000);
+        let text = diagram_text(&rows).join("\n");
+        assert!(text.contains('⑂'));
+        assert!(!text.contains('↺'), "no reset fork exists:\n{text}");
     }
 
     #[test]

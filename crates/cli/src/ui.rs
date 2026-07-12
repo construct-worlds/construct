@@ -8620,6 +8620,7 @@ fn chat_event_kind(ev: &SessionEvent) -> ChatEventKind {
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::NativeIdChanged { .. }
         | SessionEvent::EffortChanged { .. }
         | SessionEvent::NativeSubagentSnapshot { .. }
         | SessionEvent::NativeSubagentRemoved { .. }
@@ -8810,6 +8811,7 @@ fn format_chat_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::NativeIdChanged { .. }
         | SessionEvent::EffortChanged { .. }
         | SessionEvent::NativeSubagentSnapshot { .. }
         | SessionEvent::NativeSubagentRemoved { .. }
@@ -9649,6 +9651,10 @@ pub fn short_event_label(ev: &SessionEvent) -> String {
             )
         }
         SessionEvent::ModelChanged { model } => format!("model {model}"),
+        SessionEvent::NativeIdChanged {
+            prior_native_id,
+            new_native_id,
+        } => format!("native-id-changed {prior_native_id} -> {new_native_id}"),
         SessionEvent::EffortChanged { effort } => format!("effort {effort}"),
         SessionEvent::TaskStart { tool, call_id, .. } => format!("task-start {tool} {call_id}"),
         SessionEvent::TaskBackgrounded { call_id } => format!("task-bg {call_id}"),
@@ -9991,7 +9997,10 @@ fn render_lineage_row(
                     }
                 }
                 // Fork and subagent arrow glyphs render at the same
-                // brightness, and light up with their branching session.
+                // brightness, and light up with their branching session — a
+                // reset-synthesized fork (spec 0085) is still an ordinary
+                // Fork edge with a real session id, just drawn with a
+                // distinct glyph (`↺`, chosen in `lineage.rs`).
                 crate::lineage::LineageSpan::Edge { session_id, .. } => {
                     if selected_session == Some(session_id.as_str())
                         || hovered_session == Some(session_id.as_str())
@@ -14835,6 +14844,7 @@ mod tests {
             at_ms: 1_000,
             parent_busy_ms: 0,
             parent_message_count: 0,
+            is_reset_snapshot: false,
         });
         let mut sub = lineage_test_summary("s");
         sub.kind = construct_protocol::SessionKind::Subagent;
@@ -15037,6 +15047,7 @@ mod tests {
             at_ms: 1_000,
             parent_busy_ms: 0,
             parent_message_count: 0,
+            is_reset_snapshot: false,
         });
         let sessions = vec![root, fork];
         let by_id: HashMap<&str, &SessionSummary> =
@@ -15145,6 +15156,7 @@ mod tests {
                 at_ms: 0,
                 parent_busy_ms: 0,
                 parent_message_count: 0,
+                is_reset_snapshot: false,
             });
             sessions.push(f);
         }
@@ -15522,6 +15534,7 @@ mod tests {
             at_ms: 0,
             parent_busy_ms: 0,
             parent_message_count: 0,
+            is_reset_snapshot: false,
         });
 
         assert_eq!(session_list_markers(&fork), ("⑂", "★"));

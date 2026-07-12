@@ -533,6 +533,19 @@ pub enum SessionEvent {
     ModelChanged {
         model: String,
     },
+    /// Adapter detected that the wrapped harness minted a fresh native
+    /// conversation id mid-session (Claude `/clear`/`/branch`/in-session
+    /// `/resume`, Codex `/clear`/`/new`, and equivalent flows in Antigravity
+    /// and Grok — see spec 0079). The daemon synthesizes a real, archived
+    /// child session holding a copy of the transcript up to this point,
+    /// forked from this session, so the pre-reset conversation stays
+    /// addressable through the ordinary fork/archive machinery (spec 0085).
+    /// Durable per-session state, like [`ModelChanged`](Self::ModelChanged):
+    /// never written to the transcript.
+    NativeIdChanged {
+        prior_native_id: String,
+        new_native_id: String,
+    },
     /// Adapter detected the session's active reasoning-effort tier (e.g.
     /// `"high"` / `"medium"` / `"low"`). Best-effort, like `ModelChanged` for
     /// the harnesses that don't self-report (grok, codex): scraped from
@@ -1946,6 +1959,13 @@ pub struct ForkedFrom {
     /// events. `#[serde(default)]` for records predating it.
     #[serde(default)]
     pub parent_message_count: u64,
+    /// Set when this fork was synthesized automatically by a harness-native
+    /// context reset (`/clear` and equivalents, spec 0085) rather than
+    /// created by a user picking a harness and forking on purpose. Lineage
+    /// rendering uses this to show a distinct edge glyph (`↺` vs `⑂`) so the
+    /// two are never confused at a glance.
+    #[serde(default)]
+    pub is_reset_snapshot: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

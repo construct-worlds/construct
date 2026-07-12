@@ -253,10 +253,14 @@ impl App {
         let Some(id) = self.lineage_selected_session_id(&session_id) else {
             return;
         };
+        // `!s.archived` excludes a reset-synthesized snapshot (spec 0085):
+        // it's `merge: None` (never merged, never will be) but is born
+        // archived — there's no live process to merge a result into, so
+        // without this it would misread as "an open fork eligible for `m`".
         let is_open_fork = self
             .sessions
             .iter()
-            .any(|s| s.id == id && s.forked_from.is_some() && s.merge.is_none());
+            .any(|s| s.id == id && s.forked_from.is_some() && s.merge.is_none() && !s.archived);
         if !is_open_fork {
             self.set_status("merge: select an open fork".to_string());
             return;
@@ -407,6 +411,7 @@ mod tests {
             at_ms: 0,
             parent_busy_ms: 0,
             parent_message_count: 0,
+            is_reset_snapshot: false,
         });
         s
     }

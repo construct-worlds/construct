@@ -215,6 +215,27 @@ impl SessionManager {
             }
             return;
         }
+        // NativeIdChanged records a harness-native context reset (spec
+        // 0085) by synthesizing an archived fork snapshot of the
+        // pre-reset conversation. `entry` itself (the live session) is
+        // untouched here — its own native id file was already rewritten by
+        // the adapter's hook independently of this handler.
+        if let SessionEvent::NativeIdChanged {
+            prior_native_id, ..
+        } = &event
+        {
+            if let Err(e) = self
+                .synthesize_reset_snapshot(entry, prior_native_id.clone())
+                .await
+            {
+                tracing::warn!(
+                    session = %entry.id,
+                    error = ?e,
+                    "synthesize reset snapshot from adapter event failed"
+                );
+            }
+            return;
+        }
         // EffortChanged mirrors ModelChanged exactly — same durable
         // per-session state, same broadcast path.
         if let SessionEvent::EffortChanged { effort } = &event {
@@ -411,6 +432,7 @@ impl SessionManager {
                 | SessionEvent::ApprovalModeChanged { .. }
                 | SessionEvent::OperatorLoopChanged { .. }
                 | SessionEvent::ModelChanged { .. }
+                | SessionEvent::NativeIdChanged { .. }
                 | SessionEvent::EffortChanged { .. }
                 | SessionEvent::TaskStart { .. }
                 | SessionEvent::TaskBackgrounded { .. }

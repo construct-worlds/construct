@@ -3533,6 +3533,165 @@ impl SessionManager {
         Ok(())
     }
 
+    /// The native-id file name a harness's adapter reads/writes for same-
+    /// harness fork resume (`crates/adapter-{claude,codex,grok}`), or `None`
+    /// for harnesses with no native fork primitive (Antigravity, shell,
+    /// smith, ...). Shared between ordinary fork spawn (`lifecycle.rs`,
+    /// which also needs the paired `CONSTRUCT_*_FORK_FROM` env var name) and
+    /// [`SessionManager::synthesize_reset_snapshot`] (which only needs the
+    /// filename, to seed an archived snapshot's own native id).
+    fn native_id_file_name(harness: &str) -> Option<&'static str> {
+        match harness {
+            "claude" => Some("claude_session_id.txt"),
+            "codex" => Some("codex_session_id.txt"),
+            "grok" => Some("grok_session_id.txt"),
+            _ => None,
+        }
+    }
+
+    /// Record a harness-native context reset (`/clear` and equivalents,
+    /// spec 0079) detected by an adapter, by synthesizing a real, ordinary
+    /// archived child session — "reset is fork-and-archive, plus switching
+    /// the live session's own resume id" (spec 0085): the live session
+    /// `entry` never changes identity, only its native id file (rewritten
+    /// in place by the adapter's own hook, untouched here); this method's
+    /// job is the other half — a new session holding a frozen copy of
+    /// `entry`'s transcript up to this point, `forked_from` it, born
+    /// already archived with its OWN native id file set to the id that's
+    /// about to be retired, so forking from it later is the ordinary,
+    /// unmodified fork-resume path — no special casing anywhere else.
+    /// Same "daemon builds a `SessionSummary`/`SessionEntry` directly, no
+    /// adapter, persist + insert + broadcast" shape as native-subagent
+    /// projection (`handle_native_subagent_event`).
+    async fn synthesize_reset_snapshot(
+        &self,
+        entry: &Arc<SessionEntry>,
+        prior_native_id: String,
+    ) -> Result<()> {
+        let now = Utc::now();
+        let now_ms = now.timestamp_millis();
+        let (
+            harness,
+            cwd,
+            title,
+            group_id,
+            approval_mode,
+            event_count,
+            busy_ms,
+            message_count,
+            has_pty,
+            mode,
+        ) = {
+            let s = entry.summary.read().await;
+            (
+                s.harness.clone(),
+                s.cwd.clone(),
+                s.title.clone(),
+                s.group_id.clone(),
+                s.approval_mode,
+                s.event_count,
+                s.busy_ms_at(now_ms),
+                s.message_count,
+                // A fork of this snapshot should spawn the same way a fork
+                // of the live session would (interactive PTY vs headless) —
+                // carried from the live session at the moment of reset, not
+                // hardcoded, since `Client::fork_session` decides
+                // interactive-vs-headless from the SOURCE's own `has_pty`.
+                s.has_pty,
+                s.mode.clone(),
+            )
+        };
+        let existing = self.storage.read_transcript(&entry.id, 0, None)?;
+
+        let child_id = format!("s{}", uuid::Uuid::new_v4().simple());
+        let child_title = Some(match &title {
+            Some(t) => format!("(cleared) {t}"),
+            None => format!("(cleared) {harness}"),
+        });
+        let summary = construct_protocol::SessionSummary {
+            id: child_id.clone(),
+            harness: harness.clone(),
+            cwd,
+            title: child_title,
+            state: construct_protocol::SessionState::Done,
+            created_at: now,
+            last_event_at: None,
+            cost_usd: None,
+            model: None,
+            effort: None,
+            worktree: None,
+            pending_input: false,
+            last_prompt: None,
+            event_count,
+            has_pty,
+            mode,
+            pinned: false,
+            position: -now_ms,
+            group_id,
+            parent_session_id: None,
+            native_subagent: None,
+            last_pty_at_ms: None,
+            busy_ms,
+            busy_running_since_ms: None,
+            message_count,
+            approval_mode,
+            kind: construct_protocol::SessionKind::User,
+            archived: true,
+            operator_loop_disabled: true,
+            needs_attention: false,
+            forked_from: Some(construct_protocol::ForkedFrom {
+                session_id: entry.id.clone(),
+                transcript_seq: existing.events.len() as u64,
+                at_ms: now_ms,
+                parent_busy_ms: busy_ms,
+                parent_message_count: message_count,
+                is_reset_snapshot: true,
+            }),
+            merge: None,
+        };
+        let created = Arc::new(SessionEntry {
+            id: child_id.clone(),
+            summary: RwLock::new(summary.clone()),
+            transcript_count: AtomicU64::new(existing.events.len() as u64),
+            adapter: tokio::sync::Mutex::new(None),
+            pty: tokio::sync::Mutex::new(PtyState::default()),
+            deleted: AtomicBool::new(false),
+            archived: AtomicBool::new(true),
+            title_gen_attempted: AtomicBool::new(true),
+            pending_title_prompts: std::sync::Mutex::new(Vec::new()),
+            pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+            tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
+            pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
+            unseen_activity: AtomicBool::new(false),
+            pty_burst_start_ms: AtomicI64::new(0),
+            osc11_tail: std::sync::Mutex::new(Vec::new()),
+        });
+
+        self.storage.save_summary(&summary)?;
+        if let Some(id_file) = Self::native_id_file_name(&harness) {
+            let path = self.storage.session_dir(&child_id).join(id_file);
+            if let Err(error) = std::fs::write(&path, &prior_native_id) {
+                tracing::warn!(session = %child_id, ?error, "write archived reset-snapshot native id failed");
+            }
+        }
+        for ev in &existing.events {
+            if let Err(error) = self.storage.append_event(&child_id, ev) {
+                tracing::warn!(session = %child_id, ?error, "copy transcript event into reset snapshot failed");
+            }
+        }
+
+        self.sessions
+            .write()
+            .await
+            .insert(child_id.clone(), created);
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::State(StateNotificationPayload {
+                session: summary,
+            }));
+        Ok(())
+    }
+
     async fn persist_effort(&self, entry: &Arc<SessionEntry>, effort: String) -> Result<()> {
         let snapshot = {
             let mut s = entry.summary.write().await;
@@ -4504,6 +4663,7 @@ mod tests {
             at_ms: 0,
             parent_busy_ms: 0,
             parent_message_count: 0,
+            is_reset_snapshot: false,
         });
         entry
     }
@@ -4885,6 +5045,7 @@ mod tests {
             at_ms: 0,
             parent_busy_ms: 0,
             parent_message_count: 0,
+            is_reset_snapshot: false,
         });
         fork.summary.write().await.event_count = 2;
         mgr.sessions.write().await.insert("fork".into(), fork);
@@ -4952,6 +5113,7 @@ mod tests {
             at_ms: 0,
             parent_busy_ms: 0,
             parent_message_count: 0,
+            is_reset_snapshot: false,
         });
         mgr.sessions
             .write()
@@ -5577,6 +5739,120 @@ mod tests {
                 .any(|e| matches!(e.event, SessionEvent::ModelChanged { .. })),
             "ModelChanged must not be written to the transcript"
         );
+    }
+
+    /// spec 0085: a native-id-change event synthesizes a real, archived
+    /// child session — "fork and archive it" — holding a copy of the live
+    /// session's transcript up to that point, with its OWN native id file
+    /// set to the id that's being retired. Firing it twice produces two
+    /// SIBLING children (both `forked_from.session_id` pointing at the same
+    /// live session), not one growing record.
+    #[tokio::test]
+    async fn native_id_changed_synthesizes_an_archived_fork_snapshot() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage.clone(), config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let id = "snativeidchange";
+        let entry = synthetic_entry(id, construct_protocol::SessionKind::User, 0);
+        entry.summary.write().await.harness = "claude".into();
+        mgr.sessions.write().await.insert(id.into(), entry.clone());
+
+        mgr.handle_event(
+            &entry,
+            SessionEvent::Message {
+                role: construct_protocol::MessageRole::User,
+                text: "hello".into(),
+            },
+        )
+        .await;
+        mgr.handle_event(
+            &entry,
+            SessionEvent::Message {
+                role: construct_protocol::MessageRole::Assistant,
+                text: "hi".into(),
+            },
+        )
+        .await;
+
+        mgr.handle_event(
+            &entry,
+            SessionEvent::NativeIdChanged {
+                prior_native_id: "native-a".into(),
+                new_native_id: "native-b".into(),
+            },
+        )
+        .await;
+
+        // The live session itself is untouched by this handler.
+        let live = storage.load_summary(id).expect("live summary");
+        assert!(live.forked_from.is_none());
+        assert_eq!(live.event_count, 2);
+
+        let all = mgr.list().await;
+        let children: Vec<_> = all
+            .iter()
+            .filter(|s| {
+                s.forked_from
+                    .as_ref()
+                    .is_some_and(|f| f.session_id == id)
+            })
+            .collect();
+        assert_eq!(children.len(), 1, "exactly one archived snapshot so far");
+        let child = children[0];
+        assert!(child.archived, "snapshot is born archived");
+        let forked_from = child.forked_from.as_ref().unwrap();
+        assert!(forked_from.is_reset_snapshot);
+        assert_eq!(forked_from.transcript_seq, 2);
+        assert_eq!(child.event_count, 2);
+        assert_eq!(child.title.as_deref(), Some("(cleared) claude"));
+        // Forking the snapshot must spawn the same way forking the live
+        // session would (interactive PTY, not headless) — `has_pty`/`mode`
+        // are carried from the live session, not hardcoded to headless
+        // defaults (`Client::fork_session` decides interactive-vs-headless
+        // purely from the fork source's own `has_pty`/`mode`; `synthetic_
+        // entry`'s live fixture is `has_pty: true, mode: None`, which
+        // already counts as "terminal" since only `mode == Some("headless")`
+        // overrides it).
+        assert!(child.has_pty, "snapshot must carry the live session's has_pty");
+        assert_eq!(child.mode, None);
+
+        let child_native_id =
+            std::fs::read_to_string(storage.session_dir(&child.id).join("claude_session_id.txt"))
+                .expect("child native id file");
+        assert_eq!(child_native_id, "native-a");
+
+        let child_transcript = storage
+            .read_transcript(&child.id, 0, None)
+            .expect("child transcript");
+        assert_eq!(child_transcript.events.len(), 2, "transcript was copied");
+
+        // A second reset must produce a SIBLING, not overwrite the first.
+        mgr.handle_event(
+            &entry,
+            SessionEvent::NativeIdChanged {
+                prior_native_id: "native-b".into(),
+                new_native_id: "native-c".into(),
+            },
+        )
+        .await;
+        let all = mgr.list().await;
+        let children: Vec<_> = all
+            .iter()
+            .filter(|s| {
+                s.forked_from
+                    .as_ref()
+                    .is_some_and(|f| f.session_id == id)
+            })
+            .collect();
+        assert_eq!(children.len(), 2, "two sibling snapshots, not one merged record");
     }
 
     /// Regression for the post-#69 "all sessions go to `done` after
