@@ -103,7 +103,12 @@ purpose.
 Relatedly, the session list itself shows lineage structure ambiently: a
 fork renders as an indented child row under its parent (like subagent
 rows) — recursively, so a fork of a fork still appears — never as its own
-top-level row, and a parent row badges its live fork count. The section provides the temporal detail (fork/merge order,
+top-level row, and a parent row badges its live fork count. Collapsing a
+parent row hides its complete child tree (subagents, forks, and the archived-
+children disclosure), and that parent-row collapse preference survives TUI
+and daemon restarts. This is distinct from expanding an "N archived" row,
+whose per-section reveal state remains intentionally ephemeral (spec 0031).
+The section provides the temporal detail (fork/merge order,
 per-window message counts and compute time) that list rows cannot.
 
 Archiving a fork (merge or discard both auto-archive, spec 0078) never

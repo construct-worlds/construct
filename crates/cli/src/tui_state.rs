@@ -53,6 +53,11 @@ pub struct TuiState {
     pub active_window_id: Option<u64>,
     #[serde(default)]
     pub open_program_session_ids: Vec<String>,
+    /// Parent session ids whose subagent/fork trees were collapsed when the
+    /// TUI last quit. Stale ids are pruned against the live session graph when
+    /// the state is restored and saved.
+    #[serde(default)]
+    pub collapsed_session_ids: Vec<String>,
     #[serde(default)]
     pub widgets: HashMap<String, WidgetState>,
     /// Step (1..=8) of an interactive tutorial (spec 0077) in progress when
@@ -95,6 +100,7 @@ impl Default for TuiState {
             main_windows: None,
             active_window_id: None,
             open_program_session_ids: Vec::new(),
+            collapsed_session_ids: Vec::new(),
             widgets: HashMap::new(),
             tutorial_step: None,
             lineage_collapsed: false,
@@ -186,6 +192,7 @@ mod tests {
         .expect("legacy state should deserialize");
 
         assert!(state.open_program_session_ids.is_empty());
+        assert!(state.collapsed_session_ids.is_empty());
     }
 
     #[test]
@@ -199,6 +206,19 @@ mod tests {
         let restored: TuiState = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(restored.open_program_session_ids, vec!["s1", "s2"]);
+    }
+
+    #[test]
+    fn state_round_trips_collapsed_session_ids() {
+        let state = TuiState {
+            collapsed_session_ids: vec!["parent-1".into(), "parent-2".into()],
+            ..TuiState::default()
+        };
+
+        let json = serde_json::to_string(&state).expect("serialize");
+        let restored: TuiState = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(restored.collapsed_session_ids, vec!["parent-1", "parent-2"]);
     }
 
     #[test]
