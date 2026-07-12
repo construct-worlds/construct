@@ -247,9 +247,10 @@ fn emit_new_grok_transcript_lines(
     next_line: &mut usize,
     emit: &EventEmitter,
     last_model: &mut Option<String>,
+    last_effort: &mut Option<String>,
 ) {
     for value in read_new_grok_jsonl_lines(path, next_line, emit) {
-        emit_event_from_json(emit, value, last_model);
+        emit_event_from_json(emit, value, last_model, last_effort);
     }
 }
 
@@ -274,10 +275,33 @@ fn grok_model_change(v: &Value, last_model: &Option<String>) -> Option<String> {
     (last_model.as_deref() != Some(model)).then(|| model.to_string())
 }
 
-fn emit_event_from_json(emit: &EventEmitter, v: Value, last_model: &mut Option<String>) {
+/// Same signal as `grok_model_change`, for `reasoning_effort` (e.g.
+/// `"high"`/`"medium"`/`"low"`) on the same assistant line. Carries the same
+/// caveat: scanning 32 real sessions on this machine found 0 with more than
+/// one distinct value, the identical frozen-per-session pattern already
+/// confirmed for `model_id` — best-effort initial capture, unreliable for a
+/// live mid-session change.
+fn grok_effort_change(v: &Value, last_effort: &Option<String>) -> Option<String> {
+    if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        return None;
+    }
+    let effort = v.get("reasoning_effort").and_then(|e| e.as_str())?;
+    (last_effort.as_deref() != Some(effort)).then(|| effort.to_string())
+}
+
+fn emit_event_from_json(
+    emit: &EventEmitter,
+    v: Value,
+    last_model: &mut Option<String>,
+    last_effort: &mut Option<String>,
+) {
     if let Some(model) = grok_model_change(&v, last_model) {
         *last_model = Some(model.clone());
         emit.emit(SessionEvent::ModelChanged { model });
+    }
+    if let Some(effort) = grok_effort_change(&v, last_effort) {
+        *last_effort = Some(effort.clone());
+        emit.emit(SessionEvent::EffortChanged { effort });
     }
     let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match ty {
@@ -544,6 +568,7 @@ fn spawn_interactive_transcript_watcher(
             .as_ref()
             .and_then(|id| grok_updates_path(&cwd, id));
         let mut last_model = initial_model;
+        let mut last_effort: Option<String> = None;
         // Only the initial resume attach skips prior history; mid-session
         // rebinds (after /clear) start at the top of the new transcript.
         let mut next_line = if skip_existing {
@@ -575,7 +600,13 @@ fn spawn_interactive_transcript_watcher(
         loop {
             tick.tick().await;
             if let Some(path) = path.as_deref().filter(|path| path.exists()) {
-                emit_new_grok_transcript_lines(path, &mut next_line, &emit, &mut last_model);
+                emit_new_grok_transcript_lines(
+                    path,
+                    &mut next_line,
+                    &emit,
+                    &mut last_model,
+                    &mut last_effort,
+                );
             }
             if let (Some(root_id), Some(updates_path)) =
                 (current_id.as_deref(), updates_path.as_deref())
@@ -1233,6 +1264,42 @@ mod tests {
         assert_eq!(
             grok_model_change(&v, &Some("grok-4.5".to_string())).as_deref(),
             Some("grok-4.5-fast")
+        );
+    }
+
+    #[test]
+    fn effort_change_ignored_for_non_assistant_lines() {
+        let v: Value = serde_json::json!({"type": "user", "reasoning_effort": "high"});
+        assert_eq!(grok_effort_change(&v, &None), None);
+    }
+
+    #[test]
+    fn effort_change_ignored_when_field_absent() {
+        let v: Value = serde_json::json!({"type": "assistant", "content": "hi"});
+        assert_eq!(grok_effort_change(&v, &None), None);
+    }
+
+    #[test]
+    fn effort_change_fires_on_first_observation() {
+        let v: Value = serde_json::json!({"type": "assistant", "reasoning_effort": "high"});
+        assert_eq!(grok_effort_change(&v, &None).as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn effort_change_silent_when_unchanged() {
+        let v: Value = serde_json::json!({"type": "assistant", "reasoning_effort": "high"});
+        assert_eq!(
+            grok_effort_change(&v, &Some("high".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn effort_change_fires_on_switch() {
+        let v: Value = serde_json::json!({"type": "assistant", "reasoning_effort": "low"});
+        assert_eq!(
+            grok_effort_change(&v, &Some("high".to_string())).as_deref(),
+            Some("low")
         );
     }
 }

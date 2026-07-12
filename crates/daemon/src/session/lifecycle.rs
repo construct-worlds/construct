@@ -71,6 +71,7 @@ impl SessionManager {
             last_event_at: None,
             cost_usd: None,
             model: params.model.clone(),
+            effort: None,
             worktree: worktree_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),

@@ -3533,6 +3533,21 @@ impl SessionManager {
         Ok(())
     }
 
+    async fn persist_effort(&self, entry: &Arc<SessionEntry>, effort: String) -> Result<()> {
+        let snapshot = {
+            let mut s = entry.summary.write().await;
+            s.effort = Some(effort);
+            s.clone()
+        };
+        self.storage.save_summary(&snapshot)?;
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::State(StateNotificationPayload {
+                session: snapshot,
+            }));
+        Ok(())
+    }
+
     pub async fn set_approval_mode(
         &self,
         id: &str,
@@ -3942,6 +3957,7 @@ mod tests {
             last_event_at: None,
             cost_usd: None,
             model: None,
+            effort: None,
             worktree: None,
             pending_input: false,
             last_prompt: None,
@@ -4414,6 +4430,7 @@ mod tests {
                 last_event_at: None,
                 cost_usd: None,
                 model: None,
+                effort: None,
                 worktree: None,
                 pending_input: false,
                 last_prompt: None,
@@ -5600,6 +5617,7 @@ mod tests {
             last_event_at: None,
             cost_usd: None,
             model: None,
+            effort: None,
             worktree: None,
             pending_input: false,
             last_prompt: None,
@@ -5740,6 +5758,7 @@ mod tests {
             last_event_at: None,
             cost_usd: None,
             model: None,
+            effort: None,
             worktree: None,
             pending_input: false,
             last_prompt: None,

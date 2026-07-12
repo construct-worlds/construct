@@ -1231,7 +1231,10 @@ fn render_harness_model_tooltip(f: &mut Frame, app: &App) {
         return;
     };
     let model = s.model.as_deref().unwrap_or("unknown");
-    let label = format!(" model: {model} ");
+    let label = match s.effort.as_deref() {
+        Some(effort) => format!(" model: {model} ({effort}) "),
+        None => format!(" model: {model} "),
+    };
     let total = f.area();
     let inner_w = UnicodeWidthStr::width(label.as_str()) as u16;
     let rect = harness_model_tooltip_rect(hit.x_start, hit.y, inner_w + 2, 3, total);
@@ -8606,6 +8609,7 @@ fn chat_event_kind(ev: &SessionEvent) -> ChatEventKind {
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::EffortChanged { .. }
         | SessionEvent::NativeSubagentSnapshot { .. }
         | SessionEvent::NativeSubagentRemoved { .. }
         | SessionEvent::NativeSubagent { .. }
@@ -8795,6 +8799,7 @@ fn format_chat_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::EffortChanged { .. }
         | SessionEvent::NativeSubagentSnapshot { .. }
         | SessionEvent::NativeSubagentRemoved { .. }
         | SessionEvent::NativeSubagent { .. }
@@ -9633,6 +9638,7 @@ pub fn short_event_label(ev: &SessionEvent) -> String {
             )
         }
         SessionEvent::ModelChanged { model } => format!("model {model}"),
+        SessionEvent::EffortChanged { effort } => format!("effort {effort}"),
         SessionEvent::TaskStart { tool, call_id, .. } => format!("task-start {tool} {call_id}"),
         SessionEvent::TaskBackgrounded { call_id } => format!("task-bg {call_id}"),
         SessionEvent::TaskEnd { call_id, ok, .. } => format!("task-end {call_id} ok={ok}"),
@@ -15450,6 +15456,7 @@ mod tests {
             last_event_at: None,
             cost_usd: None,
             model: None,
+            effort: None,
             worktree: None,
             pending_input: false,
             last_prompt: None,

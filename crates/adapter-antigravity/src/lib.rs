@@ -231,12 +231,36 @@ fn looks_like_model_id(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
 }
 
-/// Best-effort extraction of the model a `gen_metadata` row's blob was
-/// generated with. The blob is a binary/protobuf-shaped internal format we
-/// have no schema for, so this scrapes its printable-ASCII strings for
-/// known shapes rather than parsing it properly. Expected to degrade to
-/// `None`, never panic, if agy's internal format changes.
-fn model_from_gen_metadata_blob(data: &[u8]) -> Option<String> {
+/// Splits a `"Title Case Words (Qualifier)"` display label into its base
+/// model name and effort qualifier, e.g. `"Gemini 3.5 Flash (High)"` ->
+/// `("Gemini 3.5 Flash", Some("High"))`. Agy bundles the reasoning-effort
+/// tier into the same display string as the model — there's no separate
+/// field for it — so this is the only way to recover it. Strings with no
+/// recognized qualifier suffix pass through unchanged with `effort: None`.
+fn split_model_and_effort(s: &str) -> (String, Option<String>) {
+    let s = s.trim();
+    if s.ends_with(')') {
+        if let Some(open) = s.rfind('(') {
+            let qualifier = &s[open + 1..s.len() - 1];
+            if MODEL_DISPLAY_QUALIFIERS.contains(&qualifier) {
+                let head = s[..open].trim();
+                if !head.is_empty() {
+                    return (head.to_string(), Some(qualifier.to_string()));
+                }
+            }
+        }
+    }
+    (s.to_string(), None)
+}
+
+/// Best-effort extraction of the model (and, bundled into the same display
+/// string, the reasoning-effort tier — see `split_model_and_effort`) a
+/// `gen_metadata` row's blob was generated with. The blob is a
+/// binary/protobuf-shaped internal format we have no schema for, so this
+/// scrapes its printable-ASCII strings for known shapes rather than parsing
+/// it properly. Expected to degrade to `(None, None)`, never panic, if
+/// agy's internal format changes.
+fn model_and_effort_from_gen_metadata_blob(data: &[u8]) -> (Option<String>, Option<String>) {
     let strings = ascii_strings(data);
     // Strongest signal: agy's own explicit record of a model switch, e.g.
     // "The user changed setting `Model Selection` from X to Gemini 3.5
@@ -264,28 +288,30 @@ fn model_from_gen_metadata_blob(data: &[u8]) -> Option<String> {
                     bounded[..end].trim()
                 };
                 if !model.is_empty() {
-                    return Some(model.to_string());
+                    let (model, effort) = split_model_and_effort(model);
+                    return (Some(model), effort);
                 }
             }
         }
     }
     if let Some(s) = strings.iter().find(|s| looks_like_model_display_label(s)) {
-        return Some(s.trim().to_string());
+        let (model, effort) = split_model_and_effort(s);
+        return (Some(model), effort);
     }
     if let Some(s) = strings.iter().find(|s| looks_like_model_id(s)) {
-        return Some((*s).to_string());
+        return (Some((*s).to_string()), None);
     }
-    None
+    (None, None)
 }
 
 /// Poll `conversations/<id>.db`'s `gen_metadata` table for rows newer than
 /// `after_idx`. Returns the highest idx seen (so the caller can advance its
-/// high-water mark even when no row yields a recognizable model) and the
-/// most recent model extracted from any new row.
-fn poll_gen_metadata_model(
+/// high-water mark even when no row yields anything) and the most recent
+/// model/effort extracted from any new row.
+fn poll_gen_metadata_model_and_effort(
     db_path: &Path,
     after_idx: i64,
-) -> Result<(i64, Option<String>), rusqlite::Error> {
+) -> Result<(i64, Option<String>, Option<String>), rusqlite::Error> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.busy_timeout(Duration::from_millis(200))?;
     let mut stmt =
@@ -293,15 +319,20 @@ fn poll_gen_metadata_model(
     let mut rows = stmt.query([after_idx])?;
     let mut high = after_idx;
     let mut model = None;
+    let mut effort = None;
     while let Some(row) = rows.next()? {
         let idx: i64 = row.get(0)?;
         let data: Vec<u8> = row.get(1)?;
         high = high.max(idx);
-        if let Some(m) = model_from_gen_metadata_blob(&data) {
-            model = Some(m);
+        let (m, e) = model_and_effort_from_gen_metadata_blob(&data);
+        if m.is_some() {
+            model = m;
+        }
+        if e.is_some() {
+            effort = e;
         }
     }
-    Ok((high, model))
+    Ok((high, model, effort))
 }
 
 /// File where we stash the conversation id so a daemon restart can
@@ -424,11 +455,12 @@ fn spawn_interactive_transcript_watcher(
         let mut skip_next_transcript = skip_existing && conv_id.is_some();
         let mut children: HashMap<String, AntigravityNativeChild> = HashMap::new();
         let mut child_seq: HashMap<String, u64> = HashMap::new();
-        // Best-effort model capture (see `model_from_gen_metadata_blob`):
-        // polled far less often than the transcript, since it's a
-        // heuristic scrape of a separate per-conversation sqlite db, not a
-        // latency-sensitive signal.
+        // Best-effort model/effort capture (see
+        // `model_and_effort_from_gen_metadata_blob`): polled far less often
+        // than the transcript, since it's a heuristic scrape of a separate
+        // per-conversation sqlite db, not a latency-sensitive signal.
         let mut last_model: Option<String> = None;
+        let mut last_effort: Option<String> = None;
         let mut last_gen_idx: i64 = -1;
         let mut gen_metadata_error_logged = false;
         let mut tick_count: u64 = 0;
@@ -525,17 +557,23 @@ fn spawn_interactive_transcript_watcher(
                 Some(&emit),
             );
 
-            // Best-effort model capture, throttled to ~every 2s.
+            // Best-effort model/effort capture, throttled to ~every 2s.
             if tick_count % 4 == 0 {
                 if let Some(db_path) = conversation_db_path(id) {
                     if db_path.exists() {
-                        match poll_gen_metadata_model(&db_path, last_gen_idx) {
-                            Ok((high, model)) => {
+                        match poll_gen_metadata_model_and_effort(&db_path, last_gen_idx) {
+                            Ok((high, model, effort)) => {
                                 last_gen_idx = high;
                                 if let Some(model) = model {
                                     if last_model.as_deref() != Some(model.as_str()) {
                                         last_model = Some(model.clone());
                                         emit.emit(SessionEvent::ModelChanged { model });
+                                    }
+                                }
+                                if let Some(effort) = effort {
+                                    if last_effort.as_deref() != Some(effort.as_str()) {
+                                        last_effort = Some(effort.clone());
+                                        emit.emit(SessionEvent::EffortChanged { effort });
                                     }
                                 }
                             }
@@ -1212,8 +1250,8 @@ mod tests {
             "The user changed setting `Model Selection` from None to Gemini 3.5 Flash (High).",
         ]);
         assert_eq!(
-            model_from_gen_metadata_blob(&blob).as_deref(),
-            Some("Gemini 3.5 Flash (High)")
+            model_and_effort_from_gen_metadata_blob(&blob),
+            (Some("Gemini 3.5 Flash".to_string()), Some("High".to_string()))
         );
     }
 
@@ -1231,8 +1269,8 @@ mod tests {
         blob.extend_from_slice(sentence.as_bytes());
         blob.extend_from_slice(&[0x00, 0x02]);
         assert_eq!(
-            model_from_gen_metadata_blob(&blob).as_deref(),
-            Some("Gemini 3.5 Flash (High)")
+            model_and_effort_from_gen_metadata_blob(&blob),
+            (Some("Gemini 3.5 Flash".to_string()), Some("High".to_string()))
         );
     }
 
@@ -1240,8 +1278,8 @@ mod tests {
     fn model_from_blob_finds_display_label_without_sentence() {
         let blob = synthetic_blob(&["model_enum", "Gemini 3.5 Flash (High)"]);
         assert_eq!(
-            model_from_gen_metadata_blob(&blob).as_deref(),
-            Some("Gemini 3.5 Flash (High)")
+            model_and_effort_from_gen_metadata_blob(&blob),
+            (Some("Gemini 3.5 Flash".to_string()), Some("High".to_string()))
         );
     }
 
@@ -1249,23 +1287,49 @@ mod tests {
     fn model_from_blob_falls_back_to_bare_model_id() {
         let blob = synthetic_blob(&["gemini-3-flash-agent"]);
         assert_eq!(
-            model_from_gen_metadata_blob(&blob).as_deref(),
-            Some("gemini-3-flash-agent")
+            model_and_effort_from_gen_metadata_blob(&blob),
+            (Some("gemini-3-flash-agent".to_string()), None)
         );
     }
 
     #[test]
     fn model_from_blob_none_when_nothing_matches() {
         let blob = synthetic_blob(&["used_non_gemini_model", "MODEL_PLACEHOLDER_M132"]);
-        assert_eq!(model_from_gen_metadata_blob(&blob), None);
+        assert_eq!(model_and_effort_from_gen_metadata_blob(&blob), (None, None));
     }
 
     #[test]
     fn model_from_blob_handles_empty_and_binary_only() {
-        assert_eq!(model_from_gen_metadata_blob(&[]), None);
+        assert_eq!(model_and_effort_from_gen_metadata_blob(&[]), (None, None));
         assert_eq!(
-            model_from_gen_metadata_blob(&[0x00, 0x01, 0xff, 0xfe]),
-            None
+            model_and_effort_from_gen_metadata_blob(&[0x00, 0x01, 0xff, 0xfe]),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn split_model_and_effort_isolates_the_qualifier() {
+        assert_eq!(
+            split_model_and_effort("Gemini 3.5 Flash (High)"),
+            ("Gemini 3.5 Flash".to_string(), Some("High".to_string()))
+        );
+    }
+
+    #[test]
+    fn split_model_and_effort_passes_through_names_without_a_qualifier() {
+        assert_eq!(
+            split_model_and_effort("gemini-3-flash-agent"),
+            ("gemini-3-flash-agent".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn split_model_and_effort_ignores_unrecognized_parenthetical() {
+        // Only known effort-tier words count as a qualifier — anything else
+        // in parens is part of the model name, not something to peel off.
+        assert_eq!(
+            split_model_and_effort("Some Model (Beta)"),
+            ("Some Model (Beta)".to_string(), None)
         );
     }
 }

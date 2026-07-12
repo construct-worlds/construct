@@ -215,6 +215,18 @@ impl SessionManager {
             }
             return;
         }
+        // EffortChanged mirrors ModelChanged exactly — same durable
+        // per-session state, same broadcast path.
+        if let SessionEvent::EffortChanged { effort } = &event {
+            if let Err(e) = self.persist_effort(entry, effort.clone()).await {
+                tracing::warn!(
+                    session = %entry.id,
+                    error = ?e,
+                    "persist effort from adapter event failed"
+                );
+            }
+            return;
+        }
         // PTY events take a latency-first fast path. Allocate their durable
         // sequence and enqueue the live broadcast before any synchronous file
         // writes or summary bookkeeping: focused clients are waiting on this
@@ -399,6 +411,7 @@ impl SessionManager {
                 | SessionEvent::ApprovalModeChanged { .. }
                 | SessionEvent::OperatorLoopChanged { .. }
                 | SessionEvent::ModelChanged { .. }
+                | SessionEvent::EffortChanged { .. }
                 | SessionEvent::TaskStart { .. }
                 | SessionEvent::TaskBackgrounded { .. }
                 | SessionEvent::TaskEnd { .. }
@@ -553,6 +566,7 @@ impl SessionManager {
                 last_event_at: None,
                 cost_usd: None,
                 model: owner_summary.model.clone(),
+                effort: owner_summary.effort.clone(),
                 worktree: owner_summary.worktree.clone(),
                 pending_input: false,
                 last_prompt: None,
