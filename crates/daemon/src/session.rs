@@ -2776,7 +2776,7 @@ impl SessionManager {
                 construct_protocol::SessionState::Done | construct_protocol::SessionState::Errored
             ) {
                 self.pending_verb_merges.lock().unwrap().remove(session_id);
-                self.clear_verb_shimmer_best_effort(&pending).await;
+                self.settle_verb_shimmer(&pending).await;
                 tracing::info!(
                     session = %session_id,
                     verb = %pending.verb.name,
@@ -2793,45 +2793,38 @@ impl SessionManager {
         }
     }
 
-    /// Turn off a verb's in-progress shimmer without touching the document
-    /// text (spec 0089: an abandoned verb must clear its in-flight affordance
-    /// but leave the document untouched). A no-op text edit — `old_string`
-    /// and `new_string` both equal to the anchor — paired with a `shimmer:
-    /// false` declaration is the documented way to settle a block without
-    /// changing it (see the Program Run planning-pass instructions). Best
-    /// effort: if the anchor has already drifted, the edit simply won't
-    /// match, which just means the block's identity already changed and so
-    /// isn't shimmering under this stale reference anyway.
-    async fn clear_verb_shimmer_best_effort(&self, pending: &PendingVerbMerge) {
-        let content_id = construct_protocol::program_block_spans(&pending.anchor)
+    /// Shimmer-settle declarations for every block of a verb's anchor.
+    /// Content ids that no longer exist in the live document are ignored by
+    /// the narrowing (fail closed), so these are always safe to over-declare.
+    fn verb_anchor_settle_decls(anchor: &str) -> Vec<construct_protocol::ProgramShimmerDecl> {
+        construct_protocol::program_block_spans(anchor)
             .into_iter()
-            .next()
-            .map(|span| span.id)
-            .unwrap_or_default();
-        if content_id.is_empty() {
+            .map(|span| construct_protocol::ProgramShimmerDecl {
+                id: span.id,
+                shimmer: false,
+                tooltip: None,
+            })
+            .collect()
+    }
+
+    /// Settle a verb's in-progress shimmer without touching the document
+    /// (spec 0089: every terminal path — merged, drift-escalated, or
+    /// abandoned — must clear the verb's in-flight affordance, but only the
+    /// merge itself may change the text). Declares every anchor block
+    /// settled directly against the run's pending set instead of going
+    /// through an edit, so it also works when the anchor no longer matches
+    /// the document — exactly the drift case an anchored no-op edit cannot
+    /// reach. A multi-block anchor settles in full, not just its first block.
+    async fn settle_verb_shimmer(&self, pending: &PendingVerbMerge) {
+        let decls = Self::verb_anchor_settle_decls(&pending.anchor);
+        if decls.is_empty() {
             return;
         }
-        let _ = self
-            .program_edit_from_conn(
-                ProgramEditParams {
-                    session_id: pending.program_session_id.clone(),
-                    edits: vec![construct_protocol::ProgramEdit {
-                        old_string: pending.anchor.clone(),
-                        new_string: pending.anchor.clone(),
-                        replace_all: false,
-                        keep_pending: false,
-                    }],
-                    actor: construct_protocol::ProgramUpdateActor::Agent,
-                    note: Some("verb abandoned".to_string()),
-                    shimmer: vec![construct_protocol::ProgramShimmerDecl {
-                        id: content_id,
-                        shimmer: false,
-                        tooltip: None,
-                    }],
-                },
-                None,
-            )
-            .await;
+        let Ok(program) = self.storage.read_program(&pending.program_session_id) else {
+            return;
+        };
+        self.narrow_program_run(&pending.program_session_id, &program.markdown, &decls);
+        self.broadcast_program_state(program);
     }
 
     async fn apply_verb_merge(
@@ -2872,7 +2865,14 @@ impl SessionManager {
                     }],
                     actor: construct_protocol::ProgramUpdateActor::Agent,
                     note: Some(format!("verb: {}", pending.verb.name)),
-                    shimmer: Vec::new(),
+                    // Settle the verb's shimmer in the same edit. An annotate
+                    // merge keeps the anchor blocks' text — and therefore
+                    // their content ids — alive, so without an explicit
+                    // settle they would stay in the run's pending set and
+                    // shimmer forever after the verb completed. A rewrite's
+                    // old ids drop out of the pending set on their own; the
+                    // extra declarations are ignored fail-closed.
+                    shimmer: Self::verb_anchor_settle_decls(&pending.anchor),
                 },
                 None,
             )
@@ -2891,6 +2891,12 @@ impl SessionManager {
                 // fails (e.g. the owning session has no live adapter right
                 // now) — the verb's job is done either way, and leaving it
                 // un-archived would strand it in the active list forever.
+                // The verb is complete either way, so its in-flight shimmer
+                // settles now; the owning session re-declares shimmer as it
+                // works if it wants to (partial drift can leave some anchor
+                // blocks' ids alive and still pending, so this is not a
+                // no-op).
+                self.settle_verb_shimmer(&pending).await;
                 if let Err(e) = self
                     .escalate_verb_drift(&pending, verb_session_id, content)
                     .await
@@ -5683,6 +5689,122 @@ mod tests {
         assert_eq!(
             program.markdown, markdown,
             "an abandoned verb must not touch the document"
+        );
+    }
+
+    /// spec 0089: completing a verb settles its in-flight shimmer. The
+    /// annotate case is the one that regresses silently: the merge keeps the
+    /// anchor block's text — and therefore its content id — alive, so unless
+    /// the merge explicitly declares it settled, the block stays in the
+    /// run's pending set and shimmers forever after the verb is done.
+    #[tokio::test]
+    async fn program_verb_annotate_merge_settles_anchor_shimmer() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage.clone(), config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        mgr.sessions.write().await.insert(
+            "vowner4".into(),
+            synthetic_entry("vowner4", construct_protocol::SessionKind::User, 0),
+        );
+        mgr.sessions.write().await.insert(
+            "vsub4".into(),
+            synthetic_subagent_entry("vsub4", "vowner4", 1).await,
+        );
+
+        storage
+            .update_program(
+                "vowner4",
+                "# Plan\n\nDo the thing.\n".to_string(),
+                construct_protocol::ProgramUpdateActor::Human,
+                None,
+                None,
+                None,
+            )
+            .expect("seed program");
+        // Mirror `program_verb_execute`'s spawn sequence: seed the run's
+        // pending set over the selection, then apply the provisional
+        // clip-annotation edit with its shimmer declaration.
+        mgr.start_program_run_with_dispatch_state(
+            "vowner4",
+            "Do the thing.",
+            true,
+            None,
+            false,
+            None,
+        );
+        let anchor = "Do the thing. @{session:vsub4}".to_string();
+        let content_id = construct_protocol::program_block_spans(&anchor)
+            .into_iter()
+            .next()
+            .map(|span| span.id)
+            .unwrap_or_default();
+        let edit_result = mgr
+            .program_edit_from_conn(
+                ProgramEditParams {
+                    session_id: "vowner4".to_string(),
+                    edits: vec![construct_protocol::ProgramEdit {
+                        old_string: "Do the thing.".to_string(),
+                        new_string: anchor.clone(),
+                        replace_all: false,
+                        keep_pending: true,
+                    }],
+                    actor: construct_protocol::ProgramUpdateActor::Agent,
+                    note: Some("verb: test".to_string()),
+                    shimmer: vec![construct_protocol::ProgramShimmerDecl {
+                        id: content_id,
+                        shimmer: true,
+                        tooltip: Some("Test verb".to_string()),
+                    }],
+                },
+                None,
+            )
+            .await
+            .expect("provisional clip edit");
+        assert!(
+            edit_result
+                .blocks
+                .iter()
+                .any(|block| block.shimmer && block.text.contains("Do the thing.")),
+            "the anchor block shimmers while the verb is in flight: {:?}",
+            edit_result.blocks
+        );
+
+        let widgets_dir = storage.widgets_dir("vsub4");
+        std::fs::create_dir_all(&widgets_dir).unwrap();
+        let result_file = widgets_dir.join("verb-result.json");
+        std::fs::write(&result_file, r#"{"content":"> Assumption: the thing exists."}"#).unwrap();
+        mgr.pending_verb_merges.lock().unwrap().insert(
+            "vsub4".to_string(),
+            PendingVerbMerge {
+                program_session_id: "vowner4".to_string(),
+                verb: test_verb(construct_protocol::ProgramVerbEffect::Annotate),
+                anchor: anchor.clone(),
+                result_file,
+            },
+        );
+
+        mgr.maybe_complete_verb_merge("vsub4", construct_protocol::SessionState::Done)
+            .await;
+
+        let program = storage.read_program("vowner4").expect("read program");
+        assert!(
+            program.markdown.contains(&anchor)
+                && program.markdown.contains("Assumption: the thing exists."),
+            "annotate keeps the anchor and inserts the result below it: {}",
+            program.markdown
+        );
+        let blocks = mgr.program_blocks_projection("vowner4", &program.markdown);
+        assert!(
+            blocks.iter().all(|block| !block.shimmer),
+            "a completed verb leaves no block shimmering: {blocks:?}"
         );
     }
 

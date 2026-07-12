@@ -34,6 +34,8 @@ A verb session is a **visible top-level sibling** of the Program-owning session,
 
 Shimmer on a verb's selected block(s) requires an active `ProgramRunProgress` entry to exist for the Program-owning session before any per-block shimmer declaration can take effect — a declaration made against a session with no active run is silently dropped, not a fallback error. Verb execution must seed this the same way selection Run does, before applying its own shimmer declaration. Clients give the same optimistic, pre-round-trip shimmer treatment to a verb dispatch that they give to a selection Run: the client marks the affected block(s) pending locally the instant the verb is dispatched, before the daemon round-trip completes, unioned with (not clobbering) any run already active on that session.
 
+Every terminal outcome of a verb settles that shimmer explicitly — mechanical merge, drift escalation, and abandonment alike. Content-identity churn cannot be relied on to do it implicitly: an `annotate` merge keeps the anchor blocks' text (and therefore their identity) alive, so without an explicit settle they would shimmer forever after the verb completed, and a partially drifted multi-block anchor can leave some blocks' identities intact and still pending. The settle covers the whole anchor, not just its first block, and only the merge itself may change document text — settling shimmer never does. Declarations naming blocks whose identity already drifted are ignored (fail closed). On drift escalation the verb's shimmer settles too: the verb's own work is complete, and the Program-owning session re-declares shimmer through its reconciling edit if work remains in flight.
+
 ### Verb effects
 
 - **`annotate`** inserts new content adjacent to the selection (typically directly below it) and leaves the selected text untouched.
@@ -78,7 +80,7 @@ Verb definitions as markdown files keep the surface extensible without client re
 - Verb results are applied verbatim. Any future step that summarizes, reformats, or "improves" a returned rewrite before merging violates this spec.
 - Mechanical merge must remain subordinate to the Program's version-conflict protection; escalation to the Program-owning session is the only sanctioned response to anchor drift, and merges stay single-writer.
 - Overlapping in-flight verbs on intersecting selections are permitted but must be surfaced to the user (at minimum a warning at spawn time); later results merge against the post-merge document, and escalation handles the drift.
-- Verb sessions that die or are cancelled before returning must clear the in-progress affordance and leave the document untouched.
+- Verb sessions that die or are cancelled before returning must clear the in-progress affordance and leave the document untouched. More generally, every terminal path — merged, drift-escalated, or abandoned — settles the verb's shimmer over the full anchor (see "Optimistic and confirmed shimmer").
 - Soft-archived verb sessions must keep their clips resolvable, since the clip in the document is the durable record of the interaction.
 - A verb session is `SessionKind::User` with `parent_session_id: None`, matching every other fork — never `SessionKind::Subagent` with `forked_from` also set. That combination is deliberately avoided: the lineage tree and the session-reorder logic disagree on which relationship takes precedence when both are set on the same session, so it is not a supported shape.
 
