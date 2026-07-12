@@ -721,7 +721,7 @@ impl App {
             .as_ref()
             .map(|popup| (popup.pinned_card_cols, popup.pinned_card_rows))
             .unwrap_or((
-                crate::app::PROGRAM_CLIP_HOVER_PREVIEW_COLS,
+                crate::app::PROGRAM_PINNED_CARD_DEFAULT_COLS,
                 crate::app::PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
             ));
         let owned_size = pinned.as_deref().and_then(|id| {

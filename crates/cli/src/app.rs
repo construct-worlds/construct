@@ -127,14 +127,25 @@ pub(crate) const PROGRAM_WHEEL_SCROLL_ROWS: usize = 3;
 /// parser behind a 64-col card), and 3-per-tick was measured too slow to
 /// traverse with a discrete mouse wheel.
 pub(crate) const PROGRAM_PINNED_PAN_COLS_STEP: usize = 8;
-/// Default content dimensions of the Program clip hover/pinned card (spec
-/// 0060/0090). Also the starting terminal size a pinned card resizes its
-/// session to when it takes size ownership (spec 0090) — the card and the
-/// PTY must agree exactly, or the parser would resize every frame. The
-/// pinned card is user-resizable from these defaults by dragging its
-/// right/bottom border.
-pub(crate) const PROGRAM_CLIP_HOVER_PREVIEW_COLS: u16 = 80;
+/// Content dimensions of the transient clip-chip hover preview (spec 0060) —
+/// deliberately kept small and close to a 4:3 on-screen aspect (terminal
+/// cells are ~2:1 tall, so width:2*height ≈ 4:3; see
+/// `session_hover_card_preview_geometry_reads_close_to_4_by_3`), since it's
+/// a glance-only popover, not a working view. NOT the pinned card's own
+/// default — that has its own, wider default below — this pair is read only
+/// by the un-pinned hover-preview path and as a last-resort fallback before
+/// a popup exists.
+pub(crate) const PROGRAM_CLIP_HOVER_PREVIEW_COLS: u16 = 64;
 pub(crate) const PROGRAM_CLIP_HOVER_PREVIEW_ROWS: u16 = 22;
+/// Starting content width for the pinned card (spec 0090) — wider than the
+/// transient hover preview above, since a pinned card is a working inline
+/// terminal a user reads and types into, not a glance. Also the terminal
+/// size a pinned card resizes its session to when it takes size ownership:
+/// the card and the PTY must agree exactly, or the parser would resize
+/// every frame. Height reuses `PROGRAM_CLIP_HOVER_PREVIEW_ROWS` — only the
+/// width default differs; both axes are user-resizable from here by
+/// dragging the card's right/bottom border.
+pub(crate) const PROGRAM_PINNED_CARD_DEFAULT_COLS: u16 = 80;
 /// Minimum content dims a pinned card can be drag-resized down to.
 pub(crate) const PROGRAM_PINNED_CARD_MIN_COLS: u16 = 20;
 pub(crate) const PROGRAM_PINNED_CARD_MIN_ROWS: u16 = 5;
@@ -11355,7 +11366,7 @@ fn program_popup_from_document(
         pinned_scroll_rows: 0,
         pinned_scroll_cols: 0,
         pinned_terminal_size: None,
-        pinned_card_cols: PROGRAM_CLIP_HOVER_PREVIEW_COLS,
+        pinned_card_cols: PROGRAM_PINNED_CARD_DEFAULT_COLS,
         pinned_card_rows: PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
         pinned_card_pos: None,
     }
@@ -12202,7 +12213,7 @@ mod tests {
             pinned_scroll_rows: 0,
             pinned_scroll_cols: 0,
             pinned_terminal_size: None,
-            pinned_card_cols: PROGRAM_CLIP_HOVER_PREVIEW_COLS,
+            pinned_card_cols: PROGRAM_PINNED_CARD_DEFAULT_COLS,
             pinned_card_rows: PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
             pinned_card_pos: None,
         }
