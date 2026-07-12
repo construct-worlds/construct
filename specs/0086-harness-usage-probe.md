@@ -138,6 +138,13 @@ effect of the call. A caller that wants a fresh capture opts in
 explicitly; the response tells it whether a refresh is now in flight so
 it can poll again on its own cadence rather than blocking.
 
+Startup readiness and response completion use separate quiet-period
+thresholds. Startup needs only a short stable interval before input is
+sent because interactive harnesses may keep repainting idle UI elements;
+waiting for a long silence can prevent the command from ever being sent.
+After submission, the response uses a longer quiet interval so a slowly
+rendered usage panel is not captured before its final values appear.
+
 ## Reason
 
 Users have no way to see a harness's own account/usage status without
