@@ -69,6 +69,36 @@ impl App {
                 self.session_title_menu = None;
             }
         }
+        // A pinned clip card (spec 0090) dismisses on any left click that
+        // lands neither on the card itself nor on a session clip: a click on
+        // the card is consumed here (mouse never forwards into the pinned
+        // session — spec 0090 keyboard-only scope — but the card reclaims
+        // keyboard focus, so a List-focused click resumes typing into the
+        // pin); a click on a clip is the pin toggle/switch affordance handled
+        // below; any other click — in the program body, on its chrome, or
+        // outside the modal entirely — unpins, then proceeds with the effect
+        // it always had.
+        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
+            && self
+                .program_popup
+                .as_ref()
+                .is_some_and(|popup| popup.pinned_clip.is_some())
+        {
+            if self
+                .layout
+                .program_pinned_card_rect
+                .is_some_and(|card| Self::rect_contains(card, ev.column, ev.row))
+            {
+                self.focus = PaneFocus::View;
+                self.set_program_terminal_focus(false);
+                return true;
+            }
+            if self.program_clip_session_at(ev.column, ev.row).is_none() {
+                if let Some(popup) = self.program_popup.as_mut() {
+                    popup.pinned_clip = None;
+                }
+            }
+        }
         let contains = ev.column >= modal.x
             && ev.column < modal.x.saturating_add(modal.width)
             && ev.row >= modal.y

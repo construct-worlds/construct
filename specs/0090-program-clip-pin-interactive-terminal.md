@@ -14,6 +14,8 @@ Clicking a Program `@{session:…}` smart-clip chip has two distinct gestures, d
 
 A pinned card renders anchored to the clip's on-screen position (not the pointer), and continues to do so as long as the clip is visible; scrolling it off-screen hides the card without clearing the pin, so scrolling back re-shows it. It does not own its own terminal size: like the plain hover card, it crops the session's existing cached viewport rather than replaying at its own dimensions, so it never fights the main/split view over the shared parser's size (see Consequences).
 
+Dismissal follows floating-overlay convention: a left click that lands **neither on the pinned card nor on a session clip dismisses the pin**, and then proceeds with the effect that click always had (placing the caret, activating a control, focusing another pane) — whether it lands in the Program body, on Program chrome, or outside the Program modal entirely. A click *on* the pinned card is consumed by the card: it never forwards into the pinned session (keyboard-only scope, see Reason), never leaks through to the Program text beneath the card, and does not dismiss the pin; it does reclaim keyboard focus for the card, so a user who clicked away into another pane can click the card to resume typing into the pinned session. Clicks on clips stay the pin's own toggle/switch gestures described above.
+
 ## Reason
 
 A verb session (spec 0089) may need the user's input mid-run — the `interview` verb is built around exactly this. Before this, the only way to answer was to fully navigate to that session, losing your place in the Program doc. A raw double-click-only affordance existed for navigation but nothing let the user interact in place.
@@ -30,6 +32,7 @@ Cropping the session's existing cached viewport rather than replaying at the car
 - Keyboard routing must check for a pinned clip before the Program markdown editor's own key handling, and must forward to the pinned clip's session id specifically — not whatever session happens to be selected in the sidebar, which is typically a different session (the Program-owning one).
 - A pinned card must never grow its own terminal size or trigger a resize of the shared session parser; it stays a crop of whatever size the session is already cached at, matching the existing hover-card/pin-tile discipline.
 - A pinned card forwards keyboard bytes only. Mouse events over a pinned card are not forwarded to the pinned session; this scope limit is deliberate (see Reason), not an oversight to fix later without reconsidering the tradeoff.
+- Click-outside dismissal requires the client to remember the card's painted bounds from the last frame; when the pinned clip is scrolled off-screen (no card painted), any non-clip click still dismisses the pin.
 - This supersedes spec `0060`'s Non-Goal "does not make the preview persistent, pinned, or interactive" for the **clip-chip** hover card specifically. That Non-Goal still holds for the **shimmer-text** hover card (the dispatching session's own preview) — this spec does not touch that affordance.
 
 ## Non-Goals
@@ -41,6 +44,6 @@ Cropping the session's existing cached viewport rather than replaying at the car
 
 ## Examples
 
-A user runs the `interview` verb on a vague section. The verb session's clip appears next to the selection, shimmering. The user single-clicks the clip: its hover card pins open with a focused border, showing the verb's first question. The user types an answer and presses Enter — the keystrokes went to the verb session's PTY, not the Program buffer. The verb asks a follow-up; the user answers again, still without leaving the Program doc. When done, the user presses Esc to unpin, or double-clicks the clip to jump to the full session view instead.
+A user runs the `interview` verb on a vague section. The verb session's clip appears next to the selection, shimmering. The user single-clicks the clip: its hover card pins open with a focused border, showing the verb's first question. The user types an answer and presses Enter — the keystrokes went to the verb session's PTY, not the Program buffer. The verb asks a follow-up; the user answers again, still without leaving the Program doc. When done, the user presses Esc to unpin, clicks anywhere else in the doc (the click also lands there, e.g. placing the caret), or double-clicks the clip to jump to the full session view instead.
 
 A user single-clicks a clip to glance at a worker's pinned output, then clicks a different clip elsewhere in the doc — the pin follows to the new clip; the first one's card closes.

@@ -3067,6 +3067,10 @@ pub struct LayoutSnapshot {
     /// Session smart-clip hitboxes in the active program body from the last
     /// frame. Drives hover-preview and click-to-focus on `@{session:id}` chips.
     pub program_clip_hits: Vec<ProgramClipHit>,
+    /// Bounds of the pinned clip card (spec 0090) from the last frame, when
+    /// one was painted. Clicks inside it are consumed by the card; a left
+    /// click landing neither here nor on a session clip dismisses the pin.
+    pub program_pinned_card_rect: Option<ratatui::layout::Rect>,
     /// Action-link hitboxes in the active program body from the last frame.
     /// Clicking one dispatches the action to the program's owning session as
     /// user intent (`OBSERVATION: ui.action …`), the same path widget action
@@ -11685,6 +11689,7 @@ mod tests {
             program_resize_hit: None,
             program_smart_clip_anchor: None,
             program_clip_hits: Vec::new(),
+            program_pinned_card_rect: None,
             program_action_link_hits: Vec::new(),
             program_template_hits: Vec::new(),
             browser_preview_area: None,
@@ -13384,6 +13389,118 @@ mod tests {
             app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
             Some("worker2"),
             "clicking a different clip switches the pin rather than requiring an unpin first"
+        );
+    }
+
+    /// A left click that lands neither on the pinned card nor on a session
+    /// clip dismisses the pin (spec 0090), then proceeds with its normal
+    /// effect (here: placing the caret in the Program body).
+    #[tokio::test]
+    async fn program_click_outside_pinned_card_unpins() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+
+        let consumed = app
+            .handle_program_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 5,
+                row: 1,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+            .await;
+
+        assert!(consumed, "the click still lands in the Program body");
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip,
+            None,
+            "a click outside the card and off every clip dismisses the pin"
+        );
+    }
+
+    /// A click on the pinned card itself is consumed — it neither forwards
+    /// into the pinned session (keyboard-only scope, spec 0090) nor
+    /// dismisses the pin — and reclaims keyboard focus for the card.
+    #[tokio::test]
+    async fn program_click_on_pinned_card_is_consumed_and_keeps_pin() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        app.focus = PaneFocus::List;
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+        let buffer_before = app.program_popup.as_ref().unwrap().buffer.clone();
+
+        let consumed = app
+            .handle_program_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 6,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+            .await;
+
+        assert!(consumed, "card clicks are consumed by the card");
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker1"),
+            "clicking the card keeps the pin"
+        );
+        assert_eq!(
+            app.focus,
+            PaneFocus::View,
+            "clicking the card reclaims keyboard focus so typing forwards to the pin"
+        );
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().buffer,
+            buffer_before,
+            "the consumed click must not edit or place a caret in the Program body"
+        );
+    }
+
+    /// A click entirely outside the Program modal (e.g. on the session list)
+    /// also dismisses the pin, then falls through to whatever pane it hit.
+    #[tokio::test]
+    async fn program_click_outside_modal_unpins_and_falls_through() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+
+        let consumed = app
+            .handle_program_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 50,
+                row: 15,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+            .await;
+
+        assert!(
+            !consumed,
+            "an outside-the-modal click still falls through to other panes"
+        );
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip,
+            None,
+            "the pin is dismissed on the way through"
         );
     }
 

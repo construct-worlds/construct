@@ -10506,6 +10506,7 @@ fn render_program_popup(f: &mut Frame, app: &mut App) {
     app.layout.program_resize_hit = None;
     app.layout.program_smart_clip_anchor = None;
     app.layout.program_clip_hits.clear();
+    app.layout.program_pinned_card_rect = None;
     app.layout.program_action_link_hits.clear();
     if app
         .program_popup
@@ -11882,7 +11883,10 @@ fn render_program_clip_hover(
         // frame's hits (scrolled out of view), simply don't paint anything;
         // the pin itself is untouched, so scrolling back re-shows it.
         if let Some(hit) = hits.iter().find(|hit| hit.session_id == pinned_session_id) {
-            render_session_hover_card(
+            // Remember the painted bounds for mouse routing: clicks inside
+            // the card are consumed; clicks landing neither here nor on a
+            // clip dismiss the pin (spec 0090).
+            app.layout.program_pinned_card_rect = render_session_hover_card(
                 f,
                 app,
                 modal,
@@ -11905,7 +11909,7 @@ fn render_program_clip_hover(
     else {
         return;
     };
-    if render_session_hover_card(f, app, modal, &session_id, mx, my, None, false) {
+    if render_session_hover_card(f, app, modal, &session_id, mx, my, None, false).is_some() {
         return;
     }
     // No live preview (unknown session, or no captured output yet, per spec
@@ -11979,6 +11983,8 @@ fn session_hover_card_rect(
 /// actually painted, `false` when there was nothing to show (unknown
 /// session, no captured output yet, or no room) so a caller can fall back to
 /// a plain text tooltip.
+/// Returns the card's painted bounds, or `None` when nothing was painted
+/// (unknown session, no captured output yet, or no room to anchor it).
 fn render_session_hover_card(
     f: &mut Frame,
     app: &mut App,
@@ -11988,9 +11994,9 @@ fn render_session_hover_card(
     anchor_row: u16,
     title: Option<&str>,
     focused: bool,
-) -> bool {
+) -> Option<Rect> {
     let Some(_s) = app.sessions.iter().find(|s| s.id == session_id) else {
-        return false;
+        return None;
     };
 
     let max_w = modal
@@ -12019,15 +12025,15 @@ fn render_session_hover_card(
         history.replay(cols, rows, 0)
     });
     let Some(out) = preview_output else {
-        return false;
+        return None;
     };
     let content_rows = non_empty_row_span(out.screen);
     if content_rows == 0 {
-        return false;
+        return None;
     }
     let (width, height) = session_hover_card_size(content_w, content_h, max_w);
     let Some(area) = session_hover_card_rect(modal, width, height, anchor_col, anchor_row) else {
-        return false;
+        return None;
     };
 
     f.render_widget(Clear, area);
@@ -12070,7 +12076,7 @@ fn render_session_hover_card(
         focused,
         content_rows.saturating_sub(inner.height),
     );
-    true
+    Some(area)
 }
 
 /// Status-text tooltip shown while the mouse hovers *shimmering* program text —
