@@ -864,15 +864,18 @@ impl App {
     }
 
     /// Route a keypress to the Program popup's pinned clip, if one is
-    /// pinned. `Shift+arrows` pan the card's crop (spec 0090) — the single
-    /// deliberate key carve-out that never reaches the session; every other
-    /// key, `Esc` included (sessions need Esc, e.g. to interrupt a harness
-    /// mid-turn), encodes to raw PTY bytes and forwards to that clip's
-    /// session — not `self.selected_id()`, since a pinned clip is usually a
-    /// different session than the one selected in the sidebar. Unpinning is
-    /// strictly a mouse gesture: click the pinned clip again, or click
-    /// anywhere outside the card. Returns `false` (nothing to do) when no
-    /// clip is pinned.
+    /// pinned. Two deliberate carve-outs never reach the session: the
+    /// global `C-x` chord prefix (falls through to the keymap, same escape
+    /// hatch as a captured session PTY — `C-x C-x` forwards a literal C-x)
+    /// and `Shift+arrows` (crop pan, spec 0090); every other key, `Esc`
+    /// included (sessions need Esc, e.g. to interrupt a harness mid-turn),
+    /// encodes to raw PTY bytes and forwards to that clip's session — not
+    /// `self.selected_id()`, since a pinned clip is usually a different
+    /// session than the one selected in the sidebar. Unpinning is strictly
+    /// a mouse gesture: click the pinned clip again, or click anywhere
+    /// outside the card. Returns `false` (nothing to do, or a chord key the
+    /// keymap should drive) when no clip is pinned or the key belongs to
+    /// the chord tier.
     pub(super) async fn handle_pinned_clip_key(&mut self, key: KeyEvent) -> bool {
         let Some(pinned_session_id) = self
             .program_popup
@@ -881,6 +884,26 @@ impl App {
         else {
             return false;
         };
+        // The global `C-x` prefix stays with the TUI keymap, exactly as it
+        // does over a captured session PTY: starting a chord — and every key
+        // continuing one — falls through to the keymap tier below, so
+        // `C-x o`, `C-x z`, etc. keep working while a card is pinned. The
+        // standard `C-x C-x` escape hatch forwards one literal C-x byte to
+        // the pinned session instead.
+        let is_ctrl_x = matches!(key.code, KeyCode::Char('x'))
+            && key.modifiers.contains(KeyModifiers::CONTROL);
+        if !self.chord_state.is_empty() {
+            if is_ctrl_x {
+                self.chord_state.reset();
+                self.chord_label.clear();
+                self.queue_pty_input(pinned_session_id, vec![0x18], "pinned_clip_pty_input");
+                return true;
+            }
+            return false;
+        }
+        if is_ctrl_x {
+            return false;
+        }
         // Keyboard pan: the guaranteed path on terminals that report neither
         // horizontal wheel events nor Shift/Alt-modified wheels (many
         // reserve Shift+wheel for native selection/scrollback and never send

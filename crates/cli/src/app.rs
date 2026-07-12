@@ -8916,11 +8916,12 @@ impl App {
         // A pinned clip's inline terminal owns keyboard focus while pinned
         // (same tier as the program popup itself, checked first so the pinned
         // terminal — not the Program markdown editor — receives keystrokes).
-        // Esc unpins and falls through to nothing further this keypress,
-        // mirroring `/configure`'s "close and stop" for Esc specifically;
-        // every other key forwards to the pinned session's PTY and is always
-        // considered handled, since there is no sensible fallback routing for
-        // a keystroke the user typed while looking at a live terminal.
+        // Keys forward to the pinned session's PTY, with two carve-outs that
+        // return `false` here and fall through to the tiers below: the
+        // global `C-x` chord prefix (and any key continuing a chord in
+        // flight) so the keymap keeps working while pinned, and
+        // Shift+arrows (crop pan). `C-x C-x` forwards a literal C-x to the
+        // pinned session, the same escape hatch a captured PTY has.
         if self.focus == PaneFocus::View && self.handle_pinned_clip_key(key).await {
             return;
         }
@@ -14024,6 +14025,42 @@ mod tests {
             "the Program buffer itself is untouched while a clip is pinned"
         );
         server.abort();
+    }
+
+    /// The global `C-x` prefix keeps driving the TUI keymap while a clip is
+    /// pinned — starting a chord and every key continuing one fall through
+    /// (so `C-x o` etc. still work), and the standard `C-x C-x` escape
+    /// hatch forwards one literal C-x byte to the pinned session.
+    #[tokio::test]
+    async fn pinned_clip_ctrl_x_prefix_falls_through_to_keymap() {
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+        let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+
+        let handled = app.handle_pinned_clip_key(ctrl_x).await;
+        assert!(!handled, "C-x starts a chord: the keymap tier handles it");
+        assert!(rx.try_recv().is_err(), "the prefix must not reach the session");
+
+        // Put a chord in flight, as on_key's keymap tier would after C-x.
+        app.chord_state.handle(ctrl_x, &app.keymap);
+        assert!(!app.chord_state.is_empty(), "C-x leaves a chord pending");
+        let handled = app
+            .handle_pinned_clip_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .await;
+        assert!(!handled, "a chord continuation belongs to the keymap too");
+        assert!(rx.try_recv().is_err());
+
+        let handled = app.handle_pinned_clip_key(ctrl_x).await;
+        assert!(handled, "C-x C-x is the literal escape hatch");
+        let job = rx.try_recv().expect("literal C-x forwards to the session");
+        assert_eq!(job.session_id, "worker1");
+        assert_eq!(job.bytes, vec![0x18]);
+        assert!(app.chord_state.is_empty(), "the escape hatch clears the chord");
     }
 
     /// Esc is NOT an unpin key (spec 0090): sessions need it — interrupting
