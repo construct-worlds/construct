@@ -576,6 +576,9 @@ pub async fn run(
     // `provider_name` stays the wire name for limit/context keying.
     let display_name = spec.display_name();
     let model = spec.model.clone();
+    // Captured before `spec.provider` is moved out below (`spec_string`
+    // borrows the whole struct).
+    let startup_model_spec = spec.spec_string();
     let provider = spec.provider;
     // Per-model learned token limits — adapts on overflow errors
     // and bumps upward on successful probe calls. Shared across
@@ -587,6 +590,15 @@ pub async fn run(
         state: SessionState::Running,
         detail: Some(format!("{}:{}", display_name, model)),
     });
+    // Announce the starting model the same way a later `/model` switch
+    // does — see the identical rationale in `interactive::run`. A resumed
+    // session already has its last-known model persisted and re-injected
+    // via `params.model`, so skip re-announcing.
+    if !persist::is_resume() {
+        emit.emit(SessionEvent::ModelChanged {
+            model: startup_model_spec,
+        });
+    }
     hooks
         .run(
             "session_start",
@@ -1525,6 +1537,16 @@ impl ResolvedModel {
         self.profile
             .clone()
             .unwrap_or_else(|| self.provider_name().to_string())
+    }
+
+    /// Canonical spec string for `SessionEvent::ModelChanged` — a profile
+    /// keeps its `@name` form (re-resolving as `provider:model` would drop
+    /// the profile's endpoint/key), everything else is `provider:model`.
+    pub fn spec_string(&self) -> String {
+        match &self.profile {
+            Some(p) => format!("{p}:{}", self.model),
+            None => format!("{}:{}", self.provider_name(), self.model),
+        }
     }
 }
 

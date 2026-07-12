@@ -7443,6 +7443,17 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
+/// The modeline's compact model segment — no `"model:"` label (unlike the
+/// harness-hover tooltip), just the bare value(s): `"-"` when nothing is
+/// known, the model alone, or `"model (effort)"` when both are known.
+fn modeline_model_text(model: Option<&str>, effort: Option<&str>) -> String {
+    match (model, effort) {
+        (Some(m), Some(e)) => format!("{m} ({e})"),
+        (Some(m), None) => m.to_string(),
+        (None, _) => "-".into(),
+    }
+}
+
 fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     let s = app.selected_session();
     let conn = if app.connected { "" } else { " disconnected!" };
@@ -7526,7 +7537,7 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             None => "-".into(),
         },
         model = match s {
-            Some(s) => s.model.clone().unwrap_or_else(|| "-".into()),
+            Some(s) => modeline_model_text(s.model.as_deref(), s.effort.as_deref()),
             None => "-".into(),
         },
     );
@@ -15319,6 +15330,25 @@ mod tests {
         assert!(
             rect.x + rect.width <= total.width,
             "tooltip must not spill past the right edge: {rect:?}"
+        );
+    }
+
+    #[test]
+    fn modeline_model_text_shows_dash_when_nothing_known() {
+        assert_eq!(modeline_model_text(None, None), "-");
+        assert_eq!(modeline_model_text(None, Some("high")), "-");
+    }
+
+    #[test]
+    fn modeline_model_text_shows_bare_model_without_effort() {
+        assert_eq!(modeline_model_text(Some("gpt-5.6-terra"), None), "gpt-5.6-terra");
+    }
+
+    #[test]
+    fn modeline_model_text_shows_model_and_effort_together() {
+        assert_eq!(
+            modeline_model_text(Some("gpt-5.6-terra"), Some("high")),
+            "gpt-5.6-terra (high)"
         );
     }
 

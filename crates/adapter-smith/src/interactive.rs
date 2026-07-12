@@ -2078,10 +2078,14 @@ pub async fn run(
     let mut display_name = "(not configured)".to_string();
     let mut model = String::new();
     let mut provider: Box<dyn provider::LlmProvider> = Box::new(UnconfiguredProvider);
+    // Captured here (spec is moved into `resolved` below) and emitted once
+    // startup settles and `resuming` is known, further down.
+    let mut startup_model_spec: Option<String> = None;
     if let Ok(resolved) = spec {
         provider_name = resolved.provider_name();
         display_name = resolved.display_name();
         model = resolved.model.clone();
+        startup_model_spec = Some(resolved.spec_string());
         provider = resolved.provider;
     }
     let cwd = PathBuf::from(&params.cwd);
@@ -2136,6 +2140,17 @@ pub async fn run(
     // prompt, so the user has an explicit "wake me up" escape hatch.)
     if !resuming {
         term.banner(&display_name, &model, approval_mode);
+        // Announce the starting model the same way a later `/model` switch
+        // does — otherwise nothing ever tells the daemon what smith is
+        // running until the user explicitly switches, and the session
+        // summary's `model` (and the hover tooltip / modeline that read it)
+        // stays unset the whole time. A resumed session already has its
+        // last-known model persisted and re-injected via `params.model`
+        // (`SessionManager::create`), so re-announcing here would be
+        // redundant.
+        if let Some(spec) = startup_model_spec.take() {
+            emit.emit(SessionEvent::ModelChanged { model: spec });
+        }
     }
     emit.emit(SessionEvent::Status {
         state: SessionState::Running,
@@ -2498,15 +2513,10 @@ pub async fn run(
                                         // Tell the daemon the active model
                                         // changed so it records the new spec on
                                         // the session (survives restart) and the
-                                        // UI label tracks the switch. A profile
-                                        // keeps its `@name` form — re-resolving
-                                        // as `provider:model` would drop the
-                                        // profile's endpoint/key.
-                                        let spec = match &new.profile {
-                                            Some(p) => format!("{p}:{new_model}"),
-                                            None => format!("{new_name}:{new_model}"),
-                                        };
-                                        emit.emit(SessionEvent::ModelChanged { model: spec });
+                                        // UI label tracks the switch.
+                                        emit.emit(SessionEvent::ModelChanged {
+                                            model: new.spec_string(),
+                                        });
                                         provider = new.provider;
                                         provider_name = new_name;
                                         display_name = new_display;
