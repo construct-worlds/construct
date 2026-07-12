@@ -2259,6 +2259,7 @@ mod search_tests {
             last_event_at: Some(at),
             cost_usd: None,
             model: None,
+            effort: None,
             worktree: None,
             pending_input: false,
             last_prompt: None,

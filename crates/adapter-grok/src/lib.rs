@@ -242,13 +242,67 @@ fn read_new_grok_jsonl_lines(
     values
 }
 
-fn emit_new_grok_transcript_lines(path: &Path, next_line: &mut usize, emit: &EventEmitter) {
+fn emit_new_grok_transcript_lines(
+    path: &Path,
+    next_line: &mut usize,
+    emit: &EventEmitter,
+    last_model: &mut Option<String>,
+    last_effort: &mut Option<String>,
+) {
     for value in read_new_grok_jsonl_lines(path, next_line, emit) {
-        emit_event_from_json(emit, value);
+        emit_event_from_json(emit, value, last_model, last_effort);
     }
 }
 
-fn emit_event_from_json(emit: &EventEmitter, v: Value) {
+/// The root session's active model, if `v` is an assistant turn carrying a
+/// `model_id` that differs from what we last saw — grok stamps `model_id` on
+/// every assistant line in `chat_history.jsonl`, so this establishes the
+/// initial model and, in principle, catches a mid-session `/model` switch.
+///
+/// Verified against a real session (2026-07-12): running `/model` and
+/// picking a different one did not change `model_id` on the next turn, nor
+/// `summary.json`'s `current_model_id` — and grok's own status bar kept
+/// showing the old model too, so the switch never actually took effect at
+/// the grok CLI level. That's an external grok issue, not something this
+/// diff-against-`last_model` logic can work around: there's nothing on disk
+/// to observe when grok itself never persists the change. Initial-model
+/// capture is unaffected and works reliably.
+fn grok_model_change(v: &Value, last_model: &Option<String>) -> Option<String> {
+    if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        return None;
+    }
+    let model = v.get("model_id").and_then(|m| m.as_str())?;
+    (last_model.as_deref() != Some(model)).then(|| model.to_string())
+}
+
+/// Same signal as `grok_model_change`, for `reasoning_effort` (e.g.
+/// `"high"`/`"medium"`/`"low"`) on the same assistant line. Carries the same
+/// caveat: scanning 32 real sessions on this machine found 0 with more than
+/// one distinct value, the identical frozen-per-session pattern already
+/// confirmed for `model_id` — best-effort initial capture, unreliable for a
+/// live mid-session change.
+fn grok_effort_change(v: &Value, last_effort: &Option<String>) -> Option<String> {
+    if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        return None;
+    }
+    let effort = v.get("reasoning_effort").and_then(|e| e.as_str())?;
+    (last_effort.as_deref() != Some(effort)).then(|| effort.to_string())
+}
+
+fn emit_event_from_json(
+    emit: &EventEmitter,
+    v: Value,
+    last_model: &mut Option<String>,
+    last_effort: &mut Option<String>,
+) {
+    if let Some(model) = grok_model_change(&v, last_model) {
+        *last_model = Some(model.clone());
+        emit.emit(SessionEvent::ModelChanged { model });
+    }
+    if let Some(effort) = grok_effort_change(&v, last_effort) {
+        *last_effort = Some(effort.clone());
+        emit.emit(SessionEvent::EffortChanged { effort });
+    }
     let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match ty {
         "assistant" | "tool_result" => {
@@ -499,6 +553,7 @@ fn spawn_interactive_transcript_watcher(
     emit: EventEmitter,
     skip_existing: bool,
     never_rebind_onto: HashSet<String>,
+    initial_model: Option<String>,
 ) {
     if grok_home().is_none() {
         emit.log("grok: no GROK_HOME or HOME — cannot watch native transcript");
@@ -512,6 +567,8 @@ fn spawn_interactive_transcript_watcher(
         let mut updates_path: Option<PathBuf> = current_id
             .as_ref()
             .and_then(|id| grok_updates_path(&cwd, id));
+        let mut last_model = initial_model;
+        let mut last_effort: Option<String> = None;
         // Only the initial resume attach skips prior history; mid-session
         // rebinds (after /clear) start at the top of the new transcript.
         let mut next_line = if skip_existing {
@@ -543,7 +600,13 @@ fn spawn_interactive_transcript_watcher(
         loop {
             tick.tick().await;
             if let Some(path) = path.as_deref().filter(|path| path.exists()) {
-                emit_new_grok_transcript_lines(path, &mut next_line, &emit);
+                emit_new_grok_transcript_lines(
+                    path,
+                    &mut next_line,
+                    &emit,
+                    &mut last_model,
+                    &mut last_effort,
+                );
             }
             if let (Some(root_id), Some(updates_path)) =
                 (current_id.as_deref(), updates_path.as_deref())
@@ -686,6 +749,7 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
         ctx.emit.clone(),
         attached_to_existing,
         never_rebind_onto,
+        params.model.clone(),
     );
 
     let _ = run_pty(spec, ctx).await;
@@ -1165,5 +1229,77 @@ mod tests {
         assert_eq!(find_session_id(cwd).as_deref(), Some(new_id));
         std::env::remove_var("CONSTRUCT_GROK_HOME");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn model_change_ignored_for_non_assistant_lines() {
+        let v: Value = serde_json::json!({"type": "user", "model_id": "grok-4.5"});
+        assert_eq!(grok_model_change(&v, &None), None);
+    }
+
+    #[test]
+    fn model_change_ignored_when_field_absent() {
+        let v: Value = serde_json::json!({"type": "assistant", "content": "hi"});
+        assert_eq!(grok_model_change(&v, &None), None);
+    }
+
+    #[test]
+    fn model_change_fires_on_first_observation() {
+        let v: Value = serde_json::json!({"type": "assistant", "model_id": "grok-4.5"});
+        assert_eq!(grok_model_change(&v, &None).as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
+    fn model_change_silent_when_unchanged() {
+        let v: Value = serde_json::json!({"type": "assistant", "model_id": "grok-4.5"});
+        assert_eq!(
+            grok_model_change(&v, &Some("grok-4.5".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn model_change_fires_on_switch() {
+        let v: Value = serde_json::json!({"type": "assistant", "model_id": "grok-4.5-fast"});
+        assert_eq!(
+            grok_model_change(&v, &Some("grok-4.5".to_string())).as_deref(),
+            Some("grok-4.5-fast")
+        );
+    }
+
+    #[test]
+    fn effort_change_ignored_for_non_assistant_lines() {
+        let v: Value = serde_json::json!({"type": "user", "reasoning_effort": "high"});
+        assert_eq!(grok_effort_change(&v, &None), None);
+    }
+
+    #[test]
+    fn effort_change_ignored_when_field_absent() {
+        let v: Value = serde_json::json!({"type": "assistant", "content": "hi"});
+        assert_eq!(grok_effort_change(&v, &None), None);
+    }
+
+    #[test]
+    fn effort_change_fires_on_first_observation() {
+        let v: Value = serde_json::json!({"type": "assistant", "reasoning_effort": "high"});
+        assert_eq!(grok_effort_change(&v, &None).as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn effort_change_silent_when_unchanged() {
+        let v: Value = serde_json::json!({"type": "assistant", "reasoning_effort": "high"});
+        assert_eq!(
+            grok_effort_change(&v, &Some("high".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn effort_change_fires_on_switch() {
+        let v: Value = serde_json::json!({"type": "assistant", "reasoning_effort": "low"});
+        assert_eq!(
+            grok_effort_change(&v, &Some("high".to_string())).as_deref(),
+            Some("low")
+        );
     }
 }

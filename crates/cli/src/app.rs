@@ -700,6 +700,7 @@ fn chat_scroll_kind(ev: &SessionEvent) -> ChatScrollKind {
         | SessionEvent::ApprovalModeChanged { .. }
         | SessionEvent::OperatorLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
+        | SessionEvent::EffortChanged { .. }
         | SessionEvent::NativeSubagentSnapshot { .. }
         | SessionEvent::NativeSubagentRemoved { .. }
         | SessionEvent::NativeSubagent { .. }
@@ -2769,6 +2770,27 @@ impl SessionTitleNameHit {
     }
 }
 
+/// Hover hit zone for a harness-name span — the session list's right-aligned
+/// per-row label, or a session view's title-bar label. Hit-tested against
+/// `app.mouse_pos` to show `render_harness_model_tooltip`'s current-model
+/// tooltip; not a click target, so (unlike `SessionTitleNameHit`) there's no
+/// need to track which pane it belongs to — on-screen geometry alone
+/// disambiguates which row/pane the pointer is over.
+#[derive(Debug, Clone)]
+pub struct SessionHarnessHit {
+    pub session_id: String,
+    pub x_start: u16,
+    /// Exclusive end column.
+    pub x_end: u16,
+    pub y: u16,
+}
+
+impl SessionHarnessHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.y && col >= self.x_start && col < self.x_end
+    }
+}
+
 /// One session box inside the last-rendered lineage section, in screen
 /// coordinates (clipped to the section's viewport). Hovering it brightens
 /// that box's border; clicking it jumps to the session.
@@ -2849,6 +2871,10 @@ pub struct LayoutSnapshot {
     /// entry per pane) — click starts an inline rename in place. Refreshed
     /// every frame by `render_detail`.
     pub session_title_name_hits: Vec<SessionTitleNameHit>,
+    /// Hover zones for harness-name labels — session-list rows plus each
+    /// rendered session view's title bar — so `render_harness_model_tooltip`
+    /// can show the session's current model on hover.
+    pub session_harness_hits: Vec<SessionHarnessHit>,
     /// Bounds of the sidebar's lineage section from the last frame (header
     /// row included). `None` when the selected session has no lineage to
     /// show (or the sidebar is collapsed/hidden).
@@ -11344,6 +11370,7 @@ mod tests {
             minibuffer_choice_hits: Vec::new(),
             modal_area: None,
             session_title_name_hits: Vec::new(),
+            session_harness_hits: Vec::new(),
             lineage_area: None,
             lineage_header_hit: None,
             lineage_collapse_hit: None,
@@ -11690,6 +11717,7 @@ mod tests {
             last_event_at: None,
             cost_usd: None,
             model: None,
+            effort: None,
             worktree: None,
             pending_input: false,
             last_prompt: None,
