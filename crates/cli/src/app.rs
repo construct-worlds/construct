@@ -1186,6 +1186,9 @@ pub struct App {
     pub transcript: Vec<TimestampedEvent>,
     pub transcript_session: Option<String>,
     pub transcript_scroll: u16,
+    /// Cache for `ui::render_chat`'s formatted chat lines, keyed to
+    /// `transcript`/`transcript_session` — see `ui::ChatLinesCache`.
+    pub chat_lines_cache: ui::ChatLinesCache,
     pub minibuffer: Option<Minibuffer>,
     /// Rotation index into the idle minibuffer placeholder's context hint
     /// pool: advances by the shown-window size every
@@ -3359,6 +3362,7 @@ async fn run_with_socket_initial_selection(
         transcript: Vec::new(),
         transcript_session: None,
         transcript_scroll: 0,
+        chat_lines_cache: ui::ChatLinesCache::default(),
         minibuffer: None,
         minibuffer_hint_offset: 0,
         minibuffer_hint_rotated_at: None,
@@ -11625,6 +11629,7 @@ mod tests {
             transcript: Vec::new(),
             transcript_session: None,
             transcript_scroll: 0,
+            chat_lines_cache: ui::ChatLinesCache::default(),
             minibuffer: None,
             minibuffer_hint_offset: 0,
             minibuffer_hint_rotated_at: None,
