@@ -190,6 +190,64 @@ fn grok_session_is_fork(session_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Other construct sessions' grok native ids, for sessions that share this
+/// one's `cwd` (read from each sibling's own `grok_session_id.txt`, next to
+/// its `meta.json`, both written by the daemon under
+/// `<data_dir>/sessions/<construct_id>/`).
+///
+/// Grok organizes its own on-disk sessions per-cwd
+/// (`~/.grok/sessions/<cwd>/<uuid>/`), not per-construct-session, so two
+/// construct sessions started in the same `cwd` share one folder there.
+/// `find_session_id_excluding`'s newest-mtime discovery — meant to notice a
+/// harness-native `/clear` creating a fresh dir — can't otherwise tell that
+/// apart from a sibling's own routine `summary.json` rewrite (grok restamps
+/// it, atomically, on every turn, which touches the containing dir's mtime).
+/// Feeding every live sibling's current native id into the `excluded` set
+/// closes that: a sibling merely taking a turn can no longer look like
+/// *this* session's own conversation being reset and forked-and-archived.
+fn sibling_native_ids(own_cwd: &Path) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let Some(own_dir) = session_data_dir() else {
+        return ids;
+    };
+    let Some(sessions_root) = own_dir.parent() else {
+        return ids;
+    };
+    let Ok(entries) = std::fs::read_dir(sessions_root) else {
+        return ids;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == own_dir {
+            continue;
+        }
+        let Ok(meta_text) = std::fs::read_to_string(path.join("meta.json")) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_str::<Value>(&meta_text) else {
+            continue;
+        };
+        if meta.get("harness").and_then(|h| h.as_str()) != Some("grok") {
+            continue;
+        }
+        let same_cwd = meta
+            .get("cwd")
+            .and_then(|c| c.as_str())
+            .map(|c| Path::new(c) == own_cwd)
+            .unwrap_or(false);
+        if !same_cwd {
+            continue;
+        }
+        if let Ok(native_id) = std::fs::read_to_string(path.join("grok_session_id.txt")) {
+            let native_id = native_id.trim();
+            if !native_id.is_empty() {
+                ids.insert(native_id.to_string());
+            }
+        }
+    }
+    ids
+}
+
 fn grok_session_dir(cwd: &Path, session_id: &str) -> Option<PathBuf> {
     Some(
         grok_home()?
@@ -595,8 +653,20 @@ fn spawn_interactive_transcript_watcher(
         }
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Re-scanning every sibling's meta.json on every 500ms tick is
+        // needless I/O churn — sibling composition and cwd are static for a
+        // session's lifetime, only their native ids rotate occasionally.
+        // Refreshing every 5s (10 ticks) still closes the false-rebind
+        // window far faster than that window can recur in practice.
+        let mut ticks_since_sibling_refresh: u32 = 0;
+        let mut sibling_ids: HashSet<String> = sibling_native_ids(&cwd);
         loop {
             tick.tick().await;
+            ticks_since_sibling_refresh += 1;
+            if ticks_since_sibling_refresh >= 10 {
+                ticks_since_sibling_refresh = 0;
+                sibling_ids = sibling_native_ids(&cwd);
+            }
             if let Some(path) = path.as_deref().filter(|path| path.exists()) {
                 emit_new_grok_transcript_lines(
                     path,
@@ -638,11 +708,12 @@ fn spawn_interactive_transcript_watcher(
                 }
             }
 
-            // Prefer the newest non-child session dir under this cwd. First
-            // spawn discovers the id; after /clear a fresher root dir appears
-            // and we rebind both transcript streams.
+            // Prefer the newest non-child, non-sibling session dir under this
+            // cwd. First spawn discovers the id; after /clear a fresher root
+            // dir appears and we rebind both transcript streams.
             let mut excluded: HashSet<String> = children.keys().cloned().collect();
             excluded.extend(never_rebind_onto.iter().cloned());
+            excluded.extend(sibling_ids.iter().cloned());
             if let Some(id) = find_session_id_excluding(&cwd, &excluded) {
                 if current_id.as_ref() != Some(&id) {
                     if let (Some(new_path), Some(new_updates_path)) = (
@@ -1230,6 +1301,107 @@ mod tests {
         std::env::set_var("CONSTRUCT_GROK_HOME", &home);
         assert_eq!(find_session_id(cwd).as_deref(), Some(new_id));
         std::env::remove_var("CONSTRUCT_GROK_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sibling_native_ids_reads_only_grok_siblings_in_the_same_cwd() {
+        let home = std::env::temp_dir().join(format!(
+            "agentd-grok-siblings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let sessions_root = home.join("sessions");
+        let own_dir = sessions_root.join("sOWN");
+        std::fs::create_dir_all(&own_dir).unwrap();
+
+        let cwd = Path::new("/tmp/agentd-shared-cwd");
+
+        // A real sibling: same cwd, same harness — must be picked up.
+        let sibling_dir = sessions_root.join("sSIBLING");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        std::fs::write(
+            sibling_dir.join("meta.json"),
+            format!(r#"{{"harness":"grok","cwd":"{}"}}"#, cwd.display()),
+        )
+        .unwrap();
+        std::fs::write(sibling_dir.join("grok_session_id.txt"), "sibling-native-id").unwrap();
+
+        // A different-cwd grok session — must be excluded from the result.
+        let other_cwd_dir = sessions_root.join("sOTHERCWD");
+        std::fs::create_dir_all(&other_cwd_dir).unwrap();
+        std::fs::write(
+            other_cwd_dir.join("meta.json"),
+            r#"{"harness":"grok","cwd":"/tmp/somewhere-else"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            other_cwd_dir.join("grok_session_id.txt"),
+            "other-cwd-native-id",
+        )
+        .unwrap();
+
+        // A same-cwd, different-harness session — must be excluded.
+        let other_harness_dir = sessions_root.join("sOTHERHARNESS");
+        std::fs::create_dir_all(&other_harness_dir).unwrap();
+        std::fs::write(
+            other_harness_dir.join("meta.json"),
+            format!(r#"{{"harness":"claude","cwd":"{}"}}"#, cwd.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            other_harness_dir.join("grok_session_id.txt"),
+            "wrong-harness-id",
+        )
+        .unwrap();
+
+        std::env::set_var("CONSTRUCT_SESSION_DATA_DIR", &own_dir);
+        let ids = sibling_native_ids(cwd);
+        std::env::remove_var("CONSTRUCT_SESSION_DATA_DIR");
+
+        assert_eq!(ids, HashSet::from(["sibling-native-id".to_string()]));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sibling_native_ids_skips_dirs_missing_meta_or_native_id() {
+        let home = std::env::temp_dir().join(format!(
+            "agentd-grok-siblings-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let sessions_root = home.join("sessions");
+        let own_dir = sessions_root.join("sOWN");
+        std::fs::create_dir_all(&own_dir).unwrap();
+
+        let cwd = Path::new("/tmp/agentd-shared-cwd");
+
+        // No meta.json at all (e.g. a session mid-creation) — skipped, not a panic.
+        let no_meta_dir = sessions_root.join("sNOMETA");
+        std::fs::create_dir_all(&no_meta_dir).unwrap();
+
+        // meta.json present but no grok_session_id.txt yet — skipped.
+        let no_native_id_dir = sessions_root.join("sNONATIVEID");
+        std::fs::create_dir_all(&no_native_id_dir).unwrap();
+        std::fs::write(
+            no_native_id_dir.join("meta.json"),
+            format!(r#"{{"harness":"grok","cwd":"{}"}}"#, cwd.display()),
+        )
+        .unwrap();
+
+        std::env::set_var("CONSTRUCT_SESSION_DATA_DIR", &own_dir);
+        let ids = sibling_native_ids(cwd);
+        std::env::remove_var("CONSTRUCT_SESSION_DATA_DIR");
+
+        assert!(ids.is_empty());
+
         let _ = std::fs::remove_dir_all(&home);
     }
 

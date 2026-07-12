@@ -213,7 +213,11 @@ pub fn catalog() -> Vec<Value> {
                     "prompt":   { "type": "string" },
                     "title":    { "type": "string" },
                     "mode":     { "type": "string", "enum": ["interactive", "headless"] },
-                    "worktree": { "type": "boolean" }
+                    "worktree": { "type": "boolean" },
+                    "model": {
+                        "type": "string",
+                        "description": "Model selection (config.toml can override). Claude: opus, fable, sonnet, haiku. codex: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna. agy: Gemini 3.5 Flash (Medium), Gemini 3.1 Pro (High). grok: grok-4.5, grok-composer-2.5-fast. smith: available providers (openai, anthropic, gemini, ollama, grok, grok-oauth, codex-oauth, claude-oauth, claude-code-oauth) using provider:model syntax."
+                    }
                 },
                 "required": ["harness"]
             }),
@@ -231,6 +235,18 @@ pub fn catalog() -> Vec<Value> {
                     "seed":              { "type": "boolean" }
                 },
                 "required": ["source_session_id", "harness"]
+            }),
+        ),
+        tool(
+            "construct_merge_session",
+            "Merge a forked session back into its parent. This stamps the fork's outcome onto the parent's event timeline and allows the parent to observe the result. `mode` must be either \"result\" (fork succeeded/produced value) or \"discard\" (fork was aborted/unsuccessful).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["result", "discard"] }
+                },
+                "required": ["session_id", "mode"]
             }),
         ),
         tool(
@@ -344,7 +360,11 @@ pub fn catalog() -> Vec<Value> {
                     "prompt":   { "type": "string" },
                     "title":    { "type": "string" },
                     "mode":     { "type": "string", "enum": ["interactive", "headless"] },
-                    "worktree": { "type": "boolean" }
+                    "worktree": { "type": "boolean" },
+                    "model": {
+                        "type": "string",
+                        "description": "Model selection (config.toml can override). Claude: opus, fable, sonnet, haiku. codex: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna. agy: Gemini 3.5 Flash (Medium), Gemini 3.1 Pro (High). grok: grok-4.5, grok-composer-2.5-fast. smith: available providers (openai, anthropic, gemini, ollama, grok, grok-oauth, codex-oauth, claude-oauth, claude-code-oauth) using provider:model syntax."
+                    }
                 },
                 "required": ["harness"]
             }),
@@ -682,7 +702,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 harness,
                 cwd,
                 prompt: arg_str(&args, "prompt").ok(),
-                model: None,
+                model: arg_str(&args, "model").ok().filter(|s| !s.is_empty()),
                 title: arg_str(&args, "title").ok(),
                 mode: arg_str(&args, "mode").ok(),
                 pty_size: Some(PtySize {
@@ -716,6 +736,17 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             };
             let sid = client.fork_session(&source, &harness, opts).await?;
             json!({ "session_id": sid })
+        }
+        "construct_merge_session" => {
+            let sid = arg_str(&args, "session_id")?;
+            let mode_str = arg_str(&args, "mode")?;
+            let mode = match mode_str.as_str() {
+                "result" => construct_protocol::ForkMergeMode::Result,
+                "discard" => construct_protocol::ForkMergeMode::Discard,
+                _ => anyhow::bail!("invalid merge mode"),
+            };
+            client.merge(&sid, mode).await?;
+            json!({ "ok": true })
         }
         "construct_send_input" => {
             let sid = arg_str(&args, "session_id")?;
@@ -821,7 +852,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 harness,
                 cwd,
                 prompt: arg_str(&args, "prompt").ok(),
-                model: None,
+                model: arg_str(&args, "model").ok().filter(|s| !s.is_empty()),
                 mode: Some(arg_str(&args, "mode").unwrap_or_else(|_| "headless".to_string())),
                 pty_size: Some(PtySize {
                     cols: 100,

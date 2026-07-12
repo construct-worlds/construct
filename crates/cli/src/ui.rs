@@ -7575,7 +7575,7 @@ fn format_elapsed(started_at_ms: i64) -> String {
     }
 }
 
-fn render_chat(f: &mut Frame, area: Rect, app: &App) {
+fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
     // Structured-event chat mode. This intentionally ignores PTY bytes and
     // terminal-derived snapshots; Terminal view owns terminal rendering. C-x t
     // and headless sessions both use this path so transcript inspection and
@@ -7591,13 +7591,21 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
         .as_deref()
         .zip(app.selected_id())
         .is_some_and(|(hydrated, pane)| hydrated == pane);
-    let empty = Vec::new();
-    let transcript = if transcript_is_for_pane {
-        &app.transcript
+    // A non-focused split pane always has an empty transcript here — trivially
+    // cheap to format on its own, and deliberately routed around
+    // `chat_lines_cache`, which belongs to whichever pane actually matches
+    // `transcript_session`. Feeding this pane's empty render through it would
+    // thrash the real cache every frame a split is open.
+    let chat_lines: &[Line<'static>] = if transcript_is_for_pane {
+        chat_lines_cached(
+            &mut app.chat_lines_cache,
+            &app.theme,
+            app.transcript_session.as_deref(),
+            &app.transcript,
+        )
     } else {
-        &empty
+        &[]
     };
-    let chat_lines = chat_lines(&app.theme, transcript);
     let total = chat_lines.len();
     let height = area.height as usize;
     let max_scroll = total.saturating_sub(height);
@@ -8855,6 +8863,115 @@ fn should_render_chat_message(role: MessageRole, text: &str) -> bool {
         return false;
     }
     true
+}
+
+/// Cache for `chat_lines`'s formatted output. `render_chat` runs on every
+/// redraw — keypress, mouse move, spinner tick, hover tooltip — not just
+/// when the transcript actually changes, so without this every redraw pays
+/// the full cost of reformatting (including a fresh JSON serialization per
+/// tool-call event) the *entire* session history, every time. Confirmed
+/// live: a long-running session's TUI process pinned at 100% CPU with the
+/// profile dominated by this reformatting, not by anything related to
+/// actual transcript growth.
+///
+/// One field on `App`, not a per-session map, because `App::transcript`
+/// itself is a singular field — only the focused session's transcript is
+/// ever resident (see `render_chat`'s doc comment) — so there is only ever
+/// one transcript this cache needs to track at a time.
+pub(crate) struct ChatLinesCache {
+    session: Option<String>,
+    event_count: usize,
+    /// `chat_event_kind` of the last processed non-hidden event — lets a
+    /// single new event of the same mergeable kind (the common case while
+    /// a message streams token-by-token) extend the cache in O(1) via
+    /// `append_chat_text_chunk`, matching what a full rebuild would have
+    /// produced, instead of paying for one.
+    last_kind: ChatEventKind,
+    lines: Vec<Line<'static>>,
+}
+
+impl Default for ChatLinesCache {
+    fn default() -> Self {
+        Self {
+            session: None,
+            event_count: 0,
+            last_kind: ChatEventKind::Hidden,
+            lines: Vec::new(),
+        }
+    }
+}
+
+/// `chat_event_kind` of the last non-hidden event in `events`, or `Hidden`
+/// if there is none. Mirrors what `chat_lines`'s internal `previous_kind`
+/// tracker holds after processing the whole slice: hidden events never
+/// change it, and every other branch ends up setting it to its own kind
+/// (a merge-continuation leaves it already equal to `kind`, everything
+/// else sets it explicitly).
+fn last_chat_event_kind(events: &[TimestampedEvent]) -> ChatEventKind {
+    events
+        .iter()
+        .rev()
+        .map(|ev| chat_event_kind(&ev.event))
+        .find(|kind| *kind != ChatEventKind::Hidden)
+        .unwrap_or(ChatEventKind::Hidden)
+}
+
+/// Cached, incrementally-updated equivalent of `chat_lines(theme, events)`.
+/// `App::transcript` only ever grows by one pushed event at a time during a
+/// live turn, or gets wholesale-replaced/cleared on a session switch or
+/// reset (see the call sites of `App::transcript`) — so most redraws see
+/// `events` completely unchanged since the last call (nothing to do at
+/// all), and the common "one new event streamed in" case can usually
+/// extend the cache in O(1) rather than re-walking the whole transcript.
+/// Anything else (session change, truncation, or more than one new event
+/// landing at once — e.g. catch-up after being backgrounded) falls back to
+/// a full rebuild, which is always correct, just not free.
+fn chat_lines_cached<'a>(
+    cache: &'a mut ChatLinesCache,
+    theme: &Theme,
+    session: Option<&str>,
+    events: &[TimestampedEvent],
+) -> &'a [Line<'static>] {
+    let session_changed = cache.session.as_deref() != session;
+    // A `SessionEvent::Reset` clears `app.transcript` in place without
+    // changing `app.transcript_session` — a shorter `events` than what's
+    // cached is the only signal that catches this, since the session id
+    // alone doesn't change.
+    let truncated = events.len() < cache.event_count;
+    if session_changed || truncated {
+        cache.lines = chat_lines(theme, events);
+        cache.session = session.map(str::to_string);
+        cache.event_count = events.len();
+        cache.last_kind = last_chat_event_kind(events);
+        return &cache.lines;
+    }
+    if events.len() > cache.event_count {
+        let new_events = &events[cache.event_count..];
+        if let [ev] = new_events {
+            let kind = chat_event_kind(&ev.event);
+            if kind == ChatEventKind::Hidden {
+                // No visible effect on the cached lines, same as a full rebuild.
+            } else if kind == cache.last_kind
+                && matches!(
+                    kind,
+                    ChatEventKind::AssistantMessage | ChatEventKind::Reasoning
+                )
+            {
+                append_chat_text_chunk(&mut cache.lines, &ev.event);
+            } else {
+                if !cache.lines.is_empty() && chat_event_needs_gap(cache.last_kind, kind) {
+                    cache.lines.push(Line::raw(""));
+                }
+                push_chat_event(theme, &mut cache.lines, ev);
+                cache.last_kind = kind;
+            }
+        } else {
+            cache.lines = chat_lines(theme, events);
+            cache.last_kind = last_chat_event_kind(events);
+        }
+        cache.event_count = events.len();
+    }
+    &cache.lines
 }
 
 fn chat_lines(theme: &Theme, events: &[TimestampedEvent]) -> Vec<Line<'static>> {
@@ -17381,6 +17498,195 @@ mod tests {
         assert_eq!(lines.len(), 2, "{rendered:?}");
         assert!(rendered[0].contains("agent: intro tail"), "{rendered:?}");
         assert_eq!(rendered[1], "next para");
+    }
+
+    #[test]
+    fn chat_lines_cached_matches_full_rebuild_across_incremental_growth() {
+        // Simulates exactly how the real app grows a transcript: one pushed
+        // event at a time (see `on_notification`'s `self.transcript.push`).
+        // After every single push, the cache must match a from-scratch
+        // `chat_lines` call over the same events — covering merge
+        // -continuation (assistant/reasoning runs), a same-kind run that
+        // does *not* merge (user messages still get a gap between them),
+        // kind transitions, and a hidden event with no visible effect.
+        let theme = Theme::default();
+        let at = chrono::Utc::now();
+        let events = vec![
+            TimestampedEvent {
+                seq: 1,
+                at,
+                event: SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text: "hel".into(),
+                },
+            },
+            TimestampedEvent {
+                seq: 2,
+                at,
+                event: SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text: "lo".into(),
+                },
+            },
+            TimestampedEvent {
+                seq: 3,
+                at,
+                event: SessionEvent::ModelChanged {
+                    model: "grok-4.5".into(),
+                },
+            },
+            TimestampedEvent {
+                seq: 4,
+                at,
+                event: SessionEvent::Reasoning {
+                    text: "thin".into(),
+                },
+            },
+            TimestampedEvent {
+                seq: 5,
+                at,
+                event: SessionEvent::Reasoning {
+                    text: "king".into(),
+                },
+            },
+            TimestampedEvent {
+                seq: 6,
+                at,
+                event: SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: "go on".into(),
+                },
+            },
+            TimestampedEvent {
+                seq: 7,
+                at,
+                event: SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: "again".into(),
+                },
+            },
+            TimestampedEvent {
+                seq: 8,
+                at,
+                event: SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text: "done".into(),
+                },
+            },
+        ];
+
+        let mut cache = ChatLinesCache::default();
+        for i in 0..events.len() {
+            let prefix = &events[..=i];
+            let cached = chat_lines_cached(&mut cache, &theme, Some("s1"), prefix);
+            let fresh = chat_lines(&theme, prefix);
+            assert_eq!(
+                cached.iter().map(line_text).collect::<Vec<_>>(),
+                fresh.iter().map(line_text).collect::<Vec<_>>(),
+                "mismatch after {} events",
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn chat_lines_cached_handles_a_multi_event_batch_in_one_call() {
+        // More than one new event can land between renders (e.g. catch-up
+        // after being backgrounded) — must still match a full rebuild.
+        let theme = Theme::default();
+        let at = chrono::Utc::now();
+        let first = vec![TimestampedEvent {
+            seq: 1,
+            at,
+            event: SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: "hi".into(),
+            },
+        }];
+        let mut cache = ChatLinesCache::default();
+        chat_lines_cached(&mut cache, &theme, Some("s1"), &first);
+
+        let mut all = first;
+        all.push(TimestampedEvent {
+            seq: 2,
+            at,
+            event: SessionEvent::Reasoning { text: "hmm".into() },
+        });
+        all.push(TimestampedEvent {
+            seq: 3,
+            at,
+            event: SessionEvent::Message {
+                role: MessageRole::User,
+                text: "ok".into(),
+            },
+        });
+
+        let cached = chat_lines_cached(&mut cache, &theme, Some("s1"), &all);
+        let fresh = chat_lines(&theme, &all);
+        assert_eq!(
+            cached.iter().map(line_text).collect::<Vec<_>>(),
+            fresh.iter().map(line_text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn chat_lines_cached_rebuilds_on_session_switch() {
+        let theme = Theme::default();
+        let at = chrono::Utc::now();
+        let events_a = vec![TimestampedEvent {
+            seq: 1,
+            at,
+            event: SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: "from a".into(),
+            },
+        }];
+        let events_b = vec![TimestampedEvent {
+            seq: 1,
+            at,
+            event: SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: "from b".into(),
+            },
+        }];
+        let mut cache = ChatLinesCache::default();
+        chat_lines_cached(&mut cache, &theme, Some("a"), &events_a);
+        let cached = chat_lines_cached(&mut cache, &theme, Some("b"), &events_b);
+        assert!(line_text(&cached[0]).contains("from b"));
+        assert!(!line_text(&cached[0]).contains("from a"));
+    }
+
+    #[test]
+    fn chat_lines_cached_rebuilds_when_transcript_is_truncated_in_place() {
+        // A `SessionEvent::Reset` clears `app.transcript` without changing
+        // `app.transcript_session` (same session id, shorter transcript) —
+        // the cache must detect this via length, not just session identity.
+        let theme = Theme::default();
+        let at = chrono::Utc::now();
+        let long = vec![
+            TimestampedEvent {
+                seq: 1,
+                at,
+                event: SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text: "one".into(),
+                },
+            },
+            TimestampedEvent {
+                seq: 2,
+                at,
+                event: SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: "two".into(),
+                },
+            },
+        ];
+        let mut cache = ChatLinesCache::default();
+        chat_lines_cached(&mut cache, &theme, Some("s1"), &long);
+
+        let reset: Vec<TimestampedEvent> = Vec::new();
+        let cached = chat_lines_cached(&mut cache, &theme, Some("s1"), &reset);
+        assert!(cached.is_empty(), "reset transcript must clear the cache too");
     }
 
     #[test]

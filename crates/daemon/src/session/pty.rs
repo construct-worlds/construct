@@ -1,15 +1,63 @@
 use super::*;
+use std::sync::Weak;
+
+/// Capacity of a session's ordered PTY-input delivery queue, counted in
+/// input batches (one keystroke burst or one paste each), not bytes.
+/// Interactive typing never comes close; the queue only fills when an
+/// adapter stops ACKing `session.pty_input` for a long stretch, and then
+/// failing the enqueue with a visible error beats silently buffering
+/// unbounded input into a wedged session.
+const PTY_INPUT_QUEUE_CAP: usize = 256;
+
+/// One queued PTY-input batch (spec 0087). `ack` is present when the
+/// enqueuer needs delivery confirmation — daemon-internal callers that
+/// pace themselves against the adapter (bracketed-paste-then-Enter
+/// submission, OSC 11 responses). The interactive typing path leaves it
+/// `None`: "accepted into the ordered queue" is its whole contract.
+pub(crate) struct PtyInputJob {
+    bytes: Vec<u8>,
+    ack: Option<tokio::sync::oneshot::Sender<Result<()>>>,
+}
 
 impl SessionManager {
+    /// Interactive typing path (`server::dispatch`'s `SESSION_PTY_INPUT`).
+    /// Returns once the bytes are accepted into the session's ordered
+    /// delivery queue — NOT once the adapter ACKs delivery (spec 0087).
+    /// The dispatch loop serves each connection's requests serially, and
+    /// clients pump keystrokes one request at a time, so awaiting the
+    /// adapter round-trip here let a single slow/starved adapter stall
+    /// typing into every session plus everything else queued on the
+    /// connection. Delivery failures after enqueue are logged, not
+    /// returned; typing into a session with no live adapter still fails
+    /// synchronously via the liveness check below.
     pub async fn pty_input(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
-        self.pty_input_inner(id, bytes, true).await
+        self.pty_input_inner(id, bytes, true, false).await
     }
 
+    /// Like [`Self::pty_input`] (transcript capture included) but waits
+    /// for the adapter to ACK delivery. For daemon-internal prompt
+    /// submission (program runs) whose follow-up bookkeeping should only
+    /// happen once the input has actually reached the harness.
+    pub(crate) async fn pty_input_delivered(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
+        self.pty_input_inner(id, bytes, true, true).await
+    }
+
+    /// Delivery-ACKed input without transcript capture, for daemon-internal
+    /// byte streams that must not pollute the user transcript (OSC 11
+    /// responses, bracketed-paste submission). Waits for the adapter ACK:
+    /// its callers sequence real-time behavior against delivery (e.g. the
+    /// paste → settle-delay → Enter submission dance).
     pub(crate) async fn pty_input_without_capture(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
-        self.pty_input_inner(id, bytes, false).await
+        self.pty_input_inner(id, bytes, false, true).await
     }
 
-    async fn pty_input_inner(&self, id: &str, bytes: Vec<u8>, capture: bool) -> Result<()> {
+    async fn pty_input_inner(
+        &self,
+        id: &str,
+        bytes: Vec<u8>,
+        capture: bool,
+        await_delivery: bool,
+    ) -> Result<()> {
         let entry = self
             .get_entry(id)
             .await
@@ -37,19 +85,57 @@ impl SessionManager {
                 }
             }
         }
-        let adapter = entry
-            .adapter
+        // Typing into a session whose adapter is gone must still fail
+        // synchronously: once the enqueue-ACK path returns Ok there is no
+        // response channel left to report a delivery error through. Best
+        // effort — the adapter can still die between this check and
+        // delivery, which the writer then logs.
+        if entry.adapter.lock().await.is_none() {
+            return Err(anyhow!("session has no live adapter"));
+        }
+        if await_delivery {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.enqueue_pty_input(
+                &entry,
+                PtyInputJob {
+                    bytes,
+                    ack: Some(tx),
+                },
+            )?;
+            rx.await
+                .map_err(|_| anyhow!("session closed before pty input was delivered"))?
+        } else {
+            self.enqueue_pty_input(&entry, PtyInputJob { bytes, ack: None })
+        }
+    }
+
+    /// Accept `job` into `entry`'s ordered delivery queue, lazily spawning
+    /// the per-session writer task on first use. All input producers —
+    /// interactive typing, program submission, OSC 11 responses — funnel
+    /// through this one queue, so per-session byte order is preserved no
+    /// matter which mix of paths is active. Sync (never awaits): callers
+    /// hold no locks and the dispatch loop is never delayed here.
+    fn enqueue_pty_input(&self, entry: &Arc<SessionEntry>, job: PtyInputJob) -> Result<()> {
+        let mut slot = entry
+            .pty_input_queue
             .lock()
-            .await
-            .clone()
-            .ok_or_else(|| anyhow!("session has no live adapter"))?;
-        let params = serde_json::to_value(&construct_protocol::SessionPtyInputParams::from_bytes(
-            id, &bytes,
-        ))?;
-        adapter
-            .request(ahp_method::SESSION_PTY_INPUT, params)
-            .await?;
-        Ok(())
+            .expect("pty_input_queue mutex poisoned");
+        if slot.is_none() {
+            let (tx, rx) = mpsc::channel::<PtyInputJob>(PTY_INPUT_QUEUE_CAP);
+            tokio::spawn(pty_input_writer(Arc::downgrade(entry), rx));
+            *slot = Some(tx);
+        }
+        slot.as_ref()
+            .expect("sender installed above")
+            .try_send(job)
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => anyhow!(
+                    "pty input backlogged: the session's adapter is not consuming input"
+                ),
+                mpsc::error::TrySendError::Closed(_) => {
+                    anyhow!("session closed before pty input could be queued")
+                }
+            })
     }
 
     /// Feed PTY-input bytes through a minimal terminal-input parser (printable
@@ -272,6 +358,52 @@ impl SessionManager {
         self.pty_input_without_capture(id, vec![b'\r']).await?;
         Ok(())
     }
+}
+
+/// Per-session writer task (spec 0087): drains the ordered input queue and
+/// performs the adapter `session.pty_input` round-trips that used to run
+/// inline in the IPC dispatch loop. One writer per session, spawned on the
+/// first input; exits on its own when the owning `SessionEntry` is dropped
+/// (the queue's sender lives on the entry, so the channel closes and
+/// `recv` returns `None`) — delete/restart need no explicit teardown.
+/// Holds only a `Weak` to the entry so a torn-down session's memory isn't
+/// kept alive by its own input queue.
+async fn pty_input_writer(entry: Weak<SessionEntry>, mut rx: mpsc::Receiver<PtyInputJob>) {
+    while let Some(job) = rx.recv().await {
+        let Some(entry) = entry.upgrade() else { break };
+        let result = deliver_pty_input(&entry, &job.bytes).await;
+        match job.ack {
+            // A dropped receiver means the awaiting caller was cancelled;
+            // delivery already happened, so there is nothing to report.
+            Some(ack) => {
+                let _ = ack.send(result);
+            }
+            None => {
+                if let Err(e) = result {
+                    tracing::warn!(session = %entry.id, error = %e, "pty input delivery failed");
+                }
+            }
+        }
+    }
+}
+
+/// One adapter round-trip for one queued batch. Fetches the adapter at
+/// delivery time — not enqueue time — so input queued across an adapter
+/// respawn reaches the new adapter instead of erroring on the dead one.
+async fn deliver_pty_input(entry: &Arc<SessionEntry>, bytes: &[u8]) -> Result<()> {
+    let adapter = entry
+        .adapter
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| anyhow!("session has no live adapter"))?;
+    let params = serde_json::to_value(&construct_protocol::SessionPtyInputParams::from_bytes(
+        &entry.id, bytes,
+    ))?;
+    adapter
+        .request(ahp_method::SESSION_PTY_INPUT, params)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]

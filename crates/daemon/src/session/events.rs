@@ -638,6 +638,7 @@ impl SessionManager {
                 title_gen_attempted: AtomicBool::new(true),
                 pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+                pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
                 pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
                 unseen_activity: AtomicBool::new(false),
