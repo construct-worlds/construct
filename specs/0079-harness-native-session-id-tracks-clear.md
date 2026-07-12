@@ -22,7 +22,7 @@ These harnesses mint a new native session id when the user clears context or bra
 - Claude adapters inject a `SessionStart` hook that rewrites the native id file whenever Claude reports a new `session_id` (including the `clear` source).
 - Codex adapters keep scanning originator-tagged rollouts and adopt the newest matching rollout when `/clear` or `/new` creates one.
 - Antigravity adapters re-parse `--log-file` for the **last** `Created conversation <uuid>` and rebind when it changes.
-- Grok adapters keep selecting the newest session directory under the session cwd (by mtime) and rebind when that id changes.
+- Grok adapters keep selecting the newest session directory under the session cwd (by mtime) and rebind when that id changes, excluding any directory a sibling construct session (same cwd, same harness) currently reports as its own native id — see [0088](0088-grok-native-discovery-excludes-sibling-sessions.md).
 - Transcript watchers rebind to the new native transcript after an id change so chat mode follows the active conversation.
 - Headless multi-turn adapters adopt the latest observed native id per turn, not only the first.
 
@@ -31,7 +31,7 @@ These harnesses mint a new native session id when the user clears context or bra
 - Changing construct's own session ids (`s…` fleet ids).
 - Mapping one construct session onto multiple simultaneous native conversations (e.g. keeping both pre- and post-clear ids live). Only the active native id is tracked.
 - Implementing a user-facing "resume the pre-clear conversation" UI; the old native transcripts remain on disk under the harness's own storage.
-- Perfect isolation when multiple Grok sessions share one cwd (Grok has no originator tag; newest-mtime is best-effort).
+- Perfect isolation when multiple Grok sessions share one cwd (Grok has no originator tag; newest-mtime is best-effort) — sibling exclusion ([0088](0088-grok-native-discovery-excludes-sibling-sessions.md)) closes the common case but a brand-new sibling can still be mistaken for a reset in the brief window before it's excludable.
 
 ## Examples
 
