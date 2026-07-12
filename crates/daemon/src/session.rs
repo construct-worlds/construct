@@ -2537,7 +2537,10 @@ impl SessionManager {
             .map(str::trim)
             .filter(|c| !c.is_empty());
 
-        let owner_cwd = entry.summary.read().await.cwd.clone();
+        let (owner_cwd, owner_harness) = {
+            let summary = entry.summary.read().await;
+            (summary.cwd.clone(), summary.harness.clone())
+        };
         let mut env = HashMap::new();
         env.insert(
             "CONSTRUCT_PARENT_SESSION_ID".to_string(),
@@ -2546,12 +2549,20 @@ impl SessionManager {
         let prompt = program_verb_prompt(&verb, selection_trimmed, comment);
         let subagent_id = self
             .create(CreateSessionParams {
-                harness: "smith".to_string(),
+                // Same harness as the Program-owning session, not a
+                // hardcoded "smith": many users only have their own harness
+                // (claude/codex/…) configured, and a verb subagent should
+                // work everywhere a normal session does. Interactive (PTY)
+                // rather than headless: the `interview` verb needs a real
+                // multi-turn dialogue, and headless invocation shape varies
+                // enough across wrapper adapters that PTY mode is the more
+                // uniformly supported one anyway.
+                harness: owner_harness,
                 cwd: owner_cwd,
                 prompt: Some(prompt),
                 model: None,
                 title: Some(format!("verb:{}", verb.name)),
-                mode: Some("headless".to_string()),
+                mode: Some("interactive".to_string()),
                 pty_size: Some(PtySize {
                     cols: 100,
                     rows: 30,
