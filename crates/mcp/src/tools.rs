@@ -34,6 +34,11 @@ pub fn catalog() -> Vec<Value> {
             schema_empty(),
         ),
         tool(
+            "construct_usage_query",
+            "Query the cached usage/status snapshot for one harness (e.g. \"claude\", \"codex\", \"agy\", \"grok\") — the raw output of that harness's own interactive usage/status slash command (e.g. `/usage`, `/status`), captured verbatim by a short-lived probe session and cached for 10 minutes. Returns `{ snapshot: {bytes (base64), cols, rows, captured_at_ms} | null, refreshing, enabled }`. `bytes` is base64-encoded raw terminal output (not parsed into token counts or other fields) — decode and feed it through a terminal/vt100 renderer to display it, or decode as UTF-8 lossy for a rough read. Set `allow_refresh: true` to trigger a background probe when the cache is stale or missing (this call still returns immediately; poll again shortly to pick up the result). `enabled: false` means this harness has no usage probe configured — stop polling.",
+            schema_obj(&[("harness", "string", true), ("allow_refresh", "boolean", false)]),
+        ),
+        tool(
             "construct_get_session",
             "Fetch the full detail (summary + structured transcript) for one session.",
             schema_obj(&[("session_id", "string", true)]),
@@ -463,6 +468,14 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
             Value::Array(enriched)
         }
         "construct_list_harnesses" => serde_json::to_value(client.harnesses().await?)?,
+        "construct_usage_query" => {
+            let harness = arg_str(&args, "harness")?;
+            let allow_refresh = args
+                .get("allow_refresh")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            serde_json::to_value(client.usage_query(&harness, allow_refresh).await?)?
+        }
         "construct_get_session" => {
             let sid = arg_str(&args, "session_id")?;
             serde_json::to_value(client.get(&sid).await?)?

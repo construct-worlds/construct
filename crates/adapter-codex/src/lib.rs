@@ -21,7 +21,9 @@ use construct_protocol::{
     Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
     SessionState,
 };
-use construct_adapter_common::{drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome};
+use construct_adapter_common::{
+    codex_sessions_root, drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
+};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -648,22 +650,6 @@ fn codex_rollout_events(v: &Value) -> Vec<SessionEvent> {
         }
         _ => Vec::new(),
     }
-}
-
-/// Where codex stores its rollout files. Honors `$CODEX_HOME` (checked
-/// in the session's env first, then the adapter's own env), falling
-/// back to `$HOME/.codex/sessions`.
-fn codex_sessions_root(session_env: &HashMap<String, String>) -> Option<PathBuf> {
-    if let Some(home) = session_env.get("CODEX_HOME").filter(|s| !s.is_empty()) {
-        return Some(PathBuf::from(home).join("sessions"));
-    }
-    if let Ok(home) = std::env::var("CODEX_HOME") {
-        if !home.is_empty() {
-            return Some(PathBuf::from(home).join("sessions"));
-        }
-    }
-    let home = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
-    Some(PathBuf::from(home).join(".codex").join("sessions"))
 }
 
 /// Recursively list every `rollout-*.jsonl` file under `root`. Returns
@@ -1333,24 +1319,6 @@ mod tests {
             })),
             Some(SessionState::Done)
         );
-    }
-
-    #[test]
-    fn codex_sessions_root_prefers_session_env_then_process_env_then_home() {
-        let mut session_env = HashMap::new();
-        session_env.insert("CODEX_HOME".into(), "/sess/codex".into());
-        assert_eq!(
-            codex_sessions_root(&session_env),
-            Some(PathBuf::from("/sess/codex/sessions"))
-        );
-        // Empty value in session env falls through.
-        session_env.insert("CODEX_HOME".into(), "".into());
-        let got = codex_sessions_root(&session_env);
-        // Result depends on the test runner's env; we just assert that
-        // an empty session-env value doesn't masquerade as a real one.
-        if let Some(p) = got {
-            assert_ne!(p, PathBuf::from("/sessions"));
-        }
     }
 
     #[test]

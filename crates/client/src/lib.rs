@@ -17,6 +17,7 @@ use construct_protocol::{
     SessionSetTitleParams, SessionSetViewParams, SessionSummary, SessionToolDecisionParams,
     SetTerminalBackgroundParams, SmithAuthStatusResult, SmithSetAuthMethodParams,
     SmithSetAuthMethodResult, SubscribeParams, TranscriptParams, TranscriptResult,
+    UsageQueryParams, UsageQueryResult,
 };
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
@@ -224,6 +225,19 @@ impl Client {
             ipc_method::SMITH_SET_AUTH_METHOD,
             &SmithSetAuthMethodParams {
                 method: method.to_string(),
+            },
+        )
+        .await
+    }
+    /// Query (and optionally trigger a background refresh of) the cached
+    /// usage-probe snapshot for `harness` (spec 0085). Never blocks on the
+    /// probe itself — see [`UsageQueryResult`].
+    pub async fn usage_query(&self, harness: &str, allow_refresh: bool) -> Result<UsageQueryResult> {
+        self.request(
+            ipc_method::USAGE_QUERY,
+            &UsageQueryParams {
+                harness: harness.to_string(),
+                allow_refresh,
             },
         )
         .await

@@ -25,6 +25,7 @@ mod server;
 mod session;
 mod storage;
 mod tunnel;
+mod usage;
 mod worktree;
 
 use construct_protocol::paths::Paths;

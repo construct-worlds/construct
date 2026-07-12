@@ -1007,6 +1007,12 @@ pub mod ipc_method {
     /// in a worktree against an already-running daemon — no rebuild or
     /// restart.
     pub const DEV_SET_ASSETS: &str = "dev.set_assets";
+    /// Query (and optionally trigger a background refresh of) the cached
+    /// harness usage-probe snapshot for one harness (spec 0085). Read-mostly:
+    /// never blocks on the probe itself — when a refresh is warranted it is
+    /// spawned in the background and this call returns immediately with
+    /// `refreshing: true`. Backs the TUI's hover tooltip over a harness name.
+    pub const USAGE_QUERY: &str = "usage.query";
 }
 
 pub mod ipc_notif {
@@ -1778,6 +1784,56 @@ pub struct SmithSetAuthMethodResult {
     pub note: String,
 }
 
+/// One cached harness usage-probe capture, as sent over the wire (spec
+/// 0085). `bytes` is the raw PTY output the harness's own usage/status
+/// slash command rendered — base64-encoded, deliberately unparsed (no token
+/// counts or other structured fields are extracted). Clients feed it
+/// through their own vt100 parser at `cols`x`rows` to redisplay it verbatim,
+/// including color/layout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageSnapshotInfo {
+    /// Base64-encoded raw PTY bytes captured from the probe session.
+    pub bytes: String,
+    pub cols: u16,
+    pub rows: u16,
+    /// Unix epoch ms when the snapshot was captured. Clients use this (plus
+    /// their own notion of "now") to decide whether to show the snapshot as
+    /// possibly-stale while a background refresh is in flight.
+    pub captured_at_ms: i64,
+}
+
+/// Params for `usage.query`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageQueryParams {
+    /// Harness name, e.g. `"claude"`, `"codex"`, `"agy"`, `"grok"`.
+    pub harness: String,
+    /// When `true` and the cached snapshot is missing/stale and no probe is
+    /// already in flight for this harness, the daemon spawns a background
+    /// probe and returns immediately with `refreshing: true` rather than
+    /// blocking the IPC dispatch loop for the several seconds a probe
+    /// takes. Callers (the TUI, while hovering) poll again on their normal
+    /// refresh cadence to pick up the result.
+    #[serde(default)]
+    pub allow_refresh: bool,
+}
+
+/// Result of `usage.query`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageQueryResult {
+    /// The most recently cached snapshot, if any — regardless of whether it
+    /// is still fresh (the daemon's 10-minute TTL only governs whether a
+    /// new probe is warranted, not whether the last snapshot is returned).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<UsageSnapshotInfo>,
+    /// Whether a probe is currently in flight for this harness (either
+    /// triggered by this call or already running from an earlier one).
+    pub refreshing: bool,
+    /// Whether the usage probe is configured for this harness at all (see
+    /// `usage_probe` in `config.toml`). `false` means `snapshot` will never
+    /// populate and callers should stop polling.
+    pub enabled: bool,
+}
+
 /// Distinguishes the implicit orchestrator session — created by the
 /// daemon at startup as the user's always-available command surface —
 /// from ordinary user-created sessions. The orchestrator session is
@@ -1791,6 +1847,13 @@ pub enum SessionKind {
     User,
     Orchestrator,
     Subagent,
+    /// A short-lived, daemon-internal session spun up to run a harness's
+    /// own usage/status slash command and capture what it renders (spec
+    /// 0085). Hidden from every session list via the same `User`-only
+    /// allowlist that hides `Orchestrator`/`Subagent`; deleted (along with
+    /// the native transcript file the harness CLI wrote for it) as soon as
+    /// the probe finishes.
+    UsageProbe,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
