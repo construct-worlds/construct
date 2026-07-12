@@ -169,6 +169,10 @@ For an optimized build, use `cargo build --workspace --release` and replace
 - [Program](docs/program.md) — the per-session Markdown document you and the
   agent co-edit and run: smart clips, run shimmer, templates, and live
   collaboration.
+- [Program selection verbs](docs/program-verbs.md) — typed refinement actions
+  on a Program selection (challenge assumptions, simplify, crystallize,
+  interview), the pinned inline terminal for interactive verbs, and authoring
+  your own.
 - [smith built-in agent](docs/smith.md) — providers, model selection, tools,
   approvals, automode, and hooks.
 - [Unified tool layer](docs/unified-tool-layer.md) — MCP servers and shared tools for

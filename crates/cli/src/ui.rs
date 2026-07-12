@@ -7,7 +7,7 @@ use crate::app::{
     SessionTitleMenuAction, TextSelectionRange, ViewMode, WindowDividerHit, WindowPaneHit,
     WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS,
     PROGRAM_COLLAB_CURSOR_TTL_MS, PROGRAM_CONTENT_PADDING_X, PROGRAM_CONTENT_PADDING_Y,
-    PROGRAM_REVEAL_MS,
+    PROGRAM_CLIP_HOVER_PREVIEW_COLS, PROGRAM_CLIP_HOVER_PREVIEW_ROWS, PROGRAM_REVEAL_MS,
 };
 use crate::keymap::{KeyAction, Profile};
 use crate::text_util::wrap_to_width;
@@ -42,8 +42,6 @@ const PROGRAM_TERMINAL_FOCUS_SLIDE_PERCENT: u16 = 20;
 /// outer width and ROWS is the replayed content height, so the tooltip paints
 /// 64x24 cells; terminal cells are roughly twice as tall as they are wide, so
 /// on screen that reads as a 4:3 tile instead of a letterboxed strip.
-const PROGRAM_CLIP_HOVER_PREVIEW_COLS: u16 = 64;
-const PROGRAM_CLIP_HOVER_PREVIEW_ROWS: u16 = 22;
 const PROGRAM_COLLAB_CURSOR_LABEL_MAX_WIDTH: usize = 12;
 /// How long a just-landed agent-authored Program edit keeps its brief reveal
 /// highlight (spec 0065 agent presence) before fading back to plain text.
@@ -56,7 +54,7 @@ pub(crate) const PROGRAM_AGENT_REVEAL_MS: i64 = 800;
 /// than `PROGRAM_AGENT_REVEAL_MS` on purpose: an edit that lands off-screen is
 /// still worth pointing at for a bit after its own reveal tint has faded.
 pub(crate) const PROGRAM_AGENT_RECENT_ACTIVITY_MS: i64 = 3000;
-pub(crate) const PROGRAM_SELECTION_RUN_MENU_W: u16 = 36;
+pub(crate) const PROGRAM_SELECTION_RUN_MENU_W: u16 = 46;
 const PROGRAM_SELECTION_RUN_BUTTON: &str = "▸ Run";
 const PROGRAM_SELECTION_RUN_MENU_PAD_X: u16 = 1;
 
@@ -4923,6 +4921,7 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
         &app.theme,
         editor_area.is_none(),
         paint_row_offset,
+            0,
     );
     app.block_hits.insert(
         id.clone(),
@@ -9577,9 +9576,11 @@ fn render_pty_screen(
     theme: &Theme,
     show_cursor: bool,
     row_offset: u16,
+    col_offset: u16,
 ) {
-    // Paint a slice of the vt100 screen into `area`, starting at `row_offset`.
-    // Caller is responsible for clearing the target area if needed.
+    // Paint a slice of the vt100 screen into `area`, starting at
+    // (`row_offset`, `col_offset`). Caller is responsible for clearing the
+    // target area if needed.
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -9588,7 +9589,7 @@ fn render_pty_screen(
     let buf = f.buffer_mut();
     for row in 0..visible_h {
         for col in 0..visible_w {
-            let Some(cell) = screen.cell(row_offset + row, col) else {
+            let Some(cell) = screen.cell(row_offset + row, col_offset + col) else {
                 continue;
             };
             let x = area.x + col;
@@ -9603,8 +9604,8 @@ fn render_pty_screen(
         let row = row
             .saturating_add(u16::try_from(screen.scrollback()).unwrap_or(u16::MAX))
             .saturating_sub(row_offset);
-        if row < area.height && col < area.width {
-            let x = area.x + col;
+        if row < area.height && col >= col_offset && col - col_offset < area.width {
+            let x = area.x + (col - col_offset);
             let y = area.y + row;
             if let Some(buf_cell) = f.buffer_mut().cell_mut(Position { x, y }) {
                 if screen
@@ -10247,6 +10248,7 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
         &app.theme,
         editor_area.is_none(),
         paint_row_offset,
+            0,
     );
     app.block_hits.insert(
         id,
@@ -10602,6 +10604,7 @@ fn render_program_popup(f: &mut Frame, app: &mut App) {
     app.layout.program_resize_hit = None;
     app.layout.program_smart_clip_anchor = None;
     app.layout.program_clip_hits.clear();
+    app.layout.program_pinned_card_rect = None;
     app.layout.program_action_link_hits.clear();
     if app
         .program_popup
@@ -10665,7 +10668,13 @@ fn render_program_hover_overlays(
     now: Instant,
 ) {
     for overlay in hover_overlays {
-        render_program_clip_hover(f, app, overlay.clip_bounds, &overlay.clip_hits);
+        render_program_clip_hover(
+            f,
+            app,
+            overlay.clip_bounds,
+            &overlay.clip_hits,
+            &overlay.popup,
+        );
         render_program_shimmer_hover(
             f,
             app,
@@ -11952,15 +11961,58 @@ fn program_agent_edge_indicator_line(
 }
 
 /// Mini session-preview popover shown while the mouse hovers a `@{session:id}`
-/// smart-clip in the program body. Reads the freshly captured clip hitboxes,
-/// resolves the hovered session, and paints the shared session card anchored to
-/// the hovered chip. Persists for as long as the chip is hovered.
+/// smart-clip in the program body, OR — when a clip is pinned — a live,
+/// keyboard-focused terminal anchored to that clip regardless of the mouse
+/// (single-click pins a clip; see `App::handle_pinned_clip_key`). A pin takes
+/// priority: while one is active, no other clip's hover preview shows, to
+/// avoid two floating cards at once. Reads the freshly captured clip
+/// hitboxes, resolves the relevant session, and paints the shared session
+/// card anchored to the chip.
 fn render_program_clip_hover(
     f: &mut Frame,
     app: &mut App,
     modal: Rect,
     hits: &[crate::app::ProgramClipHit],
+    popup: &crate::app::ProgramPopup,
 ) {
+    if let Some(pinned_session_id) = popup.pinned_clip.as_deref() {
+        // Anchored to the clip's own position (unless the user dragged the
+        // card elsewhere via its top border), not the mouse — a pinned card
+        // must stay put as the pointer moves. If the clip isn't among this
+        // frame's hits (scrolled out of view), simply don't paint anything;
+        // the pin itself is untouched, so scrolling back re-shows it.
+        if let Some(hit) = hits.iter().find(|hit| hit.session_id == pinned_session_id) {
+            // Remember the painted bounds for mouse routing: clicks inside
+            // the card are consumed, border drags resize/move it, wheel
+            // over it pans the crop; clicks landing neither here nor on a
+            // clip dismiss the pin (spec 0090).
+            let view = PinnedCardView {
+                dims: (popup.pinned_card_cols, popup.pinned_card_rows),
+                owned: popup.pinned_terminal_size,
+                pos: popup.pinned_card_pos,
+                pan: (popup.pinned_scroll_cols, popup.pinned_scroll_rows),
+            };
+            // A size-owning pin renders full-fidelity, so the pan hint only
+            // applies to crop mode.
+            let hint = if view.owned.is_some() {
+                "pinned — type to send, drag borders, click outside unpins"
+            } else {
+                "pinned — type to send, scroll/Shift+arrows pan, click outside unpins"
+            };
+            app.layout.program_pinned_card_rect = render_session_hover_card(
+                f,
+                app,
+                modal,
+                pinned_session_id,
+                hit.col_start,
+                hit.row,
+                Some(hint),
+                true,
+                Some(&view),
+            );
+        }
+        return;
+    }
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
@@ -11971,7 +12023,7 @@ fn render_program_clip_hover(
     else {
         return;
     };
-    if render_session_hover_card(f, app, modal, &session_id, mx, my, None) {
+    if render_session_hover_card(f, app, modal, &session_id, mx, my, None, false, None).is_some() {
         return;
     }
     // No live preview (unknown session, or no captured output yet, per spec
@@ -12039,9 +12091,37 @@ fn session_hover_card_rect(
 /// the program body without disturbing it. Used by the clip-chip hover, which
 /// previews the referenced session's terminal; always laid out wider than it
 /// is tall. When `title` is `Some`, it captions the card's top border
-/// (truncated to fit). Returns `true` when the card actually painted, `false`
-/// when there was nothing to show (unknown session, no captured output yet, or
-/// no room) so a caller can fall back to a plain text tooltip.
+/// (truncated to fit). `focused` marks a *pinned* card — accent border and a
+/// visible cursor, since it's live and keyboard-typeable, versus the plain
+/// muted-border read-only hover preview. Returns `true` when the card
+/// actually painted, `false` when there was nothing to show (unknown
+/// session, no captured output yet, or no room) so a caller can fall back to
+/// a plain text tooltip.
+/// Pinned-card rendering inputs (spec 0090), read from the popup that owns
+/// the pin. The plain hover preview passes `None` and gets the stock
+/// clip-anchored, default-sized crop.
+struct PinnedCardView {
+    /// User-resizable content dims (right/bottom-border drag).
+    dims: (u16, u16),
+    /// PTY dims while the pin owns the session's size — render at exactly
+    /// these; `None` = crop mode.
+    owned: Option<(u16, u16)>,
+    /// User-moved top-left screen position (top-border drag); `None` =
+    /// anchored to the clip.
+    pos: Option<(u16, u16)>,
+    /// Crop pan `(cols, rows)`; only meaningful in crop mode.
+    pan: (u16, u16),
+}
+
+/// Returns the card's painted bounds, or `None` when nothing was painted
+/// (unknown session, no captured output yet, or no room to anchor it).
+/// `pinned` carries the pinned card's user-controlled geometry and size
+/// ownership (spec 0090); the pan axes are clamped here against the actual
+/// content, so stale or over-scrolled offsets can never pan the crop past
+/// the screen into blank space. While `pinned.owned` is `Some`, the PTY was
+/// resized to exactly those dims, so the card replays at them — full
+/// fidelity, no crop, and no thrash, because a size-owning pin exists only
+/// when nothing else renders the session.
 fn render_session_hover_card(
     f: &mut Frame,
     app: &mut App,
@@ -12050,52 +12130,92 @@ fn render_session_hover_card(
     anchor_col: u16,
     anchor_row: u16,
     title: Option<&str>,
-) -> bool {
+    focused: bool,
+    pinned: Option<&PinnedCardView>,
+) -> Option<Rect> {
     let Some(_s) = app.sessions.iter().find(|s| s.id == session_id) else {
-        return false;
+        return None;
     };
 
-    let max_w = modal
-        .width
-        .saturating_sub(2)
-        .clamp(1, PROGRAM_CLIP_HOVER_PREVIEW_COLS);
-    let content_w = max_w;
-    let content_h = PROGRAM_CLIP_HOVER_PREVIEW_ROWS;
-    // Replay at the parser's CURRENT cached size, never at the card's size.
-    // The `ItemHistory` is shared with the main view, split panes, and pin
-    // tiles, and `replay` resizes the cached vt100 parser (and the shadow
-    // parser) to the requested dims — replaying at card dims here would
-    // visibly reflow the session everywhere else it's shown and, while it's
-    // also on screen, rebuild the shared parser on every frame (the same
-    // thrash `pin_tile_reuses_cached_size_to_avoid_split_thrash` guards
-    // against for pin tiles; see `render_pin_strip`). The card CROPS the
-    // full-size screen instead, exactly like a pin tile. Fall back to the
-    // main-view pane size only to seed a session that has never been
-    // rendered anywhere yet.
+    let modal_cap = modal.width.saturating_sub(2).max(1);
+    let (content_w, content_h, size_cap) = match pinned {
+        Some(view) => (
+            view.dims.0.clamp(1, modal_cap),
+            view.dims.1.clamp(1, modal.height.saturating_sub(2).max(1)),
+            modal_cap,
+        ),
+        None => (
+            modal_cap.min(PROGRAM_CLIP_HOVER_PREVIEW_COLS),
+            PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
+            modal_cap.min(PROGRAM_CLIP_HOVER_PREVIEW_COLS),
+        ),
+    };
+    let owned_size = pinned.and_then(|view| view.owned);
+    // Without size ownership, replay at the parser's CURRENT cached size,
+    // never at the card's size. The `ItemHistory` is shared with the main
+    // view, split panes, and pin tiles, and `replay` resizes the cached
+    // vt100 parser (and the shadow parser) to the requested dims — replaying
+    // at card dims here would visibly reflow the session everywhere else
+    // it's shown and, while it's also on screen, rebuild the shared parser
+    // on every frame (the same thrash
+    // `pin_tile_reuses_cached_size_to_avoid_split_thrash` guards against for
+    // pin tiles; see `render_pin_strip`). The card CROPS the full-size
+    // screen instead, exactly like a pin tile. Fall back to the main-view
+    // pane size only to seed a session that has never been rendered
+    // anywhere yet.
+    //
+    // WITH size ownership the tradeoff inverts: the PTY itself is
+    // card-sized, nothing else renders the session, and replaying at any
+    // other dims would misinterpret output the harness now formats for the
+    // card. Replay at the owned dims.
     let (main_cols, main_rows) = app.terminal_pane_size;
     let preview_output = app.histories.get_mut(session_id).map(|history| {
-        let (cols, rows) = history.cached_dims().unwrap_or((
-            main_cols.max(content_w).max(1),
-            main_rows.max(content_h).max(1),
-        ));
+        let (cols, rows) = match owned_size {
+            Some((cols, rows)) => (cols.max(1), rows.max(1)),
+            None => history.cached_dims().unwrap_or((
+                main_cols.max(content_w).max(1),
+                main_rows.max(content_h).max(1),
+            )),
+        };
         history.replay(cols, rows, 0)
     });
     let Some(out) = preview_output else {
-        return false;
+        return None;
     };
     let content_rows = non_empty_row_span(out.screen);
     if content_rows == 0 {
-        return false;
+        return None;
     }
-    let (width, height) = session_hover_card_size(content_w, content_h, max_w);
-    let Some(area) = session_hover_card_rect(modal, width, height, anchor_col, anchor_row) else {
-        return false;
+    let (width, height) = session_hover_card_size(content_w, content_h, size_cap);
+    // A user-moved card (top-border drag, spec 0090) renders at its chosen
+    // position, clamped fully inside the modal; otherwise it anchors to the
+    // clip as always.
+    let area = match pinned.and_then(|view| view.pos) {
+        Some((x, y)) => {
+            if width > modal.width || height > modal.height {
+                return None;
+            }
+            Rect {
+                x: x.clamp(modal.x, modal.x + modal.width - width),
+                y: y.clamp(modal.y, modal.y + modal.height - height),
+                width,
+                height,
+            }
+        }
+        None => session_hover_card_rect(modal, width, height, anchor_col, anchor_row)?,
     };
 
     f.render_widget(Clear, area);
+    let border_style = if focused {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.accent_alt)
+    };
     let mut card = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.accent_alt));
+        .border_style(border_style);
     if let Some(label) = title.map(str::trim).filter(|t| !t.is_empty()) {
         let label = format!(" {label} ");
         card = card.title(Span::styled(
@@ -12116,16 +12236,18 @@ fn render_session_hover_card(
     // bottom of the *content* rather than the screen: for fullscreen harness
     // output (status bar on the last row) this is identical to the screen
     // tail, while a sparse session whose few lines sit at the top of a tall
-    // parser still shows them instead of a blank window.
-    render_pty_screen(
-        f,
-        inner,
-        out.screen,
-        &app.theme,
-        false,
-        content_rows.saturating_sub(inner.height),
-    );
-    true
+    // parser still shows them instead of a blank window. The pan offsets
+    // shift that crop window — never the parser: rows step back from the
+    // tail, stopping at the content's top; columns pan right, stopping where
+    // the crop reaches the screen's right edge.
+    let (pan_cols, pan_rows) = pinned.map(|view| view.pan).unwrap_or((0, 0));
+    let top = content_rows
+        .saturating_sub(inner.height)
+        .saturating_sub(pan_rows);
+    let screen_cols = out.screen.size().1;
+    let left = pan_cols.min(screen_cols.saturating_sub(inner.width));
+    render_pty_screen(f, inner, out.screen, &app.theme, focused, top, left);
+    Some(area)
 }
 
 /// Status-text tooltip shown while the mouse hovers *shimmering* program text —
@@ -12840,6 +12962,7 @@ fn render_program_selection_context_menu(
 ) {
     if program_selection_range(popup).is_none() {
         app.layout.program_selection_run_hit = None;
+        app.layout.program_selection_verb_hits.clear();
         return;
     }
     let Some(pos) = program_cursor_position(
@@ -12850,12 +12973,17 @@ fn render_program_selection_context_menu(
         program_area,
     ) else {
         app.layout.program_selection_run_hit = None;
+        app.layout.program_selection_verb_hits.clear();
         return;
     };
     let menu = popup.selection_menu.as_ref().cloned().unwrap_or_default();
-    let rect = program_selection_context_menu_rect(pos, program_area, &menu);
+    // Verb buttons (spec 0089) render as a vertical list below the
+    // comment/Run row, one row per verb, ordered as advertised by the daemon.
+    let verbs = app.program_verbs.clone();
+    let rect = program_selection_context_menu_rect(pos, program_area, &menu, &verbs);
     if rect.width < 3 || rect.height < 3 {
         app.layout.program_selection_run_hit = None;
+        app.layout.program_selection_verb_hits.clear();
         return;
     }
     let inner_x = rect.x.saturating_add(1 + PROGRAM_SELECTION_RUN_MENU_PAD_X);
@@ -12872,9 +13000,17 @@ fn render_program_selection_context_menu(
         inner_y,
     );
     app.layout.program_selection_run_hit = Some(hit);
-    let hovered = app
-        .mouse_pos
-        .is_some_and(|(mx, my)| my == hit.2 && mx >= hit.0 && mx < hit.1);
+    // Gated on pointer-enter, not mere position (spec 0057/0089): a pointer
+    // left resting from an earlier action can coincide with the Run
+    // button's or a verb row's fixed position the instant the menu appears,
+    // which must not read as already-hovered. Only a pointer that actually
+    // moves after the menu was created arms these highlights; the keyboard
+    // `selected_action` highlight below is unaffected.
+    let hover_armed = app.mouse_moved_at.is_some_and(|at| at > menu.shown_at);
+    let hovered = hover_armed
+        && app
+            .mouse_pos
+            .is_some_and(|(mx, my)| my == hit.2 && mx >= hit.0 && mx < hit.1);
     let row_style = |selected: bool| {
         if selected {
             Style::default()
@@ -12885,7 +13021,8 @@ fn render_program_selection_context_menu(
             Style::default().fg(app.theme.accent)
         }
     };
-    let run_selected = hovered || menu.focused;
+    let run_selected = hovered
+        || (menu.focused && menu.selected_action == crate::app::ProgramSelectionAction::Run);
     let comment_gap = usize::from(inner_width > run_button_width);
     let comment_width = inner_width
         .saturating_sub(run_button_width)
@@ -12897,16 +13034,40 @@ fn render_program_selection_context_menu(
         menu.comment.clone()
     };
     let mut comment_lines = wrap_to_width(&comment_text, comment_width);
-    let visible_comment_rows = rect.height.saturating_sub(2) as usize;
-    comment_lines.truncate(visible_comment_rows);
+    // Reserve one row per verb, plus however many rows the highlighted
+    // row's description wraps to while focused (spec 0089 — wrapped, not
+    // truncated), at the bottom of the menu, below the comment rows —
+    // `visible_comment_rows` bounds how many comment lines fit above them.
+    let description_rows = program_selection_description_line_count(
+        &menu,
+        &verbs,
+        rect.width,
+        rect.height.saturating_sub(2) as usize,
+    );
+    let content_rows = (rect.height.saturating_sub(2) as usize).saturating_sub(description_rows);
+    let verb_rows = verbs.len().min(content_rows);
+    let visible_comment_rows = content_rows.saturating_sub(verb_rows);
+    comment_lines.truncate(visible_comment_rows.max(1));
+    let comment_selected =
+        menu.focused && menu.selected_action == crate::app::ProgramSelectionAction::Comment;
+    // Typed instruction text keeps its underline regardless of which row
+    // Up/Down currently highlights — the underline is what marks this as
+    // typed content rather than a menu action label, so it must not
+    // disappear the moment focus moves to Run or a verb. Without it, once
+    // keyboard focus left Comment, the text fell back to a plain accent fg —
+    // pixel-identical to every unselected Run/verb row — so navigating away
+    // made typed guidance visually indistinguishable from a menu label.
+    // Bold is reserved for the actively-selected row, matching `row_style`.
     let comment_style = if menu.comment.is_empty() {
         Style::default().fg(app.theme.muted)
-    } else if menu.focused {
+    } else if comment_selected {
+        Style::default()
+            .fg(app.theme.text)
+            .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+    } else {
         Style::default()
             .fg(app.theme.text)
             .add_modifier(Modifier::UNDERLINED)
-    } else {
-        Style::default().fg(app.theme.accent)
     };
     let run_style = row_style(run_selected);
     let block = Block::default()
@@ -12939,7 +13100,7 @@ fn render_program_selection_context_menu(
                 },
             );
         }
-        if menu.focused {
+        if comment_selected {
             let prefix: String = menu.comment.chars().take(menu.cursor).collect();
             let cursor_lines = wrap_to_width(&prefix, comment_width);
             let cursor_row = cursor_lines.len().saturating_sub(1);
@@ -12947,24 +13108,117 @@ fn render_program_selection_context_menu(
                 .last()
                 .map(|line| UnicodeWidthStr::width(line.as_str()))
                 .unwrap_or(0);
-            let visible_row = cursor_row.min(visible_comment_rows.saturating_sub(1));
+            let visible_row = cursor_row.min(visible_comment_rows.max(1).saturating_sub(1));
             let y = inner_y.saturating_add(visible_row as u16);
             let x =
                 inner_x.saturating_add((cursor_col.min(comment_width.saturating_sub(1))) as u16);
             f.set_cursor_position(Position { x, y });
         }
+        let mut verb_hits = Vec::with_capacity(verb_rows);
+        for (idx, verb) in verbs.iter().take(verb_rows).enumerate() {
+            let y = inner_y.saturating_add(comment_lines.len() as u16).saturating_add(idx as u16);
+            let verb_hovered = hover_armed
+                && app.mouse_pos.is_some_and(|(mx, my)| {
+                    my == y && mx >= inner_x && mx < inner_x.saturating_add(inner_width as u16)
+                });
+            let verb_key_selected = menu.focused
+                && menu.selected_action == crate::app::ProgramSelectionAction::Verb(idx);
+            let label = format!("▸ {}", verb.label);
+            let truncated = truncate_to_width(&label, inner_width);
+            let text_width = UnicodeWidthStr::width(truncated.as_str());
+            let pad = inner_width.saturating_sub(text_width);
+            let spans = vec![
+                Span::styled(truncated, row_style(verb_hovered || verb_key_selected)),
+                Span::raw(" ".repeat(pad)),
+            ];
+            f.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect {
+                    x: inner_x,
+                    y,
+                    width: inner_width as u16,
+                    height: 1,
+                },
+            );
+            verb_hits.push((
+                inner_x,
+                inner_x.saturating_add(inner_width as u16),
+                y,
+                verb.name.clone(),
+            ));
+        }
+        app.layout.program_selection_verb_hits = verb_hits;
+        // Description of the currently keyboard-highlighted row (spec
+        // 0089), wrapped — never truncated with an ellipsis — across
+        // however many rows `description_rows` reserved below the last
+        // verb row. Blank (not omitted) when that row has no description
+        // text, so the space Tab reserved doesn't jitter depending on
+        // which row Up/Down lands on.
+        if description_rows > 0 {
+            let description =
+                program_selection_action_description(menu.selected_action, &verbs)
+                    .unwrap_or_default();
+            let mut desc_lines = wrap_to_width(&description, inner_width);
+            desc_lines.truncate(description_rows);
+            for (idx, line) in desc_lines.iter().enumerate() {
+                let y = inner_y
+                    .saturating_add(comment_lines.len() as u16)
+                    .saturating_add(verb_rows as u16)
+                    .saturating_add(idx as u16);
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        line.as_str(),
+                        Style::default().fg(app.theme.dim).add_modifier(Modifier::ITALIC),
+                    ))),
+                    Rect {
+                        x: inner_x,
+                        y,
+                        width: inner_width as u16,
+                        height: 1,
+                    },
+                );
+            }
+        }
+    } else {
+        app.layout.program_selection_verb_hits.clear();
     }
 }
 
+/// The menu box's content width, honoring its border and horizontal
+/// padding — shared by the comment field (which further carves out room
+/// for the Run button) and the description row (which uses the full span).
+fn program_selection_inner_width(menu_width: u16) -> usize {
+    menu_width.saturating_sub(2 + PROGRAM_SELECTION_RUN_MENU_PAD_X.saturating_mul(2)) as usize
+}
+
 pub(crate) fn program_selection_comment_width(menu_width: u16) -> usize {
-    let inner_width =
-        menu_width.saturating_sub(2 + PROGRAM_SELECTION_RUN_MENU_PAD_X.saturating_mul(2)) as usize;
+    let inner_width = program_selection_inner_width(menu_width);
     let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_BUTTON);
     let comment_gap = usize::from(inner_width > run_button_width);
     inner_width
         .saturating_sub(run_button_width)
         .saturating_sub(comment_gap)
         .max(1)
+}
+
+/// Wrapped line count of the highlighted row's description (spec 0089),
+/// clamped to `max_rows`. `0` while the menu is unfocused — nothing is
+/// keyboard-highlighted yet, so there's nothing to describe. Otherwise at
+/// least `1` even when the highlighted row has no description text, so a
+/// verb that omitted `description` still reserves a (blank) row rather than
+/// visibly shrinking the menu relative to its neighbors.
+fn program_selection_description_line_count(
+    menu: &crate::app::ProgramSelectionMenu,
+    verbs: &[construct_protocol::ProgramVerb],
+    menu_width: u16,
+    max_rows: usize,
+) -> usize {
+    if !menu.focused {
+        return 0;
+    }
+    let width = program_selection_inner_width(menu_width).max(1);
+    let text = program_selection_action_description(menu.selected_action, verbs).unwrap_or_default();
+    wrap_to_width(&text, width).len().max(1).min(max_rows.max(1))
 }
 
 fn program_selection_comment_line_count(
@@ -12984,15 +13238,58 @@ fn program_selection_comment_line_count(
         .min(max_rows.max(1))
 }
 
+/// The description shown for whichever row Up/Down currently highlights
+/// (spec 0089) — Run and Comment have fixed descriptions. A verb's is
+/// always led by its declared `effect` ("Annotate: " / "Rewrite: "),
+/// derived from the structured field rather than trusted to appear in the
+/// author's own text, so the menu can never show a description that
+/// disagrees with what the verb will actually do to the document. The
+/// `description` frontmatter field itself should read as a lowercase
+/// continuation clause after that prefix (e.g. "surface hidden
+/// assumptions…", not "Surface hidden assumptions…" or "Annotate hidden
+/// assumptions…" — the effect word is supplied automatically).
+fn program_selection_action_description(
+    action: crate::app::ProgramSelectionAction,
+    verbs: &[construct_protocol::ProgramVerb],
+) -> Option<String> {
+    match action {
+        crate::app::ProgramSelectionAction::Comment => {
+            Some("Free-text guidance appended to Run or the selected verb.".to_string())
+        }
+        crate::app::ProgramSelectionAction::Run => {
+            Some("Execute the selection now, as orchestration.".to_string())
+        }
+        crate::app::ProgramSelectionAction::Verb(idx) => {
+            let verb = verbs.get(idx)?;
+            let effect_label = match verb.effect {
+                construct_protocol::ProgramVerbEffect::Annotate => "Annotate",
+                construct_protocol::ProgramVerbEffect::Rewrite => "Rewrite",
+            };
+            Some(match verb.description.as_deref() {
+                Some(desc) if !desc.is_empty() => format!("{effect_label}: {desc}"),
+                _ => effect_label.to_string(),
+            })
+        }
+    }
+}
+
 fn program_selection_context_menu_rect(
     pos: Position,
     total: Rect,
     menu: &crate::app::ProgramSelectionMenu,
+    verbs: &[construct_protocol::ProgramVerb],
 ) -> Rect {
     let width = PROGRAM_SELECTION_RUN_MENU_W.min(total.width);
-    let max_comment_rows = total.height.saturating_sub(2) as usize;
-    let comment_rows = program_selection_comment_line_count(menu, width, max_comment_rows);
-    let height = (2 + comment_rows as u16).min(total.height).max(1);
+    let max_rows = total.height.saturating_sub(2) as usize;
+    let comment_rows = program_selection_comment_line_count(menu, width, max_rows);
+    // One row per verb (spec 0089), below the comment/Run row, plus however
+    // many rows the highlighted row's description wraps to while focused —
+    // wrapped, not truncated, so a long description can grow the menu
+    // rather than being cut with an ellipsis.
+    let description_rows = program_selection_description_line_count(menu, verbs, width, max_rows);
+    let height = (2 + comment_rows as u16 + verbs.len() as u16 + description_rows as u16)
+        .min(total.height)
+        .max(1);
     let max_x = total.x.saturating_add(total.width).saturating_sub(width);
     let max_y = total.y.saturating_add(total.height).saturating_sub(height);
     Rect {

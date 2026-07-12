@@ -36,6 +36,9 @@ impl App {
             self.set_status("program: no session selected".to_string());
             return;
         };
+        // Replacing a popup that holds a size-owning pinned clip must hand
+        // the session its standard size back first (spec 0090).
+        self.set_program_pinned_clip(None).await;
 
         match self.client.program_get(&session_id).await {
             Ok(result) => {
@@ -65,6 +68,7 @@ impl App {
                 // refresh on open so edits / new template files surface in the
                 // empty-state placeholder without a daemon restart.
                 self.refresh_program_templates();
+                self.refresh_program_verbs();
             }
             Err(e) => {
                 self.set_status(format!("program get failed: {e}"));
@@ -112,6 +116,20 @@ impl App {
         tokio::spawn(async move {
             if let Ok(result) = client.program_templates().await {
                 let _ = tx.send(result.templates);
+            }
+        });
+    }
+
+    /// `refresh_program_templates`'s counterpart for program verbs (spec
+    /// 0087): the same "fetch fresh, deliver via channel" shape so a newly
+    /// dropped `verbs/*.md` file appears in the selection menu on the next
+    /// program open without a daemon restart.
+    fn refresh_program_verbs(&self) {
+        let client = self.client.clone();
+        let tx = self.program_verbs_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(result) = client.program_verbs().await {
+                let _ = tx.send(result.verbs);
             }
         });
     }
@@ -631,7 +649,7 @@ impl App {
     /// `session_id`. Used by selection runs so that optimistically shimmering
     /// the freshly-run block never clears shimmer another in-flight run
     /// already declared elsewhere in the program (see spec 0042).
-    fn program_run_pending_with_existing(
+    pub(super) fn program_run_pending_with_existing(
         &self,
         session_id: &str,
         ids: HashSet<String>,
@@ -642,7 +660,11 @@ impl App {
         }
     }
 
-    fn start_program_run_with_pending(&mut self, session_id: &str, pending: HashSet<String>) {
+    pub(super) fn start_program_run_with_pending(
+        &mut self,
+        session_id: &str,
+        pending: HashSet<String>,
+    ) {
         if pending.is_empty() {
             self.program_runs.remove(session_id);
             return;
@@ -724,6 +746,9 @@ impl App {
         if !self.save_program_popup().await {
             return;
         }
+        // A size-owning pinned clip releases its session's terminal size
+        // when the Program goes away with it (spec 0090).
+        self.set_program_pinned_clip(None).await;
         if let Some(session_id) = self
             .program_popup
             .as_ref()

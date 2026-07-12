@@ -51,6 +51,24 @@ impl App {
                 _ => return true,
             }
         }
+        // An in-flight pinned-card drag (spec 0090) owns the mouse until the
+        // button releases, wherever the pointer wanders — same rule as every
+        // other construct drag gesture.
+        if let Some(drag) = self.pinned_card_drag {
+            match ev.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.apply_pinned_card_drag(drag, ev);
+                    return true;
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.apply_pinned_card_drag(drag, ev);
+                    self.finish_pinned_card_drag(drag).await;
+                    self.pinned_card_drag = None;
+                    return true;
+                }
+                _ => return true,
+            }
+        }
         let Some(modal) = self.layout.modal_area else {
             return false;
         };
@@ -67,6 +85,80 @@ impl App {
             }
             if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
                 self.session_title_menu = None;
+            }
+        }
+        // A pinned clip card (spec 0090) owns the mouse over its own bounds
+        // and dismisses on clicks elsewhere:
+        // - A left click on the card is consumed here (mouse never forwards
+        //   into the pinned session — keyboard-only scope — but the card
+        //   reclaims keyboard focus, so a List-focused click resumes typing
+        //   into the pin).
+        // - Wheel over the card pans its cropped viewport instead of
+        //   scrolling the doc: vertical steps back from the live tail the
+        //   card is anchored to; ScrollLeft/ScrollRight — or Shift+wheel for
+        //   terminals that never synthesize horizontal events — pans across
+        //   the screen width. Card-local: nothing forwards to the session.
+        // - A left click landing neither on the card nor on a session clip
+        //   (the pin's own toggle/switch affordance, handled below) — in the
+        //   program body, on its chrome, or outside the modal entirely —
+        //   unpins, then proceeds with the effect it always had.
+        if self
+            .program_popup
+            .as_ref()
+            .is_some_and(|popup| popup.pinned_clip.is_some())
+        {
+            let on_card = self
+                .layout
+                .program_pinned_card_rect
+                .is_some_and(|card| Self::rect_contains(card, ev.column, ev.row));
+            match ev.kind {
+                MouseEventKind::Down(MouseButton::Left) if on_card => {
+                    // Border grabs start a drag gesture (spec 0090): the
+                    // right/bottom border resizes the card, the top border
+                    // (title bar) moves it. Interior clicks just reclaim
+                    // keyboard focus for the pin.
+                    let card = self
+                        .layout
+                        .program_pinned_card_rect
+                        .expect("on_card implies a painted card rect");
+                    let on_right = ev.column == card.x + card.width.saturating_sub(1);
+                    let on_bottom = ev.row == card.y + card.height.saturating_sub(1);
+                    let on_top = ev.row == card.y;
+                    if on_right || on_bottom {
+                        if let Some(popup) = self.program_popup.as_ref() {
+                            self.pinned_card_drag = Some(crate::app::PinnedCardDrag::Resize {
+                                start_cols: popup.pinned_card_cols,
+                                start_rows: popup.pinned_card_rows,
+                                from: (ev.column, ev.row),
+                            });
+                        }
+                    } else if on_top {
+                        self.pinned_card_drag = Some(crate::app::PinnedCardDrag::Move {
+                            grab: (
+                                ev.column.saturating_sub(card.x),
+                                ev.row.saturating_sub(card.y),
+                            ),
+                        });
+                    }
+                    self.focus = PaneFocus::View;
+                    self.set_program_terminal_focus(false);
+                    return true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if self.program_clip_session_at(ev.column, ev.row).is_none() {
+                        self.set_program_pinned_clip(None).await;
+                    }
+                }
+                MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+                    if on_card =>
+                {
+                    self.pan_pinned_clip_card(ev);
+                    return true;
+                }
+                _ => {}
             }
         }
         let contains = ev.column >= modal.x
@@ -122,14 +214,25 @@ impl App {
             .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
         let hit_selection_run = selection_run_hit
             .is_some_and(|(xs, xe, y)| ev.row == y && ev.column >= xs && ev.column < xe);
+        // Program selection verb buttons (spec 0089): a small vertical list
+        // of rows below the comment/Run row, each its own hit-rect.
+        let hit_selection_verb = self
+            .layout
+            .program_selection_verb_hits
+            .iter()
+            .find(|(xs, xe, y, _)| ev.row == *y && ev.column >= *xs && ev.column < *xe)
+            .map(|(_, _, _, name)| name.clone());
         if hit_title_toggle
             || hit_title_run
             || hit_title_close
             || hit_title_name
             || hit_selection_run
+            || hit_selection_verb.is_some()
         {
             if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if hit_title_toggle {
+                if let Some(verb) = hit_selection_verb.clone() {
+                    self.execute_program_selected_verb(verb).await;
+                } else if hit_title_toggle {
                     self.close_program_popup().await;
                 } else if hit_title_close {
                     if let Some(session_id) = self
@@ -242,21 +345,49 @@ impl App {
                 return true;
             }
         }
-        // Clicking a session smart-clip focuses that session, just like clicking
-        // its row in the session list. The program follows selection, so the
-        // clicked session's program reveals in place.
+        // Clicking a session smart-clip: a double-click (within
+        // PROGRAM_CLIP_DOUBLE_CLICK_MS, same clip) navigates to the full
+        // session view, just like every click did before pinning existed. A
+        // single click instead toggles the clip's inline terminal pinned
+        // open — clicking the same pinned clip again unpins it; clicking a
+        // different clip switches the pin to it. Pinning lets the user
+        // answer a verb session's questions (e.g. `interview`) without
+        // leaving the Program doc.
         if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
             if let Some(session_id) = self.program_clip_session_at(ev.column, ev.row) {
-                if self.sessions.iter().any(|s| s.id == session_id) {
-                    self.focus = PaneFocus::List;
-                    self.select_session(session_id);
-                    // Point the active window pane at the target too — the main
-                    // view renders from the pane's selection, not `self.selection`
-                    // directly (see `render_main_windows`). The list-row click and
-                    // the switch/new/fork paths all do this; without it the clip
-                    // updates the selection but the pane keeps rendering the old
-                    // session, so the switch never visibly lands.
-                    self.sync_active_window_selection();
+                let now = Instant::now();
+                let is_double_click =
+                    self.last_program_clip_click
+                        .as_ref()
+                        .is_some_and(|(id, at)| {
+                            id == &session_id
+                                && now.saturating_duration_since(*at)
+                                    < Duration::from_millis(PROGRAM_CLIP_DOUBLE_CLICK_MS)
+                        });
+                if is_double_click {
+                    self.last_program_clip_click = None;
+                    self.set_program_pinned_clip(None).await;
+                    if self.sessions.iter().any(|s| s.id == session_id) {
+                        self.focus = PaneFocus::List;
+                        self.select_session(session_id);
+                        // Point the active window pane at the target too — the main
+                        // view renders from the pane's selection, not `self.selection`
+                        // directly (see `render_main_windows`). The list-row click and
+                        // the switch/new/fork paths all do this; without it the clip
+                        // updates the selection but the pane keeps rendering the old
+                        // session, so the switch never visibly lands.
+                        self.sync_active_window_selection();
+                    }
+                } else {
+                    self.last_program_clip_click = Some((session_id.clone(), now));
+                    let pinned = self.program_popup.as_ref().and_then(|popup| {
+                        if popup.pinned_clip.as_deref() == Some(session_id.as_str()) {
+                            None
+                        } else {
+                            Some(session_id)
+                        }
+                    });
+                    self.set_program_pinned_clip(pinned).await;
                 }
                 return true;
             }
@@ -566,6 +697,248 @@ impl App {
         }
     }
 
+    /// Change the pinned clip through the size-ownership protocol (spec
+    /// 0090). A session pinned while visible nowhere else on screen (no main
+    /// window, not the orchestrator, not in the pin strip) gets its PTY
+    /// resized to the card's content dims, so the harness reflows to fit —
+    /// full fidelity, no crop — and is resized back to the standard pane
+    /// size the moment the pin releases (unpin, switch, dismiss, popup
+    /// close). A session that IS visible elsewhere keeps its size and the
+    /// card stays a crop with wheel pan: at most one render site ever owns a
+    /// session's size (spec 0025 discipline).
+    pub(super) async fn set_program_pinned_clip(&mut self, pinned: Option<String>) {
+        let released = self.program_popup.as_ref().and_then(|popup| {
+            popup
+                .pinned_terminal_size
+                .and_then(|_| popup.pinned_clip.clone())
+        });
+        if let Some(old_id) = released {
+            let (cols, rows) = self.terminal_pane_size;
+            let _ = self.client.pty_resize(&old_id, cols, rows).await;
+        }
+        let card_dims = self
+            .program_popup
+            .as_ref()
+            .map(|popup| (popup.pinned_card_cols, popup.pinned_card_rows))
+            .unwrap_or((
+                crate::app::PROGRAM_PINNED_CARD_DEFAULT_COLS,
+                crate::app::PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
+            ));
+        let owned_size = pinned.as_deref().and_then(|id| {
+            if self.session_visible_on_screen(id) {
+                return None;
+            }
+            let modal = self.layout.modal_area?;
+            let cols = card_dims.0.clamp(1, modal.width.saturating_sub(2).max(1));
+            Some((cols, card_dims.1.max(1)))
+        });
+        if let (Some(id), Some((cols, rows))) = (pinned.as_deref(), owned_size) {
+            let _ = self.client.pty_resize(id, cols, rows).await;
+        }
+        let Some(popup) = self.program_popup.as_mut() else {
+            return;
+        };
+        popup.set_pinned_clip(pinned);
+        popup.pinned_terminal_size = owned_size;
+    }
+
+    /// Apply one pointer sample of an in-flight pinned-card drag (spec
+    /// 0090): resize computes new content dims from the drag-start dims plus
+    /// the pointer delta (stable regardless of how the card's anchor
+    /// placement shifts as it grows); move places the card's top-left so the
+    /// grabbed cell stays under the pointer. Both clamp inside the Program
+    /// modal.
+    fn apply_pinned_card_drag(&mut self, drag: crate::app::PinnedCardDrag, ev: &MouseEvent) {
+        let Some(modal) = self.layout.modal_area else {
+            return;
+        };
+        let Some(popup) = self.program_popup.as_mut() else {
+            return;
+        };
+        match drag {
+            crate::app::PinnedCardDrag::Resize {
+                start_cols,
+                start_rows,
+                from,
+            } => {
+                let d_cols = i32::from(ev.column) - i32::from(from.0);
+                let d_rows = i32::from(ev.row) - i32::from(from.1);
+                let max_cols = i32::from(modal.width.saturating_sub(4).max(1));
+                let max_rows = i32::from(modal.height.saturating_sub(4).max(1));
+                popup.pinned_card_cols = (i32::from(start_cols) + d_cols)
+                    .clamp(i32::from(crate::app::PROGRAM_PINNED_CARD_MIN_COLS), max_cols)
+                    as u16;
+                popup.pinned_card_rows = (i32::from(start_rows) + d_rows)
+                    .clamp(i32::from(crate::app::PROGRAM_PINNED_CARD_MIN_ROWS), max_rows)
+                    as u16;
+            }
+            crate::app::PinnedCardDrag::Move { grab } => {
+                let x = ev
+                    .column
+                    .saturating_sub(grab.0)
+                    .clamp(modal.x, modal.x.saturating_add(modal.width.saturating_sub(1)));
+                let y = ev
+                    .row
+                    .saturating_sub(grab.1)
+                    .clamp(modal.y, modal.y.saturating_add(modal.height.saturating_sub(1)));
+                popup.pinned_card_pos = Some((x, y));
+            }
+        }
+    }
+
+    /// Finalize a pinned-card drag (spec 0090). Only a resize on a
+    /// size-owning pin has work left to do: the session's PTY follows the
+    /// card's final dims in one resize, on release rather than per drag
+    /// sample, so the harness reflows once instead of on every pointer step.
+    async fn finish_pinned_card_drag(&mut self, drag: crate::app::PinnedCardDrag) {
+        if !matches!(drag, crate::app::PinnedCardDrag::Resize { .. }) {
+            return;
+        }
+        let target = self.program_popup.as_ref().and_then(|popup| {
+            popup.pinned_terminal_size?;
+            let id = popup.pinned_clip.clone()?;
+            Some((id, popup.pinned_card_cols, popup.pinned_card_rows))
+        });
+        let Some((id, cols, rows)) = target else {
+            return;
+        };
+        let _ = self.client.pty_resize(&id, cols, rows).await;
+        if let Some(popup) = self.program_popup.as_mut() {
+            popup.pinned_terminal_size = Some((cols, rows));
+        }
+    }
+
+    /// Shift the pinned card's crop pan by `(d_cols, d_rows)` — positive
+    /// cols pan right, positive rows pan back from the tail. Offsets clamp
+    /// loosely to the session's cached screen here; the renderer clamps
+    /// precisely against the visible content every frame, so a pan can never
+    /// scroll past the content into blank space for long.
+    fn pan_pinned_card_by(&mut self, d_cols: i32, d_rows: i32) {
+        fn shift(value: u16, delta: i32, max: u16) -> u16 {
+            (i32::from(value) + delta).clamp(0, i32::from(max)) as u16
+        }
+        let dims = self
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.pinned_clip.as_deref())
+            .and_then(|id| self.histories.get(id))
+            .and_then(|history| history.cached_dims());
+        let Some(popup) = self.program_popup.as_mut() else {
+            return;
+        };
+        let (max_cols, max_rows) = dims.unwrap_or((u16::MAX, u16::MAX));
+        popup.pinned_scroll_cols = shift(popup.pinned_scroll_cols, d_cols, max_cols);
+        popup.pinned_scroll_rows = shift(popup.pinned_scroll_rows, d_rows, max_rows);
+    }
+
+    /// Pan the pinned clip card's cropped viewport by one wheel step (spec
+    /// 0090). Vertical steps back/forward through the tail-anchored content;
+    /// ScrollLeft/ScrollRight — or Shift/Alt+vertical-wheel, since not every
+    /// terminal synthesizes horizontal wheel events (and some never report
+    /// Shift-modified wheels at all, reserving Shift for native selection;
+    /// Alt tends to pass through) — pans across the screen width.
+    /// Shift+arrows (see `handle_pinned_clip_key`) are the guaranteed
+    /// keyboard fallback when a terminal delivers none of these.
+    ///
+    /// Horizontal signs are the OPPOSITE of the raw event names: terminals
+    /// normalize vertical wheel events for scroll intent ("ScrollUp" always
+    /// means "look back", whatever the natural-scroll setting), but they do
+    /// not apply the same normalization horizontally — observed in practice,
+    /// the raw horizontal deltas arrive gesture-encoded, so the naive
+    /// mapping panned the wrong way. Keyboard pan is unambiguous and stays
+    /// direction-literal.
+    fn pan_pinned_clip_card(&mut self, ev: &MouseEvent) {
+        let v_step = PROGRAM_WHEEL_SCROLL_ROWS as i32;
+        let h_step = PROGRAM_PINNED_PAN_COLS_STEP as i32;
+        let horizontal = ev.modifiers.contains(KeyModifiers::SHIFT)
+            || ev.modifiers.contains(KeyModifiers::ALT);
+        match (ev.kind, horizontal) {
+            (MouseEventKind::ScrollUp, true) => self.pan_pinned_card_by(h_step, 0),
+            (MouseEventKind::ScrollDown, true) => self.pan_pinned_card_by(-h_step, 0),
+            (MouseEventKind::ScrollUp, false) => self.pan_pinned_card_by(0, v_step),
+            (MouseEventKind::ScrollDown, false) => self.pan_pinned_card_by(0, -v_step),
+            (MouseEventKind::ScrollLeft, _) => self.pan_pinned_card_by(h_step, 0),
+            (MouseEventKind::ScrollRight, _) => self.pan_pinned_card_by(-h_step, 0),
+            _ => {}
+        }
+    }
+
+    /// Route a keypress to the Program popup's pinned clip, if one is
+    /// pinned. Two deliberate carve-outs never reach the session: the
+    /// global `C-x` chord prefix (falls through to the keymap, same escape
+    /// hatch as a captured session PTY — `C-x C-x` forwards a literal C-x)
+    /// and `Shift+arrows` (crop pan, spec 0090); every other key, `Esc`
+    /// included (sessions need Esc, e.g. to interrupt a harness mid-turn),
+    /// encodes to raw PTY bytes and forwards to that clip's session — not
+    /// `self.selected_id()`, since a pinned clip is usually a different
+    /// session than the one selected in the sidebar. Unpinning is strictly
+    /// a mouse gesture: click the pinned clip again, or click anywhere
+    /// outside the card. Returns `false` (nothing to do, or a chord key the
+    /// keymap should drive) when no clip is pinned or the key belongs to
+    /// the chord tier.
+    pub(super) async fn handle_pinned_clip_key(&mut self, key: KeyEvent) -> bool {
+        let Some(pinned_session_id) = self
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.pinned_clip.clone())
+        else {
+            return false;
+        };
+        // The global `C-x` prefix stays with the TUI keymap, exactly as it
+        // does over a captured session PTY: starting a chord — and every key
+        // continuing one — falls through to the keymap tier below, so
+        // `C-x o`, `C-x z`, etc. keep working while a card is pinned. The
+        // standard `C-x C-x` escape hatch forwards one literal C-x byte to
+        // the pinned session instead.
+        let is_ctrl_x = matches!(key.code, KeyCode::Char('x'))
+            && key.modifiers.contains(KeyModifiers::CONTROL);
+        if !self.chord_state.is_empty() {
+            if is_ctrl_x {
+                self.chord_state.reset();
+                self.chord_label.clear();
+                self.queue_pty_input(pinned_session_id, vec![0x18], "pinned_clip_pty_input");
+                return true;
+            }
+            return false;
+        }
+        if is_ctrl_x {
+            return false;
+        }
+        // Keyboard pan: the guaranteed path on terminals that report neither
+        // horizontal wheel events nor Shift/Alt-modified wheels (many
+        // reserve Shift+wheel for native selection/scrollback and never send
+        // it to the app). Direction-literal: the arrow points where the crop
+        // window moves — Shift+Up looks back from the tail, Shift+Right
+        // reveals content further right.
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            let v_step = PROGRAM_WHEEL_SCROLL_ROWS as i32;
+            let h_step = PROGRAM_PINNED_PAN_COLS_STEP as i32;
+            match key.code {
+                KeyCode::Up => {
+                    self.pan_pinned_card_by(0, v_step);
+                    return true;
+                }
+                KeyCode::Down => {
+                    self.pan_pinned_card_by(0, -v_step);
+                    return true;
+                }
+                KeyCode::Left => {
+                    self.pan_pinned_card_by(-h_step, 0);
+                    return true;
+                }
+                KeyCode::Right => {
+                    self.pan_pinned_card_by(h_step, 0);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        if let Some(bytes) = encode_key_to_bytes(key) {
+            self.queue_pty_input(pinned_session_id, bytes, "pinned_clip_pty_input");
+        }
+        true
+    }
+
     async fn handle_program_selection_menu_key(&mut self, key: KeyEvent) -> bool {
         let selection_active = self
             .program_popup
@@ -600,6 +973,16 @@ impl App {
             return false;
         }
 
+        // Text-editing keys (cursor movement within the comment, insert,
+        // delete) only take effect while Comment is the selected row (spec
+        // 0087) — otherwise a keyboard-navigated Run/verb row would silently
+        // eat keystrokes meant to move a cursor that isn't showing.
+        let comment_active = self
+            .program_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .is_some_and(|menu| menu.selected_action == ProgramSelectionAction::Comment);
+
         match key.code {
             KeyCode::Esc => {
                 if let Some(menu) = self
@@ -616,19 +999,43 @@ impl App {
                     popup.selection_menu = None;
                 }
                 self.layout.program_selection_run_hit = None;
+                self.layout.program_selection_verb_hits.clear();
                 self.set_status("program selection canceled".to_string());
             }
-            KeyCode::Up => self.move_program_selection_comment_cursor_vertical(-1),
-            KeyCode::Down => self.move_program_selection_comment_cursor_vertical(1),
+            KeyCode::Up => self.move_program_selection_action(-1),
+            KeyCode::Down => self.move_program_selection_action(1),
             KeyCode::Tab | KeyCode::BackTab => {}
             KeyCode::Enter => {
-                let comment = self.program_popup.as_ref().and_then(|popup| {
-                    let menu = popup.selection_menu.as_ref()?;
-                    Some(menu.comment.clone())
-                });
-                self.execute_program_selected_text(comment).await;
+                let action = self
+                    .program_popup
+                    .as_ref()
+                    .and_then(|popup| popup.selection_menu.as_ref())
+                    .map(|menu| menu.selected_action)
+                    .unwrap_or(ProgramSelectionAction::Comment);
+                match action {
+                    ProgramSelectionAction::Verb(idx) => {
+                        // Out-of-range only if the verb list shrank (live
+                        // reload) while this row was selected — fall back to
+                        // Run rather than silently doing nothing.
+                        if let Some(verb) = self.program_verbs.get(idx).cloned() {
+                            self.execute_program_selected_verb(verb.name).await;
+                        } else {
+                            let comment = self.program_popup.as_ref().and_then(|popup| {
+                                Some(popup.selection_menu.as_ref()?.comment.clone())
+                            });
+                            self.execute_program_selected_text(comment).await;
+                        }
+                    }
+                    ProgramSelectionAction::Comment | ProgramSelectionAction::Run => {
+                        let comment = self
+                            .program_popup
+                            .as_ref()
+                            .and_then(|popup| Some(popup.selection_menu.as_ref()?.comment.clone()));
+                        self.execute_program_selected_text(comment).await;
+                    }
+                }
             }
-            KeyCode::Left => {
+            KeyCode::Left if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -637,7 +1044,7 @@ impl App {
                     menu.cursor = menu.cursor.saturating_sub(1);
                 }
             }
-            KeyCode::Right => {
+            KeyCode::Right if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -646,7 +1053,7 @@ impl App {
                     menu.cursor = (menu.cursor + 1).min(menu.comment.chars().count());
                 }
             }
-            KeyCode::Home => {
+            KeyCode::Home if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -655,7 +1062,7 @@ impl App {
                     menu.cursor = 0;
                 }
             }
-            KeyCode::End => {
+            KeyCode::End if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -664,7 +1071,7 @@ impl App {
                     menu.cursor = menu.comment.chars().count();
                 }
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -678,7 +1085,7 @@ impl App {
                     }
                 }
             }
-            KeyCode::Delete => {
+            KeyCode::Delete if comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -692,7 +1099,7 @@ impl App {
                     }
                 }
             }
-            _ if ctrl_char == Some('a') => {
+            _ if ctrl_char == Some('a') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -701,7 +1108,7 @@ impl App {
                     menu.cursor = 0;
                 }
             }
-            _ if ctrl_char == Some('e') => {
+            _ if ctrl_char == Some('e') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -710,7 +1117,7 @@ impl App {
                     menu.cursor = menu.comment.chars().count();
                 }
             }
-            _ if ctrl_char == Some('b') => {
+            _ if ctrl_char == Some('b') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -719,7 +1126,7 @@ impl App {
                     menu.cursor = menu.cursor.saturating_sub(1);
                 }
             }
-            _ if ctrl_char == Some('f') => {
+            _ if ctrl_char == Some('f') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -728,7 +1135,7 @@ impl App {
                     menu.cursor = (menu.cursor + 1).min(menu.comment.chars().count());
                 }
             }
-            _ if ctrl_char == Some('d') => {
+            _ if ctrl_char == Some('d') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -742,7 +1149,7 @@ impl App {
                     }
                 }
             }
-            _ if ctrl_char == Some('k') => {
+            _ if ctrl_char == Some('k') && comment_active => {
                 if let Some(menu) = self
                     .program_popup
                     .as_mut()
@@ -756,7 +1163,9 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char(c) if ctrl_char.is_none() && !ctrl && !alt && !super_mod => {
+            KeyCode::Char(c)
+                if comment_active && ctrl_char.is_none() && !ctrl && !alt && !super_mod =>
+            {
                 if c != '\n' && c != '\r' {
                     if let Some(menu) = self
                         .program_popup
@@ -769,16 +1178,19 @@ impl App {
                     }
                 }
             }
-            _ if ctrl_char == Some('p') => self.move_program_selection_comment_cursor_vertical(-1),
-            _ if ctrl_char == Some('n') => self.move_program_selection_comment_cursor_vertical(1),
+            _ if ctrl_char == Some('p') => self.move_program_selection_action(-1),
+            _ if ctrl_char == Some('n') => self.move_program_selection_action(1),
             _ => {}
         }
         true
     }
 
-    fn move_program_selection_comment_cursor_vertical(&mut self, delta: isize) {
-        let width =
-            crate::ui::program_selection_comment_width(crate::ui::PROGRAM_SELECTION_RUN_MENU_W);
+    /// Move the selection menu's keyboard focus among its rows — Comment,
+    /// Run, then each advertised verb in order — wrapping at both ends
+    /// (spec 0089). `delta` is `-1` for Up/C-p, `1` for Down/C-n.
+    fn move_program_selection_action(&mut self, delta: isize) {
+        let verb_count = self.program_verbs.len();
+        let count = 2 + verb_count;
         let Some(menu) = self
             .program_popup
             .as_mut()
@@ -786,31 +1198,17 @@ impl App {
         else {
             return;
         };
-        let prefix: String = menu.comment.chars().take(menu.cursor).collect();
-        let prefix_lines = crate::text_util::wrap_to_width(&prefix, width);
-        let current_row = prefix_lines.len().saturating_sub(1);
-        let current_col = prefix_lines
-            .last()
-            .map(|line| unicode_width::UnicodeWidthStr::width(line.as_str()))
-            .unwrap_or(0);
-        let lines = crate::text_util::wrap_to_width(&menu.comment, width);
-        let target_row = if delta < 0 {
-            current_row.saturating_sub(delta.unsigned_abs())
-        } else {
-            current_row
-                .saturating_add(delta as usize)
-                .min(lines.len().saturating_sub(1))
+        let current = match menu.selected_action {
+            ProgramSelectionAction::Comment => 0,
+            ProgramSelectionAction::Run => 1,
+            ProgramSelectionAction::Verb(i) => 2 + i,
         };
-        let chars_before_target: usize = lines
-            .iter()
-            .take(target_row)
-            .map(|line| line.chars().count())
-            .sum();
-        let target_line = lines.get(target_row).map(String::as_str).unwrap_or("");
-        let line_cursor = char_index_for_display_col(target_line, current_col);
-        menu.cursor = chars_before_target
-            .saturating_add(line_cursor)
-            .min(menu.comment.chars().count());
+        let next = (current as isize + delta).rem_euclid(count as isize) as usize;
+        menu.selected_action = match next {
+            0 => ProgramSelectionAction::Comment,
+            1 => ProgramSelectionAction::Run,
+            i => ProgramSelectionAction::Verb(i - 2),
+        };
     }
 
     pub(super) async fn execute_program_selected_text(&mut self, comment: Option<String>) -> bool {
@@ -828,8 +1226,89 @@ impl App {
             popup.selection_menu = None;
         }
         self.layout.program_selection_run_hit = None;
+        self.layout.program_selection_verb_hits.clear();
         self.execute_program_popup(Some(selection), Some(selected_block_ids), comment)
             .await
+    }
+
+    /// Run a Program selection verb (spec 0089) on the active popup's current
+    /// selection. Unlike `execute_program_selected_text` (Run), a verb always
+    /// needs an explicit, non-empty selection — there is no whole-document
+    /// fallback — and it doesn't touch the Run-progress/pending/shimmer
+    /// machinery: the daemon owns the in-flight affordance for a verb (the
+    /// provisional clip annotation it applies before this call returns), and
+    /// its eventual merge arrives back through the same `program/state`
+    /// broadcast every other program-mutating call already updates the popup
+    /// from — this method does not need to poke `popup.buffer` itself.
+    pub(super) async fn execute_program_selected_verb(&mut self, verb: String) -> bool {
+        let Some(popup) = self.program_popup.as_ref() else {
+            self.set_status("program verb failed: no active program".to_string());
+            return false;
+        };
+        let Some(selection) = Self::selected_program_text(popup) else {
+            self.set_status("program verb failed: no selection".to_string());
+            return false;
+        };
+        let selected_block_ids = Self::selected_program_block_ids(popup);
+        let session_id = popup.program.session_id.clone();
+        let comment = popup
+            .selection_menu
+            .as_ref()
+            .map(|menu| menu.comment.clone())
+            .filter(|c| !c.trim().is_empty());
+
+        let dirty = self.program_popup.as_ref().is_some_and(|popup| {
+            program_normalize_smart_clip_instance_ids(&popup.buffer) != popup.saved_markdown
+        });
+        if dirty && !self.save_program_popup().await {
+            return false;
+        }
+
+        if let Some(popup) = self.program_popup.as_mut() {
+            popup.selection = None;
+            popup.selection_menu = None;
+        }
+        self.layout.program_selection_run_hit = None;
+        self.layout.program_selection_verb_hits.clear();
+
+        let base_version = self
+            .program_popup
+            .as_ref()
+            .map(|popup| popup.program.version);
+        let selection = program_normalize_smart_clip_instance_ids(&selection);
+        let selected_block_ids = selected_block_ids.filter(|ids| !ids.is_empty());
+        // Optimistic shimmer (spec 0042/0087): mark the verb's block(s)
+        // pending locally before the round trip, the same instant-feedback
+        // treatment selection Run gives itself. `program_run_pending_with_existing`
+        // unions with any already-active run on this session rather than
+        // clobbering it, matching Run's own selection semantics.
+        if let Some(ids) = selected_block_ids.clone() {
+            let pending = self.program_run_pending_with_existing(&session_id, ids);
+            self.start_program_run_with_pending(&session_id, pending);
+        }
+        let selection_block_ids: Option<Vec<String>> =
+            selected_block_ids.map(|ids| ids.into_iter().collect());
+        let params = construct_protocol::ProgramVerbExecuteParams {
+            session_id,
+            verb: verb.clone(),
+            selection,
+            base_version,
+            comment,
+            selection_block_ids,
+        };
+        match self.client.program_verb_execute(params).await {
+            Ok(result) => {
+                self.set_status(format!(
+                    "verb '{verb}' dispatched ({})",
+                    short_id(&result.subagent_session_id)
+                ));
+                true
+            }
+            Err(e) => {
+                self.set_status(format!("program verb failed: {e}"));
+                false
+            }
+        }
     }
 
     fn normalized_ctrl_char(key: KeyEvent) -> Option<char> {
@@ -2191,7 +2670,10 @@ impl App {
     }
 }
 
-fn program_anchored_live_edit(before: &str, after: &str) -> Option<construct_protocol::ProgramEdit> {
+fn program_anchored_live_edit(
+    before: &str,
+    after: &str,
+) -> Option<construct_protocol::ProgramEdit> {
     if before == after {
         return None;
     }
@@ -2241,18 +2723,4 @@ fn program_anchored_live_edit(before: &str, after: &str) -> Option<construct_pro
         replace_all: false,
         keep_pending: false,
     })
-}
-
-fn char_index_for_display_col(line: &str, target_col: usize) -> usize {
-    let mut col = 0usize;
-    for (idx, ch) in line.chars().enumerate() {
-        if col >= target_col {
-            return idx;
-        }
-        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if col > target_col {
-            return idx;
-        }
-    }
-    line.chars().count()
 }

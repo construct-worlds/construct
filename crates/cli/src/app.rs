@@ -107,6 +107,12 @@ pub(crate) const PROGRAM_RUN_DEDUP_WINDOW_MS: u64 = 1500;
 /// Grace window for ignoring a stale `program/state` clear that was queued
 /// before a just-adopted `program.execute` response run became visible.
 pub(crate) const PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS: u64 = 1500;
+/// Max gap between two clicks on the same Program `@{session:…}` clip for the
+/// second to count as a double-click (navigate to the full session) rather
+/// than an independent single click (toggle the clip's pinned inline
+/// terminal). Matches common desktop double-click intervals; crossterm gives
+/// only raw mouse-down events, so this timing is owned here.
+pub(crate) const PROGRAM_CLIP_DOUBLE_CLICK_MS: u64 = 400;
 /// One-shot flourish shown when an authoritative program Run pending block
 /// settles. Presentation-only and client-local.
 pub(crate) const PROGRAM_SETTLE_FLASH_MS: u64 = 300;
@@ -116,6 +122,50 @@ pub(crate) const PROGRAM_COLLAB_CURSOR_TTL_MS: i64 = 60 * 1000;
 pub(crate) const PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS: i64 = 2 * 1000;
 /// Wrapped rows the program body scrolls per mouse-wheel notch.
 pub(crate) const PROGRAM_WHEEL_SCROLL_ROWS: usize = 3;
+/// Horizontal pan step for the pinned clip card (spec 0090). Much larger
+/// than the vertical step: the hidden width can span 70+ columns (a 140-col
+/// parser behind a 64-col card), and 3-per-tick was measured too slow to
+/// traverse with a discrete mouse wheel.
+pub(crate) const PROGRAM_PINNED_PAN_COLS_STEP: usize = 8;
+/// Content dimensions of the transient clip-chip hover preview (spec 0060) —
+/// deliberately kept small and close to a 4:3 on-screen aspect (terminal
+/// cells are ~2:1 tall, so width:2*height ≈ 4:3; see
+/// `session_hover_card_preview_geometry_reads_close_to_4_by_3`), since it's
+/// a glance-only popover, not a working view. NOT the pinned card's own
+/// default — that has its own, wider default below — this pair is read only
+/// by the un-pinned hover-preview path and as a last-resort fallback before
+/// a popup exists.
+pub(crate) const PROGRAM_CLIP_HOVER_PREVIEW_COLS: u16 = 64;
+pub(crate) const PROGRAM_CLIP_HOVER_PREVIEW_ROWS: u16 = 22;
+/// Starting content width for the pinned card (spec 0090) — wider than the
+/// transient hover preview above, since a pinned card is a working inline
+/// terminal a user reads and types into, not a glance. Also the terminal
+/// size a pinned card resizes its session to when it takes size ownership:
+/// the card and the PTY must agree exactly, or the parser would resize
+/// every frame. Height reuses `PROGRAM_CLIP_HOVER_PREVIEW_ROWS` — only the
+/// width default differs; both axes are user-resizable from here by
+/// dragging the card's right/bottom border.
+pub(crate) const PROGRAM_PINNED_CARD_DEFAULT_COLS: u16 = 80;
+/// Minimum content dims a pinned card can be drag-resized down to.
+pub(crate) const PROGRAM_PINNED_CARD_MIN_COLS: u16 = 20;
+pub(crate) const PROGRAM_PINNED_CARD_MIN_ROWS: u16 = 5;
+
+/// An in-flight drag gesture on the pinned clip card (spec 0090).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedCardDrag {
+    /// Right/bottom-border grab: grow/shrink the card. Deltas are applied
+    /// against the drag-start dims so the gesture stays stable however the
+    /// card's anchor placement shifts while it grows.
+    Resize {
+        start_cols: u16,
+        start_rows: u16,
+        from: (u16, u16),
+    },
+    /// Top-border grab: move the card. `grab` is the pointer's offset
+    /// inside the card so the card doesn't jump to align its corner with
+    /// the pointer.
+    Move { grab: (u16, u16) },
+}
 const PROGRAM_UNDO_STACK_LIMIT: usize = 100;
 const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
 /// Minimum spacing between `usage.query` fetches for the same harness while
@@ -1213,6 +1263,13 @@ pub struct App {
     /// loop applies it on the next iteration (no flicker — the placeholder keeps
     /// the cached list until the fresh one lands).
     pub program_templates_tx: mpsc::UnboundedSender<Vec<construct_protocol::ProgramTemplate>>,
+    /// Program selection verbs (spec 0089) offered as buttons in the
+    /// selection context menu. Fetched and refreshed the same way as
+    /// `program_templates`.
+    pub program_verbs: Vec<construct_protocol::ProgramVerb>,
+    /// Background channel for live-reloaded program verbs, the `program_verbs`
+    /// counterpart to `program_templates_tx`.
+    pub program_verbs_tx: mpsc::UnboundedSender<Vec<construct_protocol::ProgramVerb>>,
     /// Latest daemon-side program Markdown per session id, backing widget
     /// `:::clip program` projections (spec 0074: a widget mirrors a program
     /// region by reference, never by copy). Kept fresh by `program/state`
@@ -1450,6 +1507,14 @@ pub struct App {
     /// stops receiving mouse events so the user's terminal can perform
     /// native drag selection/copy.
     pub mouse_capture_enabled: bool,
+    /// `(session_id, click_instant)` of the last click on a Program
+    /// `@{session:…}` clip chip, used to detect a double-click within
+    /// `PROGRAM_CLIP_DOUBLE_CLICK_MS` on the *same* clip — crossterm only
+    /// reports raw mouse-down events, so double-click detection is timing
+    /// state we own. A single click pins/unpins the clip's inline terminal
+    /// (`ProgramPopup::pinned_clip`); a double-click navigates to the full
+    /// session view, same as every click did before pinning existed.
+    pub last_program_clip_click: Option<(String, Instant)>,
     /// ID of the daemon-owned orchestrator session, if one is present
     /// in the sessions list. The orchestrator runs as a smith
     /// interactive (PTY) session; the TUI renders its PTY in the
@@ -1492,6 +1557,10 @@ pub struct App {
     /// coordinate, drag-start ratio, and parent split area.
     pub resizing_main_window: Option<(u64, WindowSplitDirection, u16, u16, ratatui::layout::Rect)>,
     pub resizing_program_popup: Option<()>,
+    /// In-flight drag gesture on the pinned clip card (spec 0090): a grab
+    /// on its right/bottom border resizes it, a grab on its top border
+    /// moves it.
+    pub pinned_card_drag: Option<PinnedCardDrag>,
     /// User has collapsed the session list pane via the `−` button
     /// on its title bar. Effective only when the list pane doesn't
     /// have focus — when focus is on the list (e.g. via `C-x o`),
@@ -2175,9 +2244,54 @@ pub struct ProgramPopup {
     /// focus via [`ProgramPopup::set_terminal_focus`].
     pub slide_from: f32,
     pub slide_changed_at: Option<Instant>,
+    /// Session id of the `@{session:…}` clip currently pinned open as a live,
+    /// keyboard-focused inline terminal, or `None`. Single-clicking a clip
+    /// pins it (clicking the same pinned clip again unpins); double-clicking
+    /// navigates to the full session view instead, same as before this
+    /// existed. While pinned, keystrokes route to this session's PTY instead
+    /// of editing Program Markdown — see `App::handle_pinned_clip_key`.
+    /// Per-popup, not on `App`, for the same reason as `terminal_focus`.
+    pub pinned_clip: Option<String>,
+    /// Pinned-card crop pan (spec 0090): rows scrolled back from the live
+    /// tail the card is anchored to. Mouse wheel over the card adjusts it;
+    /// clamped precisely against the session's content at render time.
+    pub pinned_scroll_rows: u16,
+    /// Pinned-card crop pan (spec 0090): columns scrolled right from the
+    /// screen's left edge (ScrollLeft/ScrollRight or Shift+wheel).
+    pub pinned_scroll_cols: u16,
+    /// `Some((cols, rows))` while the pinned card owns its session's
+    /// terminal size (spec 0090): the session was visible nowhere else when
+    /// pinned, so its PTY was resized to the card and the card renders at
+    /// exactly these dims — full fidelity, no crop. `None` = crop mode (the
+    /// session is visible elsewhere; the card never fights another render
+    /// site for size). Always set through `App::set_program_pinned_clip`.
+    pub pinned_terminal_size: Option<(u16, u16)>,
+    /// The pinned card's content dims (spec 0090), user-resizable by
+    /// dragging the card's right/bottom border. Sticky across pin
+    /// switches within this popup — a size the user chose once holds until
+    /// they change it — and the size a newly owned pin resizes its PTY to.
+    pub pinned_card_cols: u16,
+    pub pinned_card_rows: u16,
+    /// User-chosen top-left position of the pinned card (top-border drag),
+    /// in screen coords. `None` = anchored to the clip's own position.
+    /// Cleared when the pin changes: position is contextual to the clip the
+    /// card was moved away from, unlike the size preference above.
+    pub pinned_card_pos: Option<(u16, u16)>,
 }
 
 impl ProgramPopup {
+    /// Set, switch, or clear the pinned clip, resetting the card's crop pan:
+    /// a fresh pin (or unpin) always starts back at the live tail,
+    /// left-aligned. Every `pinned_clip` change goes through here so a pan
+    /// from a previous pin never bleeds into the next one.
+    pub(crate) fn set_pinned_clip(&mut self, pinned: Option<String>) {
+        self.pinned_clip = pinned;
+        self.pinned_scroll_rows = 0;
+        self.pinned_scroll_cols = 0;
+        self.pinned_terminal_size = None;
+        self.pinned_card_pos = None;
+    }
+
     /// Flip keyboard focus between this rolled-down Program and the terminal
     /// it exposes. Every flip goes through here so the popup's terminal-focus
     /// slide animates instead of snapping: the current in-flight fraction is
@@ -2478,6 +2592,20 @@ pub struct ProgramSelectionMenu {
     pub focused: bool,
     pub comment: String,
     pub cursor: usize,
+    /// Which row of the focused menu Up/Down (and C-p/C-n) navigation is on
+    /// (spec 0089): Comment, then Run, then each advertised verb in order.
+    /// Enter activates whichever row this is. Typing/comment-editing keys
+    /// only take effect while this is `Comment`.
+    pub selected_action: ProgramSelectionAction,
+    /// When this menu was created. Gates the Run button's and each verb
+    /// row's *mouse*-hover highlight: a resting pointer that merely happens
+    /// to coincide with a fixed row the instant the menu appears must not
+    /// look pre-selected — only a pointer that actually moves onto the row
+    /// after the menu exists arms the highlight (`App::mouse_moved_at`
+    /// compared against this). Same pointer-enter-not-mere-position
+    /// discipline as the shimmer hover tooltip (spec 0057); does not gate
+    /// the separate keyboard `selected_action` highlight.
+    pub shown_at: Instant,
 }
 
 impl Default for ProgramSelectionMenu {
@@ -2486,8 +2614,21 @@ impl Default for ProgramSelectionMenu {
             focused: false,
             comment: String::new(),
             cursor: 0,
+            selected_action: ProgramSelectionAction::Comment,
+            shown_at: Instant::now(),
         }
     }
+}
+
+/// One keyboard-navigable row of the Program selection context menu (spec
+/// 0087). Ordered `Comment, Run, Verb(0), Verb(1), ...` — the same order the
+/// menu renders in, and the order Up/Down/C-p/C-n cycle through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramSelectionAction {
+    Comment,
+    Run,
+    /// Index into `App::program_verbs`.
+    Verb(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -3000,6 +3141,10 @@ pub struct LayoutSnapshot {
     pub program_title_name_window_start: usize,
     /// Program selected-text context Run button bounds: `(x_start, x_end, y)`.
     pub program_selection_run_hit: Option<(u16, u16, u16)>,
+    /// Program selected-text context menu verb-row bounds (spec 0089): one
+    /// `(x_start, x_end, y, verb_name)` per rendered verb button, in the same
+    /// order as `App::program_verbs`.
+    pub program_selection_verb_hits: Vec<(u16, u16, u16, String)>,
     /// Inner content rect of the active program popup from the last frame.
     /// Cursor-move handlers and the mouse wheel read its width/height to keep
     /// the caret on-screen and to bound scrolling; `None` when no program is open.
@@ -3017,6 +3162,10 @@ pub struct LayoutSnapshot {
     /// Session smart-clip hitboxes in the active program body from the last
     /// frame. Drives hover-preview and click-to-focus on `@{session:id}` chips.
     pub program_clip_hits: Vec<ProgramClipHit>,
+    /// Bounds of the pinned clip card (spec 0090) from the last frame, when
+    /// one was painted. Clicks inside it are consumed by the card; a left
+    /// click landing neither here nor on a session clip dismisses the pin.
+    pub program_pinned_card_rect: Option<ratatui::layout::Rect>,
     /// Action-link hitboxes in the active program body from the last frame.
     /// Clicking one dispatches the action to the program's owning session as
     /// user intent (`OBSERVATION: ui.action …`), the same path widget action
@@ -3267,6 +3416,11 @@ async fn run_with_socket_initial_selection(
         .await
         .map(|r| r.templates)
         .unwrap_or_default();
+    let program_verbs = client
+        .program_verbs()
+        .await
+        .map(|r| r.verbs)
+        .unwrap_or_default();
     // Theme config is parsed now; the final palette (light vs dark) is resolved
     // after raw mode is on, once we can query the terminal background (OSC 11).
     let theme_config = crate::theme::ThemeConfig::load();
@@ -3338,6 +3492,7 @@ async fn run_with_socket_initial_selection(
     let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
     // Placeholder senders; `run_loop` installs the live channels it actually drains.
     let program_templates_tx = mpsc::unbounded_channel().0;
+    let program_verbs_tx = mpsc::unbounded_channel().0;
     let program_projection_tx = mpsc::unbounded_channel().0;
     let upgrade_status_tx = mpsc::unbounded_channel().0;
     let session_mutation_tx = mpsc::unbounded_channel().0;
@@ -3370,6 +3525,8 @@ async fn run_with_socket_initial_selection(
         harnesses,
         program_templates,
         program_templates_tx,
+        program_verbs,
+        program_verbs_tx,
         program_markdown_cache: HashMap::new(),
         program_projection_pending: HashSet::new(),
         program_projection_tx,
@@ -3455,6 +3612,7 @@ async fn run_with_socket_initial_selection(
         mouse_pos: None,
         mouse_moved_at: None,
         mouse_capture_enabled: true,
+        last_program_clip_click: None,
         orchestrator_id: initial_orch_id,
         list_panel_w: persisted.list_panel_w.unwrap_or(LIST_PANEL_W_DEFAULT),
         resizing_list: None,
@@ -3464,6 +3622,7 @@ async fn run_with_socket_initial_selection(
         resizing_matrix_rain: None,
         resizing_main_window: None,
         resizing_program_popup: None,
+        pinned_card_drag: None,
         list_collapsed: persisted.list_collapsed,
         editor_states: HashMap::new(),
         agent_statuses: HashMap::new(),
@@ -3689,6 +3848,11 @@ async fn run_loop(
     let (program_templates_tx, mut program_templates_rx) =
         mpsc::unbounded_channel::<Vec<construct_protocol::ProgramTemplate>>();
     app.program_templates_tx = program_templates_tx;
+    // Live-reload channel for program verbs, the `program_templates_tx`
+    // counterpart for spec 0089's selection-menu verbs.
+    let (program_verbs_tx, mut program_verbs_rx) =
+        mpsc::unbounded_channel::<Vec<construct_protocol::ProgramVerb>>();
+    app.program_verbs_tx = program_verbs_tx;
     // Background channel for widget program projections: `request_program_projection`
     // (kicked off by the widget renderer when a `:::clip program` block has no
     // cached program yet) delivers `(session_id, markdown)` here; the loop
@@ -4224,6 +4388,19 @@ async fn run_loop(
                     }
                 }
             }
+            verbs = program_verbs_rx.recv() => {
+                // Live-reloaded program verbs (spec 0089), the `templates`
+                // arm's counterpart — same drain-to-latest, same
+                // don't-replace-with-empty guard.
+                if let Some(mut latest) = verbs {
+                    while let Ok(next) = program_verbs_rx.try_recv() {
+                        latest = next;
+                    }
+                    if !latest.is_empty() {
+                        app.program_verbs = latest;
+                    }
+                }
+            }
             fetched = program_projection_rx.recv() => {
                 // A background program fetch for a widget `:::clip program`
                 // projection landed; cache it (draining any queued siblings)
@@ -4363,6 +4540,11 @@ impl App {
             .await
             .map(|r| r.templates)
             .unwrap_or_default();
+        let program_verbs = client
+            .program_verbs()
+            .await
+            .map(|r| r.verbs)
+            .unwrap_or_default();
         let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
 
         self.client = client;
@@ -4373,6 +4555,9 @@ impl App {
         self.harnesses = harnesses;
         if !program_templates.is_empty() {
             self.program_templates = program_templates;
+        }
+        if !program_verbs.is_empty() {
+            self.program_verbs = program_verbs;
         }
         // A daemon restart respawns every PTY session and truncates each
         // session's pty.log so the new child renders into a clean slate
@@ -8749,6 +8934,18 @@ impl App {
                 return;
             }
         }
+        // A pinned clip's inline terminal owns keyboard focus while pinned
+        // (same tier as the program popup itself, checked first so the pinned
+        // terminal — not the Program markdown editor — receives keystrokes).
+        // Keys forward to the pinned session's PTY, with two carve-outs that
+        // return `false` here and fall through to the tiers below: the
+        // global `C-x` chord prefix (and any key continuing a chord in
+        // flight) so the keymap keeps working while pinned, and
+        // Shift+arrows (crop pan). `C-x C-x` forwards a literal C-x to the
+        // pinned session, the same escape hatch a captured PTY has.
+        if self.focus == PaneFocus::View && self.handle_pinned_clip_key(key).await {
+            return;
+        }
         // The program captures keystrokes only while it is the topmost input
         // surface *and* the view pane holds focus. If a minibuffer/palette
         // overlay is open over it (e.g. `C-x x` opened the command palette or
@@ -9319,6 +9516,7 @@ impl App {
                         popup.selection_menu = None;
                     }
                     self.layout.program_selection_run_hit = None;
+                    self.layout.program_selection_verb_hits.clear();
                 }
                 self.execute_program_popup(selection, selected_block_ids, None)
                     .await;
@@ -11164,6 +11362,13 @@ fn program_popup_from_document(
         terminal_focus: false,
         slide_from: 0.0,
         slide_changed_at: None,
+        pinned_clip: None,
+        pinned_scroll_rows: 0,
+        pinned_scroll_cols: 0,
+        pinned_terminal_size: None,
+        pinned_card_cols: PROGRAM_PINNED_CARD_DEFAULT_COLS,
+        pinned_card_rows: PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
+        pinned_card_pos: None,
     }
 }
 
@@ -11581,11 +11786,13 @@ mod tests {
             program_title_name_hit: None,
             program_title_name_window_start: 0,
             program_selection_run_hit: None,
+            program_selection_verb_hits: Vec::new(),
             program_inner_area: None,
             program_base_area: None,
             program_resize_hit: None,
             program_smart_clip_anchor: None,
             program_clip_hits: Vec::new(),
+            program_pinned_card_rect: None,
             program_action_link_hits: Vec::new(),
             program_template_hits: Vec::new(),
             browser_preview_area: None,
@@ -11637,6 +11844,8 @@ mod tests {
             harnesses: Vec::new(),
             program_templates: Vec::new(),
             program_templates_tx: mpsc::unbounded_channel().0,
+            program_verbs: Vec::new(),
+            program_verbs_tx: mpsc::unbounded_channel().0,
             program_markdown_cache: HashMap::new(),
             program_projection_pending: HashSet::new(),
             program_projection_tx: mpsc::unbounded_channel().0,
@@ -11700,6 +11909,7 @@ mod tests {
             mouse_pos: None,
             mouse_moved_at: None,
             mouse_capture_enabled: true,
+            last_program_clip_click: None,
             orchestrator_id: None,
             list_panel_w: LIST_PANEL_W_DEFAULT,
             resizing_list: None,
@@ -11709,6 +11919,7 @@ mod tests {
             resizing_matrix_rain: None,
             resizing_main_window: None,
             resizing_program_popup: None,
+            pinned_card_drag: None,
             list_collapsed: false,
             tasks_popup: None,
             lineage_focused: false,
@@ -11998,6 +12209,13 @@ mod tests {
             terminal_focus: false,
             slide_from: 0.0,
             slide_changed_at: None,
+            pinned_clip: None,
+            pinned_scroll_rows: 0,
+            pinned_scroll_cols: 0,
+            pinned_terminal_size: None,
+            pinned_card_cols: PROGRAM_PINNED_CARD_DEFAULT_COLS,
+            pinned_card_rows: PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
+            pinned_card_pos: None,
         }
     }
 
@@ -13112,15 +13330,18 @@ mod tests {
             session_id: "sub1".into(),
         }];
 
-        // Click the clip.
-        let consumed = app
-            .handle_program_mouse(&MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 10,
-                row: 3,
-                modifiers: crossterm::event::KeyModifiers::empty(),
-            })
-            .await;
+        // Double-click the clip — a single click now pins its inline
+        // terminal instead of navigating (spec: pinned clip terminal); a
+        // second click on the same clip within the double-click window is
+        // still the navigate gesture this test exercises.
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_program_mouse(&click).await;
+        let consumed = app.handle_program_mouse(&click).await;
         assert!(
             consumed,
             "clip click is handled by the program mouse router"
@@ -13143,6 +13364,767 @@ mod tests {
             Some("sub1"),
             "subagent clip selection must persist across a session refresh"
         );
+    }
+
+    fn program_clip_click_fixture(session_id: &str) -> ProgramClipHit {
+        ProgramClipHit {
+            col_start: 4,
+            col_end: 16,
+            row: 3,
+            session_id: session_id.to_string(),
+        }
+    }
+
+    /// A single click on a clip pins its inline terminal instead of
+    /// navigating away — the user stays on the Program doc.
+    #[tokio::test]
+    async fn program_clip_single_click_pins_without_navigating() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+
+        let consumed = app
+            .handle_program_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 10,
+                row: 3,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+            .await;
+
+        assert!(consumed, "clip click is handled");
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker1"),
+            "single click pins the clip"
+        );
+        assert_eq!(
+            app.selection.session_id(),
+            Some("s1"),
+            "single click must not navigate away from the Program doc"
+        );
+    }
+
+    /// A second click on the same clip, well outside the double-click
+    /// window, is an independent click — it toggles the pin off rather than
+    /// counting as a double-click navigate.
+    #[tokio::test]
+    async fn program_clip_slow_second_click_unpins_instead_of_navigating() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+
+        app.handle_program_mouse(&click).await;
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker1")
+        );
+        // Simulate enough elapsed time that the next click falls outside the
+        // double-click window, without an actual sleep.
+        app.last_program_clip_click = app.last_program_clip_click.take().map(|(id, _)| {
+            (
+                id,
+                Instant::now() - Duration::from_millis(PROGRAM_CLIP_DOUBLE_CLICK_MS + 50),
+            )
+        });
+
+        app.handle_program_mouse(&click).await;
+
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip,
+            None,
+            "a slow second click unpins rather than navigating"
+        );
+        assert_eq!(app.selection.session_id(), Some("s1"), "still no navigation");
+    }
+
+    /// Clicking a different clip while one is pinned switches the pin to it
+    /// rather than requiring an explicit unpin first.
+    #[tokio::test]
+    async fn program_clip_click_different_clip_switches_pin() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test(
+            "s1",
+            "see @{session:worker1} and @{session:worker2}",
+            0,
+        ));
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![
+            program_clip_click_fixture("worker1"),
+            ProgramClipHit {
+                col_start: 20,
+                col_end: 32,
+                row: 3,
+                session_id: "worker2".into(),
+            },
+        ];
+
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker1")
+        );
+
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 25,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker2"),
+            "clicking a different clip switches the pin rather than requiring an unpin first"
+        );
+    }
+
+    /// A left click that lands neither on the pinned card nor on a session
+    /// clip dismisses the pin (spec 0090), then proceeds with its normal
+    /// effect (here: placing the caret in the Program body).
+    #[tokio::test]
+    async fn program_click_outside_pinned_card_unpins() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+
+        let consumed = app
+            .handle_program_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 5,
+                row: 1,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+            .await;
+
+        assert!(consumed, "the click still lands in the Program body");
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip,
+            None,
+            "a click outside the card and off every clip dismisses the pin"
+        );
+    }
+
+    /// A click on the pinned card itself is consumed — it neither forwards
+    /// into the pinned session (keyboard-only scope, spec 0090) nor
+    /// dismisses the pin — and reclaims keyboard focus for the card.
+    #[tokio::test]
+    async fn program_click_on_pinned_card_is_consumed_and_keeps_pin() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        app.focus = PaneFocus::List;
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+        let buffer_before = app.program_popup.as_ref().unwrap().buffer.clone();
+
+        let consumed = app
+            .handle_program_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 6,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+            .await;
+
+        assert!(consumed, "card clicks are consumed by the card");
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker1"),
+            "clicking the card keeps the pin"
+        );
+        assert_eq!(
+            app.focus,
+            PaneFocus::View,
+            "clicking the card reclaims keyboard focus so typing forwards to the pin"
+        );
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().buffer,
+            buffer_before,
+            "the consumed click must not edit or place a caret in the Program body"
+        );
+    }
+
+    /// A click entirely outside the Program modal (e.g. on the session list)
+    /// also dismisses the pin, then falls through to whatever pane it hit.
+    #[tokio::test]
+    async fn program_click_outside_modal_unpins_and_falls_through() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+
+        let consumed = app
+            .handle_program_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 50,
+                row: 15,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+            .await;
+
+        assert!(
+            !consumed,
+            "an outside-the-modal click still falls through to other panes"
+        );
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip,
+            None,
+            "the pin is dismissed on the way through"
+        );
+    }
+
+    /// Wheel over the pinned card pans its cropped viewport (spec 0090):
+    /// vertical steps back from the live tail; Shift+wheel and horizontal
+    /// wheel events pan across the screen width. Card-local — the pin
+    /// survives, and nothing forwards to the session. Unpinning resets the
+    /// pan so it never bleeds into the next pin.
+    #[tokio::test]
+    async fn program_wheel_over_pinned_card_pans_crop() {
+        use crate::pty_render::ItemHistory;
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+        let mut history = ItemHistory::new();
+        history.feed_pty(b"content");
+        let _ = history.replay(140, 40, 0);
+        app.histories.insert("worker1".into(), history);
+        let wheel = |kind, modifiers| MouseEvent {
+            kind,
+            column: 20,
+            row: 6,
+            modifiers,
+        };
+
+        let consumed = app
+            .handle_program_mouse(&wheel(
+                MouseEventKind::ScrollUp,
+                crossterm::event::KeyModifiers::empty(),
+            ))
+            .await;
+        assert!(consumed, "wheel over the card is consumed by the card");
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(
+            popup.pinned_scroll_rows, PROGRAM_WHEEL_SCROLL_ROWS as u16,
+            "wheel-up pans one step back from the tail"
+        );
+        assert_eq!(popup.pinned_clip.as_deref(), Some("worker1"), "pin survives");
+
+        app.handle_program_mouse(&wheel(
+            MouseEventKind::ScrollDown,
+            crossterm::event::KeyModifiers::empty(),
+        ))
+        .await;
+        app.handle_program_mouse(&wheel(
+            MouseEventKind::ScrollDown,
+            crossterm::event::KeyModifiers::empty(),
+        ))
+        .await;
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_scroll_rows,
+            0,
+            "wheel-down returns toward the live tail and saturates at it"
+        );
+
+        // Horizontal signs are inverted relative to the raw event names —
+        // terminals deliver horizontal deltas gesture-encoded, without the
+        // scroll-intent normalization they apply vertically (see
+        // `pan_pinned_clip_card`).
+        app.handle_program_mouse(&wheel(
+            MouseEventKind::ScrollUp,
+            crossterm::event::KeyModifiers::SHIFT,
+        ))
+        .await;
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_scroll_cols,
+            PROGRAM_PINNED_PAN_COLS_STEP as u16,
+            "Shift+wheel pans horizontally, one h-step per tick"
+        );
+        app.handle_program_mouse(&wheel(
+            MouseEventKind::ScrollLeft,
+            crossterm::event::KeyModifiers::empty(),
+        ))
+        .await;
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_scroll_cols,
+            2 * PROGRAM_PINNED_PAN_COLS_STEP as u16,
+            "a raw ScrollLeft event pans the crop right (gesture-encoded)"
+        );
+        app.handle_program_mouse(&wheel(
+            MouseEventKind::ScrollRight,
+            crossterm::event::KeyModifiers::empty(),
+        ))
+        .await;
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_scroll_cols,
+            PROGRAM_PINNED_PAN_COLS_STEP as u16,
+            "a raw ScrollRight event pans the crop back left (gesture-encoded)"
+        );
+
+        // Unpinning resets the pan; the next pin starts at the live tail.
+        app.set_program_pinned_clip(None).await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.pinned_clip, None);
+        assert_eq!(
+            (popup.pinned_scroll_rows, popup.pinned_scroll_cols),
+            (0, 0),
+            "unpin resets the crop pan"
+        );
+    }
+
+    /// Alt+wheel pans horizontally like Shift+wheel — the second modifier
+    /// exists because some terminals never report Shift-modified wheel
+    /// events to the application (Shift is reserved for native selection).
+    #[tokio::test]
+    async fn program_alt_wheel_over_pinned_card_pans_horizontally() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 20,
+            row: 6,
+            modifiers: crossterm::event::KeyModifiers::ALT,
+        })
+        .await;
+
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(
+            popup.pinned_scroll_cols, PROGRAM_PINNED_PAN_COLS_STEP as u16,
+            "Alt+wheel pans horizontally"
+        );
+        assert_eq!(popup.pinned_scroll_rows, 0, "Alt+wheel must not pan vertically");
+    }
+
+    /// Shift+arrows pan the pinned card's crop without forwarding anything
+    /// to the session — the guaranteed fallback for terminals that deliver
+    /// neither horizontal wheel events nor modified wheels. Plain arrows
+    /// still forward as PTY bytes.
+    #[tokio::test]
+    async fn pinned_clip_shift_arrows_pan_without_forwarding() {
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+        let v_step = PROGRAM_WHEEL_SCROLL_ROWS as u16;
+        let h_step = PROGRAM_PINNED_PAN_COLS_STEP as u16;
+
+        for (code, expect_cols, expect_rows) in [
+            (KeyCode::Right, h_step, 0),
+            (KeyCode::Up, h_step, v_step),
+            (KeyCode::Left, 0, v_step),
+            (KeyCode::Down, 0, 0),
+        ] {
+            let handled = app
+                .handle_pinned_clip_key(KeyEvent::new(code, KeyModifiers::SHIFT))
+                .await;
+            assert!(handled);
+            let popup = app.program_popup.as_ref().unwrap();
+            assert_eq!(
+                (popup.pinned_scroll_cols, popup.pinned_scroll_rows),
+                (expect_cols, expect_rows),
+                "Shift+{code:?} pans the crop"
+            );
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "Shift+arrows are a pan carve-out and must never reach the session"
+        );
+
+        let handled = app
+            .handle_pinned_clip_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await;
+        assert!(handled);
+        assert!(
+            rx.try_recv().is_ok(),
+            "a plain arrow still forwards to the pinned session's PTY"
+        );
+    }
+
+    /// Pinning a session that is visible nowhere else takes size ownership
+    /// (spec 0090): the PTY is resized to the card's content dims and the
+    /// popup records them; unpinning releases ownership.
+    #[tokio::test]
+    async fn program_pin_takes_size_ownership_when_session_unviewed() {
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+
+        app.set_program_pinned_clip(Some("worker1".to_string())).await;
+
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.pinned_clip.as_deref(), Some("worker1"));
+        assert_eq!(
+            popup.pinned_terminal_size,
+            // Card cols clamp to the modal (40 - 2); rows are the default.
+            Some((38, PROGRAM_CLIP_HOVER_PREVIEW_ROWS)),
+            "an unviewed session pins with size ownership at the card's dims"
+        );
+
+        app.set_program_pinned_clip(None).await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.pinned_clip, None);
+        assert_eq!(
+            popup.pinned_terminal_size, None,
+            "unpinning releases size ownership"
+        );
+    }
+
+    /// Pinning a session that is already visible in a main window must NOT
+    /// resize it — the card stays a crop so it never fights the pane for
+    /// the session's size (spec 0025/0090).
+    #[tokio::test]
+    async fn program_pin_stays_crop_when_session_visible_elsewhere() {
+        let (mut app, _dir, _server) = empty_app().await;
+        let mut worker = summary_with_kind(construct_protocol::SessionKind::User);
+        worker.id = "worker1".into();
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User), worker];
+        app.main_windows = MainWindowTree::Leaf {
+            id: 1,
+            selection: Selection::Session("worker1".into()),
+        };
+        app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+
+        app.set_program_pinned_clip(Some("worker1".to_string())).await;
+
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.pinned_clip.as_deref(), Some("worker1"));
+        assert_eq!(
+            popup.pinned_terminal_size, None,
+            "a session visible elsewhere keeps its size; the card crops"
+        );
+    }
+
+    /// Dragging the card's right/bottom border resizes it; on release a
+    /// size-owning pin's PTY follows the final dims (spec 0090).
+    #[tokio::test]
+    async fn program_pinned_card_border_drag_resizes() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        popup.pinned_terminal_size = Some((38, 22));
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+
+        // Grab the bottom-right corner (right border column, bottom row).
+        let consumed = app
+            .handle_program_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 34,
+                row: 8,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+            .await;
+        assert!(consumed);
+        assert!(
+            matches!(app.pinned_card_drag, Some(PinnedCardDrag::Resize { .. })),
+            "border grab starts a resize drag"
+        );
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker1"),
+            "border grab must not toggle the pin"
+        );
+
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 44,
+            row: 9,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 44,
+            row: 9,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+
+        assert_eq!(app.pinned_card_drag, None, "release ends the drag");
+        let popup = app.program_popup.as_ref().unwrap();
+        // +10 cols / +1 row from the drag, clamped to the modal (40x10):
+        // cols cap = 36, rows cap = 6.
+        assert_eq!(
+            (popup.pinned_card_cols, popup.pinned_card_rows),
+            (36, 6),
+            "drag resizes the card, clamped inside the modal"
+        );
+        assert_eq!(
+            popup.pinned_terminal_size,
+            Some((36, 6)),
+            "a size-owning pin's PTY follows the final dims on release"
+        );
+    }
+
+    /// Dragging the card's top border moves it; the chosen position sticks
+    /// and clamps inside the modal (spec 0090).
+    #[tokio::test]
+    async fn program_pinned_card_top_border_drag_moves() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 20,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert!(
+            matches!(app.pinned_card_drag, Some(PinnedCardDrag::Move { .. })),
+            "top-border grab starts a move drag"
+        );
+
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 8,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 8,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+
+        assert_eq!(app.pinned_card_drag, None);
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_card_pos,
+            // Grab offset was (5, 0) inside the card, so the card's
+            // top-left lands at pointer minus grab.
+            Some((3, 3)),
+            "top-border drag moves the card"
+        );
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker1"),
+            "moving must not dismiss the pin"
+        );
+    }
+
+    /// Wheel outside the pinned card keeps scrolling the Program doc and
+    /// leaves both the pin and its pan untouched — only left clicks dismiss.
+    #[tokio::test]
+    async fn program_wheel_outside_pinned_card_scrolls_doc_and_keeps_pin() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        popup.pinned_scroll_rows = 7;
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+
+        let consumed = app
+            .handle_program_mouse(&MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 5,
+                row: 1,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+            .await;
+
+        assert!(consumed, "the doc still consumes its own wheel events");
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(
+            popup.pinned_clip.as_deref(),
+            Some("worker1"),
+            "wheel off the card never dismisses the pin"
+        );
+        assert_eq!(
+            popup.pinned_scroll_rows, 7,
+            "wheel off the card does not pan the card"
+        );
+    }
+
+    /// While a clip is pinned, keystrokes forward to *that* session's PTY —
+    /// not `self.selected_id()`, which is usually a different session (the
+    /// Program-owning session, not the worker the clip names).
+    #[tokio::test]
+    async fn pinned_clip_key_forwards_to_pinned_session_not_selected_session() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+
+        let handled = app
+            .handle_pinned_clip_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .await;
+
+        assert!(handled);
+        let job = rx.try_recv().expect("keystroke should reach the pinned session's PTY");
+        assert_eq!(job.session_id, "worker1", "forwards to the pinned clip, not the selected session");
+        assert_eq!(job.bytes, b"y");
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().buffer,
+            "see @{session:worker1}",
+            "the Program buffer itself is untouched while a clip is pinned"
+        );
+        server.abort();
+    }
+
+    /// The global `C-x` prefix keeps driving the TUI keymap while a clip is
+    /// pinned — starting a chord and every key continuing one fall through
+    /// (so `C-x o` etc. still work), and the standard `C-x C-x` escape
+    /// hatch forwards one literal C-x byte to the pinned session.
+    #[tokio::test]
+    async fn pinned_clip_ctrl_x_prefix_falls_through_to_keymap() {
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+        let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+
+        let handled = app.handle_pinned_clip_key(ctrl_x).await;
+        assert!(!handled, "C-x starts a chord: the keymap tier handles it");
+        assert!(rx.try_recv().is_err(), "the prefix must not reach the session");
+
+        // Put a chord in flight, as on_key's keymap tier would after C-x.
+        app.chord_state.handle(ctrl_x, &app.keymap);
+        assert!(!app.chord_state.is_empty(), "C-x leaves a chord pending");
+        let handled = app
+            .handle_pinned_clip_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .await;
+        assert!(!handled, "a chord continuation belongs to the keymap too");
+        assert!(rx.try_recv().is_err());
+
+        let handled = app.handle_pinned_clip_key(ctrl_x).await;
+        assert!(handled, "C-x C-x is the literal escape hatch");
+        let job = rx.try_recv().expect("literal C-x forwards to the session");
+        assert_eq!(job.session_id, "worker1");
+        assert_eq!(job.bytes, vec![0x18]);
+        assert!(app.chord_state.is_empty(), "the escape hatch clears the chord");
+    }
+
+    /// Esc is NOT an unpin key (spec 0090): sessions need it — interrupting
+    /// a harness mid-turn, dismissing its menus — so it forwards to the
+    /// pinned session's PTY like any other keystroke and the pin stays.
+    /// Unpinning is strictly a mouse gesture.
+    #[tokio::test]
+    async fn pinned_clip_esc_forwards_to_session_and_keeps_pin() {
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+
+        let handled = app
+            .handle_pinned_clip_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+
+        assert!(handled);
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker1"),
+            "Esc must not unpin"
+        );
+        let job = rx.try_recv().expect("Esc forwards to the pinned session");
+        assert_eq!(job.session_id, "worker1");
+        assert_eq!(job.bytes, b"\x1b", "Esc reaches the session as a raw escape byte");
+    }
+
+    /// No clip pinned: the handler is a no-op that reports "not handled" so
+    /// the key falls through to ordinary Program-editor routing.
+    #[tokio::test]
+    async fn pinned_clip_key_handler_is_noop_when_nothing_pinned() {
+        let (mut app, _dir, _server) = empty_app().await;
+        app.program_popup = Some(program_popup_for_test("s1", "plain text", 0));
+
+        let handled = app
+            .handle_pinned_clip_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .await;
+
+        assert!(!handled);
     }
 
     #[tokio::test]
@@ -14485,6 +15467,393 @@ mod tests {
         server.abort();
     }
 
+    /// spec 0089: the selection menu renders one row per advertised verb,
+    /// below the comment/Run row, each with its own click hit-rect.
+    #[tokio::test]
+    async fn program_render_registers_verb_button_hits() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_verbs = vec![construct_protocol::ProgramVerb {
+            name: "simplify".to_string(),
+            label: "Simplify".to_string(),
+            description: None,
+            effect: construct_protocol::ProgramVerbEffect::Rewrite,
+            interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+            order: 0,
+            built_in: true,
+            prompt: "test".to_string(),
+        }];
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let text = rendered_text(term.backend().buffer());
+
+        assert!(
+            text.contains("Simplify"),
+            "verb label should render in the selection menu: {text:?}"
+        );
+        assert_eq!(
+            app.layout.program_selection_verb_hits.len(),
+            1,
+            "one hit-rect per advertised verb"
+        );
+        assert_eq!(app.layout.program_selection_verb_hits[0].3, "simplify");
+        server.abort();
+    }
+
+    fn test_verb_with_description(
+        name: &str,
+        label: &str,
+        effect: construct_protocol::ProgramVerbEffect,
+        description: &str,
+    ) -> construct_protocol::ProgramVerb {
+        construct_protocol::ProgramVerb {
+            name: name.to_string(),
+            label: label.to_string(),
+            description: Some(description.to_string()),
+            effect,
+            interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+            order: 0,
+            built_in: true,
+            prompt: "test".to_string(),
+        }
+    }
+
+    /// spec 0089: while the menu is unfocused (just opened, before Tab),
+    /// nothing is keyboard-highlighted yet, so no description row shows —
+    /// only Tab-focusing (which can then have a highlighted row) reserves
+    /// the extra row.
+    #[tokio::test]
+    async fn program_selection_menu_hides_description_row_when_unfocused() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_verbs = vec![test_verb_with_description(
+            "simplify",
+            "Simplify",
+            construct_protocol::ProgramVerbEffect::Rewrite,
+            "reduce to the minimum that preserves intent.",
+        )];
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            !text.contains("reduce to the minimum")
+                && !text.contains("Execute the selection")
+                && !text.contains("Free-text guidance"),
+            "no description shows before Tab focuses the menu: {text:?}"
+        );
+        server.abort();
+    }
+
+    /// spec 0089: once Tab focuses the menu, the highlighted row's
+    /// description appears, and it updates as Up/Down moves the highlight
+    /// to a different row instead of getting stuck on the first one shown.
+    #[tokio::test]
+    async fn program_selection_menu_shows_highlighted_row_description() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_verbs = vec![
+            test_verb_with_description(
+                "simplify",
+                "Simplify",
+                construct_protocol::ProgramVerbEffect::Rewrite,
+                "reduce to the minimum that preserves intent.",
+            ),
+            test_verb_with_description(
+                "crystallize",
+                "Crystallize spec",
+                construct_protocol::ProgramVerbEffect::Rewrite,
+                "restructure into a goal.",
+            ),
+        ];
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: true,
+            selected_action: ProgramSelectionAction::Run,
+            ..Default::default()
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("Execute the selection now"),
+            "Run's description shows while Run is highlighted: {text:?}"
+        );
+
+        app.program_popup.as_mut().unwrap().selection_menu.as_mut().unwrap().selected_action =
+            ProgramSelectionAction::Verb(0);
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render after navigating to verb 0");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("reduce to the minimum"),
+            "verb 0's own description shows once highlighted: {text:?}"
+        );
+        assert!(
+            !text.contains("Execute the selection now"),
+            "Run's description must not linger once highlight moved off Run: {text:?}"
+        );
+
+        app.program_popup.as_mut().unwrap().selection_menu.as_mut().unwrap().selected_action =
+            ProgramSelectionAction::Verb(1);
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render after navigating to verb 1");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("restructure into a goal"),
+            "verb 1's own description shows once highlighted: {text:?}"
+        );
+        assert!(
+            !text.contains("reduce to the minimum"),
+            "verb 0's description must not linger once highlight moved to verb 1: {text:?}"
+        );
+        server.abort();
+    }
+
+    /// The verb's declared `effect` prefixes its shown description
+    /// ("Annotate: " / "Rewrite: "), derived from the structured field —
+    /// never trusted to appear correctly in the author's own text — so the
+    /// user always sees exactly what the verb is about to do to the
+    /// document, regardless of how its `description` frontmatter is worded.
+    #[tokio::test]
+    async fn program_selection_menu_description_prefixed_by_declared_effect() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_verbs = vec![
+            test_verb_with_description(
+                "challenge-assumptions",
+                "Challenge assumptions",
+                construct_protocol::ProgramVerbEffect::Annotate,
+                "surface hidden assumptions.",
+            ),
+            test_verb_with_description(
+                "simplify",
+                "Simplify",
+                construct_protocol::ProgramVerbEffect::Rewrite,
+                "reduce to the minimum.",
+            ),
+        ];
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: true,
+            selected_action: ProgramSelectionAction::Verb(0),
+            ..Default::default()
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("Annotate: surface hidden assumptions"),
+            "an annotate-effect verb's description is prefixed 'Annotate: ': {text:?}"
+        );
+
+        app.program_popup.as_mut().unwrap().selection_menu.as_mut().unwrap().selected_action =
+            ProgramSelectionAction::Verb(1);
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render after navigating to verb 1");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("Rewrite: reduce to the minimum"),
+            "a rewrite-effect verb's description is prefixed 'Rewrite: ': {text:?}"
+        );
+        server.abort();
+    }
+
+    /// A description longer than one line wraps across multiple rows
+    /// instead of being cut with an ellipsis — the full text must remain
+    /// readable, including its tail.
+    #[tokio::test]
+    async fn program_selection_menu_description_wraps_instead_of_truncating() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_verbs = vec![test_verb_with_description(
+            "crystallize",
+            "Crystallize spec",
+            construct_protocol::ProgramVerbEffect::Rewrite,
+            // A single trailing token (no internal spaces) so it can never
+            // itself be split across a wrapped line boundary — makes the
+            // "still present after wrapping" assertion below unambiguous.
+            "restructure this rather long selection into a goal statement, a list of hard \
+             constraints, and a handful of acceptance criteria that reach all the way to \
+             TAILMARKERWORD.",
+        )];
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: true,
+            selected_action: ProgramSelectionAction::Verb(0),
+            ..Default::default()
+        });
+
+        // Wide enough backend that the menu isn't itself squeezed by the
+        // outer program area, only by its own fixed width.
+        let backend = ratatui::backend::TestBackend::new(140, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            !text.contains('…'),
+            "a long description must wrap, never truncate with an ellipsis: {text:?}"
+        );
+        assert!(
+            text.contains("TAILMARKERWORD"),
+            "the description's tail must still be visible once wrapped: {text:?}"
+        );
+        server.abort();
+    }
+
+    /// spec 0089/0057: a stale pointer position that merely happens to
+    /// coincide with a verb row (or the Run button) the instant the
+    /// selection menu appears must NOT render as hovered — only a pointer
+    /// that actually moves after the menu was created arms the highlight.
+    /// Reproduces the reported bug: a verb row (e.g. "Crystallize spec")
+    /// showing pre-highlighted the moment the menu opens, with no genuine
+    /// hover from the user.
+    #[tokio::test]
+    async fn program_selection_menu_ignores_stale_mouse_position_on_first_render() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.program_verbs = vec![construct_protocol::ProgramVerb {
+            name: "crystallize".to_string(),
+            label: "Crystallize spec".to_string(),
+            description: None,
+            effect: construct_protocol::ProgramVerbEffect::Rewrite,
+            interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+            order: 0,
+            built_in: true,
+            prompt: "test".to_string(),
+        }];
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+
+        // First render: compute where the verb row and Run button will land,
+        // then plant a stale mouse position exactly on the verb row — as if
+        // the pointer had been resting there from some earlier action, with
+        // no genuine hover event ever delivered (`mouse_moved_at` stays
+        // unset, mirroring a pointer that hasn't moved since before the menu
+        // existed).
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let verb_hit = app.layout.program_selection_verb_hits[0].clone();
+        let run_hit = app
+            .layout
+            .program_selection_run_hit
+            .expect("run hit registered");
+        assert!(app.mouse_moved_at.is_none(), "no genuine pointer move yet");
+        app.mouse_pos = Some((verb_hit.0, verb_hit.2));
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render with stale mouse position");
+        let buf = term.backend().buffer();
+        let verb_cell = buf
+            .cell((verb_hit.0, verb_hit.2))
+            .expect("verb row cell");
+        assert_ne!(
+            verb_cell.style().bg,
+            Some(app.theme.accent),
+            "a verb row must not appear hovered from a stale, unmoved pointer position"
+        );
+
+        // Also plant one on the Run button, for the same reason.
+        app.mouse_pos = Some((run_hit.0, run_hit.2));
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render with stale mouse over Run");
+        let buf = term.backend().buffer();
+        let run_cell = buf.cell((run_hit.0, run_hit.2)).expect("Run cell");
+        assert_ne!(
+            run_cell.style().bg,
+            Some(app.theme.accent),
+            "the Run button must not appear hovered from a stale, unmoved pointer position"
+        );
+
+        // Now a genuine pointer move onto the verb row arms the highlight.
+        app.on_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: verb_hit.0,
+            row: verb_hit.2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render after a genuine move");
+        let buf = term.backend().buffer();
+        let verb_cell = buf.cell((verb_hit.0, verb_hit.2)).expect("verb row cell");
+        assert_eq!(
+            verb_cell.style().bg,
+            Some(app.theme.accent),
+            "a pointer that genuinely moves onto the row after the menu appeared does highlight it"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn program_selection_comment_text_is_underlined_not_highlighted() {
         let (mut app, _dir, server) = empty_app().await;
@@ -14503,6 +15872,9 @@ mod tests {
             focused: true,
             comment: "focus".into(),
             cursor: 5,
+            selected_action: ProgramSelectionAction::Comment,
+        
+            ..Default::default()
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -14537,6 +15909,75 @@ mod tests {
         server.abort();
     }
 
+    /// Typed comment text must stay visually distinct from plain menu-action
+    /// labels (Run, verbs) even after keyboard focus moves off Comment onto
+    /// one of them — the underline is what marks it as typed content, not
+    /// an action, and must not vanish just because Comment lost the
+    /// highlight. Regression test for exactly that: navigate Comment ->
+    /// Run and confirm the comment text is still underlined and still not
+    /// styled identically to an unselected action row.
+    #[tokio::test]
+    async fn program_selection_comment_text_stays_underlined_after_focus_moves_to_run() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        {
+            let popup = app.program_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        }
+        app.begin_program_selection();
+        app.move_program_cursor(5);
+        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            focused: true,
+            comment: "focus".into(),
+            cursor: 5,
+            // Run, not Comment: the bug reproduces once the highlight moves
+            // off the comment row.
+            selected_action: ProgramSelectionAction::Run,
+
+            ..Default::default()
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render");
+        let buf = term.backend().buffer();
+        let mut focus_pos = None;
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                .collect();
+            if let Some(x) = row.find("focus") {
+                focus_pos = Some((x as u16, y));
+                break;
+            }
+        }
+        let (x, y) = focus_pos.expect("comment row rendered");
+        let comment_cell = buf.cell((x, y)).expect("comment cell");
+        assert!(
+            comment_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED),
+            "typed comment text must stay underlined even once Run is the highlighted row"
+        );
+        // The reported bug specifically: once the highlight left Comment,
+        // its typed text fell back to plain `accent` fg with no
+        // modifier — pixel-identical to every *unselected* Run/verb label
+        // (see `row_style(false)`). Assert directly against that color,
+        // not against Run's own (differently-styled, highlighted) cell.
+        assert_ne!(
+            comment_cell.style().fg,
+            Some(app.theme.accent),
+            "typed comment text must not fall back to the plain unselected-row color"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn program_selection_comment_run_button_is_right_aligned_and_contrasting() {
         let (mut app, _dir, server) = empty_app().await;
@@ -14555,6 +15996,12 @@ mod tests {
             focused: true,
             comment: "focus".into(),
             cursor: 5,
+            // Run, not Comment: this test asserts the Run button's own
+            // highlighted appearance, which now depends on Run specifically
+            // being the keyboard-selected row (spec 0089).
+            selected_action: ProgramSelectionAction::Run,
+        
+            ..Default::default()
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -14616,7 +16063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_selection_run_button_is_plain_until_menu_focus() {
+    async fn program_selection_run_button_highlights_after_navigating_down_from_comment() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
@@ -14657,13 +16104,32 @@ mod tests {
             .layout
             .program_selection_run_hit
             .expect("selection menu hit registered");
+        let tab_focused_run_cell = buf
+            .cell((hit.1.saturating_sub(3), hit.2))
+            .expect("Run text cell right after Tab");
+        assert_ne!(
+            tab_focused_run_cell.style().bg,
+            Some(app.theme.accent),
+            "Tab focuses the comment row by default (spec 0089) — Run stays plain until Down selects it"
+        );
+
+        // Down moves keyboard selection off Comment onto Run (spec 0089).
+        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("program should render after down");
+        let buf = term.backend().buffer();
+        let hit = app
+            .layout
+            .program_selection_run_hit
+            .expect("selection menu hit registered");
         let focused_run_cell = buf
             .cell((hit.1.saturating_sub(3), hit.2))
             .expect("focused Run text cell");
         assert_eq!(
             focused_run_cell.style().bg,
             Some(app.theme.accent),
-            "Run button should highlight once Tab focuses the menu"
+            "Run button should highlight once Down selects it"
         );
         server.abort();
     }
@@ -14686,6 +16152,9 @@ mod tests {
             focused: true,
             comment: "alpha beta gamma delta epsilon zeta eta theta".into(),
             cursor: 45,
+            selected_action: ProgramSelectionAction::Comment,
+        
+            ..Default::default()
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -14718,7 +16187,7 @@ mod tests {
             "first wrapped row should contain the start of the comment: {first_row:?}"
         );
         assert!(
-            second_row.contains("epsilon"),
+            second_row.contains("eta theta"),
             "long comment should wrap onto a second row: {second_row:?}"
         );
         assert_eq!(
@@ -16383,6 +17852,191 @@ mod tests {
         server.abort();
     }
 
+    /// A pinned clip's card renders regardless of the mouse position (unlike
+    /// the plain hover card, which only shows under the pointer), stays
+    /// anchored to the clip's own position, and — like the hover card —
+    /// crops the session's existing viewport rather than resizing the shared
+    /// parser to its own preview size.
+    #[tokio::test]
+    async fn program_pinned_clip_card_renders_regardless_of_mouse_and_crops_shared_parser() {
+        use crate::pty_render::ItemHistory;
+
+        let (mut app, _dir, server) = empty_app().await;
+        let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
+        let mut s2 = summary_with_kind(construct_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s2.id = "s2".into();
+        app.sessions = vec![s1, s2];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:s2}", 0));
+        app.program_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.program_popup.as_mut().unwrap().pinned_clip = Some("s2".to_string());
+
+        let mut history = ItemHistory::new();
+        history.feed_pty(b"PINNED_CARD_MARKER\nsecond line");
+        let _ = history.replay(140, 40, 0);
+        app.histories.insert("s2".into(), history);
+
+        // Mouse is nowhere near the clip — a plain hover card would show
+        // nothing here, but a pinned card must render anyway.
+        app.mouse_pos = Some((0, 0));
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("pinned card should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("PINNED_CARD_"),
+            "pinned card should show the session's live output even with the mouse elsewhere: {text}"
+        );
+        assert!(
+            text.contains("pinned"),
+            "pinned card should visually indicate it's pinned/typeable: {text}"
+        );
+        assert_eq!(
+            app.histories
+                .get("s2")
+                .expect("history")
+                .cached_dims()
+                .expect("parser cached after replay"),
+            (140, 40),
+            "pinned card must crop the session's existing viewport, not resize the shared parser"
+        );
+        server.abort();
+    }
+
+    /// The pinned card's pan offsets shift the crop window across the
+    /// session's cached screen (spec 0090): rows pan back from the
+    /// tail-anchored bottom (over-scroll clamps at the content top), columns
+    /// pan right (clamping at the screen's right edge). The parser is still
+    /// never resized.
+    #[tokio::test]
+    async fn program_pinned_clip_card_pans_crop_with_scroll_offsets() {
+        use crate::pty_render::ItemHistory;
+
+        let (mut app, _dir, server) = empty_app().await;
+        let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
+        let mut s2 = summary_with_kind(construct_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s2.id = "s2".into();
+        app.sessions = vec![s1, s2];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:s2}", 0));
+        app.program_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.program_popup.as_mut().unwrap().pinned_clip = Some("s2".to_string());
+        app.mouse_pos = Some((0, 0));
+
+        // 30 content rows in a 140x40 parser: the 22-row card crops the tail,
+        // so TOP_MARKER (row 1) is above the default window. FAR_RIGHT sits
+        // past column 80, beyond the 64-col card window.
+        let mut feed = String::from("TOP_MARKER\r\n");
+        for n in 0..27 {
+            feed.push_str(&format!("filler {n:02}\r\n"));
+        }
+        feed.push_str(&format!("{}FAR_RIGHT\r\n", " ".repeat(80)));
+        feed.push_str("BOTTOM_MARKER");
+        let mut history = ItemHistory::new();
+        history.feed_pty(feed.as_bytes());
+        let _ = history.replay(140, 40, 0);
+        app.histories.insert("s2".into(), history);
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("BOTTOM_MARKER") && !text.contains("TOP_MARKER"),
+            "default crop is tail-anchored, top of content off-window: {text}"
+        );
+        assert!(
+            !text.contains("FAR_RIGHT"),
+            "default crop is left-aligned, far-right content off-window: {text}"
+        );
+
+        // Over-scrolled vertical pan clamps at the content's top.
+        app.program_popup.as_mut().unwrap().pinned_scroll_rows = 200;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("TOP_MARKER"),
+            "panning back reveals the top of the content, clamped: {text}"
+        );
+
+        // Horizontal pan reveals content beyond the card's right edge,
+        // clamped so the crop never runs past the screen's width.
+        let popup = app.program_popup.as_mut().unwrap();
+        popup.pinned_scroll_rows = 0;
+        popup.pinned_scroll_cols = 500;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("FAR_RIGHT"),
+            "panning right reveals far-right content, clamped at the screen edge: {text}"
+        );
+        assert_eq!(
+            app.histories
+                .get("s2")
+                .expect("history")
+                .cached_dims()
+                .expect("parser cached after replay"),
+            (140, 40),
+            "panning must never resize the shared parser"
+        );
+        server.abort();
+    }
+
+    /// With size ownership (spec 0090) the card replays the session at its
+    /// own dims — the parser follows the card instead of staying at the
+    /// main-view size, because the PTY itself was resized to the card.
+    #[tokio::test]
+    async fn program_pinned_clip_card_owned_mode_renders_at_card_dims() {
+        use crate::pty_render::ItemHistory;
+
+        let (mut app, _dir, server) = empty_app().await;
+        let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
+        let mut s2 = summary_with_kind(construct_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s2.id = "s2".into();
+        app.sessions = vec![s1, s2];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:s2}", 0));
+        app.program_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        let popup = app.program_popup.as_mut().unwrap();
+        popup.pinned_clip = Some("s2".to_string());
+        popup.pinned_card_cols = 64;
+        popup.pinned_card_rows = 22;
+        popup.pinned_terminal_size = Some((64, 22));
+        app.mouse_pos = Some((0, 0));
+
+        let mut history = ItemHistory::new();
+        history.feed_pty(b"OWNED_MODE_MARKER\nsecond line");
+        let _ = history.replay(140, 40, 0);
+        app.histories.insert("s2".into(), history);
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("OWNED_MODE_MARKER"),
+            "owned-mode card shows the session's output: {text}"
+        );
+        assert_eq!(
+            app.histories
+                .get("s2")
+                .expect("history")
+                .cached_dims()
+                .expect("cached"),
+            (64, 22),
+            "with size ownership the parser follows the card's dims"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn program_session_hover_card_works_on_unfocused_split_program() {
         use crate::pty_render::ItemHistory;
@@ -17082,6 +18736,9 @@ mod tests {
             focused: false,
             comment: "focus tests".to_string(),
             cursor: "focus tests".chars().count(),
+            selected_action: ProgramSelectionAction::Comment,
+        
+            ..Default::default()
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -17368,74 +19025,90 @@ mod tests {
         server.abort();
     }
 
+    /// spec 0089: Up/Down (and C-p/C-n) no longer move the cursor within a
+    /// wrapped multi-line comment — they cycle the menu's keyboard-selected
+    /// row through Comment, Run, then each advertised verb in order, wrapping
+    /// at both ends. Only Comment accepts typed/editing keys.
     #[tokio::test]
-    async fn program_selection_comment_editor_supports_wrapped_vertical_motion() {
+    async fn program_selection_up_down_cycle_actions_instead_of_comment_cursor() {
         let (mut app, _dir, server) = empty_app().await;
         app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.program_verbs = vec![
+            construct_protocol::ProgramVerb {
+                name: "simplify".to_string(),
+                label: "Simplify".to_string(),
+                description: None,
+                effect: construct_protocol::ProgramVerbEffect::Rewrite,
+                interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+                order: 0,
+                built_in: true,
+                prompt: "test".to_string(),
+            },
+            construct_protocol::ProgramVerb {
+                name: "crystallize".to_string(),
+                label: "Crystallize spec".to_string(),
+                description: None,
+                effect: construct_protocol::ProgramVerbEffect::Rewrite,
+                interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+                order: 1,
+                built_in: true,
+                prompt: "test".to_string(),
+            },
+        ];
         app.begin_program_selection();
         app.move_program_cursor(5);
 
+        let selected_action = |app: &App| {
+            app.program_popup
+                .as_ref()
+                .and_then(|popup| popup.selection_menu.as_ref())
+                .expect("selection menu remains open")
+                .selected_action
+        };
+
         app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
-        for ch in "abcdefghijklmnopqrstuvwxyzabcdefghi".chars() {
-            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
-                .await;
-        }
-        let start_cursor = app
-            .program_popup
-            .as_ref()
-            .and_then(|popup| popup.selection_menu.as_ref())
-            .expect("selection menu remains open")
-            .cursor;
-        assert_eq!(start_cursor, 35);
-
-        app.handle_program_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
-            .await;
-        let menu = app
-            .program_popup
-            .as_ref()
-            .and_then(|popup| popup.selection_menu.as_ref())
-            .expect("selection menu remains open");
-        assert!(
-            menu.cursor < start_cursor,
-            "Up should move the cursor to the previous wrapped row"
+        assert_eq!(
+            selected_action(&app),
+            ProgramSelectionAction::Comment,
+            "Tab focuses the menu with Comment selected by default"
         );
+
+        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(selected_action(&app), ProgramSelectionAction::Run);
 
         app.handle_program_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
-        let menu = app
-            .program_popup
-            .as_ref()
-            .and_then(|popup| popup.selection_menu.as_ref())
-            .expect("selection menu remains open");
-        assert_eq!(
-            menu.cursor, start_cursor,
-            "C-n should return to the next wrapped row at the same visual column"
-        );
+        assert_eq!(selected_action(&app), ProgramSelectionAction::Verb(0));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
-            .await;
-        let after_cp = app
-            .program_popup
-            .as_ref()
-            .and_then(|popup| popup.selection_menu.as_ref())
-            .expect("selection menu remains open")
-            .cursor;
         app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
+        assert_eq!(selected_action(&app), ProgramSelectionAction::Verb(1));
+
+        // Past the last verb, Down wraps back around to Comment.
+        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(selected_action(&app), ProgramSelectionAction::Comment);
+
+        // And Up/C-p from Comment wraps to the last verb.
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(selected_action(&app), ProgramSelectionAction::Verb(1));
+
+        // Typing only edits the comment while Comment itself is selected.
+        app.handle_program_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await;
         let menu = app
             .program_popup
             .as_ref()
             .and_then(|popup| popup.selection_menu.as_ref())
             .expect("selection menu remains open");
         assert_eq!(
-            menu.cursor, start_cursor,
-            "Down should mirror C-n on wrapped comment text"
+            menu.comment, "",
+            "typing while a non-Comment row is selected must not edit the comment"
         );
-        assert!(
-            after_cp < start_cursor,
-            "C-p should move the cursor to the previous wrapped row"
-        );
+
         server.abort();
     }
 
