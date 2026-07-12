@@ -1398,7 +1398,7 @@ async fn dispatch(
     dispatch_entry!(ipc_method::SESSION_MOVE, {
         let p = params!(req, SessionMoveParams);
         match manager.move_session(&p.session_id, p.direction).await {
-            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Ok(moved) => ok!(req, &construct_protocol::SessionMoveResult { moved }),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });

@@ -3178,7 +3178,13 @@ impl SessionManager {
     /// No-op at the absolute top (ungrouped session #0) or bottom (last
     /// member of last group), or when the only regions in the move direction
     /// are collapsed groups.
-    pub async fn move_session(&self, id: &str, dir: MoveDirection) -> Result<()> {
+    ///
+    /// Returns whether a move actually happened, so callers can tell a real
+    /// reorder apart from hitting a boundary — both look identical from the
+    /// `Ok(())` return alone otherwise, and the boundary case is easy to
+    /// mistake for a bug (e.g. a fork stuck at the edge of its sibling
+    /// forks, which renders at the same indent as its parent).
+    pub async fn move_session(&self, id: &str, dir: MoveDirection) -> Result<bool> {
         let all_sessions: Vec<SessionSummary> = self.list().await;
         let all_groups: Vec<GroupSummary> = self.list_groups().await;
         let me = all_sessions
@@ -3215,17 +3221,19 @@ impl SessionManager {
             return match dir {
                 MoveDirection::Up if pos_in_siblings > 0 => {
                     let other = siblings[pos_in_siblings - 1];
-                    self.swap_session_positions(&me.id, &other.id).await
+                    self.swap_session_positions(&me.id, &other.id).await?;
+                    Ok(true)
                 }
                 MoveDirection::Down if pos_in_siblings + 1 < siblings.len() => {
                     let other = siblings[pos_in_siblings + 1];
-                    self.swap_session_positions(&me.id, &other.id).await
+                    self.swap_session_positions(&me.id, &other.id).await?;
+                    Ok(true)
                 }
                 // At the edge of the sibling-fork cluster: no-op. Forks don't
                 // cross into neighboring groups/regions the way top-level
                 // sessions do — their nesting is fixed to `forked_from` for
                 // the session's lifetime.
-                _ => Ok(()),
+                _ => Ok(false),
             };
         }
 
@@ -3253,14 +3261,15 @@ impl SessionManager {
                 if pos_in_region > 0 {
                     // Same-region swap.
                     let other = region[pos_in_region - 1];
-                    return self.swap_session_positions(&me.id, &other.id).await;
+                    self.swap_session_positions(&me.id, &other.id).await?;
+                    return Ok(true);
                 }
                 // At top of region — try to exit into the previous region,
                 // skipping collapsed projects.
                 let prev =
                     groups::region_above_skipping_collapsed(me.group_id.as_deref(), &all_groups);
                 let Some(prev_region) = prev else {
-                    return Ok(());
+                    return Ok(false);
                 };
                 self.move_session_into_region(
                     &me.id,
@@ -3268,22 +3277,25 @@ impl SessionManager {
                     RegionEdge::Bottom,
                     &all_sessions,
                 )
-                .await
+                .await?;
+                Ok(true)
             }
             MoveDirection::Down => {
                 if pos_in_region + 1 < region.len() {
                     let other = region[pos_in_region + 1];
-                    return self.swap_session_positions(&me.id, &other.id).await;
+                    self.swap_session_positions(&me.id, &other.id).await?;
+                    return Ok(true);
                 }
                 // At bottom of region — try to enter the next region,
                 // skipping collapsed projects.
                 let next =
                     groups::region_below_skipping_collapsed(me.group_id.as_deref(), &all_groups);
                 let Some(next_region) = next else {
-                    return Ok(());
+                    return Ok(false);
                 };
                 self.move_session_into_region(&me.id, &next_region, RegionEdge::Top, &all_sessions)
-                    .await
+                    .await?;
+                Ok(true)
             }
         }
     }
@@ -4559,9 +4571,11 @@ mod tests {
             synthetic_fork_entry("ffork-b", "fparent", 13, None).await,
         );
 
-        mgr.move_session("ffork-b", construct_protocol::MoveDirection::Up)
+        let moved = mgr
+            .move_session("ffork-b", construct_protocol::MoveDirection::Up)
             .await
             .expect("move up");
+        assert!(moved, "swapping with a sibling fork is a real move");
 
         let sessions = mgr.list().await;
         let parent = sessions.iter().find(|s| s.id == "fparent").unwrap();
@@ -4600,9 +4614,11 @@ mod tests {
             synthetic_fork_entry("gfork", "gparent", 11, None).await,
         );
 
-        mgr.move_session("gfork", construct_protocol::MoveDirection::Up)
+        let moved = mgr
+            .move_session("gfork", construct_protocol::MoveDirection::Up)
             .await
             .expect("move up");
+        assert!(!moved, "no sibling fork to swap with — reports as a no-op");
 
         let sessions = mgr.list().await;
         let parent = sessions.iter().find(|s| s.id == "gparent").unwrap();
