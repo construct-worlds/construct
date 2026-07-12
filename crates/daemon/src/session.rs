@@ -301,6 +301,16 @@ pub struct SessionEntry {
     /// ASCII through a tiny ESC-sequence state machine; first CR/LF
     /// closes the buffer and feeds it to title-gen.
     pty_input_capture: tokio::sync::Mutex<PtyInputCapture>,
+    /// Sending half of the session's ordered PTY-input delivery queue
+    /// (spec 0087); `None` until the first input arrives. A dedicated
+    /// per-session writer task drains the queue and performs the adapter
+    /// `session.pty_input` round-trips, so the serial IPC dispatch loop
+    /// ACKs typing on *enqueue* and never waits on a slow adapter — see
+    /// `session::pty` for the mechanism. The writer exits on its own when
+    /// this entry is dropped (the sender lives here, closing the channel),
+    /// so delete/restart need no explicit teardown. `std::sync::Mutex`:
+    /// locked only to install/clone the sender, never across an `.await`.
+    pty_input_queue: std::sync::Mutex<Option<mpsc::Sender<pty::PtyInputJob>>>,
     /// Per-session tool-call lifecycle map. Updated from
     /// `SessionEvent::TaskStart` / `TaskBackgrounded` / `TaskEnd`.
     /// Surfaced by `session.list_tasks` for the TUI `/tasks` popup
@@ -1219,6 +1229,7 @@ impl SessionManager {
                 title_gen_attempted: AtomicBool::new(s.title.is_some()),
                 pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+                pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
                 pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
                 unseen_activity: AtomicBool::new(false),
@@ -2234,7 +2245,10 @@ impl SessionManager {
                     .await?;
             }
             ProgramExecutionDelivery::PtySubmit => {
-                self.pty_input(&params.session_id, program_pty_submit_bytes(&prompt))
+                // Delivery-awaited (not the enqueue-ACK typing path): the
+                // run bookkeeping below should only start once the prompt
+                // has actually reached the harness.
+                self.pty_input_delivered(&params.session_id, program_pty_submit_bytes(&prompt))
                     .await?;
             }
             ProgramExecutionDelivery::AdapterInput => {
@@ -3669,6 +3683,7 @@ impl SessionManager {
             title_gen_attempted: AtomicBool::new(true),
             pending_title_prompts: std::sync::Mutex::new(Vec::new()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+            pty_input_queue: std::sync::Mutex::new(None),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
             pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
             unseen_activity: AtomicBool::new(false),
@@ -4630,6 +4645,7 @@ mod tests {
             title_gen_attempted: AtomicBool::new(false),
             pending_title_prompts: std::sync::Mutex::new(Vec::new()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+            pty_input_queue: std::sync::Mutex::new(None),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
             pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
             unseen_activity: AtomicBool::new(false),
@@ -5937,6 +5953,7 @@ mod tests {
             title_gen_attempted: AtomicBool::new(false),
             pending_title_prompts: std::sync::Mutex::new(Vec::new()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+            pty_input_queue: std::sync::Mutex::new(None),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
             pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
             unseen_activity: AtomicBool::new(false),
@@ -6078,6 +6095,7 @@ mod tests {
             title_gen_attempted: AtomicBool::new(false),
             pending_title_prompts: std::sync::Mutex::new(Vec::new()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+            pty_input_queue: std::sync::Mutex::new(None),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
             pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
             unseen_activity: AtomicBool::new(false),
@@ -6236,6 +6254,7 @@ mod tests {
                 title_gen_attempted: AtomicBool::new(false),
                 pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+                pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
                 pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
                 unseen_activity: AtomicBool::new(false),
@@ -6324,6 +6343,7 @@ mod tests {
                 title_gen_attempted: AtomicBool::new(false),
                 pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+                pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
                 pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
                 unseen_activity: AtomicBool::new(false),
@@ -6435,6 +6455,7 @@ mod tests {
                 title_gen_attempted: AtomicBool::new(false),
                 pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+                pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
                 pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
                 unseen_activity: AtomicBool::new(false),
@@ -6519,6 +6540,7 @@ mod tests {
                 title_gen_attempted: AtomicBool::new(false),
                 pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+                pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
                 pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
                 unseen_activity: AtomicBool::new(false),
@@ -8440,6 +8462,156 @@ done
             Some(true),
             "execute must broadcast a corrective run-present state after the save's stale clear: {state_runs:?}"
         );
+    }
+
+    /// Shell mock adapter for the spec-0087 pty-input queue tests: ACKs
+    /// `initialize` immediately, but for each `session.pty_input` request
+    /// appends the raw request line to `$RECORD` and then withholds the
+    /// ACK until `$RELEASE` exists. Installed straight into the session's
+    /// entry; returns the record/release paths plus the adapter message
+    /// receiver (which the caller must keep alive for the test's duration).
+    async fn install_blocking_pty_mock_adapter(
+        mgr: &SessionManager,
+        id: &str,
+        dir: &std::path::Path,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        mpsc::Receiver<AdapterMessage>,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        let record = dir.join("record.jsonl");
+        let release = dir.join("release");
+        let adapter_path = dir.join("mock-pty-adapter.sh");
+        std::fs::write(
+            &adapter_path,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  if [ -z "$id" ]; then id=null; fi
+  case "$line" in
+    *'"method":"initialize"'*|*'"method": "initialize"'*)
+      result='{"name":"test","version":"0.0.0","capabilities":{"supports_pty":true}}'
+      ;;
+    *'"method":"session.pty_input"'*|*'"method": "session.pty_input"'*)
+      printf '%s\n' "$line" >>"$RECORD"
+      while [ ! -e "$RELEASE" ]; do sleep 0.05; done
+      result='null'
+      ;;
+    *)
+      result='null'
+      ;;
+  esac
+  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+done
+"#,
+        )
+        .expect("write mock adapter");
+        let mut perms = std::fs::metadata(&adapter_path)
+            .expect("mock adapter metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&adapter_path, perms).expect("chmod mock adapter");
+        let mut env = HashMap::new();
+        env.insert("RECORD".to_string(), record.to_string_lossy().to_string());
+        env.insert("RELEASE".to_string(), release.to_string_lossy().to_string());
+        let (adapter_tx, adapter_rx) = mpsc::channel(8);
+        let (adapter, _init) = Adapter::spawn(
+            "test".to_string(),
+            adapter_path,
+            Vec::new(),
+            env,
+            adapter_tx,
+        )
+        .await
+        .expect("spawn mock adapter");
+        let entry = mgr.get_entry(id).await.expect("entry");
+        *entry.adapter.lock().await = Some(adapter);
+        (record, release, adapter_rx)
+    }
+
+    /// Spec 0087: the interactive typing path must ACK once the bytes are
+    /// accepted into the session's ordered queue — not once the adapter
+    /// round-trip completes. The mock withholds its `session.pty_input`
+    /// ACK indefinitely, so if `pty_input` still awaited delivery this
+    /// would hit the 5s timeout instead of returning immediately.
+    #[tokio::test]
+    async fn pty_input_acks_on_enqueue_not_on_adapter_delivery() {
+        use base64::Engine as _;
+        let (mgr, _storage, id) = program_test_mgr("# T\n").await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (record, release, _adapter_rx) =
+            install_blocking_pty_mock_adapter(&mgr, &id, dir.path()).await;
+
+        tokio::time::timeout(Duration::from_secs(5), mgr.pty_input(&id, b"hello".to_vec()))
+            .await
+            .expect("pty_input must return on enqueue while the adapter ACK is withheld")
+            .expect("enqueue should succeed");
+
+        // Delivery still happens — asynchronously, once the adapter ACKs.
+        std::fs::write(&release, b"go").expect("release");
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let recorded = std::fs::read_to_string(&record).unwrap_or_default();
+            if recorded.contains(&payload) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "queued input was never delivered to the adapter: {recorded:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Spec 0087: every input path funnels through the same per-session
+    /// ordered queue — batches reach the adapter in enqueue order even
+    /// while earlier batches are still awaiting their ACK — and the
+    /// delivery-awaited variant really does wait for its own batch.
+    #[tokio::test]
+    async fn pty_input_queue_preserves_order_and_awaited_variant_waits() {
+        use base64::Engine as _;
+        let (mgr, _storage, id) = program_test_mgr("# T\n").await;
+        let mgr = Arc::new(mgr);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (record, release, _adapter_rx) =
+            install_blocking_pty_mock_adapter(&mgr, &id, dir.path()).await;
+
+        mgr.pty_input(&id, b"one".to_vec()).await.expect("queue one");
+        mgr.pty_input(&id, b"two".to_vec()).await.expect("queue two");
+        let awaited = {
+            let mgr = mgr.clone();
+            let id = id.clone();
+            tokio::spawn(
+                async move { mgr.pty_input_without_capture(&id, b"three".to_vec()).await },
+            )
+        };
+        // The writer is stuck on batch "one" (ACK withheld), so the
+        // delivery-awaited call cannot have completed — deterministic, not
+        // a timing guess: nothing can ACK until the release file exists.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !awaited.is_finished(),
+            "delivery-awaited input returned before the adapter ACKed"
+        );
+
+        std::fs::write(&release, b"go").expect("release");
+        tokio::time::timeout(Duration::from_secs(5), awaited)
+            .await
+            .expect("awaited input should complete once the adapter ACKs")
+            .expect("join")
+            .expect("delivery");
+
+        let recorded = std::fs::read_to_string(&record).expect("record");
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let pos = |needle: &str| {
+            recorded
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} not delivered in order: {recorded:?}"))
+        };
+        assert!(pos(&b64(b"one")) < pos(&b64(b"two")));
+        assert!(pos(&b64(b"two")) < pos(&b64(b"three")));
     }
 
     // Spec 0042: starting a selection run while another run is still in flight
