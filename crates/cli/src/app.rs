@@ -127,6 +127,34 @@ pub(crate) const PROGRAM_WHEEL_SCROLL_ROWS: usize = 3;
 /// parser behind a 64-col card), and 3-per-tick was measured too slow to
 /// traverse with a discrete mouse wheel.
 pub(crate) const PROGRAM_PINNED_PAN_COLS_STEP: usize = 8;
+/// Default content dimensions of the Program clip hover/pinned card (spec
+/// 0060/0090). Also the starting terminal size a pinned card resizes its
+/// session to when it takes size ownership (spec 0090) — the card and the
+/// PTY must agree exactly, or the parser would resize every frame. The
+/// pinned card is user-resizable from these defaults by dragging its
+/// right/bottom border.
+pub(crate) const PROGRAM_CLIP_HOVER_PREVIEW_COLS: u16 = 80;
+pub(crate) const PROGRAM_CLIP_HOVER_PREVIEW_ROWS: u16 = 22;
+/// Minimum content dims a pinned card can be drag-resized down to.
+pub(crate) const PROGRAM_PINNED_CARD_MIN_COLS: u16 = 20;
+pub(crate) const PROGRAM_PINNED_CARD_MIN_ROWS: u16 = 5;
+
+/// An in-flight drag gesture on the pinned clip card (spec 0090).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedCardDrag {
+    /// Right/bottom-border grab: grow/shrink the card. Deltas are applied
+    /// against the drag-start dims so the gesture stays stable however the
+    /// card's anchor placement shifts while it grows.
+    Resize {
+        start_cols: u16,
+        start_rows: u16,
+        from: (u16, u16),
+    },
+    /// Top-border grab: move the card. `grab` is the pointer's offset
+    /// inside the card so the card doesn't jump to align its corner with
+    /// the pointer.
+    Move { grab: (u16, u16) },
+}
 const PROGRAM_UNDO_STACK_LIMIT: usize = 100;
 const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
 /// Minimum spacing between `usage.query` fetches for the same harness while
@@ -1518,6 +1546,10 @@ pub struct App {
     /// coordinate, drag-start ratio, and parent split area.
     pub resizing_main_window: Option<(u64, WindowSplitDirection, u16, u16, ratatui::layout::Rect)>,
     pub resizing_program_popup: Option<()>,
+    /// In-flight drag gesture on the pinned clip card (spec 0090): a grab
+    /// on its right/bottom border resizes it, a grab on its top border
+    /// moves it.
+    pub pinned_card_drag: Option<PinnedCardDrag>,
     /// User has collapsed the session list pane via the `−` button
     /// on its title bar. Effective only when the list pane doesn't
     /// have focus — when focus is on the list (e.g. via `C-x o`),
@@ -2216,6 +2248,24 @@ pub struct ProgramPopup {
     /// Pinned-card crop pan (spec 0090): columns scrolled right from the
     /// screen's left edge (ScrollLeft/ScrollRight or Shift+wheel).
     pub pinned_scroll_cols: u16,
+    /// `Some((cols, rows))` while the pinned card owns its session's
+    /// terminal size (spec 0090): the session was visible nowhere else when
+    /// pinned, so its PTY was resized to the card and the card renders at
+    /// exactly these dims — full fidelity, no crop. `None` = crop mode (the
+    /// session is visible elsewhere; the card never fights another render
+    /// site for size). Always set through `App::set_program_pinned_clip`.
+    pub pinned_terminal_size: Option<(u16, u16)>,
+    /// The pinned card's content dims (spec 0090), user-resizable by
+    /// dragging the card's right/bottom border. Sticky across pin
+    /// switches within this popup — a size the user chose once holds until
+    /// they change it — and the size a newly owned pin resizes its PTY to.
+    pub pinned_card_cols: u16,
+    pub pinned_card_rows: u16,
+    /// User-chosen top-left position of the pinned card (top-border drag),
+    /// in screen coords. `None` = anchored to the clip's own position.
+    /// Cleared when the pin changes: position is contextual to the clip the
+    /// card was moved away from, unlike the size preference above.
+    pub pinned_card_pos: Option<(u16, u16)>,
 }
 
 impl ProgramPopup {
@@ -2227,6 +2277,8 @@ impl ProgramPopup {
         self.pinned_clip = pinned;
         self.pinned_scroll_rows = 0;
         self.pinned_scroll_cols = 0;
+        self.pinned_terminal_size = None;
+        self.pinned_card_pos = None;
     }
 
     /// Flip keyboard focus between this rolled-down Program and the terminal
@@ -3549,6 +3601,7 @@ async fn run_with_socket_initial_selection(
         resizing_matrix_rain: None,
         resizing_main_window: None,
         resizing_program_popup: None,
+        pinned_card_drag: None,
         list_collapsed: persisted.list_collapsed,
         editor_states: HashMap::new(),
         agent_statuses: HashMap::new(),
@@ -11290,6 +11343,10 @@ fn program_popup_from_document(
         pinned_clip: None,
         pinned_scroll_rows: 0,
         pinned_scroll_cols: 0,
+        pinned_terminal_size: None,
+        pinned_card_cols: PROGRAM_CLIP_HOVER_PREVIEW_COLS,
+        pinned_card_rows: PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
+        pinned_card_pos: None,
     }
 }
 
@@ -11840,6 +11897,7 @@ mod tests {
             resizing_matrix_rain: None,
             resizing_main_window: None,
             resizing_program_popup: None,
+            pinned_card_drag: None,
             list_collapsed: false,
             tasks_popup: None,
             lineage_focused: false,
@@ -12132,6 +12190,10 @@ mod tests {
             pinned_clip: None,
             pinned_scroll_rows: 0,
             pinned_scroll_cols: 0,
+            pinned_terminal_size: None,
+            pinned_card_cols: PROGRAM_CLIP_HOVER_PREVIEW_COLS,
+            pinned_card_rows: PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
+            pinned_card_pos: None,
         }
     }
 
@@ -13713,6 +13775,187 @@ mod tests {
         assert!(
             rx.try_recv().is_ok(),
             "a plain arrow still forwards to the pinned session's PTY"
+        );
+    }
+
+    /// Pinning a session that is visible nowhere else takes size ownership
+    /// (spec 0090): the PTY is resized to the card's content dims and the
+    /// popup records them; unpinning releases ownership.
+    #[tokio::test]
+    async fn program_pin_takes_size_ownership_when_session_unviewed() {
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+
+        app.set_program_pinned_clip(Some("worker1".to_string())).await;
+
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.pinned_clip.as_deref(), Some("worker1"));
+        assert_eq!(
+            popup.pinned_terminal_size,
+            // Card cols clamp to the modal (40 - 2); rows are the default.
+            Some((38, PROGRAM_CLIP_HOVER_PREVIEW_ROWS)),
+            "an unviewed session pins with size ownership at the card's dims"
+        );
+
+        app.set_program_pinned_clip(None).await;
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.pinned_clip, None);
+        assert_eq!(
+            popup.pinned_terminal_size, None,
+            "unpinning releases size ownership"
+        );
+    }
+
+    /// Pinning a session that is already visible in a main window must NOT
+    /// resize it — the card stays a crop so it never fights the pane for
+    /// the session's size (spec 0025/0090).
+    #[tokio::test]
+    async fn program_pin_stays_crop_when_session_visible_elsewhere() {
+        let (mut app, _dir, _server) = empty_app().await;
+        let mut worker = summary_with_kind(construct_protocol::SessionKind::User);
+        worker.id = "worker1".into();
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User), worker];
+        app.main_windows = MainWindowTree::Leaf {
+            id: 1,
+            selection: Selection::Session("worker1".into()),
+        };
+        app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+
+        app.set_program_pinned_clip(Some("worker1".to_string())).await;
+
+        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(popup.pinned_clip.as_deref(), Some("worker1"));
+        assert_eq!(
+            popup.pinned_terminal_size, None,
+            "a session visible elsewhere keeps its size; the card crops"
+        );
+    }
+
+    /// Dragging the card's right/bottom border resizes it; on release a
+    /// size-owning pin's PTY follows the final dims (spec 0090).
+    #[tokio::test]
+    async fn program_pinned_card_border_drag_resizes() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        popup.pinned_terminal_size = Some((38, 22));
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+
+        // Grab the bottom-right corner (right border column, bottom row).
+        let consumed = app
+            .handle_program_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 34,
+                row: 8,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            })
+            .await;
+        assert!(consumed);
+        assert!(
+            matches!(app.pinned_card_drag, Some(PinnedCardDrag::Resize { .. })),
+            "border grab starts a resize drag"
+        );
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker1"),
+            "border grab must not toggle the pin"
+        );
+
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 44,
+            row: 9,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 44,
+            row: 9,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+
+        assert_eq!(app.pinned_card_drag, None, "release ends the drag");
+        let popup = app.program_popup.as_ref().unwrap();
+        // +10 cols / +1 row from the drag, clamped to the modal (40x10):
+        // cols cap = 36, rows cap = 6.
+        assert_eq!(
+            (popup.pinned_card_cols, popup.pinned_card_rows),
+            (36, 6),
+            "drag resizes the card, clamped inside the modal"
+        );
+        assert_eq!(
+            popup.pinned_terminal_size,
+            Some((36, 6)),
+            "a size-owning pin's PTY follows the final dims on release"
+        );
+    }
+
+    /// Dragging the card's top border moves it; the chosen position sticks
+    /// and clamps inside the modal (spec 0090).
+    #[tokio::test]
+    async fn program_pinned_card_top_border_drag_moves() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        popup.pinned_clip = Some("worker1".to_string());
+        app.program_popup = Some(popup);
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 20,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        assert!(
+            matches!(app.pinned_card_drag, Some(PinnedCardDrag::Move { .. })),
+            "top-border grab starts a move drag"
+        );
+
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 8,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 8,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+
+        assert_eq!(app.pinned_card_drag, None);
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_card_pos,
+            // Grab offset was (5, 0) inside the card, so the card's
+            // top-left lands at pointer minus grab.
+            Some((3, 3)),
+            "top-border drag moves the card"
+        );
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            Some("worker1"),
+            "moving must not dismiss the pin"
         );
     }
 
@@ -17261,6 +17504,55 @@ mod tests {
                 .expect("parser cached after replay"),
             (140, 40),
             "panning must never resize the shared parser"
+        );
+        server.abort();
+    }
+
+    /// With size ownership (spec 0090) the card replays the session at its
+    /// own dims — the parser follows the card instead of staying at the
+    /// main-view size, because the PTY itself was resized to the card.
+    #[tokio::test]
+    async fn program_pinned_clip_card_owned_mode_renders_at_card_dims() {
+        use crate::pty_render::ItemHistory;
+
+        let (mut app, _dir, server) = empty_app().await;
+        let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
+        let mut s2 = summary_with_kind(construct_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s2.id = "s2".into();
+        app.sessions = vec![s1, s2];
+        app.selection = Selection::Session("s1".into());
+        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:s2}", 0));
+        app.program_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        let popup = app.program_popup.as_mut().unwrap();
+        popup.pinned_clip = Some("s2".to_string());
+        popup.pinned_card_cols = 64;
+        popup.pinned_card_rows = 22;
+        popup.pinned_terminal_size = Some((64, 22));
+        app.mouse_pos = Some((0, 0));
+
+        let mut history = ItemHistory::new();
+        history.feed_pty(b"OWNED_MODE_MARKER\nsecond line");
+        let _ = history.replay(140, 40, 0);
+        app.histories.insert("s2".into(), history);
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("OWNED_MODE_MARKER"),
+            "owned-mode card shows the session's output: {text}"
+        );
+        assert_eq!(
+            app.histories
+                .get("s2")
+                .expect("history")
+                .cached_dims()
+                .expect("cached"),
+            (64, 22),
+            "with size ownership the parser follows the card's dims"
         );
         server.abort();
     }

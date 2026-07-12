@@ -36,6 +36,9 @@ impl App {
             self.set_status("program: no session selected".to_string());
             return;
         };
+        // Replacing a popup that holds a size-owning pinned clip must hand
+        // the session its standard size back first (spec 0090).
+        self.set_program_pinned_clip(None).await;
 
         match self.client.program_get(&session_id).await {
             Ok(result) => {
@@ -743,6 +746,9 @@ impl App {
         if !self.save_program_popup().await {
             return;
         }
+        // A size-owning pinned clip releases its session's terminal size
+        // when the Program goes away with it (spec 0090).
+        self.set_program_pinned_clip(None).await;
         if let Some(session_id) = self
             .program_popup
             .as_ref()

@@ -51,6 +51,24 @@ impl App {
                 _ => return true,
             }
         }
+        // An in-flight pinned-card drag (spec 0090) owns the mouse until the
+        // button releases, wherever the pointer wanders — same rule as every
+        // other construct drag gesture.
+        if let Some(drag) = self.pinned_card_drag {
+            match ev.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.apply_pinned_card_drag(drag, ev);
+                    return true;
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.apply_pinned_card_drag(drag, ev);
+                    self.finish_pinned_card_drag(drag).await;
+                    self.pinned_card_drag = None;
+                    return true;
+                }
+                _ => return true,
+            }
+        }
         let Some(modal) = self.layout.modal_area else {
             return false;
         };
@@ -95,15 +113,40 @@ impl App {
                 .is_some_and(|card| Self::rect_contains(card, ev.column, ev.row));
             match ev.kind {
                 MouseEventKind::Down(MouseButton::Left) if on_card => {
+                    // Border grabs start a drag gesture (spec 0090): the
+                    // right/bottom border resizes the card, the top border
+                    // (title bar) moves it. Interior clicks just reclaim
+                    // keyboard focus for the pin.
+                    let card = self
+                        .layout
+                        .program_pinned_card_rect
+                        .expect("on_card implies a painted card rect");
+                    let on_right = ev.column == card.x + card.width.saturating_sub(1);
+                    let on_bottom = ev.row == card.y + card.height.saturating_sub(1);
+                    let on_top = ev.row == card.y;
+                    if on_right || on_bottom {
+                        if let Some(popup) = self.program_popup.as_ref() {
+                            self.pinned_card_drag = Some(crate::app::PinnedCardDrag::Resize {
+                                start_cols: popup.pinned_card_cols,
+                                start_rows: popup.pinned_card_rows,
+                                from: (ev.column, ev.row),
+                            });
+                        }
+                    } else if on_top {
+                        self.pinned_card_drag = Some(crate::app::PinnedCardDrag::Move {
+                            grab: (
+                                ev.column.saturating_sub(card.x),
+                                ev.row.saturating_sub(card.y),
+                            ),
+                        });
+                    }
                     self.focus = PaneFocus::View;
                     self.set_program_terminal_focus(false);
                     return true;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
                     if self.program_clip_session_at(ev.column, ev.row).is_none() {
-                        if let Some(popup) = self.program_popup.as_mut() {
-                            popup.set_pinned_clip(None);
-                        }
+                        self.set_program_pinned_clip(None).await;
                     }
                 }
                 MouseEventKind::ScrollUp
@@ -323,9 +366,7 @@ impl App {
                         });
                 if is_double_click {
                     self.last_program_clip_click = None;
-                    if let Some(popup) = self.program_popup.as_mut() {
-                        popup.set_pinned_clip(None);
-                    }
+                    self.set_program_pinned_clip(None).await;
                     if self.sessions.iter().any(|s| s.id == session_id) {
                         self.focus = PaneFocus::List;
                         self.select_session(session_id);
@@ -339,14 +380,14 @@ impl App {
                     }
                 } else {
                     self.last_program_clip_click = Some((session_id.clone(), now));
-                    if let Some(popup) = self.program_popup.as_mut() {
-                        let pinned = if popup.pinned_clip.as_deref() == Some(session_id.as_str()) {
+                    let pinned = self.program_popup.as_ref().and_then(|popup| {
+                        if popup.pinned_clip.as_deref() == Some(session_id.as_str()) {
                             None
                         } else {
                             Some(session_id)
-                        };
-                        popup.set_pinned_clip(pinned);
-                    }
+                        }
+                    });
+                    self.set_program_pinned_clip(pinned).await;
                 }
                 return true;
             }
@@ -656,6 +697,117 @@ impl App {
         }
     }
 
+    /// Change the pinned clip through the size-ownership protocol (spec
+    /// 0090). A session pinned while visible nowhere else on screen (no main
+    /// window, not the orchestrator, not in the pin strip) gets its PTY
+    /// resized to the card's content dims, so the harness reflows to fit —
+    /// full fidelity, no crop — and is resized back to the standard pane
+    /// size the moment the pin releases (unpin, switch, dismiss, popup
+    /// close). A session that IS visible elsewhere keeps its size and the
+    /// card stays a crop with wheel pan: at most one render site ever owns a
+    /// session's size (spec 0025 discipline).
+    pub(super) async fn set_program_pinned_clip(&mut self, pinned: Option<String>) {
+        let released = self.program_popup.as_ref().and_then(|popup| {
+            popup
+                .pinned_terminal_size
+                .and_then(|_| popup.pinned_clip.clone())
+        });
+        if let Some(old_id) = released {
+            let (cols, rows) = self.terminal_pane_size;
+            let _ = self.client.pty_resize(&old_id, cols, rows).await;
+        }
+        let card_dims = self
+            .program_popup
+            .as_ref()
+            .map(|popup| (popup.pinned_card_cols, popup.pinned_card_rows))
+            .unwrap_or((
+                crate::app::PROGRAM_CLIP_HOVER_PREVIEW_COLS,
+                crate::app::PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
+            ));
+        let owned_size = pinned.as_deref().and_then(|id| {
+            if self.session_visible_on_screen(id) {
+                return None;
+            }
+            let modal = self.layout.modal_area?;
+            let cols = card_dims.0.clamp(1, modal.width.saturating_sub(2).max(1));
+            Some((cols, card_dims.1.max(1)))
+        });
+        if let (Some(id), Some((cols, rows))) = (pinned.as_deref(), owned_size) {
+            let _ = self.client.pty_resize(id, cols, rows).await;
+        }
+        let Some(popup) = self.program_popup.as_mut() else {
+            return;
+        };
+        popup.set_pinned_clip(pinned);
+        popup.pinned_terminal_size = owned_size;
+    }
+
+    /// Apply one pointer sample of an in-flight pinned-card drag (spec
+    /// 0090): resize computes new content dims from the drag-start dims plus
+    /// the pointer delta (stable regardless of how the card's anchor
+    /// placement shifts as it grows); move places the card's top-left so the
+    /// grabbed cell stays under the pointer. Both clamp inside the Program
+    /// modal.
+    fn apply_pinned_card_drag(&mut self, drag: crate::app::PinnedCardDrag, ev: &MouseEvent) {
+        let Some(modal) = self.layout.modal_area else {
+            return;
+        };
+        let Some(popup) = self.program_popup.as_mut() else {
+            return;
+        };
+        match drag {
+            crate::app::PinnedCardDrag::Resize {
+                start_cols,
+                start_rows,
+                from,
+            } => {
+                let d_cols = i32::from(ev.column) - i32::from(from.0);
+                let d_rows = i32::from(ev.row) - i32::from(from.1);
+                let max_cols = i32::from(modal.width.saturating_sub(4).max(1));
+                let max_rows = i32::from(modal.height.saturating_sub(4).max(1));
+                popup.pinned_card_cols = (i32::from(start_cols) + d_cols)
+                    .clamp(i32::from(crate::app::PROGRAM_PINNED_CARD_MIN_COLS), max_cols)
+                    as u16;
+                popup.pinned_card_rows = (i32::from(start_rows) + d_rows)
+                    .clamp(i32::from(crate::app::PROGRAM_PINNED_CARD_MIN_ROWS), max_rows)
+                    as u16;
+            }
+            crate::app::PinnedCardDrag::Move { grab } => {
+                let x = ev
+                    .column
+                    .saturating_sub(grab.0)
+                    .clamp(modal.x, modal.x.saturating_add(modal.width.saturating_sub(1)));
+                let y = ev
+                    .row
+                    .saturating_sub(grab.1)
+                    .clamp(modal.y, modal.y.saturating_add(modal.height.saturating_sub(1)));
+                popup.pinned_card_pos = Some((x, y));
+            }
+        }
+    }
+
+    /// Finalize a pinned-card drag (spec 0090). Only a resize on a
+    /// size-owning pin has work left to do: the session's PTY follows the
+    /// card's final dims in one resize, on release rather than per drag
+    /// sample, so the harness reflows once instead of on every pointer step.
+    async fn finish_pinned_card_drag(&mut self, drag: crate::app::PinnedCardDrag) {
+        if !matches!(drag, crate::app::PinnedCardDrag::Resize { .. }) {
+            return;
+        }
+        let target = self.program_popup.as_ref().and_then(|popup| {
+            popup.pinned_terminal_size?;
+            let id = popup.pinned_clip.clone()?;
+            Some((id, popup.pinned_card_cols, popup.pinned_card_rows))
+        });
+        let Some((id, cols, rows)) = target else {
+            return;
+        };
+        let _ = self.client.pty_resize(&id, cols, rows).await;
+        if let Some(popup) = self.program_popup.as_mut() {
+            popup.pinned_terminal_size = Some((cols, rows));
+        }
+    }
+
     /// Shift the pinned card's crop pan by `(d_cols, d_rows)` — positive
     /// cols pan right, positive rows pan back from the tail. Offsets clamp
     /// loosely to the session's cached screen here; the renderer clamps
@@ -727,9 +879,7 @@ impl App {
             return false;
         };
         if matches!(key.code, KeyCode::Esc) {
-            if let Some(popup) = self.program_popup.as_mut() {
-                popup.set_pinned_clip(None);
-            }
+            self.set_program_pinned_clip(None).await;
             return true;
         }
         // Keyboard pan: the guaranteed path on terminals that report neither

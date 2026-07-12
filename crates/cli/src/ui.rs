@@ -7,7 +7,7 @@ use crate::app::{
     SessionTitleMenuAction, TextSelectionRange, ViewMode, WindowDividerHit, WindowPaneHit,
     WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS,
     PROGRAM_COLLAB_CURSOR_TTL_MS, PROGRAM_CONTENT_PADDING_X, PROGRAM_CONTENT_PADDING_Y,
-    PROGRAM_REVEAL_MS,
+    PROGRAM_CLIP_HOVER_PREVIEW_COLS, PROGRAM_CLIP_HOVER_PREVIEW_ROWS, PROGRAM_REVEAL_MS,
 };
 use crate::keymap::{KeyAction, Profile};
 use crate::text_util::wrap_to_width;
@@ -42,8 +42,6 @@ const PROGRAM_TERMINAL_FOCUS_SLIDE_PERCENT: u16 = 20;
 /// outer width and ROWS is the replayed content height, so the tooltip paints
 /// 64x24 cells; terminal cells are roughly twice as tall as they are wide, so
 /// on screen that reads as a 4:3 tile instead of a letterboxed strip.
-const PROGRAM_CLIP_HOVER_PREVIEW_COLS: u16 = 64;
-const PROGRAM_CLIP_HOVER_PREVIEW_ROWS: u16 = 22;
 const PROGRAM_COLLAB_CURSOR_LABEL_MAX_WIDTH: usize = 12;
 /// How long a just-landed agent-authored Program edit keeps its brief reveal
 /// highlight (spec 0065 agent presence) before fading back to plain text.
@@ -10579,11 +10577,7 @@ fn render_program_hover_overlays(
             app,
             overlay.clip_bounds,
             &overlay.clip_hits,
-            overlay.popup.pinned_clip.as_deref(),
-            (
-                overlay.popup.pinned_scroll_cols,
-                overlay.popup.pinned_scroll_rows,
-            ),
+            &overlay.popup,
         );
         render_program_shimmer_hover(
             f,
@@ -11883,18 +11877,32 @@ fn render_program_clip_hover(
     app: &mut App,
     modal: Rect,
     hits: &[crate::app::ProgramClipHit],
-    pinned_session_id: Option<&str>,
-    pinned_pan: (u16, u16),
+    popup: &crate::app::ProgramPopup,
 ) {
-    if let Some(pinned_session_id) = pinned_session_id {
-        // Anchored to the clip's own position, not the mouse — a pinned card
+    if let Some(pinned_session_id) = popup.pinned_clip.as_deref() {
+        // Anchored to the clip's own position (unless the user dragged the
+        // card elsewhere via its top border), not the mouse — a pinned card
         // must stay put as the pointer moves. If the clip isn't among this
         // frame's hits (scrolled out of view), simply don't paint anything;
         // the pin itself is untouched, so scrolling back re-shows it.
         if let Some(hit) = hits.iter().find(|hit| hit.session_id == pinned_session_id) {
             // Remember the painted bounds for mouse routing: clicks inside
-            // the card are consumed, wheel over it pans the crop; clicks
-            // landing neither here nor on a clip dismiss the pin (spec 0090).
+            // the card are consumed, border drags resize/move it, wheel
+            // over it pans the crop; clicks landing neither here nor on a
+            // clip dismiss the pin (spec 0090).
+            let view = PinnedCardView {
+                dims: (popup.pinned_card_cols, popup.pinned_card_rows),
+                owned: popup.pinned_terminal_size,
+                pos: popup.pinned_card_pos,
+                pan: (popup.pinned_scroll_cols, popup.pinned_scroll_rows),
+            };
+            // A size-owning pin renders full-fidelity, so the pan hint only
+            // applies to crop mode.
+            let hint = if view.owned.is_some() {
+                "pinned — type to send, drag borders, Esc unpins"
+            } else {
+                "pinned — type to send, scroll/Shift+arrows pan, Esc unpins"
+            };
             app.layout.program_pinned_card_rect = render_session_hover_card(
                 f,
                 app,
@@ -11902,9 +11910,9 @@ fn render_program_clip_hover(
                 pinned_session_id,
                 hit.col_start,
                 hit.row,
-                Some("pinned — type to send, scroll/Shift+arrows pan, Esc unpins"),
+                Some(hint),
                 true,
-                pinned_pan,
+                Some(&view),
             );
         }
         return;
@@ -11919,8 +11927,7 @@ fn render_program_clip_hover(
     else {
         return;
     };
-    if render_session_hover_card(f, app, modal, &session_id, mx, my, None, false, (0, 0)).is_some()
-    {
+    if render_session_hover_card(f, app, modal, &session_id, mx, my, None, false, None).is_some() {
         return;
     }
     // No live preview (unknown session, or no captured output yet, per spec
@@ -11994,13 +12001,31 @@ fn session_hover_card_rect(
 /// actually painted, `false` when there was nothing to show (unknown
 /// session, no captured output yet, or no room) so a caller can fall back to
 /// a plain text tooltip.
+/// Pinned-card rendering inputs (spec 0090), read from the popup that owns
+/// the pin. The plain hover preview passes `None` and gets the stock
+/// clip-anchored, default-sized crop.
+struct PinnedCardView {
+    /// User-resizable content dims (right/bottom-border drag).
+    dims: (u16, u16),
+    /// PTY dims while the pin owns the session's size — render at exactly
+    /// these; `None` = crop mode.
+    owned: Option<(u16, u16)>,
+    /// User-moved top-left screen position (top-border drag); `None` =
+    /// anchored to the clip.
+    pos: Option<(u16, u16)>,
+    /// Crop pan `(cols, rows)`; only meaningful in crop mode.
+    pan: (u16, u16),
+}
+
 /// Returns the card's painted bounds, or `None` when nothing was painted
 /// (unknown session, no captured output yet, or no room to anchor it).
-/// `pan` is the pinned card's crop pan as `(cols, rows)` — columns right
-/// from the screen's left edge, rows back from the tail-anchored bottom
-/// (spec 0090); the plain hover card always passes `(0, 0)`. Both axes are
-/// clamped here against the actual content, so stale or over-scrolled
-/// offsets can never pan the crop past the screen into blank space.
+/// `pinned` carries the pinned card's user-controlled geometry and size
+/// ownership (spec 0090); the pan axes are clamped here against the actual
+/// content, so stale or over-scrolled offsets can never pan the crop past
+/// the screen into blank space. While `pinned.owned` is `Some`, the PTY was
+/// resized to exactly those dims, so the card replays at them — full
+/// fidelity, no crop, and no thrash, because a size-owning pin exists only
+/// when nothing else renders the session.
 fn render_session_hover_card(
     f: &mut Frame,
     app: &mut App,
@@ -12010,35 +12035,52 @@ fn render_session_hover_card(
     anchor_row: u16,
     title: Option<&str>,
     focused: bool,
-    pan: (u16, u16),
+    pinned: Option<&PinnedCardView>,
 ) -> Option<Rect> {
     let Some(_s) = app.sessions.iter().find(|s| s.id == session_id) else {
         return None;
     };
 
-    let max_w = modal
-        .width
-        .saturating_sub(2)
-        .clamp(1, PROGRAM_CLIP_HOVER_PREVIEW_COLS);
-    let content_w = max_w;
-    let content_h = PROGRAM_CLIP_HOVER_PREVIEW_ROWS;
-    // Replay at the parser's CURRENT cached size, never at the card's size.
-    // The `ItemHistory` is shared with the main view, split panes, and pin
-    // tiles, and `replay` resizes the cached vt100 parser (and the shadow
-    // parser) to the requested dims — replaying at card dims here would
-    // visibly reflow the session everywhere else it's shown and, while it's
-    // also on screen, rebuild the shared parser on every frame (the same
-    // thrash `pin_tile_reuses_cached_size_to_avoid_split_thrash` guards
-    // against for pin tiles; see `render_pin_strip`). The card CROPS the
-    // full-size screen instead, exactly like a pin tile. Fall back to the
-    // main-view pane size only to seed a session that has never been
-    // rendered anywhere yet.
+    let modal_cap = modal.width.saturating_sub(2).max(1);
+    let (content_w, content_h, size_cap) = match pinned {
+        Some(view) => (
+            view.dims.0.clamp(1, modal_cap),
+            view.dims.1.clamp(1, modal.height.saturating_sub(2).max(1)),
+            modal_cap,
+        ),
+        None => (
+            modal_cap.min(PROGRAM_CLIP_HOVER_PREVIEW_COLS),
+            PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
+            modal_cap.min(PROGRAM_CLIP_HOVER_PREVIEW_COLS),
+        ),
+    };
+    let owned_size = pinned.and_then(|view| view.owned);
+    // Without size ownership, replay at the parser's CURRENT cached size,
+    // never at the card's size. The `ItemHistory` is shared with the main
+    // view, split panes, and pin tiles, and `replay` resizes the cached
+    // vt100 parser (and the shadow parser) to the requested dims — replaying
+    // at card dims here would visibly reflow the session everywhere else
+    // it's shown and, while it's also on screen, rebuild the shared parser
+    // on every frame (the same thrash
+    // `pin_tile_reuses_cached_size_to_avoid_split_thrash` guards against for
+    // pin tiles; see `render_pin_strip`). The card CROPS the full-size
+    // screen instead, exactly like a pin tile. Fall back to the main-view
+    // pane size only to seed a session that has never been rendered
+    // anywhere yet.
+    //
+    // WITH size ownership the tradeoff inverts: the PTY itself is
+    // card-sized, nothing else renders the session, and replaying at any
+    // other dims would misinterpret output the harness now formats for the
+    // card. Replay at the owned dims.
     let (main_cols, main_rows) = app.terminal_pane_size;
     let preview_output = app.histories.get_mut(session_id).map(|history| {
-        let (cols, rows) = history.cached_dims().unwrap_or((
-            main_cols.max(content_w).max(1),
-            main_rows.max(content_h).max(1),
-        ));
+        let (cols, rows) = match owned_size {
+            Some((cols, rows)) => (cols.max(1), rows.max(1)),
+            None => history.cached_dims().unwrap_or((
+                main_cols.max(content_w).max(1),
+                main_rows.max(content_h).max(1),
+            )),
+        };
         history.replay(cols, rows, 0)
     });
     let Some(out) = preview_output else {
@@ -12048,9 +12090,23 @@ fn render_session_hover_card(
     if content_rows == 0 {
         return None;
     }
-    let (width, height) = session_hover_card_size(content_w, content_h, max_w);
-    let Some(area) = session_hover_card_rect(modal, width, height, anchor_col, anchor_row) else {
-        return None;
+    let (width, height) = session_hover_card_size(content_w, content_h, size_cap);
+    // A user-moved card (top-border drag, spec 0090) renders at its chosen
+    // position, clamped fully inside the modal; otherwise it anchors to the
+    // clip as always.
+    let area = match pinned.and_then(|view| view.pos) {
+        Some((x, y)) => {
+            if width > modal.width || height > modal.height {
+                return None;
+            }
+            Rect {
+                x: x.clamp(modal.x, modal.x + modal.width - width),
+                y: y.clamp(modal.y, modal.y + modal.height - height),
+                width,
+                height,
+            }
+        }
+        None => session_hover_card_rect(modal, width, height, anchor_col, anchor_row)?,
     };
 
     f.render_widget(Clear, area);
@@ -12088,7 +12144,7 @@ fn render_session_hover_card(
     // shift that crop window — never the parser: rows step back from the
     // tail, stopping at the content's top; columns pan right, stopping where
     // the crop reaches the screen's right edge.
-    let (pan_cols, pan_rows) = pan;
+    let (pan_cols, pan_rows) = pinned.map(|view| view.pan).unwrap_or((0, 0));
     let top = content_rows
         .saturating_sub(inner.height)
         .saturating_sub(pan_rows);
