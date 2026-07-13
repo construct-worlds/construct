@@ -4,15 +4,17 @@
   <img src="https://raw.githubusercontent.com/construct-worlds/construct/52849f56c902397d6729ec286293064c5b15bcfe/demos/lineage-program-run.gif" alt="construct lineage and program run">
 </div>
 
-Manage Codex, Claude Code, Antigravity, Grok, and smith sessions from your
-terminal — or let an agent coordinate them.
+```sh
+curl -fsSL https://raw.githubusercontent.com/construct-worlds/construct/main/install.sh | sh
+```
 
 More screenshots and demos: [gallery](gallery.md).
 
 ## Why construct?
 
-- **tmux for agent fleets** — multiple coding harnesses in one terminal session.
-  CLI-only; no desktop app to install.
+- **tmux for agent fleets** — manage Codex, Claude Code, Antigravity, Grok, and
+  smith sessions from your terminal — or let an agent coordinate them. CLI-only;
+  no desktop app to install.
 - **Fork / merge** — fork a session when you need a parallel attempt
   (new idea, side quest, or a long shot). Supports cross-harness forks and
   merging results back.
