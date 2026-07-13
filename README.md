@@ -17,12 +17,12 @@ More screenshots and demos: [gallery](gallery.md).
   (new idea, side quest, or a long shot). Supports cross-harness forks and
   merging results back.
 
-  <img src="https://raw.githubusercontent.com/construct-worlds/construct/9de1982e7ec4ae9ad71c32f3f3e3f2f58fbe93ca/demos/fork-merge.gif" alt="construct fork and merge demo" width="50%">
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/9de1982e7ec4ae9ad71c32f3f3e3f2f58fbe93ca/demos/fork-merge.gif" alt="construct fork and merge demo" width="70%">
 - **Program** — collaborative, executable Markdown
   ([docs/program.md](docs/program.md)): co-develop workflows, tasks, and ideas
   with the agent, then run them from the same document.
 
-  <img src="https://raw.githubusercontent.com/construct-worlds/construct/90d02bd2c1e6108eaa5c763bde9e2d78f8786691/demos/program.gif" alt="construct program demo" width="50%">
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/90d02bd2c1e6108eaa5c763bde9e2d78f8786691/demos/program.gif" alt="construct program demo" width="70%">
 - **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
   output, spawn helpers, send input, inspect diffs, and drive Chrome.
 - **ACP (Agent Client Protocol) server** — point Agent Client Protocol clients at
@@ -32,7 +32,7 @@ More screenshots and demos: [gallery](gallery.md).
   so you can track progress, review outputs, and take action without leaving
   the TUI or web client.
 
-  <img src="https://raw.githubusercontent.com/construct-worlds/construct/0b9df04fb1fb40b2cea5f7e42b2e249a649b0ec2/demos/generative-widgets.gif" alt="construct generative widgets demo" width="50%">
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/0b9df04fb1fb40b2cea5f7e42b2e249a649b0ec2/demos/generative-widgets.gif" alt="construct generative widgets demo" width="70%">
 - **[Remote control](docs/remote-control.md) when you step away** — `/remote-control`
   opens a browser-accessible web client with a QR code. Connect from your phone,
   no service signup, no setup required.
