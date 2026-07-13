@@ -1,11 +1,11 @@
 # smith built-in agent
 
 `smith` is the built-in agent that ships with construct. It talks to OpenAI,
-Anthropic, Google Gemini, xAI Grok, or a local Ollama directly, and can also
-draw on your Codex, Claude (Pro/Max), or Grok subscription. Smith runs its own
-agent loop with shell + filesystem + construct-control tools. Many PRs for the
-construct repository have already been made from smith sessions running inside
-construct.
+Anthropic, Google Gemini, Meta Model API, xAI Grok, or a local Ollama directly,
+and can also draw on your Codex, Claude (Pro/Max), or Grok subscription. Smith
+runs its own agent loop with shell + filesystem + construct-control tools. Many
+PRs for the construct repository have already been made from smith sessions
+running inside construct.
 
 ### Quick start
 
@@ -14,6 +14,7 @@ construct.
 export ANTHROPIC_API_KEY=sk-ant-...
 # or  export OPENAI_API_KEY=sk-...
 # or  export GEMINI_API_KEY=...        # (or GOOGLE_API_KEY)
+# or  export META_API_KEY=...          # (or MODEL_API_KEY)
 # or  export GROK_API_KEY=...          # (or XAI_API_KEY)
 # or  codex login, then use --model codex-oauth:gpt-5.4-mini
 # or  claude login, then use --model claude-oauth:sonnet
@@ -32,6 +33,8 @@ The spec is one of:
 - `anthropic:<name>` — e.g. `anthropic:claude-haiku-4-5`
 - `claude-oauth:<name>` — e.g. `claude-oauth:sonnet` (alias: `claude-code-oauth:`)
 - `gemini:<name>` — e.g. `gemini:gemini-2.5-pro`
+- `meta:<name>` — e.g. `meta:muse-spark-1.1` using `META_API_KEY` or
+  `MODEL_API_KEY`
 - `grok:<name>` — e.g. `grok:grok-4.3` using `GROK_API_KEY` or `XAI_API_KEY`
 - `grok-oauth:<name>` — e.g. `grok-oauth:grok-4.3` using the Grok CLI auth file
 - `ollama:<name>` — e.g. `ollama:llama3.1`
@@ -41,7 +44,12 @@ The spec is one of:
 
 Bare names auto-detect: `gpt-*` / `o[1-5]*` → OpenAI, `claude-*` →
 Anthropic, `gemini-*` → Gemini, `grok*` → Grok, anything else → Ollama.
-When in doubt, use the explicit prefix.
+Use the explicit `meta:` prefix for Muse Spark; a bare `muse-spark-1.1`
+continues to mean an Ollama model. When in doubt, use the explicit prefix.
+
+`meta:` calls Meta's Responses API directly. Smith streams assistant text,
+supports parallel function calls and tool-result replay, and sends
+`store: false` because construct persists and replays the conversation locally.
 
 `codex-oauth:` uses your Codex CLI subscription login: run `codex login`
 once so the credentials are stored, and smith reads them from there and calls
@@ -60,7 +68,8 @@ loads a bearer token from the Grok CLI auth file instead of `GROK_API_KEY` /
 If you don't pass a model and `CONSTRUCT_SMITH_MODEL` isn't set, smith
 picks: `ANTHROPIC_API_KEY` → `claude-opus-4-8`, else `OPENAI_API_KEY`
 → `gpt-5`, else `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) →
-`gemini-2.5-pro`, else **smith fails to start** with an error explaining
+`gemini-2.5-pro`, else `META_API_KEY` (or `MODEL_API_KEY`) →
+`muse-spark-1.1`, else **smith fails to start** with an error explaining
 what's missing. The initial Status event records the chosen `provider:model`
 so you can verify.
 
@@ -84,8 +93,8 @@ OpenAI plus two OpenAI-compatible vendors — declare named profiles in
 Each `[smith.models.<name>]` entry sets:
 
 - `provider` — wire protocol to speak: `openai`, `anthropic`, `gemini`,
-  `grok`, or `ollama`. (OAuth providers can't be profiled — use their prefixes
-  directly.)
+  `meta`, `grok`, or `ollama`. (OAuth providers can't be profiled — use their
+  prefixes directly.)
 - `base_url` — endpoint URL (defaults to the protocol's public endpoint).
 - `api_key_env` — name of the env var holding the key (preferred). Or
   `api_key = "..."` inline (discouraged). If neither is set, the protocol's
@@ -109,6 +118,11 @@ model       = "llama-3.3-70b-versatile"
 provider    = "grok"
 api_key_env = "XAI_API_KEY"
 model       = "grok-4.3"
+
+[smith.models.meta]
+provider    = "meta"
+api_key_env = "META_API_KEY"
+model       = "muse-spark-1.1"
 ```
 
 ```text
@@ -170,7 +184,8 @@ window.
 
 Context budget is also pruned automatically: estimated tokens past 70%
 of the model's window drops the oldest turn pair, always keeping the
-two most-recent.
+two most-recent. Smith starts Muse Spark 1.1 with its advertised one-million-
+token input window and retains the normal runtime limit-learning fallback.
 
 ### Opt-out / customization
 
@@ -181,13 +196,15 @@ two most-recent.
   used by `claude-oauth:`.
 - `GEMINI_API_KEY` / `GOOGLE_API_KEY` — Gemini credentials (either is
   accepted).
+- `META_API_KEY` / `MODEL_API_KEY` — Meta Model API credentials (either is
+  accepted).
 - `GROK_API_KEY` / `XAI_API_KEY` — xAI Grok API credentials (either is
   accepted).
 - `GROK_HOME` — override the base directory used by `grok-oauth:` token lookup;
   Smith reads `$GROK_HOME/.grok/auth.json` instead of `~/.grok/auth.json`.
 - `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` / `GEMINI_BASE_URL` /
-  `OLLAMA_HOST` — point at alternate endpoints. Pointing `OPENAI_BASE_URL`
-  at an OpenAI-compatible vendor (OpenRouter, DeepSeek, Groq, xAI,
+  `META_BASE_URL` / `OLLAMA_HOST` — point at alternate endpoints. Pointing
+  `OPENAI_BASE_URL` at an OpenAI-compatible vendor (OpenRouter, DeepSeek, Groq, xAI,
   Mistral, …) reuses the `openai:` path with no extra config. These bind
   one endpoint per protocol; to switch between several at runtime, use
   [Model profiles](#model-profiles) instead.
