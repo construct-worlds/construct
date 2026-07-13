@@ -424,6 +424,26 @@ impl App {
         self.schedule_content_search();
     }
 
+    /// Insert a paste into the `C-x b` search line as one edit. Returns true
+    /// when the picker consumed the text; the program-clip picker keeps using
+    /// the program editor's existing paste path because its query lives in the
+    /// program buffer rather than in [`SessionPickerDialog::query`].
+    pub(super) fn session_picker_insert_text(&mut self, text: &str) -> bool {
+        let Some(dialog) = self.session_picker.as_mut() else {
+            return false;
+        };
+        if dialog.purpose != SessionPickerPurpose::Switch {
+            return false;
+        }
+        let pos = byte_pos(&dialog.query, dialog.cursor);
+        dialog.query.insert_str(pos, text);
+        dialog.cursor += text.chars().count();
+        dialog.selected = 0;
+        dialog.scroll = 0;
+        self.schedule_content_search();
+        true
+    }
+
     fn session_picker_backspace(&mut self) {
         if let Some(dialog) = self.session_picker.as_mut() {
             if dialog.cursor > 0 {

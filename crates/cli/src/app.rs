@@ -4690,6 +4690,13 @@ impl App {
             return;
         }
 
+        // The session picker owns paste events at the same precedence as
+        // ordinary key events. Without this, `C-x b` accepted typed text in
+        // its search line but sent pasted text to the previously focused PTY.
+        if self.session_picker_insert_text(&text) {
+            return;
+        }
+
         // Mirror the keystroke routing precedence (see `on_key`): pasted
         // text lands in the program only when no minibuffer/palette overlay is
         // capturing input *and* the view pane holds focus. With an overlay open,
@@ -25266,6 +25273,30 @@ mod tests {
         app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
         assert_eq!(app.session_picker.as_ref().unwrap().cursor, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_picker_paste_edits_search_at_cursor_without_reaching_pty() {
+        let (mut app, _dir, server) = captured_app().await;
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+        app.open_session_picker(SessionPickerPurpose::Switch);
+        picker_type(&mut app, "ac");
+        app.handle_session_picker_key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        ));
+
+        app.on_paste("b🙂".to_string()).await;
+
+        let dialog = app.session_picker.as_ref().expect("picker stays open");
+        assert_eq!(dialog.query, "ab🙂c");
+        assert_eq!(dialog.cursor, 3, "cursor advances by pasted characters");
+        assert!(
+            rx.try_recv().is_err(),
+            "picker paste must not leak into the previously focused PTY"
+        );
         server.abort();
     }
 
