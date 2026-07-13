@@ -14,9 +14,9 @@ More screenshots and demos: [gallery](gallery.md).
 
 ## Why construct?
 
-- **tmux for agent fleets** — manage Codex, Claude Code, Antigravity, Grok, and
-  smith sessions from your terminal — or let an agent coordinate them. CLI-only;
-  no desktop app to install.
+- **tmux for agent fleets** — manage Codex, Claude Code, OpenCode, Antigravity,
+  Grok, and smith sessions from your terminal — or let an agent coordinate them.
+  CLI-only; no desktop app to install.
 - **Fork / merge** — fork a session when you need a parallel attempt
   (new idea, side quest, or a long shot). Supports cross-harness forks and
   merging results back.
@@ -55,6 +55,8 @@ first:
 
 - **Codex** — install the `codex` CLI and complete its OAuth login.
 - **Claude Code** — install the `claude` CLI and complete its OAuth login.
+- **OpenCode** — install the `opencode` CLI and authenticate the providers you
+  plan to use.
 - **Antigravity** — install the `agy` CLI and complete its OAuth login.
 - **Grok** — install the `grok` CLI and complete its OAuth login.
 - **smith** — built in to construct. Talks to OpenAI, Anthropic, Google Gemini,
@@ -112,8 +114,8 @@ construct daemon restart --sessions
 ### 4. Start building
 
 Happy hacking. Chase the idea from your terminal: ask Codex, Claude Code,
-Antigravity, Grok, and [smith](docs/smith.md) to dive into the hard parts, then
-keep steering from your phone when you're in motion.
+OpenCode, Antigravity, Grok, and [smith](docs/smith.md) to dive into the hard
+parts, then keep steering from your phone when you're in motion.
 
 ## Upgrading
 
