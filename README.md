@@ -1,11 +1,11 @@
-# construct
-
-**A terminal-native agentic development environment.**
+<div align="center">
+  <h1>construct</h1>
+  <p><strong>A terminal-native agentic development environment.</strong></p>
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/52849f56c902397d6729ec286293064c5b15bcfe/demos/lineage-program-run.gif" alt="construct lineage and program run">
+</div>
 
 Manage Codex, Claude Code, Antigravity, Grok, and smith sessions from your
 terminal — or let an agent coordinate them.
-
-![construct lineage and program run](https://raw.githubusercontent.com/construct-worlds/construct/52849f56c902397d6729ec286293064c5b15bcfe/demos/lineage-program-run.gif)
 
 More screenshots and demos: [gallery](gallery.md).
 
