@@ -2037,7 +2037,7 @@ impl SessionManager {
     }
 
     /// Probe real availability for one configured harness (spec 0068). The
-    /// six built-in adapters get kind-specific probes; anything else (a
+    /// built-in adapters get kind-specific probes; anything else (a
     /// community adapter registered via `[adapters.<name>]`) falls back to
     /// the original "does its `binary` resolve" check, since there's no
     /// protocol-level way to ask an arbitrary AHP adapter what it wraps.
@@ -2052,6 +2052,11 @@ impl SessionManager {
             "shell" => crate::availability::Availability::ready("ready"),
             "claude" => probe_wrapper_cli("CONSTRUCT_CLAUDE_CMD", "CONSTRUCT_CLAUDE_BIN", "claude"),
             "codex" => probe_wrapper_cli("CONSTRUCT_CODEX_CMD", "CONSTRUCT_CODEX_BIN", "codex"),
+            "opencode" => probe_wrapper_cli(
+                "CONSTRUCT_OPENCODE_CMD",
+                "CONSTRUCT_OPENCODE_BIN",
+                "opencode",
+            ),
             "antigravity" | "agy" => probe_wrapper_cli(
                 "CONSTRUCT_ANTIGRAVITY_CMD",
                 "CONSTRUCT_ANTIGRAVITY_BIN",
@@ -2686,7 +2691,7 @@ impl SessionManager {
         };
         // Fork, not a fresh child (spec 0089): when the owning session's
         // harness supports native fork-resume (currently claude, codex,
-        // grok — see `Self::native_id_file_name`), spawning with the same
+        // opencode, grok — see `Self::native_id_file_name`), spawning with the same
         // harness and `forked_from` set makes the daemon's existing fork-
         // resume wiring (`session/lifecycle.rs`) hand the new process the
         // owning session's actual native conversation state — real model
@@ -4193,6 +4198,7 @@ impl SessionManager {
         match harness {
             "claude" => Some("claude_session_id.txt"),
             "codex" => Some("codex_session_id.txt"),
+            "opencode" => Some("opencode_session_id.txt"),
             "grok" => Some("grok_session_id.txt"),
             _ => None,
         }
@@ -4649,7 +4655,7 @@ fn effective_mode(params: &CreateSessionParams) -> String {
 
 fn builtin_harness_capabilities(name: &str) -> construct_protocol::Capabilities {
     match name {
-        "shell" | "claude" | "codex" | "smith" => construct_protocol::Capabilities {
+        "shell" | "claude" | "codex" | "opencode" | "smith" => construct_protocol::Capabilities {
             supports_pty: true,
             ..Default::default()
         },
@@ -5211,6 +5217,18 @@ mod tests {
                 cols: 160,
                 rows: 50
             })
+        );
+    }
+
+    #[test]
+    fn opencode_native_fork_uses_its_persisted_session_id() {
+        assert_eq!(
+            lifecycle::native_fork_spec("opencode"),
+            Some(("opencode_session_id.txt", "CONSTRUCT_OPENCODE_FORK_FROM"))
+        );
+        assert_eq!(
+            SessionManager::native_id_file_name("opencode"),
+            Some("opencode_session_id.txt")
         );
     }
 
@@ -7011,7 +7029,7 @@ mod tests {
 
         let id = "snativeidchange";
         let entry = synthetic_entry(id, construct_protocol::SessionKind::User, 0);
-        entry.summary.write().await.harness = "claude".into();
+        entry.summary.write().await.harness = "opencode".into();
         mgr.sessions.write().await.insert(id.into(), entry.clone());
 
         mgr.handle_event(
@@ -7057,7 +7075,7 @@ mod tests {
         assert!(forked_from.is_reset_snapshot);
         assert_eq!(forked_from.transcript_seq, 2);
         assert_eq!(child.event_count, 2);
-        assert_eq!(child.title.as_deref(), Some("(cleared) claude"));
+        assert_eq!(child.title.as_deref(), Some("(cleared) opencode"));
         // Forking the snapshot must spawn the same way forking the live
         // session would (interactive PTY, not headless) — `has_pty`/`mode`
         // are carried from the live session, not hardcoded to headless
@@ -7072,9 +7090,12 @@ mod tests {
         );
         assert_eq!(child.mode, None);
 
-        let child_native_id =
-            std::fs::read_to_string(storage.session_dir(&child.id).join("claude_session_id.txt"))
-                .expect("child native id file");
+        let child_native_id = std::fs::read_to_string(
+            storage
+                .session_dir(&child.id)
+                .join("opencode_session_id.txt"),
+        )
+        .expect("child native id file");
         assert_eq!(child_native_id, "native-a");
 
         let child_transcript = storage
