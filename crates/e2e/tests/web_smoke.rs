@@ -236,11 +236,11 @@ async fn web_client_loads_and_websocket_connects() {
     );
     assert_eq!(
         web_terminal_background["light"],
-        serde_json::json!([246, 248, 251])
+        serde_json::json!([255, 255, 255])
     );
     assert_eq!(
         web_terminal_background["report"]["params"]["background"],
-        serde_json::json!([246, 248, 251])
+        serde_json::json!([255, 255, 255])
     );
 
     // Terminal fast-open hydrates only a small recent PTY tail first;
@@ -1726,12 +1726,13 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(scroll_buttons["right"], "8px");
     assert_eq!(scroll_buttons["fontSize"], "11px");
     assert_eq!(scroll_buttons["hook"], true);
+    let overlay_bg = scroll_buttons["background"].as_str().unwrap_or_default();
+    // Chrome serializes the color-mix() result as `color(srgb r g b / a)`;
+    // older plain-rgba styling serialized as `rgba(...)`. Either way the
+    // contract is a translucent backdrop, not an opaque plate.
     assert!(
-        scroll_buttons["background"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("rgba"),
-        "expected transparent overlay background, got {scroll_buttons:?}"
+        overlay_bg.contains("rgba") || overlay_bg.contains("/ 0.75"),
+        "expected translucent overlay background, got {scroll_buttons:?}"
     );
     // Scroll only — no `focus` calls. Focusing xterm would summon the
     // mobile soft keyboard when the user merely jumps scrollback.
