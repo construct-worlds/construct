@@ -1,9 +1,11 @@
 //! OpenCode CLI adapter.
 //!
 //! Runs OpenCode's native TUI under construct's PTY and injects a tiny local
-//! OpenCode plugin that records the active native session id. That id lets a
-//! construct session resume the same OpenCode conversation after a daemon
-//! restart, including after OpenCode's `/new` or session-switching commands.
+//! OpenCode plugin that records the active native session id and the model
+//! that session is answering with. The id lets a construct session resume the
+//! same OpenCode conversation after a daemon restart, including after
+//! OpenCode's `/new` or session-switching commands; the model keeps the
+//! session's recorded model in step with OpenCode's own `/models` picker.
 //!
 //! Honors `CONSTRUCT_OPENCODE_CMD` for a full command prefix, falling back to
 //! `CONSTRUCT_OPENCODE_BIN`, then `opencode` on `PATH`, then the standard
@@ -18,18 +20,48 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 const SESSION_ID_FILE: &str = "opencode_session_id.txt";
+const MODEL_FILE: &str = "opencode_model.txt";
 const PLUGIN_FILE: &str = "construct-opencode-session.js";
 
-const SESSION_PLUGIN: &str = r#"export const ConstructSession = async () => ({
-  event: async ({ event }) => {
-    if (event.type !== "session.created") return
-    const info = event.properties?.info
-    const forkFrom = process.env.CONSTRUCT_OPENCODE_FORK_FROM
-    if (!info?.id || (info.parentID && info.parentID !== forkFrom)) return
-    const file = process.env.CONSTRUCT_OPENCODE_SESSION_FILE
-    if (file) await Bun.write(file, info.id + "\n")
-  },
-})
+/// OpenCode keeps its conversations in a database shared by every OpenCode
+/// process, so both the active session id and the model it answers with have
+/// to be observed from inside our own process. The plugin records the session
+/// id on creation and, for every assistant reply on that session, the
+/// `provider/model` pair OpenCode actually used — the same form OpenCode's
+/// own model flag takes, so a resumed session can be put back on it.
+/// Assistant replies from child sessions (OpenCode's own subagents) carry a
+/// different session id and are ignored, so a subagent's model never
+/// overwrites the conversation's.
+const SESSION_PLUGIN: &str = r#"export const ConstructSession = async () => {
+  const sessionFile = process.env.CONSTRUCT_OPENCODE_SESSION_FILE
+  const modelFile = process.env.CONSTRUCT_OPENCODE_MODEL_FILE
+  const forkFrom = process.env.CONSTRUCT_OPENCODE_FORK_FROM
+  let rootId = null
+  const root = async () => {
+    if (!rootId && sessionFile) {
+      const recorded = await Bun.file(sessionFile).text().catch(() => "")
+      rootId = recorded.trim() || null
+    }
+    return rootId
+  }
+  return {
+    event: async ({ event }) => {
+      const info = event.properties?.info
+      if (event.type === "session.created") {
+        if (!info?.id || (info.parentID && info.parentID !== forkFrom)) return
+        rootId = info.id
+        if (sessionFile) await Bun.write(sessionFile, info.id + "\n")
+        return
+      }
+      if (event.type === "message.updated") {
+        if (!modelFile || info?.role !== "assistant") return
+        if (!info.providerID || !info.modelID) return
+        if (info.sessionID !== (await root())) return
+        await Bun.write(modelFile, info.providerID + "/" + info.modelID + "\n")
+      }
+    },
+  }
+}
 "#;
 
 pub async fn run() -> anyhow::Result<()> {
@@ -103,13 +135,19 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
         let mcp = construct_mcp_entry(&ctx.session_id);
         match install_session_integration(dir, inherited_config.as_ref(), mcp) {
             Ok(config) => {
+                let model_file = dir.join(MODEL_FILE);
                 env.retain(|(key, _)| key != "OPENCODE_CONFIG_CONTENT");
                 env.push(("OPENCODE_CONFIG_CONTENT".into(), config));
                 env.push((
                     "CONSTRUCT_OPENCODE_SESSION_FILE".into(),
                     session_file.to_string_lossy().into_owned(),
                 ));
+                env.push((
+                    "CONSTRUCT_OPENCODE_MODEL_FILE".into(),
+                    model_file.to_string_lossy().into_owned(),
+                ));
                 spawn_native_id_watcher(session_file.to_path_buf(), native_id, ctx.emit.clone());
+                spawn_model_watcher(model_file, params.model.clone(), ctx.emit.clone());
             }
             Err(error) => ctx.emit.log(format!(
                 "opencode native-session capture disabled: {error:#}"
@@ -161,6 +199,24 @@ fn read_native_id(path: &Path) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| value.starts_with("ses_") && value.len() > 4)
+}
+
+/// The `provider/model` pair the plugin last recorded, rejecting anything
+/// that isn't in that shape — a half-written file, or a future OpenCode that
+/// stops reporting one of the two halves, must not be reported as the
+/// session's model. The model half may itself contain slashes (an OpenRouter
+/// id like `openrouter/anthropic/claude-sonnet-4`), so only the first
+/// separator is structural.
+fn read_model(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.contains(char::is_whitespace))
+        .filter(|value| {
+            value
+                .split_once('/')
+                .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
+        })
 }
 
 fn install_session_integration(
@@ -256,6 +312,37 @@ fn spawn_native_id_watcher(path: PathBuf, initial_id: Option<String>, emit: Even
     });
 }
 
+/// Report the model OpenCode is actually answering with. Seeded with the
+/// model the daemon asked for at launch (a resume re-injects the recorded
+/// one), so a session that comes back on the same model stays quiet and only
+/// a real change — the first reply of a session started without an explicit
+/// model, or a mid-session switch through OpenCode's own picker — is
+/// reported.
+fn spawn_model_watcher(path: PathBuf, requested: Option<String>, emit: EventEmitter) {
+    tokio::spawn(async move {
+        let mut current = requested;
+        let mut timer = tokio::time::interval(std::time::Duration::from_millis(100));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            timer.tick().await;
+            let Some(observed) = read_model(&path) else {
+                continue;
+            };
+            if update_model(&mut current, observed.clone()) {
+                emit.emit(SessionEvent::ModelChanged { model: observed });
+            }
+        }
+    });
+}
+
+fn update_model(current: &mut Option<String>, observed: String) -> bool {
+    if current.as_deref() == Some(observed.as_str()) {
+        return false;
+    }
+    *current = Some(observed);
+    true
+}
+
 fn update_native_id(current: &mut Option<String>, observed: String) -> Option<(String, String)> {
     match current {
         None => {
@@ -292,6 +379,49 @@ mod tests {
         assert_eq!(read_native_id(&path), None);
         std::fs::write(&path, "ses_abc123\n").unwrap();
         assert_eq!(read_native_id(&path).as_deref(), Some("ses_abc123"));
+    }
+
+    #[test]
+    fn model_requires_provider_and_model_halves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(MODEL_FILE);
+        std::fs::write(&path, "anthropic/claude-sonnet-4-5\n").unwrap();
+        assert_eq!(
+            read_model(&path).as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        // An OpenRouter-style id keeps the slashes past the provider.
+        std::fs::write(&path, "openrouter/anthropic/claude-sonnet-4\n").unwrap();
+        assert_eq!(
+            read_model(&path).as_deref(),
+            Some("openrouter/anthropic/claude-sonnet-4")
+        );
+        for junk in ["", "\n", "anthropic", "/claude", "anthropic/"] {
+            std::fs::write(&path, junk).unwrap();
+            assert_eq!(read_model(&path), None, "accepted junk model {junk:?}");
+        }
+    }
+
+    #[test]
+    fn model_changes_report_first_observation_and_live_switch() {
+        let first = "meta/muse-spark-1.1";
+        let switched = "anthropic/claude-sonnet-4-5";
+        // No model requested at launch: the first reply establishes it.
+        let mut current = None;
+        assert!(update_model(&mut current, first.into()));
+        assert!(!update_model(&mut current, first.into()));
+        // A switch through OpenCode's own picker is a change.
+        assert!(update_model(&mut current, switched.into()));
+        assert_eq!(current.as_deref(), Some(switched));
+    }
+
+    #[test]
+    fn resumed_model_is_not_rereported() {
+        // Respawn re-injects the recorded model, so replies on that same
+        // model must not churn the daemon with a redundant change.
+        let resumed = "anthropic/claude-sonnet-4-5";
+        let mut current = Some(resumed.to_string());
+        assert!(!update_model(&mut current, resumed.into()));
     }
 
     #[test]
