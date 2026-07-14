@@ -4630,6 +4630,7 @@ async function switchCurrentViewMode(mode) {
 }
 
 async function selectSession(id, { replaceUrl = false } = {}) {
+  rpc("session.mark_seen", { session_id: id }).catch(() => {});
   if (state.currentId === id) {
     setLocationSessionId(id, { replace: replaceUrl });
     return;
