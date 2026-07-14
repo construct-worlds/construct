@@ -4840,7 +4840,7 @@ impl App {
     }
 
     pub fn select_session(&mut self, id: String) {
-        self.select_session_inner(id, true);
+        self.select_session_inner(id, true, true);
     }
 
     /// Select a session immediately after creation. The create RPC can finish
@@ -4855,10 +4855,10 @@ impl App {
     }
 
     fn select_session_without_transition(&mut self, id: String) {
-        self.select_session_inner(id, false);
+        self.select_session_inner(id, false, false);
     }
 
-    fn select_session_inner(&mut self, id: String, transition: bool) {
+    fn select_session_inner(&mut self, id: String, transition: bool, sync_window: bool) {
         self.reset_vim_mode();
         let previous_id = self.selection.session_id().map(str::to_owned);
         if transition && self.selection.session_id() != Some(id.as_str()) {
@@ -4876,11 +4876,14 @@ impl App {
             session.needs_attention = false;
         }
         self.selection = Selection::Session(id);
-        // Keep the pane tree in sync before reporting focus. Most navigation
-        // callers also synchronize after selecting, but reporting here used
-        // to observe the outgoing pane selection and clear the marker one
-        // navigation late.
-        self.sync_active_window_selection();
+        if sync_window {
+            // Keep the pane tree in sync before reporting focus. Most
+            // navigation callers also synchronize after selecting, but
+            // reporting here used to observe the outgoing pane selection and
+            // clear the marker one navigation late. Pinned-tile focus passes
+            // `false` because it intentionally leaves the main pane alone.
+            self.sync_active_window_selection();
+        }
         self.restore_lineage_scroll_for_selected_session();
         self.report_focused_sessions();
         self.transcript.clear();
