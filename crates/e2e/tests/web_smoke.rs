@@ -191,7 +191,7 @@ async fn web_client_loads_and_websocket_connects() {
         .expect("json value");
     assert_eq!(inherited_project["group_id"], "project-123");
 
-    // Every WebUI xterm paints a concrete background, even for Matrix/Basic.
+    // Every WebUI xterm paints a concrete background, even for Matrix.
     // Theme changes must report that RGB value so the daemon remains the sole
     // authority answering live child OSC 11 probes.
     let web_terminal_background: serde_json::Value = page

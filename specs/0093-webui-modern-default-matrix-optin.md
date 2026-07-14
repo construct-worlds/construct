@@ -21,7 +21,9 @@ know from mainstream AI chat apps:
   overlay buttons); on desktop widths, dialogs present as centered modal
   cards while narrow (phone) widths keep the bottom-sheet idiom.
 - Theme colors are restrained: neutral dark/light bases with the construct
-  green as the accent. The default theme is the modern dark theme.
+  green as the accent. The default theme is "System", which follows the
+  OS light/dark preference live and resolves to the modern dark or light
+  palette.
 
 The full CRT treatment — monospace chrome, scanline overlay, phosphor glow,
 neon palette — remains available as the "Matrix" theme, applied via
@@ -53,8 +55,9 @@ full nostalgia skin stays one picker option away.
 - Theme data must keep an identical variable key set across themes; the
   runtime applies only the selected theme's keys, so a key missing from one
   theme would leave stale values behind on switch.
-- The default for new clients is the modern dark theme; changing the default
-  again is a product decision, not a styling detail.
+- The default for new clients is "System" (OS-following light/dark); an
+  explicit theme choice always wins over the OS preference. Changing the
+  default again is a product decision, not a styling detail.
 
 ## Non-Goals
 

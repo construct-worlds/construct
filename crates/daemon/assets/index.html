@@ -52,6 +52,31 @@
       "Helvetica Neue", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   }
+  /* Default theme is "system": before the JS applies the stored choice,
+     the first paint follows the OS preference (dark values above, light
+     values here). applyWebTheme() then writes inline vars, which win. */
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #ffffff;
+      --bg-elev: #f7f7f8;
+      --bg-elev-2: #ececee;
+      --border: #e0e0e4;
+      --border-faint: rgba(20, 20, 30, 0.08);
+      --fg: #1c1c21;
+      --fg-dim: #6b6b76;
+      --fg-faint: #9494a0;
+      --accent: #1a9e58;
+      --accent-fg: #ffffff;
+      --accent-alt: #0969da;
+      --ok: #1a7f37;
+      --warn: #9a6700;
+      --err: #cf222e;
+      --bubble-user: #ececee;
+      --session-scrollbar-track: transparent;
+      --session-scrollbar-thumb: rgba(28, 28, 33, 0.30);
+      --term-bg: #ffffff;
+    }
+  }
   * { box-sizing: border-box; }
   html, body {
     margin: 0; padding: 0;
@@ -2465,9 +2490,9 @@
       <label class="ns-row">
         <span class="ns-label">theme</span>
         <select id="themePicker" class="ns-input" title="Theme">
+          <option value="system">System</option>
           <option value="dark">Dark</option>
           <option value="light">Light</option>
-          <option value="basic">Basic</option>
           <option value="matrix">Matrix</option>
         </select>
       </label>
@@ -2704,52 +2729,6 @@ const WEB_THEMES = {
       brightWhite: "#d1d5da",
     },
   },
-  basic: {
-    css: {
-      "--bg": "#101012",
-      "--bg-elev": "#17171a",
-      "--bg-elev-2": "#222226",
-      "--border": "#2c2c31",
-      "--border-faint": "rgba(235, 235, 245, 0.08)",
-      "--fg": "#e5e5ea",
-      "--fg-dim": "#a0a0aa",
-      "--fg-faint": "#6f6f79",
-      "--accent": "#3b82f6",
-      "--accent-fg": "#ffffff",
-      "--accent-alt": "#a855f7",
-      "--ok": "#22c55e",
-      "--warn": "#eab308",
-      "--err": "#ef4444",
-      "--bubble-user": "#222226",
-      "--session-scrollbar-track": "transparent",
-      "--session-scrollbar-thumb": "rgba(229, 229, 234, 0.28)",
-      "--term-bg": "#101012",
-      "--font-ui": SANS_FONT_STACK,
-    },
-    terminal: {
-      background: "#101012",
-      foreground: "#e5e5ea",
-      cursor: "#3b82f6",
-      cursorAccent: "#101012",
-      selectionBackground: "#374151",
-      black: "#101012",
-      red: "#ef4444",
-      green: "#22c55e",
-      yellow: "#eab308",
-      blue: "#3b82f6",
-      magenta: "#a855f7",
-      cyan: "#06b6d4",
-      white: "#e5e5ea",
-      brightBlack: "#737373",
-      brightRed: "#f87171",
-      brightGreen: "#4ade80",
-      brightYellow: "#facc15",
-      brightBlue: "#60a5fa",
-      brightMagenta: "#c084fc",
-      brightCyan: "#22d3ee",
-      brightWhite: "#fafafa",
-    },
-  },
   matrix: {
     css: {
       "--bg": "#020805",
@@ -2800,15 +2779,25 @@ const WEB_THEMES = {
 
 function loadWebThemeName() {
   const stored = localStorage.getItem(WEB_THEME_KEY);
-  return WEB_THEMES[stored] ? stored : "dark";
+  return stored === "system" || WEB_THEMES[stored] ? stored : "system";
+}
+
+/** Resolve a picker value to a concrete WEB_THEMES entry: "system"
+ *  follows the OS light/dark preference. */
+function resolveWebThemeName(name = loadWebThemeName()) {
+  if (name === "system") {
+    const light = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+    return light ? "light" : "dark";
+  }
+  return WEB_THEMES[name] ? name : "dark";
 }
 
 function xtermThemeFor(name = loadWebThemeName()) {
-  return { ...WEB_THEMES[name].terminal };
+  return { ...WEB_THEMES[resolveWebThemeName(name)].terminal };
 }
 
 function webTerminalBackground(name = loadWebThemeName()) {
-  const color = WEB_THEMES[name]?.terminal?.background || "";
+  const color = WEB_THEMES[resolveWebThemeName(name)]?.terminal?.background || "";
   const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(color);
   if (!match) return null;
   return match.slice(1).map((component) => parseInt(component, 16));
@@ -2821,10 +2810,13 @@ function reportWebTerminalBackground(name = loadWebThemeName()) {
 }
 
 function applyWebTheme(name, { persist = true } = {}) {
-  const themeName = WEB_THEMES[name] ? name : "dark";
-  const theme = WEB_THEMES[themeName];
-  document.documentElement.dataset.theme = themeName;
-  document.documentElement.style.colorScheme = themeName === "light" ? "light" : "dark";
+  // The stored/picker value ("system" included); `resolved` is the
+  // concrete palette it lands on right now.
+  const themeName = name === "system" || WEB_THEMES[name] ? name : "system";
+  const resolved = resolveWebThemeName(themeName);
+  const theme = WEB_THEMES[resolved];
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.style.colorScheme = resolved === "light" ? "light" : "dark";
   for (const [key, value] of Object.entries(theme.css)) {
     document.documentElement.style.setProperty(key, value);
   }
@@ -2832,12 +2824,23 @@ function applyWebTheme(name, { persist = true } = {}) {
   if (persist) localStorage.setItem(WEB_THEME_KEY, themeName);
   if (typeof state !== "undefined") {
     for (const handle of state.terminalById.values()) {
-      if (handle.term) handle.term.options.theme = xtermThemeFor(themeName);
+      if (handle.term) handle.term.options.theme = xtermThemeFor(resolved);
     }
-    if (state.term) state.term.options.theme = xtermThemeFor(themeName);
-    if (state.program?.hover?.term) state.program.hover.term.options.theme = xtermThemeFor(themeName);
-    reportWebTerminalBackground(themeName);
+    if (state.term) state.term.options.theme = xtermThemeFor(resolved);
+    if (state.program?.hover?.term) state.program.hover.term.options.theme = xtermThemeFor(resolved);
+    reportWebTerminalBackground(resolved);
   }
+}
+
+// "System" follows the OS live: when the OS flips light/dark and the
+// stored choice is system, re-resolve without persisting anything.
+const systemThemeQuery = window.matchMedia
+  ? window.matchMedia("(prefers-color-scheme: light)")
+  : null;
+if (systemThemeQuery && systemThemeQuery.addEventListener) {
+  systemThemeQuery.addEventListener("change", () => {
+    if (loadWebThemeName() === "system") applyWebTheme("system", { persist: false });
+  });
 }
 
 function sessionIdFromLocation() {
