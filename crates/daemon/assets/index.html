@@ -350,6 +350,13 @@
   .session-list .item .pin-indicator.is-empty {
     color: transparent;
   }
+  .session-list .item .attention-dot {
+    color: var(--accent-alt);
+    font-size: 11px;
+    line-height: 1;
+    text-align: center;
+    flex-shrink: 0;
+  }
   .session-list .item .sub {
     color: var(--fg-faint);
     font-size: 11px;
@@ -4014,7 +4021,9 @@ function sessionRowDescriptor(item) {
       (s.archived ? " is-archived" : ""),
     inner:
       disclosure + pin + sessionStatusHtml(s) +
-      `<div class="row-main"><div class="name-line"><div class="name">${escape(sessionDisplayTitle(s))}</div></div>${harness}</div>`,
+      `<div class="row-main"><div class="name-line">${
+        s.needs_attention && !s.archived ? `<span class="attention-dot" title="needs attention" aria-label="needs attention">●</span>` : ""
+      }<div class="name">${escape(sessionDisplayTitle(s))}</div></div>${harness}</div>`,
   };
 }
 
