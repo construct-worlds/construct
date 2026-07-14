@@ -24,7 +24,7 @@ async fn shared_dialect_web_surfaces() {
     let d = Daemon::spawn().await.expect("daemon");
     let r = d
         .client
-        .remote_start(true, None)
+        .remote_start(construct_protocol::TunnelProvider::None, None)
         .await
         .expect("remote.start");
 
@@ -43,7 +43,7 @@ async fn shared_dialect_web_surfaces() {
     };
     let _handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
     let page = browser.new_page("about:blank").await.expect("new page");
-    page.goto(&inject_userinfo(&r.url, "remote", &r.password))
+    page.goto(&inject_userinfo(&r.local_url, "remote", &r.password))
         .await
         .expect("goto");
 

@@ -30,7 +30,7 @@ async fn web_client_loads_and_websocket_connects() {
     let d = Daemon::spawn().await.expect("daemon");
     let r = d
         .client
-        .remote_start(/* local_only */ true, /* password */ None)
+        .remote_start(construct_protocol::TunnelProvider::None, /* password */ None)
         .await
         .expect("remote.start");
 
@@ -80,7 +80,7 @@ async fn web_client_loads_and_websocket_connects() {
     // `Fetch`-domain interception (`Page::authenticate`) is the
     // documented alternative but is unreliable on the first
     // navigation in headless mode (see chromiumoxide#issues).
-    let url_with_creds = inject_userinfo(&r.url, "remote", &r.password);
+    let url_with_creds = inject_userinfo(&r.local_url, "remote", &r.password);
     page.goto(&url_with_creds).await.expect("goto");
 
     // The web client's JS sets `#conn`'s `data-state` to `"open"`
