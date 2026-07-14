@@ -976,26 +976,33 @@ pub mod ipc_method {
     pub const SESSION_CHAT_VIEWER_ACTIVE: &str = "session.chat_viewer_active";
     pub const SUBSCRIBE_EVENTS: &str = "subscribe.events";
     pub const UNSUBSCRIBE_EVENTS: &str = "unsubscribe.events";
-    /// Start the remote WS listener + cloudflared tunnel (idempotent)
-    /// and return a URL + QR the caller can show the user. Lets the
-    /// TUI's `/remote-control` slash command surface the QR on
-    /// demand instead of requiring the env-var-at-startup flow.
+    /// Bind the remote WS listener (idempotent) and return a URL + QR
+    /// the caller can show the user. With `provider: None` — the
+    /// default — this exposes nothing past the local network: no
+    /// tunnel subprocess is spawned, and the reply describes the LAN
+    /// and loopback addresses. Naming a provider additionally starts
+    /// that tunnel and waits for its URL.
     pub const REMOTE_START: &str = "remote.start";
-    /// Take the remote WS listener back down: kill the cloudflared
+    /// Probe every tunnel provider the daemon knows about and report
+    /// which ones could start right now. Read-only: spawns no tunnel
+    /// and changes no state, so the dialog can call it freely to
+    /// decide which buttons to offer.
+    pub const REMOTE_PROVIDERS: &str = "remote.providers";
+    /// Take the remote WS listener back down: kill the tunnel
     /// subprocess (URL stops resolving), drop the listener (no new
     /// connections accepted), and clear the daemon-side
     /// `RemoteState` so the next `/remote-control` invocation mints
-    /// a fresh token. Existing in-flight connections die naturally
-    /// once cloudflared exits. Idempotent — calling stop when
+    /// a fresh password. Existing in-flight connections die naturally
+    /// once the tunnel exits. Idempotent — calling stop when
     /// nothing is running returns Ok with `was_running: false`.
     pub const REMOTE_STOP: &str = "remote.stop";
     /// Restart the daemon process in place — persist remote state
-    /// (token, password, port, tunnel URL) to disk, exec() the
-    /// current executable so any on-disk binary upgrade is picked
-    /// up. cloudflared subprocess is left running (detached process
-    /// group) so the public URL survives the restart; the new
-    /// daemon binds the same local port and adopts the still-alive
-    /// tunnel without re-spawning. Returns the new exe path and
+    /// (token, password, port, provider, tunnel URL) to disk, exec()
+    /// the current executable so any on-disk binary upgrade is picked
+    /// up. The tunnel subprocess is left running (detached process
+    /// group) so its URL survives the restart; the new daemon binds
+    /// the same local port and adopts the still-alive tunnel without
+    /// re-spawning. Returns the new exe path and
     /// timestamp the new daemon will report on startup; the IPC
     /// connection is closed by the kernel during exec(), so clients
     /// detect the restart as a socket close and reconnect.
@@ -2550,27 +2557,89 @@ pub struct RemoteStateNotificationPayload {
     pub clients: u32,
 }
 
-/// Params for the `remote.start` IPC method. Default = "set up
-/// the full public tunnel" (what the user typing `/remote-control`
-/// gets). `local_only` flips to localhost-only mode for the
-/// `/remote-control-debug` flow and CI smoke tests — no
-/// cloudflared spawn, no tunnel wait, just bind + return.
+/// How the remote listener is published beyond this machine.
+///
+/// The listener itself always binds every interface and is gated by
+/// HTTP Basic auth, so it is reachable from the local network with no
+/// provider at all. A provider adds reach *past* the LAN, and each one
+/// buys a different trade:
+///
+/// - `Cloudflare` — a `cloudflared` quick tunnel. Public internet,
+///   ephemeral URL that nobody can guess. Needs no account.
+/// - `Tailscale` — `tailscale serve`. Reachable only from the user's
+///   tailnet, with a stable URL. Access is gated by tailnet ACLs
+///   rather than by URL secrecy, which makes it the safer default for
+///   anyone who already runs Tailscale.
+///
+/// `None` is not a failure state — it is the resting state of the
+/// dialog before the user picks, and it is a perfectly good way to
+/// use remote control from a phone on the same Wi-Fi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelProvider {
+    #[default]
+    None,
+    Cloudflare,
+    Tailscale,
+}
+
+impl TunnelProvider {
+    /// Stable u8 encoding so the daemon can keep the live provider in
+    /// an atomic alongside the rest of the remote state.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            TunnelProvider::None => 0,
+            TunnelProvider::Cloudflare => 1,
+            TunnelProvider::Tailscale => 2,
+        }
+    }
+
+    /// Inverse of [`TunnelProvider::as_u8`]. Unknown values decode to
+    /// `None` rather than panicking — a forward-compatible snapshot
+    /// written by a newer daemon degrades to "no tunnel", which is
+    /// safe.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => TunnelProvider::Cloudflare,
+            2 => TunnelProvider::Tailscale,
+            _ => TunnelProvider::None,
+        }
+    }
+
+    /// Human-facing name, used in dialogs, hints, and log lines.
+    pub fn label(self) -> &'static str {
+        match self {
+            TunnelProvider::None => "local network",
+            TunnelProvider::Cloudflare => "Cloudflare",
+            TunnelProvider::Tailscale => "Tailscale",
+        }
+    }
+}
+
+/// Params for the `remote.start` IPC method.
+///
+/// `provider` defaults to `None`: bind the listener and return the
+/// local/LAN URL without exposing anything past this network. That is
+/// what opening the `/remote-control` dialog does — a tunnel is only
+/// created once the user explicitly picks a provider, so merely
+/// *looking* at the dialog never publishes the daemon.
 ///
 /// `password` is the optional user-supplied override for the HTTP
 /// Basic auth gate. When unset, the daemon auto-generates a
-/// memorable 3-token password (`swift-fox-42` shape). The chosen
+/// memorable 3-token password (`swift.fox.42` shape). The chosen
 /// password is returned in `RemoteStartResult` so the popup can
-/// display it.
+/// display it. Only honored on the first start of a listener's life.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RemoteStartParams {
     #[serde(default)]
-    pub local_only: bool,
+    pub provider: TunnelProvider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
-    /// Tunnel mode normally waits for cloudflared's public URL before
+    /// Tunnel mode normally waits for the provider's URL before
     /// replying. Interactive clients can set this false to get an
-    /// immediate localhost result, paint a progress dialog, then poll
-    /// again with waiting enabled in the background.
+    /// immediate local result, paint a progress dialog, then poll
+    /// again with waiting enabled in the background. Ignored when
+    /// `provider` is `None` (there is nothing to wait for).
     #[serde(default = "default_true")]
     pub wait_for_tunnel: bool,
 }
@@ -2597,38 +2666,86 @@ pub struct DevAssetsResult {
 
 /// Result of the `remote.start` IPC method. Always reflects what
 /// the daemon was *asked* for (via `RemoteStartParams`), never a
-/// "best effort fallback" — that asymmetry is what makes the two
-/// slash verbs feel distinct. In tunnel mode the daemon waits up
-/// to ~15s for cloudflared to publish its URL and returns a
-/// JSON-RPC *error* if it doesn't; in local-only mode the URL is
-/// always the `ws://127.0.0.1:<port>` form with `tunnel_ready =
-/// false`, no hint, no waiting.
+/// "best effort fallback". With a provider set, the daemon waits up
+/// to ~15s for that provider to publish its URL and returns a
+/// JSON-RPC *error* if it doesn't — it never silently degrades to
+/// the local URL, because a user who asked to be reachable from a
+/// coffee shop must not be told "ready" when they are not.
+///
+/// With `provider: None`, the reply is immediate and describes what
+/// is reachable without any tunnel: the loopback URL always, plus
+/// the LAN URL when this machine has one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteStartResult {
-    /// The URL to share. `wss://<rand>.trycloudflare.com/t/<token>`
-    /// in tunnel mode (always — failure produces a JSON-RPC error
-    /// instead of a degraded URL), `ws://127.0.0.1:<port>/t/<token>`
-    /// in local-only mode.
+    /// The URL to show most prominently and encode in `qr`. The
+    /// provider's URL once a tunnel is up; otherwise the LAN URL,
+    /// falling back to loopback on a machine with no usable LAN
+    /// address.
     pub url: String,
     /// Multi-line Unicode QR rendering of `url`. Empty when the
     /// encoder rejected the input (rare); callers should fall back
     /// to printing the URL alone.
     pub qr: String,
-    /// True iff `url` is the public tunnel URL. Always true in
-    /// successful tunnel mode; always false in local-only mode.
+    /// True iff `url` is a provider URL reachable beyond this
+    /// network. False whenever `url` is the LAN or loopback address.
     pub tunnel_ready: bool,
     /// HTTP Basic auth password required to load the URL. Either
     /// the caller's override (from `RemoteStartParams.password`)
-    /// or the daemon's auto-generated 3-token string. Username on
-    /// the wire is ignored by the daemon — only the password
-    /// matters.
+    /// or the daemon's auto-generated 3-token string. The username
+    /// is fixed (see `REMOTE_USERNAME` in the daemon).
     pub password: String,
     /// Optional user-readable hint. Reserved for unusual states —
-    /// typically `None` because callers can infer from
-    /// `tunnel_ready` whether they're looking at a public or
-    /// local URL.
+    /// e.g. "no LAN address found", or "starting tunnel…" on the
+    /// non-waiting first leg of an interactive start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Which provider is actually publishing `url`. `None` means the
+    /// listener is only reachable from this machine + the LAN.
+    #[serde(default)]
+    pub provider: TunnelProvider,
+    /// Loopback URL for this listener. Always populated, whatever the
+    /// provider — it is the one address guaranteed to work, and the
+    /// dialog shows it as a fallback the user can type by hand.
+    #[serde(default)]
+    pub local_url: String,
+    /// LAN URL (`http://<private-ip>:<port>/`), when this machine has
+    /// a private-range IPv4 address. `None` on a machine with no LAN
+    /// (CI containers, VPN-only routing), in which case the dialog
+    /// says so rather than showing an address that cannot work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan_url: Option<String>,
+}
+
+/// Params for the `remote.providers` IPC method. No options — the
+/// daemon probes every provider it knows about.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoteProvidersParams {}
+
+/// One provider's readiness, as probed by the daemon.
+///
+/// The dialog lists every provider the daemon knows about — including
+/// the ones that cannot run — so the user learns that Tailscale is an
+/// option at all, and what is missing. A provider that is simply
+/// absent from the list teaches nobody anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteProviderInfo {
+    pub provider: TunnelProvider,
+    /// True iff starting this provider right now would be expected to
+    /// work: binary present, and (where it applies) the local agent
+    /// logged in and able to issue a certificate.
+    pub available: bool,
+    /// Why it is unavailable, phrased as something the user can act on
+    /// ("tailscale is not logged in — run `tailscale up`"). `None`
+    /// when `available` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Result of `remote.providers`: one entry per known provider, in a
+/// stable order suitable for rendering as a row of buttons.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoteProvidersResult {
+    pub providers: Vec<RemoteProviderInfo>,
 }
 
 /// Result of the `remote.stop` IPC method. `was_running: false` is
@@ -2672,10 +2789,10 @@ pub struct DaemonRestartParams {
 pub struct DaemonRestartResult {
     pub exe: String,
     pub pid: u32,
-    /// True iff a still-running cloudflared subprocess was found
-    /// and the new daemon will adopt it rather than spawn a fresh
-    /// tunnel. Lets the CLI emit "remote URL preserved" vs
-    /// "remote URL will rotate" in the status line.
+    /// True iff a still-running tunnel subprocess was found and the
+    /// new daemon will adopt it rather than spawn a fresh one. Lets
+    /// the CLI emit "remote URL preserved" vs "remote URL will
+    /// rotate" in the status line.
     pub tunnel_preserved: bool,
 }
 

@@ -20,7 +20,7 @@ async fn web_program_view_full_parity() {
     let d = Daemon::spawn().await.expect("daemon");
     let r = d
         .client
-        .remote_start(/* local_only */ true, /* password */ None)
+        .remote_start(construct_protocol::TunnelProvider::None, /* password */ None)
         .await
         .expect("remote.start");
 
@@ -43,7 +43,7 @@ async fn web_program_view_full_parity() {
     let _handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
     let page = browser.new_page("about:blank").await.expect("new page");
-    let url = inject_userinfo(&r.url, "remote", &r.password);
+    let url = inject_userinfo(&r.local_url, "remote", &r.password);
     page.goto(&url).await.expect("goto");
     wait_conn_open(&page).await;
 

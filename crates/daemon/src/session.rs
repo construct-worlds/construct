@@ -1786,21 +1786,20 @@ impl SessionManager {
         ));
     }
 
-    /// Start (or look up) the remote WS listener + cloudflared
-    /// tunnel and return a URL + QR ready for the user. Idempotent
-    /// — calling more than once returns the existing token+URL so
-    /// the QR code stays stable for the daemon's lifetime.
+    /// Start (or look up) the remote WS listener and return a URL + QR
+    /// ready for the user. Idempotent — calling more than once returns
+    /// the existing password + URL so the QR stays stable for the
+    /// listener's lifetime.
+    ///
+    /// With `params.provider` unset, this binds the listener and stops
+    /// there: reachable from this machine and the local network,
+    /// published nowhere. Naming a provider additionally starts that
+    /// tunnel and waits for its URL.
     ///
     /// `port_hint` is honored when set (env-var-at-boot path);
-    /// otherwise an ephemeral localhost port is bound. The cloudflared
-    /// supervisor is also launched on first call (skipped when
-    /// `CONSTRUCT_REMOTE_NO_TUNNEL` is set, same as the boot path).
-    ///
-    /// `wait_for_tunnel` caps how long we wait for cloudflared to
-    /// publish its `*.trycloudflare.com` URL before returning the
-    /// localhost URL with a "still warming up" hint. ~3s is enough
-    /// for a typical fresh cloudflared start; the user can refresh
-    /// to grab the public URL once it lands.
+    /// otherwise an ephemeral port is bound. Tunnel spawning is
+    /// skipped entirely when `CONSTRUCT_REMOTE_NO_TUNNEL` is set, same
+    /// as the boot path.
     pub async fn start_remote(
         self: Arc<Self>,
         port_hint: Option<u16>,
@@ -1808,20 +1807,19 @@ impl SessionManager {
     ) -> anyhow::Result<construct_protocol::RemoteStartResult> {
         use anyhow::Context as _;
 
-        // Always-on bind path: ask the supervisor to ensure the
-        // listener is up (and, if requested, to start cloudflared
-        // too). Static call edge from here goes through an mpsc
-        // channel, NOT a direct call to `serve_ws_on`, which
-        // keeps the dispatch-loop Send inference from going into
-        // a cycle. Idempotent — repeat requests are no-ops on the
-        // bind side; the tunnel is spawned at most once per
-        // daemon lifetime.
+        // Ask the supervisor to ensure the listener is up (and, if a
+        // provider was named, to start its tunnel). The static call
+        // edge from here goes through an mpsc channel, NOT a direct
+        // call to `serve_ws_on` — that keeps the dispatch loop's Send
+        // inference from going into a cycle. Idempotent: repeat
+        // requests are no-ops on the bind side, and the tunnel is
+        // spawned at most once per listener lifetime.
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.remote_starter
             .send(crate::remote_supervisor::SupervisorMsg::Start(
                 crate::remote_supervisor::StartRequest {
                     port_hint,
-                    spawn_tunnel: !params.local_only,
+                    provider: params.provider,
                     password: params.password.clone(),
                     respond: tx,
                 },
@@ -1831,14 +1829,22 @@ impl SessionManager {
             .await
             .context("remote supervisor dropped reply channel")??;
 
-        Ok(self
-            .build_remote_result(
-                outcome.state,
-                outcome.port,
-                params.local_only,
-                params.wait_for_tunnel,
-            )
-            .await?)
+        self.build_remote_result(
+            outcome.state,
+            outcome.port,
+            params.provider,
+            params.wait_for_tunnel,
+        )
+        .await
+    }
+
+    /// Probe every tunnel provider. Read-only — spawns nothing — so
+    /// the dialog can call it on every open to decide which buttons it
+    /// can offer and what to say about the ones it can't.
+    pub async fn remote_providers(&self) -> construct_protocol::RemoteProvidersResult {
+        construct_protocol::RemoteProvidersResult {
+            providers: crate::tunnel::probe_all().await,
+        }
     }
 
     /// Tear down the remote WS listener + cloudflared tunnel via
@@ -1864,63 +1870,76 @@ impl SessionManager {
         })
     }
 
-    /// Render the final `RemoteStartResult` for either mode.
+    /// Render the final `RemoteStartResult`.
     ///
-    /// Local-only mode: return the `http://127.0.0.1:<port>` URL
-    /// immediately, no waiting. Tunnel mode: poll for the
-    /// `*.trycloudflare.com` URL up to ~15s and either return it
-    /// (`tunnel_ready = true`) or fail with a JSON-RPC error that
-    /// tells the user exactly what's wrong — never silently fall
-    /// back to the local URL the way the old single-mode shape did
-    /// (that's `/remote-control-debug`'s job).
+    /// Without a provider, this reports what is reachable right now
+    /// with no tunnel: the LAN address when the machine has one,
+    /// loopback otherwise, returned immediately. With a provider, it
+    /// polls for that provider's URL and either returns it
+    /// (`tunnel_ready = true`) or fails with a diagnostic — it never
+    /// silently degrades to the local URL, because a user who asked to
+    /// be reachable from outside must not be shown a green light and a
+    /// QR code that only works from their sofa.
     async fn build_remote_result(
         &self,
         state: crate::remote::RemoteState,
         port: u16,
-        local_only: bool,
+        provider: construct_protocol::TunnelProvider,
         wait_for_tunnel: bool,
     ) -> anyhow::Result<construct_protocol::RemoteStartResult> {
+        use construct_protocol::TunnelProvider;
         use std::time::Duration;
 
-        if local_only {
-            // Same reasoning as the tunnel-mode URL: this is the
-            // URL the user opens in a browser. The HTML's JS does
-            // the `http` → `ws` swap for its WebSocket back to
-            // this same daemon. Showing `ws://` here would mean
-            // the URL can't be pasted into a browser at all,
-            // which defeats `/remote-control-debug`'s whole
-            // point.
-            let url = format!("http://127.0.0.1:{port}/");
-            let qr = crate::remote::render_qr_dense1x2(&url).unwrap_or_default();
-            return Ok(construct_protocol::RemoteStartResult {
-                url,
-                qr,
-                tunnel_ready: false,
-                password: state.password().to_string(),
-                hint: None,
-            });
-        }
+        // Every URL here is the browser-facing `http(s)://` form, not
+        // `ws://`. The page served at it boots a small JS app that does
+        // the `http(s)` → `ws(s)` swap itself. A `ws://` URL cannot be
+        // opened in a browser or scanned from a QR at all, which is
+        // what bit us in the first phone test.
+        let local_url = format!("http://127.0.0.1:{port}/");
+        let lan_url = crate::remote::lan_ipv4().map(|ip| format!("http://{ip}:{port}/"));
+        let password = state.password().to_string();
 
-        if !wait_for_tunnel {
-            let url = format!("http://127.0.0.1:{port}/");
+        // No provider, or a first non-waiting leg on the way to one:
+        // answer immediately with the best local address we have. The
+        // interactive dialog uses the non-waiting leg to paint itself
+        // instantly and then upgrades the QR in the background.
+        if provider == TunnelProvider::None || !wait_for_tunnel {
+            let url = lan_url.clone().unwrap_or_else(|| local_url.clone());
             let qr = crate::remote::render_qr_dense1x2(&url).unwrap_or_default();
-            return Ok(construct_protocol::RemoteStartResult {
-                url,
-                qr,
-                tunnel_ready: false,
-                password: state.password().to_string(),
-                hint: Some(
-                    "Starting public tunnel… QR will update when cloudflared publishes a URL."
+            let hint = if provider != TunnelProvider::None {
+                Some(format!(
+                    "Starting {} tunnel… the QR updates when it publishes a URL.",
+                    provider.label()
+                ))
+            } else if lan_url.is_none() {
+                // Worth saying out loud rather than silently showing a
+                // loopback QR the user's phone will never reach.
+                Some(
+                    "No local network address found — this machine can only be reached \
+                     from itself. Pick a provider below to expose it."
                         .to_string(),
-                ),
+                )
+            } else {
+                None
+            };
+            return Ok(construct_protocol::RemoteStartResult {
+                url,
+                qr,
+                tunnel_ready: false,
+                password,
+                hint,
+                provider: TunnelProvider::None,
+                local_url,
+                lan_url,
             });
         }
 
-        // Tunnel mode: poll the shared tunnel-url slot. 15s
-        // covers a typical cloudflared cold start (1–3s) plus
-        // slack for slow networks. We poll rather than wire a
-        // notifier because the call shape is request/reply over
-        // IPC — the caller already blocks on this future anyway.
+        // Provider mode: poll the shared tunnel-url slot. 15s covers a
+        // cold cloudflared start (1–3s) plus slack for a slow network,
+        // and is generous for tailscale, which derives its URL rather
+        // than waiting to be told it. We poll instead of wiring a
+        // notifier because the call shape is request/reply over IPC —
+        // the caller is already blocked on this future.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
             if let Some(u) = state.tunnel_url().await {
@@ -1929,8 +1948,11 @@ impl SessionManager {
                     url: u,
                     qr,
                     tunnel_ready: true,
-                    password: state.password().to_string(),
+                    password,
                     hint: None,
+                    provider,
+                    local_url,
+                    lan_url,
                 });
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1939,29 +1961,24 @@ impl SessionManager {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
-        // Timeout: emit an error with the most useful diagnostic
-        // we can muster. The CLI surfaces this verbatim in the
-        // popup so the user knows why the tunnel didn't come up.
-        let cloudflared_available = which::which("cloudflared").is_ok();
-        let no_tunnel_env = std::env::var("CONSTRUCT_REMOTE_NO_TUNNEL").is_ok();
-        let msg = if no_tunnel_env {
-            "CONSTRUCT_REMOTE_NO_TUNNEL is set; unset it and rerun \
-             `/remote-control`. Use `/remote-control debug` for the \
-             local-only URL."
-        } else if !cloudflared_available {
-            "cloudflared not on PATH. Install with `brew install \
-             cloudflared` (or from \
-             github.com/cloudflare/cloudflared/releases) and rerun \
-             `/remote-control`. Use `/remote-control debug` for the \
-             local-only URL."
-        } else {
-            "cloudflared is running but hasn't published a \
-             *.trycloudflare.com URL within 15s. Check the daemon \
-             log (RUST_LOG=info,agentd=debug) for cloudflared's \
-             stderr, or use `/remote-control debug` for the local \
-             URL."
-        };
-        anyhow::bail!("{msg}")
+        // Timed out. Ask the provider itself why — its preflight
+        // already knows how to say "not installed", "not logged in",
+        // "no HTTPS certs" in words the user can act on, and the CLI
+        // paints whatever we return here verbatim.
+        if std::env::var("CONSTRUCT_REMOTE_NO_TUNNEL").is_ok() {
+            anyhow::bail!(
+                "CONSTRUCT_REMOTE_NO_TUNNEL is set, so no tunnel was started. \
+                 Unset it and try again."
+            );
+        }
+        let label = provider.label();
+        match crate::tunnel::preflight(provider).await {
+            Err(detail) => anyhow::bail!("{detail}"),
+            Ok(()) => anyhow::bail!(
+                "{label} started but published no URL within 15s. Check the daemon log \
+                 (RUST_LOG=info,construct=debug) for its output."
+            ),
+        }
     }
 
     pub async fn harnesses(&self) -> Vec<HarnessInfo> {

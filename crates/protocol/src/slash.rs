@@ -305,7 +305,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         visibility: ModelVisibility::Hidden,
         transcript: TranscriptPolicy::AuditOnly, // forensics: who opened the tunnel, when
         render: Render::SystemNote,
-        help: "Start/stop the remote-control tunnel",
+        help: "Show this machine's remote-control address; optionally tunnel it out",
         in_popup: true,
     },
     SlashCommand {

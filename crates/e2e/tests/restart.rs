@@ -226,7 +226,7 @@ async fn web_client_reconnects_to_same_url_after_restart() {
     let d = Daemon::spawn().await.expect("spawn daemon");
     let r = d
         .client
-        .remote_start(true, None)
+        .remote_start(construct_protocol::TunnelProvider::None, None)
         .await
         .expect("remote.start");
 
@@ -246,7 +246,7 @@ async fn web_client_reconnects_to_same_url_after_restart() {
     let _handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
     let page = browser.new_page("about:blank").await.expect("new page");
-    let url_with_creds = inject_userinfo(&r.url, "remote", &r.password);
+    let url_with_creds = inject_userinfo(&r.local_url, "remote", &r.password);
     page.goto(&url_with_creds).await.expect("goto");
 
     // Wait for the initial WS connect.

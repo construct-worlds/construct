@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use construct_protocol::TunnelProvider;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -32,8 +33,8 @@ use crate::session::{RemoteHandle, SessionManager};
 const SNAPSHOT_MAX_AGE_SECS: u64 = 300;
 
 /// Inspect the snapshot file at `path`. Returns `Some(snap)` iff
-/// the file exists, parses, is fresh, AND the cloudflared PID it
-/// records is still alive (so the URL is actually adoptable).
+/// the file exists, parses, is fresh, AND the tunnel PID it records
+/// is still alive (so the URL is actually adoptable).
 /// Returns `None` in every other case — boot-time "no snapshot"
 /// and "stale/dead snapshot" both fall through to fresh-mint.
 ///
@@ -66,7 +67,7 @@ fn load_restore_snapshot(path: &std::path::Path) -> Option<RemoteSnapshot> {
     if snap.tunnel_pid != 0 && !process_alive(snap.tunnel_pid) {
         tracing::info!(
             pid = snap.tunnel_pid,
-            "snapshot's cloudflared PID is gone; minting fresh credentials"
+            "snapshot's tunnel PID is gone; minting fresh credentials"
         );
         let _ = std::fs::remove_file(path);
         return None;
@@ -74,24 +75,39 @@ fn load_restore_snapshot(path: &std::path::Path) -> Option<RemoteSnapshot> {
     Some(snap)
 }
 
-/// Boot-time helper for the `/agentd restart` resume path: is the
+/// Boot-time helper for the `/construct restart` resume path: is the
 /// persisted remote snapshot at `path` still adoptable (fresh, and its
-/// cloudflared PID — if any — still alive)? A negative verdict removes
-/// the snapshot file as a side effect.
+/// tunnel PID — if any — still alive), and if so, which provider was
+/// publishing it? A negative verdict removes the snapshot file as a
+/// side effect.
 ///
-/// Used by `main.rs` to decide whether to *resume* the remote transport
+/// Used at boot to decide whether to *resume* the remote transport
 /// across a restart or *switch it off*. A tunnel that can no longer be
 /// adopted must NOT be silently replaced by a brand-new one — a restart
-/// should never rotate the public URL/credentials behind the user's back.
-pub fn snapshot_restorable(path: &std::path::Path) -> bool {
-    load_restore_snapshot(path).is_some()
+/// should never rotate the URL or credentials behind the user's back.
+///
+/// `Some(TunnelProvider::None)` and `None` mean different things:
+/// the former is a listener that was up but reachable only on the LAN
+/// (nothing to adopt, but do rebind it); the latter is nothing to
+/// resume at all.
+pub fn restorable_provider(path: &std::path::Path) -> Option<TunnelProvider> {
+    let snap = load_restore_snapshot(path)?;
+    // A snapshot written by a daemon from before providers existed
+    // records a live tunnel PID but no provider, and taking its
+    // `None` at face value would leave that cloudflared orphaned with
+    // nobody watching it. Back then cloudflared was the only thing it
+    // could be.
+    Some(match (snap.tunnel_provider, snap.tunnel_pid) {
+        (TunnelProvider::None, pid) if pid != 0 => TunnelProvider::Cloudflare,
+        (p, _) => p,
+    })
 }
 
-/// Supervisor command set. `Start` is the `/remote-control` /
-/// `/remote-control-debug` path; `Stop` is the `/remote-stop`
-/// path. Stop is dispatched serially with the other commands so
-/// there's no race between "client A asks to start" and "client B
-/// asks to stop".
+/// Supervisor command set. `Start` covers both opening the
+/// `/remote-control` dialog (provider `None`) and picking a provider
+/// in it; `Stop` is `/remote-control stop`. Stop is dispatched
+/// serially with the other commands so there's no race between
+/// "client A asks to start" and "client B asks to stop".
 pub enum SupervisorMsg {
     Start(StartRequest),
     Stop(StopRequest),
@@ -103,15 +119,17 @@ pub enum SupervisorMsg {
 /// `RemoteState`/`port` ended up being installed.
 pub struct StartRequest {
     pub port_hint: Option<u16>,
-    /// Whether to also spawn the cloudflared quick-tunnel. False
-    /// is the `/remote-control-debug` path: bind the local WS
-    /// listener and stop there. True is the `/remote-control`
-    /// path: bind + start cloudflared so the caller can poll for
-    /// the public URL. Idempotent — if cloudflared has already
-    /// been spawned for the *current* RemoteState's lifetime,
-    /// repeat requests are no-ops. A `Stop` clears the spawned
-    /// flag so the next start re-spawns cloudflared.
-    pub spawn_tunnel: bool,
+    /// Which provider to publish the listener through, if any.
+    /// `TunnelProvider::None` binds the listener and stops there —
+    /// reachable from this machine and the LAN, exposed nowhere else.
+    /// That is what opening the `/remote-control` dialog does, so that
+    /// looking at the dialog never publishes the daemon.
+    ///
+    /// Naming a provider additionally spawns its tunnel, at most once
+    /// per `RemoteState` lifetime — repeat requests for a provider
+    /// that is already running are no-ops. A `Stop` clears the task so
+    /// the next start spawns fresh.
+    pub provider: TunnelProvider,
     /// Caller-supplied override for the HTTP Basic auth password.
     /// `None` lets the daemon auto-generate. Only honored on the
     /// *first* start (when the listener is being bound); later
@@ -161,7 +179,7 @@ pub async fn run(manager: Arc<SessionManager>, mut rx: mpsc::UnboundedReceiver<S
                     &mut ws_task,
                     &mut tunnel_task,
                     req.port_hint,
-                    req.spawn_tunnel,
+                    req.provider,
                     req.password,
                 )
                 .await;
@@ -181,7 +199,7 @@ async fn handle_start(
     ws_task: &mut Option<JoinHandle<()>>,
     tunnel_task: &mut Option<JoinHandle<()>>,
     port_hint: Option<u16>,
-    spawn_tunnel: bool,
+    provider: TunnelProvider,
     password: Option<String>,
 ) -> Result<StartOutcome> {
     // Fast path: listener already installed (previous request, or
@@ -199,27 +217,27 @@ async fn handle_start(
         bind_and_install(manager, ws_task, port_hint, password).await?
     };
 
-    // Spawn cloudflared at most once per current RemoteState
+    // Spawn the provider's tunnel at most once per current RemoteState
     // lifetime. The tunnel itself is restart-on-death inside
-    // `tunnel::run`, so we don't need to track health here — just
-    // whether we've ever started it for this state. A `Stop`
-    // clears `tunnel_task`, so a subsequent start re-spawns
-    // cloudflared with the (new) token.
-    if spawn_tunnel && tunnel_task.is_none() {
+    // `tunnel::run`, so we don't track health here — only whether we
+    // have ever started one for this state. A `Stop` clears
+    // `tunnel_task`, so a subsequent start spawns fresh.
+    if provider != TunnelProvider::None && tunnel_task.is_none() {
         if std::env::var("CONSTRUCT_REMOTE_NO_TUNNEL").is_err() {
-            // `adopt_pid` is non-zero only after a `/agentd
-            // restart`: the snapshot captured a still-running
-            // cloudflared PID and `bind_and_install` rehydrated
-            // the state from it. `tunnel::run` watches that PID
-            // and falls back to spawning only when it dies.
+            state.set_tunnel_provider(provider).await;
+            // `adopt_pid` is non-zero only after a `/construct
+            // restart`: the snapshot captured a still-running tunnel
+            // PID and `bind_and_install` rehydrated the state from it.
+            // `tunnel::run` watches that PID and falls back to
+            // spawning only once it dies.
             let adopt_pid = state.tunnel_pid();
             let st = state.clone();
             let handle = tokio::spawn(async move {
-                crate::tunnel::run(st, port, adopt_pid).await;
+                crate::tunnel::run(provider, st, port, adopt_pid).await;
             });
             *tunnel_task = Some(handle);
         } else {
-            tracing::info!("CONSTRUCT_REMOTE_NO_TUNNEL is set; skipping cloudflared spawn");
+            tracing::info!("CONSTRUCT_REMOTE_NO_TUNNEL is set; skipping tunnel spawn");
         }
     }
 
@@ -233,23 +251,35 @@ async fn handle_stop(
 ) -> StopOutcome {
     // Clear the manager's slot first so any concurrent IPC method
     // sees "not running" before we abort the loops underneath.
-    // Capture the cloudflared PID + state for cleanup after the
-    // slot is empty (cloudflared is in its own process group, so
-    // aborting the tokio task no longer takes the subprocess down
-    // — we have to SIGTERM by PID).
-    let (was_running, tunnel_pid, state_for_cleanup) = {
+    // Capture the tunnel PID + state for cleanup after the slot is
+    // empty (the tunnel child is in its own process group, so aborting
+    // the tokio task does not take the subprocess down — we have to
+    // SIGTERM by PID).
+    //
+    // SIGTERM, not SIGKILL: both providers clean up on the way out,
+    // and `tailscale serve` in particular *must* be allowed to, since
+    // what it removes on exit is the mapping publishing this machine.
+    // Killing it outright would leave that mapping behind.
+    let (was_running, tunnel_pid, provider, state_for_cleanup) = {
         let mut guard = manager.remote_slot().expect("remote mutex poisoned");
         let pid = guard.as_ref().map(|h| h.state.tunnel_pid()).unwrap_or(0);
+        let provider = guard
+            .as_ref()
+            .map(|h| h.state.tunnel_provider())
+            .unwrap_or(TunnelProvider::None);
         let state = guard.as_ref().map(|h| h.state.clone());
         let was = guard.take().is_some();
-        (was, pid, state)
+        (was, pid, provider, state)
     };
     if tunnel_pid != 0 {
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
+        let label = provider.label();
         match kill(Pid::from_raw(tunnel_pid as i32), Signal::SIGTERM) {
-            Ok(()) => tracing::info!(pid = tunnel_pid, "sent SIGTERM to cloudflared"),
-            Err(e) => tracing::warn!(error = %e, pid = tunnel_pid, "SIGTERM cloudflared failed"),
+            Ok(()) => tracing::info!(pid = tunnel_pid, provider = label, "sent SIGTERM to tunnel"),
+            Err(e) => {
+                tracing::warn!(error = %e, pid = tunnel_pid, provider = label, "SIGTERM tunnel failed")
+            }
         }
     }
     if let Some(h) = tunnel_task.take() {
@@ -300,7 +330,21 @@ async fn bind_and_install(
         Some(snap) => (Some(snap.port), snap.tunnel_pid),
         None => (port_hint, 0),
     };
-    let bind_addr = format!("127.0.0.1:{}", bind_port.unwrap_or(0));
+    // Bind every interface, not just loopback.
+    //
+    // The common way to use remote control is a phone on the same
+    // Wi-Fi, and that needs no tunnel at all — but only if the
+    // listener answers on the LAN address. A loopback bind would make
+    // the "local network" option in the dialog a QR code pointing the
+    // phone at itself.
+    //
+    // This is safe *because* every request through this listener is
+    // gated by Basic auth with a throttled password (see
+    // `RemoteState::note_auth_failure`). Note the separate always-on
+    // web UI has no auth at all, which is exactly why that one stays
+    // bound to loopback and this one does not get to borrow its
+    // reasoning.
+    let bind_addr = format!("0.0.0.0:{}", bind_port.unwrap_or(0));
     let listener = TcpListener::bind(&bind_addr)
         .await
         .with_context(|| format!("bind WS listener {bind_addr}"))?;
@@ -330,7 +374,8 @@ async fn bind_and_install(
     tracing::info!(
         port,
         url = %format!("http://127.0.0.1:{port}/"),
-        "remote ws ready (basic-auth-gated, localhost-bind)"
+        lan = ?crate::remote::lan_ipv4().map(|ip| format!("http://{ip}:{port}/")),
+        "remote ws ready (basic-auth-gated, all interfaces)"
     );
 
     let installed = {
@@ -392,6 +437,7 @@ mod tests {
             port: 12345,
             tunnel_url: Some("https://example.trycloudflare.com".into()),
             tunnel_pid,
+            tunnel_provider: TunnelProvider::Cloudflare,
             generated_at,
         }
     }
@@ -413,17 +459,35 @@ mod tests {
     fn missing_snapshot_is_not_restorable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remote.json");
-        assert!(!snapshot_restorable(&path));
+        assert_eq!(restorable_provider(&path), None);
     }
 
+    /// A listener that was only ever reachable on the LAN has no tunnel
+    /// to verify, so it is always adoptable — and it comes back as the
+    /// LAN-only listener it was, not as a tunnel.
     #[test]
-    fn fresh_local_only_snapshot_is_restorable_and_kept() {
-        // tunnel_pid == 0 → local-only (no tunnel to verify). Fresh → adoptable.
+    fn fresh_lan_only_snapshot_is_restorable_and_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remote.json");
-        snapshot(0, now_secs()).write(&path).unwrap();
-        assert!(snapshot_restorable(&path));
+        let mut snap = snapshot(0, now_secs());
+        snap.tunnel_provider = TunnelProvider::None;
+        snap.tunnel_url = None;
+        snap.write(&path).unwrap();
+        assert_eq!(restorable_provider(&path), Some(TunnelProvider::None));
         assert!(path.exists(), "a restorable snapshot must be left in place");
+    }
+
+    /// The provider is carried across the restart: a Tailscale listener
+    /// must not come back as a Cloudflare one, or the user's stable URL
+    /// would silently rotate into a random public one.
+    #[test]
+    fn provider_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote.json");
+        let mut snap = snapshot(std::process::id(), now_secs());
+        snap.tunnel_provider = TunnelProvider::Tailscale;
+        snap.write(&path).unwrap();
+        assert_eq!(restorable_provider(&path), Some(TunnelProvider::Tailscale));
     }
 
     #[test]
@@ -434,7 +498,28 @@ mod tests {
         snapshot(std::process::id(), now_secs())
             .write(&path)
             .unwrap();
-        assert!(snapshot_restorable(&path));
+        assert_eq!(restorable_provider(&path), Some(TunnelProvider::Cloudflare));
+    }
+
+    /// Snapshots written before providers existed record a live PID and
+    /// no provider. Reading that `None` literally would abandon a
+    /// running cloudflared with nothing watching it, so it decodes as
+    /// the only provider that existed back then.
+    #[test]
+    fn pre_provider_snapshot_with_live_pid_adopts_as_cloudflare() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote.json");
+        let json = serde_json::json!({
+            "version": RemoteSnapshot::CURRENT_VERSION,
+            "token": "tok",
+            "password": "pw",
+            "port": 12345,
+            "tunnel_url": "https://example.trycloudflare.com",
+            "tunnel_pid": std::process::id(),
+            "generated_at": now_secs(),
+        });
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(restorable_provider(&path), Some(TunnelProvider::Cloudflare));
     }
 
     #[test]
@@ -443,19 +528,18 @@ mod tests {
         let path = dir.path().join("remote.json");
         let stale = now_secs().saturating_sub(SNAPSHOT_MAX_AGE_SECS + 60);
         snapshot(0, stale).write(&path).unwrap();
-        assert!(!snapshot_restorable(&path));
+        assert_eq!(restorable_provider(&path), None);
         assert!(!path.exists(), "a stale snapshot must be cleaned up");
     }
 
     #[test]
     fn fresh_snapshot_with_dead_tunnel_is_not_restorable_and_removed() {
-        // This is the issue's case: the tunnel can no longer be adopted,
-        // so the daemon must stay off (and clean up) rather than create a
-        // new tunnel.
+        // The tunnel can no longer be adopted, so the daemon must stay
+        // off (and clean up) rather than quietly mint a new one.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remote.json");
         snapshot(dead_pid(), now_secs()).write(&path).unwrap();
-        assert!(!snapshot_restorable(&path));
+        assert_eq!(restorable_provider(&path), None);
         assert!(
             !path.exists(),
             "a snapshot with a dead tunnel PID must be cleaned up"

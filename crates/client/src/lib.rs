@@ -285,38 +285,40 @@ impl Client {
     /// Start (or look up) the daemon's remote WS listener and
     /// return a QR + URL ready to display.
     ///
-    /// `local_only=false` is the `/remote-control` path: blocks
-    /// for up to ~15s while cloudflared publishes its
-    /// `*.trycloudflare.com` URL and returns the public URL or a
-    /// clear error.
+    /// `TunnelProvider::None` binds the listener and returns the LAN /
+    /// loopback URL immediately, publishing nothing beyond this
+    /// network. Any other provider additionally starts that tunnel and
+    /// blocks for up to ~15s for its URL, returning either the URL or
+    /// an error saying why it never came.
     ///
-    /// `local_only=true` is the `/remote-control-debug` path:
-    /// returns the `ws://127.0.0.1:<port>` URL immediately and
-    /// never spawns cloudflared.
-    ///
-    /// Idempotent — repeat calls return the same token + URL.
+    /// Idempotent — repeat calls return the same password + URL.
     pub async fn remote_start(
         &self,
-        local_only: bool,
+        provider: construct_protocol::TunnelProvider,
         password: Option<String>,
     ) -> Result<construct_protocol::RemoteStartResult> {
-        self.remote_start_with_wait(local_only, password, true)
-            .await
+        self.remote_start_with_wait(provider, password, true).await
     }
     pub async fn remote_start_with_wait(
         &self,
-        local_only: bool,
+        provider: construct_protocol::TunnelProvider,
         password: Option<String>,
         wait_for_tunnel: bool,
     ) -> Result<construct_protocol::RemoteStartResult> {
         let params = construct_protocol::RemoteStartParams {
-            local_only,
+            provider,
             password,
             wait_for_tunnel,
         };
         self.request(ipc_method::REMOTE_START, &params).await
     }
-    /// Tear down the remote WS listener + cloudflared tunnel.
+    /// Which tunnel providers could start right now, and why the rest
+    /// can't. Read-only — safe to call every time the dialog opens.
+    pub async fn remote_providers(&self) -> Result<construct_protocol::RemoteProvidersResult> {
+        self.request(ipc_method::REMOTE_PROVIDERS, &serde_json::Value::Null)
+            .await
+    }
+    /// Tear down the remote WS listener + any tunnel.
     /// Idempotent — `was_running: false` is the natural state when
     /// stop is called without an active listener.
     pub async fn remote_stop(&self) -> Result<construct_protocol::RemoteStopResult> {

@@ -804,9 +804,21 @@ async fn handle_ws_connection(
         None => false,
     };
     if !authed {
+        // Throttle before answering. The password is short enough to
+        // be typed on a phone, and this listener is reachable from the
+        // whole local network (and, behind a provider, from further),
+        // so the compare alone is not a gate — the delay is. Skipped
+        // for a request that carried no credentials at all, which is
+        // just a browser fetching the challenge it needs to prompt the
+        // user with, and would otherwise make every first page load
+        // feel broken.
+        if creds.is_some() {
+            remote.note_auth_failure().await;
+        }
         let _ = write_basic_auth_challenge(&mut wr).await;
         return Ok(());
     }
+    remote.note_auth_success();
 
     if !info.is_ws_upgrade {
         // Authenticated plain GET. Route static assets and session paths from
@@ -1557,6 +1569,10 @@ async fn dispatch(
             Ok(r) => ok!(req, &r),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
+    });
+    dispatch_entry!(ipc_method::REMOTE_PROVIDERS, {
+        let r = manager.remote_providers().await;
+        ok!(req, &r)
     });
     dispatch_entry!(ipc_method::REMOTE_STOP, {
         match manager.clone().stop_remote().await {

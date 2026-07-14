@@ -15254,12 +15254,12 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
     let total = f.area();
 
     let (title, title_color, body_lines, body_w, body_h) = match popup {
-        crate::app::RemoteControlPopup::Starting(p) => render_remote_starting(app, p),
-        crate::app::RemoteControlPopup::Ok(p) => render_remote_ok(app, p),
-        crate::app::RemoteControlPopup::Err {
-            local_only,
-            message,
-        } => render_remote_err(app, *local_only, message),
+        crate::app::RemoteControlPopup::Choose(c) => render_remote_choose(app, c, total.width),
+        crate::app::RemoteControlPopup::Starting(p) => render_remote_starting(app, p, total.width),
+        crate::app::RemoteControlPopup::Ok(p) => render_remote_ok(app, p, total.width),
+        crate::app::RemoteControlPopup::Err { provider, message } => {
+            render_remote_err(app, *provider, message)
+        }
     };
 
     let want_w = body_w + 6;
@@ -15295,133 +15295,362 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
     f.render_widget(para, inner);
 }
 
-fn render_remote_starting<'a>(
-    app: &App,
-    p: &'a crate::app::RemoteControlOk,
-) -> (&'static str, ratatui::style::Color, Vec<Line<'a>>, u16, u16) {
-    let mut title_tuple = render_remote_ok(app, p);
-    title_tuple.0 = " /remote-control — starting public tunnel… — Esc to close ";
-    title_tuple.1 = app.theme.warning;
-    title_tuple.2.insert(
-        0,
-        Line::from(Span::styled(
-            "Setting up public tunnel… local URL is ready; QR will update automatically.",
-            Style::default()
-                .fg(app.theme.warning)
-                .add_modifier(Modifier::BOLD),
-        )),
-    );
-    title_tuple.2.insert(1, Line::raw(""));
-    title_tuple.3 = title_tuple.3.max(72);
-    title_tuple.4 = title_tuple.4.saturating_add(2);
-    title_tuple
+/// What the popup renderers hand back: title, title colour, body, and
+/// the content's natural width/height so the modal can size to it.
+type RemotePopupBody<'a> = (String, ratatui::style::Color, Vec<Line<'a>>, u16, u16);
+
+/// Width of the label column in the address block. Keeps the URLs and
+/// credentials aligned in one column the eye can run down.
+const REMOTE_LABEL_W: usize = 10;
+
+/// One `label: value` row of the address block.
+fn remote_kv<'a>(app: &App, label: &str, value: &str, accent: bool) -> (Line<'a>, u16) {
+    let value_style = if accent {
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.dim)
+    };
+    let padded = format!("{label:<REMOTE_LABEL_W$}");
+    let w = (padded.chars().count() + value.chars().count()) as u16;
+    (
+        Line::from(vec![
+            Span::styled(padded, Style::default().fg(app.theme.dim)),
+            Span::styled(value.to_string(), value_style),
+        ]),
+        w,
+    )
 }
 
-/// Build the popup body for a successful `remote.start`. Returns
-/// `(title, title_color, lines, body_w, body_h)`.
-fn render_remote_ok<'a>(
-    app: &App,
-    p: &'a crate::app::RemoteControlOk,
-) -> (&'static str, ratatui::style::Color, Vec<Line<'a>>, u16, u16) {
-    let qr_lines: Vec<&str> = p.qr.lines().collect();
-    let qr_w = qr_lines
+/// Every address and credential the user might need — no QR; that gets
+/// composed alongside these by [`compose_qr_and_info`].
+///
+/// The accented row is always the one the QR actually encodes, so
+/// "which of these am I looking at?" never needs asking: with a tunnel
+/// up it's the tunnel URL, otherwise it's the LAN address (or loopback
+/// on a machine with no LAN).
+fn remote_info_lines<'a>(app: &App, p: &crate::app::RemoteControlOk) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line> = Vec::new();
+
+    if p.tunnel_ready {
+        lines.push(remote_kv(app, "tunnel:", &p.url, true).0);
+    }
+    if let Some(lan) = p.lan_url.as_deref() {
+        lines.push(remote_kv(app, "lan:", lan, !p.tunnel_ready).0);
+    }
+    // Loopback is always shown: it is the one address that cannot
+    // fail, and it's what someone sitting at this machine types.
+    lines.push(
+        remote_kv(
+            app,
+            "local:",
+            &p.local_url,
+            !p.tunnel_ready && p.lan_url.is_none(),
+        )
+        .0,
+    );
+
+    // The browser's Basic-auth prompt asks for a username too, and the
+    // daemon pins it to "remote" — so this row isn't decorative;
+    // anything else 401s.
+    lines.push(remote_kv(app, "user:", "remote", true).0);
+    lines.push(remote_kv(app, "password:", &p.password, true).0);
+
+    lines
+}
+
+/// Blank column between the QR and the text beside it.
+const REMOTE_QR_GAP: u16 = 3;
+
+/// Column at which the dialog's prose wraps.
+///
+/// The provider explanations are full sentences by design ("Tailscale is
+/// not logged in — run `tailscale up`"), and one long enough to out-width
+/// the QR would push the whole dialog back into the stacked layout that
+/// hides the buttons. Wrapping the prose keeps the text column narrow so
+/// the layout stays wide-and-short.
+const REMOTE_TEXT_W: usize = 46;
+
+/// Break `text` onto lines no wider than `width`, at word boundaries.
+/// A word longer than `width` gets its own (over-long) line rather than
+/// being cut in half — a truncated URL is worse than a ragged edge.
+fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+    if width == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let projected = if line.is_empty() {
+            word.chars().count()
+        } else {
+            line.chars().count() + 1 + word.chars().count()
+        };
+        if !line.is_empty() && projected > width {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// Wrapped prose as styled lines.
+fn wrapped_lines<'a>(text: &str, style: Style) -> Vec<Line<'a>> {
+    wrap_plain(text, REMOTE_TEXT_W)
+        .into_iter()
+        .map(|l| Line::from(Span::styled(l, style)))
+        .collect()
+}
+
+/// Put the QR and the text block side by side, falling back to stacking
+/// them when the terminal is too narrow.
+///
+/// Stacking is the obvious layout and it is the wrong one: a QR is
+/// ~17 rows tall on its own, and everything this dialog has to say
+/// underneath it — addresses, credentials, provider buttons — pushed
+/// the buttons off the bottom of an 80×30 terminal entirely. Side by
+/// side, the dialog's height is just the QR's, and the buttons are
+/// always on screen. Trading height for width is the right way round
+/// here, because a QR that has to be scanned is worthless if the thing
+/// explaining it has scrolled away.
+///
+/// Returns `(lines, width, height)`.
+fn compose_qr_and_info<'a>(
+    qr: &str,
+    info: Vec<Line<'a>>,
+    area_w: u16,
+) -> (Vec<Line<'a>>, u16, u16) {
+    let qr_rows: Vec<String> = qr.lines().map(str::to_string).collect();
+    let qr_w = qr_rows
         .iter()
         .map(|l| l.chars().count() as u16)
         .max()
         .unwrap_or(0);
-    let qr_h = qr_lines.len() as u16;
-    let url_w = p.url.chars().count() as u16;
-    let user_line = "user: remote";
-    let user_w = user_line.chars().count() as u16;
-    let password_line = format!("password: {}", p.password);
-    let pw_w = password_line.chars().count() as u16;
-    let hint_w = p
-        .hint
-        .as_deref()
-        .map(|s| s.chars().count() as u16)
-        .unwrap_or(0);
-    let body_w = qr_w.max(url_w).max(user_w).max(pw_w).max(hint_w);
-    // QR + blank + URL + user + password (+ blank + hint if present).
-    let body_h = qr_h + 4 + if p.hint.is_some() { 2 } else { 0 };
+    let info_w = info.iter().map(|l| l.width() as u16).max().unwrap_or(0);
 
-    let (title, title_color) = match (p.local_only, p.tunnel_ready) {
-        (true, _) => (
-            " /remote-control debug — local URL only — Esc to close ",
-            app.theme.warning,
-        ),
-        (false, true) => (
-            " /remote-control — public tunnel ready — Esc to close ",
-            app.theme.success,
-        ),
-        // local_only=false + tunnel_ready=false is no longer
-        // reachable on the daemon side (tunnel timeout now
-        // returns an error), but keep a graceful title just in
-        // case the shape evolves.
-        (false, false) => (" /remote-control — Esc to close ", app.theme.warning),
-    };
-
-    let mut lines: Vec<Line> = Vec::with_capacity(qr_lines.len() + 4);
-    for ql in &qr_lines {
-        lines.push(Line::from(Span::raw((*ql).to_string())));
-    }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        p.url.clone(),
-        Style::default()
-            .fg(app.theme.info)
-            .add_modifier(Modifier::BOLD),
-    )));
-    // Browser's basic-auth prompt asks for both username and
-    // password; render both so the user knows what to type. The
-    // daemon enforces username == "remote" (see REMOTE_USERNAME)
-    // so this value isn't decorative — anything else 401s.
-    lines.push(Line::from(vec![
-        Span::styled("user:     ", Style::default().fg(app.theme.dim)),
-        Span::styled(
-            "remote",
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("password: ", Style::default().fg(app.theme.dim)),
-        Span::styled(
-            p.password.clone(),
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    if let Some(hint) = p.hint.as_deref() {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            hint.to_string(),
-            Style::default().fg(app.theme.dim),
-        )));
+    // `+ 6` mirrors the border/padding budget the caller adds when it
+    // sizes the modal, so we only commit to the wide layout if the wide
+    // layout will actually fit.
+    let side_w = qr_w + REMOTE_QR_GAP + info_w;
+    if qr_w > 0 && side_w + 6 <= area_w {
+        // Centre the text against the QR rather than top-aligning it —
+        // the QR is much taller, and a text block pinned to its top
+        // edge reads as if it fell off.
+        let offset = (qr_rows.len().saturating_sub(info.len())) / 2;
+        let rows = qr_rows.len().max(info.len() + offset);
+        let mut out: Vec<Line> = Vec::with_capacity(rows);
+        let mut info = info.into_iter();
+        for i in 0..rows {
+            let qr_row = qr_rows.get(i).cloned().unwrap_or_default();
+            let pad = (qr_w as usize).saturating_sub(qr_row.chars().count());
+            let mut spans: Vec<Span> = vec![
+                Span::raw(format!("{qr_row}{}", " ".repeat(pad))),
+                Span::raw(" ".repeat(REMOTE_QR_GAP as usize)),
+            ];
+            if i >= offset {
+                if let Some(line) = info.next() {
+                    spans.extend(line.spans);
+                }
+            }
+            out.push(Line::from(spans));
+        }
+        // Anything that didn't fit beside the QR continues below it.
+        out.extend(info);
+        let height = out.len() as u16;
+        return (out, side_w, height);
     }
 
-    (title, title_color, lines, body_w, body_h)
+    let mut out: Vec<Line> = qr_rows
+        .iter()
+        .map(|r| Line::from(Span::raw(r.clone())))
+        .collect();
+    if !out.is_empty() {
+        out.push(Line::raw(""));
+    }
+    out.extend(info);
+    let height = out.len() as u16;
+    (out, qr_w.max(info_w), height)
 }
 
-/// Build the popup body for a failed `remote.start`. Used when the
-/// tunnel-mode call times out: the daemon returned a diagnostic;
-/// we paint it instead of a fake URL so the user knows exactly
-/// what to fix.
+/// The dialog's resting state: reachable on the LAN, published nowhere,
+/// with a row of buttons offering to change that.
+fn render_remote_choose<'a>(
+    app: &App,
+    c: &crate::app::RemoteControlChoose,
+    area_w: u16,
+) -> RemotePopupBody<'a> {
+    let mut info = remote_info_lines(app, &c.base);
+
+    if let Some(hint) = c.base.hint.as_deref() {
+        info.push(Line::raw(""));
+        info.extend(wrapped_lines(hint, Style::default().fg(app.theme.dim)));
+    }
+
+    info.push(Line::raw(""));
+    info.push(Line::from(Span::styled(
+        "Reach this from outside the local network:",
+        Style::default().fg(app.theme.text),
+    )));
+    info.push(Line::raw(""));
+
+    if c.options.is_empty() {
+        info.push(Line::from(Span::styled(
+            "(no tunnel providers known)",
+            Style::default().fg(app.theme.dim),
+        )));
+    } else {
+        // Buttons carry only the provider name — the reason an
+        // unavailable one can't be used is spelled out under the row,
+        // for whichever button is focused. Cramming it into the button
+        // would make a row nobody can read.
+        let mut spans: Vec<Span> = Vec::new();
+        for (i, opt) in c.options.iter().enumerate() {
+            let mut style = if opt.available {
+                Style::default().fg(app.theme.accent)
+            } else {
+                Style::default().fg(app.theme.dim)
+            };
+            if i == c.selected {
+                style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            }
+            spans.push(Span::styled(format!("[ {} ]", opt.provider.label()), style));
+            spans.push(Span::raw("  "));
+        }
+        info.push(Line::from(spans));
+        info.push(Line::raw(""));
+
+        // Say something about the focused button, always: why it can't
+        // run, or what picking it would do.
+        let (detail, color) = match c.selected_option() {
+            Some(opt) if opt.available => (
+                match opt.provider {
+                    construct_protocol::TunnelProvider::Tailscale => {
+                        "Your devices only. Stable URL.".to_string()
+                    }
+                    construct_protocol::TunnelProvider::Cloudflare => {
+                        "Anyone with the URL. Rotates each run.".to_string()
+                    }
+                    construct_protocol::TunnelProvider::None => String::new(),
+                },
+                app.theme.dim,
+            ),
+            Some(opt) => (
+                opt.detail
+                    .clone()
+                    .unwrap_or_else(|| "unavailable".to_string()),
+                app.theme.warning,
+            ),
+            None => (String::new(), app.theme.dim),
+        };
+        info.extend(wrapped_lines(&detail, Style::default().fg(color)));
+    }
+
+    info.push(Line::raw(""));
+    info.push(Line::from(Span::styled(
+        "←/→ select · Enter start · Esc close",
+        Style::default().fg(app.theme.dim),
+    )));
+
+    let (lines, width, height) = compose_qr_and_info(&c.base.qr, info, area_w);
+    (
+        " /remote-control — local network — Esc to close ".to_string(),
+        app.theme.info,
+        lines,
+        width,
+        height,
+    )
+}
+
+/// A tunnel is coming up. The LAN QR stays on screen and usable while
+/// we wait, rather than blanking the dialog for a spinner.
+fn render_remote_starting<'a>(
+    app: &App,
+    p: &crate::app::RemoteControlOk,
+    area_w: u16,
+) -> RemotePopupBody<'a> {
+    let label = p.provider.label();
+    let mut info = remote_info_lines(app, p);
+    info.push(Line::raw(""));
+    info.push(Line::from(Span::styled(
+        format!("Starting {label} tunnel…"),
+        Style::default()
+            .fg(app.theme.warning)
+            .add_modifier(Modifier::BOLD),
+    )));
+    info.push(Line::from(Span::styled(
+        "The QR updates when it publishes a URL.",
+        Style::default().fg(app.theme.dim),
+    )));
+
+    let (lines, width, height) = compose_qr_and_info(&p.qr, info, area_w);
+    (
+        format!(" /remote-control — starting {label}… — Esc to close "),
+        app.theme.warning,
+        lines,
+        width,
+        height,
+    )
+}
+
+/// A tunnel is up. The QR now encodes the provider's URL.
+fn render_remote_ok<'a>(
+    app: &App,
+    p: &crate::app::RemoteControlOk,
+    area_w: u16,
+) -> RemotePopupBody<'a> {
+    let mut info = remote_info_lines(app, p);
+
+    if let Some(hint) = p.hint.as_deref() {
+        info.push(Line::raw(""));
+        info.extend(wrapped_lines(hint, Style::default().fg(app.theme.dim)));
+    }
+
+    let (title, color) = if p.tunnel_ready {
+        let label = p.provider.label();
+        let reach = match p.provider {
+            construct_protocol::TunnelProvider::Tailscale => "your devices only",
+            _ => "public URL",
+        };
+        (
+            format!(" /remote-control — {label} ready ({reach}) — Esc to close "),
+            app.theme.success,
+        )
+    } else {
+        (
+            " /remote-control — local network — Esc to close ".to_string(),
+            app.theme.info,
+        )
+    };
+
+    let (lines, width, height) = compose_qr_and_info(&p.qr, info, area_w);
+    (title, color, lines, width, height)
+}
+
+/// A provider failed to start. Paint the daemon's diagnostic — which is
+/// written as the next thing the user should do — instead of a URL that
+/// would not work.
 fn render_remote_err<'a>(
     app: &App,
-    local_only: bool,
-    message: &'a str,
-) -> (&'static str, ratatui::style::Color, Vec<Line<'a>>, u16, u16) {
-    let title = if local_only {
-        " /remote-control debug — failed — Esc to close "
-    } else {
-        " /remote-control — tunnel didn't come up — Esc to close "
-    };
-    let header = "tunnel start failed:";
-    let body_lines: Vec<Line> = vec![
+    provider: construct_protocol::TunnelProvider,
+    message: &str,
+) -> RemotePopupBody<'a> {
+    let label = provider.label();
+    let header = format!("Could not start the {label} tunnel:");
+    let keys = "← back to options · Esc close";
+
+    let lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            header.to_string(),
+            header.clone(),
             Style::default()
                 .fg(app.theme.danger)
                 .add_modifier(Modifier::BOLD),
@@ -15431,15 +15660,115 @@ fn render_remote_err<'a>(
             message.to_string(),
             Style::default().fg(app.theme.text),
         )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            keys.to_string(),
+            Style::default().fg(app.theme.dim),
+        )),
     ];
-    let body_w = message
+    let width = message
         .lines()
         .map(|l| l.chars().count() as u16)
         .max()
         .unwrap_or(40)
-        .max(header.chars().count() as u16);
-    let body_h = 3 + message.lines().count() as u16;
-    (title, app.theme.danger, body_lines, body_w, body_h)
+        .max(header.chars().count() as u16)
+        .max(keys.chars().count() as u16);
+    let height = 4 + message.lines().count() as u16;
+    (
+        format!(" /remote-control — {label} failed — Esc to close "),
+        app.theme.danger,
+        lines,
+        width,
+        height,
+    )
+}
+
+#[cfg(test)]
+mod remote_popup_tests {
+    use super::*;
+
+    /// A QR of a typical URL, at the size the daemon renders it.
+    fn qr() -> String {
+        (0..19)
+            .map(|_| "#".repeat(37))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn info(n: usize, width: usize) -> Vec<Line<'static>> {
+        (0..n)
+            .map(|_| Line::from(Span::raw("x".repeat(width))))
+            .collect()
+    }
+
+    /// On a standard 100-column terminal the QR and the text sit side by
+    /// side, so the dialog is about as tall as the QR — which is what
+    /// keeps the provider buttons on screen. Stacking them overflows an
+    /// 80×30 terminal and hides the buttons below the fold, which is the
+    /// bug this layout exists to prevent.
+    #[test]
+    fn qr_and_info_sit_side_by_side_on_a_normal_terminal() {
+        let (lines, width, height) = compose_qr_and_info(&qr(), info(13, 44), 100);
+        assert!(
+            height <= 20,
+            "side-by-side should be about as tall as the QR (19), got {height}"
+        );
+        assert!(width <= 94, "must fit a 100-col frame, got {width}");
+        // Row 0 carries the QR *and* text, which stacking could never do.
+        assert!(lines[0].width() > 37, "first row should hold QR + text");
+    }
+
+    /// The prose is wrapped before it reaches the layout, so a long
+    /// provider explanation can't push the dialog back into the tall
+    /// layout. This is the regression that actually happened: "Tailscale
+    /// is not installed — get it from tailscale.com/download" is 62
+    /// columns, and unwrapped it silently hid the buttons.
+    #[test]
+    fn long_provider_message_is_wrapped_and_stays_side_by_side() {
+        let msg = "Tailscale is not installed — get it from tailscale.com/download";
+        assert!(msg.chars().count() > REMOTE_TEXT_W, "test premise");
+
+        let wrapped = wrap_plain(msg, REMOTE_TEXT_W);
+        assert!(wrapped.len() > 1, "an over-long message must wrap");
+        for l in &wrapped {
+            assert!(
+                l.chars().count() <= REMOTE_TEXT_W,
+                "wrapped line still too wide: {l:?}"
+            );
+        }
+
+        let mut lines = info(11, 44);
+        lines.extend(
+            wrapped
+                .into_iter()
+                .map(|l| Line::from(Span::raw(l)))
+                .collect::<Vec<_>>(),
+        );
+        let (_, _, height) = compose_qr_and_info(&qr(), lines, 100);
+        assert!(
+            height <= 20,
+            "wrapped message must not force the tall layout, got {height}"
+        );
+    }
+
+    /// A terminal too narrow for both columns still shows everything —
+    /// stacked, and clipped by the modal if it must be, but never
+    /// silently dropped.
+    #[test]
+    fn narrow_terminal_falls_back_to_stacking() {
+        let (lines, width, height) = compose_qr_and_info(&qr(), info(5, 44), 50);
+        assert!(width <= 44.max(37), "stacked width is the wider column");
+        assert!(height >= 19 + 5, "stacked height is QR + blank + info");
+        assert_eq!(lines[0].width(), 37, "first row is QR only when stacked");
+    }
+
+    /// Wrapping must not lose a word, however awkward the input.
+    #[test]
+    fn wrap_preserves_every_word() {
+        let text = "a bb ccc dddd eeeee ffffff";
+        let joined = wrap_plain(text, 8).join(" ");
+        assert_eq!(joined, text);
+    }
 }
 
 #[cfg(test)]

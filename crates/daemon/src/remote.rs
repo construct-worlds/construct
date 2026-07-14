@@ -1,20 +1,28 @@
-//! Remote-control state: the auth token that gates the WebSocket
-//! transport, and (in Phase 1C) the public tunnel URL once it's
-//! discovered. Lives behind an `Arc` so the WS upgrade handler, the
-//! tunnel subprocess monitor, and any future status-display path can
-//! all share one view of "what is the current remote URL + token?".
+//! Remote-control state: the credentials that gate the WebSocket
+//! transport, the addresses the listener can be reached at, and the
+//! tunnel URL once a provider publishes one. Lives behind an `Arc` so
+//! the WS upgrade handler, the tunnel subprocess monitor, and the
+//! status-display path all share one view of "how is this daemon
+//! reachable right now, and with what password?".
 //!
-//! Token model is intentionally simple for Phase 1: one daemon-
-//! lifetime token, minted at startup, required in the WS upgrade URL
-//! path (`/t/<token>`). No per-session scoping yet, no rotation yet.
-//! Both are reasonable follow-ups once we have a web client driving
-//! real usage and can see what the access patterns are.
+//! The gate is HTTP Basic auth: a fixed username and a per-listener
+//! password, defended against guessing by [`RemoteState::note_auth_failure`].
+//! A `token` field survives in the snapshot for backward-compatible
+//! deserialization, but nothing enforces it any more — do not mistake
+//! it for a second factor.
+//!
+//! The listener binds every interface, so it is reachable from the
+//! local network with no tunnel at all. That is the resting state of
+//! `/remote-control`, and it is why the password has to be able to
+//! stand on its own.
 
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use construct_protocol::TunnelProvider;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -46,12 +54,21 @@ pub struct RemoteState {
     /// clients (e.g. the desktop TUI) can show a "remote attached"
     /// badge without polling.
     clients: Arc<AtomicUsize>,
-    /// PID of the cloudflared subprocess (or 0 when unknown / not
+    /// PID of the tunnel subprocess (or 0 when unknown / not
     /// running). Captured at spawn time and persisted to
     /// `remote.json` so a restart-and-adopt path can check whether
     /// the still-running tunnel can be reused. Atomic because the
-    /// tunnel supervisor may respawn cloudflared mid-life.
+    /// tunnel supervisor may respawn the child mid-life.
     tunnel_pid: Arc<AtomicU32>,
+    /// Which provider (if any) is publishing this listener. Encoded as
+    /// a u8 so it sits alongside the other lock-free fields; persisted
+    /// so a restart knows what kind of tunnel it is adopting.
+    tunnel_provider: Arc<AtomicU8>,
+    /// Consecutive failed Basic-auth attempts, counted across every
+    /// connection rather than per-connection — an attacker who can
+    /// open one socket can open a thousand, so a per-connection
+    /// counter would throttle nothing. Reset by any success.
+    auth_failures: Arc<AtomicU32>,
     /// Local WS port the listener is bound to. Set once at install
     /// time (`with_port`) and read by `persist()` so each
     /// snapshot write knows the port without callers having to
@@ -83,12 +100,20 @@ pub struct RemoteSnapshot {
     pub port: u16,
     #[serde(default)]
     pub tunnel_url: Option<String>,
-    /// PID of the cloudflared subprocess at snapshot time. 0 means
-    /// "no tunnel was running" (debug-mode `/remote-control debug`).
-    /// The restoring daemon `kill(pid, 0)`s this to verify
-    /// liveness before adopting.
+    /// PID of the tunnel subprocess at snapshot time. 0 means "no
+    /// tunnel was running" — the resting state of a listener the user
+    /// only ever reached over the LAN. The restoring daemon
+    /// `kill(pid, 0)`s this to verify liveness before adopting.
     #[serde(default)]
     pub tunnel_pid: u32,
+    /// Which provider spawned `tunnel_pid`. Defaults to `None` so a
+    /// snapshot written by an older daemon (which only ever ran
+    /// cloudflared) still deserializes; such a snapshot carries a live
+    /// PID, and the adopting daemon watches that PID rather than
+    /// re-deriving anything from the provider, so the default is
+    /// harmless there.
+    #[serde(default)]
+    pub tunnel_provider: TunnelProvider,
     /// Unix seconds when the snapshot was last written. Snapshots
     /// older than the daemon-defined freshness window are ignored
     /// at startup — a stale `remote.json` from a long-dead daemon
@@ -159,6 +184,8 @@ impl RemoteState {
             tunnel_url: Arc::new(RwLock::new(None)),
             clients: Arc::new(AtomicUsize::new(0)),
             tunnel_pid: Arc::new(AtomicU32::new(0)),
+            tunnel_provider: Arc::new(AtomicU8::new(TunnelProvider::None.as_u8())),
+            auth_failures: Arc::new(AtomicU32::new(0)),
             port: Arc::new(AtomicU16::new(0)),
             snapshot_path: Arc::new(None),
         }
@@ -177,6 +204,8 @@ impl RemoteState {
             tunnel_url: Arc::new(RwLock::new(snap.tunnel_url.clone())),
             clients: Arc::new(AtomicUsize::new(0)),
             tunnel_pid: Arc::new(AtomicU32::new(snap.tunnel_pid)),
+            tunnel_provider: Arc::new(AtomicU8::new(snap.tunnel_provider.as_u8())),
+            auth_failures: Arc::new(AtomicU32::new(0)),
             port: Arc::new(AtomicU16::new(snap.port)),
             snapshot_path: Arc::new(None),
         }
@@ -214,6 +243,7 @@ impl RemoteState {
             port: self.port.load(Ordering::SeqCst),
             tunnel_url: url,
             tunnel_pid: self.tunnel_pid.load(Ordering::SeqCst),
+            tunnel_provider: self.tunnel_provider(),
             generated_at: unix_now(),
         }
     }
@@ -252,7 +282,7 @@ impl RemoteState {
         }
     }
 
-    /// Record the PID of the cloudflared subprocess + persist.
+    /// Record the PID of the tunnel subprocess + persist.
     pub async fn set_tunnel_pid(&self, pid: u32) {
         self.tunnel_pid.store(pid, Ordering::SeqCst);
         self.persist().await;
@@ -260,6 +290,19 @@ impl RemoteState {
 
     pub fn tunnel_pid(&self) -> u32 {
         self.tunnel_pid.load(Ordering::SeqCst)
+    }
+
+    /// Record which provider is publishing this listener + persist.
+    /// Set when a tunnel is started and cleared on stop, so the
+    /// snapshot always describes the tunnel the PID belongs to.
+    pub async fn set_tunnel_provider(&self, provider: TunnelProvider) {
+        self.tunnel_provider
+            .store(provider.as_u8(), Ordering::SeqCst);
+        self.persist().await;
+    }
+
+    pub fn tunnel_provider(&self) -> TunnelProvider {
+        TunnelProvider::from_u8(self.tunnel_provider.load(Ordering::SeqCst))
     }
 
     /// Atomically increment the active-client counter and return the
@@ -296,6 +339,10 @@ impl RemoteState {
     /// a meaningful leak against the user-chosen passwords we'd accept
     /// (auto-gen passwords are a fixed pattern; user overrides are
     /// already-known length to an attacker observing the wire).
+    ///
+    /// Callers on the network path must pair a `false` here with
+    /// [`RemoteState::note_auth_failure`] — the compare alone leaves a
+    /// guessable password guessable.
     pub fn password_matches(&self, candidate: &str) -> bool {
         let real = &self.password;
         if candidate.len() != real.len() {
@@ -306,6 +353,35 @@ impl RemoteState {
             diff |= a ^ b;
         }
         diff == 0
+    }
+
+    /// Record a failed Basic-auth attempt and sleep before the caller
+    /// is allowed to answer it.
+    ///
+    /// This is what makes a memorable, phone-typeable password safe
+    /// enough to be the only gate on a listener that is reachable from
+    /// the LAN (and, with a provider, from further away still). The
+    /// delay doubles with each consecutive failure and is counted
+    /// daemon-wide, so opening more sockets buys an attacker nothing:
+    /// once warmed up, every guess anywhere costs the cap.
+    ///
+    /// Only *failures* are delayed, and any success resets the count —
+    /// so an attacker hammering the door cannot slow down the user
+    /// walking through it. That asymmetry is deliberate; a lockout
+    /// would have handed them a denial-of-service instead.
+    pub async fn note_auth_failure(&self) {
+        let prev = self.auth_failures.fetch_add(1, Ordering::SeqCst);
+        // 100ms, 200ms, 400ms … capped at ~6.4s. The first miss is
+        // already slow enough to ruin an attacker's throughput while
+        // staying imperceptible to someone who fat-fingered a word.
+        let shift = prev.min(6);
+        let delay = Duration::from_millis(100u64 << shift);
+        tokio::time::sleep(delay).await;
+    }
+
+    /// Clear the failure counter after a successful auth.
+    pub fn note_auth_success(&self) {
+        self.auth_failures.store(0, Ordering::SeqCst);
     }
 
     /// Update the public tunnel URL. Called by the cloudflared
@@ -329,11 +405,49 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// The private IPv4 address other devices on this network can reach
+/// this machine at, if it has one.
+///
+/// Found by asking the routing table rather than by enumerating
+/// interfaces: `connect()` a UDP socket toward an arbitrary off-link
+/// address and read back the local address the kernel chose for it. No
+/// packet is ever sent — `connect` on a UDP socket only fixes the peer
+/// — so this is free, needs no dependency, and answers the question we
+/// actually care about ("which of my addresses would a peer see?")
+/// rather than the one interface enumeration answers ("what addresses
+/// do I have?"). On a laptop carrying VPN, bridge, and container
+/// interfaces, the latter is a list nobody can choose from correctly.
+///
+/// Returns `None` for anything that is not an RFC1918 address. A
+/// public address here would mean the machine sits directly on the
+/// internet, and quietly inviting the user to pass that around is not
+/// something an option labelled *local network* gets to do. A tailnet
+/// address (100.64/10) is likewise not a LAN address — reaching the
+/// daemon that way is what the Tailscale provider is for.
+///
+/// Known imperfection: with a full-tunnel VPN up, the default route
+/// points at the VPN and we report its address. That address is
+/// genuinely the one a peer would see; it just may not be a peer on
+/// the user's Wi-Fi. The dialog shows the address rather than
+/// promising it works, and a provider is one keystroke away.
+pub fn lan_ipv4() -> Option<Ipv4Addr> {
+    let sock = UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    // TEST-NET-1: reserved, unroutable, and nobody's real host. We
+    // only need the kernel to consult its routing table, which
+    // `connect` does without emitting anything.
+    let probe: SocketAddr = "192.0.2.1:9".parse().ok()?;
+    sock.connect(probe).ok()?;
+    let SocketAddr::V4(local) = sock.local_addr().ok()? else {
+        return None;
+    };
+    let ip = *local.ip();
+    (ip.is_private() && !ip.is_loopback()).then_some(ip)
+}
+
 /// `kill(pid, 0)`: does this process exist + is it signalable by
 /// us? Returns false on PID==0 (sentinel) and any error. Used by
-/// the boot-time restore path to confirm the `cloudflared`
-/// subprocess named in the snapshot is still alive before
-/// adopting its URL.
+/// the boot-time restore path to confirm the tunnel subprocess
+/// named in the snapshot is still alive before adopting its URL.
 ///
 /// A pid that exists but is owned by a different user surfaces as
 /// `EPERM`; we treat that as "not adoptable" because we can't
@@ -354,12 +468,19 @@ impl Default for RemoteState {
 }
 
 /// Memorable-password vocabulary. Short, lowercase ASCII, no
-/// homophones, no awkward-to-type characters. ~40 × ~40 × 90 =
-/// ~144 000 combinations (≈ 17 bits) — *combined* with the
-/// 122-bit URL token that's ample (~139 bits). On its own this
-/// would be brute-forceable without rate limiting, which is why
-/// we don't allow access on password alone — the token must also
-/// match on the URL path.
+/// homophones, no awkward-to-type characters.
+///
+/// 40 × 40 × 9000 ≈ 14.4M combinations (≈ 24 bits). That is not much
+/// on its own, and it is the *only* gate on the listener — the URL
+/// token this password once rode alongside is no longer enforced.
+/// Guessing is instead made impractical by [`RemoteState::auth_backoff`],
+/// which serializes and slows failed attempts across every connection.
+/// Keep those two facts together: if the throttle is ever removed, this
+/// vocabulary is not strong enough to stand alone.
+///
+/// The alternative — a long random string — was rejected because this
+/// password is typed on a phone keyboard, by a person reading it off a
+/// laptop screen across the room.
 const WORD_ADJ: &[&str] = &[
     "swift", "calm", "bold", "wise", "kind", "lucky", "quick", "merry", "brave", "happy", "sunny",
     "neat", "tidy", "smart", "fresh", "clear", "bright", "warm", "cool", "gentle", "honest",
@@ -388,7 +509,9 @@ fn generate_memorable_password() -> String {
     let bytes = id.as_bytes();
     let adj = WORD_ADJ[bytes[0] as usize % WORD_ADJ.len()];
     let noun = WORD_NOUN[bytes[1] as usize % WORD_NOUN.len()];
-    let n = (u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) % 90) + 10;
+    // Four digits rather than two: 7 more bits for two more taps, on a
+    // credential that now stands alone.
+    let n = (u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) % 9000) + 1000;
     format!("{adj}.{noun}.{n}")
 }
 

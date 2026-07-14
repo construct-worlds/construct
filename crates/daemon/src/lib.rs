@@ -193,9 +193,10 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     }
 
     // Always expose the browser UI on localhost without remote-control
-    // credentials. This is intentionally local-only: `/remote-control`
-    // remains the opt-in public tunnel path and still layers token +
-    // Basic auth on top.
+    // credentials. Loopback-only, and it must stay that way: this
+    // listener has no auth at all. The remote-control listener is the
+    // one that binds every interface, and it can only afford to
+    // because everything through it passes a throttled Basic-auth gate.
     let local_webui_port = construct_protocol::paths::local_webui_port();
     {
         let mgr = manager.clone();
@@ -221,7 +222,8 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     // the TUI's `/remote-control` slash (which calls
     // `remote.start` over IPC and shows a QR), so the env var is
     // only needed when nobody is at the terminal to type the
-    // command.
+    // command. `CONSTRUCT_REMOTE_PROVIDER` picks the tunnel; it
+    // defaults to cloudflare, which is what this path has always done.
     if let Ok(port_raw) = std::env::var("CONSTRUCT_REMOTE_WS_PORT") {
         match port_raw.parse::<u16>() {
             Ok(port) => {
@@ -238,7 +240,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
                     // The password lands in the info log so it's
                     // visible to the operator running the daemon.
                     let params = construct_protocol::RemoteStartParams {
-                        local_only: false,
+                        provider: boot_tunnel_provider(),
                         password: None,
                         wait_for_tunnel: true,
                     };
@@ -266,11 +268,16 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
         // URL/credentials. `snapshot_restorable` removes the dead
         // snapshot as a side effect, so the next boot stays off too.
         let snapshot_path = paths.runtime_dir.join("remote.json");
-        if crate::remote_supervisor::snapshot_restorable(&snapshot_path) {
+        if let Some(provider) = crate::remote_supervisor::restorable_provider(&snapshot_path) {
             let mgr = manager.clone();
             tokio::spawn(async move {
+                // Resume through the *same* provider the prior daemon
+                // used — the whole point of the snapshot is that the
+                // URL the user is looking at keeps working, and a
+                // Tailscale listener that came back as a Cloudflare one
+                // would rotate that URL out from under them.
                 let params = construct_protocol::RemoteStartParams {
-                    local_only: false,
+                    provider,
                     password: None,
                     wait_for_tunnel: true,
                 };
@@ -359,6 +366,35 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             use std::os::unix::process::CommandExt;
             let err = std::process::Command::new(&cmd.exe).args(&cmd.args).exec();
             Err(anyhow::anyhow!("exec({}) failed: {err}", cmd.exe.display()))
+        }
+    }
+}
+
+/// Which tunnel provider the boot-time `CONSTRUCT_REMOTE_WS_PORT` path
+/// should publish through, per `CONSTRUCT_REMOTE_PROVIDER`.
+///
+/// Defaults to cloudflare because that is what this path has always
+/// done, and a headless daemon that silently stopped being reachable
+/// after an upgrade would be a nasty surprise. `none` is honored and
+/// means "bind the LAN listener, publish nothing" — the right choice
+/// for a daemon on a network you already trust.
+fn boot_tunnel_provider() -> construct_protocol::TunnelProvider {
+    use construct_protocol::TunnelProvider;
+    let raw = match std::env::var("CONSTRUCT_REMOTE_PROVIDER") {
+        Ok(v) => v,
+        Err(_) => return TunnelProvider::Cloudflare,
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "cloudflare" | "cloudflared" => TunnelProvider::Cloudflare,
+        "tailscale" => TunnelProvider::Tailscale,
+        "none" | "off" | "lan" => TunnelProvider::None,
+        other => {
+            tracing::warn!(
+                value = %other,
+                "CONSTRUCT_REMOTE_PROVIDER is not one of cloudflare|tailscale|none; \
+                 defaulting to cloudflare"
+            );
+            TunnelProvider::Cloudflare
         }
     }
 }
