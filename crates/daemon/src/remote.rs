@@ -421,9 +421,9 @@ fn unix_now() -> u64 {
 /// Returns `None` for anything that is not an RFC1918 address. A
 /// public address here would mean the machine sits directly on the
 /// internet, and quietly inviting the user to pass that around is not
-/// something an option labelled *local network* gets to do. A tailnet
-/// address (100.64/10) is likewise not a LAN address — reaching the
-/// daemon that way is what the Tailscale provider is for.
+/// something an option labelled *local network* gets to do. A CGNAT /
+/// overlay-network address (100.64/10) is likewise not a private LAN
+/// address, so it is excluded too.
 ///
 /// Known imperfection: with a full-tunnel VPN up, the default route
 /// points at the VPN and we report its address. That address is

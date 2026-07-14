@@ -322,8 +322,17 @@ impl Client {
     /// Idempotent — `was_running: false` is the natural state when
     /// stop is called without an active listener.
     pub async fn remote_stop(&self) -> Result<construct_protocol::RemoteStopResult> {
-        self.request(ipc_method::REMOTE_STOP, &serde_json::Value::Null)
-            .await
+        self.remote_stop_with(false).await
+    }
+
+    /// Stop just the tunnel, keeping the LAN listener + password up
+    /// (`tunnel_only = true`), or stop everything (`false`).
+    pub async fn remote_stop_with(
+        &self,
+        tunnel_only: bool,
+    ) -> Result<construct_protocol::RemoteStopResult> {
+        let params = construct_protocol::RemoteStopParams { tunnel_only };
+        self.request(ipc_method::REMOTE_STOP, &params).await
     }
     /// Restart the daemon in place (exec self). The IPC connection
     /// is closed by the kernel during exec(), so the reply is the

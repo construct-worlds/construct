@@ -14,31 +14,33 @@ from the buttons in the dialog.
 
 | Command / setting | Purpose |
 |---|---|
-| `/remote-control` | Open the dialog: bind the listener, show the LAN address + QR, and offer tunnel providers. No tunnel is started until you pick one. |
+| `/remote-control` | Open the dialog: bind the listener, show the LAN address + QR, and offer a tunnel. No tunnel is started until you pick one. |
 | `/remote-control <password>` | Same, with a user-chosen Basic-auth password. |
-| `/remote-control tailscale` | Skip the dialog and start a Tailscale tunnel directly. |
 | `/remote-control cloudflare` | Skip the dialog and start a Cloudflare tunnel directly. |
-| `/remote-control stop` | Stop the listener/tunnel and rotate credentials for the next start. |
+| `/remote-control stop` | Stop the listener + tunnel entirely and rotate credentials for the next start. |
 | `/remote-control debug` | Alias for `/remote-control` — kept because the plain dialog is now the local-only resting state. |
 | `CONSTRUCT_REMOTE_WS_PORT=<port>` | Start the remote WebSocket listener on daemon boot for scripted/headless use. |
-| `CONSTRUCT_REMOTE_PROVIDER=<cloudflare\|tailscale\|none>` | Tunnel provider for the boot-time listener above. Defaults to `cloudflare`. |
+| `CONSTRUCT_REMOTE_PROVIDER=<cloudflare\|none>` | Tunnel provider for the boot-time listener above. Defaults to `cloudflare`. |
 | `CONSTRUCT_WEBUI_PORT=<port>` | Override the always-on localhost web UI port. Defaults to `5746`. |
 
-## Tunnel providers
+## The tunnel
 
-Reaching the daemon from beyond the local network means picking a provider, and
-the two on offer make different trade-offs:
+Reaching the daemon from beyond the local network means starting a tunnel.
+**Cloudflare** runs a `cloudflared` quick tunnel: the URL is reachable from
+anywhere and is unguessable, but it rotates on every run and its only protection
+is that nobody learns it. It needs no account — just `cloudflared` on `PATH`.
+The dialog shows the Cloudflare button even when `cloudflared` isn't installed,
+greyed out with an install hint, so you can see what's missing.
 
-- **Cloudflare** runs a `cloudflared` quick tunnel. The URL is reachable from
-  anywhere and is unguessable, but it rotates on every run and its only
-  protection is that nobody learns it. Needs no account.
-- **Tailscale** runs `tailscale serve`. The URL is stable and reachable **only
-  from your own tailnet**, so access is gated by your tailnet's rules rather than
-  by URL secrecy. Needs Tailscale installed, logged in, and HTTPS certificates
-  enabled for the tailnet.
+Once the tunnel's QR is up, the ready view offers two buttons:
 
-The dialog lists both even when one can't run, greyed out with the reason (not
-installed, not logged in, and so on), so you can see what's missing and fix it.
+- **back** — return to the local-network view with the tunnel still running.
+  Re-selecting Cloudflare shows the same URL; nothing was torn down.
+- **stop** — stop the tunnel and drop the public URL, but keep the LAN listener
+  and its password. A phone connected over the LAN keeps working.
+
+To turn remote control off completely — listener included — use
+`/remote-control stop`.
 
 ## Authentication and binding
 

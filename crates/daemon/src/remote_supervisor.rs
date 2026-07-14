@@ -144,6 +144,10 @@ pub struct StartRequest {
 /// — calling stop while nothing is running returns `was_running:
 /// false`, not an error.
 pub struct StopRequest {
+    /// Stop only the tunnel, leaving the LAN listener + password up.
+    /// This is the dialog's `stop` button: drop the public URL, keep
+    /// working on the local network. False tears everything down.
+    pub tunnel_only: bool,
     pub respond: oneshot::Sender<Result<StopOutcome>>,
 }
 
@@ -186,7 +190,11 @@ pub async fn run(manager: Arc<SessionManager>, mut rx: mpsc::UnboundedReceiver<S
                 let _ = req.respond.send(outcome);
             }
             SupervisorMsg::Stop(req) => {
-                let outcome = handle_stop(&manager, &mut ws_task, &mut tunnel_task).await;
+                let outcome = if req.tunnel_only {
+                    handle_stop_tunnel(&manager, &mut tunnel_task).await
+                } else {
+                    handle_stop(&manager, &mut ws_task, &mut tunnel_task).await
+                };
                 let _ = req.respond.send(Ok(outcome));
             }
         }
@@ -256,10 +264,9 @@ async fn handle_stop(
     // the tokio task does not take the subprocess down — we have to
     // SIGTERM by PID).
     //
-    // SIGTERM, not SIGKILL: both providers clean up on the way out,
-    // and `tailscale serve` in particular *must* be allowed to, since
-    // what it removes on exit is the mapping publishing this machine.
-    // Killing it outright would leave that mapping behind.
+    // SIGTERM, not SIGKILL: the tunnel child cleans up on the way out
+    // (a provider that registers a mapping withdraws it on exit), and
+    // killing it outright could leave that mapping behind.
     let (was_running, tunnel_pid, provider, state_for_cleanup) = {
         let mut guard = manager.remote_slot().expect("remote mutex poisoned");
         let pid = guard.as_ref().map(|h| h.state.tunnel_pid()).unwrap_or(0);
@@ -301,6 +308,63 @@ async fn handle_stop(
     manager.broadcast_remote_state(0);
     if was_running {
         tracing::info!("remote stopped: listener + tunnel torn down");
+    }
+    StopOutcome { was_running }
+}
+
+/// Stop just the tunnel, leaving the LAN listener (and its password,
+/// and any LAN-connected clients) running. This is the dialog's `stop`
+/// button: drop the public URL without ending the remote-control
+/// session, so the user can keep working over the local network and
+/// start a fresh tunnel later.
+///
+/// The tunnel supervisor task is aborted *before* the SIGTERM so its
+/// respawn loop can't race a new child into existence between the
+/// signal and the abort. The listener's slot is left in place; only
+/// the tunnel fields on the shared state are cleared, which also
+/// rewrites the snapshot so a restart doesn't try to adopt the URL we
+/// just killed.
+async fn handle_stop_tunnel(
+    manager: &Arc<SessionManager>,
+    tunnel_task: &mut Option<JoinHandle<()>>,
+) -> StopOutcome {
+    let (state, tunnel_pid, provider) = {
+        let guard = manager.remote_slot().expect("remote mutex poisoned");
+        match guard.as_ref() {
+            Some(h) => (
+                Some(h.state.clone()),
+                h.state.tunnel_pid(),
+                h.state.tunnel_provider(),
+            ),
+            None => (None, 0, TunnelProvider::None),
+        }
+    };
+
+    // Abort the supervisor first so it doesn't respawn on the death we
+    // are about to cause.
+    if let Some(h) = tunnel_task.take() {
+        h.abort();
+    }
+    if tunnel_pid != 0 {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        let label = provider.label();
+        match kill(Pid::from_raw(tunnel_pid as i32), Signal::SIGTERM) {
+            Ok(()) => tracing::info!(pid = tunnel_pid, provider = label, "stopped tunnel (listener kept)"),
+            Err(e) => {
+                tracing::warn!(error = %e, pid = tunnel_pid, provider = label, "SIGTERM tunnel failed")
+            }
+        }
+    }
+
+    let was_running = tunnel_pid != 0 || provider != TunnelProvider::None;
+    if let Some(state) = state {
+        // Clear the tunnel fields (and persist) so the listener now
+        // looks LAN-only, and a subsequent start re-spawns a fresh
+        // tunnel rather than short-circuiting on the dead URL.
+        state.set_tunnel_url(None).await;
+        state.set_tunnel_pid(0).await;
+        state.set_tunnel_provider(TunnelProvider::None).await;
     }
     StopOutcome { was_running }
 }
@@ -477,19 +541,8 @@ mod tests {
         assert!(path.exists(), "a restorable snapshot must be left in place");
     }
 
-    /// The provider is carried across the restart: a Tailscale listener
-    /// must not come back as a Cloudflare one, or the user's stable URL
-    /// would silently rotate into a random public one.
-    #[test]
-    fn provider_survives_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("remote.json");
-        let mut snap = snapshot(std::process::id(), now_secs());
-        snap.tunnel_provider = TunnelProvider::Tailscale;
-        snap.write(&path).unwrap();
-        assert_eq!(restorable_provider(&path), Some(TunnelProvider::Tailscale));
-    }
-
+    /// The provider is carried across a restart rather than re-derived,
+    /// so the URL the user is looking at keeps working.
     #[test]
     fn fresh_snapshot_with_live_tunnel_is_restorable() {
         // The test process itself is a guaranteed-alive PID.

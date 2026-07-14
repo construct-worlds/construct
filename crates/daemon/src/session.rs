@@ -1847,19 +1847,24 @@ impl SessionManager {
         }
     }
 
-    /// Tear down the remote WS listener + cloudflared tunnel via
-    /// the supervisor. Idempotent — calling when nothing is running
-    /// is not an error; the result's `was_running` field tells the
-    /// caller whether anything was actually torn down. Token
-    /// rotates on the next `start_remote` so the old QR is dead.
+    /// Tear down the remote transport via the supervisor. With
+    /// `tunnel_only`, only the tunnel goes; the LAN listener + password
+    /// stay up. Otherwise the whole thing comes down and the next
+    /// `start_remote` mints fresh credentials. Idempotent — calling when
+    /// nothing is running is not an error; `was_running` reports whether
+    /// anything was actually torn down.
     pub async fn stop_remote(
         self: Arc<Self>,
+        tunnel_only: bool,
     ) -> anyhow::Result<construct_protocol::RemoteStopResult> {
         use anyhow::Context as _;
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.remote_starter
             .send(crate::remote_supervisor::SupervisorMsg::Stop(
-                crate::remote_supervisor::StopRequest { respond: tx },
+                crate::remote_supervisor::StopRequest {
+                    tunnel_only,
+                    respond: tx,
+                },
             ))
             .map_err(|_| anyhow::anyhow!("remote supervisor task is not running"))?;
         let outcome = rx
@@ -1922,6 +1927,16 @@ impl SessionManager {
             } else {
                 None
             };
+            // Report any tunnel already live from an earlier start, so a
+            // freshly-opened dialog can badge that provider rather than
+            // implying nothing is exposed. `provider` here is what this
+            // reply's `url` is (the LAN address); `active_provider` is
+            // the separate "what's actually running" signal.
+            let active_provider = if state.tunnel_url().await.is_some() {
+                state.tunnel_provider()
+            } else {
+                TunnelProvider::None
+            };
             return Ok(construct_protocol::RemoteStartResult {
                 url,
                 qr,
@@ -1931,15 +1946,15 @@ impl SessionManager {
                 provider: TunnelProvider::None,
                 local_url,
                 lan_url,
+                active_provider,
             });
         }
 
         // Provider mode: poll the shared tunnel-url slot. 15s covers a
-        // cold cloudflared start (1–3s) plus slack for a slow network,
-        // and is generous for tailscale, which derives its URL rather
-        // than waiting to be told it. We poll instead of wiring a
-        // notifier because the call shape is request/reply over IPC —
-        // the caller is already blocked on this future.
+        // cold cloudflared start (1–3s) plus slack for a slow network.
+        // We poll instead of wiring a notifier because the call shape is
+        // request/reply over IPC — the caller is already blocked on this
+        // future.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
             if let Some(u) = state.tunnel_url().await {
@@ -1953,6 +1968,7 @@ impl SessionManager {
                     provider,
                     local_url,
                     lan_url,
+                    active_provider: provider,
                 });
             }
             if tokio::time::Instant::now() >= deadline {

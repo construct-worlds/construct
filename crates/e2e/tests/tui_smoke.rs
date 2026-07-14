@@ -93,11 +93,8 @@ async fn tui_remote_control_popup_via_palette() {
     tui.wait_for("password:", Duration::from_secs(5))
         .await
         .expect("popup password label never appeared");
-    // The dialog offers a way out of the local network, and names both
-    // providers even where neither is installed.
-    tui.wait_for("Tailscale", Duration::from_secs(5))
-        .await
-        .expect("tailscale option never appeared");
+    // The dialog offers a way out of the local network — the Cloudflare
+    // button, shown even where cloudflared isn't installed.
     tui.wait_for("Cloudflare", Duration::from_secs(5))
         .await
         .expect("cloudflare option never appeared");

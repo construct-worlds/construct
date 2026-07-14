@@ -2730,10 +2730,6 @@ impl ProgramSmartClipGroup {
     }
 }
 
-/// Live state of the `/remote-control` (or `/remote-control-debug`)
-/// modal. The `url` and `qr` are served verbatim by the daemon
-/// (`remote.start` IPC); the popup just displays them.
-///
 /// The `/remote-control` dialog.
 ///
 /// `Choose` is where it opens, and the important thing about it is
@@ -2743,19 +2739,42 @@ impl ProgramSmartClipGroup {
 /// dialog to see the address is not an act of exposing the machine —
 /// that only happens when the user picks a provider from it.
 ///
-/// `Starting` → `Ok` is the provider path; `Err` carries the daemon's
-/// diagnostic (not installed, not logged in, published nothing in
-/// time) so the dialog paints the reason rather than a fake URL.
+/// `Starting` → `Ok` is the provider path. The `Ok` (tunnel-ready)
+/// view carries a `stop`/`back` focus: `back` returns to the chooser
+/// with the tunnel left running, `stop` tears the tunnel down. `Err`
+/// carries the daemon's diagnostic so the dialog paints the reason
+/// rather than a fake URL.
 #[derive(Debug, Clone)]
 pub enum RemoteControlPopup {
     Choose(RemoteControlChoose),
     Starting(RemoteControlOk),
-    Ok(RemoteControlOk),
+    Ok {
+        ok: RemoteControlOk,
+        focus: ReadyButton,
+    },
     Err {
         /// Which provider failed, so the title can name it.
         provider: construct_protocol::TunnelProvider,
         message: String,
     },
+}
+
+/// The two buttons on the tunnel-ready view. `Back` is the default
+/// focus so a reflexive Enter is non-destructive — it returns to the
+/// chooser without killing the tunnel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadyButton {
+    Back,
+    Stop,
+}
+
+impl ReadyButton {
+    pub fn toggled(self) -> Self {
+        match self {
+            ReadyButton::Back => ReadyButton::Stop,
+            ReadyButton::Stop => ReadyButton::Back,
+        }
+    }
 }
 
 /// The resting state of the dialog: how to reach this machine right
@@ -2765,13 +2784,16 @@ pub struct RemoteControlChoose {
     /// LAN / loopback URL + QR + password. Everything here already
     /// works, with no tunnel.
     pub base: RemoteControlOk,
-    /// Every provider the daemon knows about — including the ones that
-    /// can't run, which are shown greyed out with the reason. A user
-    /// who has never heard of Tailscale learns it is an option; a user
-    /// who has it installed but logged out learns that, rather than
-    /// wondering why the button did nothing.
+    /// Every provider the daemon knows about — including ones that
+    /// can't run, shown greyed out with the reason, so a dead button
+    /// explains itself instead of doing nothing.
     pub options: Vec<construct_protocol::RemoteProviderInfo>,
     pub selected: usize,
+    /// A provider whose tunnel is already live (e.g. after `back` from
+    /// the ready view, or reopening the dialog while a tunnel runs).
+    /// Its button is badged so the user knows re-selecting it returns
+    /// the same QR rather than starting something new.
+    pub active: Option<construct_protocol::TunnelProvider>,
 }
 
 impl RemoteControlChoose {
@@ -10138,19 +10160,19 @@ impl App {
                 self.open_tasks_popup().await;
             }
             "remote-control" | "remote" => {
-                // Subcommand dispatch. `stop`, `debug`, and the
-                // provider names are reserved keywords; anything else
-                // is a literal password override (so a user who wants
-                // the password `stop` has to pick another word).
+                // Subcommand dispatch. `stop`, `debug`, and `cloudflare`
+                // are reserved keywords; anything else is a literal
+                // password override (so a user who wants the password
+                // `stop` has to pick another word).
                 //
                 //   /remote-control                  → dialog (LAN, no tunnel)
-                //   /remote-control stop             → stop
+                //   /remote-control stop             → stop everything
                 //   /remote-control debug [pw]       → dialog; kept as an
                 //                                      alias now that
                 //                                      local-only IS the
                 //                                      dialog's resting state
-                //   /remote-control tailscale [pw]   → skip the dialog,
-                //   /remote-control cloudflare [pw]     start that provider
+                //   /remote-control cloudflare [pw]  → skip the dialog,
+                //                                      start the tunnel
                 //   /remote-control <anything else>  → dialog + pw=<that>
                 use construct_protocol::TunnelProvider;
                 let (sub, rest) = arg
@@ -10161,10 +10183,6 @@ impl App {
                 match sub {
                     "stop" => self.stop_remote_control().await,
                     "" | "debug" => self.open_remote_control_popup(rest_pw).await,
-                    "tailscale" => {
-                        self.start_remote_control_provider(TunnelProvider::Tailscale, rest_pw)
-                            .await
-                    }
                     "cloudflare" | "cloudflared" => {
                         self.start_remote_control_provider(TunnelProvider::Cloudflare, rest_pw)
                             .await
@@ -10262,16 +10280,25 @@ impl App {
     /// Exposure is now something the user *chooses*, from the buttons
     /// this dialog offers, and never a side effect of looking.
     pub async fn open_remote_control_popup(&mut self, password: Option<String>) {
+        self.show_remote_chooser(password).await;
+    }
+
+    /// Bind the listener (idempotent) and show the chooser: LAN address
+    /// + provider buttons. Used to open the dialog, and to return to it
+    /// from the tunnel-ready view via `back` or `stop`. The daemon
+    /// reports any already-running tunnel, so a `back` that left the
+    /// tunnel up comes back with that provider's button badged.
+    async fn show_remote_chooser(&mut self, password: Option<String>) {
         use construct_protocol::TunnelProvider;
         if let Some(task) = self.remote_control_task.take() {
             task.abort();
         }
-        let base = match self
+        let r = match self
             .client
             .remote_start(TunnelProvider::None, password)
             .await
         {
-            Ok(r) => RemoteControlOk::from(r),
+            Ok(r) => r,
             Err(e) => {
                 self.remote_control_popup = Some(RemoteControlPopup::Err {
                     provider: TunnelProvider::None,
@@ -10280,6 +10307,8 @@ impl App {
                 return;
             }
         };
+        let active = (r.active_provider != TunnelProvider::None).then_some(r.active_provider);
+        let base = RemoteControlOk::from(r);
         // A failed probe shouldn't cost the user the dialog — the LAN
         // URL above already works. Fall back to an empty option list
         // and let the dialog say there is nothing to offer.
@@ -10295,6 +10324,7 @@ impl App {
             base,
             options,
             selected,
+            active,
         }));
     }
 
@@ -10354,7 +10384,10 @@ impl App {
             Ok((provider, Ok(r))) => {
                 let mut ok = RemoteControlOk::from(r);
                 ok.provider = provider;
-                self.remote_control_popup = Some(RemoteControlPopup::Ok(ok));
+                self.remote_control_popup = Some(RemoteControlPopup::Ok {
+                    ok,
+                    focus: ReadyButton::Back,
+                });
             }
             Ok((provider, Err(e))) => {
                 self.remote_control_popup = Some(RemoteControlPopup::Err {
@@ -10416,13 +10449,45 @@ impl App {
                 KeyCode::Left | KeyCode::Backspace => self.open_remote_control_popup(None).await,
                 _ => {}
             },
-            RemoteControlPopup::Starting(_) | RemoteControlPopup::Ok(_) => {
+            // Tunnel ready: [back] / [stop]. Arrows/Tab move between
+            // them, Enter acts on the focused one. `back` keeps the
+            // tunnel up; `stop` kills it.
+            RemoteControlPopup::Ok { focus, .. } => match key.code {
+                KeyCode::Esc => self.close_remote_control_popup(),
+                KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Tab
+                | KeyCode::BackTab
+                | KeyCode::Char('h')
+                | KeyCode::Char('l') => *focus = focus.toggled(),
+                KeyCode::Enter => match *focus {
+                    ReadyButton::Back => self.show_remote_chooser(None).await,
+                    ReadyButton::Stop => self.stop_remote_control_tunnel().await,
+                },
+                _ => {}
+            },
+            RemoteControlPopup::Starting(_) => {
                 if matches!(key.code, KeyCode::Esc) {
                     self.close_remote_control_popup();
                 }
             }
         }
         true
+    }
+
+    /// Stop just the tunnel (the dialog's `stop` button), keeping the
+    /// LAN listener + password, then return to the chooser showing the
+    /// local-network view. Re-selecting the provider afterward starts a
+    /// *fresh* tunnel — unlike `back`, which leaves the current one up.
+    async fn stop_remote_control_tunnel(&mut self) {
+        if let Some(task) = self.remote_control_task.take() {
+            task.abort();
+        }
+        if let Err(e) = self.client.remote_stop_with(true).await {
+            self.set_status(format!("stop tunnel failed: {e}"));
+            return;
+        }
+        self.show_remote_chooser(None).await;
     }
 
     /// Dismiss the dialog, and with it the orchestrator panel it was

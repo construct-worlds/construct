@@ -135,9 +135,9 @@ async fn remote_control_security_and_lifecycle() {
 /// whether or not it could run — the dialog needs the unavailable ones
 /// too, so it can grey them out and say why.
 ///
-/// Deliberately does not assert *availability*: whether cloudflared or
-/// tailscale happen to be installed is a property of the machine
-/// running the test, not of the code. What must hold is that both are
+/// Deliberately does not assert *availability*: whether cloudflared
+/// happens to be installed is a property of the machine running the
+/// test, not of the code. What must hold is that Cloudflare is
 /// described, and that anything unavailable explains itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_providers_describes_every_provider() {
@@ -150,10 +150,6 @@ async fn remote_providers_describes_every_provider() {
         .expect("remote.providers");
 
     let listed: Vec<TunnelProvider> = r.providers.iter().map(|p| p.provider).collect();
-    assert!(
-        listed.contains(&TunnelProvider::Tailscale),
-        "tailscale must be offered even when it isn't installed: {listed:?}"
-    );
     assert!(
         listed.contains(&TunnelProvider::Cloudflare),
         "cloudflare must be offered even when it isn't installed: {listed:?}"
@@ -227,5 +223,62 @@ async fn listener_is_reachable_off_loopback() {
         res.status().as_u16(),
         200,
         "listener must answer on a non-loopback address"
+    );
+}
+
+/// The dialog's `stop` button stops the tunnel but keeps the LAN
+/// listener. This test can't spawn a real tunnel (the e2e daemon runs
+/// with tunnels disabled), but it pins the load-bearing half: a
+/// tunnel-only stop must leave the listener answering with the *same*
+/// password, so a phone connected over the LAN isn't kicked off when
+/// the user drops the public URL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tunnel_only_stop_keeps_lan_listener() {
+    let d = Daemon::spawn().await.expect("spawn daemon");
+
+    let r = d
+        .client
+        .remote_start(TunnelProvider::None, None)
+        .await
+        .expect("remote.start");
+    let root = r.local_url.clone();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    // Tunnel-only stop with no tunnel running is a no-op that reports
+    // nothing was torn down — and crucially does not take the listener
+    // with it.
+    let stop = d
+        .client
+        .remote_stop_with(/* tunnel_only */ true)
+        .await
+        .expect("remote.stop tunnel-only");
+    assert!(!stop.was_running, "no tunnel was running to stop");
+
+    let after = http
+        .get(&root)
+        .basic_auth("remote", Some(&r.password))
+        .send()
+        .await
+        .expect("listener still reachable after tunnel-only stop");
+    assert_eq!(
+        after.status().as_u16(),
+        200,
+        "the LAN listener + password must survive a tunnel-only stop"
+    );
+
+    // A full stop, by contrast, takes everything down.
+    let full = d.client.remote_stop().await.expect("remote.stop full");
+    assert!(full.was_running, "full stop should tear the listener down");
+    let gone = http
+        .get(&root)
+        .basic_auth("remote", Some(&r.password))
+        .send()
+        .await;
+    assert!(
+        gone.is_err() || gone.map(|r| !r.status().is_success()).unwrap_or(true),
+        "listener must be gone after a full stop"
     );
 }

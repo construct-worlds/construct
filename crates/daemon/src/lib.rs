@@ -273,9 +273,9 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             tokio::spawn(async move {
                 // Resume through the *same* provider the prior daemon
                 // used — the whole point of the snapshot is that the
-                // URL the user is looking at keeps working, and a
-                // Tailscale listener that came back as a Cloudflare one
-                // would rotate that URL out from under them.
+                // URL the user is looking at keeps working, and coming
+                // back as a different provider (or none) would rotate or
+                // drop that URL out from under them.
                 let params = construct_protocol::RemoteStartParams {
                     provider,
                     password: None,
@@ -386,12 +386,11 @@ fn boot_tunnel_provider() -> construct_protocol::TunnelProvider {
     };
     match raw.trim().to_ascii_lowercase().as_str() {
         "cloudflare" | "cloudflared" => TunnelProvider::Cloudflare,
-        "tailscale" => TunnelProvider::Tailscale,
         "none" | "off" | "lan" => TunnelProvider::None,
         other => {
             tracing::warn!(
                 value = %other,
-                "CONSTRUCT_REMOTE_PROVIDER is not one of cloudflare|tailscale|none; \
+                "CONSTRUCT_REMOTE_PROVIDER is not one of cloudflare|none; \
                  defaulting to cloudflare"
             );
             TunnelProvider::Cloudflare

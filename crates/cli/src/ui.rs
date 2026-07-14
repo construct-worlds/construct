@@ -15256,7 +15256,9 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
     let (title, title_color, body_lines, body_w, body_h) = match popup {
         crate::app::RemoteControlPopup::Choose(c) => render_remote_choose(app, c, total.width),
         crate::app::RemoteControlPopup::Starting(p) => render_remote_starting(app, p, total.width),
-        crate::app::RemoteControlPopup::Ok(p) => render_remote_ok(app, p, total.width),
+        crate::app::RemoteControlPopup::Ok { ok, focus } => {
+            render_remote_ok(app, ok, *focus, total.width)
+        }
         crate::app::RemoteControlPopup::Err { provider, message } => {
             render_remote_err(app, *provider, message)
         }
@@ -15365,11 +15367,11 @@ const REMOTE_QR_GAP: u16 = 3;
 
 /// Column at which the dialog's prose wraps.
 ///
-/// The provider explanations are full sentences by design ("Tailscale is
-/// not logged in — run `tailscale up`"), and one long enough to out-width
-/// the QR would push the whole dialog back into the stacked layout that
-/// hides the buttons. Wrapping the prose keeps the text column narrow so
-/// the layout stays wide-and-short.
+/// The provider explanations are full sentences by design ("cloudflared
+/// is not on PATH — install with `brew install cloudflared`"), and one
+/// long enough to out-width the QR would push the whole dialog back into
+/// the stacked layout that hides the buttons. Wrapping the prose keeps
+/// the text column narrow so the layout stays wide-and-short.
 const REMOTE_TEXT_W: usize = 46;
 
 /// Break `text` onto lines no wider than `width`, at word boundaries.
@@ -15509,21 +15511,29 @@ fn render_remote_choose<'a>(
             Style::default().fg(app.theme.dim),
         )));
     } else {
-        // Buttons carry only the provider name — the reason an
-        // unavailable one can't be used is spelled out under the row,
-        // for whichever button is focused. Cramming it into the button
-        // would make a row nobody can read.
+        // Buttons carry the provider name plus a ● when that provider's
+        // tunnel is already live. The reason an unavailable one can't be
+        // used is spelled out under the row, for the focused button —
+        // cramming it into the button would make a row nobody can read.
         let mut spans: Vec<Span> = Vec::new();
         for (i, opt) in c.options.iter().enumerate() {
+            let running = c.active == Some(opt.provider);
             let mut style = if opt.available {
                 Style::default().fg(app.theme.accent)
             } else {
                 Style::default().fg(app.theme.dim)
             };
+            if running {
+                style = Style::default().fg(app.theme.success);
+            }
             if i == c.selected {
                 style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
             }
-            spans.push(Span::styled(format!("[ {} ]", opt.provider.label()), style));
+            let dot = if running { " ●" } else { "" };
+            spans.push(Span::styled(
+                format!("[ {}{dot} ]", opt.provider.label()),
+                style,
+            ));
             spans.push(Span::raw("  "));
         }
         info.push(Line::from(spans));
@@ -15532,11 +15542,12 @@ fn render_remote_choose<'a>(
         // Say something about the focused button, always: why it can't
         // run, or what picking it would do.
         let (detail, color) = match c.selected_option() {
+            Some(opt) if c.active == Some(opt.provider) => (
+                "Running. Select to show its QR again, or open it to stop.".to_string(),
+                app.theme.success,
+            ),
             Some(opt) if opt.available => (
                 match opt.provider {
-                    construct_protocol::TunnelProvider::Tailscale => {
-                        "Your devices only. Stable URL.".to_string()
-                    }
                     construct_protocol::TunnelProvider::Cloudflare => {
                         "Anyone with the URL. Rotates each run.".to_string()
                     }
@@ -15556,8 +15567,15 @@ fn render_remote_choose<'a>(
     }
 
     info.push(Line::raw(""));
+    // With a single provider there is nothing to select between, so the
+    // ←/→ hint would be a lie.
+    let keys = if c.options.len() > 1 {
+        "←/→ select · Enter start · Esc close"
+    } else {
+        "Enter start · Esc close"
+    };
     info.push(Line::from(Span::styled(
-        "←/→ select · Enter start · Esc close",
+        keys,
         Style::default().fg(app.theme.dim),
     )));
 
@@ -15602,12 +15620,16 @@ fn render_remote_starting<'a>(
     )
 }
 
-/// A tunnel is up. The QR now encodes the provider's URL.
+/// A tunnel is up. The QR now encodes the provider's URL, and the view
+/// gains `[ back ]` / `[ stop ]`: `back` keeps the tunnel and returns to
+/// the chooser, `stop` tears it down.
 fn render_remote_ok<'a>(
     app: &App,
     p: &crate::app::RemoteControlOk,
+    focus: crate::app::ReadyButton,
     area_w: u16,
 ) -> RemotePopupBody<'a> {
+    use crate::app::ReadyButton;
     let mut info = remote_info_lines(app, p);
 
     if let Some(hint) = p.hint.as_deref() {
@@ -15615,25 +15637,42 @@ fn render_remote_ok<'a>(
         info.extend(wrapped_lines(hint, Style::default().fg(app.theme.dim)));
     }
 
-    let (title, color) = if p.tunnel_ready {
-        let label = p.provider.label();
-        let reach = match p.provider {
-            construct_protocol::TunnelProvider::Tailscale => "your devices only",
-            _ => "public URL",
+    info.push(Line::raw(""));
+    // [ back ] then [ stop ], focus reversed. `back` is the safe default,
+    // so it leads.
+    let button = |label: &str, focused: bool, danger: bool| {
+        let base = if danger {
+            app.theme.danger
+        } else {
+            app.theme.accent
         };
-        (
-            format!(" /remote-control — {label} ready ({reach}) — Esc to close "),
-            app.theme.success,
-        )
-    } else {
-        (
-            " /remote-control — local network — Esc to close ".to_string(),
-            app.theme.info,
-        )
+        let mut style = Style::default().fg(base);
+        if focused {
+            style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        }
+        Span::styled(format!("[ {label} ]"), style)
     };
+    info.push(Line::from(vec![
+        button("back", focus == ReadyButton::Back, false),
+        Span::raw("  "),
+        button("stop", focus == ReadyButton::Stop, true),
+    ]));
+    info.push(Line::raw(""));
+    let hint = match focus {
+        ReadyButton::Back => "Keep the tunnel running and return to the options.",
+        ReadyButton::Stop => "Stop the tunnel. The local-network address stays up.",
+    };
+    info.extend(wrapped_lines(hint, Style::default().fg(app.theme.dim)));
+    info.push(Line::from(Span::styled(
+        "←/→ select · Enter · Esc close",
+        Style::default().fg(app.theme.dim),
+    )));
+
+    let label = p.provider.label();
+    let title = format!(" /remote-control — {label} ready (public URL) — Esc to close ");
 
     let (lines, width, height) = compose_qr_and_info(&p.qr, info, area_w);
-    (title, color, lines, width, height)
+    (title, app.theme.success, lines, width, height)
 }
 
 /// A provider failed to start. Paint the daemon's diagnostic — which is
@@ -15720,12 +15759,13 @@ mod remote_popup_tests {
 
     /// The prose is wrapped before it reaches the layout, so a long
     /// provider explanation can't push the dialog back into the tall
-    /// layout. This is the regression that actually happened: "Tailscale
-    /// is not installed — get it from tailscale.com/download" is 62
-    /// columns, and unwrapped it silently hid the buttons.
+    /// layout that hides the buttons — the regression that actually
+    /// happened when an unwrapped ~60-column "not installed" message
+    /// out-widened the QR.
     #[test]
     fn long_provider_message_is_wrapped_and_stays_side_by_side() {
-        let msg = "Tailscale is not installed — get it from tailscale.com/download";
+        let msg =
+            "cloudflared is not on PATH — install with `brew install cloudflared`, or from github.com/cloudflare/cloudflared/releases";
         assert!(msg.chars().count() > REMOTE_TEXT_W, "test premise");
 
         let wrapped = wrap_plain(msg, REMOTE_TEXT_W);

@@ -1575,7 +1575,9 @@ async fn dispatch(
         ok!(req, &r)
     });
     dispatch_entry!(ipc_method::REMOTE_STOP, {
-        match manager.clone().stop_remote().await {
+        let params = parse_params::<construct_protocol::RemoteStopParams>(req.params.clone())
+            .unwrap_or_default();
+        match manager.clone().stop_remote(params.tunnel_only).await {
             Ok(r) => ok!(req, &r),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }

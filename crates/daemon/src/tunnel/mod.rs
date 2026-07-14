@@ -4,17 +4,14 @@
 //! The listener itself binds every interface and is gated by HTTP
 //! Basic auth, so a phone on the same Wi-Fi needs no provider at all.
 //! A provider is what you reach for when the phone is *not* on the
-//! same Wi-Fi, and the two we support answer that differently:
-//!
-//! - [`cloudflare`] runs a `cloudflared` quick tunnel. The URL is
-//!   public but unguessable, and it costs nothing to set up. Reach:
-//!   anywhere.
-//! - [`tailscale`] runs `tailscale serve`. The URL is stable and
-//!   reachable only from the user's own tailnet, so access is gated
-//!   by tailnet ACLs instead of by URL secrecy. Reach: your devices.
+//! same Wi-Fi. Today there is one — [`cloudflare`], a `cloudflared`
+//! quick tunnel: a public but unguessable URL, no account, nothing to
+//! set up. The dispatch below is a seam, not a framework: another
+//! provider is a backend module plus a `TunnelProvider` variant, and
+//! nothing upstream of here has to change.
 //!
 //! Every backend presents the same shape to the supervisor, which is
-//! what lets the rest of the daemon stay provider-agnostic:
+//! what keeps the rest of the daemon provider-agnostic:
 //!
 //! 1. Spawn a child process in its own process group, so it survives
 //!    the daemon's `exec()` on `/construct restart` and the new daemon
@@ -25,17 +22,12 @@
 //!    the tunnel is actually serving.
 //! 4. Die when SIGTERM'd, releasing whatever it registered.
 //!
-//! Step 4 is why both backends run their child in the *foreground*.
-//! `tailscale serve` also has a `--bg` mode that writes into
-//! tailscaled's persistent config; we deliberately don't use it,
-//! because a backgrounded mapping outlives a crashed daemon and would
-//! leave the machine exposed with nothing left to clean it up. A
-//! foreground child tears its own mapping down when it dies, which
-//! makes "the tunnel lives exactly as long as the process we can see"
-//! true for both providers.
+//! Step 4 is why the backend runs its child in the *foreground*: the
+//! tunnel then lives exactly as long as a process we hold a PID for,
+//! and a crashed daemon can't leave a mapping behind with nothing to
+//! withdraw it.
 
 pub mod cloudflare;
-pub mod tailscale;
 
 use std::time::Duration;
 
@@ -44,9 +36,7 @@ use construct_protocol::{RemoteProviderInfo, TunnelProvider};
 use crate::remote::{process_alive, RemoteState};
 
 /// Providers the dialog offers, in the order it offers them.
-/// Tailscale leads because it is the safer of the two: it exposes the
-/// daemon to the user's own devices rather than to the internet.
-pub const PROVIDERS: [TunnelProvider; 2] = [TunnelProvider::Tailscale, TunnelProvider::Cloudflare];
+pub const PROVIDERS: [TunnelProvider; 1] = [TunnelProvider::Cloudflare];
 
 /// Probe every provider. Read-only — nothing is spawned, so the
 /// dialog can call this on every open without side effects.
@@ -64,7 +54,6 @@ pub async fn probe(provider: TunnelProvider) -> RemoteProviderInfo {
     let detail = match provider {
         TunnelProvider::None => None,
         TunnelProvider::Cloudflare => cloudflare::preflight().err(),
-        TunnelProvider::Tailscale => tailscale::preflight().await.err(),
     };
     RemoteProviderInfo {
         provider,
@@ -149,7 +138,6 @@ pub async fn preflight(provider: TunnelProvider) -> Result<(), String> {
     match provider {
         TunnelProvider::None => Ok(()),
         TunnelProvider::Cloudflare => cloudflare::preflight(),
-        TunnelProvider::Tailscale => tailscale::preflight().await,
     }
 }
 
@@ -161,6 +149,5 @@ async fn run_once(
     match provider {
         TunnelProvider::None => Ok(()),
         TunnelProvider::Cloudflare => cloudflare::run_once(remote, local_port).await,
-        TunnelProvider::Tailscale => tailscale::run_once(remote, local_port).await,
     }
 }

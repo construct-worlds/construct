@@ -988,13 +988,13 @@ pub mod ipc_method {
     /// and changes no state, so the dialog can call it freely to
     /// decide which buttons to offer.
     pub const REMOTE_PROVIDERS: &str = "remote.providers";
-    /// Take the remote WS listener back down: kill the tunnel
-    /// subprocess (URL stops resolving), drop the listener (no new
-    /// connections accepted), and clear the daemon-side
-    /// `RemoteState` so the next `/remote-control` invocation mints
-    /// a fresh password. Existing in-flight connections die naturally
-    /// once the tunnel exits. Idempotent — calling stop when
-    /// nothing is running returns Ok with `was_running: false`.
+    /// Stop remote control, or just its tunnel (see `tunnel_only` in
+    /// `RemoteStopParams`). Full stop kills the tunnel subprocess, drops
+    /// the listener, and clears the daemon-side `RemoteState` so the
+    /// next `/remote-control` mints a fresh password. Tunnel-only stop
+    /// kills the tunnel but leaves the LAN listener and its password
+    /// running. Idempotent — calling stop when nothing is running
+    /// returns Ok with `was_running: false`.
     pub const REMOTE_STOP: &str = "remote.stop";
     /// Restart the daemon process in place — persist remote state
     /// (token, password, port, provider, tunnel URL) to disk, exec()
@@ -2561,15 +2561,15 @@ pub struct RemoteStateNotificationPayload {
 ///
 /// The listener itself always binds every interface and is gated by
 /// HTTP Basic auth, so it is reachable from the local network with no
-/// provider at all. A provider adds reach *past* the LAN, and each one
-/// buys a different trade:
+/// provider at all. A provider adds reach *past* the LAN:
 ///
 /// - `Cloudflare` — a `cloudflared` quick tunnel. Public internet,
 ///   ephemeral URL that nobody can guess. Needs no account.
-/// - `Tailscale` — `tailscale serve`. Reachable only from the user's
-///   tailnet, with a stable URL. Access is gated by tailnet ACLs
-///   rather than by URL secrecy, which makes it the safer default for
-///   anyone who already runs Tailscale.
+///
+/// The enum keeps a `None` variant and room for more providers because
+/// the daemon models "reach the LAN" and "reach past it" as one axis;
+/// the tunnel backends sit behind a seam so another provider is a
+/// backend plus a variant, not a reshape.
 ///
 /// `None` is not a failure state — it is the resting state of the
 /// dialog before the user picks, and it is a perfectly good way to
@@ -2580,7 +2580,6 @@ pub enum TunnelProvider {
     #[default]
     None,
     Cloudflare,
-    Tailscale,
 }
 
 impl TunnelProvider {
@@ -2590,7 +2589,6 @@ impl TunnelProvider {
         match self {
             TunnelProvider::None => 0,
             TunnelProvider::Cloudflare => 1,
-            TunnelProvider::Tailscale => 2,
         }
     }
 
@@ -2601,7 +2599,6 @@ impl TunnelProvider {
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => TunnelProvider::Cloudflare,
-            2 => TunnelProvider::Tailscale,
             _ => TunnelProvider::None,
         }
     }
@@ -2611,7 +2608,6 @@ impl TunnelProvider {
         match self {
             TunnelProvider::None => "local network",
             TunnelProvider::Cloudflare => "Cloudflare",
-            TunnelProvider::Tailscale => "Tailscale",
         }
     }
 }
@@ -2714,6 +2710,14 @@ pub struct RemoteStartResult {
     /// says so rather than showing an address that cannot work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lan_url: Option<String>,
+    /// The tunnel provider currently live on this listener, if any —
+    /// independent of what *this* call requested. A `provider: None`
+    /// (LAN) reply can still report `active_provider: Cloudflare` when a
+    /// tunnel from an earlier start is running, so the dialog can badge
+    /// that provider's button as active instead of implying nothing is
+    /// exposed.
+    #[serde(default)]
+    pub active_provider: TunnelProvider,
 }
 
 /// Params for the `remote.providers` IPC method. No options — the
@@ -2723,20 +2727,19 @@ pub struct RemoteProvidersParams {}
 
 /// One provider's readiness, as probed by the daemon.
 ///
-/// The dialog lists every provider the daemon knows about — including
-/// the ones that cannot run — so the user learns that Tailscale is an
-/// option at all, and what is missing. A provider that is simply
-/// absent from the list teaches nobody anything.
+/// The dialog lists a provider even when it cannot run, so the user
+/// sees a greyed button with the reason rather than a button that does
+/// nothing — a provider silently absent from the list teaches nobody
+/// anything.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteProviderInfo {
     pub provider: TunnelProvider,
     /// True iff starting this provider right now would be expected to
-    /// work: binary present, and (where it applies) the local agent
-    /// logged in and able to issue a certificate.
+    /// work — e.g. its binary is present.
     pub available: bool,
     /// Why it is unavailable, phrased as something the user can act on
-    /// ("tailscale is not logged in — run `tailscale up`"). `None`
-    /// when `available` is true.
+    /// ("cloudflared is not on PATH — install with `brew install
+    /// cloudflared`"). `None` when `available` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -2746,6 +2749,21 @@ pub struct RemoteProviderInfo {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RemoteProvidersResult {
     pub providers: Vec<RemoteProviderInfo>,
+}
+
+/// Params for the `remote.stop` IPC method.
+///
+/// `tunnel_only` is the difference between "stop the tunnel" and "stop
+/// remote control". With it set, the tunnel process is torn down but
+/// the LAN listener, its password, and any LAN-connected clients are
+/// left untouched — the dialog's `stop` button, which drops the public
+/// URL and returns you to the local-network view. Left false (the
+/// `/remote-control stop` command), everything comes down and the next
+/// start mints fresh credentials.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoteStopParams {
+    #[serde(default)]
+    pub tunnel_only: bool,
 }
 
 /// Result of the `remote.stop` IPC method. `was_running: false` is
