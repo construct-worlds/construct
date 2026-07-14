@@ -1385,7 +1385,7 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(operator_label["hasOldGodClass"], false);
 
     // Issue #132: the web UI exposes pin/unpin for the selected session
-    // (now as the title-bar pin button) and marks pinned rows visibly.
+    // (as a session-menu item whose label flips) and marks pinned rows visibly.
     let pin_ui: serde_json::Value = page
         .evaluate(
             r#"
@@ -1419,21 +1419,19 @@ async fn web_client_loads_and_websocket_connects() {
               ];
               state.groups = [];
               renderSessions();
-              const initialButton = document.getElementById('titlePinBtn');
+              const initialItem = document.getElementById('sessionMenuPinItem');
               const initial = {
                 rowText: document.querySelector('[data-id="s2"]')?.innerText || '',
-                buttonText: initialButton?.textContent || '',
-                aria: initialButton?.getAttribute('aria-label') || '',
-                hidden: initialButton?.hidden === true,
+                itemText: initialItem?.textContent || '',
+                disabled: initialItem?.disabled === true,
               };
               await handleRowAction('pin', 's1');
               state.currentId = 's2';
               renderSessions();
-              const pinnedButton = document.getElementById('titlePinBtn');
+              const pinnedItem = document.getElementById('sessionMenuPinItem');
               const pinned = {
-                buttonText: pinnedButton?.textContent || '',
-                aria: pinnedButton?.getAttribute('aria-label') || '',
-                active: pinnedButton?.classList.contains('is-on') === true,
+                itemText: pinnedItem?.textContent || '',
+                disabled: pinnedItem?.disabled === true,
               };
               rpc = oldRpc;
               return { initial, pinned, calls };
@@ -1451,12 +1449,10 @@ async fn web_client_loads_and_websocket_connects() {
             .contains("★"),
         "pinned session row did not include visible pin marker: {pin_ui:?}"
     );
-    assert_eq!(pin_ui["initial"]["buttonText"], "☆");
-    assert_eq!(pin_ui["initial"]["aria"], "pin session");
-    assert_eq!(pin_ui["initial"]["hidden"], false);
-    assert_eq!(pin_ui["pinned"]["buttonText"], "★");
-    assert_eq!(pin_ui["pinned"]["aria"], "unpin session");
-    assert_eq!(pin_ui["pinned"]["active"], true);
+    assert_eq!(pin_ui["initial"]["itemText"], "pin");
+    assert_eq!(pin_ui["initial"]["disabled"], false);
+    assert_eq!(pin_ui["pinned"]["itemText"], "unpin");
+    assert_eq!(pin_ui["pinned"]["disabled"], false);
     assert_eq!(
         pin_ui["calls"],
         serde_json::json!([

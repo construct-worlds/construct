@@ -2163,12 +2163,10 @@
   <header>
     <button class="toggle-list" id="toggleList" type="button">≡</button>
     <!--
-      Pin + rename act on the current session and live in the title bar
-      (pin before the name, rename after it), mirroring where the eye
-      already is when thinking about "this session".
+      Rename acts on the current session and lives in the title bar next
+      to the session name, mirroring where the eye already is when
+      thinking about "this session". Pin lives in the session menu.
     -->
-    <button type="button" class="title-action" id="titlePinBtn" hidden
-            aria-label="pin session" title="Pin session">☆</button>
     <div class="meta" id="sessionTitle"></div>
     <button type="button" class="title-action" id="titleRenameBtn" hidden
             aria-label="rename session" title="Rename session">✎</button>
@@ -2326,6 +2324,7 @@
       </div>
       <div class="session-menu" id="sessionMenu" hidden role="menu" aria-label="session menu">
         <button type="button" role="menuitem" data-menu-action="rename">rename</button>
+        <button type="button" role="menuitem" data-menu-action="pin" id="sessionMenuPinItem">pin</button>
         <button type="button" role="menuitem" data-menu-action="fork">fork conversation</button>
         <button type="button" role="menuitem" data-menu-action="restart">restart</button>
         <button type="button" role="menuitem" data-menu-action="archive" id="sessionMenuArchiveItem">archive</button>
@@ -4090,15 +4089,7 @@ function refreshSessionActions() {
   const terminal = ["done", "errored", "killed", "stopped"].includes(status);
   const archived = !!(sel && sel.archived);
   const pinned = !!(sel && sel.pinned);
-  const pinBtn = $("titlePinBtn");
   const renameBtn = $("titleRenameBtn");
-  if (pinBtn) {
-    pinBtn.hidden = !isUserSession;
-    pinBtn.textContent = pinned ? "★" : "☆";
-    pinBtn.classList.toggle("is-on", pinned);
-    pinBtn.setAttribute("aria-label", pinned ? "unpin session" : "pin session");
-    pinBtn.title = pinned ? "Unpin session" : "Pin session";
-  }
   if (renameBtn) renameBtn.hidden = !isUserSession;
   // The menu pill overlays the view's top-right corner; the program
   // view's own bar (Find/Run/Save) occupies that spot, so hide it there.
@@ -4109,6 +4100,7 @@ function refreshSessionActions() {
   if (menu) {
     const enabledByAction = {
       rename: isUserSession,
+      pin: isUserSession,
       fork: isUserSession && !archived,
       restart: !!sel && terminal && !archived,
       archive: isUserSession,
@@ -4119,6 +4111,8 @@ function refreshSessionActions() {
       const on = enabledByAction[btn.dataset.menuAction];
       btn.disabled = on === false;
     }
+    const pinItem = $("sessionMenuPinItem");
+    if (pinItem) pinItem.textContent = pinned ? "unpin" : "pin";
     const archiveItem = $("sessionMenuArchiveItem");
     if (archiveItem) archiveItem.textContent = archived ? "unarchive" : "archive";
   }
@@ -10980,12 +10974,9 @@ closeSessionDeleteBtn.addEventListener("click", async () => {
   }
 });
 
-// Title-bar pin/rename act on the current session. After an action,
-// `session/state` notifications refresh the cached summary and
+// The title-bar rename button acts on the current session. After an
+// action, `session/state` notifications refresh the cached summary and
 // re-render the list (which calls `refreshSessionActions` for us).
-$("titlePinBtn").addEventListener("click", () => {
-  handleRowAction("pin", state.currentId);
-});
 $("titleRenameBtn").addEventListener("click", () => {
   handleRowAction("rename", state.currentId);
 });

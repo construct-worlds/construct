@@ -13,14 +13,14 @@ Scope: Where the web UI's per-session controls live and how session reorder work
   as single-step daemon moves, so region semantics — pinned block, fork
   sibling runs, group membership — stay daemon-owned and a drop stops at
   a region edge rather than jumping it.
-- Pin and rename act on the current session from the title bar: pin
-  before the session name, rename after it.
+- Rename acts on the current session from the title bar, next to the
+  session name.
 - The remaining lifecycle actions live in a session menu at the top-right
   of the session view (next to the terminal scroll controls), mirroring
-  the TUI's session-title menu: rename, fork conversation, restart,
-  archive/unarchive, merge and archive (enabled only for forks, visible
-  otherwise so the menu teaches the workflow), delete. TUI-only entries
-  that manage split panes are omitted — the web UI has no splits.
+  the TUI's session-title menu: rename, pin/unpin, fork conversation,
+  restart, archive/unarchive, merge and archive (enabled only for forks,
+  visible otherwise so the menu teaches the workflow), delete. TUI-only
+  entries that manage split panes are omitted — the web UI has no splits.
 - Client-side preferences (currently the theme) live in a settings sheet
   opened by activating the matrix-rain connection badge in the header,
   which doubles as the settings button.
