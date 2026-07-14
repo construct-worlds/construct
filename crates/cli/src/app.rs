@@ -4840,7 +4840,7 @@ impl App {
     }
 
     pub fn select_session(&mut self, id: String) {
-        self.select_session_inner(id, true);
+        self.select_session_inner(id, true, true);
     }
 
     /// Select a session immediately after creation. The create RPC can finish
@@ -4855,10 +4855,10 @@ impl App {
     }
 
     fn select_session_without_transition(&mut self, id: String) {
-        self.select_session_inner(id, false);
+        self.select_session_inner(id, false, false);
     }
 
-    fn select_session_inner(&mut self, id: String, transition: bool) {
+    fn select_session_inner(&mut self, id: String, transition: bool, sync_window: bool) {
         self.reset_vim_mode();
         let previous_id = self.selection.session_id().map(str::to_owned);
         if transition && self.selection.session_id() != Some(id.as_str()) {
@@ -4869,8 +4869,21 @@ impl App {
                 self.remember_lineage_scroll(previous_id);
             }
         }
-        // Switching to a session consumes its "needs you" marker.
+        // Switching to a session consumes its "needs you" marker. Apply this
+        // optimistically so the list updates in the same frame as selection;
+        // the focused-sessions RPC below persists the clear in the daemon.
+        if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+            session.needs_attention = false;
+        }
         self.selection = Selection::Session(id);
+        if sync_window {
+            // Keep the pane tree in sync before reporting focus. Most
+            // navigation callers also synchronize after selecting, but
+            // reporting here used to observe the outgoing pane selection and
+            // clear the marker one navigation late. Pinned-tile focus passes
+            // `false` because it intentionally leaves the main pane alone.
+            self.sync_active_window_selection();
+        }
         self.restore_lineage_scroll_for_selected_session();
         self.report_focused_sessions();
         self.transcript.clear();
@@ -24344,6 +24357,35 @@ mod tests {
             Some(Selection::Session("s1".into()))
         );
         assert_eq!(app.scrollback_for_window(Some(2)), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn selecting_session_clears_attention_marker_immediately() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut target = summary_with_kind(construct_protocol::SessionKind::User);
+        target.id = "s2".into();
+        target.position = 1;
+        target.needs_attention = true;
+        app.sessions.push(target);
+
+        app.select_session("s2".into());
+
+        assert_eq!(app.selection, Selection::Session("s2".into()));
+        assert_eq!(
+            app.selection_for_window(app.active_window_id),
+            Some(Selection::Session("s2".into())),
+            "the active pane must be synchronized before focus is reported"
+        );
+        assert!(
+            !app
+                .sessions
+                .iter()
+                .find(|session| session.id == "s2")
+                .expect("selected session")
+                .needs_attention,
+            "selection must clear the local marker without waiting for a daemon round trip"
+        );
         server.abort();
     }
 
