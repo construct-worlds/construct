@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-antigravity"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-claude"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-codex"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-common"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "construct-protocol",
  "tempfile",
@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-grok"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-opencode"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "construct-protocol",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-shell"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "construct-protocol",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-smith"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "construct-cli"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "construct-client"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "construct-protocol",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "construct-daemon"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "construct-e2e"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "construct-mcp"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "construct-protocol"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "base64",
