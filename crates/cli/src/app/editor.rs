@@ -1004,7 +1004,8 @@ impl App {
             }
             KeyCode::Up => self.move_program_selection_action(-1),
             KeyCode::Down => self.move_program_selection_action(1),
-            KeyCode::Tab | KeyCode::BackTab => {}
+            KeyCode::Tab => self.move_program_selection_action(1),
+            KeyCode::BackTab => self.move_program_selection_action(-1),
             KeyCode::Enter => {
                 let action = self
                     .program_popup
