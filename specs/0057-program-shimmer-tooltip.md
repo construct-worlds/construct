@@ -9,9 +9,9 @@ Scope: Program-block shimmer carries a required, concise agent status tooltip, w
 
 A program block's shimmer state carries an agent-authored **tooltip**: a concise, ≤10-word string describing why that block is still running (e.g. "Building PR", "Waiting on CI").
 
-- **Setting shimmer requires a tooltip.** In the program-edit MCP tool, every `pending` map value is the block's required tooltip; empty values are rejected. The program-update MCP tool continues to require a parallel tooltip for each pending boolean. Settling needs no tooltip.
+- **Setting shimmer requires a tooltip.** In both Program edit and update MCP tools, every `pending` map value is the block's required tooltip; empty values are rejected. Settling needs no tooltip.
 - **The tooltip travels with the shimmer state across the program surfaces** (building on `0053-program-shimmer-block-addressing`):
-  - The per-block shimmer declaration unit carries a tooltip (the MCP edit surface encodes it as the value in its `{block_ref: tooltip}` pending map; the update surface's complete declaration carries a parallel per-block tooltip array in document order).
+  - The per-block shimmer declaration unit carries a tooltip (the MCP edit surface encodes it as the value in its `{block_ref: tooltip}` pending map; the update surface uses `{block_index: tooltip}` because the replacement document's stable refs do not exist yet).
   - The daemon stores each pending block's tooltip alongside its id in the active run, keyed by stable block ref when available and by legacy content id only for fallback. Settling a block, or dropping it from the pending set, drops its tooltip.
   - The per-block projection returned by program get/edit/update (the `blocks` array) reports each block's tooltip, so any renderer reads it without re-deriving it.
 - **The ≤10-word guidance is enforced by graceful normalization, not rejection.** A stored tooltip is trimmed, internal whitespace collapsed, and truncated to at most ten words (with an ellipsis when truncated). An over-long tooltip is never a hard error.
