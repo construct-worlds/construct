@@ -543,8 +543,8 @@ fn program_pty_submit_bytes(prompt: &str) -> Vec<u8> {
 fn program_run_instructions() -> Vec<String> {
     vec![
         "Execute this construct program as an autonomous run.".to_string(),
-        "Shimmer semantics: a shimmering block means 'work on this block is still pending in this run — queued, in progress, or not yet done; outcome unknown'. No shimmer means 'settled — done, skipped, or no work needed'. Pending is about the state of the work, not how it runs: it applies the same whether you do the block yourself, delegate it, or drive it some other way, and a block counts as pending the moment you decide to act on it. A Run starts every executed block shimmering. Shimmer is a declared per-block state addressed by a stable block ref: read each block's id from the program get tool (or from the `blocks` returned by an edit/update), then declare a block pending or settled with the construct_program_edit `shimmer` list, e.g. `shimmer: [{id, shimmer: true, tooltip: \"Building PR\"}]`. When you set a block shimmer: true you MUST include a `tooltip`: a concise (≤10-word) description of that block's run status, shown when a viewer hovers the shimmering block; it is ignored when settling. The list is partial — it may target any block, not only the ones your edits change — and declaring a block settled clears it WITHOUT changing its text. Editing a block's semantic text advances its content epoch and gives it a new ref, so to keep an edited block shimmering — e.g. when you move a still-in-flight task into an In progress section or append a @{session} clip — set keep_pending: true on that edit; it re-adds the resulting block's new ref in the same call, so you need not know it and the block never goes dark. Never leave a settled block shimmering, and never drop shimmer from a block whose work is still in flight.".to_string(),
-        "Planning pass — this MUST be your first program action, before doing or delegating any work: read the program with the get tool to obtain every block's id, then make one construct_program_edit whose `shimmer` list declares each still-pending block's id shimmer: true (each with a concise ≤10-word `tooltip` of its run status) and each settled block's id shimmer: false. This needs no change to the blocks' text — declaring an id settled clears it. Doing this first makes the program reflect your plan within seconds of the Run instead of only after the first task completes; skipping it strands settled blocks shimmering and risks dropping shimmer from blocks still in flight.".to_string(),
+        "Shimmer semantics: a shimmering block means 'work on this block is still pending in this run — queued, in progress, or not yet done; outcome unknown'. No shimmer means 'settled — done, skipped, or no work needed'. Pending is about the state of the work, not how it runs. A Run starts every executed block shimmering. Declare status with construct_program_edit: `pending` maps each stable block ref to a concise (≤10-word) hover status, while `settled` is an array of refs to clear. Editing semantic text advances a block's ref, so set `keep_pending: true` when changing unfinished work; the compact edit response returns any new refs. Never leave settled work shimmering or drop shimmer from work still in flight.".to_string(),
+        "Planning pass — this MUST be your first program action, before doing or delegating work: read the program to obtain block ids, then make one status-only construct_program_edit with a `pending` map for every still-pending block and `settle_others: true`. No text edit is needed. This makes skipped/no-work blocks settle immediately and keeps planned work shimmering.".to_string(),
         "Treat program_run.markdown as free-form instructions and state for this turn, not as a request for a one-shot status report or as a fixed task-management schema.".to_string(),
         "Infer the user's intended objective from the document structure and prose, then keep taking useful next actions while there is actionable work you can do.".to_string(),
         "Do not ask the user to run the program again; if the document still implies useful work you can perform, continue in this turn.".to_string(),
@@ -559,7 +559,7 @@ fn program_run_instructions() -> Vec<String> {
 }
 
 fn program_execution_prompt() -> String {
-    "Run the current construct program autonomously. Before doing work, call agentd_context (or construct_context if you are using MCP) and read the program_run field for the latest program content, smart clip reference, and run instructions. If program_run is unavailable, read the current program with the program get tool before acting. Then, before starting or delegating any task, your first program action must be a single planning-pass construct_program_edit whose shimmer list declares every still-pending block's stable id shimmer: true and every settled block's stable id shimmer: false (read the block ids from the program get tool), so settled blocks stop shimmering immediately."
+    "Run the current construct program autonomously. Before doing work, call agentd_context (or construct_context if you are using MCP) and read the program_run field for the latest program content, smart clip reference, and run instructions. If program_run is unavailable, read the current program with the program get tool before acting. Then, before starting or delegating any task, your first program action must be one status-only construct_program_edit whose pending map assigns every still-pending block's stable id a concise status and whose settle_others flag is true, so omitted blocks settle immediately."
         .to_string()
 }
 
@@ -5064,6 +5064,8 @@ mod tests {
         assert!(prompt.contains("construct_context"));
         assert!(prompt.contains("program_run"));
         assert!(prompt.contains("latest program content"));
+        assert!(prompt.contains("pending map"));
+        assert!(prompt.contains("settle_others"));
         assert!(!prompt.contains("Compare options and summarize findings."));
     }
 
@@ -5111,6 +5113,11 @@ mod tests {
             .instructions
             .iter()
             .any(|s| s.contains("Do not ask the user to run the program again")));
+        assert!(context
+            .instructions
+            .iter()
+            .any(|s| s.contains("status-only construct_program_edit")
+                && s.contains("settle_others")));
         assert!(context
             .instructions
             .iter()

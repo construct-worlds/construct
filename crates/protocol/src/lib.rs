@@ -1594,6 +1594,7 @@ pub struct ProgramEdit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramEditParams {
     pub session_id: String,
+    #[serde(default)]
     pub edits: Vec<ProgramEdit>,
     #[serde(default)]
     pub actor: ProgramUpdateActor,

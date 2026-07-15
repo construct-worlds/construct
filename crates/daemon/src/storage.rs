@@ -513,8 +513,8 @@ impl Storage {
     /// there is no `base_version` gate: edits are anchored to text, so
     /// concurrent changes to *other* regions merge cleanly. Returns an error
     /// — and writes nothing — when any edit's anchor is missing or ambiguous,
-    /// so the caller can re-read and retry. A no-op edit set leaves the version
-    /// untouched.
+    /// so the caller can re-read and retry. An empty or no-op edit set leaves
+    /// the document and version untouched, allowing status-only program edits.
     pub fn edit_program(
         &self,
         id: &str,
@@ -523,7 +523,7 @@ impl Storage {
         note: Option<String>,
     ) -> Result<ProgramDocument> {
         if edits.is_empty() {
-            anyhow::bail!("program edit: no edits provided");
+            return self.read_program(id);
         }
         let current = self.read_program(id)?;
         let markdown = apply_program_edits(&current.markdown, edits)?;
@@ -701,7 +701,7 @@ impl Storage {
     }
 
     fn next_program_block_id(meta: &mut ProgramMeta) -> String {
-        let id = format!("pb_{:016x}", meta.next_block_ordinal);
+        let id = format!("b{:x}", meta.next_block_ordinal);
         meta.next_block_ordinal = meta.next_block_ordinal.saturating_add(1);
         id
     }
@@ -723,11 +723,22 @@ impl Storage {
     /// prior record an edited block's continuity is attributed to. A leftover
     /// span beyond the leftover records' count is a brand-new block.
     fn reconcile_program_block_identities(&self, meta: &mut ProgramMeta, markdown: &str) -> bool {
+        // Block ids are program-scoped ordinals. Migrate the old fixed-width
+        // spelling on access so ids stay compact in subsequent payloads.
+        let mut migrated = false;
+        for block in &mut meta.blocks {
+            if let Some(hex) = block.block_id.strip_prefix("pb_") {
+                if let Ok(ordinal) = u64::from_str_radix(hex, 16) {
+                    block.block_id = format!("b{ordinal:x}");
+                    migrated = true;
+                }
+            }
+        }
         let spans = construct_protocol::program_block_spans(markdown);
         let old = meta.blocks.clone();
         let mut used = vec![false; old.len()];
         let mut next: Vec<Option<ProgramBlockIdentity>> = vec![None; spans.len()];
-        let mut changed = old.len() != spans.len();
+        let mut changed = migrated || old.len() != spans.len();
 
         for (i, span) in spans.iter().enumerate() {
             if let Some(j) = old
@@ -2031,6 +2042,51 @@ mod program_tests {
         )
         .unwrap();
         assert_eq!(out, "# Todo\n- ship it @{harness:claude}\n# Done\n");
+    }
+
+    #[test]
+    fn program_block_refs_use_compact_ordinals_and_migrate_padded_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        storage
+            .update_program(
+                "s1",
+                "# Todo\n".into(),
+                ProgramUpdateActor::Human,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let (_, blocks) = storage.read_program_with_blocks("s1").unwrap();
+        assert_eq!(blocks[0].id, "b0:0");
+
+        let mut meta = storage.read_program_meta("s1").unwrap();
+        meta.blocks[0].block_id = "pb_0000000000000000".into();
+        storage.save_program_meta_struct("s1", &meta).unwrap();
+        let (_, migrated) = storage.read_program_with_blocks("s1").unwrap();
+        assert_eq!(migrated[0].id, "b0:0");
+    }
+
+    #[test]
+    fn status_only_program_edit_does_not_create_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        let initial = storage
+            .update_program(
+                "s1",
+                "# Todo\n".into(),
+                ProgramUpdateActor::Human,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let result = storage
+            .edit_program("s1", &[], ProgramUpdateActor::Agent, None)
+            .unwrap();
+        assert_eq!(result.version, initial.version);
+        assert!(storage.read_program_revisions("s1").unwrap().is_empty());
     }
 
     #[test]
