@@ -373,6 +373,29 @@ fn capture_frame_text(f: &mut Frame, app: &mut App) {
     app.frame_text = rows;
 }
 
+fn is_program_doc_selection(app: &App, bounds: Option<Rect>) -> bool {
+    let Some(bounds) = bounds else { return false; };
+    for hit in &app.layout.main_window_areas {
+        if bounds == hit.inner_area {
+            if let Some(crate::app::Selection::Session(session_id)) = app.selection_for_window(hit.id) {
+                return app.program_popups.contains_key(&session_id);
+            }
+        }
+    }
+    if let Some(view) = app.layout.view_area {
+        let inner = Rect {
+            x: view.x.saturating_add(1),
+            y: view.y.saturating_add(1),
+            width: view.width.saturating_sub(2),
+            height: view.height.saturating_sub(2),
+        };
+        if bounds == inner {
+            return app.program_popup.is_some();
+        }
+    }
+    false
+}
+
 fn render_text_selection(f: &mut Frame, app: &App) {
     let area = *f.buffer_mut().area();
     if area.width == 0 || area.height == 0 {
@@ -384,11 +407,13 @@ fn render_text_selection(f: &mut Frame, app: &App) {
     if let Some(sel) = &app.text_selection {
         if sel.dragged {
             let (start, end) = normalized_points(sel.anchor, sel.head);
-            render_selection_rect(f, sel.bounds.unwrap_or(area), start, end, style);
+            let use_reversed = is_program_doc_selection(app, sel.bounds);
+            render_selection_rect(f, sel.bounds.unwrap_or(area), start, end, style, use_reversed);
         }
         return;
     }
     if let Some(text) = &app.selected_text {
+        let use_reversed = is_program_doc_selection(app, app.selected_text_bounds);
         for (row, start_col, end_col) in find_text_ranges(
             &app.frame_text,
             text,
@@ -406,6 +431,7 @@ fn render_text_selection(f: &mut Frame, app: &App) {
                 start,
                 end,
                 style,
+                use_reversed,
             );
         }
     }
@@ -439,6 +465,7 @@ fn render_selection_rect(
     start: ScreenPoint,
     end: ScreenPoint,
     style: Style,
+    use_reversed: bool,
 ) {
     let max_x = area.right().saturating_sub(1);
     for row in start.row..=end.row {
@@ -457,7 +484,11 @@ fn render_selection_rect(
         }
         for x in x_start..=x_end {
             if let Some(cell) = f.buffer_mut().cell_mut(Position { x, y: row }) {
-                cell.set_style(style);
+                if use_reversed {
+                    cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                } else {
+                    cell.set_style(style);
+                }
             }
         }
     }
@@ -15143,7 +15174,7 @@ fn program_text_span_style(
         style = style.bg(theme.highlight_bg);
     }
     if selected.unwrap_or(false) {
-        style = style.bg(theme.inactive_highlight_bg);
+        style = style.add_modifier(Modifier::REVERSED);
     }
     style
 }
