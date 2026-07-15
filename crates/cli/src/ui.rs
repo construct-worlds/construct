@@ -7816,10 +7816,10 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         let separators_width = persistent_notices.len().saturating_sub(1) * 3;
         labels_width
             .saturating_add(separators_width)
-            .saturating_add(2) as u16
+            .saturating_add(1) as u16
     };
-    // Left column the notice will occupy from (its leading pad space
-    // included), or None when the notice doesn't fit / render at all.
+    // Left column the notice will occupy from, or None when the notice doesn't
+    // fit / render at all.
     let notice_start_x =
         (notice_width > 0 && notice_width < area.width).then(|| area.x + area.width - notice_width);
     let mut spans = Vec::new();
@@ -7857,7 +7857,7 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     spans.push(Span::raw(modeline_pre_hint));
     for (i, (label, action)) in empty_hint_segments.iter().enumerate() {
         let w = UnicodeWidthStr::width(*label) as u16;
-        let sep_w = if i > 0 { 2 } else { 0 };
+        let sep_w = if i > 0 { 1 } else { 0 };
         // Collision guard: the hint segments are ordered highest-priority
         // first, so when the right-aligned notice leaves too little room,
         // whole segments drop from the tail (`tour: t` first, `new:` last)
@@ -7870,8 +7870,8 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             }
         }
         if i > 0 {
-            spans.push(Span::raw("  "));
-            hint_col = hint_col.saturating_add(2);
+            spans.push(Span::raw(" "));
+            hint_col = hint_col.saturating_add(1);
         }
         // "tour: t" goes inert while a tour is already running — the action
         // would be a no-op, so it must not look clickable: dimmed, no hover,
@@ -7933,8 +7933,6 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             };
             let mut spans = Vec::new();
             let mut col = nrect.x;
-            spans.push(Span::raw(" "));
-            col = col.saturating_add(1);
             for (i, group) in persistent_notices.iter().enumerate() {
                 if i > 0 {
                     spans.push(Span::raw(" | "));
@@ -8009,9 +8007,9 @@ fn version_notice_segments(app: &App) -> Vec<(String, Option<KeyAction>)> {
 
 fn modeline_remote_text(enabled: bool, clients: u32) -> String {
     if enabled {
-        format!("[● remote: {clients}]")
+        format!("● remote:{clients}")
     } else {
-        "[○ remote: off]".to_string()
+        "○ remote".to_string()
     }
 }
 

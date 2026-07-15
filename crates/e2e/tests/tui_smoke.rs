@@ -138,14 +138,14 @@ async fn tui_remote_status_click_opens_popup_and_remains_at_zero_clients() {
     )
     .expect("spawn TUI");
 
-    tui.wait_for("[○ remote: off]", Duration::from_secs(15))
+    tui.wait_for("○ remote", Duration::from_secs(15))
         .await
         .expect("stopped remote status never rendered");
     let screen = tui.screen();
     let (row, col) = screen
         .lines()
         .enumerate()
-        .find_map(|(row, line)| line.find("[○ remote: off]").map(|col| (row, col)))
+        .find_map(|(row, line)| line.find("○ remote").map(|col| (row, col)))
         .expect("remote status coordinates");
     let mouse_down = format!("\x1b[<0;{};{}M", col + 1, row + 1);
     let mouse_up = format!("\x1b[<0;{};{}m", col + 1, row + 1);
@@ -156,7 +156,7 @@ async fn tui_remote_status_click_opens_popup_and_remains_at_zero_clients() {
         .await
         .expect("clicking remote status did not open dialog");
     tui.send(b"\x1b").expect("dismiss remote dialog");
-    tui.wait_for("[● remote: 0]", Duration::from_secs(5))
+    tui.wait_for("● remote:0", Duration::from_secs(5))
         .await
         .expect("active zero-client remote status never rendered");
 
@@ -175,7 +175,7 @@ async fn tui_remote_status_click_opens_popup_and_remains_at_zero_clients() {
     )
     .expect("spawn reconnected TUI");
     reconnected
-        .wait_for("[● remote: 0]", Duration::from_secs(15))
+        .wait_for("● remote:0", Duration::from_secs(15))
         .await
         .expect("reconnected TUI did not receive remote state snapshot");
     reconnected

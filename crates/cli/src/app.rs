@@ -27935,7 +27935,7 @@ mod tests {
             "empty state should not show q as the quit shortcut:\n{screen}"
         );
         assert!(
-            screen.contains("new: C-x C-f  help: ?  palette: C-x x  tour: t"),
+            screen.contains("new: C-x C-f help: ? palette: C-x x tour: t"),
             "missing modeline hint (incl. the tour segment):\n{screen}"
         );
         assert!(
@@ -28308,7 +28308,7 @@ mod tests {
             modeline
                 .trim_end()
                 .ends_with(&format!(
-                    "theme:matrix | [○ remote: off] | {}",
+                    "theme:matrix | ○ remote | {}",
                     crate::BUILD_ID
                 )),
             "theme label should be right-aligned in status bar:\n{modeline}"
@@ -28354,7 +28354,7 @@ mod tests {
             .expect("draw stopped state");
         let screen = rendered_text(terminal.backend().buffer());
         assert!(
-            screen.contains("theme:matrix | [○ remote: off] |"),
+            screen.contains("theme:matrix | ○ remote |"),
             "stopped remote control should remain discoverable between theme and version:\n{screen}"
         );
         let hint = app
@@ -28383,7 +28383,7 @@ mod tests {
             .expect("draw running state without clients");
         let screen = rendered_text(terminal.backend().buffer());
         assert!(
-            screen.contains("theme:matrix | [● remote: 0] |"),
+            screen.contains("theme:matrix | ● remote:0 |"),
             "running listener should stay visible with zero clients:\n{screen}"
         );
 
@@ -28393,7 +28393,7 @@ mod tests {
             .expect("draw connected state");
         let screen = rendered_text(terminal.backend().buffer());
         assert!(
-            screen.contains("theme:matrix | [● remote: 2] |"),
+            screen.contains("theme:matrix | ● remote:2 |"),
             "connected client count should render in the same right-side affordance:\n{screen}"
         );
         server.abort();
