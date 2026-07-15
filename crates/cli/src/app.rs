@@ -2828,8 +2828,8 @@ pub struct RemoteControlOk {
     pub hint: Option<String>,
     /// Which provider is publishing `url`, if any.
     pub provider: construct_protocol::TunnelProvider,
-    /// Loopback URL. Always shown, because it is the one address that
-    /// cannot fail, and it is what someone at this machine types.
+    /// Loopback URL. Shown for direct access because it is the one address
+    /// that cannot fail, and it is what someone at this machine types.
     pub local_url: String,
     /// LAN URL, when this machine has a private address. `None` on a
     /// machine with no local network to be reached from.

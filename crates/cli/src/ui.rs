@@ -15457,36 +15457,37 @@ fn remote_kv<'a>(app: &App, label: &str, value: &str, accent: bool) -> (Line<'a>
 }
 
 /// Every address and credential the user might need — no QR; that gets
-/// composed alongside these by [`compose_qr_and_info`].
+/// composed alongside these by [`compose_qr_and_info`]. Active tunnels show
+/// only their public URL so the QR screen stays focused on the shareable link.
 ///
 /// The accented row is always the one the QR actually encodes, so
 /// "which of these am I looking at?" never needs asking: with a tunnel
 /// up it's the tunnel URL, otherwise it's the LAN address (or loopback
 /// on a machine with no LAN).
+fn remote_address_rows<'a>(
+    p: &'a crate::app::RemoteControlOk,
+) -> Vec<(&'static str, &'a str, bool)> {
+    if p.tunnel_ready {
+        return vec![("tunnel:", &p.url, true)];
+    }
+
+    let mut rows = Vec::new();
+    if let Some(lan) = p.lan_url.as_deref() {
+        rows.push(("lan:", lan, true));
+    }
+    rows.push(("local:", p.local_url.as_str(), p.lan_url.is_none()));
+    rows
+}
+
 fn remote_info_lines<'a>(
     app: &App,
     p: &crate::app::RemoteControlOk,
     include_credentials: bool,
 ) -> Vec<Line<'a>> {
-    let mut lines: Vec<Line> = Vec::new();
-
-    if p.tunnel_ready {
-        lines.push(remote_kv(app, "tunnel:", &p.url, true).0);
-    }
-    if let Some(lan) = p.lan_url.as_deref() {
-        lines.push(remote_kv(app, "lan:", lan, !p.tunnel_ready).0);
-    }
-    // Loopback is always shown: it is the one address that cannot
-    // fail, and it's what someone sitting at this machine types.
-    lines.push(
-        remote_kv(
-            app,
-            "local:",
-            &p.local_url,
-            !p.tunnel_ready && p.lan_url.is_none(),
-        )
-        .0,
-    );
+    let mut lines: Vec<Line> = remote_address_rows(p)
+        .into_iter()
+        .map(|(label, value, accent)| remote_kv(app, label, value, accent).0)
+        .collect();
 
     if include_credentials {
         // Direct LAN and Cloudflare visitors see the browser's Basic-auth
@@ -15624,6 +15625,18 @@ fn compose_qr_and_info<'a>(
 
 /// The dialog's resting state: reachable on the LAN, published nowhere,
 /// with a row of buttons offering to change that.
+fn remote_provider_available_description(
+    provider: construct_protocol::TunnelProvider,
+) -> &'static str {
+    match provider {
+        construct_protocol::TunnelProvider::Cloudflare => "No signup, URL rotates each run",
+        construct_protocol::TunnelProvider::Construct => {
+            "Stable URL. Google or GitHub OAuth sign-in"
+        }
+        construct_protocol::TunnelProvider::None => "",
+    }
+}
+
 fn render_remote_choose<'a>(
     app: &App,
     c: &crate::app::RemoteControlChoose,
@@ -15686,15 +15699,7 @@ fn render_remote_choose<'a>(
                 app.theme.success,
             ),
             Some(opt) if opt.available => (
-                match opt.provider {
-                    construct_protocol::TunnelProvider::Cloudflare => {
-                        "Anyone with the URL. Rotates each run.".to_string()
-                    }
-                    construct_protocol::TunnelProvider::Construct => {
-                        "Stable name. Visitors sign in with GitHub or Google.".to_string()
-                    }
-                    construct_protocol::TunnelProvider::None => String::new(),
-                },
+                remote_provider_available_description(opt.provider).to_string(),
                 app.theme.dim,
             ),
             Some(opt) => (
@@ -15898,6 +15903,20 @@ fn render_remote_err<'a>(
 mod remote_popup_tests {
     use super::*;
 
+    fn remote_ok(tunnel_ready: bool) -> crate::app::RemoteControlOk {
+        crate::app::RemoteControlOk {
+            url: "https://quiet-river.tunnel.zarvis.ai".into(),
+            qr: String::new(),
+            tunnel_ready,
+            password: "secret".into(),
+            hint: None,
+            provider: construct_protocol::TunnelProvider::Construct,
+            local_url: "http://127.0.0.1:9800".into(),
+            lan_url: Some("http://192.168.1.2:9800".into()),
+            auth_url: None,
+        }
+    }
+
     /// A QR of a typical URL, at the size the daemon renders it.
     fn qr() -> String {
         (0..19)
@@ -15993,6 +16012,38 @@ mod remote_popup_tests {
             TunnelProvider::Cloudflare
         ));
         assert!(ready_screen_shows_basic_credentials(TunnelProvider::None));
+    }
+
+    #[test]
+    fn tunnel_ready_screen_only_lists_the_public_tunnel_address() {
+        let remote = remote_ok(true);
+        let rows = remote_address_rows(&remote);
+        let labels: Vec<_> = rows.iter().map(|(label, _, _)| *label).collect();
+
+        assert_eq!(labels, vec!["tunnel:"]);
+    }
+
+    #[test]
+    fn direct_access_screen_keeps_lan_and_local_addresses() {
+        let remote = remote_ok(false);
+        let rows = remote_address_rows(&remote);
+        let labels: Vec<_> = rows.iter().map(|(label, _, _)| *label).collect();
+
+        assert_eq!(labels, vec!["lan:", "local:"]);
+    }
+
+    #[test]
+    fn provider_descriptions_match_remote_connect_copy() {
+        use construct_protocol::TunnelProvider;
+
+        assert_eq!(
+            remote_provider_available_description(TunnelProvider::Cloudflare),
+            "No signup, URL rotates each run"
+        );
+        assert_eq!(
+            remote_provider_available_description(TunnelProvider::Construct),
+            "Stable URL. Google or GitHub OAuth sign-in"
+        );
     }
 }
 
