@@ -2747,6 +2747,7 @@ impl ProgramSmartClipGroup {
 #[derive(Debug, Clone)]
 pub enum RemoteControlPopup {
     Choose(RemoteControlChoose),
+    Name(RemoteControlName),
     Starting(RemoteControlOk),
     Ok {
         ok: RemoteControlOk,
@@ -2757,6 +2758,15 @@ pub enum RemoteControlPopup {
         provider: construct_protocol::TunnelProvider,
         message: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteControlName {
+    pub choose: RemoteControlChoose,
+    pub name: String,
+    /// The generated suggestion is selected conceptually: the first typed
+    /// character replaces it, while Enter accepts it unchanged.
+    pub pristine: bool,
 }
 
 /// The two buttons on the tunnel-ready view. `Back` is the default
@@ -2834,6 +2844,8 @@ pub struct RemoteControlOk {
     /// LAN URL, when this machine has a private address. `None` on a
     /// machine with no local network to be reached from.
     pub lan_url: Option<String>,
+    /// Browser login link while tunnel.zarvis.ai waits for OAuth.
+    pub auth_url: Option<String>,
 }
 
 impl From<construct_protocol::RemoteStartResult> for RemoteControlOk {
@@ -2847,6 +2859,7 @@ impl From<construct_protocol::RemoteStartResult> for RemoteControlOk {
             provider: r.provider,
             local_url: r.local_url,
             lan_url: r.lan_url,
+            auth_url: r.auth_url,
         }
     }
 }
@@ -10193,16 +10206,13 @@ impl App {
                         ).await
                     }
                     "construct" | "zarvis" => {
-                        let subdomain = (!rest.is_empty()).then(|| rest.to_string());
-                        if subdomain.is_none() {
-                            self.set_status(
-                                "usage: /remote-control construct <subdomain>".to_string(),
-                            );
+                        if rest.is_empty() {
+                            self.open_remote_control_popup(None).await;
                         } else {
                             self.start_remote_control_provider(
                                 TunnelProvider::Construct,
                                 None,
-                                subdomain,
+                                Some(rest.to_string()),
                             ).await;
                         }
                     }
@@ -10400,6 +10410,23 @@ impl App {
     }
 
     async fn poll_remote_control_task(&mut self) {
+        let needs_auth_url = matches!(
+            self.remote_control_popup.as_ref(),
+            Some(RemoteControlPopup::Starting(ok)) if ok.auth_url.is_none()
+        );
+        if needs_auth_url {
+            if let Ok(snapshot) = self
+                .client
+                .remote_start(construct_protocol::TunnelProvider::None, None)
+                .await
+            {
+                if let Some(RemoteControlPopup::Starting(ok)) =
+                    self.remote_control_popup.as_mut()
+                {
+                    ok.auth_url = snapshot.auth_url;
+                }
+            }
+        }
         let Some(task) = self.remote_control_task.as_mut() else {
             return;
         };
@@ -10464,11 +10491,55 @@ impl App {
                         );
                         return true;
                     }
-                    self.start_remote_control_provider(
-                        opt.provider,
-                        None,
-                        std::env::var("CONSTRUCT_TUNNEL_SUBDOMAIN").ok(),
-                    ).await;
+                    if opt.provider == construct_protocol::TunnelProvider::Construct {
+                        self.remote_control_popup = Some(RemoteControlPopup::Name(
+                            RemoteControlName {
+                                choose: choose.clone(),
+                                name: generated_tunnel_name(),
+                                pristine: true,
+                            },
+                        ));
+                    } else {
+                        self.start_remote_control_provider(opt.provider, None, None).await;
+                    }
+                }
+                _ => {}
+            },
+            RemoteControlPopup::Name(name) => match key.code {
+                KeyCode::Esc => {
+                    self.remote_control_popup =
+                        Some(RemoteControlPopup::Choose(name.choose.clone()));
+                }
+                KeyCode::Enter => {
+                    let tunnel_name = name.name.clone();
+                    if tunnel_name.is_empty() {
+                        self.set_status("enter a tunnel name".into());
+                    } else {
+                        self.start_remote_control_provider(
+                            construct_protocol::TunnelProvider::Construct,
+                            None,
+                            Some(tunnel_name),
+                        ).await;
+                    }
+                }
+                KeyCode::Backspace => {
+                    if name.pristine {
+                        name.name.clear();
+                        name.pristine = false;
+                    } else {
+                        name.name.pop();
+                    }
+                }
+                KeyCode::Char(c)
+                    if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' =>
+                {
+                    if name.pristine {
+                        name.name.clear();
+                        name.pristine = false;
+                    }
+                    if name.name.len() < 63 {
+                        name.name.push(c);
+                    }
                 }
                 _ => {}
             },
@@ -10497,11 +10568,18 @@ impl App {
                 },
                 _ => {}
             },
-            RemoteControlPopup::Starting(_) => {
-                if matches!(key.code, KeyCode::Esc) {
-                    self.close_remote_control_popup();
+            RemoteControlPopup::Starting(starting) => match key.code {
+                KeyCode::Esc => self.close_remote_control_popup(),
+                KeyCode::Char('o') => {
+                    if let Some(url) = starting.auth_url.as_deref() {
+                        match open_url(url) {
+                            Ok(()) => self.set_status("opened tunnel login in browser".into()),
+                            Err(error) => self.set_status(format!("could not open login: {error}")),
+                        }
+                    }
                 }
-            }
+                _ => {}
+            },
         }
         true
     }
@@ -10555,6 +10633,26 @@ impl App {
             Err(e) => self.set_status(format!("remote-control stop failed: {e}")),
         }
     }
+}
+
+fn generated_tunnel_name() -> String {
+    const ADJECTIVES: &[&str] = &[
+        "bright", "calm", "clever", "gentle", "lucky", "quiet", "swift", "warm",
+    ];
+    const NOUNS: &[&str] = &[
+        "badger", "comet", "falcon", "maple", "otter", "panda", "river", "willow",
+    ];
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as usize)
+        .unwrap_or(0)
+        ^ std::process::id() as usize;
+    format!(
+        "{}-{}-{:02}",
+        ADJECTIVES[seed % ADJECTIVES.len()],
+        NOUNS[(seed / ADJECTIVES.len()) % NOUNS.len()],
+        (seed / (ADJECTIVES.len() * NOUNS.len())) % 100
+    )
 }
 
 /// Best-effort one-line summary of a tool call's args JSON for the
@@ -11757,6 +11855,19 @@ fn program_line_end(s: &str, cursor: usize) -> usize {
 mod tests {
     use super::*;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn generated_tunnel_name_is_human_friendly_and_dns_safe() {
+        let name = generated_tunnel_name();
+        let parts: Vec<&str> = name.split('-').collect();
+        assert_eq!(parts.len(), 3, "expected adjective-noun-number: {name}");
+        assert_eq!(parts[2].len(), 2, "expected two-digit suffix: {name}");
+        assert!(
+            name.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "name is not DNS safe: {name}"
+        );
+    }
 
     /// Spec 0065 agent presence: the local receipt clock must renew only when
     /// the daemon's `updated_at_ms` genuinely advances, never on a rebase

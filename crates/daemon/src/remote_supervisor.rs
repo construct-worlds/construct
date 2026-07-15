@@ -378,6 +378,7 @@ async fn handle_stop_tunnel(
         // looks LAN-only, and a subsequent start re-spawns a fresh
         // tunnel rather than short-circuiting on the dead URL.
         state.set_tunnel_url(None).await;
+        state.set_auth_url(None).await;
         state.set_tunnel_pid(0).await;
         state.set_tunnel_provider(TunnelProvider::None).await;
     }

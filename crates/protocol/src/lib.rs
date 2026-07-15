@@ -2614,7 +2614,7 @@ impl TunnelProvider {
         match self {
             TunnelProvider::None => "local network",
             TunnelProvider::Cloudflare => "Cloudflare",
-            TunnelProvider::Construct => "Construct",
+            TunnelProvider::Construct => "tunnel.zarvis.ai",
         }
     }
 }
@@ -2729,6 +2729,11 @@ pub struct RemoteStartResult {
     /// exposed.
     #[serde(default)]
     pub active_provider: TunnelProvider,
+    /// Short-lived browser login URL while an interactive provider is
+    /// waiting for authorization. It is a one-time request identifier,
+    /// not an owner credential. Never persisted by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_url: Option<String>,
 }
 
 /// Params for the `remote.providers` IPC method. No options — the

@@ -37,10 +37,7 @@ use construct_protocol::{RemoteProviderInfo, TunnelProvider};
 use crate::remote::{process_alive, RemoteState};
 
 /// Providers the dialog offers, in the order it offers them.
-pub const PROVIDERS: [TunnelProvider; 2] = [
-    TunnelProvider::Cloudflare,
-    TunnelProvider::Construct,
-];
+pub const PROVIDERS: [TunnelProvider; 2] = [TunnelProvider::Construct, TunnelProvider::Cloudflare];
 
 /// Probe every provider. Read-only — nothing is spawned, so the
 /// dialog can call this on every open without side effects.
@@ -116,6 +113,7 @@ pub async fn run(
             "adopted tunnel exited; spawning fresh"
         );
         remote.set_tunnel_url(None).await;
+        remote.set_auth_url(None).await;
         remote.set_tunnel_pid(0).await;
     }
 

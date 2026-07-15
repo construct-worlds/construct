@@ -15381,8 +15381,13 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
     let total = f.area();
 
     let (title, title_color, body_lines, body_w, body_h) = match popup {
-        crate::app::RemoteControlPopup::Choose(c) => render_remote_choose(app, c, total.width),
-        crate::app::RemoteControlPopup::Starting(p) => render_remote_starting(app, p, total.width),
+        crate::app::RemoteControlPopup::Choose(c) => {
+            render_remote_choose(app, c, total.width, total.height)
+        }
+        crate::app::RemoteControlPopup::Name(n) => render_remote_name(app, n, total.width),
+        crate::app::RemoteControlPopup::Starting(p) => {
+            render_remote_starting(app, p, total.width)
+        }
         crate::app::RemoteControlPopup::Ok { ok, focus } => {
             render_remote_ok(app, ok, *focus, total.width)
         }
@@ -15617,6 +15622,7 @@ fn render_remote_choose<'a>(
     app: &App,
     c: &crate::app::RemoteControlChoose,
     area_w: u16,
+    area_h: u16,
 ) -> RemotePopupBody<'a> {
     let mut info = remote_info_lines(app, &c.base);
 
@@ -15709,9 +15715,57 @@ fn render_remote_choose<'a>(
         Style::default().fg(app.theme.dim),
     )));
 
-    let (lines, width, height) = compose_qr_and_info(&c.base.qr, info, area_w);
+    // On a short terminal the local-network QR would push the provider row
+    // below the clipped modal. Keep local details textual there; the final
+    // public tunnel URL still gets its QR in the ready view.
+    let qr = if area_h >= 30 { &c.base.qr } else { "" };
+    let (lines, width, height) = compose_qr_and_info(qr, info, area_w);
     (
-        " /remote-control — local network — Esc to close ".to_string(),
+        " /remote-connect — local network — Esc to close ".to_string(),
+        app.theme.info,
+        lines,
+        width,
+        height,
+    )
+}
+
+fn render_remote_name<'a>(
+    app: &App,
+    state: &crate::app::RemoteControlName,
+    area_w: u16,
+) -> RemotePopupBody<'a> {
+    let mut info = remote_info_lines(app, &state.choose.base);
+    info.push(Line::raw(""));
+    info.push(Line::from(Span::styled(
+        "Choose your tunnel name:",
+        Style::default().fg(app.theme.text),
+    )));
+    info.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!(" {} ", state.name),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        ),
+        Span::styled(
+            ".<your-id>.tunnel.zarvis.ai",
+            Style::default().fg(app.theme.dim),
+        ),
+    ]));
+    info.push(Line::raw(""));
+    let guidance = if state.pristine {
+        "Type to replace the suggestion · Enter continue · Esc back"
+    } else {
+        "Lowercase letters, numbers, hyphens · Enter continue · Esc back"
+    };
+    info.extend(wrapped_lines(guidance, Style::default().fg(app.theme.dim)));
+
+    // This is an input step, so the editable name always takes precedence
+    // over the already-available LAN QR.
+    let (lines, width, height) = compose_qr_and_info("", info, area_w);
+    (
+        " /remote-connect — tunnel.zarvis.ai — name your tunnel ".to_string(),
         app.theme.info,
         lines,
         width,
@@ -15735,14 +15789,33 @@ fn render_remote_starting<'a>(
             .fg(app.theme.warning)
             .add_modifier(Modifier::BOLD),
     )));
-    info.push(Line::from(Span::styled(
-        "The QR updates when it publishes a URL.",
-        Style::default().fg(app.theme.dim),
-    )));
+    if let Some(auth_url) = p.auth_url.as_deref() {
+        info.push(Line::from(Span::styled(
+            "Finish signing in in your browser:",
+            Style::default().fg(app.theme.text),
+        )));
+        info.extend(wrapped_lines(auth_url, Style::default().fg(app.theme.accent)));
+        info.push(Line::from(Span::styled(
+            "o open login again · Esc close",
+            Style::default().fg(app.theme.dim),
+        )));
+    } else {
+        info.push(Line::from(Span::styled(
+            "Opening browser login… The QR updates when the tunnel is ready.",
+            Style::default().fg(app.theme.dim),
+        )));
+    }
 
-    let (lines, width, height) = compose_qr_and_info(&p.qr, info, area_w);
+    // OAuth is the action the user must take now. A local-network QR is
+    // unrelated and can hide the login link in compact terminals.
+    let qr = if p.provider == construct_protocol::TunnelProvider::Construct {
+        ""
+    } else {
+        &p.qr
+    };
+    let (lines, width, height) = compose_qr_and_info(qr, info, area_w);
     (
-        format!(" /remote-control — starting {label}… — Esc to close "),
+        format!(" /remote-connect — starting {label}… — Esc to close "),
         app.theme.warning,
         lines,
         width,
@@ -15799,7 +15872,7 @@ fn render_remote_ok<'a>(
     )));
 
     let label = p.provider.label();
-    let title = format!(" /remote-control — {label} ready (public URL) — Esc to close ");
+    let title = format!(" /remote-connect — {label} ready (public URL) — Esc to close ");
 
     let (lines, width, height) = compose_qr_and_info(&p.qr, info, area_w);
     (title, app.theme.success, lines, width, height)
@@ -15844,7 +15917,7 @@ fn render_remote_err<'a>(
         .max(keys.chars().count() as u16);
     let height = 4 + message.lines().count() as u16;
     (
-        format!(" /remote-control — {label} failed — Esc to close "),
+        format!(" /remote-connect — {label} failed — Esc to close "),
         app.theme.danger,
         lines,
         width,
