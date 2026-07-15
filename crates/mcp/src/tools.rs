@@ -6,7 +6,7 @@ use construct_protocol::{agent_context, CreateSessionParams, PtySize};
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod browser;
@@ -107,14 +107,13 @@ pub fn catalog() -> Vec<Value> {
         // ----- Write -----
         tool(
             "construct_program_edit",
-            "PREFERRED for changing a session's program: apply one or more anchored find/replace edits (like the code Edit tool). Each edit replaces `old_string` with `new_string`; set `replace_all` to replace every occurrence, or include enough surrounding context to make `old_string` unique. An empty `old_string` appends `new_string` to the document. Edits apply to the LATEST program content, so a human editing a different region at the same time merges cleanly — no version to pass and no conflict. The call fails (writing nothing) only if an `old_string` is missing or ambiguous, which means that exact text changed underneath you: re-read with construct_program_get and retry. Agent edits need no user confirmation. For moving or reclassifying text between headings, use ONE construct_program_edit call with multiple `edits` entries — one entry removes the text from its old location and another inserts it at the new location. Do not make a separate remove call followed by a separate add call; the Program view can otherwise show a transient missing block. Shimmer (the program-run progress animation) is declared per block by stable ref: pass a `shimmer` array of `{id, shimmer}` entries to mark blocks pending (true) or settled (false). The list is PARTIAL and may target ANY block — not only the ones these edits change — so a planning pass can settle no-work blocks without touching their text; blocks you omit keep their current shimmer. Get block ids from construct_program_get or the `blocks` echoed by this call. Editing a block's semantic text advances its content epoch and gives it a new ref, so to keep an edited block shimmering set `keep_pending: true` on that edit (preferred — it re-adds the resulting block's new ref atomically, so you need not know it and the block never goes dark; use this when moving an in-flight task into an In progress section or appending a @{session} clip). Ids that no longer match a block are ignored (that block changed underneath you). Every entry that sets `shimmer: true` MUST include a `tooltip`: a concise (≤10-word) description of that block's run status (e.g. \"Building PR\", \"Waiting on CI\"); it is shown when a user hovers the shimmering block. Tooltips are ignored for `shimmer: false`.",
+            "Edit Program text and/or run status against the latest document. Anchored replacements are atomic; put both halves of a move in ONE call. Set `keep_pending` when an edit changes unfinished work. `pending` maps stable block refs to concise hover statuses; `settled` clears refs. On the first planning pass, set `settle_others` to clear every block omitted from `pending`. Stale refs fail closed. The compact response returns only refs created or changed by this call.",
             json!({
                 "type": "object",
                 "properties": {
                     "session_id": { "type": "string" },
                     "edits": {
                         "type": "array",
-                        "minItems": 1,
                         "description": "All targeted replacements to apply atomically in order. For moves, put the removal and insertion edits in this same array so the block never disappears between tool calls.",
                         "items": {
                             "type": "object",
@@ -127,22 +126,19 @@ pub fn catalog() -> Vec<Value> {
                             "required": ["old_string", "new_string"]
                         }
                     },
-                    "shimmer": {
-                        "type": "array",
-                        "description": "Partial per-block shimmer declaration applied after the edits. Each entry sets one block's pending state by its stable `id`/block ref (from construct_program_get or a prior call's `blocks`). Omitted blocks keep their current shimmer.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string", "description": "Stable block ref from a block projection" },
-                                "shimmer": { "type": "boolean", "description": "true = pending (keep shimmering); false = settled (clear)" },
-                                "tooltip": { "type": "string", "description": "Required when shimmer is true: a concise (≤10-word) description of this block's run status, shown on hover (e.g. \"Building PR\", \"Waiting on CI\"). Ignored when shimmer is false." }
-                            },
-                            "required": ["id", "shimmer"]
-                        }
+                    "pending": {
+                        "type": "object",
+                        "description": "Pending block refs mapped to concise (≤10-word) hover statuses.",
+                        "additionalProperties": { "type": "string" }
                     },
+                    "settled": {
+                        "type": "array",
+                        "description": "Block refs whose work has settled.",
+                        "items": { "type": "string" }
+                    },
+                    "settle_others": { "type": "boolean", "description": "Planning pass: settle every current block omitted from `pending`." },
                     "note": { "type": "string" }
-                },
-                "required": ["edits"]
+                }
             }),
         ),
         tool(
@@ -620,46 +616,114 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
         }
         "construct_program_edit" => {
             let sid = optional_session_arg(&args, session_id)?;
-            let edits: Vec<construct_protocol::ProgramEdit> = serde_json::from_value(
-                args.get("edits")
-                    .cloned()
-                    .ok_or_else(|| anyhow!("missing or non-array `edits`"))?,
-            )
-            .map_err(|e| anyhow!("invalid `edits`: {e}"))?;
-            if edits.is_empty() {
-                return Err(anyhow!("`edits` must contain at least one edit"));
-            }
-            let shimmer: Vec<construct_protocol::ProgramShimmerDecl> = match args.get("shimmer") {
-                Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
-                    anyhow!("invalid `shimmer` (expected an array of {{id, shimmer}}): {e}")
-                })?,
+            let before = client.program_get(&sid).await?;
+            let edits: Vec<construct_protocol::ProgramEdit> = match args.get("edits") {
+                Some(v) => serde_json::from_value(v.clone())
+                    .map_err(|e| anyhow!("invalid `edits`: {e}"))?,
                 None => Vec::new(),
             };
-            // A block declared pending must carry a concise run-status tooltip
-            // (spec 0057); settling needs none.
-            for decl in &shimmer {
-                if decl.shimmer
-                    && decl
-                        .tooltip
-                        .as_deref()
-                        .map(str::trim)
-                        .unwrap_or("")
-                        .is_empty()
-                {
+            let pending: HashMap<String, String> = match args.get("pending") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                    anyhow!("invalid `pending` (expected an object of block-ref: status): {e}")
+                })?,
+                None => HashMap::new(),
+            };
+            let settled: Vec<String> = match args.get("settled") {
+                Some(v) => serde_json::from_value(v.clone())
+                    .map_err(|e| anyhow!("invalid `settled` (expected block-ref array): {e}"))?,
+                None => Vec::new(),
+            };
+            let settle_others = args
+                .get("settle_others")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if edits.is_empty() && pending.is_empty() && settled.is_empty() && !settle_others {
+                return Err(anyhow!(
+                    "program edit needs at least one edit or run-status change"
+                ));
+            }
+            for (id, status) in &pending {
+                if status.trim().is_empty() {
                     return Err(anyhow!(
-                        "shimmer entry for block {} is shimmer:true but has no tooltip — a pending block needs a concise (≤10-word) run-status tooltip",
-                        decl.id
+                        "pending block {id} needs a concise run-status tooltip"
                     ));
                 }
+                if settled.contains(id) {
+                    return Err(anyhow!("block {id} cannot be both pending and settled"));
+                }
             }
+            let mut shimmer: Vec<construct_protocol::ProgramShimmerDecl> = pending
+                .iter()
+                .map(|(id, tooltip)| construct_protocol::ProgramShimmerDecl {
+                    id: id.clone(),
+                    shimmer: true,
+                    tooltip: Some(tooltip.clone()),
+                })
+                .collect();
+            let mut settled_refs: HashSet<String> = settled.into_iter().collect();
+            if settle_others {
+                settled_refs.extend(
+                    before
+                        .blocks
+                        .iter()
+                        .filter(|block| !pending.contains_key(&block.id))
+                        .map(|block| block.id.clone()),
+                );
+            }
+            shimmer.extend(settled_refs.into_iter().map(|id| {
+                construct_protocol::ProgramShimmerDecl {
+                    id,
+                    shimmer: false,
+                    tooltip: None,
+                }
+            }));
             let params = construct_protocol::ProgramEditParams {
-                session_id: sid,
+                session_id: sid.clone(),
                 edits,
                 actor: construct_protocol::ProgramUpdateActor::Agent,
                 note: arg_str(&args, "note").ok(),
                 shimmer,
             };
-            serde_json::to_value(client.program_edit(params).await?)?
+            let result = client.program_edit(params).await?;
+            let before_refs: HashSet<&str> =
+                before.blocks.iter().map(|block| block.id.as_str()).collect();
+            let changed_blocks: Vec<Value> = result
+                .blocks
+                .iter()
+                .filter(|block| !before_refs.contains(block.id.as_str()))
+                .map(|block| {
+                    let mut value = json!({
+                        "id": block.id,
+                        "text": block.text,
+                        "pending": block.shimmer,
+                    });
+                    if let Some(tooltip) = &block.tooltip {
+                        value["tooltip"] = json!(tooltip);
+                    }
+                    value
+                })
+                .collect();
+            let mut response = serde_json::Map::new();
+            response.insert("ok".into(), json!(true));
+            response.insert("version".into(), json!(result.program.version));
+            if result.program.version != before.program.version {
+                response.insert("changed".into(), json!(true));
+            }
+            if !changed_blocks.is_empty() {
+                response.insert("blocks".into(), json!(changed_blocks));
+            }
+            if let Some(run) = result.active_run {
+                response.insert(
+                    "run".into(),
+                    json!({
+                        "stage": run.stage,
+                        "pending": run.pending_block_count(),
+                        "settled": run.settled_block_count,
+                        "total": run.total_block_count,
+                    }),
+                );
+            }
+            Value::Object(response)
         }
         "construct_program_execute" => {
             let sid = optional_session_arg(&args, session_id)?;
@@ -1161,14 +1225,17 @@ mod tests {
             .and_then(|description| description.as_str())
             .expect("edits description");
 
-        assert!(
-            description.contains("ONE construct_program_edit call with multiple `edits` entries"),
-            "tool description should tell agents to move blocks in one call"
-        );
+        assert!(description.contains("ONE call"));
         assert!(
             edits_description.contains("For moves"),
             "edits schema description should reinforce atomic move edits"
         );
+        let schema = tool.get("inputSchema").expect("input schema");
+        assert!(schema.pointer("/properties/pending").is_some());
+        assert!(schema.pointer("/properties/settled").is_some());
+        assert!(schema.pointer("/properties/settle_others").is_some());
+        assert!(schema.pointer("/properties/shimmer").is_none());
+        assert!(schema.get("required").is_none(), "status-only calls need no edits");
     }
 
     #[test]

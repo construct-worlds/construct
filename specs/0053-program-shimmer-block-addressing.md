@@ -12,7 +12,7 @@ Program-block shimmer is a declared per-block state addressed by a daemon-owned 
 Definitions:
 
 - A **block** is a run of non-blank Markdown lines split at heading and list-item boundaries: each heading line, each list item (with its wrapped continuation lines), and each plain paragraph is its own block.
-- A **block id** identifies one block instance across moves and concurrent edits.
+- A **block id** identifies one block instance across moves and concurrent edits. It is a compact program-scoped hexadecimal ordinal (`b0`, `b1`, …), without fixed-width padding.
 - A **content epoch** increments when that block instance's semantic content changes.
 - A **block ref** is `block_id:content_epoch`. It is the authoritative shimmer address returned as each block's `id`/`block_ref` in program projections.
 - A **content id** is the legacy normalized-content hash. It ignores smart-clip `clip_id` metadata and remains available as `content_id` for compatibility, but it is ambiguous for duplicate text and must not be preferred when block refs are available.
@@ -22,13 +22,13 @@ The daemon stores block identity in program metadata and reconciles it whenever 
 Shimmer is carried across the program surfaces as follows:
 
 - **Read** returns an ordered projection of the document: each block with its stable ref (`id`/`block_ref`), legacy `content_id`, text or source line range, and current `shimmer` boolean.
-- **Edit** accepts an optional and partial list of `{id, shimmer}` declarations. The id may be a stable ref or a legacy content id. Declarations resolve against the document the call produces; a declaration whose id matches no block is dropped.
+- **Edit** accepts partial pending and settled declarations. The MCP surface encodes pending declarations as a `{block_ref: tooltip}` map and settled declarations as a block-ref array. Its `settle_others` planning-pass flag settles every current block omitted from the pending map. Declarations resolve against the document the call produces; a declaration whose id matches no block is dropped.
 - **Update** accepts a complete shimmer declaration over the blocks of the new Markdown. The daemon maps that ordered declaration to the new stable refs.
 - **Execute** lights the executed region optimistically immediately. The daemon then publishes stable refs for the active run so clients can replace the optimistic projection as soon as possible. For a selection Run, the client should tell the daemon which real document blocks its selection overlaps — computed by checking containment of the selection's range against each block's line range, not by re-parsing the raw selected text into its own standalone document and hash-matching the result. The daemon trusts that client-supplied identity when given. Hash-matching a re-parsed selection is a legacy fallback for callers that omit it; it only identifies the right block when the selection spans one or more whole blocks exactly, because a strict substring of a single block's text hashes differently from that block's real (full) content.
 
 Because shimmer is keyed by block ref, a block's prior shimmer does not carry across a semantic edit by default. Agents that edit a still-in-flight block must set `keep_pending: true` on that edit, or explicitly declare the resulting block's new ref pending in the same call. `keep_pending` is preferred because it re-adds the produced ref atomically, before any intermediate empty pending set can make the UI go dark.
 
-Every write returns the fresh per-block projection. Agents should read once, then use the echoed blocks from each write.
+Daemon IPC writes return the fresh per-block projection for interactive clients. The MCP edit surface instead returns a compact acknowledgement and only blocks whose refs were created or changed by the call. Agents should read once, retain unchanged refs, and use the changed-block echo for follow-up edits.
 
 ## Reason
 
@@ -41,6 +41,8 @@ The model remains plain-Markdown friendly: identity lives in program metadata, n
 ## Consequences
 
 - Program get, edit, update, execute, and state payloads publish the per-block projection so clients do not independently invent block identity.
+- Program-scoped ordinal ids are compact because they occur repeatedly in model-visible requests and responses; fixed-width or globally unique spellings add context cost without adding safety.
+- An MCP status-only edit may omit text edits entirely. This must not create a document revision or require a no-op text replacement.
 - Clients should use stable refs whenever the local buffer matches the saved daemon document. They may fall back to content ids only for legacy payloads or dirty optimistic buffers.
 - A stale stable-ref declaration fails closed: it matches no block if the target's semantic content changed and the caller did not use `keep_pending`.
 - Identical-content blocks are distinct when addressed by stable ref. Legacy content-id declarations may still affect all matching duplicates and should be treated as compatibility behavior.
