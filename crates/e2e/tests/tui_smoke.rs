@@ -124,3 +124,69 @@ async fn tui_remote_control_popup_via_palette() {
         status
     );
 }
+
+/// The stopped remote-control status is a mouse-first discovery path. Clicking
+/// it starts the local listener and opens the same chooser as
+/// `/remote-connect`; after dismissing the dialog, the status remains visible
+/// with a zero-client count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tui_remote_status_click_opens_popup_and_remains_at_zero_clients() {
+    let d = Daemon::spawn().await.expect("spawn daemon");
+    let mut tui = Tui::spawn_with_recording(
+        &d.socket,
+        "tui_remote_status_click_opens_popup_and_remains_at_zero_clients",
+    )
+    .expect("spawn TUI");
+
+    tui.wait_for("○ remote", Duration::from_secs(15))
+        .await
+        .expect("stopped remote status never rendered");
+    let screen = tui.screen();
+    let (row, col) = screen
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| line.find("○ remote").map(|col| (row, col)))
+        .expect("remote status coordinates");
+    let mouse_down = format!("\x1b[<0;{};{}M", col + 1, row + 1);
+    let mouse_up = format!("\x1b[<0;{};{}m", col + 1, row + 1);
+    tui.send(mouse_down.as_bytes()).expect("mouse down");
+    tui.send(mouse_up.as_bytes()).expect("mouse up");
+
+    tui.wait_for("/remote-connect", Duration::from_secs(15))
+        .await
+        .expect("clicking remote status did not open dialog");
+    tui.send(b"\x1b").expect("dismiss remote dialog");
+    tui.wait_for("● remote:0", Duration::from_secs(5))
+        .await
+        .expect("active zero-client remote status never rendered");
+
+    tui.send(b"\x18\x03").expect("send C-x C-c");
+    let status = tui
+        .wait_exit(Duration::from_secs(5))
+        .await
+        .expect("TUI did not exit");
+    assert!(status.success(), "TUI exited unsuccessfully: {status:?}");
+
+    // A fresh TUI subscription must receive the listener snapshot immediately;
+    // there may be no further client-count transition to trigger a broadcast.
+    let mut reconnected = Tui::spawn_with_recording(
+        &d.socket,
+        "tui_remote_status_snapshot_after_reconnect",
+    )
+    .expect("spawn reconnected TUI");
+    reconnected
+        .wait_for("● remote:0", Duration::from_secs(15))
+        .await
+        .expect("reconnected TUI did not receive remote state snapshot");
+    reconnected
+        .send(b"\x18\x03")
+        .expect("quit reconnected TUI");
+    let status = reconnected
+        .wait_exit(Duration::from_secs(5))
+        .await
+        .expect("reconnected TUI did not exit");
+    assert!(
+        status.success(),
+        "reconnected TUI exited unsuccessfully: {status:?}"
+    );
+}

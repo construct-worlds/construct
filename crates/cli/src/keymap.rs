@@ -121,6 +121,10 @@ pub enum KeyAction {
     /// Cycle the active UI color theme. Click-only for the minibuffer theme
     /// affordance; `/theme` remains the keyboard-facing command.
     CycleTheme,
+    /// Open the remote-control dialog. Click-only for the persistent
+    /// minibuffer status-bar affordance; `/remote-connect` remains the
+    /// keyboard-facing command.
+    OpenRemoteControl,
     /// Open the "restart daemon?" confirmation. Click-only, bound to the
     /// `<daemon build> (daemon)` segment of the status-bar version notice
     /// shown when the connected daemon's build differs from this client's.

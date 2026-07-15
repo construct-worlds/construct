@@ -2552,9 +2552,12 @@ pub struct DeletedNotificationPayload {
 /// Payload of the `remote/state` notification — number of remote WS
 /// clients currently attached to the daemon. Local clients (Unix
 /// socket) don't count; this is specifically the "is someone else
-/// also driving this daemon over the phone web client" signal.
+/// Remote-control listener availability and attached-client count for the
+/// local TUI's persistent status-bar affordance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteStateNotificationPayload {
+    #[serde(default)]
+    pub enabled: bool,
     pub clients: u32,
 }
 
