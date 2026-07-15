@@ -92,6 +92,15 @@ fn load_restore_snapshot(path: &std::path::Path) -> Option<RemoteSnapshot> {
 /// resume at all.
 pub fn restorable_provider(path: &std::path::Path) -> Option<TunnelProvider> {
     let snap = load_restore_snapshot(path)?;
+    // The first-party client runs inside the daemon and deliberately keeps
+    // every registration capability only in memory. An exec-style daemon
+    // restart therefore cannot adopt or silently recreate that tunnel: doing
+    // so would require persisting a credential or opening OAuth unexpectedly.
+    // Switch remote control off and let the user reconnect explicitly.
+    if snap.tunnel_provider == TunnelProvider::Construct {
+        let _ = std::fs::remove_file(path);
+        return None;
+    }
     // A snapshot written by a daemon from before providers existed
     // records a live tunnel PID but no provider, and taking its
     // `None` at face value would leave that cloudflared orphaned with
@@ -247,6 +256,7 @@ async fn handle_start(
     // `tunnel_task`, so a subsequent start spawns fresh.
     if provider != TunnelProvider::None && tunnel_task.is_none() {
         if std::env::var("CONSTRUCT_REMOTE_NO_TUNNEL").is_err() {
+            state.set_tunnel_error(None).await;
             state.set_tunnel_provider(provider).await;
             // `adopt_pid` is non-zero only after a `/construct
             // restart`: the snapshot captured a still-running tunnel
@@ -378,6 +388,8 @@ async fn handle_stop_tunnel(
         // looks LAN-only, and a subsequent start re-spawns a fresh
         // tunnel rather than short-circuiting on the dead URL.
         state.set_tunnel_url(None).await;
+        state.set_auth_url(None).await;
+        state.set_tunnel_error(None).await;
         state.set_tunnel_pid(0).await;
         state.set_tunnel_provider(TunnelProvider::None).await;
     }
@@ -519,6 +531,19 @@ mod tests {
             tunnel_provider: TunnelProvider::Cloudflare,
             generated_at,
         }
+    }
+
+    #[test]
+    fn in_process_construct_tunnel_requires_explicit_reconnect_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote.json");
+        let mut snap = snapshot(0, now_secs());
+        snap.tunnel_provider = TunnelProvider::Construct;
+        snap.tunnel_url = Some("https://swift-willow-4827.tunnel.zarvis.ai/".into());
+        snap.write(&path).unwrap();
+
+        assert_eq!(restorable_provider(&path), None);
+        assert!(!path.exists(), "non-adoptable snapshot must be removed");
     }
 
     /// A PID that is guaranteed dead: spawn a trivial process, reap it,

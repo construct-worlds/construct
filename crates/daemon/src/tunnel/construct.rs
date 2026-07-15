@@ -10,9 +10,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use wstunnel::executor::JoinSetTokioExecutor;
 
 use crate::remote::RemoteState;
 
@@ -20,7 +21,8 @@ const DEFAULT_API_URL: &str = "https://tunnel.zarvis.ai/api/v1/tunnels";
 
 #[derive(Serialize)]
 struct RegisterRequest<'a> {
-    subdomain: &'a str,
+    construct_instance_id: &'a str,
+    tunnel_name: &'a str,
     upstream_username: &'static str,
     upstream_password: &'a str,
 }
@@ -35,55 +37,77 @@ struct Registration {
     expires_in_seconds: u64,
 }
 
+#[derive(Deserialize)]
+struct AuthRequest {
+    verification_url: String,
+    poll_url: String,
+    poll_token: String,
+    expires_in_seconds: u64,
+    interval_seconds: u64,
+}
+
+#[derive(Deserialize)]
+struct AuthPoll {
+    #[serde(default)]
+    owner_token: Option<String>,
+}
+
 pub fn preflight() -> Result<(), String> {
-    let binary = binary();
-    if which::which(&binary).is_err() {
-        return Err(format!(
-            "{binary} is not on PATH — install wstunnel or set CONSTRUCT_WSTUNNEL_BIN"
-        ));
-    }
-    if std::env::var("CONSTRUCT_TUNNEL_OWNER_TOKEN").is_err() {
-        return Err(
-            "sign in at tunnel.zarvis.ai, then set CONSTRUCT_TUNNEL_OWNER_TOKEN".to_string(),
-        );
-    }
     Ok(())
+}
+
+#[derive(Parser)]
+struct InProcessClient {
+    #[command(flatten)]
+    client: wstunnel::config::Client,
 }
 
 pub async fn run_once(
     remote: &RemoteState,
     local_port: u16,
-    requested_subdomain: Option<&str>,
+    requested_tunnel_name: Option<&str>,
+    construct_instance_id: &str,
+    cached_owner_token: &mut Option<String>,
 ) -> Result<()> {
-    let subdomain = requested_subdomain
-        .map(str::to_owned)
-        .or_else(|| std::env::var("CONSTRUCT_TUNNEL_SUBDOMAIN").ok())
-        .ok_or_else(|| {
-            anyhow!(
-                "a subdomain is required; use `/remote-control construct <name>` or set \
-                 CONSTRUCT_TUNNEL_SUBDOMAIN"
-            )
-        })?;
-    validate_subdomain(&subdomain)?;
-
-    let owner_token = std::env::var("CONSTRUCT_TUNNEL_OWNER_TOKEN")
-        .context("CONSTRUCT_TUNNEL_OWNER_TOKEN is not set")?;
+    let tunnel_name = requested_tunnel_name
+        .filter(|name| valid_tunnel_name(name))
+        .ok_or_else(|| anyhow!("choose a tunnel name using 1–32 lowercase letters, numbers, or hyphens"))?;
     let api_url =
         std::env::var("CONSTRUCT_TUNNEL_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
     let http = reqwest::Client::new();
-    let registration = http
+    let owner_token = match cached_owner_token.as_ref() {
+        Some(token) => token.clone(),
+        None => {
+            let token = authorize(&http, remote, &api_url).await?;
+            *cached_owner_token = Some(token.clone());
+            token
+        }
+    };
+    let response = http
         .post(&api_url)
         .bearer_auth(&owner_token)
         .json(&RegisterRequest {
-            subdomain: &subdomain,
+            construct_instance_id,
+            tunnel_name,
             upstream_username: "remote",
             upstream_password: remote.password(),
         })
         .send()
         .await
-        .context("contact Construct tunnel service")?
-        .error_for_status()
-        .context("Construct tunnel registration rejected")?
+        .context("contact Construct tunnel service")?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        *cached_owner_token = None;
+    }
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().await.unwrap_or_default();
+        let detail = detail.trim();
+        if detail.is_empty() {
+            anyhow::bail!("Construct tunnel registration rejected ({status})");
+        }
+        anyhow::bail!("Construct tunnel registration rejected ({status}): {detail}");
+    }
+    let registration = response
         .json::<Registration>()
         .await
         .context("decode Construct tunnel registration")?;
@@ -93,47 +117,24 @@ pub async fn run_once(
         registration.remote_port
     );
     let auth_header = format!("Authorization: Bearer {}", registration.tunnel_token);
-    let mut child = Command::new(binary())
-        .args([
-            "client",
-            "--log-lvl",
-            "WARN",
-            "--remote-to-local",
-            &reverse,
-            "--http-headers",
-            &auth_header,
-            &registration.relay_url,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .context("spawn wstunnel client")?;
-
-    let pid = child.id().unwrap_or(0);
-    if pid != 0 {
-        remote.set_tunnel_pid(pid).await;
-    }
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow!("wstunnel stderr not captured"))?;
-    let drain = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(target: "wstunnel", "{line}");
-        }
-    });
+    let client = InProcessClient::try_parse_from([
+        "construct-wstunnel",
+        "--remote-to-local",
+        &reverse,
+        "--http-headers",
+        &auth_header,
+        &registration.relay_url,
+    ])
+    .context("configure in-process wstunnel client")?
+    .client;
+    let executor = JoinSetTokioExecutor::default();
+    let tunnel = wstunnel::run_client(client, executor);
 
     let public_url = normalize_public_url(&registration.public_url)?;
     let ready_url = registration.ready_url;
     let tunnel_token = registration.tunnel_token;
-    let refresh_after = Duration::from_secs(
-        registration
-            .expires_in_seconds
-            .saturating_sub(60)
-            .max(1),
-    );
+    let refresh_after =
+        Duration::from_secs(registration.expires_in_seconds.saturating_sub(60).max(1));
     let readiness = async {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
@@ -157,46 +158,123 @@ pub async fn run_once(
         }
     };
 
-    tokio::pin!(readiness);
+    tokio::pin!(readiness, tunnel);
     tokio::select! {
         ready = &mut readiness => ready?,
-        status = child.wait() => {
-            drain.abort();
-            let status = status.context("wait for wstunnel client")?;
-            return Err(anyhow!("wstunnel exited before the tunnel was ready: {status}"));
+        result = &mut tunnel => {
+            result.context("run in-process wstunnel client")?;
+            return Err(anyhow!("wstunnel exited before the tunnel was ready"));
         }
     }
 
-    let status = tokio::select! {
-        status = child.wait() => status.context("wait for wstunnel client")?,
-        _ = tokio::time::sleep(refresh_after) => {
-            child.start_kill().context("stop wstunnel for capability refresh")?;
-            child.wait().await.context("wait for refreshing wstunnel client")?
+    tokio::select! {
+        result = &mut tunnel => {
+            result.context("run in-process wstunnel client")?;
+            Err(anyhow!("wstunnel exited"))
         }
+        _ = tokio::time::sleep(refresh_after) => Ok(()),
+    }
+}
+
+async fn authorize(
+    http: &reqwest::Client,
+    remote: &RemoteState,
+    tunnel_api_url: &str,
+) -> Result<String> {
+    let auth_api_url = auth_api_url(tunnel_api_url)?;
+    let request = http
+        .post(auth_api_url)
+        .send()
+        .await
+        .context("start tunnel.zarvis.ai login")?
+        .error_for_status()
+        .context("tunnel.zarvis.ai rejected login request")?
+        .json::<AuthRequest>()
+        .await
+        .context("decode tunnel.zarvis.ai login request")?;
+
+    let verification_url = validate_https_url(&request.verification_url)?;
+    remote.set_auth_url(Some(verification_url.clone())).await;
+    tracing::info!(url = %verification_url, "authorize tunnel.zarvis.ai in a browser");
+    if let Err(error) = open_browser(&verification_url) {
+        tracing::info!(%error, url = %verification_url, "could not open login browser; showing URL in remote-connect dialog");
+    }
+
+    let interval = Duration::from_secs(request.interval_seconds.clamp(1, 10));
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_secs(request.expires_in_seconds.clamp(1, 10 * 60));
+    let result = async {
+        loop {
+            let response = match http
+                .get(&request.poll_url)
+                .bearer_auth(&request.poll_token)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) if tokio::time::Instant::now() < deadline => {
+                    tracing::debug!(%error, "login poll failed; retrying");
+                    tokio::time::sleep(interval).await;
+                    continue;
+                }
+                Err(error) => break Err(error).context("poll tunnel.zarvis.ai login"),
+            };
+            if response.status() == reqwest::StatusCode::ACCEPTED {
+                if tokio::time::Instant::now() >= deadline {
+                    break Err(anyhow!("tunnel.zarvis.ai login expired; start again"));
+                }
+                tokio::time::sleep(interval).await;
+                continue;
+            }
+            let poll = response
+                .error_for_status()
+                .context("tunnel.zarvis.ai login failed")?
+                .json::<AuthPoll>()
+                .await
+                .context("decode tunnel.zarvis.ai login result")?;
+            match poll.owner_token {
+                Some(token) if !token.is_empty() => break Ok(token),
+                _ => break Err(anyhow!("tunnel.zarvis.ai login omitted authorization")),
+            }
+        }
+    }
+    .await;
+    remote.set_auth_url(None).await;
+    result
+}
+
+fn auth_api_url(tunnel_api_url: &str) -> Result<reqwest::Url> {
+    let mut url =
+        reqwest::Url::parse(tunnel_api_url).context("invalid Construct tunnel API URL")?;
+    let path = url.path().trim_end_matches('/');
+    let prefix = path
+        .strip_suffix("/tunnels")
+        .ok_or_else(|| anyhow!("Construct tunnel API URL must end in /tunnels"))?;
+    url.set_path(&format!("{prefix}/auth/requests"));
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn open_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]);
+        command
     };
-    drain.abort();
-    if !status.success() {
-        return Err(anyhow!("wstunnel exited: {status}"));
-    }
-    Ok(())
-}
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
 
-fn binary() -> String {
-    std::env::var("CONSTRUCT_WSTUNNEL_BIN").unwrap_or_else(|_| "wstunnel".to_string())
-}
-
-fn validate_subdomain(value: &str) -> Result<()> {
-    let valid = (1..=63).contains(&value.len())
-        && !value.starts_with('-')
-        && !value.ends_with('-')
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if !valid {
-        anyhow::bail!(
-            "invalid tunnel subdomain `{value}`; use 1–63 lowercase letters, digits, or hyphens"
-        );
-    }
+    command
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("open browser for {url}"))?;
     Ok(())
 }
 
@@ -208,26 +286,56 @@ fn normalize_public_url(value: &str) -> Result<String> {
     Ok(format!("{}/", value.trim_end_matches('/')))
 }
 
+fn validate_https_url(value: &str) -> Result<String> {
+    let url = reqwest::Url::parse(value).context("service returned an invalid HTTPS URL")?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        anyhow::bail!("service returned a non-HTTPS URL");
+    }
+    Ok(value.to_string())
+}
+
+fn valid_tunnel_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn subdomain_validation_is_dns_label_safe() {
-        for valid in ["demo", "demo-2", "a"] {
-            assert!(validate_subdomain(valid).is_ok(), "{valid}");
-        }
-        for invalid in ["", "Demo", "-demo", "demo-", "two.labels", "has space"] {
-            assert!(validate_subdomain(invalid).is_err(), "{invalid}");
-        }
+    fn public_url_must_be_https() {
+        assert_eq!(
+            normalize_public_url("https://swift-willow-4827.tunnel.zarvis.ai").unwrap(),
+            "https://swift-willow-4827.tunnel.zarvis.ai/"
+        );
+        assert!(normalize_public_url("http://demo.example").is_err());
     }
 
     #[test]
-    fn public_url_must_be_https() {
+    fn auth_endpoint_is_derived_from_tunnel_endpoint() {
         assert_eq!(
-            normalize_public_url("https://demo.user.tunnel.zarvis.ai").unwrap(),
-            "https://demo.user.tunnel.zarvis.ai/"
+            auth_api_url("https://tunnel.zarvis.ai/api/v1/tunnels")
+                .unwrap()
+                .as_str(),
+            "https://tunnel.zarvis.ai/api/v1/auth/requests"
         );
-        assert!(normalize_public_url("http://demo.example").is_err());
+        assert!(auth_api_url("https://tunnel.zarvis.ai/wrong").is_err());
+    }
+
+    #[test]
+    fn tunnel_name_is_a_short_lowercase_dns_label() {
+        assert!(valid_tunnel_name("quiet-otter-42"));
+        assert!(valid_tunnel_name("demo"));
+        assert!(!valid_tunnel_name(""));
+        assert!(!valid_tunnel_name("-demo"));
+        assert!(!valid_tunnel_name("demo-"));
+        assert!(!valid_tunnel_name("Demo"));
+        assert!(!valid_tunnel_name(&"a".repeat(33)));
     }
 }

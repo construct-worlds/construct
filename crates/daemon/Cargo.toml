@@ -36,6 +36,7 @@ tokio-tungstenite.workspace = true
 qrcode.workspace = true
 httparse.workspace = true
 reqwest.workspace = true
+wstunnel.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

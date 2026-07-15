@@ -15381,8 +15381,13 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
     let total = f.area();
 
     let (title, title_color, body_lines, body_w, body_h) = match popup {
-        crate::app::RemoteControlPopup::Choose(c) => render_remote_choose(app, c, total.width),
-        crate::app::RemoteControlPopup::Starting(p) => render_remote_starting(app, p, total.width),
+        crate::app::RemoteControlPopup::Choose(c) => {
+            render_remote_choose(app, c, total.width, total.height)
+        }
+        crate::app::RemoteControlPopup::Name(n) => render_remote_name(app, n, total.width),
+        crate::app::RemoteControlPopup::Starting(p) => {
+            render_remote_starting(app, p, total.width)
+        }
         crate::app::RemoteControlPopup::Ok { ok, focus } => {
             render_remote_ok(app, ok, *focus, total.width)
         }
@@ -15453,38 +15458,46 @@ fn remote_kv<'a>(app: &App, label: &str, value: &str, accent: bool) -> (Line<'a>
 }
 
 /// Every address and credential the user might need — no QR; that gets
-/// composed alongside these by [`compose_qr_and_info`].
+/// composed alongside these by [`compose_qr_and_info`]. Active tunnels show
+/// only their public URL so the QR screen stays focused on the shareable link.
 ///
 /// The accented row is always the one the QR actually encodes, so
 /// "which of these am I looking at?" never needs asking: with a tunnel
 /// up it's the tunnel URL, otherwise it's the LAN address (or loopback
 /// on a machine with no LAN).
-fn remote_info_lines<'a>(app: &App, p: &crate::app::RemoteControlOk) -> Vec<Line<'a>> {
-    let mut lines: Vec<Line> = Vec::new();
-
+fn remote_address_rows<'a>(
+    p: &'a crate::app::RemoteControlOk,
+) -> Vec<(&'static str, &'a str, bool)> {
     if p.tunnel_ready {
-        lines.push(remote_kv(app, "tunnel:", &p.url, true).0);
+        return vec![("tunnel:", &p.url, true)];
     }
-    if let Some(lan) = p.lan_url.as_deref() {
-        lines.push(remote_kv(app, "lan:", lan, !p.tunnel_ready).0);
-    }
-    // Loopback is always shown: it is the one address that cannot
-    // fail, and it's what someone sitting at this machine types.
-    lines.push(
-        remote_kv(
-            app,
-            "local:",
-            &p.local_url,
-            !p.tunnel_ready && p.lan_url.is_none(),
-        )
-        .0,
-    );
 
-    // The browser's Basic-auth prompt asks for a username too, and the
-    // daemon pins it to "remote" — so this row isn't decorative;
-    // anything else 401s.
-    lines.push(remote_kv(app, "user:", "remote", true).0);
-    lines.push(remote_kv(app, "password:", &p.password, true).0);
+    let mut rows = Vec::new();
+    if let Some(lan) = p.lan_url.as_deref() {
+        rows.push(("lan:", lan, true));
+    }
+    rows.push(("local:", p.local_url.as_str(), p.lan_url.is_none()));
+    rows
+}
+
+fn remote_info_lines<'a>(
+    app: &App,
+    p: &crate::app::RemoteControlOk,
+    include_credentials: bool,
+) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line> = remote_address_rows(p)
+        .into_iter()
+        .map(|(label, value, accent)| remote_kv(app, label, value, accent).0)
+        .collect();
+
+    if include_credentials {
+        // Direct LAN and Cloudflare visitors see the browser's Basic-auth
+        // prompt. The daemon pins its username to "remote", so neither row
+        // is decorative. tunnel.zarvis.ai instead authenticates socially and
+        // supplies these upstream credentials inside its gateway.
+        lines.push(remote_kv(app, "user:", "remote", true).0);
+        lines.push(remote_kv(app, "password:", &p.password, true).0);
+    }
 
     lines
 }
@@ -15613,12 +15626,25 @@ fn compose_qr_and_info<'a>(
 
 /// The dialog's resting state: reachable on the LAN, published nowhere,
 /// with a row of buttons offering to change that.
+fn remote_provider_available_description(
+    provider: construct_protocol::TunnelProvider,
+) -> &'static str {
+    match provider {
+        construct_protocol::TunnelProvider::Cloudflare => "No signup, URL rotates each run",
+        construct_protocol::TunnelProvider::Construct => {
+            "Stable URL. Google or GitHub OAuth sign-in"
+        }
+        construct_protocol::TunnelProvider::None => "",
+    }
+}
+
 fn render_remote_choose<'a>(
     app: &App,
     c: &crate::app::RemoteControlChoose,
     area_w: u16,
+    area_h: u16,
 ) -> RemotePopupBody<'a> {
-    let mut info = remote_info_lines(app, &c.base);
+    let mut info = remote_info_lines(app, &c.base, true);
 
     if let Some(hint) = c.base.hint.as_deref() {
         info.push(Line::raw(""));
@@ -15674,15 +15700,7 @@ fn render_remote_choose<'a>(
                 app.theme.success,
             ),
             Some(opt) if opt.available => (
-                match opt.provider {
-                    construct_protocol::TunnelProvider::Cloudflare => {
-                        "Anyone with the URL. Rotates each run.".to_string()
-                    }
-                    construct_protocol::TunnelProvider::Construct => {
-                        "Stable name. Visitors sign in with GitHub or Google.".to_string()
-                    }
-                    construct_protocol::TunnelProvider::None => String::new(),
-                },
+                remote_provider_available_description(opt.provider).to_string(),
                 app.theme.dim,
             ),
             Some(opt) => (
@@ -15709,9 +15727,55 @@ fn render_remote_choose<'a>(
         Style::default().fg(app.theme.dim),
     )));
 
-    let (lines, width, height) = compose_qr_and_info(&c.base.qr, info, area_w);
+    // On a short terminal the local-network QR would push the provider row
+    // below the clipped modal. Keep local details textual there; the final
+    // public tunnel URL still gets its QR in the ready view.
+    let qr = if area_h >= 30 { &c.base.qr } else { "" };
+    let (lines, width, height) = compose_qr_and_info(qr, info, area_w);
     (
-        " /remote-control — local network — Esc to close ".to_string(),
+        " /remote-connect — local network — Esc to close ".to_string(),
+        app.theme.info,
+        lines,
+        width,
+        height,
+    )
+}
+
+fn render_remote_name<'a>(
+    app: &App,
+    state: &crate::app::RemoteControlName,
+    area_w: u16,
+) -> RemotePopupBody<'a> {
+    let mut info = remote_info_lines(app, &state.choose.base, true);
+    info.push(Line::raw(""));
+    info.push(Line::from(Span::styled(
+        "Choose your tunnel name:",
+        Style::default().fg(app.theme.text),
+    )));
+    info.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!(" {} ", state.name),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        ),
+        Span::styled(
+            "-<your-stable-id>.tunnel.zarvis.ai",
+            Style::default().fg(app.theme.dim),
+        ),
+    ]));
+    info.push(Line::raw(""));
+    let guidance = if state.pristine {
+        "Type to replace the suggestion · Enter continue · Esc back"
+    } else {
+        "Lowercase letters, numbers, hyphens · Enter continue · Esc back"
+    };
+    info.extend(wrapped_lines(guidance, Style::default().fg(app.theme.dim)));
+
+    let (lines, width, height) = compose_qr_and_info("", info, area_w);
+    (
+        " /remote-connect — tunnel.zarvis.ai — name your tunnel ".to_string(),
         app.theme.info,
         lines,
         width,
@@ -15727,7 +15791,7 @@ fn render_remote_starting<'a>(
     area_w: u16,
 ) -> RemotePopupBody<'a> {
     let label = p.provider.label();
-    let mut info = remote_info_lines(app, p);
+    let mut info = remote_info_lines(app, p, true);
     info.push(Line::raw(""));
     info.push(Line::from(Span::styled(
         format!("Starting {label} tunnel…"),
@@ -15735,14 +15799,33 @@ fn render_remote_starting<'a>(
             .fg(app.theme.warning)
             .add_modifier(Modifier::BOLD),
     )));
-    info.push(Line::from(Span::styled(
-        "The QR updates when it publishes a URL.",
-        Style::default().fg(app.theme.dim),
-    )));
+    if let Some(auth_url) = p.auth_url.as_deref() {
+        info.push(Line::from(Span::styled(
+            "Finish signing in in your browser:",
+            Style::default().fg(app.theme.text),
+        )));
+        info.extend(wrapped_lines(auth_url, Style::default().fg(app.theme.accent)));
+        info.push(Line::from(Span::styled(
+            "o open login again · Esc close",
+            Style::default().fg(app.theme.dim),
+        )));
+    } else {
+        info.push(Line::from(Span::styled(
+            "Opening browser login… The QR updates when the tunnel is ready.",
+            Style::default().fg(app.theme.dim),
+        )));
+    }
 
-    let (lines, width, height) = compose_qr_and_info(&p.qr, info, area_w);
+    // OAuth is the action the user must take now. A local-network QR is
+    // unrelated and can hide the login link in compact terminals.
+    let qr = if p.provider == construct_protocol::TunnelProvider::Construct {
+        ""
+    } else {
+        &p.qr
+    };
+    let (lines, width, height) = compose_qr_and_info(qr, info, area_w);
     (
-        format!(" /remote-control — starting {label}… — Esc to close "),
+        format!(" /remote-connect — starting {label}… — Esc to close "),
         app.theme.warning,
         lines,
         width,
@@ -15760,7 +15843,8 @@ fn render_remote_ok<'a>(
     area_w: u16,
 ) -> RemotePopupBody<'a> {
     use crate::app::ReadyButton;
-    let mut info = remote_info_lines(app, p);
+    let include_credentials = ready_screen_shows_basic_credentials(p.provider);
+    let mut info = remote_info_lines(app, p, include_credentials);
 
     if let Some(hint) = p.hint.as_deref() {
         info.push(Line::raw(""));
@@ -15799,10 +15883,16 @@ fn render_remote_ok<'a>(
     )));
 
     let label = p.provider.label();
-    let title = format!(" /remote-control — {label} ready (public URL) — Esc to close ");
+    let title = format!(" /remote-connect — {label} ready (public URL) — Esc to close ");
 
     let (lines, width, height) = compose_qr_and_info(&p.qr, info, area_w);
     (title, app.theme.success, lines, width, height)
+}
+
+fn ready_screen_shows_basic_credentials(
+    provider: construct_protocol::TunnelProvider,
+) -> bool {
+    provider != construct_protocol::TunnelProvider::Construct
 }
 
 /// A provider failed to start. Paint the daemon's diagnostic — which is
@@ -15844,7 +15934,7 @@ fn render_remote_err<'a>(
         .max(keys.chars().count() as u16);
     let height = 4 + message.lines().count() as u16;
     (
-        format!(" /remote-control — {label} failed — Esc to close "),
+        format!(" /remote-connect — {label} failed — Esc to close "),
         app.theme.danger,
         lines,
         width,
@@ -15855,6 +15945,20 @@ fn render_remote_err<'a>(
 #[cfg(test)]
 mod remote_popup_tests {
     use super::*;
+
+    fn remote_ok(tunnel_ready: bool) -> crate::app::RemoteControlOk {
+        crate::app::RemoteControlOk {
+            url: "https://quiet-river.tunnel.zarvis.ai".into(),
+            qr: String::new(),
+            tunnel_ready,
+            password: "secret".into(),
+            hint: None,
+            provider: construct_protocol::TunnelProvider::Construct,
+            local_url: "http://127.0.0.1:9800".into(),
+            lan_url: Some("http://192.168.1.2:9800".into()),
+            auth_url: None,
+        }
+    }
 
     /// A QR of a typical URL, at the size the daemon renders it.
     fn qr() -> String {
@@ -15938,6 +16042,51 @@ mod remote_popup_tests {
         let text = "a bb ccc dddd eeeee ffffff";
         let joined = wrap_plain(text, 8).join(" ");
         assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn zarvis_ready_screen_hides_gateway_internal_basic_credentials() {
+        use construct_protocol::TunnelProvider;
+
+        assert!(!ready_screen_shows_basic_credentials(
+            TunnelProvider::Construct
+        ));
+        assert!(ready_screen_shows_basic_credentials(
+            TunnelProvider::Cloudflare
+        ));
+        assert!(ready_screen_shows_basic_credentials(TunnelProvider::None));
+    }
+
+    #[test]
+    fn tunnel_ready_screen_only_lists_the_public_tunnel_address() {
+        let remote = remote_ok(true);
+        let rows = remote_address_rows(&remote);
+        let labels: Vec<_> = rows.iter().map(|(label, _, _)| *label).collect();
+
+        assert_eq!(labels, vec!["tunnel:"]);
+    }
+
+    #[test]
+    fn direct_access_screen_keeps_lan_and_local_addresses() {
+        let remote = remote_ok(false);
+        let rows = remote_address_rows(&remote);
+        let labels: Vec<_> = rows.iter().map(|(label, _, _)| *label).collect();
+
+        assert_eq!(labels, vec!["lan:", "local:"]);
+    }
+
+    #[test]
+    fn provider_descriptions_match_remote_connect_copy() {
+        use construct_protocol::TunnelProvider;
+
+        assert_eq!(
+            remote_provider_available_description(TunnelProvider::Cloudflare),
+            "No signup, URL rotates each run"
+        );
+        assert_eq!(
+            remote_provider_available_description(TunnelProvider::Construct),
+            "Stable URL. Google or GitHub OAuth sign-in"
+        );
     }
 }
 

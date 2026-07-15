@@ -95,7 +95,7 @@ jobs:
           for b in $BINS; do
             cp "target/${{ matrix.target }}/release/$b" "$stage/"
           done
-          cp LICENSE README.md "$stage/" 2>/dev/null || true
+          cp LICENSE README.md THIRD_PARTY_NOTICES.md "$stage/" 2>/dev/null || true
           tar -czf "$stage.tar.gz" "$stage"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$stage.tar.gz" > "$stage.tar.gz.sha256"

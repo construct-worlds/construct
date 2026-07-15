@@ -1,41 +1,50 @@
 # 0095-first-party-named-tunnels
 
 Status: accepted
-Date: 2026-07-14
+Date: 2026-07-15
 Area: architecture
-Scope: Construct's first-party tunnel names, identity, authorization, and runtime state
+Scope: Construct's first-party tunnel names, identity, authorization, and persistence
 
 ## Decision
 
-Construct's first-party tunnel provider uses a user-selected DNS label and a deterministic, provider-scoped user identifier to form `<label>.<user-id>.tunnel.zarvis.ai`.
+Selecting `tunnel.zarvis.ai` in `/remote-connect` opens a name-entry step before browser authorization. It proposes a human-friendly random name that the user may accept or replace. Names contain 1–32 lowercase ASCII letters, digits, and interior hyphens.
 
-The tunnel owner authenticates before registering a name. Registration produces a short-lived capability limited to one runtime reverse endpoint. The hosted service keeps active routes only in memory and may materialize generated restriction data only on ephemeral storage; it does not persist users, tunnels, names, or access-control lists.
+After a registration succeeds, Construct remembers the chosen name locally and preselects it the next time the dialog opens. A first-time user still receives the random friendly suggestion. Stopping a first-party tunnel also opens the service logout endpoint, which clears the shared browser session cookie; merely closing the dialog or returning to the chooser does not log out.
 
-The hosted service is deployed independently on Oracle Cloud infrastructure. It is not part of the `zarvis.ai` web deployment. DNS delegates `tunnel.zarvis.ai` and `*.tunnel.zarvis.ai` to the tunnel service's reserved public address.
+The public hostname is a single DNS label shaped as `<chosen-name>-<stable-user-id>.tunnel.zarvis.ai`. The service assigns each OAuth identity a persistent, human-readable, privacy-preserving stable ID. The ID is mapped from the OAuth provider plus its immutable provider subject; the raw subject, username, display name, and email are never placed in the URL.
 
-The same social identity that owns the tunnel is the initial authorization boundary for browser access. A visitor authenticates with GitHub or Google, and the service derives their user identifier from the provider plus immutable provider subject. Access is allowed only when that identifier equals the hostname's user-id. Sharing and persistent ACLs are non-goals until they have an explicit product design.
+The service persists identities and tunnel reservations in SQLite on the VM's durable disk. A reservation maps the authenticated identity and chosen name to one stable Construct installation ID. The same installation may reconnect to its reservation. A different installation owned by the same identity receives a name-conflict error. Different identities may choose the same name because their stable user suffixes differ.
 
-User identifiers are an HMAC of the provider and immutable provider subject under a server secret, encoded as a DNS-safe label. Display names, usernames, and email addresses are not identity keys. Changing providers intentionally changes the user-id.
+Active reverse endpoints, short-lived capabilities, upstream credentials, authorization requests, and browser sessions remain runtime state. A service restart retains identities and reservations but drops active routes; the client must authenticate and register again to reactivate its reserved hostname.
 
-Requested labels use lowercase ASCII letters, digits, and interior hyphens, with the DNS 63-byte limit. Because the user-id namespace separates owners, two users may choose the same label. One owner cannot run two live tunnels at the same label; a second registration replaces or rejects the first atomically.
+Owner authentication is an interactive browser handoff initiated by the running Construct daemon. Construct opens the browser capability and retains the polling capability only in process memory. After social login, the polling capability returns an owner credential exactly once. The credential is consumed directly for registration and is never displayed, copied, configured through an environment variable, or written to disk.
+
+The public tunnel ready screen shows the public URL and QR but not the remote listener's Basic username or password. Those are gateway-to-upstream credentials for this provider; public visitors authenticate socially and never enter them. LAN and providers without a credential-injecting gateway continue to display the Basic credentials.
+
+The same social identity that owns the reservation is the authorization boundary for browser access. A visitor authenticates with GitHub or Google, and access is allowed only when the identity in the signed login session equals the reservation owner. Sharing and persistent multi-user ACLs are non-goals until explicitly designed.
+
+Construct links the `wstunnel` Rust library and runs the client inside the daemon's supervised async task. No external `wstunnel` executable or PATH configuration is required.
 
 ## Reason
 
-Provider subjects are stable and do not require an identity database. HMAC prevents public provider identifiers from being recoverable from hostnames. Owner-equals-visitor authorization gives social login a precise stateless meaning without inventing an invitation system.
+The chosen name makes the URL recognizable, while the stable per-identity suffix allows independent users to choose familiar names without global contention. SQLite preserves names and identity across deployments and VM restarts. Binding each reservation to a stable local installation prevents a second Construct instance on the same account from silently taking over an existing tunnel.
 
-Runtime allocation avoids deterministic TCP-port collisions. Short-lived, narrowly scoped registration capabilities keep `wstunnel` from opening arbitrary reverse endpoints. Losing runtime state on restart is safe because supervised clients register again.
+Keeping active routing and credentials ephemeral limits the durable database to identity and ownership metadata. OAuth identity remains the visitor access boundary without exposing provider identifiers in public hostnames.
 
 ## Consequences
 
-- The client needs a social-login owner token and a selected label before starting the provider.
-- The service must validate the capability on the `wstunnel` upgrade and restrict its reverse bind to the allocated endpoint.
+- The client validates the chosen name before opening OAuth; the service validates it again at registration.
+- A failed registration does not replace the remembered name.
+- A 409 name-conflict response is shown in the `/remote-connect` error view.
+- Construct persists a random installation ID in its data directory. It is not an authentication secret.
+- Reconnecting the same installation and identity with the same name preserves the public URL.
+- Deleting Construct's installation ID makes prior reservations appear owned by another installation; reclaim or transfer requires a future explicit workflow.
+- The SQLite database must live on the VM's persistent filesystem and be excluded from deployment synchronization and image replacement.
+- The service must validate the short-lived capability on the `wstunnel` upgrade and restrict its reverse bind to the allocated endpoint.
 - A public hostname is not reported ready until the gateway can reach its reverse endpoint.
-- Service restarts may briefly interrupt tunnels, but no database restore is required; clients reconnect and register again.
-- OAuth client secrets, the HMAC identity key, and the session-signing key are operational secrets, not persisted user or tunnel data.
-- The tunnel service has its own deployment lifecycle; changing the `zarvis.ai` web application does not deploy or configure it.
+- OAuth client secrets and the session-signing key remain operational secrets outside the SQLite identity database.
 
 ## Non-Goals
 
-- Cross-account sharing, teams, invitations, and durable ACLs.
-- Reserving a label while its owner is offline.
-- Embedding `wstunnel` into the Construct executable; the initial client uses the separately installed binary.
+- Cross-account sharing, teams, invitations, durable multi-user ACLs, reservation transfer, and name reclamation.
+- Encoding raw OAuth provider subjects, usernames, emails, or display names in URLs.

@@ -1859,6 +1859,11 @@ impl SessionManager {
         tunnel_only: bool,
     ) -> anyhow::Result<construct_protocol::RemoteStopResult> {
         use anyhow::Context as _;
+        let provider = self
+            .remote_slot()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|handle| handle.state.tunnel_provider()))
+            .unwrap_or_default();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.remote_starter
             .send(crate::remote_supervisor::SupervisorMsg::Stop(
@@ -1873,6 +1878,7 @@ impl SessionManager {
             .context("remote supervisor dropped reply channel")??;
         Ok(construct_protocol::RemoteStopResult {
             was_running: outcome.was_running,
+            provider,
         })
     }
 
@@ -1948,15 +1954,22 @@ impl SessionManager {
                 local_url,
                 lan_url,
                 active_provider,
+                auth_url: state.auth_url().await,
             });
         }
 
-        // Provider mode: poll the shared tunnel-url slot. 15s covers a
-        // cold cloudflared start (1–3s) plus slack for a slow network.
+        // Provider mode: poll the shared tunnel-url slot. Browser OAuth is
+        // intentionally allowed much longer than a subprocess-only provider:
+        // the user may need to switch windows or complete MFA.
         // We poll instead of wiring a notifier because the call shape is
         // request/reply over IPC — the caller is already blocked on this
         // future.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let wait_seconds = if provider == TunnelProvider::Construct {
+            10 * 60
+        } else {
+            15
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds);
         loop {
             if let Some(u) = state.tunnel_url().await {
                 let qr = crate::remote::render_qr_dense1x2(&u).unwrap_or_default();
@@ -1970,7 +1983,11 @@ impl SessionManager {
                     local_url,
                     lan_url,
                     active_provider: provider,
+                    auth_url: None,
                 });
+            }
+            if let Some(error) = state.tunnel_error().await {
+                anyhow::bail!("{} tunnel failed: {error}", provider.label());
             }
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -1992,7 +2009,7 @@ impl SessionManager {
         match crate::tunnel::preflight(provider).await {
             Err(detail) => anyhow::bail!("{detail}"),
             Ok(()) => anyhow::bail!(
-                "{label} started but published no URL within 15s. Check the daemon log \
+                "{label} started but published no URL within {wait_seconds}s. Check the daemon log \
                  (RUST_LOG=info,construct=debug) for its output."
             ),
         }

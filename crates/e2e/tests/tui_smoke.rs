@@ -84,7 +84,7 @@ async fn tui_remote_control_popup_via_palette() {
     // depend on the popup's internal alignment (the labels are
     // padded with spaces so a `user: remote` literal would
     // mismatch). The popup title is itself a useful needle.
-    tui.wait_for("/remote-control", Duration::from_secs(15))
+    tui.wait_for("/remote-connect", Duration::from_secs(15))
         .await
         .expect("popup title never appeared");
     tui.wait_for("user:", Duration::from_secs(5))
