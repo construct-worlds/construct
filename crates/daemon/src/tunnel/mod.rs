@@ -24,6 +24,7 @@
 pub mod cloudflare;
 pub mod construct;
 
+use std::io::Write;
 use std::time::Duration;
 
 use construct_protocol::{RemoteProviderInfo, TunnelProvider};
@@ -112,7 +113,15 @@ pub async fn run(
     }
 
     let mut backoff_secs: u64 = 1;
-    let construct_instance_id = uuid::Uuid::new_v4().simple().to_string();
+    let construct_instance_id = match stable_construct_instance_id() {
+        Ok(id) => id,
+        Err(error) => {
+            remote
+                .set_tunnel_error(Some(format!("load Construct installation id: {error}")))
+                .await;
+            return;
+        }
+    };
     // Keep a successful OAuth grant in memory across transport and service
     // retries. A failure after login must not repeatedly open browser windows.
     let mut construct_owner_token = None;
@@ -158,7 +167,7 @@ async fn run_once(
     provider: TunnelProvider,
     remote: &RemoteState,
     local_port: u16,
-    _subdomain: Option<&str>,
+    subdomain: Option<&str>,
     construct_instance_id: &str,
     construct_owner_token: &mut Option<String>,
 ) -> anyhow::Result<()> {
@@ -169,10 +178,78 @@ async fn run_once(
             construct::run_once(
                 remote,
                 local_port,
+                subdomain,
                 construct_instance_id,
                 construct_owner_token,
             )
             .await
         }
+    }
+}
+
+fn stable_construct_instance_id() -> anyhow::Result<String> {
+    let dir = construct_protocol::paths::Paths::discover()
+        .data_dir
+        .join("tunnel");
+    stable_construct_instance_id_in(&dir)
+}
+
+fn stable_construct_instance_id_in(dir: &std::path::Path) -> anyhow::Result<String> {
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("installation-id");
+    if let Ok(value) = std::fs::read_to_string(&path) {
+        let value = value.trim();
+        if valid_instance_id(value) {
+            return Ok(value.to_string());
+        }
+        anyhow::bail!("{} contains an invalid id", path.display());
+    }
+
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            writeln!(file, "{id}")?;
+            file.sync_all()?;
+            Ok(id)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let value = std::fs::read_to_string(&path)?;
+            let value = value.trim();
+            if valid_instance_id(value) {
+                Ok(value.to_string())
+            } else {
+                anyhow::bail!("{} contains an invalid id", path.display())
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn valid_instance_id(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn construct_instance_id_is_persisted_and_reused() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = stable_construct_instance_id_in(temp.path()).unwrap();
+        let second = stable_construct_instance_id_in(temp.path()).unwrap();
+
+        assert_eq!(first, second);
+        assert!(valid_instance_id(&first));
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("installation-id"))
+                .unwrap()
+                .trim(),
+            first
+        );
     }
 }

@@ -22,6 +22,7 @@ const DEFAULT_API_URL: &str = "https://tunnel.zarvis.ai/api/v1/tunnels";
 #[derive(Serialize)]
 struct RegisterRequest<'a> {
     construct_instance_id: &'a str,
+    tunnel_name: &'a str,
     upstream_username: &'static str,
     upstream_password: &'a str,
 }
@@ -64,9 +65,13 @@ struct InProcessClient {
 pub async fn run_once(
     remote: &RemoteState,
     local_port: u16,
+    requested_tunnel_name: Option<&str>,
     construct_instance_id: &str,
     cached_owner_token: &mut Option<String>,
 ) -> Result<()> {
+    let tunnel_name = requested_tunnel_name
+        .filter(|name| valid_tunnel_name(name))
+        .ok_or_else(|| anyhow!("choose a tunnel name using 1–32 lowercase letters, numbers, or hyphens"))?;
     let api_url =
         std::env::var("CONSTRUCT_TUNNEL_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
     let http = reqwest::Client::new();
@@ -83,6 +88,7 @@ pub async fn run_once(
         .bearer_auth(&owner_token)
         .json(&RegisterRequest {
             construct_instance_id,
+            tunnel_name,
             upstream_username: "remote",
             upstream_password: remote.password(),
         })
@@ -288,6 +294,16 @@ fn validate_https_url(value: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
+fn valid_tunnel_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +326,16 @@ mod tests {
             "https://tunnel.zarvis.ai/api/v1/auth/requests"
         );
         assert!(auth_api_url("https://tunnel.zarvis.ai/wrong").is_err());
+    }
+
+    #[test]
+    fn tunnel_name_is_a_short_lowercase_dns_label() {
+        assert!(valid_tunnel_name("quiet-otter-42"));
+        assert!(valid_tunnel_name("demo"));
+        assert!(!valid_tunnel_name(""));
+        assert!(!valid_tunnel_name("-demo"));
+        assert!(!valid_tunnel_name("demo-"));
+        assert!(!valid_tunnel_name("Demo"));
+        assert!(!valid_tunnel_name(&"a".repeat(33)));
     }
 }
