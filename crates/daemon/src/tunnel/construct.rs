@@ -65,12 +65,20 @@ pub async fn run_once(
     remote: &RemoteState,
     local_port: u16,
     construct_instance_id: &str,
+    cached_owner_token: &mut Option<String>,
 ) -> Result<()> {
     let api_url =
         std::env::var("CONSTRUCT_TUNNEL_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
     let http = reqwest::Client::new();
-    let owner_token = authorize(&http, remote, &api_url).await?;
-    let registration = http
+    let owner_token = match cached_owner_token.as_ref() {
+        Some(token) => token.clone(),
+        None => {
+            let token = authorize(&http, remote, &api_url).await?;
+            *cached_owner_token = Some(token.clone());
+            token
+        }
+    };
+    let response = http
         .post(&api_url)
         .bearer_auth(&owner_token)
         .json(&RegisterRequest {
@@ -80,7 +88,11 @@ pub async fn run_once(
         })
         .send()
         .await
-        .context("contact Construct tunnel service")?
+        .context("contact Construct tunnel service")?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        *cached_owner_token = None;
+    }
+    let registration = response
         .error_for_status()
         .context("Construct tunnel registration rejected")?
         .json::<Registration>()
