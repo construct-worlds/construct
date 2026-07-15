@@ -53,8 +53,9 @@ copied, placed in an environment variable, or written to a configuration file.
 
 The service publishes a stable `<name>.<user-id>.tunnel.zarvis.ai` URL only
 after the reverse endpoint answers. The ready view displays that URL and its QR
-code. Visitors sign in with GitHub or Google; initially, the social identity
-must derive to the same user-id as the tunnel owner.
+code without showing the gateway's internal upstream Basic credentials.
+Visitors sign in with GitHub or Google; initially, the social identity must
+derive to the same user-id as the tunnel owner.
 
 To turn remote control off completely — listener included — use
 `/remote-control stop`.

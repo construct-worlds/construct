@@ -13,6 +13,8 @@ The tunnel owner authenticates before registering a name. Registration produces 
 
 Owner authentication is an interactive browser handoff initiated by the running Construct daemon. The service creates a short-lived authorization request with separate high-entropy browser and polling capabilities. Construct opens the browser capability and retains the polling capability only in process memory. After social login, the polling capability returns an owner credential exactly once. The credential is consumed directly for registration and is never displayed, copied, configured through an environment variable, or written to disk.
 
+The public tunnel ready screen shows the public URL and QR but not the remote listener's Basic username or password. Those are gateway-to-upstream credentials for this provider; public visitors authenticate socially and never enter them. LAN and providers without a credential-injecting gateway continue to display the Basic credentials.
+
 The hosted service is deployed independently on Oracle Cloud infrastructure. It is not part of the `zarvis.ai` web deployment. DNS delegates `tunnel.zarvis.ai` and `*.tunnel.zarvis.ai` to the tunnel service's reserved public address.
 
 The same social identity that owns the tunnel is the initial authorization boundary for browser access. A visitor authenticates with GitHub or Google, and the service derives their user identifier from the provider plus immutable provider subject. Access is allowed only when that identifier equals the hostname's user-id. Sharing and persistent ACLs are non-goals until they have an explicit product design.

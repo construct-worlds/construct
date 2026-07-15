@@ -15464,7 +15464,11 @@ fn remote_kv<'a>(app: &App, label: &str, value: &str, accent: bool) -> (Line<'a>
 /// "which of these am I looking at?" never needs asking: with a tunnel
 /// up it's the tunnel URL, otherwise it's the LAN address (or loopback
 /// on a machine with no LAN).
-fn remote_info_lines<'a>(app: &App, p: &crate::app::RemoteControlOk) -> Vec<Line<'a>> {
+fn remote_info_lines<'a>(
+    app: &App,
+    p: &crate::app::RemoteControlOk,
+    include_credentials: bool,
+) -> Vec<Line<'a>> {
     let mut lines: Vec<Line> = Vec::new();
 
     if p.tunnel_ready {
@@ -15485,11 +15489,14 @@ fn remote_info_lines<'a>(app: &App, p: &crate::app::RemoteControlOk) -> Vec<Line
         .0,
     );
 
-    // The browser's Basic-auth prompt asks for a username too, and the
-    // daemon pins it to "remote" — so this row isn't decorative;
-    // anything else 401s.
-    lines.push(remote_kv(app, "user:", "remote", true).0);
-    lines.push(remote_kv(app, "password:", &p.password, true).0);
+    if include_credentials {
+        // Direct LAN and Cloudflare visitors see the browser's Basic-auth
+        // prompt. The daemon pins its username to "remote", so neither row
+        // is decorative. tunnel.zarvis.ai instead authenticates socially and
+        // supplies these upstream credentials inside its gateway.
+        lines.push(remote_kv(app, "user:", "remote", true).0);
+        lines.push(remote_kv(app, "password:", &p.password, true).0);
+    }
 
     lines
 }
@@ -15624,7 +15631,7 @@ fn render_remote_choose<'a>(
     area_w: u16,
     area_h: u16,
 ) -> RemotePopupBody<'a> {
-    let mut info = remote_info_lines(app, &c.base);
+    let mut info = remote_info_lines(app, &c.base, true);
 
     if let Some(hint) = c.base.hint.as_deref() {
         info.push(Line::raw(""));
@@ -15734,7 +15741,7 @@ fn render_remote_name<'a>(
     state: &crate::app::RemoteControlName,
     area_w: u16,
 ) -> RemotePopupBody<'a> {
-    let mut info = remote_info_lines(app, &state.choose.base);
+    let mut info = remote_info_lines(app, &state.choose.base, true);
     info.push(Line::raw(""));
     info.push(Line::from(Span::styled(
         "Choose your tunnel name:",
@@ -15781,7 +15788,7 @@ fn render_remote_starting<'a>(
     area_w: u16,
 ) -> RemotePopupBody<'a> {
     let label = p.provider.label();
-    let mut info = remote_info_lines(app, p);
+    let mut info = remote_info_lines(app, p, true);
     info.push(Line::raw(""));
     info.push(Line::from(Span::styled(
         format!("Starting {label} tunnel…"),
@@ -15833,7 +15840,8 @@ fn render_remote_ok<'a>(
     area_w: u16,
 ) -> RemotePopupBody<'a> {
     use crate::app::ReadyButton;
-    let mut info = remote_info_lines(app, p);
+    let include_credentials = ready_screen_shows_basic_credentials(p.provider);
+    let mut info = remote_info_lines(app, p, include_credentials);
 
     if let Some(hint) = p.hint.as_deref() {
         info.push(Line::raw(""));
@@ -15876,6 +15884,12 @@ fn render_remote_ok<'a>(
 
     let (lines, width, height) = compose_qr_and_info(&p.qr, info, area_w);
     (title, app.theme.success, lines, width, height)
+}
+
+fn ready_screen_shows_basic_credentials(
+    provider: construct_protocol::TunnelProvider,
+) -> bool {
+    provider != construct_protocol::TunnelProvider::Construct
 }
 
 /// A provider failed to start. Paint the daemon's diagnostic — which is
@@ -16011,6 +16025,19 @@ mod remote_popup_tests {
         let text = "a bb ccc dddd eeeee ffffff";
         let joined = wrap_plain(text, 8).join(" ");
         assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn zarvis_ready_screen_hides_gateway_internal_basic_credentials() {
+        use construct_protocol::TunnelProvider;
+
+        assert!(!ready_screen_shows_basic_credentials(
+            TunnelProvider::Construct
+        ));
+        assert!(ready_screen_shows_basic_credentials(
+            TunnelProvider::Cloudflare
+        ));
+        assert!(ready_screen_shows_basic_credentials(TunnelProvider::None));
     }
 }
 
