@@ -297,7 +297,8 @@ impl Client {
         provider: construct_protocol::TunnelProvider,
         password: Option<String>,
     ) -> Result<construct_protocol::RemoteStartResult> {
-        self.remote_start_with_wait(provider, password, true).await
+        self.remote_start_named_with_wait(provider, password, None, true)
+            .await
     }
     pub async fn remote_start_with_wait(
         &self,
@@ -305,9 +306,21 @@ impl Client {
         password: Option<String>,
         wait_for_tunnel: bool,
     ) -> Result<construct_protocol::RemoteStartResult> {
+        self.remote_start_named_with_wait(provider, password, None, wait_for_tunnel)
+            .await
+    }
+
+    pub async fn remote_start_named_with_wait(
+        &self,
+        provider: construct_protocol::TunnelProvider,
+        password: Option<String>,
+        subdomain: Option<String>,
+        wait_for_tunnel: bool,
+    ) -> Result<construct_protocol::RemoteStartResult> {
         let params = construct_protocol::RemoteStartParams {
             provider,
             password,
+            subdomain,
             wait_for_tunnel,
         };
         self.request(ipc_method::REMOTE_START, &params).await

@@ -1821,6 +1821,7 @@ impl SessionManager {
                     port_hint,
                     provider: params.provider,
                     password: params.password.clone(),
+                    subdomain: params.subdomain.clone(),
                     respond: tx,
                 },
             ))

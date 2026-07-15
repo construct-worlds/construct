@@ -137,6 +137,8 @@ pub struct StartRequest {
     /// this field — `/remote-stop` + `/remote-control <new-pw>`
     /// is the recommended way to change the password mid-session.
     pub password: Option<String>,
+    /// Optional stable name requested from a named tunnel provider.
+    pub subdomain: Option<String>,
     pub respond: oneshot::Sender<Result<StartOutcome>>,
 }
 
@@ -185,6 +187,7 @@ pub async fn run(manager: Arc<SessionManager>, mut rx: mpsc::UnboundedReceiver<S
                     req.port_hint,
                     req.provider,
                     req.password,
+                    req.subdomain,
                 )
                 .await;
                 let _ = req.respond.send(outcome);
@@ -209,6 +212,7 @@ async fn handle_start(
     port_hint: Option<u16>,
     provider: TunnelProvider,
     password: Option<String>,
+    subdomain: Option<String>,
 ) -> Result<StartOutcome> {
     // Fast path: listener already installed (previous request, or
     // boot-time env-var startup). Reuse it and only kick the
@@ -224,6 +228,17 @@ async fn handle_start(
     } else {
         bind_and_install(manager, ws_task, port_hint, password).await?
     };
+
+    // The listener is shared, but providers are mutually exclusive. If
+    // the user chooses a different provider, stop the old child before
+    // starting the new one so its URL can never be mislabeled as the
+    // newly requested provider.
+    if provider != TunnelProvider::None
+        && tunnel_task.is_some()
+        && state.tunnel_provider() != provider
+    {
+        handle_stop_tunnel(manager, tunnel_task).await;
+    }
 
     // Spawn the provider's tunnel at most once per current RemoteState
     // lifetime. The tunnel itself is restart-on-death inside
@@ -241,7 +256,7 @@ async fn handle_start(
             let adopt_pid = state.tunnel_pid();
             let st = state.clone();
             let handle = tokio::spawn(async move {
-                crate::tunnel::run(provider, st, port, adopt_pid).await;
+                crate::tunnel::run(provider, st, port, adopt_pid, subdomain).await;
             });
             *tunnel_task = Some(handle);
         } else {

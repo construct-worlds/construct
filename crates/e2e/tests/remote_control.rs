@@ -155,6 +155,10 @@ async fn remote_providers_describes_every_provider() {
         "cloudflare must be offered even when it isn't installed: {listed:?}"
     );
     assert!(
+        listed.contains(&TunnelProvider::Construct),
+        "construct must be offered even when it is not configured: {listed:?}"
+    );
+    assert!(
         !listed.contains(&TunnelProvider::None),
         "`None` is the absence of a provider, not a button: {listed:?}"
     );
