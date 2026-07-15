@@ -314,6 +314,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_harness_hover_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
     render_modeline_version_notice_tooltip(f, app);
+    render_modeline_remote_tooltip(f, app);
     render_modeline_theme_tooltip(f, app);
 
     finish_frame(f, app);
@@ -7694,15 +7695,6 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     };
     let approval_mode_label = s.and_then(approval_mode_modeline_label);
     let approval_mode_badge = approval_mode_label.map(|badge| format!("[{badge}]"));
-    // "● remote: N" badge when at least one phone / remote client is
-    // attached to the daemon. Visible signal that another surface
-    // is also driving sessions, so the local user doesn't get
-    // surprised by a session changing under them.
-    let remote_badge = if app.remote_clients > 0 {
-        format!("[● remote: {}]  ", app.remote_clients)
-    } else {
-        String::new()
-    };
     let mut search_status = None;
     if let Some(search) = app
         .program_popup
@@ -7749,10 +7741,9 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             &[]
         };
     let modeline_before_approval_mode = format!(
-        " construct  {vim_mode}focus:{focus}  {sel}  {model}  {remote}",
+        " construct  {vim_mode}focus:{focus}  {sel}  {model}  ",
         vim_mode = vim_mode_label,
         focus = focus_label,
-        remote = remote_badge,
         sel = match s {
             Some(s) => format!("\"{}\"", primary_label(s)),
             None => "-".into(),
@@ -7793,7 +7784,7 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         },
     );
     let modeline_post_hint = format!("{status}{conn} ", status = status);
-    // Persistent notices (theme label, version notice, update-available),
+    // Persistent notices (theme, remote control, version, update-available),
     // right-aligned at the far edge. Built BEFORE the left-side spans so the
     // empty-state hint below can stay clear of the notice's footprint: both
     // sides register HintZones on the same row, and `handle_left_click`'s
@@ -7805,6 +7796,10 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     let theme_label = format!("theme:{}", app.theme_name.label());
     let mut persistent_notices: Vec<Vec<(String, Option<KeyAction>)>> =
         vec![vec![(theme_label, Some(KeyAction::CycleTheme))]];
+    persistent_notices.push(vec![(
+        modeline_remote_text(app.remote_enabled, app.remote_clients),
+        Some(KeyAction::OpenRemoteControl),
+    )]);
     persistent_notices.push(version_notice_segments(app));
     if let Some(latest) = app.latest_version.as_deref() {
         persistent_notices.push(vec![(
@@ -8012,6 +8007,14 @@ fn version_notice_segments(app: &App) -> Vec<(String, Option<KeyAction>)> {
     ]
 }
 
+fn modeline_remote_text(enabled: bool, clients: u32) -> String {
+    if enabled {
+        format!("[● remote: {clients}]")
+    } else {
+        "[○ remote: off]".to_string()
+    }
+}
+
 fn approval_mode_modeline_label(s: &SessionSummary) -> Option<&'static str> {
     s.approval_mode
         .badge()
@@ -8071,6 +8074,36 @@ fn render_modeline_version_notice_tooltip(f: &mut Frame, app: &App) {
         _ => " Newer version available — click to upgrade ",
     };
     render_button_tooltip(f, &app.theme, label, hit.x_start, hit.y.saturating_sub(2));
+}
+
+fn render_modeline_remote_tooltip(f: &mut Frame, app: &App) {
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    let Some(hit) = app.layout.shortcut_hints.iter().find(|h| {
+        h.action == KeyAction::OpenRemoteControl
+            && my == h.y
+            && mx >= h.x_start
+            && mx < h.x_end
+    }) else {
+        return;
+    };
+    let label = if app.remote_enabled {
+        format!(
+            " Remote control: {} client{}. Click to manage ",
+            app.remote_clients,
+            if app.remote_clients == 1 { "" } else { "s" }
+        )
+    } else {
+        " Remote control is off. Click to set up ".to_string()
+    };
+    render_button_tooltip(
+        f,
+        &app.theme,
+        &label,
+        hit.x_start,
+        hit.y.saturating_sub(2),
+    );
 }
 
 fn render_modeline_theme_tooltip(f: &mut Frame, app: &App) {

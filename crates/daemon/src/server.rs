@@ -429,16 +429,16 @@ struct RemoteClientGuard {
 
 impl RemoteClientGuard {
     fn new(remote: RemoteState, manager: Arc<SessionManager>) -> Self {
-        let n = remote.add_client();
-        manager.broadcast_remote_state(n);
+        remote.add_client();
+        manager.broadcast_remote_state();
         Self { remote, manager }
     }
 }
 
 impl Drop for RemoteClientGuard {
     fn drop(&mut self) {
-        let n = self.remote.sub_client();
-        self.manager.broadcast_remote_state(n);
+        self.remote.sub_client();
+        self.manager.broadcast_remote_state();
     }
 }
 
@@ -891,6 +891,12 @@ async fn run_subscription_loop(
                         Some(SubCmd::Subscribe(f)) => {
                             filter = f;
                             sub_rx = Some(manager.subscribe());
+                            forward_broadcast(
+                                &out_tx,
+                                &filter,
+                                BroadcastMsg::RemoteState(manager.remote_state_payload()),
+                                conn_id,
+                            );
                         }
                         Some(SubCmd::Unsubscribe) => {
                             sub_rx = None;
@@ -918,6 +924,12 @@ async fn run_subscription_loop(
                 Some(SubCmd::Subscribe(f)) => {
                     filter = f;
                     sub_rx = Some(manager.subscribe());
+                    forward_broadcast(
+                        &out_tx,
+                        &filter,
+                        BroadcastMsg::RemoteState(manager.remote_state_payload()),
+                        conn_id,
+                    );
                 }
                 Some(SubCmd::Unsubscribe) => {}
                 None => return,

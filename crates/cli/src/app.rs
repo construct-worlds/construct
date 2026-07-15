@@ -1344,11 +1344,11 @@ pub struct App {
     pub last_diff: Option<String>,
     pub should_quit: bool,
     pub connected: bool,
-    /// How many remote WS clients are currently attached to the
-    /// daemon. Surfaced as a "● remote" badge in the modeline so
-    /// the local user can see when the phone (or any future remote
-    /// client) is also driving sessions. Updated by the
-    /// `remote/state` notification handler.
+    /// Whether the daemon's remote-control listener is running, and how many
+    /// remote WS clients are currently attached. Both are surfaced by the
+    /// persistent remote-control affordance in the modeline and updated by
+    /// the `remote/state` notification handler.
+    pub remote_enabled: bool,
     pub remote_clients: u32,
     // Terminal-pane state.
     pub view: ViewMode,
@@ -3659,6 +3659,7 @@ async fn run_with_socket_initial_selection(
         last_diff: None,
         should_quit: false,
         connected: true,
+        remote_enabled: false,
         remote_clients: 0,
         view: ViewMode::Chat,
         histories: HashMap::new(),
@@ -7272,6 +7273,9 @@ impl App {
                         construct_protocol::RemoteStateNotificationPayload,
                     >(p)
                     {
+                        // Older daemons sent only the client count. A positive
+                        // count still proves their listener is active.
+                        self.remote_enabled = payload.enabled || payload.clients > 0;
                         self.remote_clients = payload.clients;
                     }
                 }
@@ -9949,6 +9953,9 @@ impl App {
             CycleTheme => {
                 self.apply_named_theme(self.theme_name.next());
             }
+            OpenRemoteControl => {
+                self.open_remote_control_popup(None).await;
+            }
             OpenRestartDaemonConfirm => {
                 self.minibuffer = Some(Minibuffer {
                     prompt: "Restart daemon? ".to_string(),
@@ -12440,6 +12447,7 @@ mod tests {
             last_diff: None,
             should_quit: false,
             connected: true,
+            remote_enabled: false,
             remote_clients: 0,
             view: ViewMode::Terminal,
             histories: HashMap::new(),
@@ -28172,7 +28180,10 @@ mod tests {
         // holding the invariants across a width range proves the fix for
         // every realistic BUILD_ID. At each width: no same-row zone
         // overlap, and the daemon segment click dispatches its own action.
-        for width in [92u16, 100, 108, 116, 124, 132] {
+        // Keep the deliberately long mismatch notice plus the persistent
+        // theme/remote controls renderable while still sweeping enough width
+        // to move the empty-hint collision boundary.
+        for width in [120u16, 124, 128, 132, 136, 140] {
             app.minibuffer = None;
             let backend = ratatui::backend::TestBackend::new(width, 36);
             let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
@@ -28291,14 +28302,15 @@ mod tests {
             .lines()
             .last()
             .expect("screen should have a minibuffer row");
-        // The status-bar version segment (client/daemon build) always
-        // renders after the theme label, so "right-aligned" now means
-        // "immediately followed by the version notice" rather than
-        // literally the last characters on the line.
+        // Remote control is a persistent affordance between the theme and
+        // version segments, even before its listener has been started.
         assert!(
             modeline
                 .trim_end()
-                .ends_with(&format!("theme:matrix | {}", crate::BUILD_ID)),
+                .ends_with(&format!(
+                    "theme:matrix | [○ remote: off] | {}",
+                    crate::BUILD_ID
+                )),
             "theme label should be right-aligned in status bar:\n{modeline}"
         );
         assert!(
@@ -28327,6 +28339,62 @@ mod tests {
         assert!(
             hovered_modeline.contains("Theme: matrix. Click to cycle theme"),
             "theme tooltip should appear when hovering the label"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_status_is_persistent_clickable_and_distinguishes_listener_state() {
+        let (mut app, _dir, server) = empty_app().await;
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw stopped state");
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(
+            screen.contains("theme:matrix | [○ remote: off] |"),
+            "stopped remote control should remain discoverable between theme and version:\n{screen}"
+        );
+        let hint = app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenRemoteControl)
+            .expect("remote status should be clickable")
+            .clone();
+
+        app.mouse_pos = Some((hint.x_start, hint.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw stopped hover");
+        assert!(
+            rendered_text(terminal.backend().buffer())
+                .contains("Remote control is off. Click to set up"),
+            "stopped state should explain the click action"
+        );
+
+        app.mouse_pos = None;
+        app.remote_enabled = true;
+        app.remote_clients = 0;
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw running state without clients");
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(
+            screen.contains("theme:matrix | [● remote: 0] |"),
+            "running listener should stay visible with zero clients:\n{screen}"
+        );
+
+        app.remote_clients = 2;
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw connected state");
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(
+            screen.contains("theme:matrix | [● remote: 2] |"),
+            "connected client count should render in the same right-side affordance:\n{screen}"
         );
         server.abort();
     }

@@ -257,9 +257,9 @@ pub enum BroadcastMsg {
         /// needs to receive.
         skip_conn_id: Option<u64>,
     },
-    /// Aggregate state for the remote WS transport. Emitted by
-    /// `server::handle_ws_connection` on every accept/drop so the
-    /// local TUI can show a "remote attached" badge.
+    /// Aggregate state for the remote WS transport. Emitted when the
+    /// listener starts/stops and on every client accept/drop so the local TUI
+    /// can show a persistent remote-control affordance.
     RemoteState(construct_protocol::RemoteStateNotificationPayload),
 }
 
@@ -1776,14 +1776,28 @@ impl SessionManager {
         self.broadcast.subscribe()
     }
 
-    /// Send a `remote/state` broadcast announcing the current remote-
-    /// WS client count. Best-effort — silently skipped if no
-    /// subscribers (the broadcast channel is the same one all
-    /// notifications flow through).
-    pub fn broadcast_remote_state(&self, clients: u32) {
-        let _ = self.broadcast.send(BroadcastMsg::RemoteState(
-            construct_protocol::RemoteStateNotificationPayload { clients },
-        ));
+    /// Snapshot whether the remote listener is running and its current client
+    /// count. Used both for broadcasts and for a newly subscribed TUI so it
+    /// does not have to wait for the next state transition.
+    pub fn remote_state_payload(&self) -> construct_protocol::RemoteStateNotificationPayload {
+        let guard = self.remote_slot().expect("remote mutex poisoned");
+        match guard.as_ref() {
+            Some(handle) => construct_protocol::RemoteStateNotificationPayload {
+                enabled: true,
+                clients: handle.state.client_count(),
+            },
+            None => construct_protocol::RemoteStateNotificationPayload {
+                enabled: false,
+                clients: 0,
+            },
+        }
+    }
+
+    /// Broadcast the current remote-control state. Best-effort — silently
+    /// skipped if no subscribers.
+    pub fn broadcast_remote_state(&self) {
+        let payload = self.remote_state_payload();
+        let _ = self.broadcast.send(BroadcastMsg::RemoteState(payload));
     }
 
     /// Start (or look up) the remote WS listener and return a URL + QR

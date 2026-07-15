@@ -274,6 +274,7 @@ async fn handle_start(
         }
     }
 
+    manager.broadcast_remote_state();
     Ok(StartOutcome { state, port })
 }
 
@@ -326,11 +327,10 @@ async fn handle_stop(
     if let Some(state) = state_for_cleanup {
         state.clear_persisted();
     }
-    // Broadcast `remote/state` with clients=0 so the local TUI
-    // drops its `[● remote: N]` badge even if individual per-
-    // connection `RemoteClientGuard` drops haven't fired yet (they
-    // will once those tasks observe the aborted listener).
-    manager.broadcast_remote_state(0);
+    // Broadcast the now-disabled state even if individual per-connection
+    // `RemoteClientGuard` drops have not fired yet (they will once those
+    // tasks observe the aborted listener).
+    manager.broadcast_remote_state();
     if was_running {
         tracing::info!("remote stopped: listener + tunnel torn down");
     }
