@@ -28,6 +28,7 @@
 //! withdraw it.
 
 pub mod cloudflare;
+pub mod construct;
 
 use std::time::Duration;
 
@@ -36,7 +37,10 @@ use construct_protocol::{RemoteProviderInfo, TunnelProvider};
 use crate::remote::{process_alive, RemoteState};
 
 /// Providers the dialog offers, in the order it offers them.
-pub const PROVIDERS: [TunnelProvider; 1] = [TunnelProvider::Cloudflare];
+pub const PROVIDERS: [TunnelProvider; 2] = [
+    TunnelProvider::Cloudflare,
+    TunnelProvider::Construct,
+];
 
 /// Probe every provider. Read-only — nothing is spawned, so the
 /// dialog can call this on every open without side effects.
@@ -54,6 +58,7 @@ pub async fn probe(provider: TunnelProvider) -> RemoteProviderInfo {
     let detail = match provider {
         TunnelProvider::None => None,
         TunnelProvider::Cloudflare => cloudflare::preflight().err(),
+        TunnelProvider::Construct => construct::preflight().err(),
     };
     RemoteProviderInfo {
         provider,
@@ -78,6 +83,7 @@ pub async fn run(
     remote: RemoteState,
     local_port: u16,
     adopt_pid: u32,
+    subdomain: Option<String>,
 ) {
     if provider == TunnelProvider::None {
         return;
@@ -115,7 +121,7 @@ pub async fn run(
 
     let mut backoff_secs: u64 = 1;
     loop {
-        match run_once(provider, &remote, local_port).await {
+        match run_once(provider, &remote, local_port, subdomain.as_deref()).await {
             Ok(()) => {
                 tracing::warn!(provider = label, "tunnel exited cleanly; respawning");
                 backoff_secs = 1;
@@ -138,6 +144,7 @@ pub async fn preflight(provider: TunnelProvider) -> Result<(), String> {
     match provider {
         TunnelProvider::None => Ok(()),
         TunnelProvider::Cloudflare => cloudflare::preflight(),
+        TunnelProvider::Construct => construct::preflight(),
     }
 }
 
@@ -145,9 +152,11 @@ async fn run_once(
     provider: TunnelProvider,
     remote: &RemoteState,
     local_port: u16,
+    subdomain: Option<&str>,
 ) -> anyhow::Result<()> {
     match provider {
         TunnelProvider::None => Ok(()),
         TunnelProvider::Cloudflare => cloudflare::run_once(remote, local_port).await,
+        TunnelProvider::Construct => construct::run_once(remote, local_port, subdomain).await,
     }
 }

@@ -10159,8 +10159,8 @@ impl App {
             "tasks" => {
                 self.open_tasks_popup().await;
             }
-            "remote-control" | "remote" => {
-                // Subcommand dispatch. `stop`, `debug`, and `cloudflare`
+            "remote-control" | "remote-connect" | "remote" => {
+                // Subcommand dispatch. `stop`, `debug`, and provider names
                 // are reserved keywords; anything else is a literal
                 // password override (so a user who wants the password
                 // `stop` has to pick another word).
@@ -10173,6 +10173,8 @@ impl App {
                 //                                      dialog's resting state
                 //   /remote-control cloudflare [pw]  → skip the dialog,
                 //                                      start the tunnel
+                //   /remote-control construct <name> → stable first-party
+                //                                      tunnel
                 //   /remote-control <anything else>  → dialog + pw=<that>
                 use construct_protocol::TunnelProvider;
                 let (sub, rest) = arg
@@ -10184,8 +10186,25 @@ impl App {
                     "stop" => self.stop_remote_control().await,
                     "" | "debug" => self.open_remote_control_popup(rest_pw).await,
                     "cloudflare" | "cloudflared" => {
-                        self.start_remote_control_provider(TunnelProvider::Cloudflare, rest_pw)
-                            .await
+                        self.start_remote_control_provider(
+                            TunnelProvider::Cloudflare,
+                            rest_pw,
+                            None,
+                        ).await
+                    }
+                    "construct" | "zarvis" => {
+                        let subdomain = (!rest.is_empty()).then(|| rest.to_string());
+                        if subdomain.is_none() {
+                            self.set_status(
+                                "usage: /remote-control construct <subdomain>".to_string(),
+                            );
+                        } else {
+                            self.start_remote_control_provider(
+                                TunnelProvider::Construct,
+                                None,
+                                subdomain,
+                            ).await;
+                        }
                     }
                     _ => {
                         // Everything (including any trailing
@@ -10339,13 +10358,19 @@ impl App {
         &mut self,
         provider: construct_protocol::TunnelProvider,
         password: Option<String>,
+        subdomain: Option<String>,
     ) {
         if let Some(task) = self.remote_control_task.take() {
             task.abort();
         }
         match self
             .client
-            .remote_start_with_wait(provider, password.clone(), false)
+            .remote_start_named_with_wait(
+                provider,
+                password.clone(),
+                subdomain.clone(),
+                false,
+            )
             .await
         {
             Ok(r) => {
@@ -10367,7 +10392,9 @@ impl App {
 
         let client = self.client.clone();
         self.remote_control_task = Some(tokio::spawn(async move {
-            let result = client.remote_start_with_wait(provider, password, true).await;
+            let result = client
+                .remote_start_named_with_wait(provider, password, subdomain, true)
+                .await;
             (provider, result)
         }));
     }
@@ -10437,7 +10464,11 @@ impl App {
                         );
                         return true;
                     }
-                    self.start_remote_control_provider(opt.provider, None).await;
+                    self.start_remote_control_provider(
+                        opt.provider,
+                        None,
+                        std::env::var("CONSTRUCT_TUNNEL_SUBDOMAIN").ok(),
+                    ).await;
                 }
                 _ => {}
             },

@@ -15678,6 +15678,9 @@ fn render_remote_choose<'a>(
                     construct_protocol::TunnelProvider::Cloudflare => {
                         "Anyone with the URL. Rotates each run.".to_string()
                     }
+                    construct_protocol::TunnelProvider::Construct => {
+                        "Stable name. Visitors sign in with GitHub or Google.".to_string()
+                    }
                     construct_protocol::TunnelProvider::None => String::new(),
                 },
                 app.theme.dim,

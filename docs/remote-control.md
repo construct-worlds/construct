@@ -17,10 +17,14 @@ from the buttons in the dialog.
 | `/remote-control` | Open the dialog: bind the listener, show the LAN address + QR, and offer a tunnel. No tunnel is started until you pick one. |
 | `/remote-control <password>` | Same, with a user-chosen Basic-auth password. |
 | `/remote-control cloudflare` | Skip the dialog and start a Cloudflare tunnel directly. |
+| `/remote-control construct <name>` | Start an authenticated first-party tunnel at `<name>.<user-id>.tunnel.zarvis.ai`. `/remote-connect` is an alias. |
 | `/remote-control stop` | Stop the listener + tunnel entirely and rotate credentials for the next start. |
 | `/remote-control debug` | Alias for `/remote-control` — kept because the plain dialog is now the local-only resting state. |
 | `CONSTRUCT_REMOTE_WS_PORT=<port>` | Start the remote WebSocket listener on daemon boot for scripted/headless use. |
-| `CONSTRUCT_REMOTE_PROVIDER=<cloudflare\|none>` | Tunnel provider for the boot-time listener above. Defaults to `cloudflare`. |
+| `CONSTRUCT_REMOTE_PROVIDER=<cloudflare\|construct\|none>` | Tunnel provider for the boot-time listener above. Defaults to `cloudflare`. |
+| `CONSTRUCT_TUNNEL_SUBDOMAIN=<name>` | Static label for a boot-time Construct tunnel. |
+| `CONSTRUCT_TUNNEL_OWNER_TOKEN=<token>` | Short-lived owner token obtained after signing in at `tunnel.zarvis.ai`. |
+| `CONSTRUCT_WSTUNNEL_BIN=<path>` | Optional `wstunnel` executable override. |
 | `CONSTRUCT_WEBUI_PORT=<port>` | Override the always-on localhost web UI port. Defaults to `5746`. |
 
 ## The tunnel
@@ -38,6 +42,13 @@ Once the tunnel's QR is up, the ready view offers two buttons:
   Re-selecting Cloudflare shows the same URL; nothing was torn down.
 - **stop** — stop the tunnel and drop the public URL, but keep the LAN listener
   and its password. A phone connected over the LAN keeps working.
+
+The **Construct** provider uses the separately installed `wstunnel` client. It
+registers the selected name with the first-party service, then opens a reverse
+tunnel restricted to that registration. The service publishes a stable
+`<name>.<user-id>.tunnel.zarvis.ai` URL only after the reverse endpoint answers.
+Visitors sign in with GitHub or Google; initially, the social identity must
+derive to the same user-id as the tunnel owner.
 
 To turn remote control off completely — listener included — use
 `/remote-control stop`.

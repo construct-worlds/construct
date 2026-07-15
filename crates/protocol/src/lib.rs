@@ -2566,6 +2566,8 @@ pub struct RemoteStateNotificationPayload {
 ///
 /// - `Cloudflare` — a `cloudflared` quick tunnel. Public internet,
 ///   ephemeral URL that nobody can guess. Needs no account.
+/// - `Construct` — Construct's authenticated first-party service,
+///   with a user-chosen stable name under `tunnel.zarvis.ai`.
 ///
 /// The enum keeps a `None` variant and room for more providers because
 /// the daemon models "reach the LAN" and "reach past it" as one axis;
@@ -2581,6 +2583,7 @@ pub enum TunnelProvider {
     #[default]
     None,
     Cloudflare,
+    Construct,
 }
 
 impl TunnelProvider {
@@ -2590,6 +2593,7 @@ impl TunnelProvider {
         match self {
             TunnelProvider::None => 0,
             TunnelProvider::Cloudflare => 1,
+            TunnelProvider::Construct => 2,
         }
     }
 
@@ -2600,6 +2604,7 @@ impl TunnelProvider {
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => TunnelProvider::Cloudflare,
+            2 => TunnelProvider::Construct,
             _ => TunnelProvider::None,
         }
     }
@@ -2609,6 +2614,7 @@ impl TunnelProvider {
         match self {
             TunnelProvider::None => "local network",
             TunnelProvider::Cloudflare => "Cloudflare",
+            TunnelProvider::Construct => "Construct",
         }
     }
 }
@@ -2632,6 +2638,10 @@ pub struct RemoteStartParams {
     pub provider: TunnelProvider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Stable first label requested from providers that support named
+    /// tunnels. Ignored by providers with provider-assigned names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdomain: Option<String>,
     /// Tunnel mode normally waits for the provider's URL before
     /// replying. Interactive clients can set this false to get an
     /// immediate local result, paint a progress dialog, then poll

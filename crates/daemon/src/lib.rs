@@ -242,6 +242,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
                     let params = construct_protocol::RemoteStartParams {
                         provider: boot_tunnel_provider(),
                         password: None,
+                        subdomain: std::env::var("CONSTRUCT_TUNNEL_SUBDOMAIN").ok(),
                         wait_for_tunnel: true,
                     };
                     if let Err(e) = mgr.start_remote(Some(port), params).await {
@@ -279,6 +280,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
                 let params = construct_protocol::RemoteStartParams {
                     provider,
                     password: None,
+                    subdomain: std::env::var("CONSTRUCT_TUNNEL_SUBDOMAIN").ok(),
                     wait_for_tunnel: true,
                 };
                 // port_hint=None — the supervisor reads the snapshot
@@ -386,11 +388,12 @@ fn boot_tunnel_provider() -> construct_protocol::TunnelProvider {
     };
     match raw.trim().to_ascii_lowercase().as_str() {
         "cloudflare" | "cloudflared" => TunnelProvider::Cloudflare,
+        "construct" | "zarvis" => TunnelProvider::Construct,
         "none" | "off" | "lan" => TunnelProvider::None,
         other => {
             tracing::warn!(
                 value = %other,
-                "CONSTRUCT_REMOTE_PROVIDER is not one of cloudflare|none; \
+                "CONSTRUCT_REMOTE_PROVIDER is not one of cloudflare|construct|none; \
                  defaulting to cloudflare"
             );
             TunnelProvider::Cloudflare
