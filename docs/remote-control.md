@@ -24,7 +24,6 @@ from the buttons in the dialog.
 | `CONSTRUCT_REMOTE_WS_PORT=<port>` | Start the remote WebSocket listener on daemon boot for scripted/headless use. |
 | `CONSTRUCT_REMOTE_PROVIDER=<cloudflare\|construct\|none>` | Tunnel provider for the boot-time listener above. Defaults to `cloudflare`. |
 | `CONSTRUCT_TUNNEL_SUBDOMAIN=<name>` | Static label for a boot-time Construct tunnel. |
-| `CONSTRUCT_WSTUNNEL_BIN=<path>` | Optional `wstunnel` executable override. |
 | `CONSTRUCT_WEBUI_PORT=<port>` | Override the always-on localhost web UI port. Defaults to `5746`. |
 
 ## The tunnel
@@ -43,8 +42,9 @@ Once the tunnel's QR is up, the ready view offers two buttons:
 - **stop** — stop the tunnel and drop the public URL, but keep the LAN listener
   and its password. A phone connected over the LAN keeps working.
 
-The **Construct** provider uses the separately installed `wstunnel` client. It
-starts with a human-friendly generated name that you can replace or accept.
+The **Construct** provider links the `wstunnel` Rust library directly; there is
+no separate executable to install or configure. It starts with a human-friendly
+generated name that you can replace or accept.
 Construct then opens a short-lived `tunnel.zarvis.ai` browser login (and shows
 the link in the dialog). After GitHub or Google OAuth succeeds, the running
 daemon receives authorization directly, registers the selected name, and opens
@@ -76,3 +76,7 @@ loopback while the remote-control listener does not.
 Tunnel + listener state is persisted under the runtime directory so a daemon
 restart preserves the active URL, password, and provider when possible; a
 restart never silently rotates the URL or switches how the machine is exposed.
+Cloudflare's child process can be adopted across a daemon restart. A
+`tunnel.zarvis.ai` connection runs in-process and keeps its authorization only
+in memory, so it stops on restart and requires an explicit `/remote-connect`
+and browser authorization afterward.

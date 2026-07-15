@@ -23,6 +23,8 @@ Requested labels use lowercase ASCII letters, digits, and interior hyphens, with
 
 The interactive client pre-populates the label with a human-friendly random suggestion. The user may accept or edit it before any authorization request or public tunnel is created.
 
+Construct links the `wstunnel` Rust library at a pinned upstream revision and runs the client inside the daemon's supervised async task. No external `wstunnel` executable, PATH entry, environment override, or subprocess is part of the first-party provider.
+
 ## Reason
 
 Provider subjects are stable and do not require an identity database. HMAC prevents public provider identifiers from being recoverable from hostnames. Owner-equals-visitor authorization gives social login a precise stateless meaning without inventing an invitation system.
@@ -33,6 +35,7 @@ Runtime allocation avoids deterministic TCP-port collisions. Short-lived, narrow
 
 - The client needs a selected label before starting the provider, then completes social login through a browser without exposing the owner token to the user.
 - Pending authorization requests are memory-only, single-use, and expire after ten minutes. Losing service state requires starting the login flow again and grants no durable access.
+- Stopping or restarting the daemon cancels the in-process tunnel. Because authorization capabilities are not persisted, reconnecting after a restart is an explicit `/remote-connect` plus browser authorization rather than an automatic background login.
 - The service must validate the capability on the `wstunnel` upgrade and restrict its reverse bind to the allocated endpoint.
 - A public hostname is not reported ready until the gateway can reach its reverse endpoint.
 - Service restarts may briefly interrupt tunnels, but no database restore is required; clients reconnect and register again.
@@ -43,4 +46,3 @@ Runtime allocation avoids deterministic TCP-port collisions. Short-lived, narrow
 
 - Cross-account sharing, teams, invitations, and durable ACLs.
 - Reserving a label while its owner is offline.
-- Embedding `wstunnel` into the Construct executable; the initial client uses the separately installed binary.

@@ -10,9 +10,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use wstunnel::executor::JoinSetTokioExecutor;
 
 use crate::remote::RemoteState;
 
@@ -51,13 +52,13 @@ struct AuthPoll {
 }
 
 pub fn preflight() -> Result<(), String> {
-    let binary = binary();
-    if which::which(&binary).is_err() {
-        return Err(format!(
-            "{binary} is not on PATH — install wstunnel or set CONSTRUCT_WSTUNNEL_BIN"
-        ));
-    }
     Ok(())
+}
+
+#[derive(Parser)]
+struct InProcessClient {
+    #[command(flatten)]
+    client: wstunnel::config::Client,
 }
 
 pub async fn run_once(
@@ -96,37 +97,18 @@ pub async fn run_once(
         registration.remote_port
     );
     let auth_header = format!("Authorization: Bearer {}", registration.tunnel_token);
-    let mut child = Command::new(binary())
-        .args([
-            "client",
-            "--log-lvl",
-            "WARN",
-            "--remote-to-local",
-            &reverse,
-            "--http-headers",
-            &auth_header,
-            &registration.relay_url,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .context("spawn wstunnel client")?;
-
-    let pid = child.id().unwrap_or(0);
-    if pid != 0 {
-        remote.set_tunnel_pid(pid).await;
-    }
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow!("wstunnel stderr not captured"))?;
-    let drain = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(target: "wstunnel", "{line}");
-        }
-    });
+    let client = InProcessClient::try_parse_from([
+        "construct-wstunnel",
+        "--remote-to-local",
+        &reverse,
+        "--http-headers",
+        &auth_header,
+        &registration.relay_url,
+    ])
+    .context("configure in-process wstunnel client")?
+    .client;
+    let executor = JoinSetTokioExecutor::default();
+    let tunnel = wstunnel::run_client(client, executor);
 
     let public_url = normalize_public_url(&registration.public_url)?;
     let ready_url = registration.ready_url;
@@ -156,28 +138,22 @@ pub async fn run_once(
         }
     };
 
-    tokio::pin!(readiness);
+    tokio::pin!(readiness, tunnel);
     tokio::select! {
         ready = &mut readiness => ready?,
-        status = child.wait() => {
-            drain.abort();
-            let status = status.context("wait for wstunnel client")?;
-            return Err(anyhow!("wstunnel exited before the tunnel was ready: {status}"));
+        result = &mut tunnel => {
+            result.context("run in-process wstunnel client")?;
+            return Err(anyhow!("wstunnel exited before the tunnel was ready"));
         }
     }
 
-    let status = tokio::select! {
-        status = child.wait() => status.context("wait for wstunnel client")?,
-        _ = tokio::time::sleep(refresh_after) => {
-            child.start_kill().context("stop wstunnel for capability refresh")?;
-            child.wait().await.context("wait for refreshing wstunnel client")?
+    tokio::select! {
+        result = &mut tunnel => {
+            result.context("run in-process wstunnel client")?;
+            Err(anyhow!("wstunnel exited"))
         }
-    };
-    drain.abort();
-    if !status.success() {
-        return Err(anyhow!("wstunnel exited: {status}"));
+        _ = tokio::time::sleep(refresh_after) => Ok(()),
     }
-    Ok(())
 }
 
 async fn authorize(
@@ -280,10 +256,6 @@ fn open_browser(url: &str) -> Result<()> {
         .spawn()
         .with_context(|| format!("open browser for {url}"))?;
     Ok(())
-}
-
-fn binary() -> String {
-    std::env::var("CONSTRUCT_WSTUNNEL_BIN").unwrap_or_else(|_| "wstunnel".to_string())
 }
 
 fn validate_subdomain(value: &str) -> Result<()> {

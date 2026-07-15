@@ -24,7 +24,7 @@ license = "MIT"
 authors = ["construct contributors"]
 repository = "https://github.com/construct-worlds/construct"
 description = "Cross-harness agent fleet TUI and daemon"
-rust-version = "1.75"
+rust-version = "1.85"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -59,6 +59,7 @@ eventsource-stream = "0.2"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 qrcode = { version = "0.14", default-features = false }
 httparse = "1"
+wstunnel = { git = "https://github.com/erebe/wstunnel.git", rev = "5cac9a52338a21e67254cea5d749f9cc170193be", default-features = false, features = ["clap", "ring"] }
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 diffy = "0.4"

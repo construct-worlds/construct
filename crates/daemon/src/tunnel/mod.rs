@@ -10,22 +10,16 @@
 //! provider is a backend module plus a `TunnelProvider` variant, and
 //! nothing upstream of here has to change.
 //!
-//! Every backend presents the same shape to the supervisor, which is
-//! what keeps the rest of the daemon provider-agnostic:
+//! Every backend presents the same long-running-future shape to the
+//! supervisor, which is what keeps the rest of the daemon provider-agnostic.
+//! External providers may use a child process; the first-party provider links
+//! `wstunnel` and runs it inside that future:
 //!
-//! 1. Spawn a child process in its own process group, so it survives
-//!    the daemon's `exec()` on `/construct restart` and the new daemon
-//!    can adopt it by PID.
-//! 2. Record that PID on [`RemoteState`] so stop + restart-adoption
-//!    can find it.
-//! 3. Publish a browser URL on [`RemoteState`] once — and only once —
+//! 1. Publish a browser URL on [`RemoteState`] once — and only once —
 //!    the tunnel is actually serving.
-//! 4. Die when SIGTERM'd, releasing whatever it registered.
-//!
-//! Step 4 is why the backend runs its child in the *foreground*: the
-//! tunnel then lives exactly as long as a process we hold a PID for,
-//! and a crashed daemon can't leave a mapping behind with nothing to
-//! withdraw it.
+//! 2. End when its supervisor future is cancelled, releasing whatever
+//!    it registered. Child-process providers additionally record a PID so
+//!    they can survive and be adopted across an exec-style daemon restart.
 
 pub mod cloudflare;
 pub mod construct;

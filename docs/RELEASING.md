@@ -46,7 +46,7 @@ never publish a mislabelled binary.
 
    The tarballs use `construct-<target>` names (which `install.sh` and `construct upgrade` expect).
 
-   Each tarball contains the single `construct` binary plus `README.md` and `LICENSE`. All adapter and MCP functionality is built into `construct` (`construct __adapter <name>`, `construct __mcp`).
+   Each tarball contains the single `construct` binary plus `README.md`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`. All adapter and MCP functionality is built into `construct` (`construct __adapter <name>`, `construct __mcp`).
 
 4. Review the release notes. The workflow passes `generate_release_notes: true`
    to the release step, so GitHub fills the release body automatically from the
