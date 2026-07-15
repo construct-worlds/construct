@@ -380,7 +380,8 @@ fn render_text_selection(f: &mut Frame, app: &App) {
     }
     let style = Style::default()
         .bg(app.theme.highlight_bg)
-        .fg(app.theme.highlight_fg);
+        .fg(app.theme.highlight_fg)
+        .add_modifier(ratatui::style::Modifier::BOLD);
     if let Some(sel) = &app.text_selection {
         if sel.dragged {
             let (start, end) = normalized_points(sel.anchor, sel.head);
