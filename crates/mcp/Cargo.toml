@@ -27,3 +27,4 @@ reqwest.workspace = true
 tokio-tungstenite.workspace = true
 futures.workspace = true
 image.workspace = true
+vt100.workspace = true

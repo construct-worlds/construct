@@ -1,10 +1,10 @@
 //! MCP tool catalog and dispatchers. Each tool wraps one or more methods
 //! on the daemon IPC client.
 
-use construct_client::Client;
-use construct_protocol::{agent_context, CreateSessionParams, PtySize};
 use anyhow::{anyhow, Result};
 use base64::Engine;
+use construct_client::Client;
+use construct_protocol::{agent_context, CreateSessionParams, PtySize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -12,12 +12,250 @@ use std::sync::Arc;
 mod browser;
 
 const CONTEXT_TOOL_NAME: &str = "construct_context";
+const DEFAULT_PTY_BYTES: usize = 64 * 1024;
+const MAX_MCP_PTY_BYTES: usize = 512 * 1024;
+const DEFAULT_TRANSCRIPT_EVENTS: usize = 50;
+const MAX_TRANSCRIPT_EVENTS: usize = 200;
+const MAX_COMPACT_EVENT_CHARS: usize = 16 * 1024;
+const DEFAULT_DIFF_CHARS: usize = 64 * 1024;
+const MAX_DIFF_CHARS: usize = 512 * 1024;
+const DEFAULT_USAGE_CHARS: usize = 16 * 1024;
+
+fn truncate_chars(text: &str, limit: usize) -> (String, bool) {
+    if text.chars().count() <= limit {
+        return (text.to_string(), false);
+    }
+    let mut out: String = text.chars().take(limit).collect();
+    out.push('…');
+    (out, true)
+}
+
+fn compact_session_summary(
+    summary: &construct_protocol::SessionSummary,
+    group_name: Option<&str>,
+) -> Value {
+    let mut out = serde_json::Map::new();
+    out.insert("id".into(), json!(summary.id));
+    out.insert("harness".into(), json!(summary.harness));
+    out.insert("state".into(), json!(summary.state));
+    if let Some(title) = &summary.title {
+        out.insert("title".into(), json!(title));
+    }
+    if let Some(model) = &summary.model {
+        out.insert("model".into(), json!(model));
+    }
+    if let Some(effort) = &summary.effort {
+        out.insert("effort".into(), json!(effort));
+    }
+    if summary.pending_input {
+        out.insert("pending_input".into(), json!(true));
+    }
+    if summary.has_pty {
+        out.insert("has_pty".into(), json!(true));
+    }
+    if let Some(last_event_at) = &summary.last_event_at {
+        out.insert("last_event_at".into(), json!(last_event_at));
+    }
+    if let Some(last_pty_at_ms) = summary.last_pty_at_ms {
+        out.insert("last_pty_at_ms".into(), json!(last_pty_at_ms));
+    }
+    if let Some(group_id) = &summary.group_id {
+        out.insert("group_id".into(), json!(group_id));
+    }
+    if let Some(name) = group_name {
+        out.insert("group_name".into(), json!(name));
+    }
+    if let Some(parent) = &summary.parent_session_id {
+        out.insert("parent_session_id".into(), json!(parent));
+    }
+    if summary.archived {
+        out.insert("archived".into(), json!(true));
+    }
+    Value::Object(out)
+}
+
+fn compact_program_blocks(blocks: &[construct_protocol::ProgramBlockView]) -> Vec<Value> {
+    blocks
+        .iter()
+        .map(|block| {
+            let mut out = serde_json::Map::new();
+            out.insert("id".into(), json!(block.id));
+            out.insert("start_line".into(), json!(block.start_line));
+            out.insert("end_line".into(), json!(block.end_line));
+            if block.shimmer {
+                out.insert("pending".into(), json!(true));
+            }
+            if let Some(tooltip) = &block.tooltip {
+                out.insert("tooltip".into(), json!(tooltip));
+            }
+            Value::Object(out)
+        })
+        .collect()
+}
+
+fn compact_program_run(run: &construct_protocol::ProgramRunProgress) -> Value {
+    json!({
+        "stage": run.stage,
+        "pending": run.pending_block_count(),
+        "settled": run.settled_block_count,
+        "total": run.total_block_count,
+    })
+}
+
+fn compact_transcript_event(event: &construct_protocol::TimestampedEvent) -> Value {
+    let full = serde_json::to_value(event).unwrap_or_else(|_| json!({}));
+    let encoded = serde_json::to_string(&full).unwrap_or_default();
+    if encoded.chars().count() <= MAX_COMPACT_EVENT_CHARS {
+        return full;
+    }
+    let event_value = serde_json::to_value(&event.event).unwrap_or_else(|_| json!({}));
+    let event_type = event_value
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| "event".to_string());
+    let (preview, _) = truncate_chars(
+        &serde_json::to_string(&event_value).unwrap_or_default(),
+        MAX_COMPACT_EVENT_CHARS,
+    );
+    json!({
+        "seq": event.seq,
+        "at": event.at,
+        "event": { "type": event_type, "preview": preview, "truncated": true }
+    })
+}
+
+fn render_terminal_text(bytes: &[u8], size: Option<construct_protocol::PtySize>) -> String {
+    let size = size.unwrap_or(construct_protocol::PtySize {
+        cols: 100,
+        rows: 30,
+    });
+    let mut parser = vt100::Parser::new(size.rows.max(1), size.cols.max(1), 200);
+    parser.process(bytes);
+    parser.screen().contents().trim_end().to_string()
+}
+
+fn content_etag(text: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:x}")
+}
+
+fn compact_memory_file(
+    file: Option<agent_context::MemoryFile>,
+    known: Option<&str>,
+) -> Option<Value> {
+    file.map(|file| {
+        let etag = content_etag(&file.content);
+        if known == Some(etag.as_str()) {
+            json!({ "path": file.path, "etag": etag, "unchanged": true })
+        } else {
+            json!({
+                "path": file.path,
+                "content": file.content,
+                "etag": etag,
+                "truncated": file.truncated,
+                "remaining_bytes": file.remaining_bytes,
+            })
+        }
+    })
+}
+
+fn compact_context_response(mut context: agent_context::AgentdContext, args: &Value) -> Value {
+    let known_global = args.get("known_global").and_then(Value::as_str);
+    let known_project = args.get("known_project").and_then(Value::as_str);
+    let known_program = args.get("known_program").and_then(Value::as_str);
+    let include_reference = args
+        .get("include_reference")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let global = compact_memory_file(context.global_memory.take(), known_global);
+    let project = compact_memory_file(context.project_memory.take(), known_project);
+    let program = context.program_run.take().map(|program| {
+        let encoded = serde_json::to_string(&program).unwrap_or_default();
+        let etag = content_etag(&encoded);
+        if known_program == Some(etag.as_str()) {
+            json!({
+                "session_id": program.session_id,
+                "program_version": program.program_version,
+                "etag": etag,
+                "unchanged": true,
+            })
+        } else {
+            let mut value = serde_json::to_value(program).unwrap_or_else(|_| json!({}));
+            value["etag"] = json!(etag);
+            value
+        }
+    });
+    let mut out = serde_json::Map::new();
+    out.insert("session_id".into(), json!(context.session_id));
+    out.insert("project_id".into(), json!(context.project_id));
+    out.insert("instructions".into(), json!(context.instructions));
+    if let Some(memory) = global {
+        out.insert("global_memory".into(), memory);
+    }
+    if let Some(memory) = project {
+        out.insert("project_memory".into(), memory);
+    }
+    if let Some(widgets) = context.session_widgets {
+        out.insert("session_widgets".into(), json!(widgets));
+    }
+    if let Some(program) = program {
+        out.insert("program_run".into(), program);
+    }
+    if include_reference {
+        out.insert("memory_policy".into(), json!(context.memory_policy));
+        out.insert("widget_policy".into(), json!(context.widget_policy));
+        out.insert(
+            "markdown_extensions".into(),
+            json!(context.markdown_extensions),
+        );
+    } else {
+        out.insert(
+            "reference".into(),
+            json!("Call again with include_reference:true for full memory/widget policy and Markdown extensions."),
+        );
+    }
+    Value::Object(out)
+}
+
+fn diff_stats(patch: &str) -> Value {
+    let mut files = Vec::new();
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git a/") {
+            let path = rest.split(" b/").next().unwrap_or(rest);
+            files.push(path.to_string());
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            additions += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            deletions += 1;
+        }
+    }
+    json!({ "files": files, "additions": additions, "deletions": deletions })
+}
 
 /// Static tool catalog returned by `tools/list`.
 pub fn catalog() -> Vec<Value> {
     let mut tools = vec![
         // ----- Read -----
-        tool(CONTEXT_TOOL_NAME, agent_context::TOOL_DESCRIPTION, schema_empty()),
+        tool(
+            CONTEXT_TOOL_NAME,
+            "Load current construct memory, Program-run state, and widget paths. Call before each task. Pass returned etags later to omit unchanged content; request reference policy only when needed.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "known_global": { "type": "string" },
+                    "known_project": { "type": "string" },
+                    "known_program": { "type": "string" },
+                    "include_reference": { "type": "boolean" }
+                }
+            }),
+        ),
         tool(
             "construct_whoami",
             "Returns the CONSTRUCT_SESSION_ID env var visible to this MCP server, which is the construct session id that the calling agent is running inside. Returns null if unset (the MCP server is running outside a construct-managed session).",
@@ -25,8 +263,14 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "construct_list_sessions",
-            "List every construct session known to the daemon (running and finished, ungrouped and grouped). Returns an array of session summaries. Each entry includes `last_pty_at_ms` (Unix epoch ms of the latest PTY byte — use `now - last_pty_at_ms < ~600ms` to tell whether the session looks busy) and, when the session belongs to a group, `group_id` and `group_name`.",
-            schema_empty(),
+            "List sessions as a compact fleet projection. Use `detail:full` only for UI/debug metadata.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+                    "detail": { "type": "string", "enum": ["compact", "full"] }
+                }
+            }),
         ),
         tool(
             "construct_list_harnesses",
@@ -35,50 +279,101 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "construct_usage_query",
-            "Query the cached usage/status snapshot for one harness (e.g. \"claude\", \"codex\", \"agy\", \"grok\") — the raw output of that harness's own interactive usage/status slash command (e.g. `/usage`, `/status`), captured verbatim by a short-lived probe session and cached for 5 minutes. Returns `{ snapshot: {bytes (base64), cols, rows, captured_at_ms} | null, refreshing, enabled }`. `bytes` is base64-encoded raw terminal output (not parsed into token counts or other fields) — decode and feed it through a terminal/vt100 renderer to display it, or decode as UTF-8 lossy for a rough read. Set `allow_refresh: true` to trigger a background probe when the cache is stale or missing (this call still returns immediately; poll again shortly to pick up the result). `enabled: false` means this harness has no usage probe configured — stop polling.",
-            schema_obj(&[("harness", "string", true), ("allow_refresh", "boolean", false)]),
+            "Return a cached harness usage screen as bounded plain text; optionally trigger a background refresh.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "harness": { "type": "string" },
+                    "allow_refresh": { "type": "boolean" },
+                    "max_chars": { "type": "integer", "minimum": 1, "maximum": 65536 }
+                },
+                "required": ["harness"]
+            }),
         ),
         tool(
             "construct_get_session",
-            "Fetch the full detail (summary + structured transcript) for one session.",
-            schema_obj(&[("session_id", "string", true)]),
+            "Fetch compact session detail. The default excludes transcript history; request a bounded `tail` or explicit `detail:full` when needed.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "tail": { "type": "integer", "minimum": 1, "maximum": 200 },
+                    "include_panels": { "type": "boolean" },
+                    "detail": { "type": "string", "enum": ["compact", "full"] }
+                },
+                "required": ["session_id"]
+            }),
         ),
         tool(
             "construct_get_transcript",
-            "Fetch a slice of the session's structured event log. `from` is a 1-based sequence number; `limit` bounds the returned events.",
+            "Fetch bounded structured history. Defaults to the latest 50 events; oversized individual events are compacted unless `detail:full`.",
             json!({
                 "type": "object",
                 "properties": {
                     "session_id": { "type": "string" },
                     "from":       { "type": "integer", "minimum": 0 },
-                    "limit":      { "type": "integer", "minimum": 1 }
+                    "limit":      { "type": "integer", "minimum": 1, "maximum": 200 },
+                    "tail":       { "type": "integer", "minimum": 1, "maximum": 200 },
+                    "detail":     { "type": "string", "enum": ["compact", "full"] }
                 },
                 "required": ["session_id"]
             }),
         ),
         tool(
             "construct_get_output",
-            "Fetch the session's recent PTY scrollback as text (UTF-8 lossy). Use this to read what's on the screen of a PTY-backed session.",
-            schema_obj(&[("session_id", "string", true)]),
+            "Fetch a bounded PTY tail. Defaults to a rendered 64 KiB screen; offsets support deliberate backward paging.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "max_bytes": { "type": "integer", "minimum": 1, "maximum": 524288 },
+                    "before_offset": { "type": "integer", "minimum": 0 },
+                    "mode": { "type": "string", "enum": ["screen", "text"] }
+                },
+                "required": ["session_id"]
+            }),
         ),
         tool(
             "construct_get_diff",
-            "`git diff HEAD` for the session's worktree (or its cwd if it's a git repo without an isolated worktree). Empty string if not a git repo.",
-            schema_obj(&[("session_id", "string", true)]),
+            "Return a bounded worktree diff or compact diff statistics.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["patch", "stat"] },
+                    "max_chars": { "type": "integer", "minimum": 1, "maximum": 524288 },
+                    "offset": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["session_id"]
+            }),
         ),
         tool(
             "construct_get_tasks",
-            "List the session's tool-call task registry: running, backgrounded, and recently-completed entries. Each entry includes call_id, tool, args_summary, state, started_at_ms, optionally backgrounded_at_ms / ended_at_ms / output_preview. Use this to discover what a session is currently working on, including long-running tools that have been auto-promoted to the background.",
-            schema_obj(&[("session_id", "string", true)]),
+            "List bounded running/background/recent tool tasks for a session.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "active_only": { "type": "boolean" }
+                },
+                "required": ["session_id"]
+            }),
         ),
         tool(
             "construct_program_get",
-            "Fetch a session's program Markdown document, version, retained revisions, and — when a Run is active — the per-block shimmer projection. The `blocks` array lists each block in document order with a stable ref in `id`/`block_ref`, legacy `content_id`, its `text`, and current `shimmer` state (true = pending, false = settled). Use the stable `id` to declare shimmer back via construct_program_edit or construct_program_update. Defaults to the current session when `session_id` is omitted.",
-            schema_obj(&[("session_id", "string", false)]),
+            "Fetch current Program Markdown once plus compact block refs/status. Revisions are omitted unless explicitly requested.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "revisions": { "type": "string", "enum": ["none", "metadata", "full"] }
+                }
+            }),
         ),
         tool(
             "construct_search",
-            "Search across session names, program contents, and session history (transcripts). Case-insensitive substring match, newest activity first. Transcript hits include `seq`; pass it as `from` to construct_get_transcript to read the surrounding context. Results may be truncated (see `truncated` in the response) if a session's history is very large or the global hit limit is reached — narrow with `session_id` or `scopes` to dig further into one place.",
+            "Search session names, Programs, and transcripts. Results are bounded; use hit `seq` with construct_get_transcript for context.",
             json!({
                 "type": "object",
                 "properties": {
@@ -89,19 +384,19 @@ pub fn catalog() -> Vec<Value> {
                         "items": { "type": "string", "enum": ["name", "program", "transcript"] }
                     },
                     "session_id": { "type": "string", "description": "Restrict the search to one session." },
-                    "limit": { "type": "integer", "minimum": 1, "description": "Global cap on returned hits (default 50)." }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Global hit cap; default 20." }
                 },
                 "required": ["query"]
             }),
         ),
         tool(
             "construct_program_list_templates",
-            "List built-in and user program templates. User templates live under the daemon data directory at `program/templates/*.md`.",
-            schema_empty(),
+            "List Program template metadata, or fetch one template body by id.",
+            json!({ "type": "object", "properties": { "template_id": { "type": "string" } } }),
         ),
         tool(
             "construct_program_list_verbs",
-            "List available Program selection verbs — typed refinement actions (like 'simplify' or 'crystallize') offered on a Program selection alongside execute. Each entry has a `name` (pass to construct_program_verb_execute), `label`, `effect` ('annotate' or 'rewrite'), and `interaction` ('single-shot' or 'interactive'). Built-in verbs ship with the daemon; user verbs live under the config directory at `verbs/*.md` and override a built-in of the same name.",
+            "List Program selection-verb metadata; internal purpose prompts are omitted.",
             schema_empty(),
         ),
         // ----- Write -----
@@ -143,7 +438,7 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "construct_program_update",
-            "Replace a session's ENTIRE program Markdown. Prefer construct_program_edit for targeted changes — it merges with concurrent human edits, whereas a whole-document replace can clobber them. Use this only for wholesale rewrites or initial population. Pass `base_version` from construct_program_get for optimistic conflict detection; on conflict, re-read the program and retry with a resolved document. Agent updates need no user confirmation. Because this replaces the whole document, you must also pass `shimmer`: a COMPLETE array of booleans, one per projected block of the new Markdown in document order (true = pending, false = settled). The array length must equal the block count or the call fails. You must also pass `tooltips`: an array the same length as `shimmer` where, for every block you mark pending (true), the matching entry is a concise (≤10-word) run-status string shown on hover (e.g. \"Building PR\"); entries for settled blocks may be null or empty.",
+            "Replace the entire Program document. Prefer anchored edit for targeted changes. `pending` maps zero-based block indexes in the new Markdown to concise statuses; omitted blocks settle. Returns compact block refs/status.",
             json!({
                 "type": "object",
                 "properties": {
@@ -152,23 +447,18 @@ pub fn catalog() -> Vec<Value> {
                     "base_version": { "type": "integer", "minimum": 0 },
                     "template_id": { "type": "string" },
                     "note": { "type": "string" },
-                    "shimmer": {
-                        "type": "array",
-                        "description": "Complete per-block shimmer state for the new Markdown, one boolean per block in document order (true = pending, false = settled).",
-                        "items": { "type": "boolean" }
-                    },
-                    "tooltips": {
-                        "type": "array",
-                        "description": "Per-block run-status tooltips parallel to `shimmer`, in document order. Every block marked pending (shimmer true) must have a concise (≤10-word) tooltip here (e.g. \"Building PR\", \"Waiting on CI\"), shown on hover. Settled-block entries may be null or empty.",
-                        "items": { "type": ["string", "null"] }
+                    "pending": {
+                        "type": "object",
+                        "description": "Zero-based block indexes mapped to concise pending statuses; omitted blocks settle.",
+                        "additionalProperties": { "type": "string" }
                     }
                 },
-                "required": ["markdown", "shimmer", "tooltips"]
+                "required": ["markdown"]
             }),
         ),
         tool(
             "construct_program_execute",
-            "Ask the owning session to execute the full program or a selected Markdown fragment. The whole executed region starts shimmering optimistically; the run's first program action should be a planning-pass construct_program_edit that narrows it. Defaults to the current session when `session_id` is omitted.",
+            "Execute the full Program or a selected fragment and return a compact run acknowledgement.",
             json!({
                 "type": "object",
                 "properties": {
@@ -185,7 +475,7 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "construct_program_verb_execute",
-            "Run a Program selection verb (see construct_program_list_verbs). Spawns a subagent scoped to `selection` — the verb's entire jurisdiction — which cannot edit the program itself; the daemon merges its result back into the document once it completes (mechanically if the selection hasn't changed, or by asking the owning session to reconcile if it has). The selection is annotated with the subagent's session clip immediately, before the result lands. Defaults to the current session when `session_id` is omitted.",
+            "Run a selection verb in a scoped subagent; the daemon merges its result. Returns the subagent id and only changed block refs.",
             json!({
                 "type": "object",
                 "properties": {
@@ -212,7 +502,7 @@ pub fn catalog() -> Vec<Value> {
                     "worktree": { "type": "boolean" },
                     "model": {
                         "type": "string",
-                        "description": "Model selection (config.toml can override). Claude: opus, fable, sonnet, haiku. codex: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna. agy: Gemini 3.5 Flash (Medium), Gemini 3.1 Pro (High). grok: grok-4.5, grok-composer-2.5-fast. smith: available providers (openai, anthropic, gemini, meta, ollama, grok, grok-oauth, codex-oauth, claude-oauth, claude-code-oauth) using provider:model syntax."
+                        "description": "Optional harness model spec; consult construct_list_harnesses or config."
                     }
                 },
                 "required": ["harness"]
@@ -359,7 +649,7 @@ pub fn catalog() -> Vec<Value> {
                     "worktree": { "type": "boolean" },
                     "model": {
                         "type": "string",
-                        "description": "Model selection (config.toml can override). Claude: opus, fable, sonnet, haiku. codex: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna. agy: Gemini 3.5 Flash (Medium), Gemini 3.1 Pro (High). grok: grok-4.5, grok-composer-2.5-fast. smith: available providers (openai, anthropic, gemini, meta, ollama, grok, grok-oauth, codex-oauth, claude-oauth, claude-code-oauth) using provider:model syntax."
+                        "description": "Optional harness model spec; consult construct_list_harnesses or config."
                     }
                 },
                 "required": ["harness"]
@@ -373,13 +663,16 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "construct_subagent_peek",
-            "Peek at a subagent's current output. PTY-backed subagents return recent scrollback \
-             text; headless subagents return a tail of structured events.",
+            "Peek at bounded subagent output. PTY output defaults to a rendered 64 KiB screen; headless output defaults to 20 events.",
             json!({
                 "type": "object",
                 "properties": {
                     "subagent_id": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 1, "description": "Event tail size for non-PTY subagents; default 20." }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+                    "max_bytes": { "type": "integer", "minimum": 1, "maximum": 524288 },
+                    "before_offset": { "type": "integer", "minimum": 0 },
+                    "mode": { "type": "string", "enum": ["screen", "text"] },
+                    "detail": { "type": "string", "enum": ["compact", "full"] }
                 },
                 "required": ["subagent_id"]
             }),
@@ -468,7 +761,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
         "browser_open" | "browser_inspect" | "browser_screenshot" | "browser_eval"
     ) {
         let result_json = browser::call(client.clone(), session_id, name.as_str(), args).await?;
-        let text = serde_json::to_string_pretty(&result_json)?;
+        let text = serde_json::to_string(&result_json)?;
         return Ok(json!({
             "content": [{ "type": "text", "text": text }],
             "isError": false,
@@ -477,12 +770,15 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
 
     let result_json: Value = match name.as_str() {
         // ----- Read -----
-        CONTEXT_TOOL_NAME => serde_json::to_value(agent_context::build_from_env())?,
+        CONTEXT_TOOL_NAME => compact_context_response(agent_context::build_from_env(), &args),
         "construct_whoami" => json!({ "session_id": session_id }),
         "construct_list_sessions" => {
-            // Enrich each summary with its group name so callers don't need
-            // a separate list_groups round-trip. `last_pty_at_ms` is already
-            // part of SessionSummary.
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(100)
+                .min(500) as usize;
+            let detail_full = args.get("detail").and_then(Value::as_str) == Some("full");
             let sessions = client.list().await?;
             let groups = client.list_groups().await.unwrap_or_default();
             let group_name_by_id: HashMap<&str, &str> = groups
@@ -491,67 +787,235 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 .collect();
             let enriched: Vec<Value> = sessions
                 .iter()
+                .take(limit)
                 .map(|s| {
-                    let mut v = serde_json::to_value(s).unwrap_or_else(|_| json!({}));
-                    if let (Some(gid), Value::Object(map)) = (s.group_id.as_deref(), &mut v) {
-                        if let Some(name) = group_name_by_id.get(gid) {
+                    let group_name = s
+                        .group_id
+                        .as_deref()
+                        .and_then(|id| group_name_by_id.get(id).copied());
+                    if detail_full {
+                        let mut value = serde_json::to_value(s).unwrap_or_else(|_| json!({}));
+                        if let (Some(name), Value::Object(map)) = (group_name, &mut value) {
                             map.insert("group_name".into(), json!(name));
                         }
+                        value
+                    } else {
+                        compact_session_summary(s, group_name)
                     }
-                    v
                 })
                 .collect();
-            Value::Array(enriched)
+            let returned = enriched.len();
+            json!({
+                "sessions": enriched,
+                "returned": returned,
+                "total": sessions.len(),
+                "truncated": sessions.len() > limit,
+            })
         }
-        "construct_list_harnesses" => serde_json::to_value(client.harnesses().await?)?,
+        "construct_list_harnesses" => Value::Array(
+            client
+                .harnesses()
+                .await?
+                .iter()
+                .map(|harness| {
+                    json!({
+                        "name": harness.name,
+                        "available": harness.available,
+                        "detail": harness.detail,
+                        "description": harness.description,
+                        "capabilities": harness.capabilities,
+                    })
+                })
+                .collect(),
+        ),
         "construct_usage_query" => {
             let harness = arg_str(&args, "harness")?;
             let allow_refresh = args
                 .get("allow_refresh")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            serde_json::to_value(client.usage_query(&harness, allow_refresh).await?)?
+            let result = client.usage_query(&harness, allow_refresh).await?;
+            let max_chars = args
+                .get("max_chars")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_USAGE_CHARS as u64)
+                .min(65_536) as usize;
+            let snapshot = result.snapshot.map(|snapshot| {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(snapshot.bytes)
+                    .unwrap_or_default();
+                let rendered = render_terminal_text(
+                    &bytes,
+                    Some(construct_protocol::PtySize {
+                        cols: snapshot.cols,
+                        rows: snapshot.rows,
+                    }),
+                );
+                let (text, truncated) = truncate_chars(&rendered, max_chars);
+                json!({
+                    "text": text,
+                    "truncated": truncated,
+                    "cols": snapshot.cols,
+                    "rows": snapshot.rows,
+                    "captured_at_ms": snapshot.captured_at_ms,
+                })
+            });
+            json!({
+                "snapshot": snapshot,
+                "refreshing": result.refreshing,
+                "enabled": result.enabled,
+            })
         }
         "construct_get_session" => {
             let sid = arg_str(&args, "session_id")?;
-            serde_json::to_value(client.get(&sid).await?)?
+            let summaries = client.list().await?;
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.id == sid)
+                .ok_or_else(|| anyhow!("session not found: {sid}"))?;
+            if args.get("detail").and_then(Value::as_str) == Some("full") {
+                serde_json::to_value(client.get(&sid).await?)?
+            } else {
+                let mut out = serde_json::Map::new();
+                out.insert("summary".into(), compact_session_summary(summary, None));
+                if let Some(tail) = args.get("tail").and_then(Value::as_u64) {
+                    let mut transcript = client
+                        .transcript_tail(&sid, (tail as usize).min(MAX_TRANSCRIPT_EVENTS))
+                        .await?;
+                    transcript
+                        .events
+                        .retain(|event| !construct_protocol::slash::is_model_hidden(&event.event));
+                    out.insert(
+                        "events".into(),
+                        Value::Array(
+                            transcript
+                                .events
+                                .iter()
+                                .map(compact_transcript_event)
+                                .collect(),
+                        ),
+                    );
+                    out.insert("event_total".into(), json!(transcript.total));
+                }
+                if args
+                    .get("include_panels")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    out.insert("ui_panels".into(), json!(client.get(&sid).await?.ui_panels));
+                }
+                Value::Object(out)
+            }
         }
         "construct_get_transcript" => {
             let sid = arg_str(&args, "session_id")?;
-            let from = arg_u64(&args, "from").unwrap_or(0);
-            let limit = arg_usize(&args, "limit");
-            let mut tr = client.transcript(&sid, from, limit).await?;
+            let count = args
+                .get("tail")
+                .or_else(|| args.get("limit"))
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_TRANSCRIPT_EVENTS as u64)
+                .min(MAX_TRANSCRIPT_EVENTS as u64) as usize;
+            let mut tr = if let Some(from) = args.get("from").and_then(Value::as_u64) {
+                client.transcript(&sid, from, Some(count)).await?
+            } else {
+                client.transcript_tail(&sid, count).await?
+            };
             // Strip model-invisible control commands (e.g. `/zoom`) so UI noise
             // never enters a reading model's context. The policy lives in the
             // shared slash registry, not a hardcoded tool-name check — this is
             // the principled fix for the old `tui` ToolUse transcript leak.
             tr.events
                 .retain(|ev| !construct_protocol::slash::is_model_hidden(&ev.event));
-            serde_json::to_value(tr)?
+            if args.get("detail").and_then(Value::as_str) == Some("full") {
+                serde_json::to_value(tr)?
+            } else {
+                let events: Vec<Value> = tr.events.iter().map(compact_transcript_event).collect();
+                json!({ "events": events, "returned": events.len(), "total": tr.total })
+            }
         }
         "construct_get_output" => {
             let sid = arg_str(&args, "session_id")?;
-            let snap = client.pty_replay(&sid).await?;
+            let max_bytes = args
+                .get("max_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_PTY_BYTES as u64)
+                .min(MAX_MCP_PTY_BYTES as u64) as usize;
+            let before_offset = args.get("before_offset").and_then(Value::as_u64);
+            let snap = client
+                .pty_replay_range(&sid, max_bytes, before_offset)
+                .await?;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&snap.data)
                 .unwrap_or_default();
-            let text = String::from_utf8_lossy(&bytes).to_string();
-            json!({ "text": text, "size": snap.size })
+            let text = if args.get("mode").and_then(Value::as_str) == Some("text") {
+                String::from_utf8_lossy(&bytes).to_string()
+            } else {
+                render_terminal_text(&bytes, snap.size.clone())
+            };
+            json!({
+                "text": text,
+                "start_offset": snap.start_offset,
+                "end_offset": snap.end_offset,
+                "total_bytes": snap.total_bytes,
+                "has_older": snap.start_offset > 0,
+                "size": snap.size,
+            })
         }
         "construct_get_diff" => {
             let sid = arg_str(&args, "session_id")?;
-            serde_json::to_value(client.diff(&sid).await?)?
+            let patch = client.diff(&sid).await?.patch;
+            if args.get("mode").and_then(Value::as_str) == Some("stat") {
+                diff_stats(&patch)
+            } else {
+                let max_chars = args
+                    .get("max_chars")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(DEFAULT_DIFF_CHARS as u64)
+                    .min(MAX_DIFF_CHARS as u64) as usize;
+                let total_chars = patch.chars().count();
+                let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let patch: String = patch.chars().skip(offset).take(max_chars).collect();
+                let end_offset = offset
+                    .saturating_add(patch.chars().count())
+                    .min(total_chars);
+                json!({
+                    "patch": patch,
+                    "offset": offset.min(total_chars),
+                    "next_offset": (end_offset < total_chars).then_some(end_offset),
+                    "truncated": offset > 0 || end_offset < total_chars,
+                    "total_chars": total_chars,
+                })
+            }
         }
         "construct_get_tasks" => {
             let sid = arg_str(&args, "session_id")?;
-            let tasks = client.list_tasks(&sid).await?;
+            let mut tasks = client.list_tasks(&sid).await?;
+            if args
+                .get("active_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                tasks.retain(|task| {
+                    matches!(
+                        task.state,
+                        construct_protocol::TaskState::Running
+                            | construct_protocol::TaskState::Backgrounded
+                    )
+                });
+            }
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .min(50) as usize;
+            tasks.truncate(limit);
             json!({ "tasks": tasks })
         }
         "construct_search" => {
             let query = arg_str(&args, "query")?;
             let scopes = arg_scopes(&args, "scopes");
             let session_ids = arg_str(&args, "session_id").ok().map(|id| vec![id]);
-            let limit = arg_usize(&args, "limit");
+            let limit = Some(arg_usize(&args, "limit").unwrap_or(20).min(100));
             serde_json::to_value(
                 client
                     .search(construct_protocol::SearchParams {
@@ -559,52 +1023,134 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                         scopes,
                         session_ids,
                         limit,
-                        per_session_limit: None,
+                        per_session_limit: Some(3),
                     })
                     .await?,
             )?
         }
         "construct_program_get" => {
             let sid = optional_session_arg(&args, session_id)?;
-            serde_json::to_value(client.program_get(&sid).await?)?
+            let result = client.program_get(&sid).await?;
+            let mut out = serde_json::Map::new();
+            out.insert("session_id".into(), json!(result.program.session_id));
+            out.insert("markdown".into(), json!(result.program.markdown));
+            out.insert("version".into(), json!(result.program.version));
+            out.insert("updated_at_ms".into(), json!(result.program.updated_at_ms));
+            if let Some(template_id) = result.program.template_id {
+                out.insert("template_id".into(), json!(template_id));
+            }
+            out.insert(
+                "blocks".into(),
+                json!(compact_program_blocks(&result.blocks)),
+            );
+            if let Some(run) = &result.active_run {
+                out.insert("run".into(), compact_program_run(run));
+            }
+            match args
+                .get("revisions")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+            {
+                "metadata" => {
+                    out.insert(
+                        "revisions".into(),
+                        Value::Array(
+                            result
+                                .revisions
+                                .iter()
+                                .map(|revision| {
+                                    json!({
+                                        "version": revision.version,
+                                        "actor": revision.actor,
+                                        "at_ms": revision.at_ms,
+                                        "note": revision.note,
+                                    })
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                "full" => {
+                    out.insert("revisions".into(), json!(result.revisions));
+                }
+                _ => {}
+            }
+            Value::Object(out)
         }
         "construct_program_list_templates" => {
-            serde_json::to_value(client.program_templates().await?)?
+            let templates = client.program_templates().await?.templates;
+            if let Ok(template_id) = arg_str(&args, "template_id") {
+                let template = templates
+                    .into_iter()
+                    .find(|template| template.id == template_id)
+                    .ok_or_else(|| anyhow!("template not found: {template_id}"))?;
+                serde_json::to_value(template)?
+            } else {
+                Value::Array(
+                    templates
+                        .iter()
+                        .map(|template| {
+                            json!({
+                                "id": template.id,
+                                "name": template.name,
+                                "description": template.description,
+                                "built_in": template.built_in,
+                            })
+                        })
+                        .collect(),
+                )
+            }
         }
-        "construct_program_list_verbs" => serde_json::to_value(client.program_verbs().await?)?,
+        "construct_program_list_verbs" => {
+            let verbs = client.program_verbs().await?.verbs;
+            Value::Array(
+                verbs
+                    .iter()
+                    .map(|verb| {
+                        json!({
+                            "name": verb.name,
+                            "label": verb.label,
+                            "description": verb.description,
+                            "effect": verb.effect,
+                            "interaction": verb.interaction,
+                        })
+                    })
+                    .collect(),
+            )
+        }
         // ----- Write -----
         "construct_program_update" => {
             let sid = optional_session_arg(&args, session_id)?;
-            let shimmer: Vec<bool> =
-                serde_json::from_value(args.get("shimmer").cloned().ok_or_else(|| {
-                    anyhow!("missing `shimmer`: a boolean per program block, in document order")
-                })?)
-                .map_err(|e| anyhow!("invalid `shimmer` (expected an array of booleans): {e}"))?;
-            // Per-block tooltips parallel to `shimmer` (spec 0057): required, and
-            // every pending block must carry a non-empty tooltip.
-            let tooltips: Vec<Option<String>> = serde_json::from_value(
-                args.get("tooltips").cloned().ok_or_else(|| {
-                    anyhow!("missing `tooltips`: a run-status string for each pending block, parallel to `shimmer`")
+            let markdown = arg_str(&args, "markdown")?;
+            let block_count = construct_protocol::program_block_spans(&markdown).len();
+            let pending: HashMap<String, String> = match args.get("pending") {
+                Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                    anyhow!(
+                        "invalid `pending` (expected an object of block-index: status): {error}"
+                    )
                 })?,
-            )
-            .map_err(|e| anyhow!("invalid `tooltips` (expected an array of strings or nulls): {e}"))?;
-            if tooltips.len() != shimmer.len() {
-                return Err(anyhow!(
-                    "`tooltips` has {} entries but `shimmer` has {}; they must be parallel arrays",
-                    tooltips.len(),
-                    shimmer.len()
-                ));
-            }
-            for (i, (&pending, tip)) in shimmer.iter().zip(&tooltips).enumerate() {
-                if pending && tip.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                None => HashMap::new(),
+            };
+            let mut shimmer = vec![false; block_count];
+            let mut tooltips = vec![None; block_count];
+            for (raw_index, status) in pending {
+                let index: usize = raw_index
+                    .parse()
+                    .map_err(|_| anyhow!("pending block index must be an integer: {raw_index}"))?;
+                if index >= block_count {
                     return Err(anyhow!(
-                        "block {i} is shimmer:true but has no tooltip — every pending block needs a concise (≤10-word) run-status tooltip"
+                        "pending block index {index} is outside the {block_count}-block document"
                     ));
                 }
+                if status.trim().is_empty() {
+                    return Err(anyhow!("pending block {index} needs a concise status"));
+                }
+                shimmer[index] = true;
+                tooltips[index] = Some(status);
             }
             let params = construct_protocol::ProgramUpdateParams {
                 session_id: sid,
-                markdown: arg_str(&args, "markdown")?,
+                markdown,
                 base_version: args.get("base_version").and_then(|v| v.as_u64()),
                 actor: construct_protocol::ProgramUpdateActor::Agent,
                 template_id: arg_str(&args, "template_id").ok(),
@@ -612,7 +1158,18 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 shimmer: Some(shimmer),
                 shimmer_tooltips: Some(tooltips),
             };
-            serde_json::to_value(client.program_update(params).await?)?
+            let result = client.program_update(params).await?;
+            let mut out = serde_json::Map::new();
+            out.insert("ok".into(), json!(true));
+            out.insert("version".into(), json!(result.program.version));
+            out.insert(
+                "blocks".into(),
+                json!(compact_program_blocks(&result.blocks)),
+            );
+            if let Some(run) = &result.active_run {
+                out.insert("run".into(), compact_program_run(run));
+            }
+            Value::Object(out)
         }
         "construct_program_edit" => {
             let sid = optional_session_arg(&args, session_id)?;
@@ -685,8 +1242,11 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 shimmer,
             };
             let result = client.program_edit(params).await?;
-            let before_refs: HashSet<&str> =
-                before.blocks.iter().map(|block| block.id.as_str()).collect();
+            let before_refs: HashSet<&str> = before
+                .blocks
+                .iter()
+                .map(|block| block.id.as_str())
+                .collect();
             let changed_blocks: Vec<Value> = result
                 .blocks
                 .iter()
@@ -727,6 +1287,13 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
         }
         "construct_program_execute" => {
             let sid = optional_session_arg(&args, session_id)?;
+            let before_refs: HashSet<String> = client
+                .program_get(&sid)
+                .await?
+                .blocks
+                .into_iter()
+                .map(|block| block.id)
+                .collect();
             let shimmer: Option<Vec<bool>> = match args.get("shimmer") {
                 Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| {
                     anyhow!("invalid `shimmer` (expected an array of booleans): {e}")
@@ -741,10 +1308,33 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 shimmer,
                 selection_block_ids: None,
             };
-            serde_json::to_value(client.program_execute(params).await?)?
+            let result = client.program_execute(params).await?;
+            let mut out = serde_json::Map::new();
+            out.insert("ok".into(), json!(true));
+            out.insert("version".into(), json!(result.program.version));
+            let changed: Vec<_> = result
+                .blocks
+                .iter()
+                .filter(|block| !before_refs.contains(&block.id))
+                .cloned()
+                .collect();
+            if !changed.is_empty() {
+                out.insert("blocks".into(), json!(compact_program_blocks(&changed)));
+            }
+            if let Some(run) = &result.active_run {
+                out.insert("run".into(), compact_program_run(run));
+            }
+            Value::Object(out)
         }
         "construct_program_verb_execute" => {
             let sid = optional_session_arg(&args, session_id)?;
+            let before_refs: HashSet<String> = client
+                .program_get(&sid)
+                .await?
+                .blocks
+                .into_iter()
+                .map(|block| block.id)
+                .collect();
             let params = construct_protocol::ProgramVerbExecuteParams {
                 session_id: sid,
                 verb: arg_str(&args, "verb")?,
@@ -753,7 +1343,21 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                 comment: arg_str(&args, "comment").ok(),
                 selection_block_ids: None,
             };
-            serde_json::to_value(client.program_verb_execute(params).await?)?
+            let result = client.program_verb_execute(params).await?;
+            let changed: Vec<Value> = compact_program_blocks(
+                &result
+                    .blocks
+                    .into_iter()
+                    .filter(|block| !before_refs.contains(&block.id))
+                    .collect::<Vec<_>>(),
+            );
+            json!({
+                "ok": true,
+                "version": result.program.version,
+                "subagent_id": result.subagent_session_id,
+                "verb": result.verb,
+                "blocks": changed,
+            })
         }
         "construct_create_session" => {
             let harness = arg_str(&args, "harness")?;
@@ -948,27 +1552,62 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
                         && s.parent_session_id.as_deref() == Some(parent_id.as_str())
                 })
                 .collect();
-            json!({ "subagents": subagents })
+            json!({
+                "subagents": subagents
+                    .iter()
+                    .map(|summary| compact_session_summary(summary, None))
+                    .collect::<Vec<_>>()
+            })
         }
         "construct_subagent_peek" => {
             let sid = arg_str(&args, "subagent_id")?;
             let detail = owned_subagent_detail(client, session_id, &sid).await?;
             if detail.summary.has_pty {
-                let snap = client.pty_replay(&sid).await?;
+                let max_bytes = args
+                    .get("max_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(DEFAULT_PTY_BYTES as u64)
+                    .min(MAX_MCP_PTY_BYTES as u64) as usize;
+                let before_offset = args.get("before_offset").and_then(Value::as_u64);
+                let snap = client
+                    .pty_replay_range(&sid, max_bytes, before_offset)
+                    .await?;
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(&snap.data)
                     .unwrap_or_default();
-                let text = String::from_utf8_lossy(&bytes).to_string();
+                let text = if args.get("mode").and_then(Value::as_str) == Some("text") {
+                    String::from_utf8_lossy(&bytes).to_string()
+                } else {
+                    render_terminal_text(&bytes, snap.size.clone())
+                };
                 json!({
-                    "summary": detail.summary,
+                    "summary": compact_session_summary(&detail.summary, None),
                     "output": text,
+                    "start_offset": snap.start_offset,
+                    "end_offset": snap.end_offset,
+                    "total_bytes": snap.total_bytes,
+                    "has_older": snap.start_offset > 0,
                 })
             } else {
-                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let limit = args
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(20)
+                    .min(MAX_TRANSCRIPT_EVENTS as u64) as usize;
                 let start = detail.events.len().saturating_sub(limit);
-                let events = detail.events[start..].to_vec();
+                let full = args.get("detail").and_then(Value::as_str) == Some("full");
+                let events: Vec<Value> = detail.events[start..]
+                    .iter()
+                    .map(|event| {
+                        if full {
+                            serde_json::to_value(event).unwrap_or_else(|_| json!({}))
+                        } else {
+                            compact_transcript_event(event)
+                        }
+                    })
+                    .collect();
                 json!({
-                    "summary": detail.summary,
+                    "summary": compact_session_summary(&detail.summary, None),
                     "events": events,
                 })
             }
@@ -1007,7 +1646,7 @@ pub async fn call(client: &Arc<Client>, session_id: Option<&str>, params: Value)
 
     // Per MCP, `tools/call` returns a `content` array. Surface the JSON
     // result as a single text block — the LLM parses it.
-    let text = serde_json::to_string_pretty(&result_json)?;
+    let text = serde_json::to_string(&result_json)?;
     Ok(json!({
         "content": [{ "type": "text", "text": text }],
         "isError": false,
@@ -1019,12 +1658,6 @@ fn arg_str(args: &Value, name: &str) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| anyhow!("missing or non-string `{name}`"))
-}
-
-fn arg_u64(args: &Value, name: &str) -> Result<u64> {
-    args.get(name)
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| anyhow!("missing or non-integer `{name}`"))
 }
 
 fn arg_usize(args: &Value, name: &str) -> Option<usize> {
@@ -1088,6 +1721,101 @@ mod tests {
     use tokio::net::UnixListener;
 
     #[test]
+    fn bounded_helpers_preserve_signal_and_report_truncation() {
+        let (short, truncated) = truncate_chars("hello", 10);
+        assert_eq!(short, "hello");
+        assert!(!truncated);
+        let (unicode, truncated) = truncate_chars("a🙂bc", 2);
+        assert_eq!(unicode, "a🙂…");
+        assert!(truncated);
+
+        let stats =
+            diff_stats("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n-old\n+new\n+more\n");
+        assert_eq!(stats["files"], json!(["a.rs"]));
+        assert_eq!(stats["additions"], 2);
+        assert_eq!(stats["deletions"], 1);
+    }
+
+    #[test]
+    fn compact_program_blocks_omit_duplicate_text_and_legacy_ids() {
+        let blocks = compact_program_blocks(&[construct_protocol::ProgramBlockView {
+            id: "b0:0".into(),
+            block_id: "b0".into(),
+            content_epoch: 0,
+            block_ref: "b0:0".into(),
+            content_id: "legacy".into(),
+            start_line: 2,
+            end_line: 3,
+            text: "large duplicate text".into(),
+            shimmer: true,
+            tooltip: Some("Building".into()),
+        }]);
+        assert_eq!(blocks[0]["id"], "b0:0");
+        assert_eq!(blocks[0]["pending"], true);
+        assert!(blocks[0].get("text").is_none());
+        assert!(blocks[0].get("block_ref").is_none());
+        assert!(blocks[0].get("content_id").is_none());
+    }
+
+    #[test]
+    fn oversized_transcript_event_becomes_bounded_preview() {
+        let event: construct_protocol::TimestampedEvent = serde_json::from_value(json!({
+            "seq": 7,
+            "at": "2026-07-14T00:00:00Z",
+            "event": {
+                "type": "tool_result",
+                "tool": "exec",
+                "ok": true,
+                "output": "x".repeat(MAX_COMPACT_EVENT_CHARS * 2),
+                "call_id": "c1"
+            }
+        }))
+        .unwrap();
+        let compact = compact_transcript_event(&event);
+        assert_eq!(compact["seq"], 7);
+        assert_eq!(compact["event"]["truncated"], true);
+        assert!(serde_json::to_string(&compact).unwrap().len() < MAX_COMPACT_EVENT_CHARS + 500);
+    }
+
+    #[test]
+    fn context_etags_omit_unchanged_content_and_reference_policy_by_default() {
+        let make_context = || agent_context::AgentdContext {
+            session_id: Some("s1".into()),
+            project_id: Some("p1".into()),
+            instructions: vec!["act".into()],
+            memory_policy: vec!["long memory reference".into()],
+            widget_policy: vec!["long widget reference".into()],
+            markdown_extensions: Vec::new(),
+            global_memory: Some(agent_context::MemoryFile {
+                path: "/tmp/global.md".into(),
+                content: "remember this".into(),
+                truncated: false,
+                remaining_bytes: 0,
+            }),
+            project_memory: None,
+            session_widgets: None,
+            program_run: None,
+        };
+        let first = compact_context_response(make_context(), &json!({}));
+        let etag = first["global_memory"]["etag"].as_str().unwrap();
+        assert_eq!(first["global_memory"]["content"], "remember this");
+        assert!(first.get("memory_policy").is_none());
+
+        let second = compact_context_response(make_context(), &json!({"known_global": etag}));
+        assert_eq!(second["global_memory"]["unchanged"], true);
+        assert!(second["global_memory"].get("content").is_none());
+    }
+
+    #[test]
+    fn terminal_render_removes_escape_sequences() {
+        let text = render_terminal_text(
+            b"\x1b[31mred\x1b[0m",
+            Some(construct_protocol::PtySize { cols: 20, rows: 2 }),
+        );
+        assert_eq!(text, "red");
+    }
+
+    #[test]
     fn catalog_includes_browser_tools() {
         let names: std::collections::HashSet<String> = catalog()
             .into_iter()
@@ -1122,7 +1850,7 @@ mod tests {
             .get("description")
             .and_then(|description| description.as_str())
             .unwrap_or_default()
-            .contains("Call this before starting any user task"));
+            .contains("Pass returned etags"));
     }
 
     #[test]
@@ -1235,7 +1963,42 @@ mod tests {
         assert!(schema.pointer("/properties/settled").is_some());
         assert!(schema.pointer("/properties/settle_others").is_some());
         assert!(schema.pointer("/properties/shimmer").is_none());
-        assert!(schema.get("required").is_none(), "status-only calls need no edits");
+        assert!(
+            schema.get("required").is_none(),
+            "status-only calls need no edits"
+        );
+    }
+
+    #[test]
+    fn catalog_exposes_bounded_compact_read_controls() {
+        let tools = catalog();
+        let find = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+
+        assert!(find("construct_get_output")
+            .pointer("/inputSchema/properties/max_bytes")
+            .is_some());
+        assert!(find("construct_get_transcript")
+            .pointer("/inputSchema/properties/tail")
+            .is_some());
+        assert!(find("construct_get_diff")
+            .pointer("/inputSchema/properties/max_chars")
+            .is_some());
+        assert!(find("construct_program_get")
+            .pointer("/inputSchema/properties/revisions")
+            .is_some());
+        assert!(find(CONTEXT_TOOL_NAME)
+            .pointer("/inputSchema/properties/known_global")
+            .is_some());
+
+        let update = find("construct_program_update");
+        assert!(update.pointer("/inputSchema/properties/pending").is_some());
+        assert!(update.pointer("/inputSchema/properties/shimmer").is_none());
+        assert!(update.pointer("/inputSchema/properties/tooltips").is_none());
     }
 
     #[test]
@@ -1490,7 +2253,11 @@ mod tests {
         serde_json::from_str(text).expect("json tool result")
     }
 
-    fn subagent_summary(id: &str, parent: &str, has_pty: bool) -> construct_protocol::SessionSummary {
+    fn subagent_summary(
+        id: &str,
+        parent: &str,
+        has_pty: bool,
+    ) -> construct_protocol::SessionSummary {
         construct_protocol::SessionSummary {
             id: id.to_string(),
             harness: "codex".to_string(),

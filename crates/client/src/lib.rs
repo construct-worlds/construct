@@ -644,12 +644,22 @@ impl Client {
     /// Fetch up to `max_bytes` of the most recent PTY-log tail — bounded, for
     /// rendering a compact screen preview without pulling the full replay cap.
     pub async fn pty_replay_tail(&self, id: &str, max_bytes: usize) -> Result<PtyReplayResult> {
+        self.pty_replay_range(id, max_bytes, None).await
+    }
+    /// Fetch a bounded PTY-log range ending before `before_offset` (or at the
+    /// current tail when omitted). Returns absolute offsets for backward paging.
+    pub async fn pty_replay_range(
+        &self,
+        id: &str,
+        max_bytes: usize,
+        before_offset: Option<u64>,
+    ) -> Result<PtyReplayResult> {
         self.request(
             ipc_method::SESSION_PTY_REPLAY,
             &construct_protocol::PtyReplayParams {
                 session_id: id.to_string(),
                 max_bytes: Some(max_bytes),
-                before_offset: None,
+                before_offset,
             },
         )
         .await

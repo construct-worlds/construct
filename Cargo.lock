@@ -633,6 +633,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "vt100",
 ]
 
 [[package]]
