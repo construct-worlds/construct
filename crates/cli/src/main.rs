@@ -133,10 +133,18 @@ enum Command {
     /// `construct`.
     Ssh {
         /// Remote command to run instead of `construct` (still receives
-        /// CONSTRUCT_CLIPBOARD_SOCK via `env`).
+        /// CONSTRUCT_CLIPBOARD_SOCK via `env`) — e.g. an absolute path when
+        /// construct isn't on the remote login PATH. Env fallback:
+        /// CONSTRUCT_SSH_REMOTE_CMD.
         #[arg(long)]
         remote_cmd: Option<String>,
-        /// Arguments passed to `ssh` verbatim (flags + destination).
+        /// Transport command to use instead of `ssh` (e.g. "tsh ssh",
+        /// "et"). Split on whitespace; must accept OpenSSH-style -o/-R/-t
+        /// flags for the socket forward. Env fallback: CONSTRUCT_SSH_CMD.
+        #[arg(long)]
+        ssh_cmd: Option<String>,
+        /// Arguments passed to the transport command verbatim
+        /// (flags + destination).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         args: Vec<OsString>,
     },
@@ -662,8 +670,12 @@ async fn main() -> Result<()> {
             restart,
             check,
         } => upgrade::run(version, bin_dir, restart, check, &socket).await,
-        Command::Ssh { remote_cmd, args } => {
-            let code = clipboard_bridge::run_ssh(args, remote_cmd).await?;
+        Command::Ssh {
+            remote_cmd,
+            ssh_cmd,
+            args,
+        } => {
+            let code = clipboard_bridge::run_ssh(args, remote_cmd, ssh_cmd).await?;
             std::process::exit(code);
         }
         Command::Acp {
