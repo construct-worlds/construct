@@ -8011,6 +8011,14 @@ impl App {
             && self.dragging_lineage_scrollbar.is_none()
             && self.text_selection.is_none()
             && !card_owns_event
+            // A modal (remote-control dialog, program editor, help, tasks)
+            // paints on top and owns every mouse event over it — forwarding to
+            // the session PTY underneath would let a mouse-grabbing child (e.g.
+            // a full-screen harness) swallow clicks meant for the dialog's
+            // buttons, or a click meant to dismiss the modal. `handle_left_click`
+            // already routes in-modal clicks to the modal and out-of-modal
+            // clicks to dismissal.
+            && self.layout.modal_area.is_none()
             && self.forward_mouse_to_child(&ev)
         {
             return;
@@ -28716,6 +28724,94 @@ mod tests {
             app.layout.remote_control_hits.is_empty(),
             "closing the dialog clears its click zones"
         );
+
+        server.abort();
+    }
+
+    /// The dialog is reached from the orchestrator, so it overlays the main
+    /// view — often a session running a full-screen, mouse-grabbing harness.
+    /// A click on a dialog control must reach the dialog, not be forwarded down
+    /// that child's PTY. Regression test for the modal guard on
+    /// `forward_mouse_to_child`.
+    #[tokio::test]
+    async fn dialog_click_is_not_forwarded_to_a_mouse_grabbing_pane_underneath() {
+        use construct_protocol::{RemoteProviderInfo, TunnelProvider};
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = empty_app().await;
+
+        // A selected session whose pane fills the screen and whose child has
+        // turned on mouse tracking (`?1000h`) — exactly what would swallow the
+        // click without the guard.
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        app.sync_active_window_selection();
+        let mut history = crate::pty_render::ItemHistory::new();
+        history.feed_pty(b"\x1b[?1000h");
+        let _ = history.replay(120, 40, 0);
+        assert_ne!(
+            history.mouse_protocol_mode(),
+            vt100::MouseProtocolMode::None,
+            "test premise: the child grabs the mouse"
+        );
+        app.histories.insert("s1".into(), history);
+
+        app.remote_control_popup = Some(RemoteControlPopup::Choose(RemoteControlChoose {
+            base: remote_ok_fixture(false),
+            options: vec![
+                RemoteProviderInfo {
+                    provider: TunnelProvider::Cloudflare,
+                    available: true,
+                    detail: None,
+                },
+                RemoteProviderInfo {
+                    provider: TunnelProvider::Construct,
+                    available: true,
+                    detail: None,
+                },
+            ],
+            selected: 0,
+            active: None,
+        }));
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw dialog");
+
+        // Force the pane geometry to blanket the screen and map to the live
+        // session, so the click coordinate unambiguously sits over the
+        // mouse-grabbing child (the render's own panes may be narrower).
+        app.layout.main_window_areas = vec![WindowPaneHit {
+            id: app.active_window_id,
+            area: Rect::new(0, 0, 120, 40),
+            inner_area: Rect::new(0, 0, 120, 40),
+        }];
+
+        let p1 = app
+            .layout
+            .remote_control_hits
+            .iter()
+            .find(|h| matches!(h.action, RemoteControlHitAction::SelectProvider(1)))
+            .cloned()
+            .expect("provider 1 zone");
+
+        let ev = |kind| MouseEvent {
+            kind,
+            column: p1.x_start,
+            row: p1.y,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.on_mouse(ev(MouseEventKind::Down(MouseButton::Left))).await;
+        app.on_mouse(ev(MouseEventKind::Up(MouseButton::Left))).await;
+
+        match &app.remote_control_popup {
+            Some(RemoteControlPopup::Choose(c)) => assert_eq!(
+                c.selected, 1,
+                "click over a mouse-grabbing pane must still reach the dialog"
+            ),
+            other => panic!("dialog should stay on the chooser, got {other:?}"),
+        }
 
         server.abort();
     }
