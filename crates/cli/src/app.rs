@@ -919,6 +919,10 @@ pub enum MinibufferIntent {
     ConfirmLocalFileUpload {
         session_id: String,
         path: String,
+        /// True when the drop landed on the program editor: the uploaded
+        /// attachment inserts a Markdown link into the program (spec 0099)
+        /// instead of pasting into the session PTY.
+        to_program: bool,
     },
     Rename {
         session_id: String,
@@ -1017,6 +1021,23 @@ pub struct ProgramClipHit {
 }
 
 impl ProgramClipHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.col_start && col < self.col_end
+    }
+}
+
+/// One on-screen segment of a program attachment chip (spec 0099).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramAttachmentHit {
+    pub col_start: u16,
+    pub col_end: u16,
+    pub row: u16,
+    pub name: String,
+    pub path: String,
+    pub is_image: bool,
+}
+
+impl ProgramAttachmentHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         row == self.row && col >= self.col_start && col < self.col_end
     }
@@ -3284,6 +3305,10 @@ pub struct LayoutSnapshot {
     /// Session smart-clip hitboxes in the active program body from the last
     /// frame. Drives hover-preview and click-to-focus on `@{session:id}` chips.
     pub program_clip_hits: Vec<ProgramClipHit>,
+    /// Attachment-chip hitboxes (`![name](path)` / `[name](path)` rendered as
+    /// `[Image: …]` / `[File: …]`, spec 0099) from the last frame. Drives the
+    /// hover info card.
+    pub program_attachment_hits: Vec<ProgramAttachmentHit>,
     /// Bounds of the pinned clip card (spec 0090) from the last frame, when
     /// one was painted. Clicks inside it are consumed by the card; a left
     /// click landing neither here nor on a session clip dismisses the pin.
@@ -4866,6 +4891,36 @@ impl App {
             && self.minibuffer.is_none()
             && self.focus == PaneFocus::View
         {
+            // A file dropped onto the program editor over an ssh bridge:
+            // the pasted local path is unreadable here — offer the upload
+            // (spec 0098) and insert an attachment link (spec 0099) on
+            // confirm, instead of pasting a dead path into the doc.
+            if crate::clipboard_bridge::socket_from_env().is_some() {
+                if let Some(path) = crate::clipboard_bridge::droppable_local_path(&text) {
+                    if let Some(session_id) = self
+                        .program_popup
+                        .as_ref()
+                        .map(|p| p.program.session_id.clone())
+                    {
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.clone());
+                        self.minibuffer = Some(Minibuffer {
+                            prompt: format!("Upload local file {name} to the program? [y/n] "),
+                            input: String::new(),
+                            cursor: 0,
+                            intent: MinibufferIntent::ConfirmLocalFileUpload {
+                                session_id,
+                                path,
+                                to_program: true,
+                            },
+                            error: None,
+                        });
+                        return;
+                    }
+                }
+            }
             self.insert_program_text(&text);
             // Pasted text can extend (or tear down) the live `@<typeahead>`
             // token backing the `@`→session picker's effective query; keep
@@ -4901,7 +4956,11 @@ impl App {
                         ),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::ConfirmLocalFileUpload { session_id, path },
+                        intent: MinibufferIntent::ConfirmLocalFileUpload {
+                            session_id,
+                            path,
+                            to_program: false,
+                        },
                         error: None,
                     });
                     return;
@@ -5049,6 +5108,18 @@ impl App {
             self.on_paste(text).await;
             return;
         }
+        // With the program editor focused, a binary paste becomes a program
+        // attachment link (spec 0099) rather than a PTY paste.
+        if self
+            .program_popup
+            .as_ref()
+            .is_some_and(|popup| !popup.terminal_focus)
+            && self.minibuffer.is_none()
+            && self.focus == PaneFocus::View
+        {
+            self.attach_item_to_program(item).await;
+            return;
+        }
         // Prefer the same target the oversized-text paste flow would use
         // (minibuffer intent / captured PTY); from the list, fall back to the
         // selected session.
@@ -5059,6 +5130,56 @@ impl App {
         };
         self.attach_item_and_paste(session_id, item, context_target.is_some())
             .await;
+    }
+
+    /// Attach `item` to the program's session and insert a Markdown link to
+    /// it at the program cursor (spec 0099): `![name](path)` for images,
+    /// `[name](path)` otherwise, with the path `<…>`-wrapped when it
+    /// contains spaces so standard Markdown parsers keep accepting it.
+    async fn attach_item_to_program(&mut self, item: crate::clipboard_bridge::PasteItem) {
+        use base64::Engine as _;
+        let Some(session_id) = self
+            .program_popup
+            .as_ref()
+            .map(|p| p.program.session_id.clone())
+        else {
+            self.set_status("program closed; nothing attached".to_string());
+            return;
+        };
+        let filename = item
+            .filename
+            .clone()
+            .unwrap_or_else(|| item.default_filename());
+        let data = base64::engine::general_purpose::STANDARD.encode(&item.bytes);
+        match self
+            .client
+            .attach_clipboard(
+                &session_id,
+                data,
+                Some(filename.clone()),
+                Some(item.mime.clone()),
+            )
+            .await
+        {
+            Ok(result) => {
+                let target = if result.path.contains(' ') {
+                    format!("<{}>", result.path)
+                } else {
+                    result.path
+                };
+                let link = if item.mime.starts_with("image/") {
+                    format!("![{filename}]({target})")
+                } else {
+                    format!("[{filename}]({target})")
+                };
+                self.insert_program_text(&link);
+                self.set_status(format!(
+                    "attached {filename} ({} KiB) to the program",
+                    item.bytes.len().div_ceil(1024),
+                ));
+            }
+            Err(e) => self.set_status(format!("program attachment failed: {e}")),
+        }
     }
 
     /// Attach `item` to `session_id` (daemon writes it under the session's
@@ -5115,8 +5236,15 @@ impl App {
     /// Confirmed drag-drop upload (spec 0098): fetch the dropped file's
     /// bytes from the local machine through the clipboard bridge and attach
     /// them to the session. Runs only after the user approved the exact
-    /// path in the confirmation prompt.
-    pub(super) async fn upload_local_file(&mut self, session_id: String, path: String) {
+    /// path in the confirmation prompt. With `to_program`, the attachment
+    /// inserts a Markdown link into the program (spec 0099) instead of
+    /// pasting into the PTY.
+    pub(super) async fn upload_local_file(
+        &mut self,
+        session_id: String,
+        path: String,
+        to_program: bool,
+    ) {
         let Some(sock) = crate::clipboard_bridge::socket_from_env() else {
             self.set_status("clipboard bridge is gone; upload cancelled".to_string());
             return;
@@ -5137,6 +5265,14 @@ impl App {
                 return;
             }
         };
+        if to_program {
+            // Falls back to a plain session attachment inside when the
+            // program closed while the confirm prompt was up.
+            if self.program_popup.is_some() {
+                self.attach_item_to_program(item).await;
+                return;
+            }
+        }
         // Deliver straight to the session PTY: the confirm prompt replaced
         // whatever minibuffer context the drop landed in.
         self.attach_item_and_paste(session_id, item, false).await;
@@ -12666,6 +12802,7 @@ mod tests {
             program_resize_hit: None,
             program_smart_clip_anchor: None,
             program_clip_hits: Vec::new(),
+            program_attachment_hits: Vec::new(),
             program_pinned_card_rect: None,
             program_action_link_hits: Vec::new(),
             program_template_hits: Vec::new(),
