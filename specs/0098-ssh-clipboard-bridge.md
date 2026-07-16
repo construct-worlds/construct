@@ -16,6 +16,14 @@ construct provides a first-party clipboard bridge for SSH use:
   environment variable pointing at the forwarded socket. All user-supplied
   arguments are passed to `ssh` verbatim so existing SSH configuration
   (ports, jump hosts, aliases) keeps working.
+- Both ends of the invocation are user-overridable, by flag or persistent
+  environment variable: the transport command replacing `ssh` (for
+  OpenSSH-compatible wrappers like Teleport's `tsh ssh` or Eternal
+  Terminal), and the remote command replacing `construct` (for hosts where
+  the binary isn't on the login PATH). Overrides don't change the bridge
+  contract: the transport must accept OpenSSH-style option/forward/tty
+  flags, and the remote command still receives the socket environment
+  variable.
 - The remote TUI, when that environment variable is present, prefers the
   bridge for clipboard traffic: selection copies are sent to the bridge
   (landing on the local machine's clipboard), and clipboard reads consult

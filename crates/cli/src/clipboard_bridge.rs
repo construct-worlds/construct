@@ -488,6 +488,20 @@ fn parse_osascript_data(s: &str) -> Option<Vec<u8>> {
 // `construct ssh`: agent + tunnel + remote TUI in one command.
 // ---------------------------------------------------------------------------
 
+/// `--ssh-cmd` env fallback: the transport command replacing `ssh`
+/// (e.g. `tsh ssh`, `et`). Must accept OpenSSH-style `-o`/`-R`/`-t` flags.
+pub(crate) const ENV_SSH_CMD: &str = "CONSTRUCT_SSH_CMD";
+/// `--remote-cmd` env fallback: what to run on the remote host instead of
+/// `construct` (e.g. an absolute path when it isn't on the login PATH).
+pub(crate) const ENV_REMOTE_CMD: &str = "CONSTRUCT_SSH_REMOTE_CMD";
+
+/// Flag beats env; blank values (empty flag or exported-but-empty env) are
+/// treated as unset so `CONSTRUCT_SSH_CMD= construct ssh …` gets the default.
+fn resolve_override(flag: Option<String>, env_name: &str) -> Option<String> {
+    flag.or_else(|| std::env::var(env_name).ok())
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// Run `ssh` with a clipboard bridge attached. Blocks until ssh exits and
 /// returns its exit code; the agent and both socket files die with us
 /// (tempdir cleanup) — the remote socket file may linger in the remote /tmp,
@@ -495,6 +509,7 @@ fn parse_osascript_data(s: &str) -> Option<Vec<u8>> {
 pub(crate) async fn run_ssh(
     ssh_args: Vec<OsString>,
     remote_cmd: Option<String>,
+    ssh_cmd: Option<String>,
 ) -> Result<i32> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -514,13 +529,32 @@ pub(crate) async fn run_ssh(
     let remote_sock = format!("/tmp/construct-clip-{}.sock", socket_nonce());
     tokio::spawn(serve(listener, Arc::new(SystemClipboard)));
 
-    let argv = build_ssh_argv(&ssh_args, &local_sock, &remote_sock, remote_cmd.as_deref());
-    let status = tokio::process::Command::new("ssh")
+    let ssh_cmd = resolve_override(ssh_cmd, ENV_SSH_CMD);
+    let remote_cmd = resolve_override(remote_cmd, ENV_REMOTE_CMD);
+    let (program, prefix_args) = split_ssh_cmd(ssh_cmd.as_deref());
+    let argv = build_ssh_argv(
+        &prefix_args,
+        &ssh_args,
+        &local_sock,
+        &remote_sock,
+        remote_cmd.as_deref(),
+    );
+    let status = tokio::process::Command::new(&program)
         .args(&argv)
         .status()
         .await
-        .context("spawn ssh (is OpenSSH installed?)")?;
+        .with_context(|| format!("spawn {program} (transport command not found?)"))?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Split the transport command into program + leading args. Whitespace
+/// split only — enough for `tsh ssh` / `gcloud compute ssh`; arguments that
+/// themselves contain spaces aren't supported here (pass them via `ssh_args`
+/// instead).
+fn split_ssh_cmd(cmd: Option<&str>) -> (String, Vec<OsString>) {
+    let mut parts = cmd.unwrap_or("ssh").split_whitespace();
+    let program = parts.next().unwrap_or("ssh").to_string();
+    (program, parts.map(Into::into).collect())
 }
 
 /// Unique-enough suffix for the remote socket path so concurrent bridges to
@@ -534,17 +568,20 @@ fn socket_nonce() -> String {
     format!("{:x}", nanos ^ ((std::process::id() as u64) << 32))
 }
 
-/// Assemble the ssh argv: our forward + tty flags first, the user's args
+/// Assemble the ssh argv: the transport command's own args first (e.g. the
+/// `ssh` in `tsh ssh`), then our forward + tty flags, the user's args
 /// verbatim, then the remote command as the final argument. `env` (not a
 /// `VAR=x` prefix) carries the socket path so it works under any remote
 /// login shell, csh included.
 fn build_ssh_argv(
+    prefix_args: &[OsString],
     user_args: &[OsString],
     local_sock: &Path,
     remote_sock: &str,
     remote_cmd: Option<&str>,
 ) -> Vec<OsString> {
-    let mut argv: Vec<OsString> = vec![
+    let mut argv: Vec<OsString> = prefix_args.to_vec();
+    argv.extend::<Vec<OsString>>(vec![
         // Replace a stale leftover socket from a crashed prior bridge
         // instead of failing the forward.
         "-o".into(),
@@ -553,7 +590,7 @@ fn build_ssh_argv(
         format!("{}:{}", remote_sock, local_sock.display()).into(),
         // Passing a remote command disables tty allocation; the TUI needs one.
         "-t".into(),
-    ];
+    ]);
     argv.extend(user_args.iter().cloned());
     let cmd = remote_cmd.unwrap_or("construct");
     argv.push(format!("env {ENV_SOCK}={remote_sock} {cmd}").into());
@@ -568,6 +605,7 @@ mod tests {
     #[test]
     fn ssh_argv_wraps_user_args_and_appends_remote_cmd() {
         let argv = build_ssh_argv(
+            &[],
             &["-p".into(), "2222".into(), "devbox".into()],
             Path::new("/tmp/x/clip.sock"),
             "/tmp/construct-clip-abc.sock",
@@ -596,6 +634,7 @@ mod tests {
     #[test]
     fn ssh_argv_honors_remote_cmd_override() {
         let argv = build_ssh_argv(
+            &[],
             &["devbox".into()],
             Path::new("/l.sock"),
             "/r.sock",
@@ -605,6 +644,52 @@ mod tests {
         assert_eq!(
             last,
             "env CONSTRUCT_CLIPBOARD_SOCK=/r.sock /opt/construct/bin/construct --socket /x"
+        );
+    }
+
+    #[test]
+    fn ssh_cmd_splits_into_program_and_prefix_args() {
+        let (program, prefix) = split_ssh_cmd(None);
+        assert_eq!(program, "ssh");
+        assert!(prefix.is_empty());
+
+        let (program, prefix) = split_ssh_cmd(Some("tsh ssh"));
+        assert_eq!(program, "tsh");
+        assert_eq!(prefix, vec![OsString::from("ssh")]);
+
+        let (program, prefix) = split_ssh_cmd(Some("gcloud compute ssh"));
+        assert_eq!(program, "gcloud");
+        assert_eq!(
+            prefix,
+            vec![OsString::from("compute"), OsString::from("ssh")]
+        );
+    }
+
+    #[test]
+    fn ssh_argv_puts_transport_prefix_args_first() {
+        let argv = build_ssh_argv(
+            &["ssh".into()],
+            &["devbox".into()],
+            Path::new("/l.sock"),
+            "/r.sock",
+            None,
+        );
+        let argv: Vec<String> = argv
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            vec![
+                "ssh",
+                "-o",
+                "StreamLocalBindUnlink=yes",
+                "-R",
+                "/r.sock:/l.sock",
+                "-t",
+                "devbox",
+                "env CONSTRUCT_CLIPBOARD_SOCK=/r.sock construct",
+            ]
         );
     }
 
