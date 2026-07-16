@@ -10673,6 +10673,7 @@ fn render_program_popup(f: &mut Frame, app: &mut App) {
     app.layout.program_smart_clip_anchor = None;
     app.layout.program_clip_hits.clear();
     app.layout.program_attachment_hits.clear();
+    app.layout.program_attachment_image_rects.clear();
     app.layout.program_pinned_card_rect = None;
     app.layout.program_action_link_hits.clear();
     if app
@@ -10758,10 +10759,111 @@ fn render_program_hover_overlays(
     render_program_attachment_hover(f, app);
 }
 
+/// Decoded RGBA for a program attachment image, memoized by path + mtime so
+/// an overwritten file re-decodes and a broken/huge one isn't re-read every
+/// frame. Files above the cap are treated as undecodable.
+fn program_attachment_decoded(
+    app: &mut App,
+    path: &str,
+) -> Option<std::sync::Arc<image::RgbaImage>> {
+    const MAX_DECODE_BYTES: u64 = 64 * 1024 * 1024;
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    if let Some((cached_mtime, img)) = app.attachment_images.get(path) {
+        if *cached_mtime == mtime {
+            return img.clone();
+        }
+    }
+    let decoded = (meta.len() <= MAX_DECODE_BYTES)
+        .then(|| std::fs::read(path).ok())
+        .flatten()
+        .and_then(|bytes| image::load_from_memory(&bytes).ok())
+        .map(|img| std::sync::Arc::new(img.to_rgba8()));
+    app.attachment_images
+        .insert(path.to_string(), (mtime, decoded.clone()));
+    decoded
+}
+
+/// Blit expanded inline attachment images (spec 0099) over the blank rows
+/// their padding reserved, and register their on-screen rects (active
+/// program only) for click-to-collapse and bottom-edge drag-resize.
+fn render_program_attachment_images(
+    f: &mut Frame,
+    app: &mut App,
+    popup: &crate::app::ProgramPopup,
+    scroll_offset: usize,
+    inner: Rect,
+    active: bool,
+) {
+    if app
+        .program_popup
+        .as_ref()
+        .is_none_or(|p| p.expanded_attachments.is_empty())
+        || inner.width == 0
+        || inner.height == 0
+    {
+        return;
+    }
+    let width = inner.width as usize;
+    let viewport_end = scroll_offset.saturating_add(inner.height as usize);
+    // Locate blocks with an immutable pass over the transform, then paint
+    // with the mutable decode/resize caches.
+    let mut blocks: Vec<(String, usize, u16)> = Vec::new();
+    let mut row_base = 0usize;
+    for raw in popup.buffer.lines() {
+        if row_base >= viewport_end {
+            break;
+        }
+        let rendered = program_rendered_line_text(Some(app), raw, width);
+        let rows = program_wrap_row_starts(&rendered, width).len().max(1);
+        if let Some((path, img_rows)) = program_expanded_attachment(Some(app), raw) {
+            // Row 0 keeps the chip; the image starts on the next row.
+            blocks.push((path, row_base + 1, img_rows));
+        }
+        row_base = row_base.saturating_add(rows);
+    }
+    for (path, first_abs, img_rows) in blocks {
+        let last_abs = first_abs + img_rows.max(1) as usize - 1;
+        if last_abs < scroll_offset || first_abs >= viewport_end {
+            continue;
+        }
+        let vis_first = first_abs.max(scroll_offset);
+        let vis_last = last_abs.min(viewport_end.saturating_sub(1));
+        let rect = Rect {
+            x: inner.x,
+            y: inner.y + (vis_first - scroll_offset) as u16,
+            width: inner.width,
+            height: (vis_last + 1 - vis_first) as u16,
+        };
+        match program_attachment_decoded(app, &path) {
+            Some(img) => {
+                let (ow, oh) = blit_scale_dims(img.dimensions(), rect, false);
+                let resized = resized_image(&mut app.image_resize_cache, &img, ow * 2, oh);
+                paint_resized_quadrants(f, rect, &resized, 1.0, (0.0, 1.0));
+            }
+            None => {
+                f.render_widget(
+                    Paragraph::new(format!("cannot preview {path}"))
+                        .style(Style::default().fg(app.theme.danger)),
+                    rect,
+                );
+            }
+        }
+        if active {
+            app.layout
+                .program_attachment_image_rects
+                .push((rect, path));
+        }
+    }
+}
+
 /// Info card shown while the mouse hovers an attachment chip (spec 0099):
 /// filename, path, and size · type — or a missing-file note when the path no
-/// longer resolves. Anchored above the chip (below when there's no room).
-fn render_program_attachment_hover(f: &mut Frame, app: &App) {
+/// longer resolves. Image attachments add a half-block preview under the
+/// info lines. Anchored above the chip (below when there's no room).
+fn render_program_attachment_hover(f: &mut Frame, app: &mut App) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
@@ -10770,8 +10872,14 @@ fn render_program_attachment_hover(f: &mut Frame, app: &App) {
         .program_attachment_hits
         .iter()
         .find(|h| h.contains(mx, my))
+        .cloned()
     else {
         return;
+    };
+    let preview = if hit.is_image {
+        program_attachment_decoded(app, &hit.path)
+    } else {
+        None
     };
     let detail = match std::fs::metadata(&hit.path) {
         Ok(meta) => format!(
@@ -10800,8 +10908,16 @@ fn render_program_attachment_hover(f: &mut Frame, app: &App) {
         .map(|l| UnicodeWidthStr::width(l.as_str()))
         .max()
         .unwrap_or(0) as u16;
-    let w = (inner_w + 4).min(total.width);
-    let h = (lines.len() as u16) + 2;
+    // Image previews get a fixed strip under the info lines, sized to a
+    // modest thumbnail; the card never exceeds half the screen height.
+    let preview_rows: u16 = match &preview {
+        Some(_) => 10u16.min(total.height / 2),
+        None => 0,
+    };
+    let w = (inner_w + 4)
+        .max(if preview.is_some() { 44 } else { 0 })
+        .min(total.width);
+    let h = (lines.len() as u16) + 2 + preview_rows;
     let mut x = mx.min(total.x + total.width.saturating_sub(w));
     x = x.max(total.x);
     // Prefer above the chip; fall below when the chip sits near the top.
@@ -10821,8 +10937,9 @@ fn render_program_attachment_hover(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border_focused))
         .padding(ratatui::widgets::Padding::new(1, 1, 0, 0));
+    let content = block.inner(rect);
     let text: Vec<Line> = lines
-        .into_iter()
+        .iter()
         .enumerate()
         .map(|(i, l)| {
             let style = if i == 0 {
@@ -10832,10 +10949,24 @@ fn render_program_attachment_hover(f: &mut Frame, app: &App) {
             } else {
                 Style::default().fg(app.theme.dim)
             };
-            Line::from(Span::styled(l, style))
+            Line::from(Span::styled(l.clone(), style))
         })
         .collect();
+    let info_rows = text.len() as u16;
     f.render_widget(Paragraph::new(text).block(block), rect);
+    if let Some(img) = preview {
+        let image_area = Rect {
+            x: content.x,
+            y: content.y + info_rows,
+            width: content.width,
+            height: content.height.saturating_sub(info_rows),
+        };
+        if image_area.height > 0 {
+            let (ow, oh) = blit_scale_dims(img.dimensions(), image_area, false);
+            let resized = resized_image(&mut app.image_resize_cache, &img, ow * 2, oh);
+            paint_resized_quadrants(f, image_area, &resized, 1.0, (0.0, 1.0));
+        }
+    }
 }
 
 /// `1023 B` / `4 KiB` / `2.3 MiB` — compact size label for the attachment
@@ -11683,6 +11814,7 @@ fn render_program_popup_at(
     let mut lines = render_program_markdown_lines(
         app,
         &popup.buffer,
+        inner.width as usize,
         selection,
         search_matches,
         search_selected,
@@ -11801,11 +11933,12 @@ fn render_program_popup_at(
     if active {
         app.layout.program_clip_hits = clip_hits.clone();
         app.layout.program_action_link_hits = action_link_hits;
-        // Attachment chips only need hover (no click affordance yet), so the
-        // active program is the only registrant, like the click hitboxes.
+        // Attachment chips register hover/click hitboxes only for the active
+        // program, like the click hitboxes above.
         app.layout.program_attachment_hits =
             program_attachment_chip_hits(Some(app), &popup.buffer, scroll_offset, inner);
     }
+    render_program_attachment_images(f, app, popup, scroll_offset, inner, active);
     if active && !popup.closing {
         if let Some(pos) =
             program_cursor_position(Some(app), &popup.buffer, popup.cursor, scroll_offset, inner)
@@ -12640,7 +12773,7 @@ fn program_block_visual_rows(
         if i >= end_line {
             break;
         }
-        let (rendered, _clips) = program_rendered_line_with_clips(app, raw);
+        let (rendered, _clips) = program_rendered_line_with_clips(app, raw, width);
         let rows = program_wrap_row_starts(&rendered, width).len().max(1);
         if i >= start_line {
             first.get_or_insert(visual_row_base);
@@ -12675,7 +12808,7 @@ fn program_shimmer_block_at(
     let mut visual_row_base = 0usize;
     let mut source_line = None;
     for (i, raw) in markdown.lines().enumerate() {
-        let (rendered, _clips) = program_rendered_line_with_clips(app, raw);
+        let (rendered, _clips) = program_rendered_line_with_clips(app, raw, width);
         let rows = program_wrap_row_starts(&rendered, width).len();
         let next_base = visual_row_base.saturating_add(rows);
         if target_abs_row >= visual_row_base && target_abs_row < next_base {
@@ -14112,13 +14245,13 @@ pub(crate) fn program_cursor_visual_pos(
     // drifts the moment a line wraps mid-word and compounds for lines below.
     let mut visual_row = 0usize;
     for raw in markdown.lines().take(line) {
-        let text = program_rendered_line_text(app, raw);
+        let text = program_rendered_line_text(app, raw, width);
         visual_row = visual_row.saturating_add(program_wrap_row_starts(&text, width).len());
     }
 
     let cur_raw = markdown.lines().nth(line).unwrap_or("");
     let visual_col = program_visual_col_for_line(app, cur_raw, col);
-    let starts = program_wrap_row_starts(&program_rendered_line_text(app, cur_raw), width);
+    let starts = program_wrap_row_starts(&program_rendered_line_text(app, cur_raw, width), width);
     let (row_in_line, col_in_row) = program_wrap_locate(&starts, visual_col, width);
     let visual_row = visual_row.saturating_add(row_in_line);
     (visual_row, col_in_row)
@@ -14197,7 +14330,7 @@ pub(crate) fn program_visual_to_cursor(
     let mut line_start = 0usize; // char offset of the current line's first char
     let mut owner: Option<(usize, Vec<usize>, &str, usize)> = None;
     for raw in markdown.split('\n') {
-        let rendered = program_rendered_line_text(app, raw);
+        let rendered = program_rendered_line_text(app, raw, width);
         let starts = program_wrap_row_starts(&rendered, width);
         let row_count = starts.len();
         if target_row < rows_before + row_count {
@@ -14496,8 +14629,19 @@ fn program_heading_content(raw: &str) -> Option<(usize, &str)> {
 /// heading markers (painted literally, chips included), the `  • ` list
 /// prefix, the fixed chip text of `:::clip` / `:::` fence lines, and expanded
 /// smart-clip chips — so the cursor's wrap math sees exactly the glyphs (and
-/// their spaces) ratatui wraps.
-fn program_rendered_line_text(app: Option<&App>, raw: &str) -> String {
+/// their spaces) ratatui wraps. `width` is the wrap width, consulted only to
+/// pad expanded inline attachment images (spec 0099) to their block height;
+/// pass 0 from callers that only measure intra-line prefixes.
+fn program_rendered_line_text(app: Option<&App>, raw: &str, width: usize) -> String {
+    let mut out = program_rendered_line_text_unpadded(app, raw);
+    if let Some((_, rows)) = program_expanded_attachment(app, raw) {
+        let pad = program_attachment_pad(&out, width, rows);
+        out.push_str(&pad);
+    }
+    out
+}
+
+fn program_rendered_line_text_unpadded(app: Option<&App>, raw: &str) -> String {
     let trimmed = raw.trim();
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
     if trimmed.is_empty() {
@@ -14605,6 +14749,50 @@ pub(crate) fn program_md_link_label(name: &str, is_image: bool) -> String {
     let ellipsis = if name.chars().count() > 24 { "…" } else { "" };
     let kind = if is_image { "Image" } else { "File" };
     format!("{kind}: {shown}{ellipsis}")
+}
+
+/// Default and bounds for an expanded inline attachment image's height, in
+/// body rows (spec 0099). Client-local; drag-resize adjusts within bounds.
+pub(crate) const PROGRAM_ATTACHMENT_DEFAULT_ROWS: u16 = 12;
+pub(crate) const PROGRAM_ATTACHMENT_MIN_ROWS: u16 = 3;
+pub(crate) const PROGRAM_ATTACHMENT_MAX_ROWS: u16 = 40;
+
+/// Expanded inline image state for a source line (spec 0099): when `raw` is a
+/// standalone image link whose path the active program popup has expanded,
+/// returns (path, image rows). The line then renders as its chip row plus
+/// that many image rows — produced by padding the rendered text (see
+/// [`program_attachment_pad`]) so every wrap-math consumer counts the same
+/// height without bespoke cases.
+fn program_expanded_attachment(app: Option<&App>, raw: &str) -> Option<(String, u16)> {
+    let popup = app?.program_popup.as_ref()?;
+    if popup.expanded_attachments.is_empty() {
+        return None;
+    }
+    let trimmed = raw.trim();
+    let link = find_program_md_link(trimmed)?;
+    if !link.is_image || link.start != 0 || link.end != trimmed.len() {
+        return None;
+    }
+    let rows = *popup.expanded_attachments.get(link.path)?;
+    Some((link.path.to_string(), rows))
+}
+
+/// Padding that stretches a rendered line by exactly `rows` extra wrapped
+/// rows at `width` columns (the chip keeps its own row; the image blits over
+/// the padded rows). Each padding unit is one space followed by a
+/// braille-blank (U+2800) run of `width - 1` cells: the space is break
+/// whitespace, and the run — one cell too wide to share any row that
+/// already has content, one cell too narrow to overflow its own — lands on
+/// a row of its own. Braille blank is NOT `char::is_whitespace`, so both
+/// the wrap math and ratatui treat the run as an ordinary word and paint it
+/// as a blank glyph. `rendered` itself is assumed to fit its row (the
+/// popup's 40-cell minimum keeps chip labels comfortably inside).
+fn program_attachment_pad(_rendered: &str, width: usize, rows: u16) -> String {
+    if width < 2 {
+        return String::new();
+    }
+    let unit = format!(" {}", "\u{2800}".repeat(width - 1));
+    unit.repeat(rows as usize)
 }
 
 /// The next inline token — smart clip or attachment link — in `text`, with
@@ -14741,10 +14929,14 @@ fn program_inline_with_clips(
 /// [`program_rendered_line_text`]) paired with the display-column spans of every
 /// smart-clip in it. Computing both from one pass keeps the clip offsets and the
 /// wrapped text perfectly consistent for hit-testing.
-fn program_rendered_line_with_clips(app: Option<&App>, raw: &str) -> (String, Vec<LineClip>) {
+fn program_rendered_line_with_clips(
+    app: Option<&App>,
+    raw: &str,
+    width: usize,
+) -> (String, Vec<LineClip>) {
     let trimmed = raw.trim();
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
-    if trimmed.is_empty() {
+    let (mut text, clips) = if trimmed.is_empty() {
         (String::new(), Vec::new())
     } else if program_heading_content(raw).is_some()
         || trimmed.starts_with(":::clip")
@@ -14753,7 +14945,7 @@ fn program_rendered_line_with_clips(app: Option<&App>, raw: &str) -> (String, Ve
         // Headings paint their source literally (no chip expansion) and clip
         // fence lines paint fixed chip text — neither carries clickable clip
         // spans, so both report the rendered text with no clips.
-        (program_rendered_line_text(app, raw), Vec::new())
+        (program_rendered_line_text_unpadded(app, raw), Vec::new())
     } else if let Some((_, rest)) = program_list_item_content(raw) {
         let (body, clips) = program_inline_with_clips(app, rest, leading + 4);
         (format!("{}  • {body}", " ".repeat(leading)), clips)
@@ -14766,7 +14958,12 @@ fn program_rendered_line_with_clips(app: Option<&App>, raw: &str) -> (String, Ve
         let lead: String = raw.chars().take(leading).collect();
         let (body_text, clips) = program_inline_with_clips(app, body, leading);
         (format!("{lead}{body_text}"), clips)
+    };
+    if let Some((_, rows)) = program_expanded_attachment(app, raw) {
+        let pad = program_attachment_pad(&text, width, rows);
+        text.push_str(&pad);
     }
+    (text, clips)
 }
 
 /// On-screen cell ranges of every session smart-clip in `markdown`, laid out in
@@ -14794,7 +14991,7 @@ pub(crate) fn program_session_clip_hits(
         if visual_row_base >= viewport_end {
             break;
         }
-        let (rendered, clips) = program_rendered_line_with_clips(app, raw);
+        let (rendered, clips) = program_rendered_line_with_clips(app, raw, width);
         let starts = program_wrap_row_starts(&rendered, width);
         for clip in &clips {
             let LineClipKind::Smart(raw_clip) = &clip.kind else {
@@ -14848,7 +15045,7 @@ pub(crate) fn program_attachment_chip_hits(
         if visual_row_base >= viewport_end {
             break;
         }
-        let (rendered, clips) = program_rendered_line_with_clips(app, raw);
+        let (rendered, clips) = program_rendered_line_with_clips(app, raw, width);
         let starts = program_wrap_row_starts(&rendered, width);
         for clip in &clips {
             let LineClipKind::Attachment {
@@ -14961,7 +15158,7 @@ pub(crate) fn program_action_link_hits(
         if visual_row_base >= viewport_end {
             break;
         }
-        let rendered = program_rendered_line_text(app, raw);
+        let rendered = program_rendered_line_text(app, raw, width);
         let starts = program_wrap_row_starts(&rendered, width);
         for link in scan_agentd_action_links(&rendered) {
             let visual_start = UnicodeWidthStr::width(&rendered[..link.start]);
@@ -15029,7 +15226,7 @@ fn program_visual_col_for_line(app: Option<&App>, raw: &str, raw_col: usize) -> 
         // 1:1 to the source chars; measure the source column literally and
         // clamp it into the painted width so the caret stays on the line (and
         // end-of-line clicks resolve to the line's last offset).
-        let rendered = program_rendered_line_text(app, raw);
+        let rendered = program_rendered_line_text(app, raw, 0);
         program_prefix_display_width(raw, raw_col)
             .min(UnicodeWidthStr::width(rendered.as_str()))
     } else if let Some((_, rest)) = program_list_item_content(raw) {
@@ -15092,6 +15289,7 @@ fn program_selection_range(popup: &crate::app::ProgramPopup) -> Option<(usize, u
 fn render_program_markdown_lines<'a>(
     app: &App,
     markdown: &'a str,
+    width: usize,
     selection: Option<(usize, usize)>,
     search_matches: Option<&'a [(usize, usize)]>,
     search_selected: Option<usize>,
@@ -15217,7 +15415,7 @@ fn render_program_markdown_lines<'a>(
                 &[],
             )));
         } else {
-            out.push(Line::from(render_program_inline_spans(
+            let mut spans = render_program_inline_spans(
                 app,
                 raw,
                 line_start,
@@ -15226,7 +15424,19 @@ fn render_program_markdown_lines<'a>(
                 search_matches,
                 search_selected,
                 &action_ranges,
-            )));
+            );
+            // Expanded inline attachment (spec 0099): pad the painted line
+            // to the same wrapped height the layout math counts, so the
+            // Paragraph's wrapping keeps subsequent lines aligned; the image
+            // blits over the blank rows afterwards.
+            if let Some((_, rows)) = program_expanded_attachment(Some(app), raw) {
+                let painted: String = spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect();
+                spans.push(Span::raw(program_attachment_pad(&painted, width, rows)));
+            }
+            out.push(Line::from(spans));
         }
         line_start += raw.chars().count() + 1;
     }
@@ -15252,7 +15462,7 @@ pub(crate) fn render_program_markdown_lines_for_test<'a>(
     app: &App,
     markdown: &'a str,
 ) -> Vec<Line<'a>> {
-    render_program_markdown_lines(app, markdown, None, None, None)
+    render_program_markdown_lines(app, markdown, 80, None, None, None)
 }
 
 /// Widget-surface renderer entry point for tests outside this module (the
@@ -16773,6 +16983,26 @@ mod tests {
             clips[0].visual_width,
             UnicodeWidthStr::width(program_md_link_label("n", false).as_str()) + 2
         );
+    }
+
+    #[test]
+    fn expanded_attachment_padding_yields_exact_row_count() {
+        // Content + padding must wrap to exactly 1 + rows rows — the
+        // invariant every layout consumer relies on (spec 0099) — across
+        // content shapes that hit different word-wrap boundary behaviors.
+        for content in ["x", "xxxxxxxxxx", " Image: shot ", "word and more words"] {
+            for rows in [1u16, 3, 5, 12] {
+                for width in [20usize, 37, 94] {
+                    let pad = program_attachment_pad(content, width, rows);
+                    let line = format!("{content}{pad}");
+                    assert_eq!(
+                        program_wrap_row_starts(&line, width).len(),
+                        rows as usize + 1,
+                        "content={content:?} rows={rows} width={width}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
