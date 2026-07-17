@@ -14914,6 +14914,15 @@ mod tests {
             "expansion migrated to the edited line's instance"
         );
         assert_eq!(popup.expanded_attachments.len(), 1);
+        // Migration writes through to the persisted store, so a restart
+        // right after the edit seeds the migrated key.
+        assert_eq!(
+            app.program_expanded_store
+                .get("s1")
+                .and_then(|m| m.get(&format!("{}:{}", new_key.0, new_key.1))),
+            Some(&("/tmp/shot.png".to_string(), 5)),
+            "store tracks the migrated key"
+        );
 
         // Breaking the link keeps the entry parked for restore-on-retype.
         app.program_popup.as_mut().unwrap().buffer = "![shot](/tmp/shot.png x".to_string();

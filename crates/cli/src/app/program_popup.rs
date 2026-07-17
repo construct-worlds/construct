@@ -99,6 +99,7 @@ impl App {
         let mut claimed: std::collections::HashSet<_> =
             kept.iter().map(|(key, _)| *key).collect();
         popup.expanded_attachments.extend(kept);
+        let mut migrated = false;
         for (old_key, (path, rows)) in orphans {
             match current
                 .iter()
@@ -107,11 +108,19 @@ impl App {
                 Some((new_key, _)) => {
                     claimed.insert(*new_key);
                     popup.expanded_attachments.insert(*new_key, (path, rows));
+                    migrated = true;
                 }
                 None => {
                     popup.expanded_attachments.insert(old_key, (path, rows));
                 }
             }
+        }
+        // Keep the persisted store in step with migrated keys so a TUI
+        // restart right after an edit seeds current keys, not stale ones
+        // (stale keys would still heal through this same migration, but
+        // only while the entry's path survives the session).
+        if migrated {
+            self.persist_program_expanded();
         }
     }
 
@@ -281,7 +290,12 @@ impl App {
                         self.program_collaborators
                             .insert(cursor.client_id.clone(), cursor);
                     }
-                    let popup = program_popup_from_document(result.program, result.blocks, now);
+                    let mut popup = program_popup_from_document(result.program, result.blocks, now);
+                    // Restored popups get their persisted image-expansion
+                    // state back too (spec 0099) — without this, a TUI
+                    // restart came back collapsed and the next interaction
+                    // persisted the empty map over the stored one.
+                    self.seed_program_expanded(&mut popup);
                     if selected_id.as_deref() == Some(session_id.as_str()) {
                         self.program_popup = Some(popup);
                     } else {
