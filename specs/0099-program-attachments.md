@@ -27,9 +27,9 @@ Scope: Image and file attachments referenced from a session's program document, 
   Expansion follows CommonMark/GitHub rendering semantics: the image
   **replaces** the chip at the link's position in the flow — the chip text
   is not shown alongside it — and is **left-aligned**, never centered.
-  Clicking the image collapses back to the chip. A terminal client may
-  keep the chip visible for a mid-text link (a character grid cannot grow
-  one line's height), rendering the image on the rows below instead.
+  Text before the link keeps its place; text after the link flows **below
+  the image**, preserving reading order (a terminal's equivalent of the
+  tall HTML line box). Clicking the image collapses back to the chip.
   Expansion state and preview size are **client-local view state**: they
   are never written into the Markdown and never synchronized, so agents
   and other clients see only the canonical link. A client may persist its

@@ -14610,7 +14610,9 @@ mod tests {
                 (img_path.display().to_string(), 5),
             );
         let (a, o) = marker_rows(&mut app);
-        assert_eq!(o - a, 7, "expanded image adds exactly its 5 rows");
+        // "lead text " keeps its row, the block takes 5, and " tail" flows
+        // onto its own row BELOW the image (spec 0099): 1 + 5 + 1 = 7 rows.
+        assert_eq!(o - a, 8, "text after the link flows below the image");
     }
 
     /// A standalone image-link line replaced by its expanded image
