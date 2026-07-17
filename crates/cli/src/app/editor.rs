@@ -363,7 +363,10 @@ impl App {
                     if popup.expanded_attachments.remove(&hit.key).is_none() {
                         popup
                             .expanded_attachments
-                            .insert(hit.key, crate::ui::PROGRAM_ATTACHMENT_DEFAULT_ROWS);
+                            .insert(
+                                hit.key,
+                                (hit.path.clone(), crate::ui::PROGRAM_ATTACHMENT_DEFAULT_ROWS),
+                            );
                     }
                 }
                 self.persist_program_expanded();

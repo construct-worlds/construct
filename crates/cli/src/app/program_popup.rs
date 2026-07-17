@@ -60,11 +60,59 @@ impl App {
         };
         popup.expanded_attachments = saved
             .iter()
-            .filter_map(|(key, rows)| {
+            .filter_map(|(key, (path, rows))| {
                 let (hash, idx) = key.split_once(':')?;
-                Some(((hash.parse().ok()?, idx.parse().ok()?), *rows))
+                Some((
+                    (hash.parse().ok()?, idx.parse().ok()?),
+                    (path.clone(), *rows),
+                ))
             })
             .collect();
+    }
+
+    /// Re-attach expansion state after buffer edits (spec 0099): an entry
+    /// whose line changed migrates to the first unclaimed instance with the
+    /// same target path — so typing after an inlined image keeps it
+    /// expanded. Entries with no surviving same-path instance are kept
+    /// under their old key: breaking a link mid-edit and re-completing it
+    /// then restores the expansion. Cheap no-op while the buffer is
+    /// unchanged; called once per frame for the active popup.
+    pub(crate) fn reconcile_program_expanded(&mut self) {
+        let Some(popup) = self.program_popup.as_mut() else {
+            return;
+        };
+        let buffer_hash = crate::ui::program_line_key(&popup.buffer);
+        if popup.expanded_reconcile_hash == buffer_hash {
+            return;
+        }
+        popup.expanded_reconcile_hash = buffer_hash;
+        if popup.expanded_attachments.is_empty() {
+            return;
+        }
+        let current = crate::ui::program_attachment_instances(&popup.buffer);
+        let current_keys: std::collections::HashSet<_> =
+            current.iter().map(|(key, _)| *key).collect();
+        let (kept, orphans): (Vec<_>, Vec<_>) = popup
+            .expanded_attachments
+            .drain()
+            .partition(|(key, _)| current_keys.contains(key));
+        let mut claimed: std::collections::HashSet<_> =
+            kept.iter().map(|(key, _)| *key).collect();
+        popup.expanded_attachments.extend(kept);
+        for (old_key, (path, rows)) in orphans {
+            match current
+                .iter()
+                .find(|(key, p)| p == &path && !claimed.contains(key))
+            {
+                Some((new_key, _)) => {
+                    claimed.insert(*new_key);
+                    popup.expanded_attachments.insert(*new_key, (path, rows));
+                }
+                None => {
+                    popup.expanded_attachments.insert(old_key, (path, rows));
+                }
+            }
+        }
     }
 
     /// Write-through the active popup's expansion map to the per-session
@@ -75,10 +123,10 @@ impl App {
             return;
         };
         let session_id = popup.program.session_id.clone();
-        let serialized: HashMap<String, u16> = popup
+        let serialized: HashMap<String, (String, u16)> = popup
             .expanded_attachments
             .iter()
-            .map(|((hash, idx), rows)| (format!("{hash}:{idx}"), *rows))
+            .map(|((hash, idx), entry)| (format!("{hash}:{idx}"), entry.clone()))
             .collect();
         if serialized.is_empty() {
             self.program_expanded_store.remove(&session_id);

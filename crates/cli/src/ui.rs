@@ -125,6 +125,9 @@ fn clear_pane_side_borders(f: &mut Frame, area: Rect, app: &App) {
 }
 
 pub fn render(f: &mut Frame, app: &mut App) {
+    // Re-attach image-expansion state to edited lines before any layout
+    // math runs this frame (spec 0099); no-op while the buffer is unchanged.
+    app.reconcile_program_expanded();
     app.layout.browser_preview_area = None;
     app.layout.browser_preview_close = None;
     app.layout.terminal_scrollbar = None;
@@ -14898,6 +14901,32 @@ pub(crate) fn program_line_instance(
     hash ^ (ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
+/// Every image-link instance in `markdown`, in document order, with its
+/// expansion key and target path. Drives expansion-state reconciliation
+/// after edits (spec 0099).
+pub(crate) fn program_attachment_instances(markdown: &str) -> Vec<((u64, usize), String)> {
+    let mut out = Vec::new();
+    let mut dups = std::collections::HashMap::new();
+    for raw in markdown.lines() {
+        let li = program_line_instance(&mut dups, raw);
+        let trimmed = raw.trim();
+        if program_heading_content(raw).is_some()
+            || trimmed.starts_with(":::clip")
+            || trimmed == ":::"
+        {
+            continue;
+        }
+        let mut rest = raw;
+        let mut idx = 0usize;
+        while let Some(link) = find_program_md_link(rest) {
+            out.push(((li, idx), link.path.to_string()));
+            rest = &rest[link.end..];
+            idx += 1;
+        }
+    }
+    out
+}
+
 /// An expanded inline image on `raw` (spec 0099). `replaces_line` is the
 /// CommonMark/GitHub semantic: when the link is the line's sole content, the
 /// image *replaces* the chip entirely (the line renders as the image alone,
@@ -14932,7 +14961,7 @@ fn program_expanded_attachment(
     let mut idx = 0usize;
     while let Some(link) = find_program_md_link(rest) {
         let key = (line_instance, idx);
-        if let Some(rows) = popup.expanded_attachments.get(&key) {
+        if let Some((_, rows)) = popup.expanded_attachments.get(&key) {
             let replaces_line = find_program_md_link(trimmed)
                 .is_some_and(|only| only.start == 0 && only.end == trimmed.len());
             return Some(ProgramExpandedAttachment {
@@ -15483,10 +15512,12 @@ fn program_visual_col_for_line(
     width: usize,
     line_instance: u64,
 ) -> usize {
-    // A line replaced by its expanded image has no text cells: caret
-    // positions up to the link's end park at the block's top-left; the
-    // line-end position (e.g. right after typing the closing `)`) sits at
-    // the block's END, so typing continues visually after the image.
+    // Caret rules on an expanded line (spec 0099): the line-end position —
+    // e.g. right after typing the closing `)` — sits at the END of the
+    // line's whole visual extent, image rows included, so the caret reads
+    // as "after the image". On a replaced line every earlier position
+    // parks at the block's top-left (there are no text cells); on a
+    // mid-text line, earlier positions keep their text-row mapping.
     if let Some(exp) = program_expanded_attachment(app, raw, line_instance) {
         if exp.replaces_line {
             let link_end_chars = find_program_md_link(raw)
@@ -15497,6 +15528,10 @@ fn program_visual_col_for_line(
             } else {
                 0
             };
+        }
+        if raw_col >= raw.chars().count() {
+            let rendered = program_rendered_line_text(app, raw, width, line_instance);
+            return UnicodeWidthStr::width(rendered.as_str());
         }
     }
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();

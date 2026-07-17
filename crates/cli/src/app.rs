@@ -1742,9 +1742,9 @@ pub struct App {
     /// (instance key, on-screen row of the image block's top).
     pub resizing_program_attachment: Option<((u64, usize), u16)>,
     /// Persisted per-session expansion state (spec 0099): session id →
-    /// ("linehash:idx" → rows). Loaded lazily from the TUI state file on
-    /// first program open; written through on every toggle/resize.
-    pub program_expanded_store: HashMap<String, HashMap<String, u16>>,
+    /// ("linehash:idx" → (path, rows)). Loaded lazily from the TUI state
+    /// file on first program open; written through on every toggle/resize.
+    pub program_expanded_store: HashMap<String, HashMap<String, (String, u16)>>,
     pub program_expanded_store_loaded: bool,
     /// Adapter/file-backed dynamic UI panels, keyed by session id then panel id.
     /// Actions route back as normal session input.
@@ -2272,10 +2272,14 @@ pub struct ProgramPopup {
     pub selection_menu: Option<ProgramSelectionMenu>,
     pub smart_clip: Option<ProgramSmartClipSearch>,
     /// Image links currently expanded inline, keyed by link instance
-    /// (line-content hash, index within line) → block height in body rows.
-    /// Client-local view state (spec 0099): persisted per session in the
-    /// TUI's state file, never synced or written into the Markdown.
-    pub expanded_attachments: HashMap<(u64, usize), u16>,
+    /// (line-content hash ⊕ dup ordinal, index within line) → (target path,
+    /// block height in body rows). The path lets edits re-attach state to
+    /// the moved instance (see `reconcile_program_expanded`). Client-local
+    /// view state (spec 0099): persisted per session in the TUI's state
+    /// file, never synced or written into the Markdown.
+    pub expanded_attachments: HashMap<(u64, usize), (String, u16)>,
+    /// Hash of the buffer the expansion map was last reconciled against.
+    pub expanded_reconcile_hash: u64,
     pub search: Option<ProgramSearch>,
     pub revealed_at: Instant,
     pub hide_after: Instant,
@@ -8626,7 +8630,9 @@ impl App {
                         crate::ui::PROGRAM_ATTACHMENT_MAX_ROWS,
                     );
                     if let Some(popup) = self.program_popup.as_mut() {
-                        popup.expanded_attachments.insert(key, rows);
+                        if let Some(entry) = popup.expanded_attachments.get_mut(&key) {
+                            entry.1 = rows;
+                        }
                     }
                     return;
                 }
@@ -12375,6 +12381,7 @@ fn program_popup_from_document(
         selection_menu: None,
         smart_clip: None,
         expanded_attachments: HashMap::new(),
+        expanded_reconcile_hash: 0,
         search: None,
         revealed_at: now,
         hide_after: now + Duration::from_secs(365 * 24 * 60 * 60),
@@ -13284,6 +13291,7 @@ mod tests {
             selection_menu: None,
             smart_clip: None,
             expanded_attachments: HashMap::new(),
+            expanded_reconcile_hash: 0,
             search: None,
             revealed_at: now,
             hide_after: now + Duration::from_secs(60),
@@ -14592,8 +14600,14 @@ mod tests {
             .unwrap()
             .expanded_attachments
             .insert(
-                (crate::ui::program_line_key(&format!("lead text ![shot]({}) tail", img_path.display())), 0),
-                5,
+                (
+                    crate::ui::program_line_key(&format!(
+                        "lead text ![shot]({}) tail",
+                        img_path.display()
+                    )),
+                    0,
+                ),
+                (img_path.display().to_string(), 5),
             );
         let (a, o) = marker_rows(&mut app);
         assert_eq!(o - a, 7, "expanded image adds exactly its 5 rows");
@@ -14612,7 +14626,7 @@ mod tests {
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
         popup.expanded_attachments.insert(
             (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0),
-            5,
+            ("/tmp/shot.png".to_string(), 5),
         );
         app.program_popup = Some(popup);
 
@@ -14686,7 +14700,10 @@ mod tests {
                     crate::ui::program_line_key("note ![shot](/tmp/shot.png) end"),
                     0
                 )),
-            Some(&crate::ui::PROGRAM_ATTACHMENT_DEFAULT_ROWS),
+            Some(&(
+                "/tmp/shot.png".to_string(),
+                crate::ui::PROGRAM_ATTACHMENT_DEFAULT_ROWS
+            )),
             "first click expands at the default height"
         );
 
@@ -14792,13 +14809,18 @@ mod tests {
         let (mut app, _dir, _server) = empty_app().await;
         let key = (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0);
         let mut popup = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
-        popup.expanded_attachments.insert(key, 9);
+        popup
+            .expanded_attachments
+            .insert(key, ("/tmp/shot.png".to_string(), 9));
         app.program_popup = Some(popup);
         app.persist_program_expanded();
 
         let mut fresh = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
         app.seed_program_expanded(&mut fresh);
-        assert_eq!(fresh.expanded_attachments.get(&key), Some(&9));
+        assert_eq!(
+            fresh.expanded_attachments.get(&key),
+            Some(&("/tmp/shot.png".to_string(), 9))
+        );
 
         // Collapsing everything clears the session's entry.
         app.program_popup
@@ -14810,6 +14832,112 @@ mod tests {
         let mut fresh = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
         app.seed_program_expanded(&mut fresh);
         assert!(fresh.expanded_attachments.is_empty());
+    }
+
+    /// The caret at the end of a replaced line paints AFTER the image (the
+    /// block's last row), not before it (spec 0099) — completing `)` leaves
+    /// the visible caret below the image.
+    #[tokio::test]
+    async fn program_caret_after_expanded_image_paints_at_block_end() {
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let line = "![shot](/tmp/shot.png)";
+        let md = format!("{line}\nomegaword");
+        let mut popup = program_popup_for_test("s1", &md, line.chars().count());
+        popup.revealed_at = Instant::now() - Duration::from_secs(10);
+        popup.expanded_attachments.insert(
+            (crate::ui::program_line_key(line), 0),
+            ("/tmp/shot.png".to_string(), 5),
+        );
+        app.program_popup = Some(popup);
+
+        let width = 90usize;
+        let (row, _col) = crate::ui::program_cursor_visual_pos(
+            Some(&app),
+            &md,
+            line.chars().count(),
+            width,
+        );
+        assert_eq!(
+            row, 4,
+            "caret at the line end sits on the block's last row (rows 0..=4)"
+        );
+
+        // Mid-line trailing link ("test ![…]"): the line-end caret also
+        // lands after the image (the block's last row), while positions
+        // inside the leading text stay on the text row.
+        let line = "test ![shot](/tmp/shot.png)";
+        let md = format!("{line}\nomegaword");
+        let mut popup = program_popup_for_test("s1", &md, line.chars().count());
+        popup.revealed_at = Instant::now() - Duration::from_secs(10);
+        popup.expanded_attachments.insert(
+            (crate::ui::program_line_key(line), 0),
+            ("/tmp/shot.png".to_string(), 5),
+        );
+        app.program_popup = Some(popup);
+        let (row, _) = crate::ui::program_cursor_visual_pos(
+            Some(&app),
+            &md,
+            line.chars().count(),
+            width,
+        );
+        assert_eq!(row, 5, "line-end caret sits on the last image row");
+        let (row, _) = crate::ui::program_cursor_visual_pos(Some(&app), &md, 2, width);
+        assert_eq!(row, 0, "caret inside the leading text stays on the text row");
+    }
+
+    /// Typing after an inlined image keeps it expanded: the edit changes
+    /// the line's content key, and reconciliation re-attaches the state to
+    /// the moved instance (spec 0099).
+    #[tokio::test]
+    async fn program_typing_after_image_keeps_expansion() {
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
+        popup.revealed_at = Instant::now() - Duration::from_secs(10);
+        popup.expanded_attachments.insert(
+            (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0),
+            ("/tmp/shot.png".to_string(), 5),
+        );
+        app.program_popup = Some(popup);
+
+        // Simulate typing after the link: the line's content (and key) change.
+        app.program_popup.as_mut().unwrap().buffer = "![shot](/tmp/shot.png) x".to_string();
+        app.reconcile_program_expanded();
+        let popup = app.program_popup.as_ref().unwrap();
+        let new_key = (crate::ui::program_line_key("![shot](/tmp/shot.png) x"), 0);
+        assert_eq!(
+            popup.expanded_attachments.get(&new_key),
+            Some(&("/tmp/shot.png".to_string(), 5)),
+            "expansion migrated to the edited line's instance"
+        );
+        assert_eq!(popup.expanded_attachments.len(), 1);
+
+        // Breaking the link keeps the entry parked for restore-on-retype.
+        app.program_popup.as_mut().unwrap().buffer = "![shot](/tmp/shot.png x".to_string();
+        app.reconcile_program_expanded();
+        assert_eq!(
+            app.program_popup
+                .as_ref()
+                .unwrap()
+                .expanded_attachments
+                .len(),
+            1,
+            "orphaned entry is kept while the link is broken"
+        );
+        app.program_popup.as_mut().unwrap().buffer = "![shot](/tmp/shot.png) x".to_string();
+        app.reconcile_program_expanded();
+        assert_eq!(
+            app.program_popup
+                .as_ref()
+                .unwrap()
+                .expanded_attachments
+                .get(&new_key),
+            Some(&("/tmp/shot.png".to_string(), 5)),
+            "re-completing the link restores the expansion"
+        );
     }
 
     /// Vertical caret motion hops over an expanded image's rows instead of
@@ -14826,7 +14954,7 @@ mod tests {
             .expanded_attachments
             .insert(
                 (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0),
-                5,
+                ("/tmp/shot.png".to_string(), 5),
             );
         app.program_popup = Some(popup);
 
