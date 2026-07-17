@@ -51,6 +51,32 @@ impl App {
                 _ => return true,
             }
         }
+        // An in-flight inline-image resize (spec 0099) owns the mouse until
+        // release, same as the popup-resize gesture above. Handled here —
+        // not in the generic mouse path — because this handler runs first
+        // and consumes drags over the popup body.
+        if let Some((key, top)) = self.resizing_program_attachment {
+            match ev.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let rows = (ev.row.saturating_sub(top).saturating_add(1)).clamp(
+                        crate::ui::PROGRAM_ATTACHMENT_MIN_ROWS,
+                        crate::ui::PROGRAM_ATTACHMENT_MAX_ROWS,
+                    );
+                    if let Some(popup) = self.program_popup.as_mut() {
+                        if let Some(entry) = popup.expanded_attachments.get_mut(&key) {
+                            entry.1 = rows;
+                        }
+                    }
+                    return true;
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.resizing_program_attachment = None;
+                    self.persist_program_expanded();
+                    return true;
+                }
+                _ => return true,
+            }
+        }
         // An in-flight pinned-card drag (spec 0090) owns the mouse until the
         // button releases, wherever the pointer wanders — same rule as every
         // other construct drag gesture.

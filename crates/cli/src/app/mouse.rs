@@ -37,7 +37,16 @@ impl App {
             || self
                 .layout
                 .program_resize_hit
-                .is_some_and(|hit| Self::rect_contains(hit, col, row)))
+                .is_some_and(|hit| Self::rect_contains(hit, col, row))
+            // Bottom edge of an expanded inline attachment image: dragging
+            // it resizes the block (spec 0099).
+            || self
+                .layout
+                .program_attachment_image_rects
+                .iter()
+                .any(|(r, _, _)| {
+                    row == r.y + r.height.saturating_sub(1) && col >= r.x && col < r.x + r.width
+                }))
         .then_some("↕")
     }
     pub(super) fn selection_bounds_at(&self, col: u16, row: u16) -> Option<ratatui::layout::Rect> {

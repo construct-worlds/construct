@@ -8622,20 +8622,6 @@ impl App {
                 });
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some((key, top)) = self.resizing_program_attachment {
-                    // Dragging the preview's bottom edge sets the block
-                    // height directly from the cursor row (spec 0099).
-                    let rows = (ev.row.saturating_sub(top).saturating_add(1)).clamp(
-                        crate::ui::PROGRAM_ATTACHMENT_MIN_ROWS,
-                        crate::ui::PROGRAM_ATTACHMENT_MAX_ROWS,
-                    );
-                    if let Some(popup) = self.program_popup.as_mut() {
-                        if let Some(entry) = popup.expanded_attachments.get_mut(&key) {
-                            entry.1 = rows;
-                        }
-                    }
-                    return;
-                }
                 if let Some((anchor_col, anchor_w)) = self.resizing_list {
                     // Apply the column delta to the width that was
                     // current at drag start. Works for both grab
@@ -14940,6 +14926,69 @@ mod tests {
             Some(&("/tmp/shot.png".to_string(), 5)),
             "re-completing the link restores the expansion"
         );
+    }
+
+    /// Dragging an expanded image's bottom edge resizes it — the whole
+    /// gesture (Down on the edge, Drag, Up) flows through the program mouse
+    /// handler, which owns drags over the popup body (spec 0099).
+    #[tokio::test]
+    async fn program_attachment_bottom_edge_drag_resizes() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let key = (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0);
+        let mut popup = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
+        popup.revealed_at = Instant::now() - Duration::from_secs(10);
+        popup
+            .expanded_attachments
+            .insert(key, ("/tmp/shot.png".to_string(), 5));
+        app.program_popup = Some(popup);
+
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let (rect, _, _) = app
+            .layout
+            .program_attachment_image_rects
+            .first()
+            .cloned()
+            .expect("image rect registered");
+        let bottom = rect.y + rect.height - 1;
+        // The bottom edge shows the vertical-resize affordance.
+        assert_eq!(
+            app.resize_handle_glyph_at(rect.x + 1, bottom),
+            Some("↕"),
+            "bottom edge advertises the resize handle"
+        );
+        let ev = |kind, row| MouseEvent {
+            kind,
+            column: rect.x + 1,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_program_mouse(&ev(MouseEventKind::Down(MouseButton::Left), bottom))
+            .await;
+        assert!(app.resizing_program_attachment.is_some(), "drag armed");
+        let consumed = app
+            .handle_program_mouse(&ev(MouseEventKind::Drag(MouseButton::Left), rect.y + 9))
+            .await;
+        assert!(consumed, "program handler owns the drag");
+        assert_eq!(
+            app.program_popup
+                .as_ref()
+                .unwrap()
+                .expanded_attachments
+                .get(&key)
+                .map(|(_, rows)| *rows),
+            Some(10),
+            "drag to row top+9 sets 10 rows"
+        );
+        app.handle_program_mouse(&ev(MouseEventKind::Up(MouseButton::Left), rect.y + 9))
+            .await;
+        assert!(app.resizing_program_attachment.is_none(), "drag settles");
     }
 
     /// Vertical caret motion hops over an expanded image's rows instead of
