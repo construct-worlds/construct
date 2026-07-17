@@ -195,6 +195,43 @@ impl App {
         true
     }
 
+    pub(super) fn begin_list_scrollbar_drag_or_jump(&mut self, col: u16, row: u16) -> bool {
+        let Some(hit) = self.layout.list_scrollbar else {
+            return false;
+        };
+        if !Self::rect_contains(hit.area, col, row) {
+            return false;
+        }
+        let grab = if Self::rect_contains(hit.thumb, col, row) {
+            row.saturating_sub(hit.thumb.y)
+        } else {
+            hit.thumb.height / 2
+        };
+        self.dragging_list_scrollbar = Some((grab, hit.max_scroll));
+        self.drag_list_scrollbar_to_row(row, grab, hit.max_scroll);
+        true
+    }
+
+    pub(super) fn drag_list_scrollbar_to_row(
+        &mut self,
+        row: u16,
+        grab: u16,
+        max_scroll: usize,
+    ) {
+        let Some(hit) = self.layout.list_scrollbar else {
+            return;
+        };
+        let max_thumb_top = hit.area.height.saturating_sub(hit.thumb.height) as usize;
+        if max_thumb_top == 0 || max_scroll == 0 {
+            return;
+        }
+        let top = row
+            .saturating_sub(grab)
+            .saturating_sub(hit.area.y)
+            .min(hit.area.height.saturating_sub(hit.thumb.height)) as usize;
+        self.list_scroll_offset = (top * max_scroll + max_thumb_top / 2) / max_thumb_top;
+    }
+
     pub(super) fn drag_terminal_scrollbar_to_row(
         &mut self,
         row: u16,
