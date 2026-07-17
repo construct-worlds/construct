@@ -14667,9 +14667,9 @@ mod tests {
             "first click expands at the default height"
         );
 
-        // Re-render so the hitboxes reflect the expanded layout: the
-        // mid-line chip shrinks to the 1-cell anchor marker (the image
-        // replaces the label, spec 0099); clicking the marker collapses.
+        // Re-render: while expanded the chip paints NOTHING (the image
+        // fully replaces it, spec 0099) — no label, no chip hitbox.
+        // Clicking inside the image's rect collapses.
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
@@ -14677,24 +14677,25 @@ mod tests {
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
         let mut chip_label = false;
-        let mut marker = false;
         for y in 0..40u16 {
             let row: String = (0..100u16).map(|x| buffer[(x, y)].symbol()).collect();
             chip_label |= row.contains("Image: shot");
-            marker |= row.contains('▣');
         }
-        assert!(!chip_label, "expanded mid-line chip must not show its label");
-        assert!(marker, "expanded mid-line chip shows the anchor marker");
-        let hit = app
+        assert!(!chip_label, "expanded chip must paint nothing");
+        assert!(
+            app.layout.program_attachment_hits.is_empty(),
+            "no chip hitbox while expanded"
+        );
+        let (rect, _) = app
             .layout
-            .program_attachment_hits
+            .program_attachment_image_rects
             .first()
             .cloned()
-            .expect("chip hitbox after expansion");
+            .expect("image rect registered");
         app.handle_program_mouse(&MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: hit.col_start,
-            row: hit.row,
+            column: rect.x,
+            row: rect.y,
             modifiers: crossterm::event::KeyModifiers::empty(),
         })
         .await;
@@ -14704,7 +14705,46 @@ mod tests {
                 .unwrap()
                 .expanded_attachments
                 .is_empty(),
-            "second click collapses"
+            "clicking the image collapses"
+        );
+    }
+
+    /// Vertical caret motion hops over an expanded image's rows instead of
+    /// getting stuck remapping into them (spec 0099).
+    #[tokio::test]
+    async fn program_cursor_vertical_skips_expanded_image_rows() {
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let md = "alphaword\n![shot](/tmp/shot.png)\nomegaword";
+        let mut popup = program_popup_for_test("s1", md, 0);
+        popup.revealed_at = Instant::now() - Duration::from_secs(10);
+        popup
+            .expanded_attachments
+            .insert("/tmp/shot.png".to_string(), 5);
+        app.program_popup = Some(popup);
+
+        // Render once so `program_inner_area` (which vertical motion needs)
+        // is captured.
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let omega_start = md.find("omegaword").unwrap();
+        assert_eq!(app.program_popup.as_ref().unwrap().cursor, 0);
+        app.move_program_cursor_vertical(1);
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().cursor,
+            omega_start,
+            "C-n from the line above hops over the image block"
+        );
+        app.move_program_cursor_vertical(-1);
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().cursor,
+            0,
+            "C-p from below hops back over the image block"
         );
     }
 

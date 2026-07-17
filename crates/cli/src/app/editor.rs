@@ -2567,6 +2567,15 @@ impl App {
                 } else {
                     row.saturating_add(delta as usize)
                 };
+                // Never land inside an expanded image's rows — hop over the
+                // block in the direction of travel (spec 0099).
+                let target_row = ui::program_skip_attachment_rows(
+                    Some(app),
+                    &popup.buffer,
+                    target_row,
+                    delta > 0,
+                    width,
+                );
                 let cursor = ui::program_visual_to_cursor(
                     Some(app),
                     &popup.buffer,

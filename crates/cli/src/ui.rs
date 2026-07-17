@@ -14811,21 +14811,16 @@ pub(crate) fn program_md_link_label(name: &str, is_image: bool) -> String {
     format!("{kind}: {shown}{ellipsis}")
 }
 
-/// The label a link chip actually paints, given expansion state: an expanded
-/// image's chip shrinks to a 1-cell anchor marker — the image replaces the
-/// chip (spec 0099); mid-line the marker only marks where the source sits
-/// (and still collapses on click). Standalone lines never reach this (the
-/// whole line is replaced).
-fn program_md_chip_label(app: Option<&App>, link: &ProgramMdLink<'_>) -> String {
+/// The label a link chip actually paints, given expansion state: `None`
+/// while the image is expanded — the image fully replaces the chip
+/// (spec 0099, GitHub semantics), leaving zero cells at the source
+/// position; the image itself carries collapse-on-click and hover info.
+fn program_md_chip_label(app: Option<&App>, link: &ProgramMdLink<'_>) -> Option<String> {
     let expanded = link.is_image
         && app
             .and_then(|a| a.program_popup.as_ref())
             .is_some_and(|p| p.expanded_attachments.contains_key(link.path));
-    if expanded {
-        "▣".to_string()
-    } else {
-        program_md_link_label(link.name, link.is_image)
-    }
+    (!expanded).then(|| program_md_link_label(link.name, link.is_image))
 }
 
 /// Default and bounds for an expanded inline attachment image's height, in
@@ -14879,6 +14874,43 @@ fn program_expanded_attachment(app: Option<&App>, raw: &str) -> Option<ProgramEx
         rest = &rest[link.end..];
     }
     None
+}
+
+/// Adjust a vertical-motion target row so the caret never lands inside an
+/// expanded image's reserved rows (spec 0099): moving down skips to the
+/// first row below the block; moving up lands on the last text row above it,
+/// or the previous line's last row when the image replaced its line
+/// entirely. Without this, visual-row motion maps back into the same line
+/// and the caret gets stuck at the image.
+pub(crate) fn program_skip_attachment_rows(
+    app: Option<&App>,
+    markdown: &str,
+    target_row: usize,
+    moving_down: bool,
+    width: usize,
+) -> usize {
+    let width = width.max(1);
+    let mut row_base = 0usize;
+    for raw in markdown.lines() {
+        let rendered = program_rendered_line_text(app, raw, width);
+        let rows = program_wrap_row_starts(&rendered, width).len().max(1);
+        if target_row < row_base + rows {
+            if let Some(exp) = program_expanded_attachment(app, raw) {
+                let img_rows = (exp.rows as usize).min(rows);
+                let img_first = row_base + rows - img_rows;
+                if target_row >= img_first {
+                    return if moving_down {
+                        row_base + rows
+                    } else {
+                        img_first.saturating_sub(1)
+                    };
+                }
+            }
+            return target_row;
+        }
+        row_base += rows;
+    }
+    target_row
 }
 
 /// Shrink an image's reserved rect to its scaled size, anchored at the
@@ -14968,16 +15000,20 @@ fn program_inline_rendered_text(app: Option<&App>, text: &str) -> String {
         let (label, src_len) = match token {
             ProgramInlineToken::Clip { raw, src_len } => {
                 let (_, label) = program_smart_clip_label(app, raw);
-                (label, src_len)
+                (Some(label), src_len)
             }
             ProgramInlineToken::Link(link) => (
                 program_md_chip_label(app, &link),
                 link.end - link.start,
             ),
         };
-        out.push(' ');
-        out.push_str(&label);
-        out.push(' ');
+        // None = expanded image (spec 0099): the source occupies zero cells;
+        // the image below is its representation.
+        if let Some(label) = label {
+            out.push(' ');
+            out.push_str(&label);
+            out.push(' ');
+        }
         rest = &rest[start + src_len..];
     }
     out.push_str(rest);
@@ -15026,7 +15062,7 @@ fn program_inline_with_clips(
         let (label, kind, src_len) = match token {
             ProgramInlineToken::Clip { raw, src_len } => {
                 let (_, label) = program_smart_clip_label(app, raw);
-                (label, LineClipKind::Smart(raw.to_string()), src_len)
+                (Some(label), LineClipKind::Smart(raw.to_string()), src_len)
             }
             ProgramInlineToken::Link(link) => (
                 program_md_chip_label(app, &link),
@@ -15038,18 +15074,22 @@ fn program_inline_with_clips(
                 link.end - link.start,
             ),
         };
-        // Chip visual width = padded label width, matching the ` label `
-        // form pushed below and `program_inline_rendered_text`.
-        let width = UnicodeWidthStr::width(label.as_str()) + 2;
-        clips.push(LineClip {
-            visual_start: visual,
-            visual_width: width,
-            kind,
-        });
-        out.push(' ');
-        out.push_str(&label);
-        out.push(' ');
-        visual += width;
+        // None = expanded image: zero cells, no chip hitbox — the image's
+        // own rect carries collapse and hover.
+        if let Some(label) = label {
+            // Chip visual width = padded label width, matching the ` label `
+            // form pushed below and `program_inline_rendered_text`.
+            let width = UnicodeWidthStr::width(label.as_str()) + 2;
+            clips.push(LineClip {
+                visual_start: visual,
+                visual_width: width,
+                kind,
+            });
+            out.push(' ');
+            out.push_str(&label);
+            out.push(' ');
+            visual += width;
+        }
         rest = &rest[start + src_len..];
     }
     out.push_str(rest);
@@ -15411,9 +15451,10 @@ fn program_inline_visual_width(app: Option<&App>, text: &str, raw_col: usize) ->
                 (program_smart_clip_visual_width(app, raw_clip), *src_len)
             }
             ProgramInlineToken::Link(link) => (
-                UnicodeWidthStr::width(
-                    program_md_chip_label(app, link).as_str(),
-                ) + 2,
+                // Expanded image: zero cells at the source position.
+                program_md_chip_label(app, link)
+                    .map(|label| UnicodeWidthStr::width(label.as_str()) + 2)
+                    .unwrap_or(0),
                 link.end - link.start,
             ),
         };
@@ -15786,7 +15827,10 @@ fn program_attachment_chip_span(
     in_match: bool,
     is_active_match: bool,
 ) -> Span<'static> {
-    let label = program_md_chip_label(app, link);
+    // Expanded image: the chip paints nothing (zero cells, spec 0099).
+    let Some(label) = program_md_chip_label(app, link) else {
+        return Span::raw("");
+    };
     let bg = if is_active_match || in_match {
         theme.highlight_bg
     } else if link.is_image {
@@ -17151,22 +17195,21 @@ mod tests {
         );
     }
 
-    /// While a mid-line image is expanded, its chip shrinks to the 1-cell
-    /// anchor marker — the image (below) replaces the chip's label
-    /// (spec 0099). Verified through the transform, so the painter, wrap
-    /// math, and hit widths all agree.
+    /// Without expansion state the chip keeps its collapsed label; when
+    /// expanded, `program_md_chip_label` returns None and the source
+    /// occupies zero cells — asserted end-to-end (label absence, no chip
+    /// hitbox, caret hop) by the app-level render tests.
     #[test]
-    fn expanded_midline_chip_shrinks_to_anchor_marker() {
-        // No App state → collapsed label.
+    fn collapsed_chip_label_and_expanded_none() {
         assert_eq!(
             program_inline_rendered_text(None, "a ![shot](/tmp/s.png) b"),
             "a  Image: shot  b"
         );
-        // The pure label fn keeps its collapsed form; expansion-aware
-        // callers go through program_md_chip_label, which needs App state —
-        // exercised end-to-end by the app-level render tests.
         let link = find_program_md_link("![shot](/tmp/s.png)").expect("link");
-        assert_eq!(program_md_chip_label(None, &link), "Image: shot");
+        assert_eq!(
+            program_md_chip_label(None, &link).as_deref(),
+            Some("Image: shot")
+        );
     }
 
     /// The chip is atomic to the cursor (spec 0099): raw columns inside the
