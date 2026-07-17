@@ -31,6 +31,74 @@ impl App {
         }
     }
 
+    /// Path of the TUI's persisted program view state (spec 0099: expansion
+    /// state is client-local; this file makes it survive TUI restarts).
+    fn program_expanded_store_path() -> std::path::PathBuf {
+        construct_protocol::paths::Paths::discover()
+            .state_dir
+            .join("tui-program-expanded.json")
+    }
+
+    /// Seed a freshly opened popup's expansion map from the persisted
+    /// per-session store, loading the store file on first use.
+    pub(super) fn seed_program_expanded(&mut self, popup: &mut ProgramPopup) {
+        if !self.program_expanded_store_loaded {
+            self.program_expanded_store_loaded = true;
+            // Tests exercise the in-memory store only — never the real
+            // user state file.
+            #[cfg(not(test))]
+            {
+                self.program_expanded_store =
+                    std::fs::read_to_string(Self::program_expanded_store_path())
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+            }
+        }
+        let Some(saved) = self.program_expanded_store.get(&popup.program.session_id) else {
+            return;
+        };
+        popup.expanded_attachments = saved
+            .iter()
+            .filter_map(|(key, rows)| {
+                let (hash, idx) = key.split_once(':')?;
+                Some(((hash.parse().ok()?, idx.parse().ok()?), *rows))
+            })
+            .collect();
+    }
+
+    /// Write-through the active popup's expansion map to the per-session
+    /// store and the state file. Best-effort: a failed write only costs
+    /// persistence, never the in-memory state.
+    pub(super) fn persist_program_expanded(&mut self) {
+        let Some(popup) = self.program_popup.as_ref() else {
+            return;
+        };
+        let session_id = popup.program.session_id.clone();
+        let serialized: HashMap<String, u16> = popup
+            .expanded_attachments
+            .iter()
+            .map(|((hash, idx), rows)| (format!("{hash}:{idx}"), *rows))
+            .collect();
+        if serialized.is_empty() {
+            self.program_expanded_store.remove(&session_id);
+        } else {
+            self.program_expanded_store.insert(session_id, serialized);
+        }
+        // Tests exercise the in-memory store only — never the real user
+        // state file.
+        #[cfg(not(test))]
+        {
+            let path = Self::program_expanded_store_path();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_string(&self.program_expanded_store) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+    }
+
     pub(super) async fn open_program_popup(&mut self) {
         let Some(session_id) = self.selected_id() else {
             self.set_status("program: no session selected".to_string());
@@ -55,6 +123,8 @@ impl App {
                 // last hidden, so hide→show is position-preserving rather than
                 // jumping back to the top.
                 self.restore_program_view_state(&mut popup);
+                // Restore persisted image-expansion state (spec 0099).
+                self.seed_program_expanded(&mut popup);
                 self.program_popup = Some(popup);
                 // Opening a program focuses the view pane so its keystrokes are
                 // captured immediately for editing. `C-x o` then hands focus

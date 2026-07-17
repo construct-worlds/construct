@@ -1035,6 +1035,8 @@ pub struct ProgramAttachmentHit {
     pub name: String,
     pub path: String,
     pub is_image: bool,
+    /// Per-instance expansion key (line hash, index within line).
+    pub key: (u64, usize),
 }
 
 impl ProgramAttachmentHit {
@@ -1737,8 +1739,13 @@ pub struct App {
     pub attachment_images:
         HashMap<String, (std::time::SystemTime, Option<std::sync::Arc<image::RgbaImage>>)>,
     /// Live drag state for resizing an expanded inline attachment image:
-    /// (attachment path, on-screen row of the image block's top).
-    pub resizing_program_attachment: Option<(String, u16)>,
+    /// (instance key, on-screen row of the image block's top).
+    pub resizing_program_attachment: Option<((u64, usize), u16)>,
+    /// Persisted per-session expansion state (spec 0099): session id →
+    /// ("linehash:idx" → rows). Loaded lazily from the TUI state file on
+    /// first program open; written through on every toggle/resize.
+    pub program_expanded_store: HashMap<String, HashMap<String, u16>>,
+    pub program_expanded_store_loaded: bool,
     /// Adapter/file-backed dynamic UI panels, keyed by session id then panel id.
     /// Actions route back as normal session input.
     pub ui_panels: HashMap<String, HashMap<String, construct_protocol::UiPanel>>,
@@ -2264,10 +2271,11 @@ pub struct ProgramPopup {
     pub selection: Option<ProgramSelection>,
     pub selection_menu: Option<ProgramSelectionMenu>,
     pub smart_clip: Option<ProgramSmartClipSearch>,
-    /// Image links currently expanded inline, keyed by target path → block
-    /// height in body rows. Client-local view state (spec 0099): never
-    /// persisted, synced, or written into the Markdown.
-    pub expanded_attachments: HashMap<String, u16>,
+    /// Image links currently expanded inline, keyed by link instance
+    /// (line-content hash, index within line) → block height in body rows.
+    /// Client-local view state (spec 0099): persisted per session in the
+    /// TUI's state file, never synced or written into the Markdown.
+    pub expanded_attachments: HashMap<(u64, usize), u16>,
     pub search: Option<ProgramSearch>,
     pub revealed_at: Instant,
     pub hide_after: Instant,
@@ -3324,7 +3332,7 @@ pub struct LayoutSnapshot {
     /// On-screen rects of expanded inline attachment images (spec 0099) from
     /// the last frame, with their target paths. Click inside collapses; a
     /// drag starting on the bottom edge resizes.
-    pub program_attachment_image_rects: Vec<(ratatui::layout::Rect, String)>,
+    pub program_attachment_image_rects: Vec<(ratatui::layout::Rect, (u64, usize), String)>,
     /// Bounds of the pinned clip card (spec 0090) from the last frame, when
     /// one was painted. Clicks inside it are consumed by the card; a left
     /// click landing neither here nor on a session clip dismisses the pin.
@@ -3826,6 +3834,8 @@ async fn run_with_socket_initial_selection(
         pending_tool_approvals: HashMap::new(),
         browser_previews: HashMap::new(),
         attachment_images: HashMap::new(),
+        program_expanded_store: HashMap::new(),
+        program_expanded_store_loaded: false,
         resizing_program_attachment: None,
         ui_panels: HashMap::new(),
         dynamic_ui_popover_open: None,
@@ -8608,7 +8618,7 @@ impl App {
                 });
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some((path, top)) = self.resizing_program_attachment.clone() {
+                if let Some((key, top)) = self.resizing_program_attachment {
                     // Dragging the preview's bottom edge sets the block
                     // height directly from the cursor row (spec 0099).
                     let rows = (ev.row.saturating_sub(top).saturating_add(1)).clamp(
@@ -8616,7 +8626,7 @@ impl App {
                         crate::ui::PROGRAM_ATTACHMENT_MAX_ROWS,
                     );
                     if let Some(popup) = self.program_popup.as_mut() {
-                        popup.expanded_attachments.insert(path, rows);
+                        popup.expanded_attachments.insert(key, rows);
                     }
                     return;
                 }
@@ -8714,7 +8724,11 @@ impl App {
                 self.resizing_matrix_rain = None;
                 self.resizing_main_window = None;
                 self.resizing_lineage = None;
-                self.resizing_program_attachment = None;
+                if self.resizing_program_attachment.take().is_some() {
+                    // The drag adjusted heights on every move; persist the
+                    // final size once, when the drag settles.
+                    self.persist_program_expanded();
+                }
                 if was_resizing {
                     self.text_selection = None;
                     return;
@@ -13017,6 +13031,8 @@ mod tests {
             pending_tool_approvals: HashMap::new(),
             browser_previews: HashMap::new(),
             attachment_images: HashMap::new(),
+            program_expanded_store: HashMap::new(),
+            program_expanded_store_loaded: false,
             resizing_program_attachment: None,
             ui_panels: HashMap::new(),
             dynamic_ui_popover_open: None,
@@ -14575,7 +14591,10 @@ mod tests {
             .as_mut()
             .unwrap()
             .expanded_attachments
-            .insert(img_path.display().to_string(), 5);
+            .insert(
+                (crate::ui::program_line_key(&format!("lead text ![shot]({}) tail", img_path.display())), 0),
+                5,
+            );
         let (a, o) = marker_rows(&mut app);
         assert_eq!(o - a, 7, "expanded image adds exactly its 5 rows");
     }
@@ -14591,9 +14610,10 @@ mod tests {
         let mut popup =
             program_popup_for_test("s1", "alphaword\n![shot](/tmp/shot.png)\nomegaword", 0);
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
-        popup
-            .expanded_attachments
-            .insert("/tmp/shot.png".to_string(), 5);
+        popup.expanded_attachments.insert(
+            (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0),
+            5,
+        );
         app.program_popup = Some(popup);
 
         let backend = ratatui::backend::TestBackend::new(100, 40);
@@ -14662,7 +14682,10 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .expanded_attachments
-                .get("/tmp/shot.png"),
+                .get(&(
+                    crate::ui::program_line_key("note ![shot](/tmp/shot.png) end"),
+                    0
+                )),
             Some(&crate::ui::PROGRAM_ATTACHMENT_DEFAULT_ROWS),
             "first click expands at the default height"
         );
@@ -14686,7 +14709,7 @@ mod tests {
             app.layout.program_attachment_hits.is_empty(),
             "no chip hitbox while expanded"
         );
-        let (rect, _) = app
+        let (rect, _, _) = app
             .layout
             .program_attachment_image_rects
             .first()
@@ -14709,6 +14732,86 @@ mod tests {
         );
     }
 
+    /// Two byte-identical image-link lines expand independently (spec 0099):
+    /// toggling the first leaves the second collapsed.
+    #[tokio::test]
+    async fn program_identical_image_lines_expand_independently() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, _server) = empty_app().await;
+        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
+        app.selection = Selection::Session("s1".into());
+        let mut popup = program_popup_for_test(
+            "s1",
+            "![shot](/tmp/shot.png)\nmiddle\n![shot](/tmp/shot.png)",
+            0,
+        );
+        popup.revealed_at = Instant::now() - Duration::from_secs(10);
+        app.program_popup = Some(popup);
+
+        fn render_once(app: &mut App) {
+            let backend = ratatui::backend::TestBackend::new(100, 40);
+            let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+            terminal.draw(|f| crate::ui::render(f, app)).expect("draw");
+        }
+        render_once(&mut app);
+        assert_eq!(
+            app.layout.program_attachment_hits.len(),
+            2,
+            "both instances start as chips"
+        );
+        let first = app.layout.program_attachment_hits[0].clone();
+        let second = app.layout.program_attachment_hits[1].clone();
+        assert_ne!(first.key, second.key, "instances carry distinct keys");
+        app.handle_program_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: first.col_start,
+            row: first.row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+
+        render_once(&mut app);
+        assert_eq!(
+            app.layout.program_attachment_hits.len(),
+            1,
+            "only the second instance still shows a chip"
+        );
+        assert_eq!(app.layout.program_attachment_hits[0].key, second.key);
+        assert_eq!(
+            app.layout.program_attachment_image_rects.len(),
+            1,
+            "exactly one image block renders"
+        );
+    }
+
+    /// Expansion state round-trips through the per-session store: persist
+    /// from one popup, seed a fresh popup for the same session, state
+    /// restored (spec 0099).
+    #[tokio::test]
+    async fn program_expanded_state_roundtrips_through_store() {
+        let (mut app, _dir, _server) = empty_app().await;
+        let key = (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0);
+        let mut popup = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
+        popup.expanded_attachments.insert(key, 9);
+        app.program_popup = Some(popup);
+        app.persist_program_expanded();
+
+        let mut fresh = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
+        app.seed_program_expanded(&mut fresh);
+        assert_eq!(fresh.expanded_attachments.get(&key), Some(&9));
+
+        // Collapsing everything clears the session's entry.
+        app.program_popup
+            .as_mut()
+            .unwrap()
+            .expanded_attachments
+            .clear();
+        app.persist_program_expanded();
+        let mut fresh = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
+        app.seed_program_expanded(&mut fresh);
+        assert!(fresh.expanded_attachments.is_empty());
+    }
+
     /// Vertical caret motion hops over an expanded image's rows instead of
     /// getting stuck remapping into them (spec 0099).
     #[tokio::test]
@@ -14721,7 +14824,10 @@ mod tests {
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
         popup
             .expanded_attachments
-            .insert("/tmp/shot.png".to_string(), 5);
+            .insert(
+                (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0),
+                5,
+            );
         app.program_popup = Some(popup);
 
         // Render once so `program_inner_area` (which vertical motion needs)

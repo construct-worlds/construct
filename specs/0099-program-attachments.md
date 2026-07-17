@@ -32,7 +32,14 @@ Scope: Image and file attachments referenced from a session's program document, 
   one line's height), rendering the image on the rows below instead.
   Expansion state and preview size are **client-local view state**: they
   are never written into the Markdown and never synchronized, so agents
-  and other clients see only the canonical link.
+  and other clients see only the canonical link. A client may persist its
+  own view state (per session) so expansion survives restarts.
+- Expansion state is **per link instance**, not per target path: the same
+  file referenced twice expands independently. Instance identity derives
+  from the link's containing line content (plus duplicate-line ordinal and
+  index within the line) — so ordinary edits elsewhere leave it untouched,
+  breaking a link mid-edit and re-completing it restores its expansion,
+  and editing the line itself resets its instances to chips.
 - Clients expand previews as their architecture allows: a client that
   owns its text rendering may reflow the document around a true inline
   block; a client built on a native text-input surface may anchor the

@@ -360,32 +360,35 @@ impl App {
                 .cloned();
             if let Some(hit) = image_chip {
                 if let Some(popup) = self.program_popup.as_mut() {
-                    if popup.expanded_attachments.remove(&hit.path).is_none() {
-                        popup.expanded_attachments.insert(
-                            hit.path.clone(),
-                            crate::ui::PROGRAM_ATTACHMENT_DEFAULT_ROWS,
-                        );
+                    if popup.expanded_attachments.remove(&hit.key).is_none() {
+                        popup
+                            .expanded_attachments
+                            .insert(hit.key, crate::ui::PROGRAM_ATTACHMENT_DEFAULT_ROWS);
                     }
                 }
+                self.persist_program_expanded();
                 return true;
             }
             let image_rect = self
                 .layout
                 .program_attachment_image_rects
                 .iter()
-                .find(|(r, _)| {
+                .find(|(r, _, _)| {
                     ev.column >= r.x
                         && ev.column < r.x + r.width
                         && ev.row >= r.y
                         && ev.row < r.y + r.height
                 })
                 .cloned();
-            if let Some((rect, path)) = image_rect {
+            if let Some((rect, key, _path)) = image_rect {
                 let bottom = rect.y + rect.height.saturating_sub(1);
                 if ev.row == bottom {
-                    self.resizing_program_attachment = Some((path, rect.y));
-                } else if let Some(popup) = self.program_popup.as_mut() {
-                    popup.expanded_attachments.remove(&path);
+                    self.resizing_program_attachment = Some((key, rect.y));
+                } else {
+                    if let Some(popup) = self.program_popup.as_mut() {
+                        popup.expanded_attachments.remove(&key);
+                    }
+                    self.persist_program_expanded();
                 }
                 return true;
             }
