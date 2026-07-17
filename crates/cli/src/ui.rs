@@ -128,6 +128,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.browser_preview_area = None;
     app.layout.browser_preview_close = None;
     app.layout.terminal_scrollbar = None;
+    app.layout.list_scrollbar = None;
     app.layout.dynamic_ui_action_hits.clear();
     app.layout.dynamic_ui_url_hits.clear();
     app.layout.dynamic_ui_widget_hits.clear();
@@ -2211,6 +2212,62 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_items_area = Some(list_items_area);
     app.layout.list_scroll_offset = visible_start + state.offset();
     app.list_scroll_offset = app.layout.list_scroll_offset;
+    // Session rows keep their full width; the scrollbar is an auto-hidden
+    // background tint over the rightmost column, matching lineage. Hovering
+    // the session-list header or rows reveals it, while lineage/operator
+    // hover does not. An active drag keeps its bar alive until mouse-up.
+    let list_hover_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: list_items_area
+            .y
+            .saturating_add(list_items_area.height)
+            .saturating_sub(area.y),
+    };
+    let show_list_scrollbar = app.session_rows_focused()
+        || app.dragging_list_scrollbar.is_some()
+        || app
+            .mouse_pos
+            .is_some_and(|(mx, my)| contains_rect(list_hover_area, mx, my));
+    if show_list_scrollbar && max_scroll > 0 && list_items_area.width > 0 {
+        let track_h = list_items_area.height as usize;
+        if track_h > 0 {
+            let thumb_h = (track_h * track_h / app_items.len().max(1)).clamp(1, track_h);
+            let max_top = track_h - thumb_h;
+            let top = (app.list_scroll_offset * max_top + max_scroll / 2) / max_scroll;
+            let x = list_items_area.x + list_items_area.width - 1;
+            let track_color = blend_color(Color::Black, app.theme.text, 0.30);
+            let thumb_color = blend_color(Color::Black, app.theme.text, 0.80);
+            app.layout.list_scrollbar = Some(crate::app::ListScrollbarHit {
+                area: Rect {
+                    x,
+                    y: list_items_area.y,
+                    width: 1,
+                    height: track_h as u16,
+                },
+                thumb: Rect {
+                    x,
+                    y: list_items_area.y + top as u16,
+                    width: 1,
+                    height: thumb_h as u16,
+                },
+                max_scroll,
+            });
+            for row in 0..track_h {
+                if let Some(cell) = f.buffer_mut().cell_mut(ratatui::layout::Position {
+                    x,
+                    y: list_items_area.y + row as u16,
+                }) {
+                    cell.set_bg(if row >= top && row < top + thumb_h {
+                        thumb_color
+                    } else {
+                        track_color
+                    });
+                }
+            }
+        }
+    }
     // Hover zones for the harness label of each visible row, for
     // `render_harness_hover_tooltip`. A deliberate second pass (rather than
     // threading a push through the item-building closure above) — recomputes

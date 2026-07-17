@@ -1501,6 +1501,8 @@ pub struct App {
     /// scrollbar thumb. `thumb_grab_offset` is the row delta from the thumb top
     /// to the cursor at mouse-down, so dragging preserves where the user grabbed.
     pub dragging_terminal_scrollbar: Option<(u16, usize)>,
+    /// Session-list scrollbar drag: `(thumb_grab_offset, max_scroll)`.
+    pub dragging_list_scrollbar: Option<(u16, usize)>,
     pub dragging_lineage_scrollbar: Option<(bool, u16, usize)>,
     /// Per-session "last PTY byte" timestamp, updated locally from incoming
     /// Pty events. Used to drive the "session looks busy" spinner via a
@@ -3059,6 +3061,13 @@ pub struct TerminalScrollbarHit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListScrollbarHit {
+    pub area: ratatui::layout::Rect,
+    pub thumb: ratatui::layout::Rect,
+    pub max_scroll: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineageScrollbarHit {
     pub area: ratatui::layout::Rect,
     pub thumb: ratatui::layout::Rect,
@@ -3204,6 +3213,9 @@ pub struct LayoutSnapshot {
     /// last render so click-to-row mapping stays correct when the
     /// list overflows its visible area.
     pub list_scroll_offset: usize,
+    /// Auto-hidden vertical scrollbar over the rightmost column of the
+    /// session rows, when the list overflows and is focused or hovered.
+    pub list_scrollbar: Option<ListScrollbarHit>,
     /// Clickable shortcut labels in the last frame (minibuffer hints,
     /// empty-state onboarding shortcuts). Empty when a minibuffer prompt
     /// (palette / send-input / etc.) is open for minibuffer hints, but may
@@ -3800,6 +3812,7 @@ async fn run_with_socket_initial_selection(
         orchestrator_panel_h: persisted.orchestrator_panel_h,
         resizing_orchestrator_panel: None,
         dragging_terminal_scrollbar: None,
+        dragging_list_scrollbar: None,
         dragging_lineage_scrollbar: None,
         pty_activity: HashMap::new(),
         start_instant: now,
@@ -8307,6 +8320,7 @@ impl App {
             && self.resizing_program_popup.is_none()
             && self.resizing_lineage.is_none()
             && self.dragging_terminal_scrollbar.is_none()
+            && self.dragging_list_scrollbar.is_none()
             && self.dragging_lineage_scrollbar.is_none()
             && self.text_selection.is_none()
             && self.mouse_over_tutorial_card(ev.column, ev.row);
@@ -8337,6 +8351,7 @@ impl App {
             && self.resizing_main_window.is_none()
             && self.resizing_lineage.is_none()
             && self.dragging_terminal_scrollbar.is_none()
+            && self.dragging_list_scrollbar.is_none()
             && self.dragging_lineage_scrollbar.is_none()
             && self.text_selection.is_none()
             && !card_owns_event
@@ -8541,6 +8556,9 @@ impl App {
                 if self.begin_terminal_scrollbar_drag_or_jump(ev.column, ev.row) {
                     return;
                 }
+                if self.begin_list_scrollbar_drag_or_jump(ev.column, ev.row) {
+                    return;
+                }
                 if self.begin_lineage_scrollbar_drag_or_jump(ev.column, ev.row) {
                     return;
                 }
@@ -8661,6 +8679,8 @@ impl App {
                 } else if let Some((grab_offset, max_scrollback)) = self.dragging_terminal_scrollbar
                 {
                     self.drag_terminal_scrollbar_to_row(ev.row, grab_offset, max_scrollback);
+                } else if let Some((grab, max_scroll)) = self.dragging_list_scrollbar {
+                    self.drag_list_scrollbar_to_row(ev.row, grab, max_scroll);
                 } else if let Some((horizontal, grab, max_scroll)) = self.dragging_lineage_scrollbar
                 {
                     self.drag_lineage_scrollbar_to(ev.column, ev.row, horizontal, grab, max_scroll);
@@ -8682,6 +8702,7 @@ impl App {
                     || self.resizing_pin_strip.is_some()
                     || self.resizing_orchestrator_panel.is_some()
                     || self.dragging_terminal_scrollbar.is_some()
+                    || self.dragging_list_scrollbar.is_some()
                     || self.dragging_lineage_scrollbar.is_some()
                     || self.resizing_matrix_rain.is_some()
                     || self.resizing_main_window.is_some()
@@ -8691,6 +8712,7 @@ impl App {
                 self.resizing_pin_strip = None;
                 self.resizing_orchestrator_panel = None;
                 self.dragging_terminal_scrollbar = None;
+                self.dragging_list_scrollbar = None;
                 self.dragging_lineage_scrollbar = None;
                 self.resizing_matrix_rain = None;
                 self.resizing_main_window = None;
@@ -12804,6 +12826,7 @@ mod tests {
             list_row_count: 0,
             list_items_area: None,
             list_scroll_offset: 0,
+            list_scrollbar: None,
             shortcut_hints: Vec::new(),
             tutorial_card_area: None,
             minibuffer_harness_hits: Vec::new(),
@@ -12946,6 +12969,7 @@ mod tests {
             orchestrator_panel_h: None,
             resizing_orchestrator_panel: None,
             dragging_terminal_scrollbar: None,
+            dragging_list_scrollbar: None,
             dragging_lineage_scrollbar: None,
             pty_activity: HashMap::new(),
             start_instant: now,
@@ -27910,6 +27934,64 @@ mod tests {
         summary.has_pty = true;
         let app = test_app(client, vec![summary]);
         (app, dir, server)
+    }
+
+    #[tokio::test]
+    async fn session_list_scrollbar_auto_hides_and_supports_track_clicks() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = captured_app().await;
+        for i in 2..=40 {
+            let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+            session.id = format!("s{i}");
+            app.sessions.push(session);
+        }
+        let backend = ratatui::backend::TestBackend::new(120, 28);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+
+        // View focus and a pointer outside the sidebar leave the overflowing
+        // list at rest with no scrollbar chrome.
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let rows = app.layout.list_items_area.expect("session rows");
+        assert!(app.sessions.len() > rows.height as usize, "premise: overflow");
+        assert!(app.layout.list_scrollbar.is_none());
+
+        // Hover anywhere in the list's header/rows region reveals it without
+        // changing the rows geometry.
+        let list = app.layout.list_area.expect("list pane");
+        app.mouse_pos = Some((list.x + 2, list.y));
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.layout.list_scrollbar.is_some());
+        assert_eq!(app.layout.list_items_area, Some(rows));
+
+        let view = app.layout.view_area.expect("view pane");
+        app.mouse_pos = Some((view.x + 1, view.y + 1));
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.layout.list_scrollbar.is_none());
+
+        // Active session-row focus reveals the bar even with the pointer out.
+        app.focus = PaneFocus::List;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let bar = app.layout.list_scrollbar.expect("focused scrollbar");
+
+        // Clicking near the track's bottom jumps the viewport toward the end.
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: bar.area.x,
+            row: bar.area.y + bar.area.height - 1,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        assert!(app.list_scroll_offset > 0, "track click scrolls the list");
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: bar.area.x,
+            row: bar.area.y + bar.area.height - 1,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        assert!(app.dragging_list_scrollbar.is_none());
+        server.abort();
     }
 
     async fn empty_app() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
