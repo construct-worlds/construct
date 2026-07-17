@@ -10882,15 +10882,23 @@ fn render_program_attachment_images(
                 rect
             }
         };
-        // Persistent resize handle on the image's bottom edge — hover-only
-        // affordances never show in terminals without any-motion mouse
-        // reporting (macOS Terminal.app), so the cue must always be
-        // painted. The grab zone is the marker's row plus the row below,
-        // so the drag doesn't demand single-row aim.
+        // Resize handle marker, centered on the image's bottom edge. Shown
+        // on hover in terminals that report mouse motion; always shown in
+        // terminals that don't (macOS Terminal.app never sends motion, so a
+        // hover-gated cue would simply never appear there). The grab zone
+        // is the marker's row plus the row below, so the drag doesn't
+        // demand single-row aim.
         let handle_row = draw.y + draw.height.saturating_sub(1);
+        let hovering = app.mouse_pos.is_some_and(|(mx, my)| {
+            mx >= draw.x
+                && mx < draw.x + draw.width
+                && my >= draw.y
+                && my <= handle_row.saturating_add(1)
+        });
+        let show_marker = !app.mouse_motion_seen || hovering;
         let marker = " ─ ↕ ─ ";
         let marker_w = UnicodeWidthStr::width(marker) as u16;
-        if draw.width > marker_w {
+        if show_marker && draw.width > marker_w {
             let marker_rect = Rect {
                 x: draw.x + (draw.width - marker_w) / 2,
                 y: handle_row,
