@@ -189,7 +189,10 @@ newest state if Bluetooth applies backpressure. Avoiding a continuous external
 clock and bounding the actual parameter workload keeps Bluetooth MIDI traffic
 low enough for long-running use. If CoreMIDI reports a failed scene or
 transport send, Construct retains that desired global state and retries every
-two seconds until it succeeds.
+two seconds until it succeeds. Construct also reasserts the global state every
+two seconds after reported success so a silently dropped Bluetooth packet
+self-recovers. Running transport is reasserted with MIDI Continue rather than
+Start, preserving the playhead.
 Scene defaults can be edited in `midi.toml`:
 
 ```toml

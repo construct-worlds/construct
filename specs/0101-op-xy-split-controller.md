@@ -99,8 +99,11 @@ for a frame remain batched into one packet. State updates queued while the
 transport is busy are coalesced to the newest snapshot so stale scene,
 transport, mixer, and synth states are never replayed after backpressure clears.
 Failed global scene or transport sends retain their desired state and retry at
-a bounded two-second interval; a transient CoreMIDI error must not permanently
-freeze global feedback.
+a bounded two-second interval. The desired global state is also reasserted at
+that interval after reported success because Bluetooth delivery is not
+acknowledged: scenes are resent, stopped transport receives Stop again, and
+running transport receives Continue so its playhead is not reset. A transient
+or silently dropped CoreMIDI send must not permanently freeze global feedback.
 Construct does not stream MIDI clock because OP-XY can start its sequencer from
 its internal clock, and sustained clock plus per-track packets can lock its BLE
 receive path until the device is power-cycled.

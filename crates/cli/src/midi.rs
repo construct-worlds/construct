@@ -1001,6 +1001,7 @@ const FEEDBACK_MIN_FRAME_PERIOD: std::time::Duration =
     std::time::Duration::from_millis(200);
 const FEEDBACK_MAX_CC_MESSAGES_PER_SECOND: u32 = 16;
 const FEEDBACK_RETRY_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
+const FEEDBACK_REASSERT_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn feedback_activity_message_count(snapshot: FeedbackSnapshot) -> u32 {
     (snapshot.active_slots | snapshot.attention_slots).count_ones()
@@ -1032,7 +1033,7 @@ fn feedback_loop(
     let mut snapshot = FeedbackSnapshot::default();
     let mut transport_started = None;
     let mut sent_fleet = None;
-    let mut next_fleet_retry = std::time::Instant::now();
+    let mut next_fleet_send = std::time::Instant::now();
     let mut volume_frame = 0usize;
     let mut next_volume_frame = std::time::Instant::now();
     send_slot_volumes(&mut connection, u8::MAX, 0);
@@ -1048,7 +1049,7 @@ fn feedback_loop(
                 }
                 if next.fleet != snapshot.fleet {
                     sent_fleet = None;
-                    next_fleet_retry = std::time::Instant::now();
+                    next_fleet_send = std::time::Instant::now();
                 }
                 if next.active_slots != snapshot.active_slots
                     || next.attention_slots != snapshot.attention_slots
@@ -1084,16 +1085,19 @@ fn feedback_loop(
             }
         }
         let now = std::time::Instant::now();
-        if sent_fleet != Some(snapshot.fleet) && now >= next_fleet_retry {
+        if now >= next_fleet_send {
+            let reassert = sent_fleet == Some(snapshot.fleet);
             if send_fleet_state(
                 &mut connection,
                 snapshot.fleet,
                 &mut transport_started,
                 &config,
+                reassert,
             ) {
                 sent_fleet = Some(snapshot.fleet);
+                next_fleet_send = now + FEEDBACK_REASSERT_PERIOD;
             } else {
-                next_fleet_retry = now + FEEDBACK_RETRY_PERIOD;
+                next_fleet_send = now + FEEDBACK_RETRY_PERIOD;
             }
         }
         let any_activity = snapshot.active_slots
@@ -1262,6 +1266,7 @@ fn send_fleet_state(
     fleet: FeedbackState,
     transport_started: &mut Option<bool>,
     config: &OpXyFeedbackConfig,
+    reassert: bool,
 ) -> bool {
     let scene = if fleet.needs_attention() {
         config.attention_scene
@@ -1270,10 +1275,8 @@ fn send_fleet_state(
     };
     let scene_sent = send_scene(connection, scene);
     let should_start = fleet.is_active();
-    let transport_sent = if *transport_started == Some(should_start) {
-        true
-    } else {
-        let status = if should_start { 0xFA } else { 0xFC };
+    let transport_status = fleet_transport_status(fleet, *transport_started, reassert);
+    let transport_sent = if let Some(status) = transport_status {
         match connection.send(&[status]) {
             Ok(()) => {
                 *transport_started = Some(should_start);
@@ -1281,8 +1284,27 @@ fn send_fleet_state(
             }
             Err(_) => false,
         }
+    } else {
+        true
     };
     scene_sent && transport_sent
+}
+
+fn fleet_transport_status(
+    fleet: FeedbackState,
+    transport_started: Option<bool>,
+    reassert: bool,
+) -> Option<u8> {
+    let should_start = fleet.is_active();
+    if reassert {
+        // MIDI Continue reasserts a running transport without resetting the
+        // OP-XY playhead like another Start would. Stop is safe to repeat.
+        Some(if should_start { 0xFB } else { 0xFC })
+    } else if transport_started == Some(should_start) {
+        None
+    } else {
+        Some(if should_start { 0xFA } else { 0xFC })
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1815,6 +1837,30 @@ mod tests {
             assert_eq!(state.is_active(), active, "{state:?}");
             assert_eq!(state.needs_attention(), attention, "{state:?}");
         }
+    }
+
+    #[test]
+    fn fleet_transport_reassertion_uses_continue_without_resetting_playhead() {
+        assert_eq!(
+            fleet_transport_status(FeedbackState::Working, None, false),
+            Some(0xFA),
+            "a transition into activity starts from the beginning"
+        );
+        assert_eq!(
+            fleet_transport_status(FeedbackState::AttentionWorking, Some(true), false),
+            None,
+            "an attention-only scene transition leaves running transport alone"
+        );
+        assert_eq!(
+            fleet_transport_status(FeedbackState::AttentionWorking, Some(true), true),
+            Some(0xFB),
+            "a periodic running reassertion uses Continue instead of Start"
+        );
+        assert_eq!(
+            fleet_transport_status(FeedbackState::AttentionIdle, Some(false), true),
+            Some(0xFC),
+            "a periodic idle reassertion repeats Stop"
+        );
     }
 
     #[test]
