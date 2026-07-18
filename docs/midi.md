@@ -152,13 +152,17 @@ numbers as the one-based numbers shown on the device. By default,
 every non-archived user session, including sessions without a `[N]` mapping.
 Set it to `"mapped"` to aggregate only the eight sessions assigned to
 `[1]`–`[8]`, independent of TUI focus. Subagents and orchestrator/system
-sessions do not contribute. Construct sends immediate scene changes using CC
-85. Scene and transport encode attention and activity independently:
+sessions do not contribute. In the default all-session scope, transport uses
+the same live activity signal as Matrix Rain: an active agent or recent PTY
+output. Stale persisted `running` records therefore do not hold the sequencer
+on. The mapped scope uses the assigned sessions' pending/running states.
+Construct sends immediate scene changes using CC 85. Scene and transport encode
+attention and activity independently:
 
 - Scene 1 with MIDI Stop when no included session is active or needs attention.
-- Scene 1 with MIDI Start when one or more included sessions are pending or running
+- Scene 1 with MIDI Start when one or more included sessions are active
   and none needs attention.
-- Scene 2 with MIDI Start when one or more included sessions are pending or running
+- Scene 2 with MIDI Start when one or more included sessions are active
   and one or more needs attention.
 - Scene 2 with MIDI Stop when one or more included sessions need attention but none
   is pending or running.

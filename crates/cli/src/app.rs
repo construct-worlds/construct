@@ -257,6 +257,27 @@ pub(crate) fn is_matrix_rain_activity_session(s: &SessionSummary) -> bool {
     !s.archived && is_user_list_session(s)
 }
 
+pub(crate) fn is_matrix_rain_session_active(
+    session: &SessionSummary,
+    agent_statuses: &HashMap<String, construct_protocol::AgentStatus>,
+    pty_activity: &HashMap<String, Instant>,
+    now: Instant,
+) -> bool {
+    if !is_matrix_rain_activity_session(session) {
+        return false;
+    }
+    let active_agent = agent_statuses
+        .get(&session.id)
+        .map(|status| status.active)
+        .unwrap_or(false);
+    let recent_live_pty = pty_activity
+        .get(&session.id)
+        .and_then(|at| now.checked_duration_since(*at))
+        .map(|elapsed| elapsed.as_millis() < 900)
+        .unwrap_or(false);
+    active_agent || recent_live_pty
+}
+
 fn is_subagent_session(s: &SessionSummary) -> bool {
     matches!(s.kind, construct_protocol::SessionKind::Subagent)
 }
@@ -4884,15 +4905,18 @@ fn op_xy_slot_feedback_state(active_slots: u8, attention_slots: u8) -> crate::mi
     }
 }
 
-fn op_xy_all_feedback_state(sessions: &[SessionSummary]) -> crate::midi::FeedbackState {
-    use construct_protocol::SessionState;
+fn op_xy_all_feedback_state(
+    sessions: &[SessionSummary],
+    agent_statuses: &HashMap<String, construct_protocol::AgentStatus>,
+    pty_activity: &HashMap<String, Instant>,
+    now: Instant,
+) -> crate::midi::FeedbackState {
     let (active, attention) = sessions
         .iter()
         .filter(|session| is_matrix_rain_activity_session(session))
         .fold((false, false), |(active, attention), session| {
             (
-                active
-                    || matches!(session.state, SessionState::Pending | SessionState::Running),
+                active || is_matrix_rain_session_active(session, agent_statuses, pty_activity, now),
                 attention || session.needs_attention,
             )
         });
@@ -11048,7 +11072,12 @@ impl App {
             crate::midi::OpXyAggregateScope::Mapped => {
                 op_xy_slot_feedback_state(active_slots, attention_slots)
             }
-            crate::midi::OpXyAggregateScope::All => op_xy_all_feedback_state(&self.sessions),
+            crate::midi::OpXyAggregateScope::All => op_xy_all_feedback_state(
+                &self.sessions,
+                &self.agent_statuses,
+                &self.pty_activity,
+                Instant::now(),
+            ),
         };
         crate::midi::FeedbackSnapshot {
             fleet,
@@ -13897,7 +13926,7 @@ mod tests {
     }
 
     #[test]
-    fn op_xy_all_feedback_uses_matrix_rain_session_scope() {
+    fn op_xy_all_feedback_uses_matrix_rain_live_activity() {
         let mut mapped = summary_with_kind(construct_protocol::SessionKind::User);
         mapped.state = construct_protocol::SessionState::Done;
 
@@ -13911,9 +13940,40 @@ mod tests {
         let mut subagent = summary_with_kind(construct_protocol::SessionKind::Subagent);
         subagent.needs_attention = true;
 
+        let sessions = [mapped, unmapped.clone(), archived, subagent];
+        let mut agent_statuses = HashMap::new();
+        let mut pty_activity = HashMap::new();
+        let now = Instant::now();
         assert_eq!(
-            op_xy_all_feedback_state(&[mapped, unmapped, archived, subagent]),
+            op_xy_all_feedback_state(&sessions, &agent_statuses, &pty_activity, now),
+            crate::midi::FeedbackState::Idle,
+            "a stale persisted Running state is not live Matrix Rain activity"
+        );
+
+        agent_statuses.insert(
+            unmapped.id.clone(),
+            construct_protocol::AgentStatus {
+                active: true,
+                started_at_ms: 1,
+                status: "working".into(),
+            },
+        );
+        assert_eq!(
+            op_xy_all_feedback_state(&sessions, &agent_statuses, &pty_activity, now),
             crate::midi::FeedbackState::Working
+        );
+
+        agent_statuses.get_mut(&unmapped.id).unwrap().active = false;
+        pty_activity.insert(unmapped.id.clone(), now);
+        assert_eq!(
+            op_xy_all_feedback_state(&sessions, &agent_statuses, &pty_activity, now),
+            crate::midi::FeedbackState::Working,
+            "recent PTY output is live Matrix Rain activity"
+        );
+        pty_activity.insert(unmapped.id, now - Duration::from_secs(1));
+        assert_eq!(
+            op_xy_all_feedback_state(&sessions, &agent_statuses, &pty_activity, now),
+            crate::midi::FeedbackState::Idle
         );
     }
 

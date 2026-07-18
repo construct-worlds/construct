@@ -55,10 +55,12 @@ orchestrator/system sessions never contribute. Unassigned sessions contribute
 only in the all-session scope. Mixer and synth feedback remain mapped to
 hardware slots regardless of aggregate scope. Scene encodes attention:
 Scene 2 is selected when any included session needs attention, otherwise Scene
-1 is selected. Transport independently encodes activity: it runs when any
-included session is pending or running and stops otherwise. The four possible
-combinations are therefore Scene 1 stopped, Scene 1 running, Scene 2 stopped,
-and Scene 2 running.
+1 is selected. Transport independently encodes activity. The all-session scope
+uses Matrix Rain's live signal—an active agent or recent PTY output—so a stale
+persisted Running state cannot hold transport on. The mapped scope uses the
+resolved sessions' pending/running states. The four possible combinations are
+therefore Scene 1 stopped, Scene 1 running, Scene 2 stopped, and Scene 2
+running.
 Construct supplies MIDI real-time Start/Stop while OP-XY retains its internal
 clock. Session-state and attention-marker changes update feedback as part of
 handling the event that changed them; feedback must not depend on an animation
