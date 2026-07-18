@@ -4796,7 +4796,7 @@ async fn run_loop(
         // focused session's state and attention marker must reach OP-XY as
         // soon as the notification that changed them has been applied.
         if let Some(feedback) = midi_feedback.as_ref() {
-            feedback.update(app.op_xy_feedback_state());
+            feedback.update(app.op_xy_feedback_snapshot());
         }
     }
     Ok(())
@@ -4863,6 +4863,29 @@ fn op_xy_session_feedback_state(session: Option<&SessionSummary>) -> crate::midi
     } else {
         crate::midi::FeedbackState::Idle
     }
+}
+
+fn op_xy_attention_slot_mask(
+    sessions: &[SessionSummary],
+    slots: &[Option<String>],
+) -> u8 {
+    slots
+        .iter()
+        .take(8)
+        .enumerate()
+        .fold(0u8, |mask, (slot, session_id)| {
+            let needs_attention = session_id.as_ref().is_some_and(|session_id| {
+                sessions
+                    .iter()
+                    .find(|session| session.id == *session_id)
+                    .is_some_and(|session| session.needs_attention)
+            });
+            if needs_attention {
+                mask | (1 << slot)
+            } else {
+                mask
+            }
+        })
 }
 
 impl App {
@@ -10733,6 +10756,14 @@ impl App {
         op_xy_session_feedback_state(self.selected_session())
     }
 
+    pub(crate) fn op_xy_feedback_snapshot(&self) -> crate::midi::FeedbackSnapshot {
+        let slots = self.resolved_op_xy_session_slots();
+        crate::midi::FeedbackSnapshot {
+            focused: self.op_xy_feedback_state(),
+            attention_slots: op_xy_attention_slot_mask(&self.sessions, &slots),
+        }
+    }
+
     fn resolved_op_xy_session_slots(&self) -> Vec<Option<String>> {
         named_op_xy_session_slots(&self.sessions)
     }
@@ -13514,6 +13545,33 @@ mod tests {
         assert_eq!(
             op_xy_session_feedback_state(None),
             crate::midi::FeedbackState::Idle
+        );
+    }
+
+    #[test]
+    fn op_xy_attention_volume_slots_follow_named_session_attention_dots() {
+        let mut first = summary_with_kind(construct_protocol::SessionKind::User);
+        first.id = "first".into();
+        first.needs_attention = true;
+        let mut eighth = summary_with_kind(construct_protocol::SessionKind::User);
+        eighth.id = "eighth".into();
+        eighth.needs_attention = true;
+        let mut quiet = summary_with_kind(construct_protocol::SessionKind::User);
+        quiet.id = "quiet".into();
+
+        let slots = vec![
+            Some(first.id.clone()),
+            Some(quiet.id.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(eighth.id.clone()),
+        ];
+        assert_eq!(
+            op_xy_attention_slot_mask(&[first, eighth, quiet], &slots),
+            0b1000_0001
         );
     }
 

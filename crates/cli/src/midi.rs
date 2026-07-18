@@ -87,6 +87,22 @@ pub(crate) enum FeedbackState {
     Attention,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FeedbackSnapshot {
+    pub focused: FeedbackState,
+    /// Bit 0 is session slot `[1]`; bit 7 is session slot `[8]`.
+    pub attention_slots: u8,
+}
+
+impl Default for FeedbackSnapshot {
+    fn default() -> Self {
+        Self {
+            focused: FeedbackState::Idle,
+            attention_slots: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct OpXyFeedbackConfig {
@@ -627,8 +643,8 @@ fn op_xy_learn(_requested_device: Option<&str>) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 pub(crate) struct MidiFeedback {
-    tx: std_mpsc::Sender<FeedbackState>,
-    last_state: std::cell::Cell<FeedbackState>,
+    tx: std_mpsc::Sender<FeedbackSnapshot>,
+    last_snapshot: std::cell::Cell<FeedbackSnapshot>,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -636,16 +652,16 @@ pub(crate) struct MidiFeedback;
 
 #[cfg(target_os = "macos")]
 impl MidiFeedback {
-    pub(crate) fn update(&self, state: FeedbackState) {
-        if self.last_state.replace(state) != state {
-            let _ = self.tx.send(state);
+    pub(crate) fn update(&self, snapshot: FeedbackSnapshot) {
+        if self.last_snapshot.replace(snapshot) != snapshot {
+            let _ = self.tx.send(snapshot);
         }
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 impl MidiFeedback {
-    pub(crate) fn update(&self, _state: FeedbackState) {}
+    pub(crate) fn update(&self, _snapshot: FeedbackSnapshot) {}
 }
 
 #[cfg(target_os = "macos")]
@@ -670,7 +686,7 @@ pub(crate) fn start_feedback() -> Result<Option<MidiFeedback>> {
         .context("spawn MIDI feedback thread")?;
     Ok(Some(MidiFeedback {
         tx,
-        last_state: std::cell::Cell::new(FeedbackState::Idle),
+        last_snapshot: std::cell::Cell::new(FeedbackSnapshot::default()),
     }))
 }
 
@@ -682,25 +698,34 @@ pub(crate) fn start_feedback() -> Result<Option<MidiFeedback>> {
 #[cfg(target_os = "macos")]
 fn feedback_loop(
     mut connection: MidiOutputConnection,
-    rx: std_mpsc::Receiver<FeedbackState>,
+    rx: std_mpsc::Receiver<FeedbackSnapshot>,
     config: OpXyFeedbackConfig,
 ) {
+    const VOLUME_FRAME_PERIOD: std::time::Duration = std::time::Duration::from_millis(75);
+    const BOUNCE: [u8; 16] = [
+        24, 56, 92, 120, 127, 106, 70, 30, 0, 24, 50, 62, 46, 24, 8, 0,
+    ];
     let bpm = config.clock_bpm.clamp(20.0, 300.0);
     let clock_period = std::time::Duration::from_secs_f64(60.0 / bpm / 24.0);
-    let mut state = FeedbackState::Idle;
+    let mut snapshot = FeedbackSnapshot::default();
     let mut started = false;
+    let mut volume_frame = 0usize;
+    let mut next_volume_frame = std::time::Instant::now();
     send_scene(&mut connection, config.normal_scene);
     let _ = connection.send(&[0xFC]);
+    send_attention_volumes(&mut connection, u8::MAX, 0);
     loop {
-        match rx.recv_timeout(if started {
+        let timeout = if started {
             clock_period
+        } else if snapshot.attention_slots != 0 {
+            VOLUME_FRAME_PERIOD
         } else {
             std::time::Duration::from_millis(250)
-        }) {
+        };
+        match rx.recv_timeout(timeout) {
             Ok(next) => {
-                if next != state {
-                    state = next;
-                    match state {
+                if next.focused != snapshot.focused {
+                    match next.focused {
                         FeedbackState::Idle => {
                             send_scene(&mut connection, config.normal_scene);
                             let _ = connection.send(&[0xFC]);
@@ -722,17 +747,48 @@ fn feedback_loop(
                         }
                     }
                 }
+                if next.attention_slots != snapshot.attention_slots {
+                    let cleared = snapshot.attention_slots & !next.attention_slots;
+                    send_attention_volumes(&mut connection, cleared, 0);
+                    volume_frame = 0;
+                    next_volume_frame = std::time::Instant::now();
+                }
+                snapshot = next;
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {}
             Err(std_mpsc::RecvTimeoutError::Disconnected) => {
-                if started {
-                    let _ = connection.send(&[0xFC]);
-                }
+                send_attention_volumes(&mut connection, u8::MAX, 0);
+                let _ = connection.send(&[0xFC]);
                 break;
             }
         }
         if started {
             let _ = connection.send(&[0xF8]);
+        }
+        let now = std::time::Instant::now();
+        if snapshot.attention_slots != 0 && now >= next_volume_frame {
+            send_attention_volumes(
+                &mut connection,
+                snapshot.attention_slots,
+                BOUNCE[volume_frame],
+            );
+            volume_frame = (volume_frame + 1) % BOUNCE.len();
+            next_volume_frame = now + VOLUME_FRAME_PERIOD;
+        }
+    }
+}
+
+fn track_volume_message(slot: usize, value: u8) -> Option<[u8; 3]> {
+    (slot < 8).then_some([0xB0 | slot as u8, 7, value.min(127)])
+}
+
+#[cfg(target_os = "macos")]
+fn send_attention_volumes(connection: &mut MidiOutputConnection, slots: u8, value: u8) {
+    for slot in 0..8 {
+        if slots & (1 << slot) != 0 {
+            if let Some(message) = track_volume_message(slot, value) {
+                let _ = connection.send(&message);
+            }
         }
     }
 }
@@ -1043,23 +1099,38 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn feedback_sender_publishes_only_state_transitions() {
+    fn feedback_sender_publishes_only_snapshot_transitions() {
         let (tx, rx) = std_mpsc::channel();
         let feedback = MidiFeedback {
             tx,
-            last_state: std::cell::Cell::new(FeedbackState::Idle),
+            last_snapshot: std::cell::Cell::new(FeedbackSnapshot::default()),
         };
 
-        feedback.update(FeedbackState::Idle);
+        feedback.update(FeedbackSnapshot::default());
         assert!(rx.try_recv().is_err());
 
-        feedback.update(FeedbackState::Working);
-        assert_eq!(rx.try_recv().unwrap(), FeedbackState::Working);
-        feedback.update(FeedbackState::Working);
+        let working = FeedbackSnapshot {
+            focused: FeedbackState::Working,
+            attention_slots: 0,
+        };
+        feedback.update(working);
+        assert_eq!(rx.try_recv().unwrap(), working);
+        feedback.update(working);
         assert!(rx.try_recv().is_err());
 
-        feedback.update(FeedbackState::Attention);
-        assert_eq!(rx.try_recv().unwrap(), FeedbackState::Attention);
+        let attention = FeedbackSnapshot {
+            focused: FeedbackState::Working,
+            attention_slots: 0b1000_0001,
+        };
+        feedback.update(attention);
+        assert_eq!(rx.try_recv().unwrap(), attention);
+    }
+
+    #[test]
+    fn track_volume_messages_map_slots_to_channels_one_through_eight() {
+        assert_eq!(track_volume_message(0, 127), Some([0xB0, 7, 127]));
+        assert_eq!(track_volume_message(7, 64), Some([0xB7, 7, 64]));
+        assert_eq!(track_volume_message(8, 64), None);
     }
 
     #[test]

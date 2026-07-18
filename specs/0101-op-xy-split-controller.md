@@ -31,6 +31,12 @@ clock while the focused session is running or needs attention. Focus, session
 state, and attention-marker changes update feedback as part of handling the
 event that changed them; feedback must not depend on an animation timer.
 
+Mixer tracks 1–8 are a global attention overview for assigned session slots
+`[1]`–`[8]`, independent of pane focus. A slot without an attention marker has
+track volume zero. A slot with an attention marker repeatedly animates its
+track volume with a damped bounce envelope; simultaneous markers animate
+together. Feedback shutdown resets all eight volumes to zero.
+
 ## Reason
 
 OP-XY Instrument mode exposes linked-track notes, its sequencer, and MIDI

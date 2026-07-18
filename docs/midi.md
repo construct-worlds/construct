@@ -71,6 +71,13 @@ changes using CC 85:
 - Scene 2 with MIDI Start and clock while a non-terminal focused session has
   the blue attention dot.
 
+The OP-XY mixer provides an eight-session attention overview independently of
+the focused-session scene. Mixer tracks 1–8 correspond to title slots
+`[1]`–`[8]`. Construct holds CC 7 (track volume) at zero for slots without a
+blue attention dot. A slot with a blue dot repeatedly follows a damped bounce
+envelope, so its mixer fader visibly bounces. Multiple attention slots animate
+together. Exiting Construct resets all eight track volumes to zero.
+
 While feedback is active Construct sends MIDI Start and a 24-PPQN clock at 120
 BPM so the template's sequencer LEDs animate. These defaults can be edited in
 `midi.toml`:
