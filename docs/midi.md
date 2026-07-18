@@ -103,9 +103,10 @@ all eight track volumes to zero.
 
 Synth tracks 1–4 independently mirror the sessions shown in split panes 1–4,
 using the same idle, running, and attention envelopes. This indicator is based
-on each pane's session rather than keyboard focus. The default target is synth
-parameter 1 (CC 12); choose another CC from the OP-XY track-parameter range
-when the template uses a different engine or preferred visual control.
+on each pane's session rather than keyboard focus. All four primary synth
+parameters move together. Their default targets are CC 12–15; choose another
+starting CC from the OP-XY track-parameter range when the template uses a
+different engine or preferred visual controls.
 
 Construct sends MIDI Start/Stop for transport but deliberately leaves timing to
 the OP-XY's internal clock. Animation updates are limited to five batched packets
@@ -120,6 +121,8 @@ normal_scene = 1
 attention_scene = 2
 split_activity_cc = 12
 ```
+
+`split_activity_cc` is the first of four consecutive parameter CCs.
 
 Scenes store track volume and mute state, so the Construct template should use
 identical volume/mute settings in every feedback scene. Disable MIDI echo on

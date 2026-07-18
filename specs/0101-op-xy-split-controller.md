@@ -42,7 +42,8 @@ Feedback shutdown resets all eight volumes to zero.
 Synth tracks 1–4 are a second, pane-oriented activity display. In visual
 reading order, each track reflects the session shown in its split pane using
 the same idle, running, and attention envelopes, independent of focus. The
-synth-parameter CC is configurable and defaults to parameter 1 (CC 12).
+four primary synth parameters move together. Their starting CC is configurable
+and defaults to parameter 1, producing CC 12–15.
 
 Auxiliary track 3 supplies generic, focus-sensitive navigation on MIDI channel
 10. Absolute CC 2 maps value changes to Up/Down and absolute CC 3 maps changes

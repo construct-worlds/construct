@@ -126,7 +126,7 @@ pub struct OpXyFeedbackConfig {
     /// Scene numbers are written as the one-based numbers shown by OP-XY.
     pub normal_scene: u8,
     pub attention_scene: u8,
-    /// OP-XY synth parameter 1 by default. Track parameters occupy CC 12–47.
+    /// First of four consecutive OP-XY synth parameters. Defaults to CC 12–15.
     pub split_activity_cc: u8,
 }
 
@@ -928,6 +928,13 @@ fn pane_parameter_message(pane: usize, cc: u8, value: u8) -> Option<[u8; 3]> {
     (pane < 4).then_some([0xB0 | pane as u8, cc.min(127), value.min(127)])
 }
 
+const SPLIT_ACTIVITY_PARAMETER_COUNT: u8 = 4;
+
+fn split_activity_ccs(first_cc: u8) -> impl Iterator<Item = u8> {
+    let first_cc = first_cc.min(127 - (SPLIT_ACTIVITY_PARAMETER_COUNT - 1));
+    first_cc..first_cc + SPLIT_ACTIVITY_PARAMETER_COUNT
+}
+
 fn slot_volume_packet(slots: u8, value: u8) -> Vec<u8> {
     let mut packet = Vec::with_capacity(slots.count_ones() as usize * 3);
     for slot in 0..8 {
@@ -950,11 +957,15 @@ fn send_slot_volumes(connection: &mut MidiOutputConnection, slots: u8, value: u8
 
 fn pane_parameter_packet(panes: u8, cc: u8, value: u8) -> Vec<u8> {
     let panes = panes & 0b0000_1111;
-    let mut packet = Vec::with_capacity(panes.count_ones() as usize * 3);
+    let mut packet = Vec::with_capacity(
+        panes.count_ones() as usize * usize::from(SPLIT_ACTIVITY_PARAMETER_COUNT) * 3,
+    );
     for pane in 0..4 {
         if panes & (1 << pane) != 0 {
-            if let Some(message) = pane_parameter_message(pane, cc, value) {
-                packet.extend_from_slice(&message);
+            for parameter_cc in split_activity_ccs(cc) {
+                if let Some(message) = pane_parameter_message(pane, parameter_cc, value) {
+                    packet.extend_from_slice(&message);
+                }
             }
         }
     }
@@ -1000,7 +1011,9 @@ fn activity_pane_packet(
     attention_value: u8,
 ) -> Vec<u8> {
     let visible = (active_panes | attention_panes) & 0b0000_1111;
-    let mut packet = Vec::with_capacity(visible.count_ones() as usize * 3);
+    let mut packet = Vec::with_capacity(
+        visible.count_ones() as usize * usize::from(SPLIT_ACTIVITY_PARAMETER_COUNT) * 3,
+    );
     for pane in 0..4 {
         let bit = 1 << pane;
         let value = if attention_panes & bit != 0 {
@@ -1010,8 +1023,12 @@ fn activity_pane_packet(
         } else {
             None
         };
-        if let Some(message) = value.and_then(|value| pane_parameter_message(pane, cc, value)) {
-            packet.extend_from_slice(&message);
+        if let Some(value) = value {
+            for parameter_cc in split_activity_ccs(cc) {
+                if let Some(message) = pane_parameter_message(pane, parameter_cc, value) {
+                    packet.extend_from_slice(&message);
+                }
+            }
         }
     }
     packet
@@ -1443,11 +1460,17 @@ mod tests {
         );
         assert_eq!(
             pane_parameter_packet(0b0000_1001, 12, 40),
-            vec![0xB0, 12, 40, 0xB3, 12, 40]
+            vec![
+                0xB0, 12, 40, 0xB0, 13, 40, 0xB0, 14, 40, 0xB0, 15, 40, 0xB3, 12, 40,
+                0xB3, 13, 40, 0xB3, 14, 40, 0xB3, 15, 40,
+            ]
         );
         assert_eq!(
             activity_pane_packet(0b0000_1100, 0b0000_1000, 12, 40, 70),
-            vec![0xB2, 12, 40, 0xB3, 12, 70]
+            vec![
+                0xB2, 12, 40, 0xB2, 13, 40, 0xB2, 14, 40, 0xB2, 15, 40, 0xB3, 12, 70,
+                0xB3, 13, 70, 0xB3, 14, 70, 0xB3, 15, 70,
+            ]
         );
     }
 
