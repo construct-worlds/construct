@@ -91,6 +91,7 @@ pub(crate) enum FeedbackState {
 pub(crate) struct FeedbackSnapshot {
     pub focused: FeedbackState,
     /// Bit 0 is session slot `[1]`; bit 7 is session slot `[8]`.
+    pub active_slots: u8,
     pub attention_slots: u8,
 }
 
@@ -98,6 +99,7 @@ impl Default for FeedbackSnapshot {
     fn default() -> Self {
         Self {
             focused: FeedbackState::Idle,
+            active_slots: 0,
             attention_slots: 0,
         }
     }
@@ -702,8 +704,13 @@ fn feedback_loop(
     config: OpXyFeedbackConfig,
 ) {
     const VOLUME_FRAME_PERIOD: std::time::Duration = std::time::Duration::from_millis(75);
-    const BOUNCE: [u8; 16] = [
-        24, 56, 92, 120, 127, 106, 70, 30, 0, 24, 50, 62, 46, 24, 8, 0,
+    // CC 7 is 0–127. Active work moves gently through 25–40%; attention
+    // performs a two-stage damped bounce through 30–70%.
+    const ACTIVE_MOTION: [u8; 16] = [
+        32, 35, 39, 43, 47, 50, 51, 50, 47, 43, 39, 35, 32, 34, 37, 40,
+    ];
+    const ATTENTION_BOUNCE: [u8; 16] = [
+        38, 52, 68, 82, 89, 78, 61, 45, 38, 47, 56, 61, 54, 46, 40, 38,
     ];
     let bpm = config.clock_bpm.clamp(20.0, 300.0);
     let clock_period = std::time::Duration::from_secs_f64(60.0 / bpm / 24.0);
@@ -713,11 +720,11 @@ fn feedback_loop(
     let mut next_volume_frame = std::time::Instant::now();
     send_scene(&mut connection, config.normal_scene);
     let _ = connection.send(&[0xFC]);
-    send_attention_volumes(&mut connection, u8::MAX, 0);
+    send_slot_volumes(&mut connection, u8::MAX, 0);
     loop {
         let timeout = if started {
             clock_period
-        } else if snapshot.attention_slots != 0 {
+        } else if snapshot.active_slots | snapshot.attention_slots != 0 {
             VOLUME_FRAME_PERIOD
         } else {
             std::time::Duration::from_millis(250)
@@ -747,9 +754,12 @@ fn feedback_loop(
                         }
                     }
                 }
-                if next.attention_slots != snapshot.attention_slots {
-                    let cleared = snapshot.attention_slots & !next.attention_slots;
-                    send_attention_volumes(&mut connection, cleared, 0);
+                if next.active_slots != snapshot.active_slots
+                    || next.attention_slots != snapshot.attention_slots
+                {
+                    let previous_visible = snapshot.active_slots | snapshot.attention_slots;
+                    let next_visible = next.active_slots | next.attention_slots;
+                    send_slot_volumes(&mut connection, previous_visible & !next_visible, 0);
                     volume_frame = 0;
                     next_volume_frame = std::time::Instant::now();
                 }
@@ -757,7 +767,7 @@ fn feedback_loop(
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {}
             Err(std_mpsc::RecvTimeoutError::Disconnected) => {
-                send_attention_volumes(&mut connection, u8::MAX, 0);
+                send_slot_volumes(&mut connection, u8::MAX, 0);
                 let _ = connection.send(&[0xFC]);
                 break;
             }
@@ -766,13 +776,15 @@ fn feedback_loop(
             let _ = connection.send(&[0xF8]);
         }
         let now = std::time::Instant::now();
-        if snapshot.attention_slots != 0 && now >= next_volume_frame {
-            send_attention_volumes(
+        if snapshot.active_slots | snapshot.attention_slots != 0 && now >= next_volume_frame {
+            send_activity_volumes(
                 &mut connection,
+                snapshot.active_slots,
                 snapshot.attention_slots,
-                BOUNCE[volume_frame],
+                ACTIVE_MOTION[volume_frame],
+                ATTENTION_BOUNCE[volume_frame],
             );
-            volume_frame = (volume_frame + 1) % BOUNCE.len();
+            volume_frame = (volume_frame + 1) % ACTIVE_MOTION.len();
             next_volume_frame = now + VOLUME_FRAME_PERIOD;
         }
     }
@@ -783,12 +795,35 @@ fn track_volume_message(slot: usize, value: u8) -> Option<[u8; 3]> {
 }
 
 #[cfg(target_os = "macos")]
-fn send_attention_volumes(connection: &mut MidiOutputConnection, slots: u8, value: u8) {
+fn send_slot_volumes(connection: &mut MidiOutputConnection, slots: u8, value: u8) {
     for slot in 0..8 {
         if slots & (1 << slot) != 0 {
             if let Some(message) = track_volume_message(slot, value) {
                 let _ = connection.send(&message);
             }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn send_activity_volumes(
+    connection: &mut MidiOutputConnection,
+    active_slots: u8,
+    attention_slots: u8,
+    active_value: u8,
+    attention_value: u8,
+) {
+    for slot in 0..8 {
+        let bit = 1 << slot;
+        let value = if attention_slots & bit != 0 {
+            Some(attention_value)
+        } else if active_slots & bit != 0 {
+            Some(active_value)
+        } else {
+            None
+        };
+        if let Some(message) = value.and_then(|value| track_volume_message(slot, value)) {
+            let _ = connection.send(&message);
         }
     }
 }
@@ -1111,6 +1146,7 @@ mod tests {
 
         let working = FeedbackSnapshot {
             focused: FeedbackState::Working,
+            active_slots: 0b0000_0001,
             attention_slots: 0,
         };
         feedback.update(working);
@@ -1120,6 +1156,7 @@ mod tests {
 
         let attention = FeedbackSnapshot {
             focused: FeedbackState::Working,
+            active_slots: 0b0000_0001,
             attention_slots: 0b1000_0001,
         };
         feedback.update(attention);

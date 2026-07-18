@@ -4865,27 +4865,35 @@ fn op_xy_session_feedback_state(session: Option<&SessionSummary>) -> crate::midi
     }
 }
 
-fn op_xy_attention_slot_mask(
+fn op_xy_slot_state_masks(
     sessions: &[SessionSummary],
     slots: &[Option<String>],
-) -> u8 {
-    slots
-        .iter()
-        .take(8)
-        .enumerate()
-        .fold(0u8, |mask, (slot, session_id)| {
-            let needs_attention = session_id.as_ref().is_some_and(|session_id| {
-                sessions
-                    .iter()
-                    .find(|session| session.id == *session_id)
-                    .is_some_and(|session| session.needs_attention)
-            });
-            if needs_attention {
-                mask | (1 << slot)
-            } else {
-                mask
-            }
-        })
+) -> (u8, u8) {
+    use construct_protocol::SessionState;
+    slots.iter().take(8).enumerate().fold(
+        (0u8, 0u8),
+        |(active, attention), (slot, session_id)| {
+            let Some(session) = session_id
+                .as_ref()
+                .and_then(|session_id| sessions.iter().find(|session| session.id == *session_id))
+            else {
+                return (active, attention);
+            };
+            let bit = 1 << slot;
+            (
+                if matches!(session.state, SessionState::Pending | SessionState::Running) {
+                    active | bit
+                } else {
+                    active
+                },
+                if session.needs_attention {
+                    attention | bit
+                } else {
+                    attention
+                },
+            )
+        },
+    )
 }
 
 impl App {
@@ -10758,9 +10766,11 @@ impl App {
 
     pub(crate) fn op_xy_feedback_snapshot(&self) -> crate::midi::FeedbackSnapshot {
         let slots = self.resolved_op_xy_session_slots();
+        let (active_slots, attention_slots) = op_xy_slot_state_masks(&self.sessions, &slots);
         crate::midi::FeedbackSnapshot {
             focused: self.op_xy_feedback_state(),
-            attention_slots: op_xy_attention_slot_mask(&self.sessions, &slots),
+            active_slots,
+            attention_slots,
         }
     }
 
@@ -13549,15 +13559,18 @@ mod tests {
     }
 
     #[test]
-    fn op_xy_attention_volume_slots_follow_named_session_attention_dots() {
+    fn op_xy_volume_slots_follow_named_session_activity_and_attention() {
         let mut first = summary_with_kind(construct_protocol::SessionKind::User);
         first.id = "first".into();
+        first.state = construct_protocol::SessionState::AwaitingInput;
         first.needs_attention = true;
         let mut eighth = summary_with_kind(construct_protocol::SessionKind::User);
         eighth.id = "eighth".into();
+        eighth.state = construct_protocol::SessionState::Errored;
         eighth.needs_attention = true;
         let mut quiet = summary_with_kind(construct_protocol::SessionKind::User);
         quiet.id = "quiet".into();
+        quiet.state = construct_protocol::SessionState::Running;
 
         let slots = vec![
             Some(first.id.clone()),
@@ -13570,8 +13583,8 @@ mod tests {
             Some(eighth.id.clone()),
         ];
         assert_eq!(
-            op_xy_attention_slot_mask(&[first, eighth, quiet], &slots),
-            0b1000_0001
+            op_xy_slot_state_masks(&[first, eighth, quiet], &slots),
+            (0b0000_0010, 0b1000_0001)
         );
     }
 
