@@ -10666,17 +10666,10 @@ impl App {
             return;
         }
 
-        let previous_window = self.active_window_id;
-        let previous_focus = self.focus;
-        if window_id != previous_window {
+        if self.focus != PaneFocus::View || self.active_window_id != window_id {
             self.focus_main_window(window_id);
         }
         self.select_session(session_id);
-        if window_id != previous_window {
-            self.focus_main_window(previous_window);
-            self.focus = previous_focus;
-            self.report_focused_sessions();
-        }
         self.set_status(format!(
             "OP-XY pane {} → session slot {}",
             pane + 1,
@@ -10686,29 +10679,20 @@ impl App {
 
     pub(crate) async fn handle_op_xy_event(&mut self, event: crate::midi::OpXyEvent) {
         use crate::midi::OpXyControl;
+        let Some(window_id) = self.op_xy_pane_window_id(event.pane) else {
+            self.set_status(format!("OP-XY pane {} is not visible", event.pane + 1));
+            return;
+        };
+        if self.focus != PaneFocus::View || self.active_window_id != window_id {
+            self.focus_main_window(window_id);
+        }
         match event.control {
             OpXyControl::Session(slot) => self.select_op_xy_slot_in_pane(event.pane, slot),
             OpXyControl::Enter => {
-                let Some(window_id) = self.op_xy_pane_window_id(event.pane) else {
-                    self.set_status(format!("OP-XY pane {} is not visible", event.pane + 1));
-                    return;
-                };
-                if self.focus != PaneFocus::View || self.active_window_id != window_id {
-                    self.focus_main_window(window_id);
-                    self.set_status(format!("focus: OP-XY pane {}", event.pane + 1));
-                } else {
-                    self.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-                        .await;
-                }
+                self.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                    .await;
             }
             control => {
-                let Some(window_id) = self.op_xy_pane_window_id(event.pane) else {
-                    self.set_status(format!("OP-XY pane {} is not visible", event.pane + 1));
-                    return;
-                };
-                if self.focus != PaneFocus::View || self.active_window_id != window_id {
-                    self.focus_main_window(window_id);
-                }
                 let code = match control {
                     OpXyControl::Left => KeyCode::Left,
                     OpXyControl::Down => KeyCode::Down,

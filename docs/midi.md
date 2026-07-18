@@ -54,10 +54,10 @@ Construct detects `[1]` through `[8]` at the beginning of session titles. If
 multiple sessions claim the same number, the one with the latest activity is
 selected.
 
-Pressing a session key places that session in the pane addressed by the
-current OP-XY track without stealing keyboard focus. An arrow key focuses that
-pane and dispatches the corresponding native TUI arrow. The first Enter press
-focuses an unfocused pane; another Enter press acts on the focused pane.
+Every recognized OP-XY key first focuses the pane addressed by the current
+track and then performs its action. Session keys switch that pane's session,
+arrows dispatch the corresponding native TUI arrow, and Enter acts on the now
+focused pane. The reserved sequencer-display no-op does not change focus.
 
 ### Scene feedback
 

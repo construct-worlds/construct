@@ -17,9 +17,9 @@ pane. A reserved sequencer-display note is always consumed as a no-op.
 Session titles beginning with `[1]` through `[8]` assign those sessions to the
 corresponding hardware slots. If multiple titles claim one slot, the session
 with the latest activity wins; creation time breaks the absence of activity,
-and session id makes exact ties deterministic. Selecting a slot changes the
-addressed pane without taking focus. Enter focuses an unfocused addressed pane
-before it can dispatch Enter to that pane.
+and session id makes exact ties deterministic. Every recognized OP-XY control
+first focuses the pane addressed by the selected track and then performs its
+action. The reserved sequencer-display no-op never changes focus.
 
 Feedback is global rather than per-pane. Assigned-session state drives
 preconfigured OP-XY scenes: a working scene while any assigned session runs,
