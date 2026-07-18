@@ -183,10 +183,14 @@ pub enum ListItem {
         indented: bool,
         has_children: bool,
         children_expanded: bool,
+        /// A hidden non-archived descendant needs attention while this row is collapsed.
+        attention_rollup: bool,
     },
     GroupHeader {
         group: GroupSummary,
         member_count: usize,
+        /// A hidden non-archived member or descendant needs attention.
+        attention_rollup: bool,
     },
     /// Expandable "▸ N archived" / "▾ N archived" row that ends a section
     /// (the ungrouped top-level run or a project) when that section has
@@ -6132,6 +6136,32 @@ impl App {
             out
         }
 
+        fn descendants_need_attention<'a>(
+            parent_id: &str,
+            subagents_by_parent: &HashMap<&'a str, Vec<&'a SessionSummary>>,
+            forks_by_parent: &HashMap<&'a str, Vec<&'a SessionSummary>>,
+        ) -> bool {
+            let mut stack = vec![parent_id];
+            let mut visited = HashSet::new();
+            while let Some(id) = stack.pop() {
+                let descendants = subagents_by_parent
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .chain(forks_by_parent.get(id).into_iter().flatten());
+                for descendant in descendants {
+                    if descendant.archived || !visited.insert(descendant.id.as_str()) {
+                        continue;
+                    }
+                    if descendant.needs_attention {
+                        return true;
+                    }
+                    stack.push(descendant.id.as_str());
+                }
+            }
+            false
+        }
+
         fn push_session_tree<'a>(
             out: &mut Vec<ListItem>,
             s: &SessionSummary,
@@ -6149,11 +6179,18 @@ impl App {
                 .unwrap_or(false);
             let has_children = has_subagents || has_forks;
             let children_expanded = has_children && !collapsed.contains(&s.id);
+            let attention_rollup = !children_expanded
+                && descendants_need_attention(
+                    &s.id,
+                    subagents_by_parent,
+                    forks_by_parent,
+                );
             out.push(ListItem::Session {
                 summary: s.clone(),
                 indented,
                 has_children,
                 children_expanded,
+                attention_rollup,
             });
             // Collapsing a session hides everything nested under it —
             // active subagents, active forks, and the archived-children
@@ -6201,6 +6238,7 @@ impl App {
                     indented: true,
                     has_children: false,
                     children_expanded: false,
+                    attention_rollup: false,
                 });
                 if depth >= 8 {
                     continue;
@@ -6236,6 +6274,7 @@ impl App {
                             indented: true,
                             has_children: false,
                             children_expanded: false,
+                            attention_rollup: false,
                         });
                     }
                     for child in archived_children {
@@ -6316,9 +6355,19 @@ impl App {
             members.sort_by_key(|s| s.position);
             let (active, archived): (Vec<&SessionSummary>, Vec<&SessionSummary>) =
                 members.into_iter().partition(|s| !s.archived);
+            let attention_rollup = g.collapsed
+                && active.iter().any(|session| {
+                    session.needs_attention
+                        || descendants_need_attention(
+                            &session.id,
+                            &subagents_by_parent,
+                            &forks_by_parent,
+                        )
+                });
             out.push(ListItem::GroupHeader {
                 group: g.clone(),
                 member_count: active.len(),
+                attention_rollup,
             });
             if !g.collapsed {
                 for s in active {
@@ -34877,6 +34926,7 @@ mod tests {
                 indented,
                 has_children,
                 children_expanded,
+                ..
             } => {
                 assert_eq!(summary.id, "sparent");
                 assert!(!indented);
@@ -34928,6 +34978,110 @@ mod tests {
             }
             _ => panic!("expected collapsed parent session"),
         }
+    }
+
+    #[tokio::test]
+    async fn collapsed_project_and_parent_roll_up_descendant_attention() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut parent = summary_with_kind(construct_protocol::SessionKind::User);
+        parent.id = "parent".into();
+        parent.group_id = Some("project".into());
+        let mut child = summary_with_kind(construct_protocol::SessionKind::Subagent);
+        child.id = "child".into();
+        child.parent_session_id = Some(parent.id.clone());
+        let mut grandchild = summary_with_kind(construct_protocol::SessionKind::Subagent);
+        grandchild.id = "grandchild".into();
+        grandchild.parent_session_id = Some(child.id.clone());
+        grandchild.needs_attention = true;
+        app.sessions = vec![parent, child, grandchild];
+        app.groups = vec![GroupSummary {
+            id: "project".into(),
+            name: "Project".into(),
+            created_at: chrono::Utc::now(),
+            position: 0,
+            collapsed: true,
+        }];
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        let row_text = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, y: u16| {
+            (0..term.backend().buffer().area.width)
+                .map(|x| {
+                    term.backend()
+                        .buffer()
+                        .cell((x, y))
+                        .map(|cell| cell.symbol())
+                        .unwrap_or(" ")
+                })
+                .collect::<String>()
+        };
+
+        assert!(matches!(
+            &app.list_items()[0],
+            ListItem::GroupHeader { attention_rollup: true, .. }
+        ));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("render collapsed project");
+        let rows_y = app.layout.list_items_area.expect("list rows").y;
+        assert!(row_text(&term, rows_y).contains("Project ●"));
+
+        app.groups[0].collapsed = false;
+        let expanded = app.list_items();
+        assert!(matches!(
+            &expanded[0],
+            ListItem::GroupHeader { attention_rollup: false, .. }
+        ));
+        assert!(matches!(
+            &expanded[1],
+            ListItem::Session {
+                summary,
+                children_expanded: true,
+                attention_rollup: false,
+                ..
+            } if summary.id == "parent"
+        ));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("render expanded project");
+        assert!(!row_text(&term, rows_y).contains('●'));
+        assert!(
+            row_text(&term, rows_y + 3).contains('●'),
+            "expanded tree identifies the grandchild as the attention source"
+        );
+
+        app.children_collapsed.insert("parent".into());
+        let parent_collapsed = app.list_items();
+        assert!(matches!(
+            &parent_collapsed[1],
+            ListItem::Session {
+                summary,
+                children_expanded: false,
+                attention_rollup: true,
+                ..
+            } if summary.id == "parent" && !summary.needs_attention
+        ));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("render collapsed parent");
+        assert!(row_text(&term, rows_y + 1).contains('●'));
+
+        app.children_collapsed.remove("parent");
+        app.sessions
+            .iter_mut()
+            .find(|session| session.id == "parent")
+            .expect("parent session")
+            .needs_attention = true;
+        assert!(matches!(
+            &app.list_items()[1],
+            ListItem::Session {
+                summary,
+                children_expanded: true,
+                attention_rollup: false,
+                ..
+            } if summary.id == "parent" && summary.needs_attention
+        ));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("render expanded parent with its own attention");
+        assert!(row_text(&term, rows_y + 1).contains('●'));
+        server.abort();
     }
 
     #[tokio::test]
