@@ -34,6 +34,11 @@ channel 10. Its existing absolute-encoder controls remain independent of this
 note routing. Auxiliary 2 is reserved for OP-XY's internal Punch-In FX engine
 and does not emit a native MIDI control stream for Construct.
 
+The Auxiliary 3 scroll encoder follows TUI focus. A focused sidebar scrolls its
+session rows or lineage diagram, a focused document or dynamic panel scrolls
+its own content, and a focused session scrolls chat or terminal history. It
+must not route every scroll event to the session pane regardless of focus.
+
 Scene and transport feedback aggregate the eight sessions resolved into
 `[1]`–`[8]` hardware slots independently of TUI focus. Hidden, archived,
 program, and unassigned sessions do not contribute. Scene encodes attention:
