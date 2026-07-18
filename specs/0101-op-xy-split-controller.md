@@ -29,11 +29,12 @@ track octaves, so adding prompts does not require relearning the controller.
 
 Scene and transport feedback aggregate the eight sessions resolved into
 `[1]`–`[8]` hardware slots independently of TUI focus. Hidden, archived,
-program, and unassigned sessions do not contribute. If any assigned
-non-terminal session needs attention, Scene 2 runs and takes precedence over
-ordinary activity. Otherwise, if any assigned session is pending or running,
-Scene 1 runs. When neither condition exists, Scene 1 is stopped.
-Terminal state takes precedence over a stale attention marker on that session.
+program, and unassigned sessions do not contribute. Scene encodes attention:
+Scene 2 is selected when any assigned session needs attention, otherwise Scene
+1 is selected. Transport independently encodes activity: it runs when any
+assigned session is pending or running and stops otherwise. The four possible
+combinations are therefore Scene 1 stopped, Scene 1 running, Scene 2 stopped,
+and Scene 2 running.
 Construct supplies MIDI real-time Start/Stop while OP-XY retains its internal
 clock. Session-state and attention-marker changes update feedback as part of
 handling the event that changed them; feedback must not depend on an animation

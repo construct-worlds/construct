@@ -4857,24 +4857,23 @@ fn op_xy_session_feedback_state(session: Option<&SessionSummary>) -> crate::midi
     let Some(session) = session else {
         return crate::midi::FeedbackState::Idle;
     };
-    if session.state.is_terminal() {
-        crate::midi::FeedbackState::Idle
-    } else if session.needs_attention {
-        crate::midi::FeedbackState::Attention
-    } else if matches!(session.state, SessionState::Pending | SessionState::Running) {
-        crate::midi::FeedbackState::Working
-    } else {
-        crate::midi::FeedbackState::Idle
+    match (
+        matches!(session.state, SessionState::Pending | SessionState::Running),
+        session.needs_attention,
+    ) {
+        (false, false) => crate::midi::FeedbackState::Idle,
+        (true, false) => crate::midi::FeedbackState::Working,
+        (false, true) => crate::midi::FeedbackState::AttentionIdle,
+        (true, true) => crate::midi::FeedbackState::AttentionWorking,
     }
 }
 
 fn op_xy_slot_feedback_state(active_slots: u8, attention_slots: u8) -> crate::midi::FeedbackState {
-    if attention_slots != 0 {
-        crate::midi::FeedbackState::Attention
-    } else if active_slots != 0 {
-        crate::midi::FeedbackState::Working
-    } else {
-        crate::midi::FeedbackState::Idle
+    match (active_slots != 0, attention_slots != 0) {
+        (false, false) => crate::midi::FeedbackState::Idle,
+        (true, false) => crate::midi::FeedbackState::Working,
+        (false, true) => crate::midi::FeedbackState::AttentionIdle,
+        (true, true) => crate::midi::FeedbackState::AttentionWorking,
     }
 }
 
@@ -13596,7 +13595,13 @@ mod tests {
         session.needs_attention = true;
         assert_eq!(
             op_xy_session_feedback_state(Some(&session)),
-            crate::midi::FeedbackState::Attention
+            crate::midi::FeedbackState::AttentionWorking
+        );
+
+        session.state = construct_protocol::SessionState::AwaitingInput;
+        assert_eq!(
+            op_xy_session_feedback_state(Some(&session)),
+            crate::midi::FeedbackState::AttentionIdle
         );
 
         session.needs_attention = false;
@@ -13608,8 +13613,7 @@ mod tests {
         session.needs_attention = true;
         assert_eq!(
             op_xy_session_feedback_state(Some(&session)),
-            crate::midi::FeedbackState::Idle,
-            "terminal state takes precedence over a stale attention marker"
+            crate::midi::FeedbackState::AttentionIdle
         );
         assert_eq!(
             op_xy_session_feedback_state(None),
@@ -13618,7 +13622,7 @@ mod tests {
     }
 
     #[test]
-    fn op_xy_feedback_aggregates_assigned_slots_with_attention_precedence() {
+    fn op_xy_feedback_aggregates_assigned_slots_as_independent_bits() {
         assert_eq!(
             op_xy_slot_feedback_state(0, 0),
             crate::midi::FeedbackState::Idle
@@ -13629,7 +13633,11 @@ mod tests {
         );
         assert_eq!(
             op_xy_slot_feedback_state(0b0000_0100, 0b1000_0000),
-            crate::midi::FeedbackState::Attention
+            crate::midi::FeedbackState::AttentionWorking
+        );
+        assert_eq!(
+            op_xy_slot_feedback_state(0, 0b1000_0000),
+            crate::midi::FeedbackState::AttentionIdle
         );
     }
 
