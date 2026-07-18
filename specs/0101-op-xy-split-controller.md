@@ -27,6 +27,12 @@ without submitting it. Empty or missing prompt slots do nothing. Their notes
 are derived from the learned first-black-key anchor and normalized across pane
 track octaves, so adding prompts does not require relearning the controller.
 
+Auxiliary tracks 2 and 3 reuse every learned black- and white-key meaning but
+address the currently focused split pane instead of a track-selected pane.
+Their note channels are configurable and default to MIDI channels 9 and 10.
+The existing Auxiliary 3 absolute-encoder controls remain independent of this
+note routing.
+
 Scene and transport feedback aggregate the eight sessions resolved into
 `[1]`–`[8]` hardware slots independently of TUI focus. Hidden, archived,
 program, and unassigned sessions do not contribute. Scene encodes attention:

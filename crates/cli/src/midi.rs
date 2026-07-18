@@ -87,6 +87,7 @@ pub(crate) struct OpXyEvent {
 pub(crate) enum MidiInputEvent {
     Action(MidiAction),
     OpXy(OpXyEvent),
+    OpXyFocused(OpXyControl),
     OpXyAux(OpXyAuxControl),
 }
 
@@ -157,8 +158,11 @@ impl Default for OpXyFeedbackConfig {
 #[serde(default)]
 pub struct OpXyAuxConfig {
     pub enabled: bool,
-    /// Human-facing MIDI channel used by the OP-XY auxiliary track.
+    /// Human-facing MIDI channel used by the OP-XY auxiliary encoder track.
     pub channel: u8,
+    /// Aux-track note channels whose keys target the currently focused split pane.
+    #[serde(default = "default_op_xy_aux_focused_note_channels")]
+    pub focused_note_channels: Vec<u8>,
     /// Absolute CC for the third encoder.
     pub arrow_cc: u8,
     /// Absolute CC for the fourth encoder.
@@ -170,10 +174,15 @@ impl Default for OpXyAuxConfig {
         Self {
             enabled: true,
             channel: 10,
+            focused_note_channels: default_op_xy_aux_focused_note_channels(),
             arrow_cc: 2,
             scroll_cc: 3,
         }
     }
+}
+
+fn default_op_xy_aux_focused_note_channels() -> Vec<u8> {
+    vec![9, 10]
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -274,6 +283,27 @@ impl OpXyConfig {
         let normalized_note = i16::from(message.number) + i16::from(reference_anchor)
             - i16::from(pane_anchor);
         let normalized_note = u8::try_from(normalized_note).ok().filter(|note| *note <= 127)?;
+        let control = self.control_for_note(normalized_note)?;
+        Some(OpXyEvent { pane, control })
+    }
+
+    fn focused_event_for(&self, message: &MidiMessage) -> Option<OpXyControl> {
+        if !self.enabled
+            || message.kind != MidiMessageKind::Note
+            || !message.pressed
+            || !self.aux.enabled
+            || !self
+                .aux
+                .focused_note_channels
+                .contains(&message.channel)
+        {
+            return None;
+        }
+        self.control_for_note(message.number)
+    }
+
+    fn control_for_note(&self, normalized_note: u8) -> Option<OpXyControl> {
+        let reference_anchor = self.session_notes.first().copied()?;
         if self.no_op_note == Some(normalized_note) {
             return None;
         }
@@ -310,7 +340,7 @@ impl OpXyConfig {
         } else {
             return None;
         };
-        Some(OpXyEvent { pane, control })
+        Some(control)
     }
 }
 
@@ -572,6 +602,13 @@ pub(crate) fn start_listener() -> Result<Option<(MidiListener, MidiEventReceiver
                     let _ = tx.send(MidiInputEvent::OpXy(event));
                     return;
                 }
+                if let Some(control) = op_xy
+                    .as_ref()
+                    .and_then(|profile| profile.focused_event_for(&message))
+                {
+                    let _ = tx.send(MidiInputEvent::OpXyFocused(control));
+                    return;
+                }
                 if let Some(event) = op_xy.as_ref().and_then(|profile| {
                     profile
                         .enabled
@@ -676,8 +713,11 @@ fn print_mappings() -> Result<()> {
         }
         if op_xy.aux.enabled {
             println!(
-                "  aux: channel {}, arrow CC {}, scroll CC {}",
-                op_xy.aux.channel, op_xy.aux.arrow_cc, op_xy.aux.scroll_cc
+                "  aux: encoder channel {}, focused note channels {:?}, arrow CC {}, scroll CC {}",
+                op_xy.aux.channel,
+                op_xy.aux.focused_note_channels,
+                op_xy.aux.arrow_cc,
+                op_xy.aux.scroll_cc
             );
         }
     }
@@ -1381,6 +1421,15 @@ mod tests {
     }
 
     #[test]
+    fn op_xy_aux_existing_config_defaults_focused_note_channels() {
+        let config: OpXyAuxConfig = toml::from_str(
+            "enabled = true\nchannel = 10\narrow_cc = 2\nscroll_cc = 3\n",
+        )
+        .unwrap();
+        assert_eq!(config.focused_note_channels, vec![9, 10]);
+    }
+
+    #[test]
     fn config_round_trips_as_readable_toml() {
         let config = MidiConfig {
             device: Some("OP-XY".into()),
@@ -1564,6 +1613,43 @@ mod tests {
                 control: OpXyControl::Session(3),
             })
         );
+    }
+
+    #[test]
+    fn op_xy_aux_two_and_three_notes_reuse_controls_for_focused_pane() {
+        let mut profile = op_xy_profile();
+        profile.prompt_texts = vec!["focused prompt".into()];
+
+        for channel_status in [0x98, 0x99] {
+            assert_eq!(
+                profile
+                    .focused_event_for(&parse_message(&[channel_status, 56, 100]).unwrap()),
+                Some(OpXyControl::Session(3))
+            );
+            assert_eq!(
+                profile
+                    .focused_event_for(&parse_message(&[channel_status, 48, 100]).unwrap()),
+                Some(OpXyControl::Prompt {
+                    slot: 0,
+                    text: "focused prompt".into(),
+                })
+            );
+            assert_eq!(
+                profile
+                    .focused_event_for(&parse_message(&[channel_status, 60, 100]).unwrap()),
+                Some(OpXyControl::Left)
+            );
+        }
+
+        assert!(profile
+            .focused_event_for(&parse_message(&[0x97, 56, 100]).unwrap())
+            .is_none());
+        assert!(profile
+            .focused_event_for(&parse_message(&[0x88, 56, 0]).unwrap())
+            .is_none());
+        assert!(profile
+            .focused_event_for(&parse_message(&[0x98, 65, 100]).unwrap())
+            .is_none());
     }
 
     #[test]
