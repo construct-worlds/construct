@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-07-17
 Area: tui
-Scope: An OP-XY Instrument-mode template controls four Construct split panes and receives focused-session status feedback.
+Scope: An OP-XY Instrument-mode template controls four Construct split panes and receives aggregate session status feedback.
 
 ## Decision
 
@@ -27,16 +27,15 @@ without submitting it. Empty or missing prompt slots do nothing. Their notes
 are derived from the learned first-black-key anchor and normalized across pane
 track octaves, so adding prompts does not require relearning the controller.
 
-Feedback follows only the currently view-focused session. Scene 1 with stopped
-transport represents terminal or idle state, Scene 1 with running transport
-represents work in progress, and Scene 2 with running transport represents the
-blue attention-dot state for a non-terminal session. Terminal state takes
-precedence over a stale attention marker. List focus or any other absence of a
-view-focused session is idle. Construct supplies MIDI real-time Start/Stop
-transport while the focused session is running or needs attention, while
-OP-XY retains its internal clock. Focus, session
-state, and attention-marker changes update feedback as part of handling the
-event that changed them; feedback must not depend on an animation timer.
+Scene and transport feedback aggregate every session independently of TUI
+focus. If any non-terminal session needs attention, Scene 2 runs and takes
+precedence over ordinary activity. Otherwise, if any session is pending or
+running, Scene 1 runs. When neither condition exists, Scene 1 is stopped.
+Terminal state takes precedence over a stale attention marker on that session.
+Construct supplies MIDI real-time Start/Stop while OP-XY retains its internal
+clock. Session-state and attention-marker changes update feedback as part of
+handling the event that changed them; feedback must not depend on an animation
+timer.
 
 Mixer tracks 1–8 are a global activity overview for assigned session slots
 `[1]`–`[8]`, independent of pane focus. Idle and terminal slots have track

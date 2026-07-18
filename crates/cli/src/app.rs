@@ -4796,7 +4796,7 @@ async fn run_loop(
         // Publish after every handled event rather than only from the
         // low-priority animation tick. A sustained notification stream can
         // intentionally win over that tick in the biased select above, but a
-        // focused session's state and attention marker must reach OP-XY as
+        // aggregate session state and attention markers must reach OP-XY as
         // soon as the notification that changed them has been applied.
         if let Some(feedback) = midi_feedback.as_ref() {
             feedback.update(app.op_xy_feedback_snapshot());
@@ -4866,6 +4866,22 @@ fn op_xy_session_feedback_state(session: Option<&SessionSummary>) -> crate::midi
     } else {
         crate::midi::FeedbackState::Idle
     }
+}
+
+fn op_xy_fleet_feedback_state(sessions: &[SessionSummary]) -> crate::midi::FeedbackState {
+    let mut aggregate = crate::midi::FeedbackState::Idle;
+    for session in sessions {
+        match op_xy_session_feedback_state(Some(session)) {
+            crate::midi::FeedbackState::Attention => {
+                return crate::midi::FeedbackState::Attention;
+            }
+            crate::midi::FeedbackState::Working => {
+                aggregate = crate::midi::FeedbackState::Working;
+            }
+            crate::midi::FeedbackState::Idle => {}
+        }
+    }
+    aggregate
 }
 
 fn op_xy_slot_state_masks(
@@ -10803,10 +10819,7 @@ impl App {
     }
 
     pub(crate) fn op_xy_feedback_state(&self) -> crate::midi::FeedbackState {
-        if self.focus != PaneFocus::View {
-            return crate::midi::FeedbackState::Idle;
-        }
-        op_xy_session_feedback_state(self.selected_session())
+        op_xy_fleet_feedback_state(&self.sessions)
     }
 
     pub(crate) fn op_xy_feedback_snapshot(&self) -> crate::midi::FeedbackSnapshot {
@@ -10822,7 +10835,7 @@ impl App {
         let (active_panes, attention_panes) =
             op_xy_slot_state_masks(&self.sessions, &pane_sessions);
         crate::midi::FeedbackSnapshot {
-            focused: self.op_xy_feedback_state(),
+            fleet: self.op_xy_feedback_state(),
             active_slots,
             attention_slots,
             active_panes: active_panes & 0b0000_1111,
@@ -13582,7 +13595,7 @@ mod tests {
     }
 
     #[test]
-    fn op_xy_feedback_tracks_only_the_focused_session_state() {
+    fn op_xy_feedback_classifies_individual_session_state() {
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.state = construct_protocol::SessionState::Running;
         assert_eq!(
@@ -13611,6 +13624,30 @@ mod tests {
         assert_eq!(
             op_xy_session_feedback_state(None),
             crate::midi::FeedbackState::Idle
+        );
+    }
+
+    #[test]
+    fn op_xy_feedback_aggregates_all_sessions_with_attention_precedence() {
+        let mut idle = summary_with_kind(construct_protocol::SessionKind::User);
+        idle.state = construct_protocol::SessionState::Done;
+        let mut working = summary_with_kind(construct_protocol::SessionKind::User);
+        working.state = construct_protocol::SessionState::Running;
+        let mut attention = summary_with_kind(construct_protocol::SessionKind::User);
+        attention.state = construct_protocol::SessionState::AwaitingInput;
+        attention.needs_attention = true;
+
+        assert_eq!(
+            op_xy_fleet_feedback_state(&[idle.clone()]),
+            crate::midi::FeedbackState::Idle
+        );
+        assert_eq!(
+            op_xy_fleet_feedback_state(&[idle.clone(), working.clone()]),
+            crate::midi::FeedbackState::Working
+        );
+        assert_eq!(
+            op_xy_fleet_feedback_state(&[idle, working, attention]),
+            crate::midi::FeedbackState::Attention
         );
     }
 

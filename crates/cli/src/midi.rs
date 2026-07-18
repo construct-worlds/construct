@@ -99,7 +99,7 @@ pub(crate) enum FeedbackState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FeedbackSnapshot {
-    pub focused: FeedbackState,
+    pub fleet: FeedbackState,
     /// Bit 0 is session slot `[1]`; bit 7 is session slot `[8]`.
     pub active_slots: u8,
     pub attention_slots: u8,
@@ -111,7 +111,7 @@ pub(crate) struct FeedbackSnapshot {
 impl Default for FeedbackSnapshot {
     fn default() -> Self {
         Self {
-            focused: FeedbackState::Idle,
+            fleet: FeedbackState::Idle,
             active_slots: 0,
             attention_slots: 0,
             active_panes: 0,
@@ -874,8 +874,8 @@ fn feedback_loop(
         };
         match rx.recv_timeout(timeout) {
             Ok(next) => {
-                if next.focused != snapshot.focused {
-                    match next.focused {
+                if next.fleet != snapshot.fleet {
+                    match next.fleet {
                         FeedbackState::Idle => {
                             send_scene(&mut connection, config.normal_scene);
                             let _ = connection.send(&[0xFC]);
@@ -1456,7 +1456,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         let working = FeedbackSnapshot {
-            focused: FeedbackState::Working,
+            fleet: FeedbackState::Working,
             active_slots: 0b0000_0001,
             attention_slots: 0,
             active_panes: 0b0000_0001,
@@ -1468,7 +1468,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         let attention = FeedbackSnapshot {
-            focused: FeedbackState::Working,
+            fleet: FeedbackState::Working,
             active_slots: 0b0000_0001,
             attention_slots: 0b1000_0001,
             active_panes: 0b0000_0011,
