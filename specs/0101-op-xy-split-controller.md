@@ -18,12 +18,14 @@ and Enter notes dispatch native TUI input to the selected session's visible
 split.
 
 Session titles beginning with `[1]` through `[8]` assign those sessions to the
-corresponding hardware slots. If multiple titles claim one slot, the session
-with the latest activity wins; creation time breaks the absence of activity,
-and session id makes exact ties deterministic. Session commands locate and
-focus the split already displaying the channel-selected session; they never
-silently target a different session. The reserved black-key no-op never changes
-focus.
+corresponding hardware slots. The marker may be followed immediately by title
+text or by whitespace. Only non-archived top-level user sessions are eligible;
+subagents and hidden internal sessions cannot claim or displace a hardware
+slot. If multiple eligible titles claim one slot, the session with the latest
+activity wins; creation time breaks the absence of activity, and session id
+makes exact ties deterministic. Session commands locate and focus the split
+already displaying the channel-selected session; they never silently target a
+different session. The reserved black-key no-op never changes focus.
 
 White keys 1–6 are configurable prompt slots. A configured key focuses the
 split containing the channel-selected session and inserts text into its composer
