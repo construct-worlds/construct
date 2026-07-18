@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-07-17
 Area: tui
-Scope: An OP-XY Instrument-mode template controls four Construct split panes and receives global session-status feedback.
+Scope: An OP-XY Instrument-mode template controls four Construct split panes and receives focused-session status feedback.
 
 ## Decision
 
@@ -21,11 +21,13 @@ and session id makes exact ties deterministic. Every recognized OP-XY control
 first focuses the pane addressed by the selected track and then performs its
 action. The reserved sequencer-display no-op never changes focus.
 
-Feedback is global rather than per-pane. Assigned-session state drives
-preconfigured OP-XY scenes: a working scene while any assigned session runs,
-two alternating attention scenes while any assigned session needs the user,
-and stopped transport otherwise. Construct supplies MIDI real-time transport
-and clock while feedback animation is active.
+Feedback follows only the currently view-focused session. Scene 1 with stopped
+transport represents terminal or idle state, Scene 1 with running transport
+represents work in progress, and Scene 2 with running transport represents the
+blue attention-dot state for a non-terminal session. Terminal state takes
+precedence over a stale attention marker. List focus or any other absence of a
+view-focused session is idle. Construct supplies MIDI real-time transport and
+clock while the focused session is running or needs attention.
 
 ## Reason
 

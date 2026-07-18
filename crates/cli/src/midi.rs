@@ -92,9 +92,8 @@ pub(crate) enum FeedbackState {
 pub struct OpXyFeedbackConfig {
     pub enabled: bool,
     /// Scene numbers are written as the one-based numbers shown by OP-XY.
-    pub working_scene: u8,
-    pub attention_scene_a: u8,
-    pub attention_scene_b: u8,
+    pub normal_scene: u8,
+    pub attention_scene: u8,
     pub clock_bpm: f64,
 }
 
@@ -102,9 +101,8 @@ impl Default for OpXyFeedbackConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            working_scene: 1,
-            attention_scene_a: 3,
-            attention_scene_b: 4,
+            normal_scene: 1,
+            attention_scene: 2,
             clock_bpm: 120.0,
         }
     }
@@ -685,8 +683,8 @@ fn feedback_loop(
     let clock_period = std::time::Duration::from_secs_f64(60.0 / bpm / 24.0);
     let mut state = FeedbackState::Idle;
     let mut started = false;
-    let mut attention_phase = false;
-    let mut next_attention_flip = std::time::Instant::now();
+    send_scene(&mut connection, config.normal_scene);
+    let _ = connection.send(&[0xFC]);
     loop {
         match rx.recv_timeout(if started {
             clock_period
@@ -698,23 +696,19 @@ fn feedback_loop(
                     state = next;
                     match state {
                         FeedbackState::Idle => {
-                            if started {
-                                let _ = connection.send(&[0xFC]);
-                                started = false;
-                            }
+                            send_scene(&mut connection, config.normal_scene);
+                            let _ = connection.send(&[0xFC]);
+                            started = false;
                         }
                         FeedbackState::Working => {
-                            send_scene(&mut connection, config.working_scene);
+                            send_scene(&mut connection, config.normal_scene);
                             if !started {
                                 let _ = connection.send(&[0xFA]);
                                 started = true;
                             }
                         }
                         FeedbackState::Attention => {
-                            attention_phase = false;
-                            send_scene(&mut connection, config.attention_scene_a);
-                            next_attention_flip = std::time::Instant::now()
-                                + std::time::Duration::from_millis(500);
+                            send_scene(&mut connection, config.attention_scene);
                             if !started {
                                 let _ = connection.send(&[0xFA]);
                                 started = true;
@@ -733,19 +727,6 @@ fn feedback_loop(
         }
         if started {
             let _ = connection.send(&[0xF8]);
-        }
-        if state == FeedbackState::Attention && std::time::Instant::now() >= next_attention_flip {
-            attention_phase = !attention_phase;
-            send_scene(
-                &mut connection,
-                if attention_phase {
-                    config.attention_scene_b
-                } else {
-                    config.attention_scene_a
-                },
-            );
-            next_attention_flip =
-                std::time::Instant::now() + std::time::Duration::from_millis(500);
         }
     }
 }

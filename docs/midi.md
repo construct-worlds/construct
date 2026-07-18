@@ -65,9 +65,11 @@ The learned profile enables feedback by default. Construct treats OP-XY scene
 numbers as the one-based numbers shown on the device and sends immediate scene
 changes using CC 85:
 
-- Scene 1 while an assigned session is running.
-- Scenes 3 and 4 alternating when an assigned session needs attention.
-- MIDI Stop when no assigned session is running or needs attention.
+- Scene 1 with MIDI Start and clock while the focused session is running.
+- Scene 1 with MIDI Stop for a completed, idle, paused, awaiting-input, or
+  errored focused session, and whenever focus is outside a session view.
+- Scene 2 with MIDI Start and clock while a non-terminal focused session has
+  the blue attention dot.
 
 While feedback is active Construct sends MIDI Start and a 24-PPQN clock at 120
 BPM so the template's sequencer LEDs animate. These defaults can be edited in
@@ -76,9 +78,8 @@ BPM so the template's sequencer LEDs animate. These defaults can be edited in
 ```toml
 [op_xy.feedback]
 enabled = true
-working_scene = 1
-attention_scene_a = 3
-attention_scene_b = 4
+normal_scene = 1
+attention_scene = 2
 clock_bpm = 120.0
 ```
 

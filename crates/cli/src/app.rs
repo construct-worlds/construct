@@ -4844,6 +4844,22 @@ fn named_op_xy_session_slots(sessions: &[SessionSummary]) -> Vec<Option<String>>
         .collect()
 }
 
+fn op_xy_session_feedback_state(session: Option<&SessionSummary>) -> crate::midi::FeedbackState {
+    use construct_protocol::SessionState;
+    let Some(session) = session else {
+        return crate::midi::FeedbackState::Idle;
+    };
+    if session.state.is_terminal() {
+        crate::midi::FeedbackState::Idle
+    } else if session.needs_attention {
+        crate::midi::FeedbackState::Attention
+    } else if matches!(session.state, SessionState::Pending | SessionState::Running) {
+        crate::midi::FeedbackState::Working
+    } else {
+        crate::midi::FeedbackState::Idle
+    }
+}
+
 impl App {
     async fn reconnect(
         &mut self,
@@ -10706,32 +10722,10 @@ impl App {
     }
 
     pub(crate) fn op_xy_feedback_state(&self) -> crate::midi::FeedbackState {
-        use construct_protocol::SessionState;
-        let assigned: HashSet<String> = self
-            .resolved_op_xy_session_slots()
-            .into_iter()
-            .flatten()
-            .collect();
-        let sessions: Vec<_> = self
-            .sessions
-            .iter()
-            .filter(|session| assigned.contains(&session.id))
-            .collect();
-        if sessions.iter().any(|session| {
-            session.needs_attention
-                || matches!(
-                    session.state,
-                    SessionState::AwaitingInput | SessionState::Errored
-                )
-        }) {
-            crate::midi::FeedbackState::Attention
-        } else if sessions.iter().any(|session| {
-            matches!(session.state, SessionState::Pending | SessionState::Running)
-        }) {
-            crate::midi::FeedbackState::Working
-        } else {
-            crate::midi::FeedbackState::Idle
+        if self.focus != PaneFocus::View {
+            return crate::midi::FeedbackState::Idle;
         }
+        op_xy_session_feedback_state(self.selected_session())
     }
 
     fn resolved_op_xy_session_slots(&self) -> Vec<Option<String>> {
@@ -13483,6 +13477,39 @@ mod tests {
         ] {
             assert_eq!(op_xy_slot_from_title(title), expected, "{title}");
         }
+    }
+
+    #[test]
+    fn op_xy_feedback_tracks_only_the_focused_session_state() {
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.state = construct_protocol::SessionState::Running;
+        assert_eq!(
+            op_xy_session_feedback_state(Some(&session)),
+            crate::midi::FeedbackState::Working
+        );
+
+        session.needs_attention = true;
+        assert_eq!(
+            op_xy_session_feedback_state(Some(&session)),
+            crate::midi::FeedbackState::Attention
+        );
+
+        session.needs_attention = false;
+        session.state = construct_protocol::SessionState::Errored;
+        assert_eq!(
+            op_xy_session_feedback_state(Some(&session)),
+            crate::midi::FeedbackState::Idle
+        );
+        session.needs_attention = true;
+        assert_eq!(
+            op_xy_session_feedback_state(Some(&session)),
+            crate::midi::FeedbackState::Idle,
+            "terminal state takes precedence over a stale attention marker"
+        );
+        assert_eq!(
+            op_xy_session_feedback_state(None),
+            crate::midi::FeedbackState::Idle
+        );
     }
 
     #[test]
