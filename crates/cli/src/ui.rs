@@ -3603,7 +3603,7 @@ fn fleet_activity_target(app: &App, now: Instant) -> f32 {
     for s in app
         .sessions
         .iter()
-        .filter(|s| s.kind == construct_protocol::SessionKind::User)
+        .filter(|s| crate::app::is_matrix_rain_activity_session(s))
     {
         let active_agent = app
             .agent_statuses

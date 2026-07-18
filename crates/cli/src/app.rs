@@ -249,6 +249,10 @@ fn is_user_list_session(s: &SessionSummary) -> bool {
     matches!(s.kind, construct_protocol::SessionKind::User)
 }
 
+pub(crate) fn is_matrix_rain_activity_session(s: &SessionSummary) -> bool {
+    !s.archived && is_user_list_session(s)
+}
+
 fn is_subagent_session(s: &SessionSummary) -> bool {
     matches!(s.kind, construct_protocol::SessionKind::Subagent)
 }
@@ -4802,7 +4806,7 @@ async fn run_loop(
         // aggregate session state and attention markers must reach OP-XY as
         // soon as the notification that changed them has been applied.
         if let Some(feedback) = midi_feedback.as_ref() {
-            feedback.update(app.op_xy_feedback_snapshot());
+            feedback.update(app.op_xy_feedback_snapshot(feedback.aggregate_scope()));
         }
     }
     Ok(())
@@ -4869,6 +4873,26 @@ fn op_xy_session_feedback_state(session: Option<&SessionSummary>) -> crate::midi
 
 fn op_xy_slot_feedback_state(active_slots: u8, attention_slots: u8) -> crate::midi::FeedbackState {
     match (active_slots != 0, attention_slots != 0) {
+        (false, false) => crate::midi::FeedbackState::Idle,
+        (true, false) => crate::midi::FeedbackState::Working,
+        (false, true) => crate::midi::FeedbackState::AttentionIdle,
+        (true, true) => crate::midi::FeedbackState::AttentionWorking,
+    }
+}
+
+fn op_xy_all_feedback_state(sessions: &[SessionSummary]) -> crate::midi::FeedbackState {
+    use construct_protocol::SessionState;
+    let (active, attention) = sessions
+        .iter()
+        .filter(|session| is_matrix_rain_activity_session(session))
+        .fold((false, false), |(active, attention), session| {
+            (
+                active
+                    || matches!(session.state, SessionState::Pending | SessionState::Running),
+                attention || session.needs_attention,
+            )
+        });
+    match (active, attention) {
         (false, false) => crate::midi::FeedbackState::Idle,
         (true, false) => crate::midi::FeedbackState::Working,
         (false, true) => crate::midi::FeedbackState::AttentionIdle,
@@ -10965,11 +10989,20 @@ impl App {
         }
     }
 
-    pub(crate) fn op_xy_feedback_snapshot(&self) -> crate::midi::FeedbackSnapshot {
+    pub(crate) fn op_xy_feedback_snapshot(
+        &self,
+        aggregate_scope: crate::midi::OpXyAggregateScope,
+    ) -> crate::midi::FeedbackSnapshot {
         let slots = self.resolved_op_xy_session_slots();
         let (active_slots, attention_slots) = op_xy_slot_state_masks(&self.sessions, &slots);
+        let fleet = match aggregate_scope {
+            crate::midi::OpXyAggregateScope::Mapped => {
+                op_xy_slot_feedback_state(active_slots, attention_slots)
+            }
+            crate::midi::OpXyAggregateScope::All => op_xy_all_feedback_state(&self.sessions),
+        };
         crate::midi::FeedbackSnapshot {
-            fleet: op_xy_slot_feedback_state(active_slots, attention_slots),
+            fleet,
             active_slots,
             attention_slots,
             active_tracks: active_slots & 0b0000_1111,
@@ -13815,6 +13848,27 @@ mod tests {
     }
 
     #[test]
+    fn op_xy_all_feedback_uses_matrix_rain_session_scope() {
+        let mut mapped = summary_with_kind(construct_protocol::SessionKind::User);
+        mapped.state = construct_protocol::SessionState::Done;
+
+        let mut unmapped = summary_with_kind(construct_protocol::SessionKind::User);
+        unmapped.state = construct_protocol::SessionState::Running;
+
+        let mut archived = summary_with_kind(construct_protocol::SessionKind::User);
+        archived.archived = true;
+        archived.needs_attention = true;
+
+        let mut subagent = summary_with_kind(construct_protocol::SessionKind::Subagent);
+        subagent.needs_attention = true;
+
+        assert_eq!(
+            op_xy_all_feedback_state(&[mapped, unmapped, archived, subagent]),
+            crate::midi::FeedbackState::Working
+        );
+    }
+
+    #[test]
     fn op_xy_volume_slots_follow_named_session_activity_and_attention() {
         let mut first = summary_with_kind(construct_protocol::SessionKind::User);
         first.id = "first".into();
@@ -13909,7 +13963,7 @@ mod tests {
         second.state = construct_protocol::SessionState::Running;
         app.sessions = vec![root, second, child];
 
-        let feedback = app.op_xy_feedback_snapshot();
+        let feedback = app.op_xy_feedback_snapshot(crate::midi::OpXyAggregateScope::Mapped);
         assert_eq!(feedback.active_slots, 0b0000_0010);
         assert_eq!(
             feedback.active_tracks, 0b0000_0010,
