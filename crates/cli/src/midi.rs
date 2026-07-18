@@ -57,9 +57,10 @@ pub enum MidiCommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OpXyControl {
     Session(usize),
+    Prompt { slot: usize, text: String },
     Left,
     Down,
     Right,
@@ -75,14 +76,14 @@ pub(crate) enum OpXyAuxControl {
     ScrollDown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OpXyEvent {
     /// Zero-based visual pane position: left-to-right, then top-to-bottom.
     pub pane: usize,
     pub control: OpXyControl,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MidiInputEvent {
     Action(MidiAction),
     OpXy(OpXyEvent),
@@ -231,6 +232,8 @@ pub struct OpXyConfig {
     /// First black-key note on each pane track, used to normalize track octaves.
     pub pane_anchor_notes: Vec<u8>,
     pub session_notes: Vec<u8>,
+    /// Prompt text assigned to white keys 1–6. Empty or missing entries are unassigned.
+    pub prompt_texts: Vec<String>,
     pub left_note: Option<u8>,
     pub down_note: Option<u8>,
     pub right_note: Option<u8>,
@@ -269,6 +272,20 @@ impl OpXyConfig {
             .position(|note| *note == normalized_note)
         {
             OpXyControl::Session(slot)
+        } else if let Some((slot, text)) = self
+            .prompt_texts
+            .iter()
+            .take(OP_XY_PROMPT_KEY_OFFSETS.len())
+            .enumerate()
+            .find(|(slot, text)| {
+                !text.is_empty()
+                    && op_xy_prompt_note(reference_anchor, *slot) == Some(normalized_note)
+            })
+        {
+            OpXyControl::Prompt {
+                slot,
+                text: text.clone(),
+            }
         } else if self.left_note == Some(normalized_note) {
             OpXyControl::Left
         } else if self.down_note == Some(normalized_note) {
@@ -284,6 +301,15 @@ impl OpXyConfig {
         };
         Some(OpXyEvent { pane, control })
     }
+}
+
+/// White keys 1–6 relative to black key 1. The learned layout starts at F/F♯:
+/// white 1 is one semitone below the first black key, then follows white notes.
+const OP_XY_PROMPT_KEY_OFFSETS: [i16; 6] = [-1, 1, 3, 5, 6, 8];
+
+fn op_xy_prompt_note(reference_anchor: u8, slot: usize) -> Option<u8> {
+    let note = i16::from(reference_anchor) + *OP_XY_PROMPT_KEY_OFFSETS.get(slot)?;
+    u8::try_from(note).ok().filter(|note| *note <= 127)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, Ord, PartialOrd)]
@@ -632,6 +658,11 @@ fn print_mappings() -> Result<()> {
         println!("op-xy: {}", if op_xy.enabled { "enabled" } else { "disabled" });
         println!("  pane channels: {:?}", op_xy.pane_channels);
         println!("  session notes: {:?}", op_xy.session_notes);
+        for (slot, prompt) in op_xy.prompt_texts.iter().take(6).enumerate() {
+            if !prompt.is_empty() {
+                println!("  white prompt {}: {:?}", slot + 1, prompt);
+            }
+        }
         if op_xy.aux.enabled {
             println!(
                 "  aux: channel {}, arrow CC {}, scroll CC {}",
@@ -737,6 +768,7 @@ fn op_xy_learn(requested_device: Option<&str>) -> Result<()> {
         pane_channels,
         pane_anchor_notes,
         session_notes,
+        prompt_texts: Vec::new(),
         left_note: Some(left_note),
         down_note: Some(down_note),
         right_note: Some(right_note),
@@ -1395,6 +1427,7 @@ mod tests {
                 pane_channels: vec![5, 6, 7, 8],
                 pane_anchor_notes: vec![54, 42, 30, 54],
                 session_notes: vec![54, 56, 58, 61, 63, 66, 68, 70],
+                prompt_texts: vec!["Review the current changes.".into()],
                 left_note: Some(72),
                 down_note: Some(74),
                 right_note: Some(76),
@@ -1490,6 +1523,7 @@ mod tests {
             pane_channels: vec![13, 14, 15, 16],
             pane_anchor_notes: vec![49; 4],
             session_notes: vec![49, 51, 54, 56, 58, 61, 63, 66],
+            prompt_texts: Vec::new(),
             left_note: Some(60),
             down_note: Some(62),
             right_note: Some(64),
@@ -1530,6 +1564,62 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn op_xy_maps_white_keys_one_through_six_to_custom_prompts() {
+        let mut profile = op_xy_profile();
+        profile.pane_channels = vec![5, 6, 7, 8];
+        profile.pane_anchor_notes = vec![54, 42, 30, 54];
+        profile.session_notes = vec![54, 56, 58, 61, 63, 66, 68, 70];
+        profile.prompt_texts = (1..=6).map(|slot| format!("prompt {slot}")).collect();
+
+        for (slot, note) in [53, 55, 57, 59, 60, 62].into_iter().enumerate() {
+            assert_eq!(
+                profile.event_for(&parse_message(&[0x94, note, 100]).unwrap()),
+                Some(OpXyEvent {
+                    pane: 0,
+                    control: OpXyControl::Prompt {
+                        slot,
+                        text: format!("prompt {}", slot + 1),
+                    },
+                })
+            );
+        }
+
+        assert_eq!(
+            profile.event_for(&parse_message(&[0x95, 41, 100]).unwrap()),
+            Some(OpXyEvent {
+                pane: 1,
+                control: OpXyControl::Prompt {
+                    slot: 0,
+                    text: "prompt 1".into(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn op_xy_leaves_empty_prompt_slots_unassigned() {
+        let mut profile = op_xy_profile();
+        profile.pane_channels = vec![5, 6, 7, 8];
+        profile.pane_anchor_notes = vec![54; 4];
+        profile.session_notes = vec![54, 56, 58, 61, 63, 66, 68, 70];
+        profile.prompt_texts = vec![String::new(), "second".into()];
+
+        assert!(profile
+            .event_for(&parse_message(&[0x94, 53, 100]).unwrap())
+            .is_none());
+        assert_eq!(
+            profile.event_for(&parse_message(&[0x94, 55, 100]).unwrap()),
+            Some(OpXyEvent {
+                pane: 0,
+                control: OpXyControl::Prompt {
+                    slot: 1,
+                    text: "second".into(),
+                },
+            })
+        );
     }
 
     #[test]

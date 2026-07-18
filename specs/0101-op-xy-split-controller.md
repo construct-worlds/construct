@@ -21,6 +21,12 @@ and session id makes exact ties deterministic. Every recognized OP-XY control
 first focuses the pane addressed by the selected track and then performs its
 action. The reserved sequencer-display no-op never changes focus.
 
+White keys 1–6 are configurable prompt slots. A configured key focuses its
+track's pane and inserts the assigned text into that pane's session composer
+without submitting it. Empty or missing prompt slots do nothing. Their notes
+are derived from the learned first-black-key anchor and normalized across pane
+track octaves, so adding prompts does not require relearning the controller.
+
 Feedback follows only the currently view-focused session. Scene 1 with stopped
 transport represents terminal or idle state, Scene 1 with running transport
 represents work in progress, and Scene 2 with running transport represents the

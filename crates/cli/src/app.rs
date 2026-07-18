@@ -10743,6 +10743,27 @@ impl App {
         }
         match event.control {
             OpXyControl::Session(slot) => self.select_op_xy_slot_in_pane(event.pane, slot),
+            OpXyControl::Prompt { slot, text } => {
+                let Some(session_id) = self
+                    .selection_for_window(window_id)
+                    .and_then(|selection| selection.session_id().map(str::to_owned))
+                else {
+                    self.set_status(format!(
+                        "OP-XY pane {} has no session for prompt {}",
+                        event.pane + 1,
+                        slot + 1
+                    ));
+                    return;
+                };
+                self.set_scrollback_for_window(Some(window_id), 0);
+                let bytes = self.encode_paste_for_pty(&session_id, text);
+                self.queue_pty_input(session_id, bytes, "OP-XY prompt pty_input");
+                self.set_status(format!(
+                    "OP-XY pane {} inserted prompt {}",
+                    event.pane + 1,
+                    slot + 1
+                ));
+            }
             OpXyControl::Enter => {
                 self.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
                     .await;
@@ -10753,7 +10774,9 @@ impl App {
                     OpXyControl::Down => KeyCode::Down,
                     OpXyControl::Right => KeyCode::Right,
                     OpXyControl::Up => KeyCode::Up,
-                    OpXyControl::Session(_) | OpXyControl::Enter => unreachable!(),
+                    OpXyControl::Session(_)
+                    | OpXyControl::Prompt { .. }
+                    | OpXyControl::Enter => unreachable!(),
                 };
                 self.on_key(KeyEvent::new(code, KeyModifiers::NONE)).await;
             }

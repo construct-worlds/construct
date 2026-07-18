@@ -59,6 +59,29 @@ track and then performs its action. Session keys switch that pane's session,
 arrows dispatch the corresponding native TUI arrow, and Enter acts on the now
 focused pane. The reserved sequencer-display no-op does not change focus.
 
+White keys 1–6 can insert user-defined prompt text. Like every other recognized
+track key, a prompt key first focuses the split pane addressed by that track.
+Construct then pastes the configured text into that pane's session input without
+submitting it, leaving it available to edit or send with the Enter key. Assign
+the keys in order under `[op_xy]`; use an empty string to leave a position
+unassigned:
+
+```toml
+[op_xy]
+prompt_texts = [
+  "Review the current changes.",
+  "Run the relevant tests and fix failures.",
+  "Summarize progress and remaining work.",
+  "",
+  "",
+  "",
+]
+```
+
+Existing learned profiles do not need to be relearned. Construct derives the
+six white-key notes from the profile's first-black-key anchor and applies the
+same per-track octave normalization used by the session keys.
+
 Auxiliary track 3 can provide focus-sensitive generic controls on MIDI channel
 10. Its third encoder (CC 2) sends Up/Down, and its fourth encoder (CC 3) sends
 scroll up/down. Because OP-XY reports absolute values, Construct uses the first
