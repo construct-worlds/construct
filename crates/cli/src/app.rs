@@ -10823,8 +10823,61 @@ impl App {
                 self.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
                     .await;
             }
-            OpXyAuxControl::ScrollUp => self.run_action(KeyAction::ScrollUp).await,
-            OpXyAuxControl::ScrollDown => self.run_action(KeyAction::ScrollDown).await,
+            OpXyAuxControl::ScrollUp => self.scroll_op_xy_focused_surface(false),
+            OpXyAuxControl::ScrollDown => self.scroll_op_xy_focused_surface(true),
+        }
+    }
+
+    fn scroll_op_xy_focused_surface(&mut self, down: bool) {
+        const LIST_STEP: i32 = 3;
+        const LINEAGE_STEP: usize = 2;
+
+        if self.help_visible {
+            self.help_scroll_offset = if down {
+                self.help_scroll_offset.saturating_add(3)
+            } else {
+                self.help_scroll_offset.saturating_sub(3)
+            };
+            return;
+        }
+
+        if self.focus == PaneFocus::List {
+            if self.lineage_focused {
+                self.lineage_scroll = if down {
+                    self.lineage_scroll.saturating_add(LINEAGE_STEP)
+                } else {
+                    self.lineage_scroll.saturating_sub(LINEAGE_STEP)
+                };
+                self.lineage_follow_selection = false;
+            } else {
+                self.adjust_list_scroll(if down { LIST_STEP } else { -LIST_STEP });
+            }
+            return;
+        }
+
+        if self
+            .program_popup
+            .as_ref()
+            .is_some_and(|popup| !popup.terminal_focus)
+        {
+            let rows = PROGRAM_WHEEL_SCROLL_ROWS as isize;
+            self.scroll_program_popup(if down { rows } else { -rows });
+            return;
+        }
+
+        let dynamic_key = KeyEvent::new(
+            if down { KeyCode::Down } else { KeyCode::Up },
+            KeyModifiers::NONE,
+        );
+        if self.try_dynamic_ui_scroll_key(dynamic_key) {
+            return;
+        }
+
+        let delta = if down { -1 } else { 1 };
+        if self.can_scroll_pty_history() {
+            self.adjust_scrollback(delta);
+        } else if self.view == ViewMode::Chat {
+            self.adjust_chat_scroll(delta);
         }
     }
 
@@ -13686,6 +13739,55 @@ mod tests {
             op_xy_slot_state_masks(&[first, eighth, quiet], &slots),
             (0b0000_0010, 0b1000_0001)
         );
+    }
+
+    #[tokio::test]
+    async fn op_xy_aux_scroll_follows_list_lineage_and_program_focus() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.sessions = (0..10)
+            .map(|index| {
+                let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+                session.id = format!("s{index}");
+                session.title = Some(format!("session {index}"));
+                session
+            })
+            .collect();
+        app.layout.list_items_area = Some(ratatui::layout::Rect::new(0, 0, 20, 4));
+        app.focus = PaneFocus::List;
+
+        app.handle_op_xy_aux_control(crate::midi::OpXyAuxControl::ScrollDown)
+            .await;
+        assert_eq!(app.list_scroll_offset, 3, "focused list scrolls");
+
+        app.lineage_focused = true;
+        app.handle_op_xy_aux_control(crate::midi::OpXyAuxControl::ScrollDown)
+            .await;
+        assert_eq!(app.lineage_scroll, 2, "focused lineage scrolls");
+        assert!(!app.lineage_follow_selection);
+        assert_eq!(
+            app.list_scroll_offset, 3,
+            "lineage focus does not also scroll session rows"
+        );
+
+        let markdown = (0..20)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.focus = PaneFocus::View;
+        app.program_popup = Some(program_popup_for_test("s0", &markdown, 0));
+        app.layout.program_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 5));
+        app.handle_op_xy_aux_control(crate::midi::OpXyAuxControl::ScrollDown)
+            .await;
+        assert_eq!(
+            app.program_popup.as_ref().unwrap().scroll_offset,
+            PROGRAM_WHEEL_SCROLL_ROWS,
+            "focused program document scrolls"
+        );
+
+        app.handle_op_xy_aux_control(crate::midi::OpXyAuxControl::ScrollUp)
+            .await;
+        assert_eq!(app.program_popup.as_ref().unwrap().scroll_offset, 0);
+        server.abort();
     }
 
     #[test]
