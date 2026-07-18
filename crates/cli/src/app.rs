@@ -4810,14 +4810,7 @@ async fn run_loop(
 
 fn op_xy_slot_from_title(title: &str) -> Option<usize> {
     let rest = title.strip_prefix('[')?;
-    let (number, suffix) = rest.split_once(']')?;
-    if suffix
-        .chars()
-        .next()
-        .is_some_and(|character| !character.is_whitespace())
-    {
-        return None;
-    }
+    let (number, _suffix) = rest.split_once(']')?;
     let one_based = number.parse::<usize>().ok()?;
     if (1..=8).contains(&one_based) {
         Some(one_based - 1)
@@ -4833,6 +4826,9 @@ fn op_xy_session_activity(session: &SessionSummary) -> &chrono::DateTime<chrono:
 fn named_op_xy_session_slots(sessions: &[SessionSummary]) -> Vec<Option<String>> {
     let mut matches: Vec<Option<&SessionSummary>> = vec![None; 8];
     for session in sessions {
+        if session.archived || !is_user_list_session(session) {
+            continue;
+        }
         let Some(slot) = session
             .title
             .as_deref()
@@ -13714,22 +13710,50 @@ mod tests {
         let slots = named_op_xy_session_slots(&[newer.clone(), older]);
         assert_eq!(slots[2].as_deref(), Some("newer"));
 
-        newer.title = Some("[3]not a slot prefix".into());
-        assert!(named_op_xy_session_slots(&[newer])[2].is_none());
+        newer.title = Some("[3]no-space prefix".into());
+        assert_eq!(
+            named_op_xy_session_slots(&[newer])[2].as_deref(),
+            Some("newer")
+        );
     }
 
     #[test]
     fn op_xy_title_slots_accept_only_one_through_eight() {
         for (title, expected) in [
             ("[1] primary", Some(0)),
+            ("[1]primary", Some(0)),
+            ("[1]", Some(0)),
             ("[8] documentation", Some(7)),
+            ("[8]documentation", Some(7)),
             ("[0] invalid", None),
             ("[9] invalid", None),
-            ("[2]invalid", None),
             ("session [2]", None),
         ] {
             assert_eq!(op_xy_slot_from_title(title), expected, "{title}");
         }
+    }
+
+    #[test]
+    fn op_xy_title_slots_exclude_subagents_and_archived_sessions() {
+        let base = chrono::Utc::now();
+        let mut user = summary_with_kind(construct_protocol::SessionKind::User);
+        user.id = "user".into();
+        user.title = Some("[2]user".into());
+        user.last_event_at = Some(base);
+
+        let mut subagent = summary_with_kind(construct_protocol::SessionKind::Subagent);
+        subagent.id = "subagent".into();
+        subagent.title = Some("[2]subagent".into());
+        subagent.last_event_at = Some(base + chrono::Duration::seconds(2));
+
+        let mut archived = summary_with_kind(construct_protocol::SessionKind::User);
+        archived.id = "archived".into();
+        archived.title = Some("[2]archived".into());
+        archived.archived = true;
+        archived.last_event_at = Some(base + chrono::Duration::seconds(3));
+
+        let slots = named_op_xy_session_slots(&[subagent, archived, user]);
+        assert_eq!(slots[1].as_deref(), Some("user"));
     }
 
     #[test]

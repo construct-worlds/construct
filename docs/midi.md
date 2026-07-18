@@ -50,9 +50,11 @@ Prefix a session title with its black-key slot number:
 [8] documentation
 ```
 
-Construct detects `[1]` through `[8]` at the beginning of session titles. If
-multiple sessions claim the same number, the one with the latest activity is
-selected.
+Construct detects `[1]` through `[8]` at the beginning of session titles, with
+or without a following space (`[1] primary` and `[1]primary` are equivalent).
+Only live top-level user sessions can claim a slot; subagent and archived
+sessions are ignored. If multiple eligible sessions claim the same number, the
+one with the latest activity is selected.
 
 The MIDI channel selects the session. Black keys then choose the destination
 or action:
