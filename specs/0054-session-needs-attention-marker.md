@@ -68,6 +68,12 @@ on you."
   restart, sessions that were waiting still show the marker; a reconnecting
   viewer re-asserts focus so the session it is looking at clears. Restart
   must only *preserve* markers, never *manufacture* them.
+- **Collapsed ancestors roll up hidden markers.** If a non-archived descendant
+  needs attention while its parent session or project is collapsed, the
+  collapsed ancestor row shows the blue dot. Expanding the ancestor removes
+  that rollup dot so the descendant's own row identifies the source. A parent
+  session that itself needs attention keeps its own dot whether expanded or
+  collapsed.
 
 ## Reason
 
