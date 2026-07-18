@@ -94,7 +94,18 @@ pub(crate) enum MidiInputEvent {
 pub(crate) enum FeedbackState {
     Idle,
     Working,
-    Attention,
+    AttentionIdle,
+    AttentionWorking,
+}
+
+impl FeedbackState {
+    fn is_active(self) -> bool {
+        matches!(self, Self::Working | Self::AttentionWorking)
+    }
+
+    fn needs_attention(self) -> bool {
+        matches!(self, Self::AttentionIdle | Self::AttentionWorking)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -875,26 +886,20 @@ fn feedback_loop(
         match rx.recv_timeout(timeout) {
             Ok(next) => {
                 if next.fleet != snapshot.fleet {
-                    match next.fleet {
-                        FeedbackState::Idle => {
-                            send_scene(&mut connection, config.normal_scene);
-                            let _ = connection.send(&[0xFC]);
-                            started = false;
+                    let scene = if next.fleet.needs_attention() {
+                        config.attention_scene
+                    } else {
+                        config.normal_scene
+                    };
+                    send_scene(&mut connection, scene);
+                    if next.fleet.is_active() {
+                        if !started {
+                            let _ = connection.send(&[0xFA]);
+                            started = true;
                         }
-                        FeedbackState::Working => {
-                            send_scene(&mut connection, config.normal_scene);
-                            if !started {
-                                let _ = connection.send(&[0xFA]);
-                                started = true;
-                            }
-                        }
-                        FeedbackState::Attention => {
-                            send_scene(&mut connection, config.attention_scene);
-                            if !started {
-                                let _ = connection.send(&[0xFA]);
-                                started = true;
-                            }
-                        }
+                    } else {
+                        let _ = connection.send(&[0xFC]);
+                        started = false;
                     }
                 }
                 if next.active_slots != snapshot.active_slots
@@ -1468,7 +1473,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         let attention = FeedbackSnapshot {
-            fleet: FeedbackState::Attention,
+            fleet: FeedbackState::AttentionWorking,
             active_slots: 0b0000_0001,
             attention_slots: 0b1000_0001,
             active_panes: 0b0000_0011,
@@ -1476,6 +1481,19 @@ mod tests {
         };
         feedback.update(attention);
         assert_eq!(rx.try_recv().unwrap(), attention);
+    }
+
+    #[test]
+    fn feedback_state_encodes_attention_and_activity_independently() {
+        for (state, active, attention) in [
+            (FeedbackState::Idle, false, false),
+            (FeedbackState::Working, true, false),
+            (FeedbackState::AttentionIdle, false, true),
+            (FeedbackState::AttentionWorking, true, true),
+        ] {
+            assert_eq!(state.is_active(), active, "{state:?}");
+            assert_eq!(state.needs_attention(), attention, "{state:?}");
+        }
     }
 
     #[test]
