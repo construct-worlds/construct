@@ -93,6 +93,9 @@ pub(crate) struct FeedbackSnapshot {
     /// Bit 0 is session slot `[1]`; bit 7 is session slot `[8]`.
     pub active_slots: u8,
     pub attention_slots: u8,
+    /// Low four bits correspond to split panes 1–4 in visual reading order.
+    pub active_panes: u8,
+    pub attention_panes: u8,
 }
 
 impl Default for FeedbackSnapshot {
@@ -101,6 +104,8 @@ impl Default for FeedbackSnapshot {
             focused: FeedbackState::Idle,
             active_slots: 0,
             attention_slots: 0,
+            active_panes: 0,
+            attention_panes: 0,
         }
     }
 }
@@ -112,6 +117,8 @@ pub struct OpXyFeedbackConfig {
     /// Scene numbers are written as the one-based numbers shown by OP-XY.
     pub normal_scene: u8,
     pub attention_scene: u8,
+    /// OP-XY synth parameter 1 by default. Track parameters occupy CC 12–47.
+    pub split_activity_cc: u8,
 }
 
 impl Default for OpXyFeedbackConfig {
@@ -120,6 +127,7 @@ impl Default for OpXyFeedbackConfig {
             enabled: true,
             normal_scene: 1,
             attention_scene: 2,
+            split_activity_cc: 12,
         }
     }
 }
@@ -713,8 +721,13 @@ fn feedback_loop(
     send_scene(&mut connection, config.normal_scene);
     let _ = connection.send(&[0xFC]);
     send_slot_volumes(&mut connection, u8::MAX, 0);
+    send_pane_parameters(&mut connection, 0b0000_1111, config.split_activity_cc, 0);
     loop {
-        let timeout = if snapshot.active_slots | snapshot.attention_slots != 0 {
+        let any_activity = snapshot.active_slots
+            | snapshot.attention_slots
+            | snapshot.active_panes
+            | snapshot.attention_panes;
+        let timeout = if any_activity != 0 {
             VOLUME_FRAME_PERIOD
         } else {
             std::time::Duration::from_millis(250)
@@ -753,21 +766,43 @@ fn feedback_loop(
                     volume_frame = 0;
                     next_volume_frame = std::time::Instant::now();
                 }
+                if next.active_panes != snapshot.active_panes
+                    || next.attention_panes != snapshot.attention_panes
+                {
+                    let previous_visible = snapshot.active_panes | snapshot.attention_panes;
+                    let next_visible = next.active_panes | next.attention_panes;
+                    send_pane_parameters(
+                        &mut connection,
+                        previous_visible & !next_visible,
+                        config.split_activity_cc,
+                        0,
+                    );
+                    volume_frame = 0;
+                    next_volume_frame = std::time::Instant::now();
+                }
                 snapshot = next;
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {}
             Err(std_mpsc::RecvTimeoutError::Disconnected) => {
                 send_slot_volumes(&mut connection, u8::MAX, 0);
+                send_pane_parameters(&mut connection, 0b0000_1111, config.split_activity_cc, 0);
                 let _ = connection.send(&[0xFC]);
                 break;
             }
         }
         let now = std::time::Instant::now();
-        if snapshot.active_slots | snapshot.attention_slots != 0 && now >= next_volume_frame {
-            send_activity_volumes(
+        let any_activity = snapshot.active_slots
+            | snapshot.attention_slots
+            | snapshot.active_panes
+            | snapshot.attention_panes;
+        if any_activity != 0 && now >= next_volume_frame {
+            send_activity_frame(
                 &mut connection,
                 snapshot.active_slots,
                 snapshot.attention_slots,
+                snapshot.active_panes,
+                snapshot.attention_panes,
+                config.split_activity_cc,
                 ACTIVE_MOTION[volume_frame],
                 ATTENTION_BOUNCE[volume_frame],
             );
@@ -779,6 +814,10 @@ fn feedback_loop(
 
 fn track_volume_message(slot: usize, value: u8) -> Option<[u8; 3]> {
     (slot < 8).then_some([0xB0 | slot as u8, 7, value.min(127)])
+}
+
+fn pane_parameter_message(pane: usize, cc: u8, value: u8) -> Option<[u8; 3]> {
+    (pane < 4).then_some([0xB0 | pane as u8, cc.min(127), value.min(127)])
 }
 
 fn slot_volume_packet(slots: u8, value: u8) -> Vec<u8> {
@@ -796,6 +835,27 @@ fn slot_volume_packet(slots: u8, value: u8) -> Vec<u8> {
 #[cfg(target_os = "macos")]
 fn send_slot_volumes(connection: &mut MidiOutputConnection, slots: u8, value: u8) {
     let packet = slot_volume_packet(slots, value);
+    if !packet.is_empty() {
+        let _ = connection.send(&packet);
+    }
+}
+
+fn pane_parameter_packet(panes: u8, cc: u8, value: u8) -> Vec<u8> {
+    let panes = panes & 0b0000_1111;
+    let mut packet = Vec::with_capacity(panes.count_ones() as usize * 3);
+    for pane in 0..4 {
+        if panes & (1 << pane) != 0 {
+            if let Some(message) = pane_parameter_message(pane, cc, value) {
+                packet.extend_from_slice(&message);
+            }
+        }
+    }
+    packet
+}
+
+#[cfg(target_os = "macos")]
+fn send_pane_parameters(connection: &mut MidiOutputConnection, panes: u8, cc: u8, value: u8) {
+    let packet = pane_parameter_packet(panes, cc, value);
     if !packet.is_empty() {
         let _ = connection.send(&packet);
     }
@@ -824,20 +884,51 @@ fn activity_volume_packet(
     packet
 }
 
+fn activity_pane_packet(
+    active_panes: u8,
+    attention_panes: u8,
+    cc: u8,
+    active_value: u8,
+    attention_value: u8,
+) -> Vec<u8> {
+    let visible = (active_panes | attention_panes) & 0b0000_1111;
+    let mut packet = Vec::with_capacity(visible.count_ones() as usize * 3);
+    for pane in 0..4 {
+        let bit = 1 << pane;
+        let value = if attention_panes & bit != 0 {
+            Some(attention_value)
+        } else if active_panes & bit != 0 {
+            Some(active_value)
+        } else {
+            None
+        };
+        if let Some(message) = value.and_then(|value| pane_parameter_message(pane, cc, value)) {
+            packet.extend_from_slice(&message);
+        }
+    }
+    packet
+}
+
 #[cfg(target_os = "macos")]
-fn send_activity_volumes(
+fn send_activity_frame(
     connection: &mut MidiOutputConnection,
     active_slots: u8,
     attention_slots: u8,
+    active_panes: u8,
+    attention_panes: u8,
+    pane_cc: u8,
     active_value: u8,
     attention_value: u8,
 ) {
-    let packet = activity_volume_packet(
-        active_slots,
-        attention_slots,
+    let mut packet =
+        activity_volume_packet(active_slots, attention_slots, active_value, attention_value);
+    packet.extend(activity_pane_packet(
+        active_panes,
+        attention_panes,
+        pane_cc,
         active_value,
         attention_value,
-    );
+    ));
     if !packet.is_empty() {
         let _ = connection.send(&packet);
     }
@@ -1163,6 +1254,8 @@ mod tests {
             focused: FeedbackState::Working,
             active_slots: 0b0000_0001,
             attention_slots: 0,
+            active_panes: 0b0000_0001,
+            attention_panes: 0,
         };
         feedback.update(working);
         assert_eq!(rx.try_recv().unwrap(), working);
@@ -1173,6 +1266,8 @@ mod tests {
             focused: FeedbackState::Working,
             active_slots: 0b0000_0001,
             attention_slots: 0b1000_0001,
+            active_panes: 0b0000_0011,
+            attention_panes: 0b0000_0010,
         };
         feedback.update(attention);
         assert_eq!(rx.try_recv().unwrap(), attention);
@@ -1190,6 +1285,14 @@ mod tests {
         assert_eq!(
             activity_volume_packet(0b0000_0011, 0b0000_0010, 40, 70),
             vec![0xB0, 7, 40, 0xB1, 7, 70]
+        );
+        assert_eq!(
+            pane_parameter_packet(0b0000_1001, 12, 40),
+            vec![0xB0, 12, 40, 0xB3, 12, 40]
+        );
+        assert_eq!(
+            activity_pane_packet(0b0000_1100, 0b0000_1000, 12, 40, 70),
+            vec![0xB2, 12, 40, 0xB3, 12, 70]
         );
     }
 

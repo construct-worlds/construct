@@ -39,8 +39,14 @@ attention marker takes precedence and animates that slot with a damped bounce
 between 30% and 70%. Simultaneous active and attention slots animate together.
 Feedback shutdown resets all eight volumes to zero.
 
-Bluetooth feedback traffic is bounded: mixer animation is at most five packets
-per second, with all track-volume messages for a frame batched into one packet.
+Synth tracks 1–4 are a second, pane-oriented activity display. In visual
+reading order, each track reflects the session shown in its split pane using
+the same idle, running, and attention envelopes, independent of focus. The
+synth-parameter CC is configurable and defaults to parameter 1 (CC 12).
+
+Bluetooth feedback traffic is bounded: animation is at most five packets per
+second, with all mixer-volume and split-pane synth-parameter messages for a
+frame batched into one packet.
 Construct does not stream MIDI clock because OP-XY can start its sequencer from
 its internal clock, and sustained clock plus per-track packets can lock its BLE
 receive path until the device is power-cycled.

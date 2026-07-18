@@ -10767,10 +10767,21 @@ impl App {
     pub(crate) fn op_xy_feedback_snapshot(&self) -> crate::midi::FeedbackSnapshot {
         let slots = self.resolved_op_xy_session_slots();
         let (active_slots, attention_slots) = op_xy_slot_state_masks(&self.sessions, &slots);
+        let pane_sessions = (0..4)
+            .map(|pane| {
+                let window_id = self.op_xy_pane_window_id(pane)?;
+                self.selection_for_window(window_id)
+                    .and_then(|selection| selection.session_id().map(str::to_owned))
+            })
+            .collect::<Vec<_>>();
+        let (active_panes, attention_panes) =
+            op_xy_slot_state_masks(&self.sessions, &pane_sessions);
         crate::midi::FeedbackSnapshot {
             focused: self.op_xy_feedback_state(),
             active_slots,
             attention_slots,
+            active_panes: active_panes & 0b0000_1111,
+            attention_panes: attention_panes & 0b0000_1111,
         }
     }
 

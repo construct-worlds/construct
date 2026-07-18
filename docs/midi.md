@@ -83,8 +83,14 @@ the focused-session scene. Mixer tracks 1–8 correspond to title slots
 Multiple active and attention slots animate together. Exiting Construct resets
 all eight track volumes to zero.
 
+Synth tracks 1–4 independently mirror the sessions shown in split panes 1–4,
+using the same idle, running, and attention envelopes. This indicator is based
+on each pane's session rather than keyboard focus. The default target is synth
+parameter 1 (CC 12); choose another CC from the OP-XY track-parameter range
+when the template uses a different engine or preferred visual control.
+
 Construct sends MIDI Start/Stop for transport but deliberately leaves timing to
-the OP-XY's internal clock. Mixer updates are limited to five batched packets
+the OP-XY's internal clock. Animation updates are limited to five batched packets
 per second. Avoiding a continuous external clock and batching all animated
 track volumes keeps Bluetooth MIDI traffic low enough for long-running use.
 Scene defaults can be edited in `midi.toml`:
@@ -94,6 +100,7 @@ Scene defaults can be edited in `midi.toml`:
 enabled = true
 normal_scene = 1
 attention_scene = 2
+split_activity_cc = 12
 ```
 
 Scenes store track volume and mute state, so the Construct template should use
