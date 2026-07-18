@@ -10843,7 +10843,7 @@ impl App {
                         [slot] => (false, *slot),
                         _ => {
                             self.set_status(
-                                "usage: /midi-slot <1-8> | /midi-slot clear <1-8>".into(),
+                                "usage: /opxy-slot <1-8> | /opxy-slot clear <1-8>".into(),
                             );
                             return;
                         }

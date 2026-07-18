@@ -665,7 +665,7 @@ fn op_xy_learn(requested_device: Option<&str>) -> Result<()> {
     });
     config.save(&path)?;
     println!("saved OP-XY controller profile to {}", path.display());
-    println!("assign the selected TUI session with `/midi-slot 1` through `/midi-slot 8`");
+    println!("assign the selected TUI session with `/opxy-slot 1` through `/opxy-slot 8`");
     Ok(())
 }
 

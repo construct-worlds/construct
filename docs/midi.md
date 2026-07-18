@@ -44,13 +44,14 @@ coexist with it.
 In the TUI, select a session and assign it to a black-key slot:
 
 ```text
-/midi-slot 1
-/midi-slot 2
+/opxy-slot 1
+/opxy-slot 2
 …
-/midi-slot 8
+/opxy-slot 8
 ```
 
-`/midi-slot` shows all assignments and `/midi-slot clear 3` clears one. Slot
+`/opxy-slot` shows all assignments and `/opxy-slot clear 3` clears one. The
+older descriptive spelling `/midi-slot` is also accepted as an alias. Slot
 numbers appear before assigned session names in the session list.
 
 Pressing a session key places that session in the pane addressed by the

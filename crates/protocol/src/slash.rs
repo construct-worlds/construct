@@ -263,8 +263,8 @@ pub const COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         id: CommandId::MidiSlot,
-        name: "/midi-slot",
-        aliases: &["opxy-slot"],
+        name: "/opxy-slot",
+        aliases: &["midi-slot"],
         args: Args::Optional,
         routing: Routing::Client,
         visibility: ModelVisibility::Hidden,

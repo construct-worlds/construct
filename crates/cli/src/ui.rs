@@ -8841,7 +8841,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
 
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
-                    palette commands: new fork send delete rename program diff border midi-slot
+                    palette commands: new fork send delete rename program diff border opxy-slot
                                       theme zoom interrupt refresh harnesses configure
                                       paste help
     ?               toggle this help
@@ -8915,7 +8915,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
 
   global
     :               command palette
-                    palette commands: new fork send delete rename program diff border midi-slot
+                    palette commands: new fork send delete rename program diff border opxy-slot
                                       theme zoom interrupt refresh harnesses configure
                                       paste help
     A               cycle approval mode
