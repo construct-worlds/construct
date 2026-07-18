@@ -68,6 +68,14 @@ pub(crate) enum OpXyControl {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpXyAuxControl {
+    Up,
+    Down,
+    ScrollUp,
+    ScrollDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OpXyEvent {
     /// Zero-based visual pane position: left-to-right, then top-to-bottom.
     pub pane: usize,
@@ -78,6 +86,7 @@ pub(crate) struct OpXyEvent {
 pub(crate) enum MidiInputEvent {
     Action(MidiAction),
     OpXy(OpXyEvent),
+    OpXyAux(OpXyAuxControl),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +141,87 @@ impl Default for OpXyFeedbackConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct OpXyAuxConfig {
+    pub enabled: bool,
+    /// Human-facing MIDI channel used by the OP-XY auxiliary track.
+    pub channel: u8,
+    /// Absolute CC for the third encoder.
+    pub arrow_cc: u8,
+    /// Absolute CC for the fourth encoder.
+    pub scroll_cc: u8,
+}
+
+impl Default for OpXyAuxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            channel: 10,
+            arrow_cc: 2,
+            scroll_cc: 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OpXyAuxState {
+    arrow_value: Option<u8>,
+    scroll_value: Option<u8>,
+}
+
+impl OpXyAuxState {
+    fn event_for(
+        &mut self,
+        config: &OpXyAuxConfig,
+        message: &MidiMessage,
+    ) -> Option<OpXyAuxControl> {
+        if !config.enabled
+            || message.kind != MidiMessageKind::Cc
+            || message.channel != config.channel
+        {
+            return None;
+        }
+        let (previous, increasing, decreasing) = if message.number == config.arrow_cc {
+            (&mut self.arrow_value, OpXyAuxControl::Down, OpXyAuxControl::Up)
+        } else if message.number == config.scroll_cc {
+            (
+                &mut self.scroll_value,
+                OpXyAuxControl::ScrollDown,
+                OpXyAuxControl::ScrollUp,
+            )
+        } else {
+            return None;
+        };
+        let old = previous.replace(message.value)?;
+        absolute_encoder_direction(old, message.value).map(|direction| match direction {
+            EncoderDirection::Increase => increasing,
+            EncoderDirection::Decrease => decreasing,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncoderDirection {
+    Increase,
+    Decrease,
+}
+
+fn absolute_encoder_direction(previous: u8, current: u8) -> Option<EncoderDirection> {
+    if previous == current {
+        return None;
+    }
+    // OP-XY encoders can cross the end of their absolute 0–127 range. Choose
+    // the shorter direction around that ring so 127→0 remains an increase.
+    let forward = current.wrapping_sub(previous) & 0x7f;
+    let backward = previous.wrapping_sub(current) & 0x7f;
+    Some(if forward <= backward {
+        EncoderDirection::Increase
+    } else {
+        EncoderDirection::Decrease
+    })
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct OpXyConfig {
@@ -148,6 +238,7 @@ pub struct OpXyConfig {
     pub enter_note: Option<u8>,
     /// A sequenced display note that Construct must consume without action.
     pub no_op_note: Option<u8>,
+    pub aux: OpXyAuxConfig,
     pub feedback: OpXyFeedbackConfig,
 }
 
@@ -427,6 +518,7 @@ pub(crate) fn start_listener() -> Result<Option<(MidiListener, MidiEventReceiver
     let port_name = input.port_name(&port).context("read MIDI device name")?;
     let mappings = config.mappings;
     let op_xy = config.op_xy;
+    let mut op_xy_aux_state = OpXyAuxState::default();
     let (tx, rx) = mpsc::unbounded_channel();
     let connection = input
         .connect(
@@ -441,6 +533,15 @@ pub(crate) fn start_listener() -> Result<Option<(MidiListener, MidiEventReceiver
                     .and_then(|profile| profile.event_for(&message))
                 {
                     let _ = tx.send(MidiInputEvent::OpXy(event));
+                    return;
+                }
+                if let Some(event) = op_xy.as_ref().and_then(|profile| {
+                    profile
+                        .enabled
+                        .then(|| op_xy_aux_state.event_for(&profile.aux, &message))
+                        .flatten()
+                }) {
+                    let _ = tx.send(MidiInputEvent::OpXyAux(event));
                     return;
                 }
                 for mapping in &mappings {
@@ -531,6 +632,12 @@ fn print_mappings() -> Result<()> {
         println!("op-xy: {}", if op_xy.enabled { "enabled" } else { "disabled" });
         println!("  pane channels: {:?}", op_xy.pane_channels);
         println!("  session notes: {:?}", op_xy.session_notes);
+        if op_xy.aux.enabled {
+            println!(
+                "  aux: channel {}, arrow CC {}, scroll CC {}",
+                op_xy.aux.channel, op_xy.aux.arrow_cc, op_xy.aux.scroll_cc
+            );
+        }
     }
     Ok(())
 }
@@ -636,6 +743,7 @@ fn op_xy_learn(requested_device: Option<&str>) -> Result<()> {
         up_note: Some(up_note),
         enter_note: Some(enter_note),
         no_op_note: Some(no_op_note),
+        aux: OpXyAuxConfig::default(),
         feedback: OpXyFeedbackConfig::default(),
     });
     config.save(&path)?;
@@ -1173,6 +1281,52 @@ mod tests {
     }
 
     #[test]
+    fn op_xy_aux_converts_absolute_cc_changes_after_calibration() {
+        let config = OpXyAuxConfig::default();
+        let mut state = OpXyAuxState::default();
+
+        assert_eq!(
+            state.event_for(&config, &parse_message(&[0xb9, 2, 40]).unwrap()),
+            None
+        );
+        assert_eq!(
+            state.event_for(&config, &parse_message(&[0xb9, 2, 41]).unwrap()),
+            Some(OpXyAuxControl::Down)
+        );
+        assert_eq!(
+            state.event_for(&config, &parse_message(&[0xb9, 2, 39]).unwrap()),
+            Some(OpXyAuxControl::Up)
+        );
+
+        assert_eq!(
+            state.event_for(&config, &parse_message(&[0xb9, 3, 127]).unwrap()),
+            None
+        );
+        assert_eq!(
+            state.event_for(&config, &parse_message(&[0xb9, 3, 0]).unwrap()),
+            Some(OpXyAuxControl::ScrollDown)
+        );
+        assert_eq!(
+            state.event_for(&config, &parse_message(&[0xb9, 3, 127]).unwrap()),
+            Some(OpXyAuxControl::ScrollUp)
+        );
+    }
+
+    #[test]
+    fn op_xy_aux_ignores_unassigned_ccs_and_other_channels() {
+        let config = OpXyAuxConfig::default();
+        let mut state = OpXyAuxState::default();
+        assert_eq!(
+            state.event_for(&config, &parse_message(&[0xb9, 0, 50]).unwrap()),
+            None
+        );
+        assert_eq!(
+            state.event_for(&config, &parse_message(&[0xb8, 2, 50]).unwrap()),
+            None
+        );
+    }
+
+    #[test]
     fn config_round_trips_as_readable_toml() {
         let config = MidiConfig {
             device: Some("OP-XY".into()),
@@ -1230,6 +1384,7 @@ mod tests {
                 up_note: Some(73),
                 enter_note: Some(75),
                 no_op_note: Some(71),
+                aux: OpXyAuxConfig::default(),
                 feedback: OpXyFeedbackConfig::default(),
             }),
         };
@@ -1318,6 +1473,7 @@ mod tests {
             up_note: Some(68),
             enter_note: Some(70),
             no_op_note: Some(65),
+            aux: OpXyAuxConfig::default(),
             feedback: OpXyFeedbackConfig::default(),
         }
     }

@@ -59,6 +59,24 @@ track and then performs its action. Session keys switch that pane's session,
 arrows dispatch the corresponding native TUI arrow, and Enter acts on the now
 focused pane. The reserved sequencer-display no-op does not change focus.
 
+Auxiliary track 3 can provide focus-sensitive generic controls on MIDI channel
+10. Its third encoder (CC 2) sends Up/Down, and its fourth encoder (CC 3) sends
+scroll up/down. Because OP-XY reports absolute values, Construct uses the first
+value received from each encoder only to establish its position. Later changes
+produce one action per MIDI message; increasing values move or scroll down and
+decreasing values move or scroll up. Crossing between 127 and 0 preserves the
+physical direction. CC 0 and CC 1 are currently unassigned.
+
+The defaults can be changed in `midi.toml`:
+
+```toml
+[op_xy.aux]
+enabled = true
+channel = 10
+arrow_cc = 2
+scroll_cc = 3
+```
+
 ### Scene feedback
 
 The learned profile enables feedback by default. Construct treats OP-XY scene

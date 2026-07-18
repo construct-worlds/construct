@@ -4523,6 +4523,9 @@ async fn run_loop(
                     Some(crate::midi::MidiInputEvent::OpXy(event)) => {
                         app.handle_op_xy_event(event).await;
                     }
+                    Some(crate::midi::MidiInputEvent::OpXyAux(control)) => {
+                        app.handle_op_xy_aux_control(control).await;
+                    }
                     None => midi_rx = None,
                 }
             }
@@ -10754,6 +10757,25 @@ impl App {
                 };
                 self.on_key(KeyEvent::new(code, KeyModifiers::NONE)).await;
             }
+        }
+    }
+
+    pub(crate) async fn handle_op_xy_aux_control(
+        &mut self,
+        control: crate::midi::OpXyAuxControl,
+    ) {
+        use crate::midi::OpXyAuxControl;
+        match control {
+            OpXyAuxControl::Up => {
+                self.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+                    .await;
+            }
+            OpXyAuxControl::Down => {
+                self.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                    .await;
+            }
+            OpXyAuxControl::ScrollUp => self.run_action(KeyAction::ScrollUp).await,
+            OpXyAuxControl::ScrollDown => self.run_action(KeyAction::ScrollDown).await,
         }
     }
 

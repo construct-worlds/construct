@@ -44,6 +44,13 @@ reading order, each track reflects the session shown in its split pane using
 the same idle, running, and attention envelopes, independent of focus. The
 synth-parameter CC is configurable and defaults to parameter 1 (CC 12).
 
+Auxiliary track 3 supplies generic, focus-sensitive navigation on MIDI channel
+10. Absolute CC 2 maps value changes to Up/Down and absolute CC 3 maps changes
+to scroll up/down. Each encoder's first received value calibrates its independent
+position without producing an action. Subsequent messages produce one action
+in the shortest direction around the 0–127 range, so boundary crossings do not
+reverse the control unexpectedly. CC 0 and CC 1 remain unassigned.
+
 Bluetooth feedback traffic is bounded: animation is at most five packets per
 second, with all mixer-volume and split-pane synth-parameter messages for a
 frame batched into one packet.
