@@ -1567,6 +1567,15 @@ pub struct App {
     /// Used to gate the program shimmer hover tooltip on pointer-enter (spec
     /// 0057) rather than merely "pointer happens to be here".
     pub mouse_moved_at: Option<Instant>,
+    /// Whether this terminal has ever delivered a `MouseEventKind::Moved`
+    /// event. Terminals without all-motion tracking (e.g. macOS
+    /// Terminal.app) never do — there, `mouse_pos` goes stale between
+    /// clicks/wheels, so hover-revealed affordances (the sidebar's
+    /// auto-hidden scrollbars) would stay invisible while the user is
+    /// physically hovering them. Rendering falls back to always showing
+    /// those affordances until the first genuine motion event proves hover
+    /// tracking works.
+    pub saw_mouse_motion: bool,
     /// Whether terminal mouse capture is enabled. When false, agentd
     /// stops receiving mouse events so the user's terminal can perform
     /// native drag selection/copy.
@@ -3865,6 +3874,7 @@ async fn run_with_socket_initial_selection(
         session_title_rename: None,
         mouse_pos: None,
         mouse_moved_at: None,
+        saw_mouse_motion: false,
         mouse_capture_enabled: true,
         last_program_clip_click: None,
         orchestrator_id: initial_orch_id,
@@ -8492,6 +8502,11 @@ impl App {
             self.mouse_moved_at = Some(Instant::now());
         }
         self.mouse_pos = Some(next_pos);
+        // A genuine motion event proves the terminal tracks hover, so
+        // hover-revealed affordances can rely on `mouse_pos` from here on.
+        if matches!(ev.kind, MouseEventKind::Moved) {
+            self.saw_mouse_motion = true;
+        }
         if self.help_dismiss_mouse_button.is_some_and(
             |button| matches!(ev.kind, MouseEventKind::Up(released) if released == button),
         ) {
@@ -13652,6 +13667,7 @@ mod tests {
             session_title_rename: None,
             mouse_pos: None,
                 mouse_moved_at: None,
+                saw_mouse_motion: false,
             mouse_capture_enabled: true,
             last_program_clip_click: None,
             orchestrator_id: None,
@@ -29610,6 +29626,9 @@ mod tests {
             session.id = format!("s{i}");
             app.sessions.push(session);
         }
+        // A hover-tracking terminal (the motion-less fallback keeps the bar
+        // always visible and is covered by its own test).
+        app.saw_mouse_motion = true;
         let backend = ratatui::backend::TestBackend::new(120, 28);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
 
@@ -29667,6 +29686,30 @@ mod tests {
         })
         .await;
         assert!(app.dragging_list_scrollbar.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_list_scrollbar_stays_visible_without_motion_tracking() {
+        // Same motion-less fallback as the lineage scrollbars: without
+        // `Moved` events (macOS Terminal.app) hover can never reveal the
+        // bar, so an overflowing list keeps it visible.
+        let (mut app, _dir, server) = captured_app().await;
+        for i in 2..=40 {
+            let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+            session.id = format!("s{i}");
+            app.sessions.push(session);
+        }
+        assert!(!app.saw_mouse_motion, "premise: no motion event seen yet");
+        let backend = ratatui::backend::TestBackend::new(120, 28);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let rows = app.layout.list_items_area.expect("session rows");
+        assert!(app.sessions.len() > rows.height as usize, "premise: overflow");
+        assert!(
+            app.layout.list_scrollbar.is_some(),
+            "no motion tracking → the bar must not hide behind hover"
+        );
         server.abort();
     }
 
@@ -34142,6 +34185,10 @@ mod tests {
     async fn lineage_scrollbars_show_only_on_focus_or_hover() {
         let (mut app, _dir, server) = test_app_with_tall_wide_lineage().await;
         app.select_session("s1".to_string());
+        // A hover-tracking terminal: motion events arrive, so the reveal
+        // can rely on `mouse_pos` (the motion-less fallback is tested
+        // separately below).
+        app.saw_mouse_motion = true;
         let backend = ratatui::backend::TestBackend::new(120, 28);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
 
@@ -34206,6 +34253,48 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         assert!(app.layout.lineage_vscrollbar.is_some());
         assert!(app.layout.lineage_hscrollbar.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lineage_scrollbars_stay_visible_without_motion_tracking() {
+        // Terminals without all-motion mouse reporting (macOS Terminal.app)
+        // never deliver `Moved` events, so `mouse_pos` goes stale at the
+        // last click/wheel and the hover reveal can never trigger. Until a
+        // genuine motion event proves hover works, an overflowing section
+        // must keep its scrollbars visible and interactive — otherwise the
+        // horizontal bar is unreachable except by keyboard-focusing the
+        // section first (the bug this guards against).
+        let (mut app, _dir, server) = test_app_with_tall_wide_lineage().await;
+        app.select_session("s1".to_string());
+        assert!(!app.saw_mouse_motion, "premise: no motion event seen yet");
+        let backend = ratatui::backend::TestBackend::new(120, 28);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+
+        // Unfocused, pointer parked far away (a click landed in a main
+        // pane): both bars still render and register their drag hits.
+        app.mouse_pos = Some((110, 5));
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.layout.lineage_v_overflow && app.layout.lineage_h_overflow,
+            "premise: both axes overflow"
+        );
+        assert!(app.layout.lineage_vscrollbar.is_some());
+        assert!(app.layout.lineage_hscrollbar.is_some());
+
+        // The first genuine motion event proves hover tracking works, and
+        // the bars go back to hover/focus reveal — hidden at rest.
+        app.on_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 110,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+        .await;
+        assert!(app.saw_mouse_motion);
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.layout.lineage_vscrollbar.is_none());
+        assert!(app.layout.lineage_hscrollbar.is_none());
         server.abort();
     }
 

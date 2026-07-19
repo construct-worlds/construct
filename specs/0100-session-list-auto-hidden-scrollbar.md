@@ -13,6 +13,12 @@ active keyboard focus or the pointer is over the session-list header or rows.
 The scrollbar hides when neither condition is true. Hovering the lineage or
 operator regions below the rows does not reveal the session-list scrollbar.
 
+Hover-reveal requires a terminal that reports pointer motion. Until the TUI
+has observed at least one genuine motion event in the current run, it must
+assume hover tracking is unavailable (macOS Terminal.app never reports
+motion) and keep an overflowing list's scrollbar visible instead of hiding
+it — otherwise the bar would be unreachable by mouse in such terminals.
+
 The scrollbar is a slim right-edge overlay: it does not reserve a column,
 reflow row labels, or change the list's geometry when it appears. Its thumb
 and track retain a full-cell mouse target for dragging and jumping, while the

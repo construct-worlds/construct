@@ -2238,6 +2238,9 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     };
     let show_list_scrollbar = app.session_rows_focused()
         || app.dragging_list_scrollbar.is_some()
+        // No motion tracking (Terminal.app) → hover can never reveal the
+        // bar; show it whenever the list overflows instead.
+        || !app.saw_mouse_motion
         || app
             .mouse_pos
             .is_some_and(|(mx, my)| contains_rect(list_hover_area, mx, my));
@@ -2567,7 +2570,11 @@ fn render_lineage_section(
     // while the section is actively keyboard-focused or the pointer is
     // inside it. In particular, the horizontal bar's reserved row remains
     // part of the section so entering/leaving hover never shifts the diagram.
+    // Terminals without motion tracking (`App::saw_mouse_motion`) never
+    // update `mouse_pos` on hover, so the reveal can't trigger there —
+    // fall back to always showing the bars whenever the diagram overflows.
     let show_scrollbars = focused
+        || !app.saw_mouse_motion
         || app
             .mouse_pos
             .is_some_and(|(mx, my)| contains_rect(rect, mx, my));

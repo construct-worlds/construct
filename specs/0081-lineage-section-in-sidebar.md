@@ -30,10 +30,14 @@ the diagram. When the diagram overflows the section's width, the
 horizontal scrollbar gets its own row at the section's bottom (below the
 padding row), so the last diagram row never renders underneath it. Needed
 scrollbars are visible only while the section has active keyboard focus or
-the pointer is anywhere inside the section. The horizontal scrollbar's row
-stays reserved while its bar is hidden, preventing hover from shifting the
-diagram vertically. Both scrollbars render as slim edge indicators rather
-than full-cell bands, while their full-cell tracks remain mouse-interactive.
+the pointer is anywhere inside the section — except in terminals that never
+report pointer motion (macOS Terminal.app): until a genuine motion event has
+been observed in the current run, hover can never trigger the reveal, so
+needed scrollbars stay visible whenever the diagram overflows. The
+horizontal scrollbar's row stays reserved while its bar is hidden,
+preventing hover from shifting the diagram vertically. Both scrollbars
+render as slim edge indicators rather than full-cell bands, while their
+full-cell tracks remain mouse-interactive.
 
 The section's header is a one-row horizontal rule carrying its label and
 controls — the same visual furniture as the operator panel's title bar
