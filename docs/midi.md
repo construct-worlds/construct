@@ -186,11 +186,17 @@ track-parameter range when the template uses a different engine or preferred
 visual controls. Unlike the fixed mixer envelopes, the synth animation ranges
 are configurable in `midi.toml` as percents of the 0–127 CC range:
 
-- Pending or running: a smooth, continuous sweep between `active_range`
+- Pending or running: a smooth sweep between `active_range`
   (default `[25, 40]`).
 - Blue attention dot: a bounce between `attention_range` (default `[30, 70]`)
   — a quick rise toward the maximum, a fall back to the minimum, then a hold
   at the minimum for several frames before the next bounce.
+
+Mixer and synth animation is a burst, not a continuous stream: after each
+activity change the motion plays a few full cycles, then freezes at steady
+levels (refreshed every 30 seconds) until the next change. Sustained
+streaming is what can lock the OP-XY's Bluetooth receive path, so
+long-unchanged activity intentionally goes quiet.
 
 Widen both ranges to make the OP-XY synth graphics move more visibly, e.g.
 `active_range = [10, 90]` and `attention_range = [10, 90]`. These keys affect
@@ -203,12 +209,14 @@ and synth parameters are active, with a ceiling of sixteen decoded CC messages
 per second. Frames remain batched, and queued state changes are coalesced to the
 newest state if Bluetooth applies backpressure. Avoiding a continuous external
 clock and bounding the actual parameter workload keeps Bluetooth MIDI traffic
-low enough for long-running use. If CoreMIDI reports a failed scene or
-transport send, Construct retains that desired global state and retries every
-two seconds until it succeeds. Construct also reasserts the global state every
-two seconds after reported success so a silently dropped Bluetooth packet
+low enough for long-running use. Construct reasserts the global state every
+two seconds so a silently dropped Bluetooth packet
 self-recovers. Running transport is reasserted with MIDI Continue rather than
-Start, preserving the playhead.
+Start, preserving the playhead. If CoreMIDI reports a failed send, Construct
+drops the connection and re-probes for the device every five seconds,
+resynchronizing all feedback state from scratch once it reconnects — the
+OP-XY may also be paired after Construct is already running and feedback
+comes up on its own.
 Scene defaults can be edited in `midi.toml`:
 
 ```toml
