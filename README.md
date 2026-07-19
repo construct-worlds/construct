@@ -27,10 +27,9 @@ More screenshots and demos: [gallery](gallery.md).
   with the agent, then run them from the same document.
 
   <img src="https://raw.githubusercontent.com/construct-worlds/construct/90d02bd2c1e6108eaa5c763bde9e2d78f8786691/demos/program.gif" alt="construct program demo" width="70%">
-- **Agent-to-agent orchestration** — hand one agent a big goal and let it run
-  the fleet: it breaks the work down, delegates to helper sessions, watches
-  their progress, and pulls the results together — while you supervise or step
-  away.
+- **Agent-to-agent orchestration** — let your Codex and Claude Code sessions
+  talk to each other: one agent can hand a task to another, check how it's
+  going, and pick up the results.
 - **ACP (Agent Client Protocol) server** — point Agent Client Protocol clients at
   `construct acp` to create, load, resume, prompt, cancel, and close construct
   daemon sessions through the same installed binary.
