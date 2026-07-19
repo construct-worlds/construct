@@ -97,15 +97,31 @@ shortest-direction boundary behavior used by the Aux 3 encoders.
 Bluetooth feedback traffic is bounded by decoded CC work, not just packet
 count. Animation dynamically slows as more mixer tracks and synth parameters
 are visible so it emits at most sixteen CC messages per second; all messages
-for a frame remain batched into one packet. State updates queued while the
+for a frame remain batched into one packet. Activity animation is a burst,
+not a sustained stream: after an activity change the motion plays a small
+fixed number of full cycles, then freezes at steady held levels — with held
+attention distinguishably louder than held activity — refreshed at a slow
+bounded cadence so a dropped packet cannot leave a stale level behind.
+Sustained continuous streaming is what locks the OP-XY's Bluetooth receive
+path, so long-running unchanged activity must approach zero sustained
+traffic. State updates queued while the
 transport is busy are coalesced to the newest snapshot so stale scene,
 transport, mixer, and synth states are never replayed after backpressure clears.
-Failed global scene or transport sends retain their desired state and retry at
-a bounded two-second interval. The desired global state is also reasserted at
-that interval after reported success because Bluetooth delivery is not
+The desired global state is reasserted at
+a bounded two-second interval after reported success because Bluetooth
+delivery is not
 acknowledged: scenes are resent, stopped transport receives Stop again, and
 running transport receives Continue so its playhead is not reset. A transient
 or silently dropped CoreMIDI send must not permanently freeze global feedback.
+
+Feedback owns its device connection and self-heals it. A failed CoreMIDI send
+marks the connection dead, and a dead or never-established connection is
+re-attempted at a slow bounded cadence, so feedback starts working when the
+device pairs after the TUI launched and comes back on its own after the
+device reboots or Bluetooth drops. Reconnecting assumes nothing about device
+state: previously asserted scene, transport, mixer, and synth values are
+forgotten and the full state is resynchronized from scratch. Feedback startup
+must not require the device to be present.
 Construct does not stream MIDI clock because OP-XY can start its sequencer from
 its internal clock, and sustained clock plus per-track packets can lock its BLE
 receive path until the device is power-cycled.

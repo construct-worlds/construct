@@ -971,25 +971,36 @@ pub(crate) fn start_feedback() -> Result<Option<MidiFeedback>> {
     else {
         return Ok(None);
     };
-    let device = config.device.as_deref().context("OP-XY profile has no MIDI device")?;
-    let output = MidiOutput::new("construct-op-xy-feedback").context("initialize MIDI output")?;
-    let port = find_output_port(&output, device)?;
-    let port_name = output.port_name(&port).context("read MIDI output name")?;
+    let device = config
+        .device
+        .clone()
+        .context("OP-XY profile has no MIDI device")?;
     let aggregate_scope = profile.feedback.aggregate_scope;
-    let connection = output
-        .connect(&port, "construct-op-xy-feedback")
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
-        .with_context(|| format!("connect MIDI output {port_name:?}"))?;
+    // The device being absent right now is not an error: the loop keeps
+    // trying, so feedback comes alive when the OP-XY pairs after the TUI
+    // started, and comes back if Bluetooth drops mid-session.
+    let connection = connect_feedback_output(&device).ok();
     let (tx, rx) = std_mpsc::channel();
     std::thread::Builder::new()
         .name("construct-midi-feedback".into())
-        .spawn(move || feedback_loop(connection, rx, profile.feedback))
+        .spawn(move || feedback_loop(device, connection, rx, profile.feedback))
         .context("spawn MIDI feedback thread")?;
     Ok(Some(MidiFeedback {
         tx,
         last_snapshot: std::cell::Cell::new(FeedbackSnapshot::default()),
         aggregate_scope,
     }))
+}
+
+#[cfg(target_os = "macos")]
+fn connect_feedback_output(device: &str) -> Result<MidiOutputConnection> {
+    let output = MidiOutput::new("construct-op-xy-feedback").context("initialize MIDI output")?;
+    let port = find_output_port(&output, device)?;
+    let port_name = output.port_name(&port).context("read MIDI output name")?;
+    output
+        .connect(&port, "construct-op-xy-feedback")
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+        .with_context(|| format!("connect MIDI output {port_name:?}"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1000,8 +1011,77 @@ pub(crate) fn start_feedback() -> Result<Option<MidiFeedback>> {
 const FEEDBACK_MIN_FRAME_PERIOD: std::time::Duration =
     std::time::Duration::from_millis(200);
 const FEEDBACK_MAX_CC_MESSAGES_PER_SECOND: u32 = 16;
-const FEEDBACK_RETRY_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
 const FEEDBACK_REASSERT_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
+/// How often the loop probes for the device after losing (or never having)
+/// the output connection. Each probe creates a short-lived CoreMIDI client,
+/// so this stays coarse.
+const FEEDBACK_RECONNECT_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
+/// Full animation cycles played after an activity change before the mixer
+/// and synth values freeze at steady holds. Sustained Bluetooth streaming is
+/// what wedges the OP-XY's BLE receive path, so motion is a burst, not a
+/// constant drip.
+const FEEDBACK_ANIMATION_CYCLES_BEFORE_HOLD: u32 = 3;
+/// While holding, the steady values are re-sent at this slow cadence so a
+/// silently dropped packet cannot leave a stale level on the device forever.
+const FEEDBACK_HOLD_REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
+
+// CC 7 is 0–127. Active work moves gently through 25–40%; attention
+// performs a two-stage damped bounce through 30–70%.
+const ACTIVE_MOTION: [u8; 8] = [32, 38, 45, 51, 45, 38, 34, 32];
+const ATTENTION_BOUNCE: [u8; 8] = [38, 62, 89, 58, 38, 56, 44, 38];
+/// Steady levels once the animation quiesces: active settles at its resting
+/// level, attention holds visibly higher so the two states stay
+/// distinguishable at a glance without any motion.
+const ACTIVE_HOLD: u8 = 32;
+const ATTENTION_HOLD: u8 = 62;
+
+/// One emitted mixer/synth frame: the levels to send and how long to wait
+/// before the next frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActivityFrame {
+    active: u8,
+    attention: u8,
+    hold: bool,
+}
+
+/// Paces the activity animation so Bluetooth traffic is bursty: a few full
+/// motion cycles after every activity change, then a steady hold refreshed
+/// slowly until the next change.
+#[derive(Debug, Default)]
+struct ActivityAnimation {
+    frame: usize,
+    cycles_since_change: u32,
+}
+
+impl ActivityAnimation {
+    fn on_change(&mut self) {
+        *self = Self::default();
+    }
+
+    fn quiesced(&self) -> bool {
+        self.cycles_since_change >= FEEDBACK_ANIMATION_CYCLES_BEFORE_HOLD
+    }
+
+    fn next_frame(&mut self) -> ActivityFrame {
+        if self.quiesced() {
+            return ActivityFrame {
+                active: ACTIVE_HOLD,
+                attention: ATTENTION_HOLD,
+                hold: true,
+            };
+        }
+        let frame = ActivityFrame {
+            active: ACTIVE_MOTION[self.frame],
+            attention: ATTENTION_BOUNCE[self.frame],
+            hold: false,
+        };
+        self.frame = (self.frame + 1) % ACTIVE_MOTION.len();
+        if self.frame == 0 {
+            self.cycles_since_change += 1;
+        }
+        frame
+    }
+}
 
 fn feedback_activity_message_count(snapshot: FeedbackSnapshot) -> u32 {
     (snapshot.active_slots | snapshot.attention_slots).count_ones()
@@ -1022,23 +1102,31 @@ fn feedback_frame_period(snapshot: FeedbackSnapshot) -> std::time::Duration {
 
 #[cfg(target_os = "macos")]
 fn feedback_loop(
-    mut connection: MidiOutputConnection,
+    device: String,
+    mut connection: Option<MidiOutputConnection>,
     rx: std_mpsc::Receiver<FeedbackSnapshot>,
     config: OpXyFeedbackConfig,
 ) {
-    // CC 7 is 0–127. Active work moves gently through 25–40%; attention
-    // performs a two-stage damped bounce through 30–70%.
-    const ACTIVE_MOTION: [u8; 8] = [32, 38, 45, 51, 45, 38, 34, 32];
-    const ATTENTION_BOUNCE: [u8; 8] = [38, 62, 89, 58, 38, 56, 44, 38];
     let mut snapshot = FeedbackSnapshot::default();
     let mut transport_started = None;
     let mut sent_fleet = None;
     let mut next_fleet_send = std::time::Instant::now();
-    let mut volume_frame = 0usize;
+    let mut animation = ActivityAnimation::default();
     let mut next_volume_frame = std::time::Instant::now();
-    send_slot_volumes(&mut connection, u8::MAX, 0);
-    send_pane_parameters(&mut connection, 0b0000_1111, config.track_activity_cc, 0);
+    let mut next_connect_attempt = std::time::Instant::now() + FEEDBACK_RECONNECT_PERIOD;
+    // `false` marks the connection as dead; the sends themselves are lossy
+    // (Bluetooth), so only an Err from CoreMIDI — a disposed endpoint after
+    // the device dropped off — tears it down.
+    let mut connection_ok = connection.is_some();
+    if let Some(connection) = connection.as_mut() {
+        connection_ok &= send_slot_volumes(connection, u8::MAX, 0);
+        connection_ok &=
+            send_pane_parameters(connection, 0b0000_1111, config.track_activity_cc, 0);
+    }
     loop {
+        if !connection_ok {
+            connection = None;
+        }
         let timeout = feedback_frame_period(snapshot);
         match rx.recv_timeout(timeout) {
             Ok(mut next) => {
@@ -1056,8 +1144,11 @@ fn feedback_loop(
                 {
                     let previous_visible = snapshot.active_slots | snapshot.attention_slots;
                     let next_visible = next.active_slots | next.attention_slots;
-                    send_slot_volumes(&mut connection, previous_visible & !next_visible, 0);
-                    volume_frame = 0;
+                    if let Some(connection) = connection.as_mut() {
+                        connection_ok &=
+                            send_slot_volumes(connection, previous_visible & !next_visible, 0);
+                    }
+                    animation.on_change();
                     next_volume_frame = std::time::Instant::now();
                 }
                 if next.active_tracks != snapshot.active_tracks
@@ -1065,30 +1156,55 @@ fn feedback_loop(
                 {
                     let previous_visible = snapshot.active_tracks | snapshot.attention_tracks;
                     let next_visible = next.active_tracks | next.attention_tracks;
-                    send_pane_parameters(
-                        &mut connection,
-                        previous_visible & !next_visible,
-                        config.track_activity_cc,
-                        0,
-                    );
-                    volume_frame = 0;
+                    if let Some(connection) = connection.as_mut() {
+                        connection_ok &= send_pane_parameters(
+                            connection,
+                            previous_visible & !next_visible,
+                            config.track_activity_cc,
+                            0,
+                        );
+                    }
+                    animation.on_change();
                     next_volume_frame = std::time::Instant::now();
                 }
                 snapshot = next;
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {}
             Err(std_mpsc::RecvTimeoutError::Disconnected) => {
-                send_slot_volumes(&mut connection, u8::MAX, 0);
-                send_pane_parameters(&mut connection, 0b0000_1111, config.track_activity_cc, 0);
-                let _ = connection.send(&[0xFC]);
+                if let Some(connection) = connection.as_mut() {
+                    send_slot_volumes(connection, u8::MAX, 0);
+                    send_pane_parameters(connection, 0b0000_1111, config.track_activity_cc, 0);
+                    let _ = connection.send(&[0xFC]);
+                }
                 break;
             }
         }
         let now = std::time::Instant::now();
+        if connection.is_none() && now >= next_connect_attempt {
+            next_connect_attempt = now + FEEDBACK_RECONNECT_PERIOD;
+            if let Ok(mut fresh) = connect_feedback_output(&device) {
+                // The device may have rebooted or re-paired since the last
+                // connection: forget everything previously asserted and
+                // resynchronize the full state from scratch.
+                connection_ok = send_slot_volumes(&mut fresh, u8::MAX, 0)
+                    && send_pane_parameters(&mut fresh, 0b0000_1111, config.track_activity_cc, 0);
+                if connection_ok {
+                    connection = Some(fresh);
+                    transport_started = None;
+                    sent_fleet = None;
+                    next_fleet_send = now;
+                    animation.on_change();
+                    next_volume_frame = now;
+                }
+            }
+        }
+        let Some(active_connection) = connection.as_mut() else {
+            continue;
+        };
         if now >= next_fleet_send {
             let reassert = sent_fleet == Some(snapshot.fleet);
             if send_fleet_state(
-                &mut connection,
+                active_connection,
                 snapshot.fleet,
                 &mut transport_started,
                 &config,
@@ -1097,7 +1213,8 @@ fn feedback_loop(
                 sent_fleet = Some(snapshot.fleet);
                 next_fleet_send = now + FEEDBACK_REASSERT_PERIOD;
             } else {
-                next_fleet_send = now + FEEDBACK_RETRY_PERIOD;
+                connection_ok = false;
+                continue;
             }
         }
         let any_activity = snapshot.active_slots
@@ -1105,18 +1222,23 @@ fn feedback_loop(
             | snapshot.active_tracks
             | snapshot.attention_tracks;
         if any_activity != 0 && now >= next_volume_frame {
-            send_activity_frame(
-                &mut connection,
+            let frame = animation.next_frame();
+            connection_ok &= send_activity_frame(
+                active_connection,
                 snapshot.active_slots,
                 snapshot.attention_slots,
                 snapshot.active_tracks,
                 snapshot.attention_tracks,
                 config.track_activity_cc,
-                ACTIVE_MOTION[volume_frame],
-                ATTENTION_BOUNCE[volume_frame],
+                frame.active,
+                frame.attention,
             );
-            volume_frame = (volume_frame + 1) % ACTIVE_MOTION.len();
-            next_volume_frame = now + feedback_frame_period(snapshot);
+            next_volume_frame = now
+                + if frame.hold {
+                    FEEDBACK_HOLD_REFRESH_PERIOD
+                } else {
+                    feedback_frame_period(snapshot)
+                };
         }
     }
 }
@@ -1149,11 +1271,9 @@ fn slot_volume_packet(slots: u8, value: u8) -> Vec<u8> {
 }
 
 #[cfg(target_os = "macos")]
-fn send_slot_volumes(connection: &mut MidiOutputConnection, slots: u8, value: u8) {
+fn send_slot_volumes(connection: &mut MidiOutputConnection, slots: u8, value: u8) -> bool {
     let packet = slot_volume_packet(slots, value);
-    if !packet.is_empty() {
-        let _ = connection.send(&packet);
-    }
+    packet.is_empty() || connection.send(&packet).is_ok()
 }
 
 fn pane_parameter_packet(panes: u8, cc: u8, value: u8) -> Vec<u8> {
@@ -1174,11 +1294,9 @@ fn pane_parameter_packet(panes: u8, cc: u8, value: u8) -> Vec<u8> {
 }
 
 #[cfg(target_os = "macos")]
-fn send_pane_parameters(connection: &mut MidiOutputConnection, panes: u8, cc: u8, value: u8) {
+fn send_pane_parameters(connection: &mut MidiOutputConnection, panes: u8, cc: u8, value: u8) -> bool {
     let packet = pane_parameter_packet(panes, cc, value);
-    if !packet.is_empty() {
-        let _ = connection.send(&packet);
-    }
+    packet.is_empty() || connection.send(&packet).is_ok()
 }
 
 fn activity_volume_packet(
@@ -1245,7 +1363,7 @@ fn send_activity_frame(
     pane_cc: u8,
     active_value: u8,
     attention_value: u8,
-) {
+) -> bool {
     let mut packet =
         activity_volume_packet(active_slots, attention_slots, active_value, attention_value);
     packet.extend(activity_pane_packet(
@@ -1255,9 +1373,7 @@ fn send_activity_frame(
         active_value,
         attention_value,
     ));
-    if !packet.is_empty() {
-        let _ = connection.send(&packet);
-    }
+    packet.is_empty() || connection.send(&packet).is_ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -1861,6 +1977,37 @@ mod tests {
             Some(0xFC),
             "a periodic idle reassertion repeats Stop"
         );
+    }
+
+    #[test]
+    fn activity_animation_bursts_then_holds_until_the_next_change() {
+        let mut animation = ActivityAnimation::default();
+        // The full motion cycles play exactly as authored…
+        for cycle in 0..FEEDBACK_ANIMATION_CYCLES_BEFORE_HOLD {
+            for step in 0..ACTIVE_MOTION.len() {
+                let frame = animation.next_frame();
+                assert!(!frame.hold, "cycle {cycle} step {step} still animates");
+                assert_eq!(frame.active, ACTIVE_MOTION[step]);
+                assert_eq!(frame.attention, ATTENTION_BOUNCE[step]);
+            }
+        }
+        // …then the animation freezes at steady, distinguishable holds.
+        for _ in 0..3 {
+            let frame = animation.next_frame();
+            assert!(frame.hold, "an unchanged snapshot stops streaming frames");
+            assert_eq!(frame.active, ACTIVE_HOLD);
+            assert_eq!(frame.attention, ATTENTION_HOLD);
+        }
+        assert!(
+            ATTENTION_HOLD > ACTIVE_HOLD,
+            "held attention must stay visually louder than held activity"
+        );
+
+        // Any activity change starts a fresh burst from the top.
+        animation.on_change();
+        let frame = animation.next_frame();
+        assert!(!frame.hold);
+        assert_eq!(frame.active, ACTIVE_MOTION[0]);
     }
 
     #[test]
