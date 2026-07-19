@@ -1030,9 +1030,13 @@ const FEEDBACK_RECONNECT_PERIOD: std::time::Duration = std::time::Duration::from
 /// silently dropped packet cannot leave a stale level on the device forever.
 const FEEDBACK_HOLD_REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Frames in one synth-parameter animation cycle. Kept deliberately longer
-/// than the eight-frame mixer curves so the synth graphics sweep smoothly.
-const SYNTH_FRAME_COUNT: usize = 16;
+/// Frames in one synth-parameter active cycle: a short three-level jump
+/// pattern so the OP-XY synth graphics visibly snap between levels instead
+/// of slowly sweeping.
+const SYNTH_ACTIVE_FRAME_COUNT: usize = 4;
+/// Frames in one synth-parameter attention cycle: a snap bounce followed by
+/// a hold-at-minimum pause.
+const SYNTH_ATTENTION_FRAME_COUNT: usize = 10;
 
 /// Converts a percent of the 0–127 CC range to a CC value, rounding to the
 /// nearest integer and clamping to the valid CC range.
@@ -1046,38 +1050,22 @@ fn synth_range_bounds(range: [u8; 2]) -> (u8, u8) {
     (min, max)
 }
 
-/// Smooth triangle sweep from min to max and back over one cycle: the first
-/// half of the frames rises monotonically to the maximum, the second half
-/// falls monotonically back toward the minimum.
-fn synth_active_curve(range: [u8; 2]) -> [u8; SYNTH_FRAME_COUNT] {
+/// Three-level jump cycle `[min, mid, max, mid]`: every frame leaps by
+/// roughly half the configured range, so the synth graphic snaps between
+/// levels instead of nudging. `mid` is the rounded midpoint of the range.
+fn synth_active_curve(range: [u8; 2]) -> [u8; SYNTH_ACTIVE_FRAME_COUNT] {
     let (min, max) = synth_range_bounds(range);
-    let mut curve = [0u8; SYNTH_FRAME_COUNT];
-    for (frame, value) in curve.iter_mut().enumerate() {
-        let phase = frame as f64 / SYNTH_FRAME_COUNT as f64;
-        let triangle = 1.0 - (2.0 * phase - 1.0).abs();
-        *value = (f64::from(min) + (f64::from(max) - f64::from(min)) * triangle).round() as u8;
-    }
-    curve
+    let mid = ((u16::from(min) + u16::from(max) + 1) / 2) as u8;
+    [min, mid, max, mid]
 }
 
-/// Bounce with a pause: a quick rise to the maximum, a fall back to the
-/// minimum, then a hold at the minimum for the remaining frames of the cycle.
-fn synth_attention_curve(range: [u8; 2]) -> [u8; SYNTH_FRAME_COUNT] {
-    const RISE_FRAMES: usize = 2;
-    const FALL_FRAMES: usize = 4;
+/// Snap bounce with a pause: jump straight from min to max in one frame,
+/// fall back to min on the next, then hold at min for the remaining frames
+/// of the cycle before bouncing again.
+fn synth_attention_curve(range: [u8; 2]) -> [u8; SYNTH_ATTENTION_FRAME_COUNT] {
     let (min, max) = synth_range_bounds(range);
-    let span = f64::from(max) - f64::from(min);
-    let mut curve = [0u8; SYNTH_FRAME_COUNT];
-    for (frame, value) in curve.iter_mut().enumerate() {
-        let position = if frame < RISE_FRAMES {
-            frame as f64 / RISE_FRAMES as f64
-        } else if frame < RISE_FRAMES + FALL_FRAMES {
-            1.0 - (frame - RISE_FRAMES) as f64 / FALL_FRAMES as f64
-        } else {
-            0.0
-        };
-        *value = (f64::from(min) + span * position).round() as u8;
-    }
+    let mut curve = [min; SYNTH_ATTENTION_FRAME_COUNT];
+    curve[1] = max;
     curve
 }
 
@@ -1094,12 +1082,12 @@ const ATTENTION_BOUNCE: [u8; 8] = [38, 62, 89, 58, 38, 56, 44, 38];
 const ACTIVE_HOLD: u8 = 32;
 const ATTENTION_HOLD: u8 = 62;
 /// Frames played after an activity change before the animation freezes:
-/// three combined cycles, where one combined cycle is the 16-frame synth
-/// sweep (also two full 8-frame mixer cycles), so the freeze always lands
-/// on both curves' starting points. Sustained Bluetooth streaming is what
-/// wedges the OP-XY's BLE receive path, so motion is a burst, not a
-/// constant drip.
-const FEEDBACK_ANIMATION_FRAMES_BEFORE_HOLD: usize = 3 * SYNTH_FRAME_COUNT;
+/// one combined cycle, the least common multiple of the 8-frame mixer
+/// curves, the 4-frame synth jump cycle, and the 10-frame synth bounce, so
+/// the freeze always lands on every curve's starting point. Sustained
+/// Bluetooth streaming is what wedges the OP-XY's BLE receive path, so
+/// motion is a burst, not a constant drip.
+const FEEDBACK_ANIMATION_FRAMES_BEFORE_HOLD: usize = 40;
 
 /// One emitted mixer/synth frame: the levels to send and whether the
 /// animation has settled into its steady hold.
@@ -1117,8 +1105,8 @@ struct ActivityFrame {
 /// slowly until the next change.
 #[derive(Debug)]
 struct ActivityAnimation {
-    synth_active: [u8; SYNTH_FRAME_COUNT],
-    synth_attention: [u8; SYNTH_FRAME_COUNT],
+    synth_active: [u8; SYNTH_ACTIVE_FRAME_COUNT],
+    synth_attention: [u8; SYNTH_ATTENTION_FRAME_COUNT],
     frame: usize,
 }
 
@@ -1144,19 +1132,19 @@ impl ActivityAnimation {
             return ActivityFrame {
                 active: ACTIVE_HOLD,
                 attention: ATTENTION_HOLD,
-                // The synth curves' own rest points: the active sweep starts
-                // at its configured minimum, the attention bounce pauses at
-                // its configured minimum.
+                // The synth curves' own rest points: the active jump cycle
+                // starts at its configured minimum, the attention bounce
+                // pauses at its configured minimum.
                 synth_active: self.synth_active[0],
-                synth_attention: self.synth_attention[SYNTH_FRAME_COUNT - 1],
+                synth_attention: self.synth_attention[SYNTH_ATTENTION_FRAME_COUNT - 1],
                 hold: true,
             };
         }
         let frame = ActivityFrame {
             active: ACTIVE_MOTION[self.frame % ACTIVE_MOTION.len()],
             attention: ATTENTION_BOUNCE[self.frame % ATTENTION_BOUNCE.len()],
-            synth_active: self.synth_active[self.frame % SYNTH_FRAME_COUNT],
-            synth_attention: self.synth_attention[self.frame % SYNTH_FRAME_COUNT],
+            synth_active: self.synth_active[self.frame % SYNTH_ACTIVE_FRAME_COUNT],
+            synth_attention: self.synth_attention[self.frame % SYNTH_ATTENTION_FRAME_COUNT],
             hold: false,
         };
         self.frame += 1;
@@ -2081,11 +2069,11 @@ mod tests {
             );
             assert_eq!(
                 frame.synth_active,
-                synth_active[frame_index % SYNTH_FRAME_COUNT]
+                synth_active[frame_index % SYNTH_ACTIVE_FRAME_COUNT]
             );
             assert_eq!(
                 frame.synth_attention,
-                synth_attention[frame_index % SYNTH_FRAME_COUNT]
+                synth_attention[frame_index % SYNTH_ATTENTION_FRAME_COUNT]
             );
         }
         // …then the animation freezes at steady, distinguishable holds.
@@ -2096,11 +2084,11 @@ mod tests {
             assert_eq!(frame.attention, ATTENTION_HOLD);
             assert_eq!(
                 frame.synth_active, synth_active[0],
-                "held synth activity rests at the configured sweep start"
+                "held synth activity rests at the configured jump-cycle start"
             );
             assert_eq!(
                 frame.synth_attention,
-                synth_attention[SYNTH_FRAME_COUNT - 1],
+                synth_attention[SYNTH_ATTENTION_FRAME_COUNT - 1],
                 "held synth attention rests at the configured pause level"
             );
         }
@@ -2226,41 +2214,47 @@ mod tests {
     }
 
     #[test]
-    fn synth_active_curve_sweeps_smoothly_between_configured_bounds() {
+    fn synth_active_curve_jumps_between_three_levels() {
         let curve = synth_active_curve([10, 90]);
-        assert_eq!(*curve.iter().min().unwrap(), 13, "10% of 127 rounds to 13");
-        assert_eq!(
-            *curve.iter().max().unwrap(),
-            114,
-            "90% of 127 rounds to 114"
-        );
-        let (rising, falling) = curve.split_at(SYNTH_FRAME_COUNT / 2);
+        assert_eq!(curve.len(), 4);
+        assert_eq!(curve[0], 13, "10% of 127 rounds to 13");
+        assert_eq!(curve[2], 114, "90% of 127 rounds to 114");
+        assert_eq!(curve[1], curve[3], "mid levels match: {curve:?}");
+        assert_eq!(curve[1], (13 + 114 + 1) / 2, "mid is the rounded midpoint");
+        let min_step = curve
+            .windows(2)
+            .map(|pair| pair[0].abs_diff(pair[1]))
+            .min()
+            .unwrap();
         assert!(
-            rising.windows(2).all(|pair| pair[0] <= pair[1]),
-            "first half of the cycle rises monotonically: {curve:?}"
+            min_step >= (114 - 13) / 2,
+            "every frame jumps by at least half the range: {curve:?}"
         );
-        assert!(
-            falling.windows(2).all(|pair| pair[0] >= pair[1]),
-            "second half of the cycle falls monotonically: {curve:?}"
-        );
+
+        let default_curve = synth_active_curve([25, 40]);
+        assert_eq!(default_curve[0], 32);
+        assert_eq!(default_curve[2], 51);
     }
 
     #[test]
-    fn synth_attention_curve_bounces_then_holds_at_minimum() {
+    fn synth_attention_curve_snaps_then_holds_at_minimum() {
         let curve = synth_attention_curve([10, 90]);
         assert_eq!(curve[0], 13);
-        assert_eq!(
-            *curve.iter().max().unwrap(),
-            114,
-            "the bounce peaks at the configured maximum"
-        );
-        let peak = curve.iter().position(|value| *value == 114).unwrap();
-        assert!(peak <= 2, "the bounce rises quickly: {curve:?}");
-        let hold = &curve[6..];
+        assert_eq!(curve[1], 114, "the bounce snaps to max in one frame");
+        assert_eq!(curve[2], 13, "the bounce falls back to min in one frame");
+        let hold = &curve[2..];
         assert!(
             hold.iter().all(|value| *value == 13),
             "the tail holds at the minimum for several frames: {curve:?}"
         );
+        assert!(
+            hold.len() >= 6,
+            "the hold spans at least six frames: {curve:?}"
+        );
+
+        let default_curve = synth_attention_curve([30, 70]);
+        assert_eq!(default_curve[0], 38);
+        assert_eq!(default_curve[1], 89);
     }
 
     #[test]
