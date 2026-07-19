@@ -138,11 +138,14 @@ path, so long-running unchanged activity must approach zero sustained
 traffic. State updates queued while the
 transport is busy are coalesced to the newest snapshot so stale scene,
 transport, mixer, and synth states are never replayed after backpressure clears.
-The desired global state is reasserted at
-a bounded two-second interval after reported success because Bluetooth
-delivery is not
-acknowledged: scenes are resent, stopped transport receives Stop again, and
-running transport receives Continue so its playhead is not reset. A transient
+The desired global state is reasserted after reported success because
+Bluetooth delivery is not acknowledged: scenes are resent, stopped transport
+receives Stop again, and running transport receives Continue so its playhead
+is not reset. The reassert schedule decays: the first reassert follows a
+state change within a bounded short interval, and while the state stays
+unchanged the interval backs off to a bounded ceiling, so an unchanged fleet
+settles to a near-silent trickle instead of a permanent fixed-rate drip. Any
+global-state change resets the schedule and sends immediately. A transient
 or silently dropped CoreMIDI send must not permanently freeze global feedback.
 
 Feedback owns its device connection and self-heals it. A failed CoreMIDI send

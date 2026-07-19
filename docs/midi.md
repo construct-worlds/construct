@@ -226,9 +226,13 @@ and synth parameters are active, with a ceiling of sixteen decoded CC messages
 per second. Frames remain batched, and queued state changes are coalesced to the
 newest state if Bluetooth applies backpressure. Avoiding a continuous external
 clock and bounding the actual parameter workload keeps Bluetooth MIDI traffic
-low enough for long-running use. Construct reasserts the global state every
-two seconds so a silently dropped Bluetooth packet
-self-recovers. Running transport is reasserted with MIDI Continue rather than
+low enough for long-running use. Construct reasserts the global state so a
+silently dropped Bluetooth packet self-recovers, on a decaying schedule: the
+first reassert lands 10 seconds after a change, and the interval doubles up
+to a 60-second ceiling while nothing changes — an idle fleet trickles one
+small packet per minute instead of a permanent two-second drip. Any scene,
+tempo, or transport change resets the schedule and sends immediately.
+Running transport is reasserted with MIDI Continue rather than
 Start, preserving the playhead. If CoreMIDI reports a failed send, Construct
 drops the connection and re-probes for the device every five seconds,
 resynchronizing all feedback state from scratch once it reconnects — the
