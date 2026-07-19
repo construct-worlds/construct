@@ -1032,7 +1032,20 @@ pub(crate) fn start_feedback() -> Result<Option<MidiFeedback>> {
 const FEEDBACK_MIN_FRAME_PERIOD: std::time::Duration =
     std::time::Duration::from_millis(200);
 const FEEDBACK_MAX_CC_MESSAGES_PER_SECOND: u32 = 16;
-const FEEDBACK_REASSERT_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
+/// First reassert after a global-state (scene/tempo/transport) change.
+/// Reasserts exist only to self-heal silently dropped Bluetooth packets, and
+/// sustained streaming is what wedges the OP-XY's BLE receive path — so the
+/// interval starts here and backs off while the state stays unchanged.
+const FEEDBACK_REASSERT_MIN_PERIOD: std::time::Duration = std::time::Duration::from_secs(10);
+/// Ceiling for the reassert backoff: an unchanged fleet settles to one
+/// global-state packet per minute instead of a permanent two-second drip.
+const FEEDBACK_REASSERT_MAX_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The next reassert delay while the global state stays unchanged: doubles up
+/// to the ceiling. Any state change resets the schedule to the minimum.
+fn next_reassert_period(current: std::time::Duration) -> std::time::Duration {
+    (current * 2).min(FEEDBACK_REASSERT_MAX_PERIOD)
+}
 /// How often the loop probes for the device after losing (or never having)
 /// the output connection. Each probe creates a short-lived CoreMIDI client,
 /// so this stays coarse.
@@ -1210,6 +1223,7 @@ fn feedback_loop(
     let mut transport_started = None;
     let mut sent_fleet = None;
     let mut next_fleet_send = std::time::Instant::now();
+    let mut reassert_period = FEEDBACK_REASSERT_MIN_PERIOD;
     let mut animation = ActivityAnimation::new(&config);
     let mut next_volume_frame = std::time::Instant::now();
     let mut next_connect_attempt = std::time::Instant::now() + FEEDBACK_RECONNECT_PERIOD;
@@ -1243,6 +1257,7 @@ fn feedback_loop(
                 {
                     sent_fleet = None;
                     next_fleet_send = std::time::Instant::now();
+                    reassert_period = FEEDBACK_REASSERT_MIN_PERIOD;
                 }
                 if next.active_slots != snapshot.active_slots
                     || next.attention_slots != snapshot.attention_slots
@@ -1298,6 +1313,7 @@ fn feedback_loop(
                     transport_started = None;
                     sent_fleet = None;
                     next_fleet_send = now;
+                    reassert_period = FEEDBACK_REASSERT_MIN_PERIOD;
                     animation.on_change();
                     next_volume_frame = now;
                 }
@@ -1317,7 +1333,8 @@ fn feedback_loop(
                 reassert,
             ) {
                 sent_fleet = Some(snapshot.fleet);
-                next_fleet_send = now + FEEDBACK_REASSERT_PERIOD;
+                next_fleet_send = now + reassert_period;
+                reassert_period = next_reassert_period(reassert_period);
             } else {
                 connection_ok = false;
                 continue;
@@ -2079,6 +2096,21 @@ mod tests {
         };
         feedback.update(attention);
         assert_eq!(rx.try_recv().unwrap(), attention);
+    }
+
+    #[test]
+    fn reassert_schedule_backs_off_while_state_is_unchanged() {
+        let mut period = FEEDBACK_REASSERT_MIN_PERIOD;
+        let mut schedule = vec![period.as_secs()];
+        for _ in 0..4 {
+            period = next_reassert_period(period);
+            schedule.push(period.as_secs());
+        }
+        assert_eq!(
+            schedule,
+            [10, 20, 40, 60, 60],
+            "unchanged state decays the reassert drip toward the ceiling"
+        );
     }
 
     #[test]
