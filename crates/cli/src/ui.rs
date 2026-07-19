@@ -6961,7 +6961,7 @@ fn render_terminal_scrollbar(
         ((max_scrollback.saturating_sub(rendered_scrollback)) * max_thumb_top) / max_scrollback
     };
 
-    const SCROLLBAR_W: u16 = 4;
+    const SCROLLBAR_W: u16 = 2;
     let bar_w = area.width.min(SCROLLBAR_W);
     let x0 = area.x + area.width.saturating_sub(bar_w);
     let scrollbar_area = Rect {
