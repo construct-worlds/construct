@@ -3607,27 +3607,19 @@ fn foreground_rain_frame(
 }
 
 fn fleet_activity_target(app: &App, now: Instant) -> f32 {
-    let mut active_count = 0u16;
-    for s in app
+    let active_count = app
         .sessions
         .iter()
-        .filter(|s| crate::app::is_matrix_rain_activity_session(s))
-    {
-        let active_agent = app
-            .agent_statuses
-            .get(&s.id)
-            .map(|status| status.active)
-            .unwrap_or(false);
-        let recent_live_pty = app
-            .pty_activity
-            .get(&s.id)
-            .and_then(|at| now.checked_duration_since(*at))
-            .map(|d| d.as_millis() < 900)
-            .unwrap_or(false);
-        if active_agent || recent_live_pty {
-            active_count = active_count.saturating_add(1);
-        }
-    }
+        .filter(|session| {
+            crate::app::is_matrix_rain_session_active(
+                session,
+                &app.agent_statuses,
+                &app.pty_activity,
+                now,
+            )
+        })
+        .count()
+        .min(u16::MAX as usize) as u16;
     rain_activity_for_active_sessions(active_count)
 }
 

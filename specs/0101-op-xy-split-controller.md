@@ -55,10 +55,12 @@ orchestrator/system sessions never contribute. Unassigned sessions contribute
 only in the all-session scope. Mixer and synth feedback remain mapped to
 hardware slots regardless of aggregate scope. Scene encodes attention:
 Scene 2 is selected when any included session needs attention, otherwise Scene
-1 is selected. Transport independently encodes activity: it runs when any
-included session is pending or running and stops otherwise. The four possible
-combinations are therefore Scene 1 stopped, Scene 1 running, Scene 2 stopped,
-and Scene 2 running.
+1 is selected. Transport independently encodes activity. The all-session scope
+uses Matrix Rain's live signal—an active agent or recent PTY output—so a stale
+persisted Running state cannot hold transport on. The mapped scope uses the
+resolved sessions' pending/running states. The four possible combinations are
+therefore Scene 1 stopped, Scene 1 running, Scene 2 stopped, and Scene 2
+running.
 Construct supplies MIDI real-time Start/Stop while OP-XY retains its internal
 clock. Session-state and attention-marker changes update feedback as part of
 handling the event that changed them; feedback must not depend on an animation
@@ -99,8 +101,11 @@ for a frame remain batched into one packet. State updates queued while the
 transport is busy are coalesced to the newest snapshot so stale scene,
 transport, mixer, and synth states are never replayed after backpressure clears.
 Failed global scene or transport sends retain their desired state and retry at
-a bounded two-second interval; a transient CoreMIDI error must not permanently
-freeze global feedback.
+a bounded two-second interval. The desired global state is also reasserted at
+that interval after reported success because Bluetooth delivery is not
+acknowledged: scenes are resent, stopped transport receives Stop again, and
+running transport receives Continue so its playhead is not reset. A transient
+or silently dropped CoreMIDI send must not permanently freeze global feedback.
 Construct does not stream MIDI clock because OP-XY can start its sequencer from
 its internal clock, and sustained clock plus per-track packets can lock its BLE
 receive path until the device is power-cycled.
