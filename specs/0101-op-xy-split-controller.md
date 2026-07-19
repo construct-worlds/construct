@@ -15,7 +15,13 @@ corresponding visible split pane in reading order. Black key 5 cycles focus
 among that session's split, list row, and lineage section. Black keys 6–8 are
 Escape, the sequencer-display no-op, and Backspace respectively. Learned arrow
 and Enter notes dispatch native TUI input to the selected session's visible
-split.
+split. When the lineage section holds keyboard focus, those notes instead act
+on the section exactly as the equivalent keyboard keys: arrows move its
+highlight, and Enter switches the previously focused split to the highlighted
+lineage node and moves focus into it — the same behavior as clicking that node
+with the mouse. They must not silently pull focus back to the split while the
+section owns the keyboard. Prompt-slot notes keep targeting the session's
+composer regardless of section focus.
 
 Session titles beginning with `[1]` through `[8]` assign those sessions to the
 corresponding hardware slots. The marker may be followed immediately by title
@@ -74,9 +80,16 @@ between 30% and 70%. Simultaneous active and attention slots animate together.
 Feedback shutdown resets all eight volumes to zero.
 
 Synth tracks 1–4 are a second activity display for session slots `[1]`–`[4]`,
-independent of split placement and focus. They use the same idle, running, and
-attention envelopes. The four primary synth parameters move together. Their
-starting CC is configurable and defaults to parameter 1, producing CC 12–15.
+independent of split placement and focus. The four primary synth parameters
+move together. Their starting CC is configurable and defaults to parameter 1,
+producing CC 12–15. Their animation ranges are configurable as percents of the
+0–127 CC range: active sessions sweep smoothly between the
+configured bounds (default 25–40%), while attention bounces between them with
+a pause at the minimum (default 30–70%). These ranges apply only to the synth
+parameters; mixer volumes always keep the fixed 25–40% / 30–70% envelopes.
+While streaming, the sweep is continuous; how long streaming lasts is
+governed by the Bluetooth burst rule below, with held synth values resting at
+each curve's own configured minimum.
 
 Auxiliary track 3 supplies generic, focus-sensitive navigation on MIDI channel
 10. Absolute CC 2 maps value changes to Up/Down and absolute CC 3 maps changes

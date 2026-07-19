@@ -148,6 +148,14 @@ pub struct OpXyFeedbackConfig {
     /// First of four consecutive OP-XY synth parameters. Defaults to CC 12–15.
     #[serde(alias = "split_activity_cc")]
     pub track_activity_cc: u8,
+    /// Synth-track animation range while a session is pending/running, as
+    /// `[min, max]` percents of the 0–127 CC range. Active sessions sweep
+    /// smoothly between these bounds. Mixer CC 7 volumes are unaffected.
+    pub active_range: [u8; 2],
+    /// Synth-track animation range while a session needs attention, as
+    /// `[min, max]` percents of the 0–127 CC range. Attention bounces between
+    /// these bounds, pausing at the minimum. Mixer CC 7 volumes are unaffected.
+    pub attention_range: [u8; 2],
 }
 
 impl Default for OpXyFeedbackConfig {
@@ -158,6 +166,8 @@ impl Default for OpXyFeedbackConfig {
             normal_scene: 1,
             attention_scene: 2,
             track_activity_cc: 12,
+            active_range: [25, 40],
+            attention_range: [30, 70],
         }
     }
 }
@@ -1016,50 +1026,117 @@ const FEEDBACK_REASSERT_PERIOD: std::time::Duration = std::time::Duration::from_
 /// the output connection. Each probe creates a short-lived CoreMIDI client,
 /// so this stays coarse.
 const FEEDBACK_RECONNECT_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
-/// Full animation cycles played after an activity change before the mixer
-/// and synth values freeze at steady holds. Sustained Bluetooth streaming is
-/// what wedges the OP-XY's BLE receive path, so motion is a burst, not a
-/// constant drip.
-const FEEDBACK_ANIMATION_CYCLES_BEFORE_HOLD: u32 = 3;
 /// While holding, the steady values are re-sent at this slow cadence so a
 /// silently dropped packet cannot leave a stale level on the device forever.
 const FEEDBACK_HOLD_REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
 
-// CC 7 is 0–127. Active work moves gently through 25–40%; attention
-// performs a two-stage damped bounce through 30–70%.
+/// Frames in one synth-parameter animation cycle. Kept deliberately longer
+/// than the eight-frame mixer curves so the synth graphics sweep smoothly.
+const SYNTH_FRAME_COUNT: usize = 16;
+
+/// Converts a percent of the 0–127 CC range to a CC value, rounding to the
+/// nearest integer and clamping to the valid CC range.
+fn percent_to_cc(percent: u8) -> u8 {
+    ((u16::from(percent.min(100)) * 127 + 50) / 100).min(127) as u8
+}
+
+fn synth_range_bounds(range: [u8; 2]) -> (u8, u8) {
+    let min = percent_to_cc(range[0].min(range[1]));
+    let max = percent_to_cc(range[0].max(range[1]));
+    (min, max)
+}
+
+/// Smooth triangle sweep from min to max and back over one cycle: the first
+/// half of the frames rises monotonically to the maximum, the second half
+/// falls monotonically back toward the minimum.
+fn synth_active_curve(range: [u8; 2]) -> [u8; SYNTH_FRAME_COUNT] {
+    let (min, max) = synth_range_bounds(range);
+    let mut curve = [0u8; SYNTH_FRAME_COUNT];
+    for (frame, value) in curve.iter_mut().enumerate() {
+        let phase = frame as f64 / SYNTH_FRAME_COUNT as f64;
+        let triangle = 1.0 - (2.0 * phase - 1.0).abs();
+        *value = (f64::from(min) + (f64::from(max) - f64::from(min)) * triangle).round() as u8;
+    }
+    curve
+}
+
+/// Bounce with a pause: a quick rise to the maximum, a fall back to the
+/// minimum, then a hold at the minimum for the remaining frames of the cycle.
+fn synth_attention_curve(range: [u8; 2]) -> [u8; SYNTH_FRAME_COUNT] {
+    const RISE_FRAMES: usize = 2;
+    const FALL_FRAMES: usize = 4;
+    let (min, max) = synth_range_bounds(range);
+    let span = f64::from(max) - f64::from(min);
+    let mut curve = [0u8; SYNTH_FRAME_COUNT];
+    for (frame, value) in curve.iter_mut().enumerate() {
+        let position = if frame < RISE_FRAMES {
+            frame as f64 / RISE_FRAMES as f64
+        } else if frame < RISE_FRAMES + FALL_FRAMES {
+            1.0 - (frame - RISE_FRAMES) as f64 / FALL_FRAMES as f64
+        } else {
+            0.0
+        };
+        *value = (f64::from(min) + span * position).round() as u8;
+    }
+    curve
+}
+
+// CC 7 is 0–127. Mixer volumes keep fixed envelopes: active work moves
+// gently through 25–40%; attention performs a two-stage damped bounce
+// through 30–70%. Synth parameters instead follow the configurable curves
+// above.
 const ACTIVE_MOTION: [u8; 8] = [32, 38, 45, 51, 45, 38, 34, 32];
 const ATTENTION_BOUNCE: [u8; 8] = [38, 62, 89, 58, 38, 56, 44, 38];
-/// Steady levels once the animation quiesces: active settles at its resting
-/// level, attention holds visibly higher so the two states stay
-/// distinguishable at a glance without any motion.
+/// Steady mixer levels once the animation quiesces: active settles at its
+/// resting level, attention holds visibly higher so the two states stay
+/// distinguishable at a glance without any motion. Held synth parameters
+/// come from the configured curves' own rest points instead.
 const ACTIVE_HOLD: u8 = 32;
 const ATTENTION_HOLD: u8 = 62;
+/// Frames played after an activity change before the animation freezes:
+/// three combined cycles, where one combined cycle is the 16-frame synth
+/// sweep (also two full 8-frame mixer cycles), so the freeze always lands
+/// on both curves' starting points. Sustained Bluetooth streaming is what
+/// wedges the OP-XY's BLE receive path, so motion is a burst, not a
+/// constant drip.
+const FEEDBACK_ANIMATION_FRAMES_BEFORE_HOLD: usize = 3 * SYNTH_FRAME_COUNT;
 
-/// One emitted mixer/synth frame: the levels to send and how long to wait
-/// before the next frame.
+/// One emitted mixer/synth frame: the levels to send and whether the
+/// animation has settled into its steady hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ActivityFrame {
     active: u8,
     attention: u8,
+    synth_active: u8,
+    synth_attention: u8,
     hold: bool,
 }
 
 /// Paces the activity animation so Bluetooth traffic is bursty: a few full
 /// motion cycles after every activity change, then a steady hold refreshed
 /// slowly until the next change.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ActivityAnimation {
+    synth_active: [u8; SYNTH_FRAME_COUNT],
+    synth_attention: [u8; SYNTH_FRAME_COUNT],
     frame: usize,
-    cycles_since_change: u32,
 }
 
 impl ActivityAnimation {
+    fn new(config: &OpXyFeedbackConfig) -> Self {
+        Self {
+            synth_active: synth_active_curve(config.active_range),
+            synth_attention: synth_attention_curve(config.attention_range),
+            frame: 0,
+        }
+    }
+
     fn on_change(&mut self) {
-        *self = Self::default();
+        self.frame = 0;
     }
 
     fn quiesced(&self) -> bool {
-        self.cycles_since_change >= FEEDBACK_ANIMATION_CYCLES_BEFORE_HOLD
+        self.frame >= FEEDBACK_ANIMATION_FRAMES_BEFORE_HOLD
     }
 
     fn next_frame(&mut self) -> ActivityFrame {
@@ -1067,18 +1144,22 @@ impl ActivityAnimation {
             return ActivityFrame {
                 active: ACTIVE_HOLD,
                 attention: ATTENTION_HOLD,
+                // The synth curves' own rest points: the active sweep starts
+                // at its configured minimum, the attention bounce pauses at
+                // its configured minimum.
+                synth_active: self.synth_active[0],
+                synth_attention: self.synth_attention[SYNTH_FRAME_COUNT - 1],
                 hold: true,
             };
         }
         let frame = ActivityFrame {
-            active: ACTIVE_MOTION[self.frame],
-            attention: ATTENTION_BOUNCE[self.frame],
+            active: ACTIVE_MOTION[self.frame % ACTIVE_MOTION.len()],
+            attention: ATTENTION_BOUNCE[self.frame % ATTENTION_BOUNCE.len()],
+            synth_active: self.synth_active[self.frame % SYNTH_FRAME_COUNT],
+            synth_attention: self.synth_attention[self.frame % SYNTH_FRAME_COUNT],
             hold: false,
         };
-        self.frame = (self.frame + 1) % ACTIVE_MOTION.len();
-        if self.frame == 0 {
-            self.cycles_since_change += 1;
-        }
+        self.frame += 1;
         frame
     }
 }
@@ -1111,7 +1192,7 @@ fn feedback_loop(
     let mut transport_started = None;
     let mut sent_fleet = None;
     let mut next_fleet_send = std::time::Instant::now();
-    let mut animation = ActivityAnimation::default();
+    let mut animation = ActivityAnimation::new(&config);
     let mut next_volume_frame = std::time::Instant::now();
     let mut next_connect_attempt = std::time::Instant::now() + FEEDBACK_RECONNECT_PERIOD;
     // `false` marks the connection as dead; the sends themselves are lossy
@@ -1232,6 +1313,8 @@ fn feedback_loop(
                 config.track_activity_cc,
                 frame.active,
                 frame.attention,
+                frame.synth_active,
+                frame.synth_attention,
             );
             next_volume_frame = now
                 + if frame.hold {
@@ -1363,6 +1446,8 @@ fn send_activity_frame(
     pane_cc: u8,
     active_value: u8,
     attention_value: u8,
+    synth_active_value: u8,
+    synth_attention_value: u8,
 ) -> bool {
     let mut packet =
         activity_volume_packet(active_slots, attention_slots, active_value, attention_value);
@@ -1370,8 +1455,8 @@ fn send_activity_frame(
         active_tracks,
         attention_tracks,
         pane_cc,
-        active_value,
-        attention_value,
+        synth_active_value,
+        synth_attention_value,
     ));
     packet.is_empty() || connection.send(&packet).is_ok()
 }
@@ -1981,15 +2066,27 @@ mod tests {
 
     #[test]
     fn activity_animation_bursts_then_holds_until_the_next_change() {
-        let mut animation = ActivityAnimation::default();
+        let config = OpXyFeedbackConfig::default();
+        let mut animation = ActivityAnimation::new(&config);
+        let synth_active = synth_active_curve(config.active_range);
+        let synth_attention = synth_attention_curve(config.attention_range);
         // The full motion cycles play exactly as authored…
-        for cycle in 0..FEEDBACK_ANIMATION_CYCLES_BEFORE_HOLD {
-            for step in 0..ACTIVE_MOTION.len() {
-                let frame = animation.next_frame();
-                assert!(!frame.hold, "cycle {cycle} step {step} still animates");
-                assert_eq!(frame.active, ACTIVE_MOTION[step]);
-                assert_eq!(frame.attention, ATTENTION_BOUNCE[step]);
-            }
+        for frame_index in 0..FEEDBACK_ANIMATION_FRAMES_BEFORE_HOLD {
+            let frame = animation.next_frame();
+            assert!(!frame.hold, "frame {frame_index} still animates");
+            assert_eq!(frame.active, ACTIVE_MOTION[frame_index % ACTIVE_MOTION.len()]);
+            assert_eq!(
+                frame.attention,
+                ATTENTION_BOUNCE[frame_index % ATTENTION_BOUNCE.len()]
+            );
+            assert_eq!(
+                frame.synth_active,
+                synth_active[frame_index % SYNTH_FRAME_COUNT]
+            );
+            assert_eq!(
+                frame.synth_attention,
+                synth_attention[frame_index % SYNTH_FRAME_COUNT]
+            );
         }
         // …then the animation freezes at steady, distinguishable holds.
         for _ in 0..3 {
@@ -1997,6 +2094,15 @@ mod tests {
             assert!(frame.hold, "an unchanged snapshot stops streaming frames");
             assert_eq!(frame.active, ACTIVE_HOLD);
             assert_eq!(frame.attention, ATTENTION_HOLD);
+            assert_eq!(
+                frame.synth_active, synth_active[0],
+                "held synth activity rests at the configured sweep start"
+            );
+            assert_eq!(
+                frame.synth_attention,
+                synth_attention[SYNTH_FRAME_COUNT - 1],
+                "held synth attention rests at the configured pause level"
+            );
         }
         assert!(
             ATTENTION_HOLD > ACTIVE_HOLD,
@@ -2089,6 +2195,93 @@ mod tests {
                 MidiAction::from_str(&action.label(), true).unwrap(),
                 *action
             );
+        }
+    }
+
+    #[test]
+    fn synth_feedback_ranges_default_to_current_envelopes() {
+        let config = OpXyFeedbackConfig::default();
+        assert_eq!(config.active_range, [25, 40]);
+        assert_eq!(config.attention_range, [30, 70]);
+
+        let active = synth_active_curve(config.active_range);
+        assert_eq!(*active.iter().min().unwrap(), 32, "25% of 127 rounds to 32");
+        assert_eq!(*active.iter().max().unwrap(), 51, "40% of 127 rounds to 51");
+        let attention = synth_attention_curve(config.attention_range);
+        assert_eq!(
+            *attention.iter().min().unwrap(),
+            38,
+            "30% of 127 rounds to 38"
+        );
+        assert_eq!(
+            *attention.iter().max().unwrap(),
+            89,
+            "70% of 127 rounds to 89"
+        );
+
+        let parsed: OpXyFeedbackConfig =
+            toml::from_str("active_range = [10, 90]\nattention_range = [5, 95]\n").unwrap();
+        assert_eq!(parsed.active_range, [10, 90]);
+        assert_eq!(parsed.attention_range, [5, 95]);
+    }
+
+    #[test]
+    fn synth_active_curve_sweeps_smoothly_between_configured_bounds() {
+        let curve = synth_active_curve([10, 90]);
+        assert_eq!(*curve.iter().min().unwrap(), 13, "10% of 127 rounds to 13");
+        assert_eq!(
+            *curve.iter().max().unwrap(),
+            114,
+            "90% of 127 rounds to 114"
+        );
+        let (rising, falling) = curve.split_at(SYNTH_FRAME_COUNT / 2);
+        assert!(
+            rising.windows(2).all(|pair| pair[0] <= pair[1]),
+            "first half of the cycle rises monotonically: {curve:?}"
+        );
+        assert!(
+            falling.windows(2).all(|pair| pair[0] >= pair[1]),
+            "second half of the cycle falls monotonically: {curve:?}"
+        );
+    }
+
+    #[test]
+    fn synth_attention_curve_bounces_then_holds_at_minimum() {
+        let curve = synth_attention_curve([10, 90]);
+        assert_eq!(curve[0], 13);
+        assert_eq!(
+            *curve.iter().max().unwrap(),
+            114,
+            "the bounce peaks at the configured maximum"
+        );
+        let peak = curve.iter().position(|value| *value == 114).unwrap();
+        assert!(peak <= 2, "the bounce rises quickly: {curve:?}");
+        let hold = &curve[6..];
+        assert!(
+            hold.iter().all(|value| *value == 13),
+            "the tail holds at the minimum for several frames: {curve:?}"
+        );
+    }
+
+    #[test]
+    fn percent_to_cc_rounds_and_clamps_to_the_cc_range() {
+        assert_eq!(percent_to_cc(0), 0);
+        assert_eq!(percent_to_cc(50), 64);
+        assert_eq!(percent_to_cc(100), 127);
+        assert_eq!(percent_to_cc(200), 127);
+    }
+
+    #[test]
+    fn synth_feedback_ranges_do_not_change_mixer_volume_packets() {
+        // Mixer CC 7 envelopes are fixed constants in the feedback loop; the
+        // configurable synth ranges only feed `activity_pane_packet`.
+        for range in [[25, 40], [10, 90]] {
+            let curve = synth_active_curve(range);
+            let volume = activity_volume_packet(0b0000_0011, 0b0000_0010, 32, 51);
+            let pane = activity_pane_packet(0b0000_0001, 0, 12, curve[0], curve[0]);
+            assert!(volume.chunks(3).all(|m| m[1] == 7));
+            assert!(pane.chunks(3).all(|m| m[1] != 7));
+            assert_eq!(volume, activity_volume_packet(0b0000_0011, 0b0000_0010, 32, 51));
         }
     }
 
