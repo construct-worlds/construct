@@ -55,6 +55,18 @@ pub enum MidiCommand {
         #[arg(long)]
         device: Option<String>,
     },
+    /// Probe the OP-XY from a fresh MIDI client while feedback is stuck.
+    ///
+    /// Sends a scene flip and a short transport pulse from a brand-new
+    /// CoreMIDI client, bypassing the TUI's long-lived feedback connection.
+    /// Run it while scene/transport feedback is wedged, before re-pairing or
+    /// power-cycling the device: whether the OP-XY reacts tells you which
+    /// side of the Bluetooth link is stalled.
+    OpXyTest {
+        /// Case-insensitive substring of the OP-XY MIDI device name.
+        #[arg(long)]
+        device: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -744,7 +756,72 @@ pub async fn run(command: Option<MidiCommand>) -> Result<()> {
         }) => learn(action, device.as_deref(), trigger),
         Some(MidiCommand::Forget { action }) => forget(action),
         Some(MidiCommand::OpXyLearn { device }) => op_xy_learn(device.as_deref()),
+        Some(MidiCommand::OpXyTest { device }) => op_xy_feedback_test(device.as_deref()),
     }
+}
+
+/// `construct midi op-xy-test`: exercise scene and transport from a fresh
+/// CoreMIDI client. The TUI's feedback rides one long-lived connection; when
+/// it wedges while OP-XY key input still arrives, the open question is
+/// whether the stall is per-connection on the host (a fresh client gets
+/// through) or in the outbound Bluetooth path / the device's receive
+/// processing (nothing gets through short of re-pairing). Running this from
+/// a separate process is what makes the client fresh.
+#[cfg(target_os = "macos")]
+fn op_xy_feedback_test(requested_device: Option<&str>) -> Result<()> {
+    let config = MidiConfig::load(&Paths::discover().midi_file())?;
+    let feedback = config
+        .op_xy
+        .as_ref()
+        .map(|profile| profile.feedback.clone())
+        .unwrap_or_default();
+    let device = requested_device
+        .or(config.device.as_deref())
+        .context("no MIDI device configured; pass --device")?;
+    let output = MidiOutput::new("construct-op-xy-test").context("initialize MIDI output")?;
+    let port = find_output_port(&output, device)?;
+    let port_name = output.port_name(&port).context("read MIDI output name")?;
+    let mut connection = output
+        .connect(&port, "construct-op-xy-test")
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+        .with_context(|| format!("connect MIDI output {port_name:?}"))?;
+    let pause = std::time::Duration::from_millis(2000);
+
+    eprintln!("probing {port_name:?} from a fresh MIDI client — watch the OP-XY");
+    eprintln!(
+        "1/3 selecting scene {} (attention)…",
+        feedback.attention_scene
+    );
+    let mut delivered = send_scene(&mut connection, feedback.attention_scene);
+    std::thread::sleep(pause);
+    eprintln!("2/3 selecting scene {} (normal)…", feedback.normal_scene);
+    delivered &= send_scene(&mut connection, feedback.normal_scene);
+    std::thread::sleep(pause);
+    eprintln!("3/3 pulsing transport (sequencer should start, then stop)…");
+    delivered &= connection.send(&[0xFA]).is_ok();
+    std::thread::sleep(pause);
+    delivered &= connection.send(&[0xFC]).is_ok();
+
+    if !delivered {
+        eprintln!();
+        eprintln!("CoreMIDI rejected at least one send — the device's endpoint is");
+        eprintln!("gone from the system; reconnect it in Audio MIDI Setup.");
+        return Ok(());
+    }
+    eprintln!();
+    eprintln!("every send was accepted by CoreMIDI. If the OP-XY visibly reacted");
+    eprintln!("(scene flip, sequencer pulse) while the TUI's feedback is stuck,");
+    eprintln!("the stall is the TUI's long-lived connection — report this, it is");
+    eprintln!("host-side and automatically recoverable. If the OP-XY did not");
+    eprintln!("react at all, the outbound Bluetooth path or the device's MIDI");
+    eprintln!("receive processing is locked; only re-pairing or a power cycle");
+    eprintln!("clears that.");
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn op_xy_feedback_test(_requested_device: Option<&str>) -> Result<()> {
+    anyhow::bail!("native MIDI control is currently supported on macOS")
 }
 
 #[cfg(target_os = "macos")]
