@@ -89,6 +89,9 @@ attention snap-bounces between them, leaping to the maximum in one frame and
 falling back the next, with a pause at the minimum (default 30–70%). These
 ranges apply only to the synth
 parameters; mixer volumes always keep the fixed 25–40% / 30–70% envelopes.
+The four parameters of each track play the same curve phase-offset by one
+frame, so they show different levels at any moment — a wave across the synth
+graphic.
 While streaming, the jumps repeat continuously; how long streaming lasts is
 governed by the Bluetooth burst rule below, with held synth values resting at
 each curve's own configured minimum.

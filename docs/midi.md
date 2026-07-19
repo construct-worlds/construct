@@ -194,6 +194,11 @@ are configurable in `midi.toml` as percents of the 0–127 CC range:
   frame, falling back on the next, then holding at the minimum for several
   frames before the next bounce.
 
+The four parameters of each synth track play the same curve phase-offset by
+one frame, so at any moment they show different levels — a wave across the
+OP-XY synth graphic (with the four-frame active cycle, all four levels are
+visible simultaneously).
+
 Mixer and synth animation is a burst, not a continuous stream: after each
 activity change the motion plays a few full cycles, then freezes at steady
 levels (refreshed every 30 seconds) until the next change. Sustained
