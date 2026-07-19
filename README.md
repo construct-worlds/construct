@@ -17,9 +17,9 @@ More screenshots and demos: [gallery](gallery.md).
 - **tmux for agent fleets** — manage Codex, Claude Code, OpenCode, Antigravity,
   Grok, and smith sessions from your terminal — or let an agent coordinate them.
   CLI-only; no desktop app to install.
-- **Fork / merge** — fork a session when you need a parallel attempt
-  (new idea, side quest, or a long shot). Supports cross-harness forks and
-  merging results back.
+- **Lineage** — sessions branch like ideas do: fork one when you want a
+  parallel attempt (new idea, side quest, or a long shot) — even into a
+  different harness — and merge the results back.
 
   <img src="https://raw.githubusercontent.com/construct-worlds/construct/9de1982e7ec4ae9ad71c32f3f3e3f2f58fbe93ca/demos/fork-merge.gif" alt="construct fork and merge demo" width="70%">
 - **Program** — collaborative, executable Markdown
@@ -27,8 +27,10 @@ More screenshots and demos: [gallery](gallery.md).
   with the agent, then run them from the same document.
 
   <img src="https://raw.githubusercontent.com/construct-worlds/construct/90d02bd2c1e6108eaa5c763bde9e2d78f8786691/demos/program.gif" alt="construct program demo" width="70%">
-- **Agent-to-agent orchestration** — MCP tools let an agent list sessions, read
-  output, spawn helpers, send input, inspect diffs, and drive Chrome.
+- **Agent-to-agent orchestration** — hand one agent a big goal and let it run
+  the fleet: it breaks the work down, delegates to helper sessions, watches
+  their progress, and pulls the results together — while you supervise or step
+  away.
 - **ACP (Agent Client Protocol) server** — point Agent Client Protocol clients at
   `construct acp` to create, load, resume, prompt, cancel, and close construct
   daemon sessions through the same installed binary.
