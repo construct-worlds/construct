@@ -7796,17 +7796,24 @@ fn modeline_model_text(model: Option<&str>, effort: Option<&str>) -> String {
 
 const CONTEXT_GAUGE_CELLS: usize = 10;
 
-/// A compact bar with its percentage immediately to the right. Exact token
-/// counts are intentionally reserved for the hover tooltip.
-fn modeline_context_gauge_text(used: Option<u64>, window: Option<u64>) -> Option<String> {
+/// A compact ten-cell bar with the percentage overlaid in its middle. Every
+/// cell is a block: unused capacity is dimmed at render time instead of using
+/// a separate glyph. Exact token counts remain in the hover tooltip.
+fn modeline_context_gauge_text(used: Option<u64>, window: Option<u64>) -> Option<(String, usize)> {
     let used = used?;
     let window = window.filter(|window| *window > 0)?;
     let percent = used.saturating_mul(100) / window;
     let filled = ((percent.min(100) as usize * CONTEXT_GAUGE_CELLS) + 99) / 100;
     let cells: String = (0..CONTEXT_GAUGE_CELLS)
-        .map(|i| if i < filled { '█' } else { '░' })
+        .map(|_| '█')
         .collect();
-    Some(format!(" [{cells}] ({}%)", percent.min(999)))
+    let label = format!("{:>3}%", percent.min(999));
+    let label_start = (CONTEXT_GAUGE_CELLS - label.len()) / 2;
+    let mut cells: Vec<char> = cells.chars().collect();
+    for (i, ch) in label.chars().enumerate() {
+        cells[label_start + i] = ch;
+    }
+    Some((format!(" {}", cells.into_iter().collect::<String>()), filled))
 }
 
 /// The original detailed context indicator, available by clicking the compact
@@ -7843,9 +7850,10 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     let approval_mode_badge = approval_mode_label.map(|badge| format!("[{badge}]"));
     let context_gauge = s.and_then(|s| {
         if app.context_gauge_as_text {
-            modeline_context_usage_text(s.context_used, s.context_window)
+            modeline_context_usage_text(s.context_used, s.context_window).map(|text| (text, None))
         } else {
             modeline_context_gauge_text(s.context_used, s.context_window)
+                .map(|(text, filled)| (text, Some(filled)))
         }
     });
     let mut search_status = None;
@@ -7908,14 +7916,14 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     );
     let modeline_before_approval_mode = format!(
         "{modeline_before_context_gauge}{}  ",
-        context_gauge.as_deref().unwrap_or("")
+        context_gauge.as_ref().map(|(text, _)| text.as_str()).unwrap_or("")
     );
-    if let Some(gauge) = context_gauge.as_deref() {
+    if let Some((gauge, _)) = context_gauge.as_ref() {
         let start_col = area
             .x
             .saturating_add(UnicodeWidthStr::width(modeline_before_context_gauge.as_str()) as u16);
         let end_col = start_col
-            .saturating_add(UnicodeWidthStr::width(gauge) as u16)
+            .saturating_add(UnicodeWidthStr::width(gauge.as_str()) as u16)
             .min(area.x.saturating_add(area.width));
         if end_col > start_col {
             app.layout.modeline_context_gauge_hit = Some(crate::app::ModelineContextGaugeHit {
@@ -8008,16 +8016,35 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         .x
         .saturating_add(UnicodeWidthStr::width(modeline_before_approval_mode.as_str()) as u16);
     spans.push(Span::raw(modeline_before_context_gauge));
-    if let Some(gauge) = context_gauge {
+    if let Some((gauge, filled)) = context_gauge {
         let hovered = app
             .mouse_pos
             .zip(app.layout.modeline_context_gauge_hit)
             .is_some_and(|((col, row), hit)| hit.contains(col, row));
-        let style = Style::default()
-            .bg(app.theme.modeline_bg)
-            .fg(if hovered { app.theme.text } else { app.theme.modeline_fg })
-            .add_modifier(if hovered { Modifier::BOLD } else { Modifier::empty() });
-        spans.push(Span::styled(gauge, style));
+        if let Some(filled) = filled {
+            for (index, ch) in gauge.chars().enumerate() {
+                let fg = if hovered {
+                    app.theme.text
+                } else if index > 0 && index - 1 < filled {
+                    app.theme.modeline_fg
+                } else {
+                    app.theme.dim
+                };
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default()
+                        .bg(app.theme.modeline_bg)
+                        .fg(fg)
+                        .add_modifier(if hovered { Modifier::BOLD } else { Modifier::empty() }),
+                ));
+            }
+        } else {
+            let style = Style::default()
+                .bg(app.theme.modeline_bg)
+                .fg(if hovered { app.theme.text } else { app.theme.modeline_fg })
+                .add_modifier(if hovered { Modifier::BOLD } else { Modifier::empty() });
+            spans.push(Span::styled(gauge, style));
+        }
     }
     spans.push(Span::raw("  "));
     if let Some(badge) = approval_mode_badge {
@@ -18592,10 +18619,10 @@ mod tests {
     }
 
     #[test]
-    fn modeline_context_gauge_places_the_percent_right_of_the_bar() {
+    fn modeline_context_gauge_overlays_the_percent_without_brackets() {
         assert_eq!(
             modeline_context_gauge_text(Some(12_400), Some(258_400)),
-            Some(" [█░░░░░░░░░] (4%)".to_string())
+            Some((" ███  4%███".to_string(), 1))
         );
         assert_eq!(modeline_context_gauge_text(Some(74_200), None), None);
         assert_eq!(modeline_context_gauge_text(Some(500), Some(0)), None);

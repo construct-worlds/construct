@@ -17,10 +17,12 @@ reports replace old ones, a context reset clears it, and the last
 report is recovered from the transcript at load.
 
 The TUI modeline renders the gauge immediately after the model name as a
-compact graphical bar with its percentage immediately to the right. Hovering the bar reveals
-the exact `used / window` token counts. The bar is shown only when the
-harness states its window; the window is never guessed from model names or
-hardcoded tables outside the harness's own report.
+compact all-block graphical bar with its percentage overlaid. Used capacity
+uses the normal modeline text color and remaining capacity uses the dim text
+color; overlaid characters inherit the brightness of the capacity beneath
+them. Hovering the bar reveals the exact `used / window` token counts. The
+bar is shown only when the harness states its window; the window is never
+guessed from model names or hardcoded tables outside the harness's own report.
 
 Clicking the indicator toggles the client-local display between that compact
 bar and the detailed `(used/window %)` text representation.
