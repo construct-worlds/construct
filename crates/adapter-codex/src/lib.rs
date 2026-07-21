@@ -255,6 +255,7 @@ fn spawn_interactive_transcript_watcher(
         let mut child_lines: HashMap<String, usize> = HashMap::new();
         let mut child_seq: HashMap<String, u64> = HashMap::new();
         let mut child_states: HashMap<String, SessionState> = HashMap::new();
+        let mut child_usage: HashMap<String, UsageTotals> = HashMap::new();
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -412,7 +413,10 @@ fn spawn_interactive_transcript_watcher(
                         state = next_state;
                         child_states.insert(child_id.clone(), state);
                     }
-                    let events = codex_rollout_events(&value);
+                    let events = codex_child_events(
+                        &value,
+                        child_usage.entry(child_id.clone()).or_default(),
+                    );
                     if events.is_empty() && codex_native_state(&value).is_some() {
                         emit.emit(SessionEvent::NativeSubagent {
                             id: child_id.clone(),
@@ -628,6 +632,18 @@ fn codex_usage_events(v: &Value, reported: &mut UsageTotals) -> Vec<SessionEvent
                 .filter(|w| *w > 0),
         });
     }
+    out
+}
+
+/// Events one child-rollout record contributes to its subagent mirror:
+/// token-usage deltas first, then transcript events — the same order the
+/// root watcher emits them. Child rollouts carry their own cumulative
+/// `token_count` snapshots, so every mirror keeps its own `UsageTotals`
+/// baseline; without this projection a subagent's tally never leaves zero
+/// and its lineage lane is stuck on the message-count fallback (spec 0103).
+fn codex_child_events(v: &Value, reported: &mut UsageTotals) -> Vec<SessionEvent> {
+    let mut out = codex_usage_events(v, reported);
+    out.extend(codex_rollout_events(v));
     out
 }
 
@@ -1287,6 +1303,73 @@ mod tests {
         assert!(
             codex_usage_events(&snapshot(48_890, 19_968, 257, 29_796), &mut reported).is_empty(),
             "an unchanged snapshot must not re-report usage or respam the gauge"
+        );
+    }
+
+    #[test]
+    fn child_rollout_token_counts_reach_the_subagent_mirror() {
+        // A subagent's rollout stamps the same cumulative `token_count`
+        // records as the root's, against its own running total — the child
+        // projection must turn them into per-call Cost deltas off the
+        // child's own baseline (spec 0103), and still pass transcript
+        // events through untouched.
+        let snapshot = |input: u64, output: u64| {
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": input,
+                            "cached_input_tokens": 0,
+                            "output_tokens": output,
+                        },
+                        "last_token_usage": { "input_tokens": 0 },
+                    }
+                }
+            })
+        };
+        let mut reported = UsageTotals::default();
+        match codex_child_events(&snapshot(1_000, 50), &mut reported).as_slice() {
+            [SessionEvent::Cost {
+                tokens_in,
+                tokens_out,
+                ..
+            }] => {
+                assert_eq!(*tokens_in, 1_000);
+                assert_eq!(*tokens_out, 50);
+            }
+            other => panic!("expected the child's Cost delta: {other:?}"),
+        }
+        match codex_child_events(&snapshot(1_600, 80), &mut reported).as_slice() {
+            [SessionEvent::Cost {
+                tokens_in,
+                tokens_out,
+                ..
+            }] => {
+                assert_eq!(*tokens_in, 600);
+                assert_eq!(*tokens_out, 30);
+            }
+            other => panic!("expected only the delta on the second snapshot: {other:?}"),
+        }
+        let message = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "done" }]
+            }
+        });
+        let events = codex_child_events(&message, &mut reported);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Message { .. })),
+            "transcript events must still project: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, SessionEvent::Cost { .. })),
+            "a non-usage record must not fabricate a Cost: {events:?}"
         );
     }
 
