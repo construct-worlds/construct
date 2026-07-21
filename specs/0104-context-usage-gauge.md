@@ -16,11 +16,11 @@ the latest report on the session summary — a gauge, not a counter: new
 reports replace old ones, a context reset clears it, and the last
 report is recovered from the transcript at load.
 
-The TUI modeline renders the gauge immediately after the model name:
-"`(used/window %)`" when the window is known — e.g. `(12.4k/258k 5%)`
-— and "`(used)`" when it isn't. The window is never guessed from model
-names or hardcoded tables outside the harness's own report: showing
-`(used)` honestly beats a percentage against an assumed denominator.
+The TUI modeline renders the gauge immediately after the model name as a
+compact graphical bar with its percentage overlaid. Hovering the bar reveals
+the exact `used / window` token counts. The bar is shown only when the
+harness states its window; the window is never guessed from model names or
+hardcoded tables outside the harness's own report.
 
 ## Reason
 
@@ -40,8 +40,8 @@ the different question "how full is this conversation right now?".
   into the fresh conversation.
 - Repeated identical snapshots must not spam the transcript; adapters
   report on change.
-- Clients rendering the gauge must handle all three states: unknown
-  (no report yet — render nothing), used-only, and used+window.
+- Clients render the graphical bar only for used+window; unknown and
+  used-only reports render no ratio rather than implying a denominator.
 
 ## Non-Goals
 
@@ -53,8 +53,9 @@ the different question "how full is this conversation right now?".
 ## Examples
 
 - A codex session that just consumed 12,400 prompt tokens against its
-  258k window shows `(12.4k/258k 5%)` after the model name.
-- A kimi session (no window reported) shows `(74.2k)`.
-- A brand-new session or a bare shell shows no gauge at all.
+  258k window shows a 5%-filled bar after the model name; hover shows
+  `12.4k / 258k tokens (5%)`.
+- A kimi session (no window reported), a brand-new session, and a bare shell
+  show no gauge.
 - After a harness-native `/clear`, the gauge disappears until the
   first call of the fresh conversation reports again.
