@@ -1527,6 +1527,32 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
         "fork records its owner lineage"
     );
 
+    // The selection is annotated with the fork's session clip at dispatch
+    // (parity with verbs and instant-dispatch), and the annotated block
+    // shimmers with a "Running" tooltip.
+    let expected_clip = format!("- say hello @{{session:{fork_id}}}");
+    assert!(
+        result.program.markdown.contains(&expected_clip),
+        "fork run should annotate the selection with the fork's session clip: {}",
+        result.program.markdown
+    );
+    let annotated_block = result
+        .blocks
+        .iter()
+        .find(|b| b.text.contains("say hello"))
+        .expect("annotated block present in projection");
+    assert!(annotated_block.shimmer, "annotated block should shimmer");
+    assert_eq!(
+        annotated_block.tooltip.as_deref(),
+        Some("Running"),
+        "annotated block should carry the 'Running' tooltip"
+    );
+    let refetched = d.client.program_get(&owner).await.expect("program.get");
+    assert!(
+        refetched.program.markdown.contains(&expected_clip),
+        "the clip annotation is persisted daemon-side, not response-local"
+    );
+
     // The forked-run prompt must reach the fork's PTY. The shell echoes
     // typed input, so a distinctive token from the prompt appearing in the
     // fork's PTY log proves the paste landed after the harness was ready
@@ -1547,6 +1573,67 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// The owner-targeted counterpart (Shift+Run / non-fork callers): the work
+/// stays in the Program-owning session the user is already looking at, so
+/// no session clip is added to the selection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn program_selection_owner_run_adds_no_session_clip() {
+    let d = Daemon::spawn().await.expect("daemon");
+    let cwd = d.dir.path().to_string_lossy().to_string();
+
+    let owner = d
+        .client
+        .create(shell_session_params(&cwd, "owner"))
+        .await
+        .expect("create owner session");
+
+    let md = "# Todo\n\n- say hello\n";
+    let updated = d
+        .client
+        .program_update(construct_protocol::ProgramUpdateParams {
+            session_id: owner.clone(),
+            markdown: md.to_string(),
+            base_version: None,
+            actor: construct_protocol::ProgramUpdateActor::Human,
+            template_id: None,
+            note: None,
+            shimmer: None,
+            shimmer_tooltips: None,
+        })
+        .await
+        .expect("program.update");
+
+    let result = d
+        .client
+        .program_execute(construct_protocol::ProgramExecuteParams {
+            session_id: owner.clone(),
+            selection: Some("- say hello".to_string()),
+            base_version: Some(updated.program.version),
+            shimmer: None,
+            selection_block_ids: None,
+            comment: None,
+            fork: false,
+        })
+        .await
+        .expect("program.execute");
+
+    assert_eq!(
+        result.execution_session_id.as_deref(),
+        Some(owner.as_str()),
+        "owner run executes on the owning session"
+    );
+    assert!(
+        !result.program.markdown.contains("@{session:"),
+        "owner run must not annotate the selection with a session clip: {}",
+        result.program.markdown
+    );
+    let refetched = d.client.program_get(&owner).await.expect("program.get");
+    assert!(
+        !refetched.program.markdown.contains("@{session:"),
+        "no clip annotation daemon-side either"
+    );
 }
 
 fn shell_session_params(cwd: &str, title: &str) -> construct_protocol::CreateSessionParams {
