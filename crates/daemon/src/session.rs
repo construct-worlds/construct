@@ -632,14 +632,26 @@ fn program_execution_prompt_with_comment(comment: Option<&str>) -> String {
     prompt
 }
 
-fn forked_program_execution_prompt(owner_session_id: &str, comment: Option<&str>) -> String {
+fn forked_program_execution_prompt(
+    owner_session_id: &str,
+    fork_session_id: &str,
+    comment: Option<&str>,
+) -> String {
     let mut prompt = program_execution_prompt_with_comment(comment);
     prompt.push_str(&format!(
-        "\n\nYou are running in an interactive fork. The Program you must read and update belongs \
-         to session `{owner_session_id}`. Always pass `session_id: \"{owner_session_id}\"` to \
-         construct_program_get and every construct_program_edit/update call; do not edit a \
-         Program belonging to this fork. Apply progress and results directly to that owner \
-         document as you work. Do not return a result for the owner to merge."
+        "\n\nYou are running in an interactive fork (session `{fork_session_id}`). The Program \
+         you must read and update belongs to session `{owner_session_id}`. Always pass \
+         `session_id: \"{owner_session_id}\"` to construct_program_get and every \
+         construct_program_edit/update call; do not edit a Program belonging to this fork. Apply \
+         progress and results directly to that owner document as you work. Do not return a \
+         result for the owner to merge.\
+         \n\nWhen the dispatched work is fully complete and you have settled every block you \
+         were dispatched for on the owner Program, close this fork as your final action by \
+         calling the archive-session tool (construct_archive_session, or agentd_archive_session \
+         if you have the agentd-prefixed toolset) with `session_id: \"{fork_session_id}\"`. \
+         Archiving is a soft close: the transcript and the owner Program's session clip stay \
+         valid. If work remains pending, you are blocked, or the user has joined the \
+         conversation in this fork, leave the session open instead of archiving."
     ));
     prompt
 }
@@ -2858,7 +2870,7 @@ impl SessionManager {
             // The fork's own context env points at this sidecar. Store the
             // owner's Program context there before delivering the first turn.
             self.write_program_run_context(&fork_id, &run_context)?;
-            let prompt = forked_program_execution_prompt(&params.session_id, run_comment);
+            let prompt = forked_program_execution_prompt(&params.session_id, &fork_id, run_comment);
             self.spawn_program_fork_prompt_delivery(
                 fork_id.clone(),
                 fork_created_at_ms,
@@ -5653,6 +5665,24 @@ mod tests {
             "Additional user instruction for this Run: focus tests and keep output short"
         ));
         assert!(!prompt.contains("focus tests\nand keep output short"));
+    }
+
+    /// Spec 0076 auto-close contract: a Run fork's prompt tells it to
+    /// archive ITSELF (its own session id, not the owner's) as its final
+    /// action once every dispatched block has settled, and to stay open
+    /// when blocked / work remains / the user joined the conversation.
+    /// The owner-targeting contract must survive alongside it.
+    #[test]
+    fn forked_run_prompt_instructs_self_archive_on_completion() {
+        let prompt = forked_program_execution_prompt("owner1", "fork1", None);
+
+        assert!(prompt.contains("session_id: \"owner1\""));
+        assert!(prompt.contains("do not edit a Program belonging to this fork"));
+        assert!(prompt.contains("construct_archive_session"));
+        assert!(prompt.contains("session_id: \"fork1\""));
+        assert!(prompt.contains("settled every block"));
+        assert!(prompt.contains("final action"));
+        assert!(prompt.contains("leave the session open"));
     }
 
     #[test]
