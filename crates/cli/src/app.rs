@@ -979,7 +979,7 @@ pub enum MinibufferIntent {
     Orchestrator,
     /// Approval prompt for a Risky tool call from an agent harness
     /// without inline approval UI. Single-key dispatch: `y`/Enter
-    /// approve, `n`/Esc deny, `a` auto-review, `f` unsafe-auto.
+    /// approve, `n`/Esc deny, `a` auto-review, `f` always-approve.
     ApproveTool {
         session_id: String,
         call_id: String,
@@ -8343,7 +8343,7 @@ impl App {
             construct_protocol::ToolRisk::Risky => "risky",
         };
         let short_args: String = args_summary.chars().take(80).collect();
-        // The choice cluster (`y=approve  n=deny  a=auto-review  f=unsafe-auto`)
+        // The choice cluster (`y=approve  n=deny  a=auto-review  f=always-approve`)
         // is no longer baked into the stored prompt text — it's rendered
         // separately as clickable spans (spec 0075), built from
         // `allow_auto_review` on the intent itself.
@@ -29029,7 +29029,7 @@ mod tests {
         ));
         let prompt = &app.minibuffer.as_ref().unwrap().prompt;
         assert!(prompt.contains("approve [risky] shell(echo hi)"));
-        // The `y=approve  n=deny  a=auto-review  f=unsafe-auto` choice
+        // The `y=approve  n=deny  a=auto-review  f=always-approve` choice
         // cluster is no longer baked into the stored prompt text — it
         // renders as clickable spans built from `allow_auto_review` on the
         // intent (spec 0075); see the render tests below.

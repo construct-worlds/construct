@@ -2542,7 +2542,7 @@
   <!--
     Tool-approval bottom sheet. Shown when the adapter emits
     `tool_approval_request`; the user picks approve / deny /
-    auto-review / unsafe-auto and the client posts back via
+    auto-review / always-approve and the client posts back via
     `session.tool_decision`. Queued sheet if multiple arrive while
     one is open.
   -->
@@ -2561,7 +2561,7 @@
           Auto-review
         </button>
         <button type="button" class="btn-unsafe-auto" id="approvalUnsafeAuto">
-          Unsafe-auto
+          Always-Approve
         </button>
       </div>
     </div>
