@@ -451,7 +451,9 @@ impl SessionManager {
     /// 6), and only an update at-or-after `since_ms` counts as evidence
     /// that the thing this particular wait cares about actually happened.
     /// See [`usage_probe_wait_outcome`] for the pure decision step.
-    async fn wait_for_pty_settle(
+    /// `pub(super)`: program fork prompt delivery reuses this same wait to
+    /// let a cold-started fork finish its startup draw before pasting.
+    pub(super) async fn wait_for_pty_settle(
         &self,
         id: &str,
         since_ms: i64,
@@ -481,8 +483,9 @@ impl SessionManager {
 
     /// Current byte length of `id`'s on-disk `pty.log`, used to mark "the
     /// probe command hasn't been sent yet" before step 5 so step 7 can
-    /// slice out only what the command produced.
-    fn pty_log_len(&self, id: &str) -> u64 {
+    /// slice out only what the command produced. `pub(super)`: also the
+    /// before-marker for program fork prompt delivery's paste-output gate.
+    pub(super) fn pty_log_len(&self, id: &str) -> u64 {
         std::fs::metadata(self.storage.pty_log_path(id))
             .map(|m| m.len())
             .unwrap_or(0)
