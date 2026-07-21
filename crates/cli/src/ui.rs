@@ -7795,13 +7795,18 @@ fn modeline_model_text(model: Option<&str>, effort: Option<&str>) -> String {
 }
 
 /// The modeline's detailed context indicator and the number of its text cells
-/// covered by the filled part of its background bar.
+/// covered by the filled part of its background bar, when a window is known.
 fn modeline_context_usage_text(
     used: Option<u64>,
     window: Option<u64>,
-) -> Option<(String, usize)> {
+) -> Option<(String, Option<usize>)> {
     let used = used?;
-    let window = window.filter(|window| *window > 0)?;
+    let Some(window) = window.filter(|window| *window > 0) else {
+        return Some((
+            format!(" {} used", crate::lineage::format_token_count(used)),
+            None,
+        ));
+    };
     let text = format!(
         "  {}/{} {}% ",
         crate::lineage::format_token_count(used),
@@ -7812,7 +7817,7 @@ fn modeline_context_usage_text(
     // final spaces are padding within the bar itself.
     let text_cells = UnicodeWidthStr::width(&text[1..]);
     let filled_cells = (text_cells * used.min(window) as usize).div_ceil(window as usize);
-    Some((text, filled_cells))
+    Some((text, Some(filled_cells)))
 }
 
 fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
@@ -8003,29 +8008,47 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             .mouse_pos
             .zip(app.layout.modeline_context_gauge_hit)
             .is_some_and(|((col, row), hit)| hit.contains(col, row));
-        for (index, ch) in gauge.chars().enumerate() {
-            let bar_cell = index > 0;
-            let background = if !bar_cell {
-                app.theme.modeline_bg
-            } else if index - 1 < filled_cells {
-                if hovered {
-                    app.theme.text
+        if let Some(filled_cells) = filled_cells {
+            for (index, ch) in gauge.chars().enumerate() {
+                let bar_cell = index > 0;
+                let background = if !bar_cell {
+                    app.theme.modeline_bg
+                } else if index - 1 < filled_cells {
+                    if hovered {
+                        app.theme.text
+                    } else {
+                        app.theme.modeline_fg
+                    }
                 } else {
-                    app.theme.modeline_fg
-                }
-            } else {
-                app.theme.dim
-            };
+                    app.theme.dim
+                };
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default()
+                        .bg(background)
+                        .fg(if bar_cell {
+                            app.theme.modeline_bg
+                        } else {
+                            app.theme.modeline_fg
+                        })
+                        .add_modifier(if hovered && bar_cell {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ));
+            }
+        } else {
             spans.push(Span::styled(
-                ch.to_string(),
+                gauge,
                 Style::default()
-                    .bg(background)
-                    .fg(if bar_cell {
-                        app.theme.modeline_bg
+                    .bg(app.theme.modeline_bg)
+                    .fg(if hovered {
+                        app.theme.text
                     } else {
                         app.theme.modeline_fg
                     })
-                    .add_modifier(if hovered && bar_cell {
+                    .add_modifier(if hovered {
                         Modifier::BOLD
                     } else {
                         Modifier::empty()
@@ -8287,22 +8310,27 @@ fn render_modeline_context_gauge_tooltip(f: &mut Frame, app: &App) {
     let Some(session) = app.selected_session() else {
         return;
     };
-    let (Some(used), Some(window)) = (session.context_used, session.context_window) else {
+    let Some(used) = session.context_used else {
         return;
     };
-    if window == 0 {
-        return;
-    }
-    let percent = used.saturating_mul(100) / window;
-    render_button_tooltip(
-        f,
-        &app.theme,
-        &format!(
+    let text = if let Some(window) = session.context_window.filter(|window| *window > 0) {
+        let percent = used.saturating_mul(100) / window;
+        format!(
             " Context: {} / {} tokens ({}%) ",
             crate::lineage::format_token_count(used),
             crate::lineage::format_token_count(window),
             percent,
-        ),
+        )
+    } else {
+        format!(
+            " Context: {} tokens used ",
+            crate::lineage::format_token_count(used),
+        )
+    };
+    render_button_tooltip(
+        f,
+        &app.theme,
+        &text,
         hit.start_col,
         hit.row.saturating_sub(2),
     );
@@ -18608,10 +18636,16 @@ mod tests {
     fn modeline_context_usage_shows_full_token_text_over_a_bar() {
         assert_eq!(
             modeline_context_usage_text(Some(12_400), Some(258_400)),
-            Some(("  12k/258k 4% ".to_string(), 1))
+            Some(("  12k/258k 4% ".to_string(), Some(1)))
         );
-        assert_eq!(modeline_context_usage_text(Some(74_200), None), None);
-        assert_eq!(modeline_context_usage_text(Some(500), Some(0)), None);
+        assert_eq!(
+            modeline_context_usage_text(Some(74_200), None),
+            Some((" 74k used".to_string(), None))
+        );
+        assert_eq!(
+            modeline_context_usage_text(Some(500), Some(0)),
+            Some((" 500 used".to_string(), None))
+        );
         assert_eq!(modeline_context_usage_text(None, Some(258_400)), None);
     }
 
