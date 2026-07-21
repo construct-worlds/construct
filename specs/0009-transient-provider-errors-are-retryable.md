@@ -21,7 +21,7 @@ Provider adapters should distinguish transient failures from permanent request, 
 
 Retry behavior should be visible enough that users can tell progress is still happening and should eventually surface a clear error if retries are exhausted.
 
-Retried turns must preserve conversation intent. They should not duplicate tool side effects that were already accepted as complete.
+Retried turns must preserve conversation intent. They should not duplicate assistant answers or tool side effects that were already accepted as complete. Partial reasoning is presentation rather than a committed assistant answer: when a transient stream failure occurs after reasoning but before any assistant text, the incomplete reasoning is labeled and the turn may be retried automatically.
 
 ## Non-Goals
 
@@ -29,4 +29,4 @@ This does not require infinite retries, retrying every error, or silently ignori
 
 ## Examples
 
-A temporary provider overload during text generation can be retried. An invalid API key or unsupported model name should fail clearly.
+A temporary provider overload before assistant text is emitted can be retried. A transport interruption after partial reasoning can also be retried, with the interrupted attempt identified in the UI. Once assistant text has streamed, automatic replay stops. An invalid API key or unsupported model name should fail clearly.
