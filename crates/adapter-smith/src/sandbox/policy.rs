@@ -15,7 +15,7 @@ pub enum SandboxMode {
     ReadOnly,
     /// Write within `writable_roots`, network per `network`. The default.
     WorkspaceWrite,
-    /// No enforcement (an approved/escalated action, or `unsafe-auto`).
+    /// No enforcement (an approved/escalated action, or `always-approve`).
     FullAccess,
 }
 

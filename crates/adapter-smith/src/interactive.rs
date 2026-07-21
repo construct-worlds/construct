@@ -145,7 +145,7 @@ impl<'a> Terminal<'a> {
         };
         let line = format!(
             "\r\n\x1b[1;33m? approve [{risk_label}]\x1b[0m {tool}\x1b[2m({args_summary})\x1b[0m\
-             — \x1b[1m[y]\x1b[0mapprove / \x1b[1m[n]\x1b[0mdeny{auto_review_option} / \x1b[1m[f]\x1b[0munsafe-auto: "
+             — \x1b[1m[y]\x1b[0mapprove / \x1b[1m[n]\x1b[0mdeny{auto_review_option} / \x1b[1m[f]\x1b[0malways-approve: "
         );
         self.write(line.as_bytes());
     }

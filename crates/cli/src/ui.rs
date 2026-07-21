@@ -1644,7 +1644,7 @@ fn minibuffer_choice_suffix(intent: &MinibufferIntent) -> Option<Vec<PromptPart>
             }
             parts.push(PromptPart::Text("  "));
             parts.push(PromptPart::Choice {
-                label: "f=unsafe-auto",
+                label: "f=always-approve",
                 action: Key('f'),
             });
             parts
@@ -21437,7 +21437,7 @@ mod tests {
     fn approval_mode_modeline_label_uses_non_manual_badge() {
         let mut s = summary_with_mode("smith", Some("interactive"));
         s.approval_mode = construct_protocol::ApprovalMode::UnsafeAuto;
-        assert_eq!(approval_mode_modeline_label(&s), Some("unsafe-auto"));
+        assert_eq!(approval_mode_modeline_label(&s), Some("always-approve"));
     }
 
     #[test]

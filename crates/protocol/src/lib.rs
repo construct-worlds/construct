@@ -763,7 +763,7 @@ impl ApprovalMode {
         match self {
             ApprovalMode::Manual => None,
             ApprovalMode::AutoReview => Some("auto-review"),
-            ApprovalMode::UnsafeAuto => Some("unsafe-auto"),
+            ApprovalMode::UnsafeAuto => Some("always-approve"),
         }
     }
 }

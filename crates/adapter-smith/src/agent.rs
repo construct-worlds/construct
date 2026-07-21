@@ -1,6 +1,6 @@
 //! The smith agent loop. Pulls user input from the inbox, calls the
 //! provider, runs any tool calls (gating Risky ones behind an approval
-//! prompt unless unsafe-auto is on), feeds results back, and loops until
+//! prompt unless always-approve is on), feeds results back, and loops until
 //! the model signals end-of-turn.
 
 use crate::context;
@@ -344,7 +344,7 @@ When the user says "subagent", default to `agentd_subagent_create`: a child agen
 
 Read, search, and list through `shell` (`cat`/`sed -n`, `rg`/`grep`, `ls`); batch independent reads into a single command, or issue them as several parallel `shell` calls each with `read_only: true` so they run concurrently, rather than one round-trip per file. Set `read_only: true` ONLY on commands that are provably side-effect-free (no writes, redirects, `$(...)`, or chaining into a mutator); leave it off for anything that changes state. Change files with `edit_file` — prefer one call carrying several hunks (and across files) over many small single-hunk calls. The shell tool runs `bash -lc` with a default 30s timeout.
 
-You are running with the user's permissions. The user must approve every Risky tool call unless the session is in `unsafe-auto`. When a tool is denied, do not retry it without revising the approach — explain what alternative you'd take instead, or ask the user a clarifying question.
+You are running with the user's permissions. The user must approve every Risky tool call unless the session is in `always-approve`. When a tool is denied, do not retry it without revising the approach — explain what alternative you'd take instead, or ask the user a clarifying question.
 
 LONG-RUNNING TOOLS: a tool result of exactly "(running in background; will report when complete)" means the tool exceeded the foreground time budget and is still running. Don't retry it. Don't poll. Continue with whatever you can do without that result. You'll receive an `OBSERVATION:` message with the real output later — react to that observation when it arrives, ideally with a short summary or a `noted` if no action is needed.
 
@@ -378,7 +378,7 @@ Dynamic session UI: when a session/task benefits from compact status/actions, ca
 
 SURFACING — choose the channel by whether the user needs to respond. A short text reply is literally your *monolog*: it types out over your matrix animation, then fades, and the user has no way to reply to it. Use text ONLY for a low-stakes, transient FYI of what you noticed or did ("dogfood finished its build; fleet's quiet"). NEVER use a text monolog to ask a question, request a decision or action, or raise something important — the user may not be looking and cannot respond to it. Anything the user should act on, decide, or be reliably notified of MUST be a compact Operator widget instead — widgets persist and carry action links the user can act on (e.g. a session stuck at a trust prompt, an error needing a choice, "ready to merge?"). Reply exactly `noted` when nothing needs surfacing.
 
-Be concise. The minibuffer panel is small; aim for one to three short lines per turn, longer only when the user explicitly asks for detail. Risky tool calls (delete / kill / send) still gate through approval unless the session is in unsafe-auto."#;
+Be concise. The minibuffer panel is small; aim for one to three short lines per turn, longer only when the user explicitly asks for detail. Risky tool calls (delete / kill / send) still gate through approval unless the session is in always-approve."#;
 
 /// Pick the right system prompt for this session's kind. The daemon
 /// sets `CONSTRUCT_SESSION_KIND` at spawn time; default is `user` so old
@@ -645,7 +645,7 @@ pub async fn run(
         )
         .await;
 
-    // Per-session approval mode. Defaults to unsafe-auto when the legacy env override is set.
+    // Per-session approval mode. Defaults to always-approve when the legacy env override is set.
     let mut approval_mode = if std::env::var("CONSTRUCT_SMITH_AUTOMODE").as_deref() == Ok("1") {
         construct_protocol::ApprovalMode::UnsafeAuto
     } else {
