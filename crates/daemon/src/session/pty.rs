@@ -351,7 +351,64 @@ impl SessionManager {
         self.pty_input_without_capture(id, vec![b'\r']).await?;
         Ok(())
     }
+
+    /// Cold-start-tolerant variant of [`Self::program_submit_typed_prompt`]
+    /// for prompts delivered to a just-created execution fork: the submit
+    /// Enter is gated on the PTY producing output after the paste, not just
+    /// a fixed delay. A cold-started harness still busy with its own
+    /// startup work doesn't drain stdin during a fixed delay, so the paste
+    /// and the Enter accumulate in the PTY buffer and arrive in ONE read —
+    /// the Enter then sits directly after the `ESC[201~` paste-end marker
+    /// in the same input batch and gets treated as part of the paste burst
+    /// instead of a standalone submit keypress, leaving the prompt visibly
+    /// typed but never submitted (spec 0086 documents the identical race
+    /// for usage probes). Output growth after the paste is evidence the
+    /// harness consumed it, so the Enter written afterwards arrives in a
+    /// later read and parses as a real keypress. Unlike the usage probe's
+    /// token-echo gate this cannot look for the prompt text itself: program
+    /// prompts are long, and external TUIs collapse long pastes into a
+    /// `[Pasted text #N]` placeholder that never echoes the body. On gate
+    /// timeout the Enter is sent anyway — a missing echo most likely means
+    /// the harness is drawing nothing yet, and the Enter can't make that
+    /// outcome worse than the old fixed-delay behavior.
+    pub(super) async fn program_submit_typed_prompt_cold_start(
+        &self,
+        id: &str,
+        prompt: &str,
+    ) -> Result<()> {
+        let before_offset = self.pty_log_len(id);
+        self.pty_input_without_capture(id, program_bracketed_paste_bytes(prompt))
+            .await?;
+        let started = tokio::time::Instant::now();
+        loop {
+            if self.pty_log_len(id) > before_offset {
+                break;
+            }
+            if started.elapsed() >= PROGRAM_PASTE_OUTPUT_GATE_TIMEOUT {
+                tracing::warn!(
+                    session = %id,
+                    "program fork prompt: no PTY output after paste within the gate window; sending Enter anyway",
+                );
+                break;
+            }
+            tokio::time::sleep(PROGRAM_PASTE_OUTPUT_GATE_POLL).await;
+        }
+        // Keep the short settle between the observed echo and the Enter:
+        // the echo proves the paste was consumed, the settle lets the
+        // harness finish the render/state update it triggered.
+        tokio::time::sleep(PROGRAM_EXTERNAL_PTY_SUBMIT_DELAY).await;
+        self.pty_input_without_capture(id, vec![b'\r']).await?;
+        Ok(())
+    }
 }
+
+/// Poll interval / hard cap for the paste-output gate in
+/// [`SessionManager::program_submit_typed_prompt_cold_start`]. The timeout
+/// is generous relative to how fast a responsive harness echoes (tens of
+/// ms) precisely because the case the gate exists for is a harness slow to
+/// drain stdin while busy with its own startup work.
+const PROGRAM_PASTE_OUTPUT_GATE_POLL: Duration = Duration::from_millis(50);
+const PROGRAM_PASTE_OUTPUT_GATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Per-session writer task (spec 0087): drains the ordered input queue and
 /// performs the adapter `session.pty_input` round-trips that used to run

@@ -73,6 +73,19 @@ const RESPAWN_REDRAW_MAX_WAIT: Duration = Duration::from_secs(6);
 /// settle lets its render/state update land so the trailing `\r` is read as
 /// a clean submit keypress rather than being coalesced into the paste.
 const PROGRAM_EXTERNAL_PTY_SUBMIT_DELAY: Duration = Duration::from_millis(120);
+/// How long a freshly created program-execution fork's PTY must stay quiet
+/// before its harness's startup draw is considered settled enough to accept
+/// the run/verb prompt, plus the hard cap on waiting for that to happen. A
+/// fork cold-starts its harness (often through a native fork-resume), and a
+/// harness still busy with its own startup work does not drain stdin — a
+/// prompt pasted during that window either vanishes into the pre-draw screen
+/// or lands with its submit Enter coalesced into the same input read as the
+/// paste and never runs (the identical race spec 0086 documents for usage
+/// probes). On timeout the prompt is delivered anyway: a slow-booting
+/// harness eventually drains stdin, and delivering late can never be worse
+/// than the old deliver-immediately behavior.
+const PROGRAM_FORK_STARTUP_SETTLE: Duration = Duration::from_millis(500);
+const PROGRAM_FORK_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const PROGRAM_CURSOR_TTL_MS: i64 = 60 * 1000;
 const PROGRAM_AGENT_CURSOR_TTL_MS: i64 = 2 * 1000;
 /// How long an interactive full-screen TUI harness's PTY may be silent before
@@ -2665,6 +2678,95 @@ impl SessionManager {
         .await
     }
 
+    /// Deliver a run/verb prompt to a just-created execution fork. Unlike
+    /// [`Self::deliver_text_to_session`], which assumes an already-running
+    /// harness that is draining stdin, this first waits for the fork's
+    /// cold-started harness to finish its startup draw, then — for external
+    /// agent TUIs — gates the submit Enter on the paste observably reaching
+    /// the harness (see `program_submit_typed_prompt_cold_start`). Without
+    /// both, the prompt raced the harness's boot and either vanished or sat
+    /// in the input box unsubmitted, leaving the fork idle. Blocking,
+    /// potentially for seconds: call via
+    /// [`Self::spawn_program_fork_prompt_delivery`] so the IPC dispatch
+    /// loop is never stalled behind a booting fork.
+    async fn deliver_program_prompt_to_fork(
+        self: &Arc<Self>,
+        fork_id: &str,
+        created_at_ms: i64,
+        prompt: &str,
+    ) -> Result<()> {
+        let entry = self
+            .get_entry(fork_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {fork_id}"))?;
+        let (delivery, has_pty) = {
+            let summary = entry.summary.read().await;
+            (program_execution_delivery(&summary), summary.has_pty)
+        };
+        if has_pty
+            && !self
+                .wait_for_pty_settle(
+                    fork_id,
+                    created_at_ms,
+                    PROGRAM_FORK_STARTUP_SETTLE,
+                    PROGRAM_FORK_STARTUP_TIMEOUT,
+                )
+                .await
+        {
+            tracing::warn!(
+                session = %fork_id,
+                "program fork prompt: harness startup never settled; delivering anyway",
+            );
+        }
+        match delivery {
+            ProgramExecutionDelivery::ExternalPtyTypedSubmit => {
+                self.program_submit_typed_prompt_cold_start(fork_id, prompt)
+                    .await?;
+            }
+            ProgramExecutionDelivery::PtySubmit => {
+                self.pty_input_delivered(fork_id, program_pty_submit_bytes(prompt))
+                    .await?;
+            }
+            ProgramExecutionDelivery::AdapterInput => {
+                self.send_input(fork_id, prompt.to_string()).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Background wrapper around [`Self::deliver_program_prompt_to_fork`]:
+    /// the startup-settle wait lasts as long as the fork's harness takes to
+    /// boot, and `program.execute` / `program.verb_execute` run on the IPC
+    /// dispatch loop, which serves a connection's requests serially —
+    /// awaiting the boot inline would freeze the requesting client's whole
+    /// connection (spec 0087's lesson). Delivery failure is logged; with
+    /// `verb_cleanup` set the fork's pending verb merge is dropped and the
+    /// fork archived, matching the inline error path this replaced.
+    fn spawn_program_fork_prompt_delivery(
+        self: &Arc<Self>,
+        fork_id: String,
+        created_at_ms: i64,
+        prompt: String,
+        verb_cleanup: bool,
+    ) {
+        let mgr = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mgr
+                .deliver_program_prompt_to_fork(&fork_id, created_at_ms, &prompt)
+                .await
+            {
+                tracing::warn!(
+                    session = %fork_id, error = %e,
+                    "program fork prompt delivery failed; fork will sit idle",
+                );
+                if verb_cleanup {
+                    mgr.pending_verb_merges.lock().unwrap().remove(&fork_id);
+                    let _ = mgr.archive(&fork_id).await;
+                }
+            }
+        });
+    }
+
     pub async fn program_execute(
         self: &Arc<Self>,
         params: ProgramExecuteParams,
@@ -2747,6 +2849,7 @@ impl SessionManager {
         let run_context = program_run_context(&result.program, scope, body);
         self.write_program_run_context(&params.session_id, &run_context)?;
         let (execution_session_id, prompt, queued_behind_current_turn) = if params.fork {
+            let fork_created_at_ms = Utc::now().timestamp_millis();
             let fork_id = self
                 .create_program_execution_fork(&params.session_id, "program selection run".into())
                 .await?;
@@ -2754,7 +2857,12 @@ impl SessionManager {
             // owner's Program context there before delivering the first turn.
             self.write_program_run_context(&fork_id, &run_context)?;
             let prompt = forked_program_execution_prompt(&params.session_id, run_comment);
-            self.deliver_text_to_session(&fork_id, &prompt).await?;
+            self.spawn_program_fork_prompt_delivery(
+                fork_id.clone(),
+                fork_created_at_ms,
+                prompt.clone(),
+                false,
+            );
             (fork_id, prompt, false)
         } else {
             let prompt = program_execution_prompt_with_comment(run_comment);
@@ -2981,6 +3089,7 @@ impl SessionManager {
         // way the verb's own prompt (built below, full document + selection)
         // is still the instruction for *this* turn — a resumed conversation
         // remembers the past but still needs to be told what to do now.
+        let verb_created_at_ms = Utc::now().timestamp_millis();
         let verb_session_id = self
             .create_program_execution_fork(&params.session_id, format!("verb:{}", verb.name))
             .await?;
@@ -3054,10 +3163,6 @@ impl SessionManager {
         );
 
         if params.direct_edit {
-            if let Err(e) = self.deliver_text_to_session(&verb_session_id, &prompt).await {
-                let _ = self.archive(&verb_session_id).await;
-                return Err(e);
-            }
             self.pending_verb_merges.lock().unwrap().insert(
                 verb_session_id.clone(),
                 PendingVerbMerge {
@@ -3071,6 +3176,14 @@ impl SessionManager {
                         .widgets_dir(&verb_session_id)
                         .join("direct-edit-no-merge"),
                 },
+            );
+            // Registered before delivery: the background task's failure
+            // cleanup (drop merge + archive) relies on the entry existing.
+            self.spawn_program_fork_prompt_delivery(
+                verb_session_id.clone(),
+                verb_created_at_ms,
+                prompt,
+                true,
             );
             return Ok(ProgramVerbExecuteResult {
                 program: edit_result.program,
@@ -3092,14 +3205,12 @@ impl SessionManager {
                     .join("verb-result.json"),
             },
         );
-        if let Err(e) = self.deliver_text_to_session(&verb_session_id, &prompt).await {
-            self.pending_verb_merges
-                .lock()
-                .unwrap()
-                .remove(&verb_session_id);
-            let _ = self.archive(&verb_session_id).await;
-            return Err(e);
-        }
+        self.spawn_program_fork_prompt_delivery(
+            verb_session_id.clone(),
+            verb_created_at_ms,
+            prompt,
+            true,
+        );
 
         Ok(ProgramVerbExecuteResult {
             program: edit_result.program,

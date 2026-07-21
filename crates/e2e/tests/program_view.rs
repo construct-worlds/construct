@@ -1457,6 +1457,98 @@ async fn program_instant_dispatch_preserves_nested_indentation() {
     );
 }
 
+/// A selection Run with `fork: true` creates an interactive fork of the
+/// owning session and must actually get its prompt delivered AND submitted
+/// there. The fork cold-starts its harness, so the prompt is delivered in
+/// the background once the fork's startup draw settles — the execute
+/// response returns immediately with the fork's id, and the prompt shows up
+/// in the fork's PTY shortly after. Regression: the prompt used to be
+/// pasted the instant the fork was created, racing the harness's boot, and
+/// either vanished or sat unsubmitted in the input box — the fork just
+/// idled forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn program_selection_fork_run_delivers_and_submits_prompt() {
+    use base64::Engine as _;
+
+    let d = Daemon::spawn().await.expect("daemon");
+    let cwd = d.dir.path().to_string_lossy().to_string();
+
+    let owner = d
+        .client
+        .create(shell_session_params(&cwd, "owner"))
+        .await
+        .expect("create owner session");
+
+    let md = "# Todo\n\n- say hello\n";
+    let updated = d
+        .client
+        .program_update(construct_protocol::ProgramUpdateParams {
+            session_id: owner.clone(),
+            markdown: md.to_string(),
+            base_version: None,
+            actor: construct_protocol::ProgramUpdateActor::Human,
+            template_id: None,
+            note: None,
+            shimmer: None,
+            shimmer_tooltips: None,
+        })
+        .await
+        .expect("program.update");
+
+    let result = d
+        .client
+        .program_execute(construct_protocol::ProgramExecuteParams {
+            session_id: owner.clone(),
+            selection: Some("- say hello".to_string()),
+            base_version: Some(updated.program.version),
+            shimmer: None,
+            selection_block_ids: None,
+            comment: None,
+            fork: true,
+        })
+        .await
+        .expect("program.execute");
+
+    // The execute response names the fork, which exists, is interactive,
+    // and records its lineage back to the owner.
+    let fork_id = result
+        .execution_session_id
+        .clone()
+        .expect("fork execution session id");
+    assert_ne!(fork_id, owner, "fork run must not execute on the owner");
+    let sessions = d.client.list().await.expect("list");
+    let fork = sessions
+        .iter()
+        .find(|s| s.id == fork_id)
+        .expect("fork session listed");
+    assert_eq!(
+        fork.forked_from.as_ref().map(|f| f.session_id.as_str()),
+        Some(owner.as_str()),
+        "fork records its owner lineage"
+    );
+
+    // The forked-run prompt must reach the fork's PTY. The shell echoes
+    // typed input, so a distinctive token from the prompt appearing in the
+    // fork's PTY log proves the paste landed after the harness was ready
+    // (delivery is gated on the fork's startup draw settling first).
+    let needle = "construct program autonomously";
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let replay = d.client.pty_replay(&fork_id).await.expect("pty_replay");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&replay.data)
+            .expect("pty replay base64");
+        let text = String::from_utf8_lossy(&bytes);
+        if text.contains(needle) {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("fork PTY never showed the program prompt; log so far:\n{text}");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 fn shell_session_params(cwd: &str, title: &str) -> construct_protocol::CreateSessionParams {
     construct_protocol::CreateSessionParams {
         harness: "shell".to_string(),
