@@ -2875,7 +2875,7 @@ impl SessionManager {
             self.deliver_text_to_session(&params.session_id, &prompt).await?;
             (params.session_id.clone(), prompt, queued)
         };
-        let active_run = self.start_program_run_with_dispatch_state(
+        self.start_program_run_with_dispatch_state(
             &params.session_id,
             &run_body,
             is_selection,
@@ -2883,10 +2883,81 @@ impl SessionManager {
             queued_behind_current_turn,
             params.selection_block_ids.as_deref(),
         );
-        self.broadcast_program_state(result.program.clone());
-        let blocks = self.program_blocks_projection(&params.session_id, &result.program.markdown);
+
+        // A selection Run dispatched to a fork annotates the selection with
+        // the fork's session clip — parity with verbs (spec 0089) and the
+        // instant-dispatch fast path: the program shows *where* the work
+        // went, and the clip renders the fork's live state in place.
+        // Owner-targeted runs (Shift) add no clip: the work stays in the
+        // Program-owning session the user is already looking at. Best
+        // effort — a drifted/ambiguous anchor skips the clip rather than
+        // failing a run whose fork already exists and is booting.
+        let annotated = if params.fork {
+            match params.selection.as_deref().filter(|s| !s.trim().is_empty()) {
+                Some(raw_selection) => {
+                    let anchor =
+                        format!("{} @{{session:{}}}", raw_selection, execution_session_id);
+                    // The clip lands at the end of the selection, so the
+                    // *last* block is the one whose content (and id) gained
+                    // it and needs its shimmer re-declared.
+                    let content_id = construct_protocol::program_block_spans(&anchor)
+                        .into_iter()
+                        .last()
+                        .map(|span| span.id)
+                        .unwrap_or_default();
+                    let edit_result = self
+                        .program_edit_from_conn(
+                            ProgramEditParams {
+                                session_id: params.session_id.clone(),
+                                edits: vec![construct_protocol::ProgramEdit {
+                                    old_string: raw_selection.to_string(),
+                                    new_string: anchor,
+                                    replace_all: false,
+                                    keep_pending: true,
+                                }],
+                                actor: construct_protocol::ProgramUpdateActor::Agent,
+                                note: Some("selection run".to_string()),
+                                shimmer: vec![construct_protocol::ProgramShimmerDecl {
+                                    id: content_id,
+                                    shimmer: true,
+                                    tooltip: Some("Running".to_string()),
+                                }],
+                            },
+                            None,
+                        )
+                        .await;
+                    match edit_result {
+                        Ok(edit_result) => Some(edit_result),
+                        Err(e) => {
+                            tracing::warn!(
+                                session = %params.session_id, error = %e,
+                                "selection run fork: session-clip annotation skipped (anchor did not apply)",
+                            );
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        // The annotation edit broadcasts the updated program (with the
+        // seeded run) itself; only the un-annotated path still owes one.
+        let (program, blocks) = match annotated {
+            Some(edit_result) => (edit_result.program, edit_result.blocks),
+            None => {
+                self.broadcast_program_state(result.program.clone());
+                let blocks =
+                    self.program_blocks_projection(&params.session_id, &result.program.markdown);
+                (result.program, blocks)
+            }
+        };
+        // Re-snapshot after the edit: `keep_pending` remaps the annotated
+        // block's pending ref to its post-clip id.
+        let active_run = self.program_run_snapshot(&params.session_id);
         Ok(ProgramExecuteResult {
-            program: result.program,
+            program,
             prompt,
             active_run,
             blocks,
