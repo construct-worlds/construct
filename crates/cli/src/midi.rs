@@ -993,8 +993,18 @@ impl MidiFeedback {
     pub(crate) fn update(&self, _snapshot: FeedbackSnapshot) {}
 }
 
+/// Link-state transitions of the feedback output connection, reported to the
+/// TUI so the OP-XY's reachability is visible instead of silent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OpXyLinkStatus {
+    Connected { port: String },
+    Disconnected,
+}
+
+pub(crate) type OpXyLinkStatusReceiver = mpsc::UnboundedReceiver<OpXyLinkStatus>;
+
 #[cfg(target_os = "macos")]
-pub(crate) fn start_feedback() -> Result<Option<MidiFeedback>> {
+pub(crate) fn start_feedback() -> Result<Option<(MidiFeedback, OpXyLinkStatusReceiver)>> {
     let config = MidiConfig::load(&Paths::discover().midi_file())?;
     let Some(profile) = config.op_xy.filter(|profile| profile.enabled && profile.feedback.enabled)
     else {
@@ -1010,30 +1020,35 @@ pub(crate) fn start_feedback() -> Result<Option<MidiFeedback>> {
     // started, and comes back if Bluetooth drops mid-session.
     let connection = connect_feedback_output(&device).ok();
     let (tx, rx) = std_mpsc::channel();
+    let (status_tx, status_rx) = mpsc::unbounded_channel();
     std::thread::Builder::new()
         .name("construct-midi-feedback".into())
-        .spawn(move || feedback_loop(device, connection, rx, profile.feedback))
+        .spawn(move || feedback_loop(device, connection, rx, profile.feedback, status_tx))
         .context("spawn MIDI feedback thread")?;
-    Ok(Some(MidiFeedback {
-        tx,
-        last_snapshot: std::cell::Cell::new(FeedbackSnapshot::default()),
-        aggregate_scope,
-    }))
+    Ok(Some((
+        MidiFeedback {
+            tx,
+            last_snapshot: std::cell::Cell::new(FeedbackSnapshot::default()),
+            aggregate_scope,
+        },
+        status_rx,
+    )))
 }
 
 #[cfg(target_os = "macos")]
-fn connect_feedback_output(device: &str) -> Result<MidiOutputConnection> {
+fn connect_feedback_output(device: &str) -> Result<(MidiOutputConnection, String)> {
     let output = MidiOutput::new("construct-op-xy-feedback").context("initialize MIDI output")?;
     let port = find_output_port(&output, device)?;
     let port_name = output.port_name(&port).context("read MIDI output name")?;
-    output
+    let connection = output
         .connect(&port, "construct-op-xy-feedback")
         .map_err(|e| anyhow::anyhow!(e.to_string()))
-        .with_context(|| format!("connect MIDI output {port_name:?}"))
+        .with_context(|| format!("connect MIDI output {port_name:?}"))?;
+    Ok((connection, port_name))
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn start_feedback() -> Result<Option<MidiFeedback>> {
+pub(crate) fn start_feedback() -> Result<Option<(MidiFeedback, OpXyLinkStatusReceiver)>> {
     Ok(None)
 }
 
@@ -1230,9 +1245,10 @@ fn feedback_frame_period(snapshot: FeedbackSnapshot) -> std::time::Duration {
 #[cfg(target_os = "macos")]
 fn feedback_loop(
     device: String,
-    mut connection: Option<MidiOutputConnection>,
+    initial_connection: Option<(MidiOutputConnection, String)>,
     rx: std_mpsc::Receiver<FeedbackSnapshot>,
     config: OpXyFeedbackConfig,
+    status_tx: mpsc::UnboundedSender<OpXyLinkStatus>,
 ) {
     let mut snapshot = FeedbackSnapshot::default();
     let mut transport_started = None;
@@ -1243,6 +1259,16 @@ fn feedback_loop(
     let mut next_volume_frame = std::time::Instant::now();
     let mut held = false;
     let mut next_connect_attempt = std::time::Instant::now() + FEEDBACK_RECONNECT_PERIOD;
+    let mut connection = match initial_connection {
+        Some((connection, port)) => {
+            let _ = status_tx.send(OpXyLinkStatus::Connected { port });
+            Some(connection)
+        }
+        None => {
+            let _ = status_tx.send(OpXyLinkStatus::Disconnected);
+            None
+        }
+    };
     // `false` marks the connection as dead; the sends themselves are lossy
     // (Bluetooth), so only an Err from CoreMIDI — a disposed endpoint after
     // the device dropped off — tears it down.
@@ -1253,8 +1279,8 @@ fn feedback_loop(
             send_pane_parameters(connection, 0b0000_1111, config.track_activity_cc, 0);
     }
     loop {
-        if !connection_ok {
-            connection = None;
+        if !connection_ok && connection.take().is_some() {
+            let _ = status_tx.send(OpXyLinkStatus::Disconnected);
         }
         let timeout = feedback_frame_period(snapshot);
         match rx.recv_timeout(timeout) {
@@ -1318,7 +1344,7 @@ fn feedback_loop(
         let now = std::time::Instant::now();
         if connection.is_none() && now >= next_connect_attempt {
             next_connect_attempt = now + FEEDBACK_RECONNECT_PERIOD;
-            if let Ok(mut fresh) = connect_feedback_output(&device) {
+            if let Ok((mut fresh, port)) = connect_feedback_output(&device) {
                 // The device may have rebooted or re-paired since the last
                 // connection: forget everything previously asserted and
                 // resynchronize the full state from scratch.
@@ -1332,6 +1358,7 @@ fn feedback_loop(
                     reassert_period = FEEDBACK_REASSERT_MIN_PERIOD;
                     animation.on_change();
                     next_volume_frame = now;
+                    let _ = status_tx.send(OpXyLinkStatus::Connected { port });
                 }
             }
         }

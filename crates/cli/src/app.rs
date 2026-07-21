@@ -1816,6 +1816,10 @@ pub struct App {
     pub session_transitions: HashMap<u64, SessionTransition>,
     /// Short visual transitions for newly visible pinned-session tiles.
     pub pin_transitions: HashMap<String, Instant>,
+    /// OP-XY feedback link state for the modeline indicator: `None` until
+    /// the feedback loop reports (or when no OP-XY profile is enabled — the
+    /// indicator only renders once a report arrives), then `Some(connected)`.
+    pub op_xy_link_connected: Option<bool>,
     /// Ambient Matrix-rain panel state for empty rows in the session list.
     pub matrix_rain: crate::matrix_rain::MatrixRain,
     /// Smoothed 0..1 foreground intensity for Matrix rain. The render path
@@ -3915,6 +3919,7 @@ async fn run_with_socket_initial_selection(
         image_resize_cache: Vec::new(),
         session_transitions: HashMap::new(),
         pin_transitions: HashMap::new(),
+        op_xy_link_connected: None,
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
         matrix_rain_intensity: 0.0,
         matrix_rain_intensity_updated_at: now,
@@ -4118,11 +4123,12 @@ async fn run_loop(
     };
     // Keep the backend connection alive for the duration of the event loop.
     let _midi_listener = midi_listener;
-    let midi_feedback = match crate::midi::start_feedback() {
-        Ok(feedback) => feedback,
+    let (midi_feedback, mut midi_link_rx) = match crate::midi::start_feedback() {
+        Ok(Some((feedback, link_rx))) => (Some(feedback), Some(link_rx)),
+        Ok(None) => (None, None),
         Err(e) => {
             app.set_status(format!("MIDI feedback disabled: {e}"));
-            None
+            (None, None)
         }
     };
     let mut notifications = app
@@ -4569,6 +4575,17 @@ async fn run_loop(
                         app.handle_op_xy_aux_control(control).await;
                     }
                     None => midi_rx = None,
+                }
+            }
+            status = async {
+                match midi_link_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => futures::future::pending().await,
+                }
+            }, if midi_link_rx.is_some() => {
+                match status {
+                    Some(status) => app.apply_op_xy_link_status(status),
+                    None => midi_link_rx = None,
                 }
             }
             hydrated = hydration_tasks.join_next(), if !hydration_tasks.is_empty() => {
@@ -11160,6 +11177,25 @@ impl App {
         true
     }
 
+    /// Apply a feedback-thread link report: update the modeline indicator
+    /// and announce transitions in the status line. Repeated same-state
+    /// reports stay quiet.
+    pub(crate) fn apply_op_xy_link_status(&mut self, status: crate::midi::OpXyLinkStatus) {
+        let connected = matches!(status, crate::midi::OpXyLinkStatus::Connected { .. });
+        if self.op_xy_link_connected == Some(connected) {
+            return;
+        }
+        self.op_xy_link_connected = Some(connected);
+        match status {
+            crate::midi::OpXyLinkStatus::Connected { port } => {
+                self.set_status(format!("MIDI connected: {port}"));
+            }
+            crate::midi::OpXyLinkStatus::Disconnected => {
+                self.set_status("MIDI disconnected: waiting for the device".into());
+            }
+        }
+    }
+
     pub(crate) fn op_xy_feedback_snapshot(
         &self,
         aggregate_scope: crate::midi::OpXyAggregateScope,
@@ -13725,6 +13761,7 @@ mod tests {
             image_resize_cache: Vec::new(),
             session_transitions: HashMap::new(),
             pin_transitions: HashMap::new(),
+            op_xy_link_connected: None,
             matrix_rain: crate::matrix_rain::MatrixRain::default(),
             matrix_rain_intensity: 0.0,
             matrix_rain_intensity_updated_at: now,
@@ -14369,6 +14406,90 @@ mod tests {
             app.lineage_focused,
             "the section's dormant memory survives the jump"
         );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn modeline_status_preempts_notices_on_narrow_terminals() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.apply_op_xy_link_status(crate::midi::OpXyLinkStatus::Connected {
+            port: "OP-XY Bluetooth".into(),
+        });
+        app.set_status("reconnected to daemon".to_string());
+
+        let screen_at = |app: &mut App, width: u16| -> String {
+            let backend = ratatui::backend::TestBackend::new(width, 30);
+            let mut term = ratatui::Terminal::new(backend).expect("terminal");
+            term.draw(|f| crate::ui::render(f, app)).expect("draw");
+            let buf = term.backend().buffer();
+            let area = *buf.area();
+            (area.y..area.y + area.height)
+                .map(|y| {
+                    (area.x..area.x + area.width)
+                        .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // The 100-col e2e terminal: the notice block would overprint the
+        // status tail, so the notices yield and the status renders whole.
+        // (This is the exact regression that broke tui_auto_reconnects_
+        // after_restart when the midi notice widened the block.)
+        let narrow = screen_at(&mut app, 100);
+        assert!(
+            narrow.contains("reconnected to daemon"),
+            "status text renders whole on a narrow terminal"
+        );
+        assert!(
+            !narrow.contains("midi"),
+            "colliding notices sit the frame out while a status shows"
+        );
+
+        // A wide terminal fits both.
+        let wide = screen_at(&mut app, 220);
+        assert!(wide.contains("reconnected to daemon"));
+        assert!(
+            wide.contains("● midi"),
+            "notices return whenever they fit alongside the status"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn op_xy_link_status_updates_indicator_and_announces_transitions() {
+        let (mut app, _dir, server) = empty_app().await;
+        assert_eq!(
+            app.op_xy_link_connected, None,
+            "no indicator before the feedback loop reports"
+        );
+
+        app.apply_op_xy_link_status(crate::midi::OpXyLinkStatus::Connected {
+            port: "OP-XY Bluetooth".into(),
+        });
+        assert_eq!(app.op_xy_link_connected, Some(true));
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|(message, _)| message.contains("MIDI connected")));
+
+        // A same-state report (e.g. a resync to the same port) must not spam
+        // the status line.
+        app.status = None;
+        app.apply_op_xy_link_status(crate::midi::OpXyLinkStatus::Connected {
+            port: "OP-XY Bluetooth".into(),
+        });
+        assert!(app.status.is_none(), "same-state report stays quiet");
+
+        app.apply_op_xy_link_status(crate::midi::OpXyLinkStatus::Disconnected);
+        assert_eq!(app.op_xy_link_connected, Some(false));
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|(message, _)| message.contains("MIDI disconnected")));
 
         server.abort();
     }

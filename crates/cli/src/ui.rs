@@ -7883,6 +7883,12 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         modeline_remote_text(app.remote_enabled, app.remote_clients),
         Some(KeyAction::OpenRemoteControl),
     )]);
+    // OP-XY link indicator: present only once the feedback loop has reported
+    // (i.e. an OP-XY profile is actually running), mirroring the remote
+    // notice's filled/hollow-dot vocabulary.
+    if let Some(connected) = app.op_xy_link_connected {
+        persistent_notices.push(vec![(modeline_midi_text(connected), None)]);
+    }
     persistent_notices.push(version_notice_segments(app));
     if let Some(latest) = app.latest_version.as_deref() {
         persistent_notices.push(vec![(
@@ -7990,6 +7996,11 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         }
         hint_col = hint_col.saturating_add(w);
     }
+    // Where the left-flowing content (through the transient status text)
+    // ends, in absolute columns. Used below to let the persistent notices
+    // yield instead of overprinting the status's tail on narrow terminals.
+    let left_end =
+        hint_col.saturating_add(UnicodeWidthStr::width(modeline_post_hint.as_str()) as u16);
     spans.push(Span::raw(modeline_post_hint));
     let para = Paragraph::new(Line::from(spans)).style(
         Style::default()
@@ -8007,7 +8018,16 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     // measured) above, before the left-side spans, so the empty-state hint
     // could stay clear of this footprint.
     {
-        if let Some(nx) = notice_start_x {
+        // A transient status message preempts the notices: when the left
+        // content runs into the notice block (narrow terminal + long
+        // status), the notices sit this frame out instead of overprinting
+        // the status's tail. They return the moment the status clears —
+        // information over decoration. Skipping the render also skips their
+        // HintZones, so a click can never hit an invisible notice. Scoped to
+        // an actual status being shown: the empty-state hints already yield
+        // to the notices themselves (segments drop from their tail), so
+        // without a status the notices always render.
+        if let Some(nx) = notice_start_x.filter(|nx| status.is_empty() || left_end <= *nx) {
             let nrect = Rect {
                 x: nx,
                 y: area.y,
@@ -8093,6 +8113,14 @@ fn modeline_remote_text(enabled: bool, clients: u32) -> String {
         format!("● remote:{clients}")
     } else {
         "○ remote".to_string()
+    }
+}
+
+fn modeline_midi_text(connected: bool) -> String {
+    if connected {
+        "● midi".to_string()
+    } else {
+        "○ midi".to_string()
     }
 }
 
@@ -20878,6 +20906,12 @@ mod tests {
         );
         assert_eq!(matrix_rain_panel_height(Some(50), 30), 30);
         assert_eq!(matrix_rain_panel_height(Some(8), 3), 3);
+    }
+
+    #[test]
+    fn modeline_midi_text_mirrors_the_remote_dot_vocabulary() {
+        assert_eq!(modeline_midi_text(true), "● midi");
+        assert_eq!(modeline_midi_text(false), "○ midi");
     }
 
     #[test]

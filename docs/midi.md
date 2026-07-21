@@ -229,6 +229,12 @@ and synth parameters are active, with a ceiling of sixteen decoded CC messages
 per second. Frames remain batched, and queued state changes are coalesced to the
 newest state if Bluetooth applies backpressure. Avoiding a continuous external
 clock and bounding the actual parameter workload keeps Bluetooth MIDI traffic
+The TUI modeline shows the feedback link state next to the remote indicator —
+`● midi` while the device connection is up, `○ midi` while Construct is
+waiting for the device — and announces connect/disconnect transitions in the
+status line. The indicator appears only when an OP-XY profile with feedback
+is enabled.
+
 low enough for long-running use. Construct reasserts the global state so a
 silently dropped Bluetooth packet self-recovers, on a decaying schedule: the
 first reassert lands 10 seconds after a change, and the interval doubles up
