@@ -16,17 +16,11 @@ the latest report on the session summary — a gauge, not a counter: new
 reports replace old ones, a context reset clears it, and the last
 report is recovered from the transcript at load.
 
-The TUI modeline renders the gauge immediately after the model name as a
-compact all-block graphical bar with its percentage overlaid. Used capacity
-uses the normal modeline text color and remaining capacity uses the dim text
-color. The bar is painted as cell backgrounds, so overlaid characters retain
-the filled or dim capacity visibly beneath them. Hovering the bar reveals the
-exact `used / window` token counts. The
-bar is shown only when the harness states its window; the window is never
-guessed from model names or hardcoded tables outside the harness's own report.
-
-Clicking the indicator toggles the client-local display between that compact
-bar and the detailed `(used/window %)` text representation.
+The TUI modeline renders the gauge immediately after the model name as
+`(used/window %)` — for example `(12.4k/258k 5%)`. Hovering the text reveals
+the exact `used / window` token counts. The indicator is shown only when the
+harness states its window; the window is never guessed from model names or
+hardcoded tables outside the harness's own report.
 
 ## Reason
 
@@ -46,7 +40,7 @@ the different question "how full is this conversation right now?".
   into the fresh conversation.
 - Repeated identical snapshots must not spam the transcript; adapters
   report on change.
-- Clients render the graphical bar only for used+window; unknown and
+- Clients render the detailed ratio only for used+window; unknown and
   used-only reports render no ratio rather than implying a denominator.
 
 ## Non-Goals
@@ -59,7 +53,7 @@ the different question "how full is this conversation right now?".
 ## Examples
 
 - A codex session that just consumed 12,400 prompt tokens against its
-  258k window shows a 5%-filled bar after the model name; hover shows
+  258k window shows `(12.4k/258k 5%)` after the model name; hover shows
   `12.4k / 258k tokens (5%)`.
 - A kimi session (no window reported), a brand-new session, and a bare shell
   show no gauge.
