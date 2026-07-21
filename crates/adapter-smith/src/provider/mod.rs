@@ -180,6 +180,17 @@ pub trait TextSink: Send {
     /// streaming only tool-call arguments isn't killed as idle. Default
     /// no-op; `delta` / `reasoning_delta` already imply progress.
     fn progress(&mut self) {}
+    /// A transient provider failure is being retried. `next_attempt` is
+    /// one-based; `had_partial_reasoning` tells presentation sinks that the
+    /// previous attempt emitted reasoning, but no assistant answer. Default
+    /// no-op keeps capture/discard sinks lightweight.
+    fn retrying(
+        &mut self,
+        _next_attempt: usize,
+        _max_attempts: usize,
+        _had_partial_reasoning: bool,
+    ) {
+    }
 }
 
 /// Sentinel error for "the input you sent is over the model's

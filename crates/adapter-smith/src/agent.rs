@@ -311,6 +311,26 @@ impl<'a> TextSink for MessageSink<'a> {
             text: text.to_string(),
         });
     }
+    fn retrying(&mut self, next_attempt: usize, max_attempts: usize, had_partial_reasoning: bool) {
+        let detail = retry_detail(next_attempt, max_attempts, had_partial_reasoning);
+        self.emit.emit(SessionEvent::Status {
+            state: SessionState::Running,
+            detail: Some(detail),
+        });
+    }
+}
+
+pub(crate) fn retry_detail(
+    next_attempt: usize,
+    max_attempts: usize,
+    had_partial_reasoning: bool,
+) -> String {
+    let interrupted = if had_partial_reasoning {
+        "response stream interrupted after partial reasoning"
+    } else {
+        "response stream interrupted"
+    };
+    format!("{interrupted}; retrying {next_attempt}/{max_attempts}")
 }
 
 pub(crate) const SYSTEM_PROMPT_USER: &str = r#"You are smith, an AI agent embedded in agentd (a multi-session terminal agent fleet).

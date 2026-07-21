@@ -618,6 +618,22 @@ impl<'a> TextSink for PtySink<'a> {
             });
         }
     }
+
+    fn retrying(&mut self, next_attempt: usize, max_attempts: usize, had_partial_reasoning: bool) {
+        let detail = crate::agent::retry_detail(next_attempt, max_attempts, had_partial_reasoning);
+        let mut out = Vec::with_capacity(detail.len() + 32);
+        self.close_reasoning_block(&mut out);
+        out.extend_from_slice(format!("\r\n\x1b[2m({detail})\x1b[0m\r\n").as_bytes());
+        if self.emit_pty {
+            self.emit.emit(SessionEvent::pty(&out));
+        }
+        if self.emit_messages {
+            self.emit.emit(SessionEvent::Status {
+                state: SessionState::Running,
+                detail: Some(detail),
+            });
+        }
+    }
 }
 
 /// Readline-ish line editor — handles printable chars, cursor

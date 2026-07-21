@@ -68,10 +68,10 @@ async fn complete_with_retries(
     let max_attempts = retry.max_attempts.max(1);
     let mut attempt = 1usize;
     loop {
-        let (result, visible_output) = {
+        let (result, output_stage) = {
             let mut retry_sink = RetryTrackingSink {
                 inner: sink,
-                visible_output: false,
+                output_stage: OutputStage::None,
             };
             let result = complete_with_idle_timeout(
                 provider,
@@ -83,16 +83,24 @@ async fn complete_with_retries(
                 timeout,
             )
             .await;
-            (result, retry_sink.visible_output)
+            (result, retry_sink.output_stage)
         };
 
         match result {
             Ok(turn) => return Ok(turn),
             Err(err) => {
-                if attempt >= max_attempts || visible_output || !is_retryable_provider_error(&err) {
+                if attempt >= max_attempts
+                    || output_stage == OutputStage::Assistant
+                    || !is_retryable_provider_error(&err)
+                {
                     return Err(err);
                 }
                 let delay = retry_delay(retry, attempt);
+                sink.retrying(
+                    attempt + 1,
+                    max_attempts,
+                    output_stage == OutputStage::Reasoning,
+                );
                 tracing::warn!(
                     provider = provider.name(),
                     model,
@@ -225,20 +233,27 @@ fn is_retryable_provider_error(err: &anyhow::Error) -> bool {
 
 struct RetryTrackingSink<'a> {
     inner: &'a mut dyn TextSink,
-    visible_output: bool,
+    output_stage: OutputStage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutputStage {
+    None,
+    Reasoning,
+    Assistant,
 }
 
 impl TextSink for RetryTrackingSink<'_> {
     fn delta(&mut self, text: &str) {
         if !text.is_empty() {
-            self.visible_output = true;
+            self.output_stage = OutputStage::Assistant;
         }
         self.inner.delta(text);
     }
 
     fn reasoning_delta(&mut self, text: &str) {
-        if !text.is_empty() {
-            self.visible_output = true;
+        if !text.is_empty() && self.output_stage == OutputStage::None {
+            self.output_stage = OutputStage::Reasoning;
         }
         self.inner.reasoning_delta(text);
     }
@@ -333,10 +348,17 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum FailureEmission {
+        None,
+        Reasoning,
+        Assistant,
+    }
+
     struct FlakyProvider {
         failures_left: std::sync::atomic::AtomicUsize,
         message: &'static str,
-        emits_before_failure: bool,
+        emission: FailureEmission,
     }
 
     #[async_trait]
@@ -362,8 +384,10 @@ mod tests {
                 )
                 .is_ok()
             {
-                if self.emits_before_failure {
-                    sink.delta("partial");
+                match self.emission {
+                    FailureEmission::None => {}
+                    FailureEmission::Reasoning => sink.reasoning_delta("partial reasoning"),
+                    FailureEmission::Assistant => sink.delta("partial answer"),
                 }
                 return Err(anyhow!(self.message));
             }
@@ -413,10 +437,23 @@ mod tests {
         }
     }
 
-    struct NullSink;
+    #[derive(Default)]
+    struct NullSink {
+        retries: Vec<(usize, usize, bool)>,
+    }
 
     impl TextSink for NullSink {
         fn delta(&mut self, _text: &str) {}
+
+        fn retrying(
+            &mut self,
+            next_attempt: usize,
+            max_attempts: usize,
+            had_partial_reasoning: bool,
+        ) {
+            self.retries
+                .push((next_attempt, max_attempts, had_partial_reasoning));
+        }
     }
 
     fn messages() -> Vec<Message> {
@@ -431,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn hung_provider_turn_times_out() {
         let provider = HangingProvider;
-        let mut sink = NullSink;
+        let mut sink = NullSink::default();
         let err = complete_with_idle_timeout(
             &provider,
             "model",
@@ -449,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_timeout_allows_provider_to_complete() {
         let provider = ImmediateProvider;
-        let mut sink = NullSink;
+        let mut sink = NullSink::default();
         let turn = complete_with_idle_timeout(
             &provider,
             "model",
@@ -474,7 +511,7 @@ mod tests {
             pings: 10,
             interval: Duration::from_millis(10),
         };
-        let mut sink = NullSink;
+        let mut sink = NullSink::default();
         let turn = complete_with_idle_timeout(
             &provider,
             "model",
@@ -494,9 +531,9 @@ mod tests {
         let provider = FlakyProvider {
             failures_left: std::sync::atomic::AtomicUsize::new(2),
             message: "codex-oauth: 503 Service Unavailable from chatgpt.com",
-            emits_before_failure: false,
+            emission: FailureEmission::None,
         };
-        let mut sink = NullSink;
+        let mut sink = NullSink::default();
         let turn = complete_with_retries(
             &provider,
             "model",
@@ -514,6 +551,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(turn.text.as_deref(), Some("ok"));
+        assert_eq!(sink.retries, vec![(2, 3, false), (3, 3, false)]);
     }
 
     #[tokio::test]
@@ -521,9 +559,9 @@ mod tests {
         let provider = FlakyProvider {
             failures_left: std::sync::atomic::AtomicUsize::new(1),
             message: "Your input exceeds the context window of this model",
-            emits_before_failure: false,
+            emission: FailureEmission::None,
         };
-        let mut sink = NullSink;
+        let mut sink = NullSink::default();
         let err = complete_with_retries(
             &provider,
             "model",
@@ -550,13 +588,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn does_not_retry_after_visible_output() {
+    async fn retries_after_reasoning_only_output() {
         let provider = FlakyProvider {
             failures_left: std::sync::atomic::AtomicUsize::new(1),
             message: "codex-oauth SSE stream: Transport error",
-            emits_before_failure: true,
+            emission: FailureEmission::Reasoning,
         };
-        let mut sink = NullSink;
+        let mut sink = NullSink::default();
+        let turn = complete_with_retries(
+            &provider,
+            "model",
+            "system",
+            &messages(),
+            &[],
+            &mut sink,
+            Some(Duration::from_secs(1)),
+            RetryConfig {
+                max_attempts: 3,
+                base_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(turn.text.as_deref(), Some("ok"));
+        assert_eq!(sink.retries, vec![(2, 3, true)]);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_after_assistant_output() {
+        let provider = FlakyProvider {
+            failures_left: std::sync::atomic::AtomicUsize::new(1),
+            message: "codex-oauth SSE stream: Transport error",
+            emission: FailureEmission::Assistant,
+        };
+        let mut sink = NullSink::default();
         let err = complete_with_retries(
             &provider,
             "model",
@@ -574,6 +640,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("SSE stream"));
+        assert!(sink.retries.is_empty());
         assert_eq!(
             provider
                 .failures_left
