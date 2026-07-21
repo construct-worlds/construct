@@ -7796,22 +7796,17 @@ fn modeline_model_text(model: Option<&str>, effort: Option<&str>) -> String {
 
 const CONTEXT_GAUGE_CELLS: usize = 10;
 
-/// A compact bar whose percentage label replaces cells in the middle. Exact
-/// token counts are intentionally reserved for the hover tooltip.
+/// A compact bar with its percentage immediately to the right. Exact token
+/// counts are intentionally reserved for the hover tooltip.
 fn modeline_context_gauge_text(used: Option<u64>, window: Option<u64>) -> Option<String> {
     let used = used?;
     let window = window.filter(|window| *window > 0)?;
     let percent = used.saturating_mul(100) / window;
     let filled = ((percent.min(100) as usize * CONTEXT_GAUGE_CELLS) + 99) / 100;
-    let label = format!("{:>3}%", percent.min(999));
-    let label_start = (CONTEXT_GAUGE_CELLS - label.len()) / 2;
-    let mut cells: Vec<char> = (0..CONTEXT_GAUGE_CELLS)
+    let cells: String = (0..CONTEXT_GAUGE_CELLS)
         .map(|i| if i < filled { '█' } else { '░' })
         .collect();
-    for (i, ch) in label.chars().enumerate() {
-        cells[label_start + i] = ch;
-    }
-    Some(format!(" [{}]", cells.into_iter().collect::<String>()))
+    Some(format!(" [{cells}] ({}%)", percent.min(999)))
 }
 
 fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
@@ -8001,7 +7996,7 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             .is_some_and(|((col, row), hit)| hit.contains(col, row));
         let style = Style::default()
             .bg(app.theme.modeline_bg)
-            .fg(if hovered { app.theme.text } else { app.theme.accent })
+            .fg(if hovered { app.theme.text } else { app.theme.modeline_fg })
             .add_modifier(if hovered { Modifier::BOLD } else { Modifier::empty() });
         spans.push(Span::styled(gauge, style));
     }
@@ -18577,10 +18572,10 @@ mod tests {
     }
 
     #[test]
-    fn modeline_context_gauge_uses_a_bar_with_an_overlaid_percent() {
+    fn modeline_context_gauge_places_the_percent_right_of_the_bar() {
         assert_eq!(
             modeline_context_gauge_text(Some(12_400), Some(258_400)),
-            Some(" [█░░  4%░░░]".to_string())
+            Some(" [█░░░░░░░░░] (4%)".to_string())
         );
         assert_eq!(modeline_context_gauge_text(Some(74_200), None), None);
         assert_eq!(modeline_context_gauge_text(Some(500), Some(0)), None);

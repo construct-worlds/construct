@@ -17,7 +17,7 @@ reports replace old ones, a context reset clears it, and the last
 report is recovered from the transcript at load.
 
 The TUI modeline renders the gauge immediately after the model name as a
-compact graphical bar with its percentage overlaid. Hovering the bar reveals
+compact graphical bar with its percentage immediately to the right. Hovering the bar reveals
 the exact `used / window` token counts. The bar is shown only when the
 harness states its window; the window is never guessed from model names or
 hardcoded tables outside the harness's own report.
