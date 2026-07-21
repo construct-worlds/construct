@@ -8023,19 +8023,32 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             .is_some_and(|((col, row), hit)| hit.contains(col, row));
         if let Some(filled) = filled {
             for (index, ch) in gauge.chars().enumerate() {
-                let fg = if hovered {
-                    app.theme.text
-                } else if index > 0 && index - 1 < filled {
-                    app.theme.modeline_fg
-                } else {
-                    app.theme.dim
-                };
+                let cell_background = (index > 0).then(|| {
+                    if index - 1 < filled {
+                        if hovered { app.theme.text } else { app.theme.modeline_fg }
+                    } else {
+                        app.theme.dim
+                    }
+                });
+                // A terminal cell cannot draw a block glyph *and* a letter.
+                // Paint each capacity cell as a colored background instead,
+                // so the percentage remains visibly over the bar rather than
+                // replacing the underlying block in its four cells.
+                let glyph = if cell_background.is_some() && ch == '█' { ' ' } else { ch };
                 spans.push(Span::styled(
-                    ch.to_string(),
+                    glyph.to_string(),
                     Style::default()
-                        .bg(app.theme.modeline_bg)
-                        .fg(fg)
-                        .add_modifier(if hovered { Modifier::BOLD } else { Modifier::empty() }),
+                        .bg(cell_background.unwrap_or(app.theme.modeline_bg))
+                        .fg(if cell_background.is_some() {
+                            app.theme.modeline_bg
+                        } else {
+                            app.theme.modeline_fg
+                        })
+                        .add_modifier(if hovered && cell_background.is_some() {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
                 ));
             }
         } else {
@@ -18619,7 +18632,7 @@ mod tests {
     }
 
     #[test]
-    fn modeline_context_gauge_overlays_the_percent_without_brackets() {
+    fn modeline_context_gauge_uses_full_bar_cells_behind_the_percent() {
         assert_eq!(
             modeline_context_gauge_text(Some(12_400), Some(258_400)),
             Some((" ███  4%███".to_string(), 1))
