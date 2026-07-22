@@ -1573,6 +1573,23 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+
+    // Closing the fork settles its dispatched shimmer (spec 0076): this
+    // fork (a plain shell) never made a settle edit, so without the
+    // daemon-side backstop the annotated block would shimmer forever
+    // after the fork archives. The settle runs inside archive itself, so
+    // a single read after the call must already observe it.
+    d.client.archive(&fork_id).await.expect("archive fork");
+    let refetched = d.client.program_get(&owner).await.expect("program.get");
+    let still_pending = refetched
+        .active_run
+        .as_ref()
+        .map(|run| run.pending_block_refs.clone())
+        .unwrap_or_default();
+    assert!(
+        still_pending.is_empty(),
+        "archiving the fork settles its dispatched blocks; still pending: {still_pending:?}"
+    );
 }
 
 /// The owner-targeted counterpart (Shift+Run / non-fork callers): the work
