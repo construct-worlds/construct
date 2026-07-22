@@ -2038,7 +2038,12 @@ fn session_detail_segments(s: &SessionSummary, now_ms: i64) -> Vec<(String, u8)>
             ),
             2,
         ));
-    } else if let Some(at) = s.last_event_at {
+    } else if let Some(at) = s.last_message_at.or(s.last_event_at) {
+        // Prefer the last actual chat message so the age means "since the
+        // conversation last moved" — `last_event_at` also refreshes on
+        // status rows, tool blocks, and daemon-restart resume plumbing.
+        // Sessions with no messages at all (plain shells) fall back to the
+        // last recorded event.
         segs.push((
             format!(
                 "{} ago",
@@ -18139,6 +18144,14 @@ mod tests {
         let segs = session_detail_segments(&s, 7_200_000);
         assert_eq!(segs[0].0, "2h ago");
 
+        // With a message timestamp present, the age tracks the MESSAGE, not
+        // the newer status/tool event — so restart resume plumbing (which
+        // refreshes `last_event_at`) doesn't snap the age back to zero.
+        s.last_message_at = Some(chrono::Utc.timestamp_millis_opt(0).unwrap());
+        s.last_event_at = Some(chrono::Utc.timestamp_millis_opt(7_100_000).unwrap());
+        let segs = session_detail_segments(&s, 7_200_000);
+        assert_eq!(segs[0].0, "2h ago");
+
         // A session reporting no model/usage data at all (a plain shell)
         // falls back to where it lives.
         let mut sh = lineage_test_summary("sh");
@@ -19141,6 +19154,7 @@ mod tests {
             state,
             created_at: chrono::Utc::now(),
             last_event_at: None,
+            last_message_at: None,
             cost_usd: None,
             model: None,
             effort: None,

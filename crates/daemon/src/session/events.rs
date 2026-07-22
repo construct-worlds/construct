@@ -56,6 +56,7 @@ impl SessionManager {
                 s.last_event_at = Some(now);
                 s.event_count = 0;
                 s.message_count = 0;
+                s.last_message_at = None;
                 s.tokens = Default::default();
                 s.context_used = None;
                 s.context_window = None;
@@ -396,6 +397,7 @@ impl SessionManager {
             s.event_count = seq;
             if matches!(&event, SessionEvent::Message { .. }) {
                 s.message_count = s.message_count.saturating_add(1);
+                s.last_message_at = Some(now);
             }
             let prev_state = s.state;
             match &event {
@@ -631,6 +633,7 @@ impl SessionManager {
                 state,
                 created_at: now,
                 last_event_at: None,
+                last_message_at: None,
                 cost_usd: None,
                 model: owner_summary.model.clone(),
                 effort: owner_summary.effort.clone(),

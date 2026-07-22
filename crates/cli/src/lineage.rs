@@ -2166,6 +2166,7 @@ mod tests {
             state: SessionState::Running,
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
             last_event_at: None,
+            last_message_at: None,
             cost_usd: None,
             model: None,
             effort: None,

@@ -1541,12 +1541,13 @@ impl SessionManager {
             // context gauge (spec 0104) restores from the LAST report seen,
             // and a Reset along the way clears it — mirroring the live fold.
             let path = storage.transcript_path(&s.id);
-            let (count, message_count, tokens, context) = if path.exists() {
+            let (count, message_count, last_message_at, tokens, context) = if path.exists() {
                 let f = std::fs::File::open(&path)?;
                 let reader = std::io::BufReader::new(f);
                 use std::io::BufRead;
                 let mut n = 0u64;
                 let mut msgs = 0u64;
+                let mut last_msg_at: Option<chrono::DateTime<chrono::Utc>> = None;
                 let mut tally = construct_protocol::TokenTally::default();
                 let mut context: (Option<u64>, Option<u64>) = (None, None);
                 for line in reader.lines() {
@@ -1559,7 +1560,10 @@ impl SessionManager {
                         serde_json::from_str::<construct_protocol::TimestampedEvent>(&line)
                     {
                         match ts.event {
-                            SessionEvent::Message { .. } => msgs += 1,
+                            SessionEvent::Message { .. } => {
+                                msgs += 1;
+                                last_msg_at = Some(ts.at);
+                            }
                             SessionEvent::Cost {
                                 tokens_in,
                                 tokens_out,
@@ -1580,12 +1584,19 @@ impl SessionManager {
                         }
                     }
                 }
-                (n, msgs, tally, context)
+                (n, msgs, last_msg_at, tally, context)
             } else {
-                (0, 0, construct_protocol::TokenTally::default(), (None, None))
+                (
+                    0,
+                    0,
+                    None,
+                    construct_protocol::TokenTally::default(),
+                    (None, None),
+                )
             };
             let mut s = s;
             s.message_count = message_count;
+            s.last_message_at = last_message_at;
             s.tokens = tokens;
             s.context_used = context.0;
             s.context_window = context.1;
@@ -4922,6 +4933,7 @@ impl SessionManager {
             state: construct_protocol::SessionState::Done,
             created_at: now,
             last_event_at: None,
+            last_message_at: None,
             cost_usd: None,
             model: None,
             effort: None,
@@ -5587,6 +5599,7 @@ mod tests {
             state: SessionState::Running,
             created_at: "2026-06-17T00:00:00Z".parse().expect("timestamp"),
             last_event_at: None,
+            last_message_at: None,
             cost_usd: None,
             model: None,
             effort: None,
@@ -6102,6 +6115,7 @@ mod tests {
                 state: SessionState::Running,
                 created_at: Utc::now(),
                 last_event_at: None,
+                last_message_at: None,
                 cost_usd: None,
                 model: None,
                 effort: None,
@@ -8100,6 +8114,7 @@ mod tests {
             state: SessionState::Running,
             created_at: Utc::now(),
             last_event_at: None,
+            last_message_at: None,
             cost_usd: None,
             model: None,
             effort: None,
@@ -8247,6 +8262,7 @@ mod tests {
             state: SessionState::AwaitingInput,
             created_at: Utc::now(),
             last_event_at: None,
+            last_message_at: None,
             cost_usd: None,
             model: None,
             effort: None,
@@ -9376,10 +9392,18 @@ mod tests {
                 text: "even more".into(),
             },
         ];
+        // Distinct timestamps per event: the last MESSAGE is at index 2,
+        // while later Reasoning events carry newer stamps.
+        let base = Utc::now();
+        let mut last_message_stamp = None;
         for (i, event) in events.into_iter().enumerate() {
+            let at = base + chrono::Duration::seconds(i as i64);
+            if matches!(event, construct_protocol::SessionEvent::Message { .. }) {
+                last_message_stamp = Some(at);
+            }
             let ts = construct_protocol::TimestampedEvent {
                 seq: i as u64 + 1,
-                at: Utc::now(),
+                at,
                 event,
             };
             storage.append_event("recount", &ts).expect("append event");
@@ -9398,6 +9422,11 @@ mod tests {
             .summary()
             .await;
         assert_eq!(loaded.message_count, 2, "only Message events count");
+        assert_eq!(
+            loaded.last_message_at, last_message_stamp,
+            "last_message_at restores from the newest Message event's own \
+             timestamp — the trailing Reasoning events don't move it"
+        );
     }
 
     /// `SessionManager::search` must use the live, in-memory session list
