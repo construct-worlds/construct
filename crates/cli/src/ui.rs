@@ -8025,9 +8025,12 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
                 ch.to_string(),
                 Style::default()
                     .bg(background)
-                    .fg(if bar_cell {
+                    .fg(if bar_cell && index - 1 < filled_cells {
                         app.theme.modeline_bg
                     } else {
+                        // Empty cells retain the normal modeline foreground
+                        // against the dim bar, rather than the low-contrast
+                        // inverse color used over filled cells.
                         app.theme.modeline_fg
                     })
                     .add_modifier(if hovered && bar_cell {
