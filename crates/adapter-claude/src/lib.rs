@@ -1051,7 +1051,7 @@ fn claude_usage_from_assistant(
     let window_tokens = claude_context_window_from_transcript(v).or_else(|| {
         msg.get("model")
             .and_then(Value::as_str)
-            .and_then(claude_context_window_for_model)
+            .and_then(|model| claude_context_window_for_model(model, prompt_side))
     });
     vec![
         SessionEvent::Cost {
@@ -1080,23 +1080,43 @@ fn claude_context_window_from_transcript(v: &Value) -> Option<u64> {
         })
 }
 
-/// Anthropic's standard context window for the Claude families the CLI emits.
-/// Larger beta windows are intentionally not assumed: a transcript-provided
-/// value always wins and unknown future model names remain usage-only.
-fn claude_context_window_for_model(model: &str) -> Option<u64> {
+const CLAUDE_CONTEXT_WINDOW_STEP: u64 = 200_000;
+const CLAUDE_LONG_CONTEXT_WINDOW: u64 = 1_000_000;
+
+/// Known Claude capacities, enlarged in 200k steps only when the observed
+/// prompt-side usage proves the nominal fallback is too small. A native
+/// transcript value always wins and unknown future names remain usage-only.
+fn claude_context_window_for_model(model: &str, used_tokens: u64) -> Option<u64> {
     let model = model.to_ascii_lowercase();
-    ([
+    let opus_4_6_or_newer = model
+        .strip_prefix("claude-opus-4-")
+        .and_then(|suffix| suffix.split(['-', '.']).next())
+        .and_then(|version| version.parse::<u64>().ok())
+        .is_some_and(|minor| minor >= 6);
+    let base = if matches!(model.as_str(), "fable-5" | "sonnet-5")
+        || model.starts_with("claude-fable-5")
+        || model.starts_with("claude-sonnet-5")
+        || opus_4_6_or_newer
+    {
+        CLAUDE_LONG_CONTEXT_WINDOW
+    } else if [
         "claude-3-",
-        "claude-fable-5",
         "claude-opus-4",
         "claude-sonnet-4",
-        "claude-sonnet-5",
         "claude-haiku-4",
     ]
     .iter()
-    .any(|prefix| model.starts_with(prefix))
-        || matches!(model.as_str(), "fable-5" | "sonnet-5"))
-    .then_some(200_000)
+    .any(|prefix| model.starts_with(prefix)) {
+        CLAUDE_CONTEXT_WINDOW_STEP
+    } else {
+        return None;
+    };
+    Some(
+        used_tokens
+            .max(base)
+            .div_ceil(CLAUDE_CONTEXT_WINDOW_STEP)
+            * CLAUDE_CONTEXT_WINDOW_STEP,
+    )
 }
 
 fn extract_message_text(msg: Option<&Value>) -> String {
@@ -1613,5 +1633,26 @@ mod tests {
             claude_model_change(&v, &Some("claude-sonnet-5".to_string())).as_deref(),
             Some("claude-opus-4-8")
         );
+    }
+
+    #[test]
+    fn known_claude_windows_use_long_context_and_expand_with_usage() {
+        assert_eq!(
+            claude_context_window_for_model("claude-sonnet-5", 1),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            claude_context_window_for_model("claude-opus-4-6", 1),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            claude_context_window_for_model("claude-sonnet-4", 200_001),
+            Some(400_000)
+        );
+        assert_eq!(
+            claude_context_window_for_model("claude-sonnet-4", 400_001),
+            Some(600_000)
+        );
+        assert_eq!(claude_context_window_for_model("claude-future-9", 1), None);
     }
 }
