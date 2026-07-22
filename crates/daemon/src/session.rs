@@ -645,15 +645,35 @@ fn forked_program_execution_prompt(
          construct_program_edit/update call; do not edit a Program belonging to this fork. Apply \
          progress and results directly to that owner document as you work. Do not return a \
          result for the owner to merge.\
-         \n\nWhen the dispatched work is fully complete and you have settled every block you \
-         were dispatched for on the owner Program, close this fork as your final action by \
-         calling the archive-session tool (construct_archive_session, or agentd_archive_session \
-         if you have the agentd-prefixed toolset) with `session_id: \"{fork_session_id}\"`. \
-         Archiving is a soft close: the transcript and the owner Program's session clip stay \
-         valid. If work remains pending, you are blocked, or the user has joined the \
-         conversation in this fork, leave the session open instead of archiving."
+         \n\nWhen the dispatched work is fully complete, close this fork with a two-step \
+         finish: first make a final construct_program_edit that settles every block you were \
+         dispatched for on the owner Program (none of your blocks may be left shimmering), \
+         then — as your last action — call the archive-session tool \
+         (construct_archive_session, or agentd_archive_session if you have the agentd-prefixed \
+         toolset) with `session_id: \"{fork_session_id}\"`. Never archive before the settle \
+         edit has succeeded. Archiving is a soft close: the transcript and the owner Program's \
+         session clip stay valid. If work remains pending, you are blocked, or the user has \
+         joined the conversation in this fork, leave the session open instead of archiving."
     ));
     prompt
+}
+
+/// A selection-Run execution fork's dispatch record (spec 0076), tracked
+/// from dispatch until the fork closes (archive or delete). Closing the
+/// fork settles the shimmer of the blocks it was dispatched for — the
+/// deterministic backstop behind the prompt's own settle-then-archive
+/// contract, so a fork that archives without settling can never leave the
+/// owner Program shimmering forever.
+#[derive(Clone)]
+struct RunForkDispatch {
+    /// The session whose Program document this fork was dispatched from.
+    owner_session_id: String,
+    /// The dispatched text as annotated at dispatch time (selection plus
+    /// the fork's `@{session:<id>}` clip when annotation succeeded). Its
+    /// block ids settle blocks the fork never edited; blocks whose text
+    /// drifted are caught separately by scanning the live document for the
+    /// fork's clip.
+    anchor: String,
 }
 
 /// A Program-verb session awaiting a structured result to merge back into
@@ -1272,6 +1292,12 @@ pub struct SessionManager {
     /// deliver its result — a known v1 limitation, not a data-loss risk
     /// since the result file itself survives on disk for manual recovery).
     pending_verb_merges: std::sync::Mutex<HashMap<String, PendingVerbMerge>>,
+    /// Live selection-Run fork dispatches, keyed by fork session id (spec
+    /// 0076): closing a tracked fork settles its dispatched blocks'
+    /// shimmer. In-memory only, like `pending_verb_merges` — a daemon
+    /// restart drops the backstop for forks already in flight, and the
+    /// run's inactivity expiry then remains the last-resort clear.
+    run_fork_dispatches: std::sync::Mutex<HashMap<String, RunForkDispatch>>,
     program_cursors: std::sync::Mutex<HashMap<u64, construct_protocol::ProgramCursor>>,
     /// Reserved pseudo-connection id for each session's agent-authored
     /// Program cursor (spec 0065 agent presence), keyed by session id and
@@ -1654,6 +1680,7 @@ impl SessionManager {
                 widget_snapshots: tokio::sync::Mutex::new(widget_snapshots),
                 program_runs: std::sync::Mutex::new(HashMap::new()),
                 pending_verb_merges: std::sync::Mutex::new(HashMap::new()),
+                run_fork_dispatches: std::sync::Mutex::new(HashMap::new()),
                 program_cursors: std::sync::Mutex::new(HashMap::new()),
                 agent_program_cursor_conn_ids: std::sync::Mutex::new(HashMap::new()),
                 next_conn_id: AtomicU64::new(1),
@@ -2904,6 +2931,7 @@ impl SessionManager {
         // Program-owning session the user is already looking at. Best
         // effort — a drifted/ambiguous anchor skips the clip rather than
         // failing a run whose fork already exists and is booting.
+        let mut dispatch_anchor: Option<String> = None;
         let annotated = if params.fork {
             match params.selection.as_deref().filter(|s| !s.trim().is_empty()) {
                 Some(raw_selection) => {
@@ -2923,7 +2951,7 @@ impl SessionManager {
                                 session_id: params.session_id.clone(),
                                 edits: vec![construct_protocol::ProgramEdit {
                                     old_string: raw_selection.to_string(),
-                                    new_string: anchor,
+                                    new_string: anchor.clone(),
                                     replace_all: false,
                                     keep_pending: true,
                                 }],
@@ -2939,21 +2967,42 @@ impl SessionManager {
                         )
                         .await;
                     match edit_result {
-                        Ok(edit_result) => Some(edit_result),
+                        Ok(edit_result) => {
+                            dispatch_anchor = Some(anchor);
+                            Some(edit_result)
+                        }
                         Err(e) => {
                             tracing::warn!(
                                 session = %params.session_id, error = %e,
                                 "selection run fork: session-clip annotation skipped (anchor did not apply)",
                             );
+                            dispatch_anchor = Some(raw_selection.to_string());
                             None
                         }
                     }
                 }
-                None => None,
+                // No selection (API callers forking a full-document Run):
+                // the whole executed body is the dispatch.
+                None => {
+                    dispatch_anchor = Some(run_body.clone());
+                    None
+                }
             }
         } else {
             None
         };
+        // Track the fork's dispatch so closing the fork settles its
+        // blocks' shimmer even if the fork never made its own settle edit
+        // (see `settle_run_fork_dispatch`).
+        if let Some(anchor) = dispatch_anchor {
+            self.run_fork_dispatches.lock().unwrap().insert(
+                execution_session_id.clone(),
+                RunForkDispatch {
+                    owner_session_id: params.session_id.clone(),
+                    anchor,
+                },
+            );
+        }
         // The annotation edit broadcasts the updated program (with the
         // seeded run) itself; only the un-annotated path still owes one.
         let (program, blocks) = match annotated {
@@ -3379,6 +3428,49 @@ impl SessionManager {
             return;
         };
         self.narrow_program_run(&pending.program_session_id, &program.markdown, &decls);
+        self.broadcast_program_state(program);
+    }
+
+    /// Deterministic backstop for a closing selection-Run fork (spec 0076):
+    /// settle the shimmer of every block the fork was dispatched for, so a
+    /// fork that archives (or is deleted) without making its own settle
+    /// edit can never leave the owner Program shimmering forever. Two
+    /// complementary sources identify the fork's blocks:
+    /// - the dispatch anchor's content ids, which settle blocks the fork
+    ///   never edited (mirroring `settle_verb_shimmer`), and
+    /// - a live-document scan for the fork's `@{session:<id>}` clip, which
+    ///   settles blocks whose text (and therefore ids) drifted while the
+    ///   fork worked on them — the common case, since the fork is told to
+    ///   update its blocks in place and the clip travels with the block.
+    /// No-op for untracked sessions; consumes the tracking entry so a
+    /// second close path (archive then delete) cannot double-settle.
+    async fn settle_run_fork_dispatch(&self, fork_id: &str) {
+        let dispatch = self.run_fork_dispatches.lock().unwrap().remove(fork_id);
+        let Some(dispatch) = dispatch else {
+            return;
+        };
+        let Ok(program) = self.storage.read_program(&dispatch.owner_session_id) else {
+            return;
+        };
+        let mut decls = Self::verb_anchor_settle_decls(&dispatch.anchor);
+        let clip = format!("@{{session:{fork_id}}}");
+        let blocks =
+            self.program_blocks_projection(&dispatch.owner_session_id, &program.markdown);
+        for block in &blocks {
+            if block.text.contains(&clip)
+                && !decls.iter().any(|decl| decl.id == block.content_id)
+            {
+                decls.push(construct_protocol::ProgramShimmerDecl {
+                    id: block.content_id.clone(),
+                    shimmer: false,
+                    tooltip: None,
+                });
+            }
+        }
+        if decls.is_empty() {
+            return;
+        }
+        self.narrow_program_run(&dispatch.owner_session_id, &program.markdown, &decls);
         self.broadcast_program_state(program);
     }
 
@@ -4084,6 +4176,10 @@ impl SessionManager {
             // for native mirrors, but allow users to hide one explicitly.
             return self.archive_native_mirror(id).await;
         }
+        // A closing Run fork settles its dispatched blocks' shimmer (spec
+        // 0076) — this covers the fork's own self-archive, the auto-close
+        // path, and a manual archive alike. No-op for untracked sessions.
+        self.settle_run_fork_dispatch(id).await;
         // Snapshot the child subagents before we start mutating state so a
         // concurrently-finishing subagent can't slip out of the cascade.
         let child_subagents = self.child_subagent_ids(id).await;
@@ -4238,6 +4334,10 @@ impl SessionManager {
                 ));
             }
         }
+        // A deleted Run fork settles its dispatched blocks' shimmer just
+        // like an archived one (spec 0076); consuming the tracking entry
+        // here also makes an archive-then-delete sequence settle once.
+        self.settle_run_fork_dispatch(id).await;
         // Pull out the entry so the in-memory map releases the Arc; the
         // entry itself stays alive via our local Arc until the function ends.
         let entry = {
@@ -5680,8 +5780,9 @@ mod tests {
         assert!(prompt.contains("do not edit a Program belonging to this fork"));
         assert!(prompt.contains("construct_archive_session"));
         assert!(prompt.contains("session_id: \"fork1\""));
-        assert!(prompt.contains("settled every block"));
-        assert!(prompt.contains("final action"));
+        assert!(prompt.contains("settles every block"));
+        assert!(prompt.contains("Never archive before the settle edit"));
+        assert!(prompt.contains("last action"));
         assert!(prompt.contains("leave the session open"));
     }
 
@@ -6584,6 +6685,84 @@ mod tests {
         assert!(
             blocks.iter().all(|block| !block.shimmer),
             "a completed verb leaves no block shimmering: {blocks:?}"
+        );
+    }
+
+    /// Spec 0076: closing a selection-Run fork settles its dispatched
+    /// blocks' shimmer deterministically — including the drift case, where
+    /// the fork edited its block's text (advancing the content id past the
+    /// stored dispatch anchor) but the block still carries the fork's
+    /// `@{session:<id>}` clip. Without the backstop, a fork that archives
+    /// itself without a final settle edit leaves the block shimmering
+    /// forever, since the run only auto-clears on the OWNER's terminal
+    /// state and the owner never ran.
+    #[tokio::test]
+    async fn run_fork_close_settles_dispatched_shimmer_even_after_drift() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage.clone(), config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        mgr.sessions.write().await.insert(
+            "fowner".into(),
+            synthetic_entry("fowner", construct_protocol::SessionKind::User, 0),
+        );
+
+        // The document as the fork left it: the dispatched item's text was
+        // rewritten by the fork (drifted from the dispatch anchor) but its
+        // session clip survived, and the fork never settled its shimmer.
+        let anchor = "- say hello @{session:ffork}".to_string();
+        storage
+            .update_program(
+                "fowner",
+                "# Todo\n\n- said hello, done @{session:ffork}\n".to_string(),
+                construct_protocol::ProgramUpdateActor::Agent,
+                None,
+                None,
+                None,
+            )
+            .expect("seed program");
+        mgr.start_program_run_with_dispatch_state(
+            "fowner",
+            "- said hello, done @{session:ffork}",
+            true,
+            None,
+            false,
+            None,
+        );
+        let before = mgr.program_run_snapshot("fowner").expect("run seeded");
+        assert!(
+            !before.pending_block_refs.is_empty(),
+            "the dispatched block starts pending"
+        );
+
+        mgr.run_fork_dispatches.lock().unwrap().insert(
+            "ffork".to_string(),
+            RunForkDispatch {
+                owner_session_id: "fowner".to_string(),
+                anchor,
+            },
+        );
+
+        mgr.settle_run_fork_dispatch("ffork").await;
+
+        let after = mgr.program_run_snapshot("fowner");
+        assert!(
+            after
+                .as_ref()
+                .map(|run| run.pending_block_refs.is_empty())
+                .unwrap_or(true),
+            "closing the fork settles its dispatched block: {after:?}"
+        );
+        assert!(
+            mgr.run_fork_dispatches.lock().unwrap().get("ffork").is_none(),
+            "the tracking entry is consumed so a later delete cannot double-settle"
         );
     }
 
