@@ -835,6 +835,7 @@ mod tests {
             state: construct_protocol::SessionState::Running,
             created_at: chrono::Utc::now(),
             last_event_at: None,
+            last_message_at: None,
             cost_usd: None,
             model: None,
             effort: None,

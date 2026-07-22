@@ -2214,6 +2214,7 @@ mod tests {
             state: SessionState::Running,
             created_at: "2026-05-24T00:00:00Z".parse().expect("timestamp"),
             last_event_at: None,
+            last_message_at: None,
             cost_usd: None,
             model: None,
             effort: None,

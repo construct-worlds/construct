@@ -15,7 +15,10 @@ The session list renders in one of two user-selectable view modes:
 - **Full**: the compact line plus a muted second detail line aligned under the
   name, showing (in display order) the model and reasoning effort, a small
   context-window gauge with percentage, current activity (live busy time while
-  running, coarse age since last activity otherwise), and lifetime token
+  running; otherwise a coarse age since the last chat message, so status
+  rows, tool blocks, and daemon-restart resume events do not reset it —
+  sessions with no messages fall back to the last recorded event), and
+  lifetime token
   volume. Cost is deliberately excluded. The gauge's fill rounds to the
   nearest step so the bar tracks the percentage (just over half reads as
   half, not three quarters).

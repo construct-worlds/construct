@@ -2006,6 +2006,14 @@ pub struct SessionSummary {
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the most recent chat `Message` event persisted — unlike
+    /// `last_event_at`, which every transcript event refreshes (status rows,
+    /// tool blocks, usage reports, resume plumbing), this only moves on
+    /// actual conversation. Restored from the transcript at load so it
+    /// survives daemon restarts and self-heals for sessions recorded before
+    /// the field existed. `None` for sessions with no messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

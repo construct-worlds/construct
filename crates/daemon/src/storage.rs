@@ -2469,6 +2469,7 @@ mod search_tests {
             state: SessionState::Running,
             created_at: at,
             last_event_at: Some(at),
+            last_message_at: None,
             cost_usd: None,
             model: None,
             effort: None,

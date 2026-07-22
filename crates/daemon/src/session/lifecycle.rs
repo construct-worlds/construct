@@ -72,6 +72,7 @@ impl SessionManager {
             state: SessionState::Pending,
             created_at: now,
             last_event_at: None,
+            last_message_at: None,
             cost_usd: None,
             model: params.model.clone(),
             effort: None,
