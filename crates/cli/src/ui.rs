@@ -287,7 +287,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if let Some(strip) = pin_strip_area {
         render_pin_strip(f, strip, app, &pinned_ids);
     }
-    // When the list is collapsed, overlay a `›` uncollapse glyph
+    // When the list is collapsed, overlay a `»` uncollapse glyph
     // on the main view's left border so the user can recover the
     // hidden pane without a key chord. Painted AFTER `render_detail`
     // so it sits on top of the block's border. Click handler in
@@ -653,7 +653,7 @@ pub fn list_plus_button_range(list_area: Rect) -> Option<(u16, u16, u16)> {
     Some((list_area.x + 1, list_area.x + 3, list_area.y))
 }
 
-/// Hit zone for the right-aligned `−` button that collapses the
+/// Hit zone for the right-aligned `«` button that collapses the
 /// session list. Returns `(x_start, x_end_exclusive, y)`. Sits one
 /// cell inset from the right corner so the corner glyph stays
 /// visible.
@@ -679,7 +679,7 @@ pub fn matrix_rain_close_button_range(rain_area: Rect) -> Option<(u16, u16, u16)
     Some((x_start, x_end, rain_area.y))
 }
 
-/// Cell where the `›` uncollapse glyph is painted on the main
+/// Cell where the `»` uncollapse glyph is painted on the main
 /// view's left border when the session list is collapsed. Anchored
 /// to the top-left corner so the affordance reads as the "header"
 /// of the would-be list pane. Returns `(x, y)`.
@@ -825,7 +825,7 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
     // Note: widget title squares no longer show a tooltip — hovering a square
     // reveals the widget itself (see `render_session_widget_title` /
     // `render_matrix_rain_header`).
-    // Only when expanded — collapsed list has no `+` / `−`.
+    // Only when expanded — collapsed list has no `+` / `«`.
     if app.list_collapsed && app.focus != PaneFocus::List {
         return;
     }
@@ -876,7 +876,7 @@ fn render_view_uncollapse_glyph(f: &mut Frame, app: &App, view_area: Rect) {
     let style = Style::default()
         .fg(app.theme.accent)
         .add_modifier(Modifier::BOLD);
-    f.buffer_mut().set_string(gx, gy, "›", style);
+    f.buffer_mut().set_string(gx, gy, "»", style);
 }
 
 /// Top-row close-button geometry for the session view's right edge.
@@ -1938,7 +1938,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     // session rows OR the lineage section (whose header highlights via
     // `lineage_focused` in `render_lineage_section`).
     let focused = app.session_rows_focused() || app.tutorial_wants_list_highlight();
-    // Collapsed render path: a thin column with a `>` expand glyph
+    // Collapsed render path: a thin column with a `»` expand glyph
     // on the top border. Anywhere inside the pane click-expands. Keyed off
     // raw list focus so the sidebar stays expanded while the lineage
     // section is focused too.
@@ -1948,7 +1948,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
             .borders(Borders::ALL)
             .border_style(pane_border_style(&app.theme, focused))
             .title(Line::from(Span::styled(
-                "›",
+                "»",
                 Style::default()
                     .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
@@ -1958,7 +1958,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
     // Expanded render path: title is ` + sessions ` with a
-    // right-aligned ` − ` for collapse. Both are clickable; the
+    // right-aligned ` « ` for collapse. Both are clickable; the
     // click handler in `App::click_list` consults
     // `list_title_button_hit` for the geometry.
     let plus_style = Style::default()
@@ -1983,7 +1983,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         Style::default().fg(app.theme.muted)
     };
     let collapse_line =
-        Line::from(Span::styled(" − ", minus_style)).alignment(ratatui::layout::Alignment::Right);
+        Line::from(Span::styled(" « ", minus_style)).alignment(ratatui::layout::Alignment::Right);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(pane_border_style(&app.theme, focused))
