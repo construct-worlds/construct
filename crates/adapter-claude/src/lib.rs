@@ -1020,7 +1020,8 @@ fn claude_events_from_json(v: &Value, last_usage_msg_id: &mut Option<String>) ->
 /// which is the same prompt-side sum — what actually filled the window on
 /// this call) covers fresh input + cache creation + cache reads, keeping
 /// `tokens_cached ⊆ tokens_in` per the `Cost` event's contract. Claude
-/// states no context-window size, so the gauge carries no denominator.
+/// transcripts sometimes include a window size explicitly; otherwise known
+/// Claude model families supply the conservative default below.
 fn claude_usage_from_assistant(
     v: &Value,
     last_usage_msg_id: &mut Option<String>,
@@ -1047,6 +1048,11 @@ fn claude_usage_from_assistant(
     let prompt_side = input
         .saturating_add(cache_read)
         .saturating_add(cache_creation);
+    let window_tokens = claude_context_window_from_transcript(v).or_else(|| {
+        msg.get("model")
+            .and_then(Value::as_str)
+            .and_then(claude_context_window_for_model)
+    });
     vec![
         SessionEvent::Cost {
             usd: 0.0,
@@ -1056,9 +1062,41 @@ fn claude_usage_from_assistant(
         },
         SessionEvent::ContextUsage {
             used_tokens: prompt_side,
-            window_tokens: None,
+            window_tokens,
         },
     ]
+}
+
+/// Prefer an explicit native-harness value over an inferred model capacity.
+fn claude_context_window_from_transcript(v: &Value) -> Option<u64> {
+    ["context_window", "context_window_tokens", "contextWindow"]
+        .into_iter()
+        .find_map(|key| {
+            v.get(key)
+                .or_else(|| v.get("message")?.get(key))
+                .or_else(|| v.get("message")?.get("usage")?.get(key))
+                .and_then(Value::as_u64)
+                .filter(|window| *window > 0)
+        })
+}
+
+/// Anthropic's standard context window for the Claude families the CLI emits.
+/// Larger beta windows are intentionally not assumed: a transcript-provided
+/// value always wins and unknown future model names remain usage-only.
+fn claude_context_window_for_model(model: &str) -> Option<u64> {
+    let model = model.to_ascii_lowercase();
+    ([
+        "claude-3-",
+        "claude-fable-5",
+        "claude-opus-4",
+        "claude-sonnet-4",
+        "claude-sonnet-5",
+        "claude-haiku-4",
+    ]
+    .iter()
+    .any(|prefix| model.starts_with(prefix))
+        || matches!(model.as_str(), "fable-5" | "sonnet-5"))
+    .then_some(200_000)
 }
 
 fn extract_message_text(msg: Option<&Value>) -> String {
@@ -1457,6 +1495,7 @@ mod tests {
                 "type": "assistant",
                 "message": {
                     "id": "msg_01",
+                    "model": "claude-sonnet-4-5",
                     "role": "assistant",
                     "content": [content],
                     "usage": {
@@ -1488,14 +1527,14 @@ mod tests {
             other => panic!("expected a leading Cost event, got {other:?}"),
         }
         // The Cost rides with the context gauge (spec 0104): same prompt
-        // side, no window (claude never states one).
+        // side, with the known model's context-window fallback.
         match first.get(1) {
             Some(SessionEvent::ContextUsage {
                 used_tokens,
                 window_tokens,
             }) => {
                 assert_eq!(*used_tokens, 137);
-                assert_eq!(*window_tokens, None);
+                assert_eq!(*window_tokens, Some(200_000));
             }
             other => panic!("expected a ContextUsage event after Cost, got {other:?}"),
         }
