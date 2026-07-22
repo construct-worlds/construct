@@ -243,7 +243,7 @@ impl App {
         }
         self.focus = PaneFocus::List;
         // Title bar buttons: `+` (left, new session), the view-mode label
-        // (after the title), and `−` (right, collapse). All live on the top
+        // (after the title), and `«` (right, collapse). All live on the top
         // border row.
         if row == list.y {
             if let Some((xs, xe, y)) = crate::ui::list_plus_button_range(list) {

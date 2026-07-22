@@ -1643,7 +1643,7 @@ pub struct App {
     /// on its right/bottom border resizes it, a grab on its top border
     /// moves it.
     pub pinned_card_drag: Option<PinnedCardDrag>,
-    /// User has collapsed the session list pane via the `−` button
+    /// User has collapsed the session list pane via the `«` button
     /// on its title bar. Effective only when the list pane doesn't
     /// have focus — when focus is on the list (e.g. via `C-x o`),
     /// the list temporarily renders at its full width so the user
@@ -3014,7 +3014,7 @@ pub const LIST_PANEL_W_DEFAULT: u16 = 40;
 
 /// Width of the list pane in collapsed state. Zero — the pane is
 /// hidden entirely and the main view expands to occupy the full
-/// horizontal span. The uncollapse affordance is a `›` glyph on
+/// horizontal span. The uncollapse affordance is a `»` glyph on
 /// the main view's left border (see `view_uncollapse_glyph_pos`).
 pub const LIST_PANEL_W_COLLAPSED: u16 = 0;
 
