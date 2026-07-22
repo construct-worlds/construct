@@ -242,7 +242,7 @@ impl App {
             return;
         }
         self.focus = PaneFocus::List;
-        // Title bar buttons: `+` (left, new session) and `−`
+        // Title bar buttons: `+` (left, new session) and `«`
         // (right, collapse). Both live on the top border row.
         if row == list.y {
             if let Some((xs, xe, y)) = crate::ui::list_plus_button_range(list) {
