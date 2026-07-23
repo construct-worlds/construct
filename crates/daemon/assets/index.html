@@ -412,11 +412,16 @@
     overflow: hidden;
     container-type: inline-size;
   }
+  /* Identity sits LAST and right-anchored, stacking directly under the
+     title row's harness label — the two "what's running this" facts
+     group vertically, and the most variable-width cell lives where a
+     ragged left edge can't break column alignment. */
   .session-list .item .detail .d-model {
     flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    text-align: right;
     color: var(--fg-dim);
   }
   .session-list .item .detail .d-ctx {
@@ -424,7 +429,7 @@
     width: 50px;
     display: inline-flex;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: space-between;
     gap: 4px;
   }
   .session-list .item .detail .d-live {
@@ -11307,7 +11312,7 @@ function sessionDetailHtml(s) {
     const dir = s.worktree || s.cwd || "";
     identity = dir.split("/").filter(Boolean).pop() || dir;
   }
-  const parts = [`<span class="d-model">${escape(identity)}</span>`];
+  const parts = [];
   const window = s.context_window || 0;
   if (s.context_used != null && window > 0) {
     const pct = Math.min(100, Math.round((s.context_used * 100) / window));
@@ -11334,6 +11339,7 @@ function sessionDetailHtml(s) {
       ? `<span class="d-tok"><i class="d-val">${escape(formatTokenCount(tokens))}</i>&nbsp;tok</span>`
       : `<span class="d-tok">${DETAIL_EMPTY}</span>`,
   );
+  parts.push(`<span class="d-model">${escape(identity)}</span>`);
   // Hover reveals everything, including columns a narrow sidebar dropped.
   const summary = [
     identity,

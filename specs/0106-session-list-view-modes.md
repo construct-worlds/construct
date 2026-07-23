@@ -30,13 +30,16 @@ Rules both modes must preserve:
   placement and label shape as the lineage section's full/compact toggle. The
   choice persists across launches; legacy state restores to compact.
 - The detail line is COLUMNIZED: every row lays its fields into one shared
-  set of columns (identity left-aligned, then the gauge, with activity and
-  tokens right-anchored at the row edge, mirroring the harness label on the
-  title line), so the same field starts at the same position on every row
-  and the list scans vertically. Column widths are computed across the
-  whole list, not the viewport, so nothing shifts while scrolling; one
-  overlong identity is capped and ellipsized rather than widening its
-  column for everyone.
+  set of columns — the context gauge leftmost (the highest-priority scan
+  signal), then activity and tokens, with the identity cell (model·effort)
+  right-anchored at the row edge so it stacks directly under the title
+  row's right-aligned harness label and the two "what's running this"
+  facts read as one group. The same field starts at the same position on
+  every row and the list scans vertically; the most variable-width field
+  (identity) sits where its ragged left edge cannot disturb alignment.
+  Column widths are computed across the whole list, not the viewport, so
+  nothing shifts while scrolling; one overlong identity is capped and
+  ellipsized rather than claiming the row.
 - A cell whose session lacks that datum renders a dim placeholder, holding
   the column open — position must always mean the same field. A session
   reporting no model (e.g. a plain shell) fills the identity column with

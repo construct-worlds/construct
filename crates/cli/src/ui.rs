@@ -2090,7 +2090,6 @@ fn session_detail_cells(s: &SessionSummary, now_ms: i64) -> DetailCells {
 /// viewport) so columns don't shift while scrolling. A column no row
 /// populates collapses to its one-cell placeholder.
 struct DetailColumns {
-    model_w: usize,
     ctx_w: usize,
     act_w: usize,
     tok_w: usize,
@@ -2098,7 +2097,6 @@ struct DetailColumns {
 
 fn compute_detail_columns(items: &[crate::app::ListItem], now_ms: i64) -> DetailColumns {
     let mut cols = DetailColumns {
-        model_w: 1,
         ctx_w: 1,
         act_w: 1,
         tok_w: 1,
@@ -2108,9 +2106,6 @@ fn compute_detail_columns(items: &[crate::app::ListItem], now_ms: i64) -> Detail
             continue;
         };
         let cells = session_detail_cells(summary, now_ms);
-        cols.model_w = cols
-            .model_w
-            .max(UnicodeWidthStr::width(cells.model.as_str()).min(DETAIL_MODEL_W_MAX));
         cols.ctx_w = cols.ctx_w.max(match &cells.ctx {
             DetailCtx::Gauge(..) => DETAIL_GAUGE_W,
             DetailCtx::Text(t) => UnicodeWidthStr::width(t.as_str()),
@@ -2127,11 +2122,14 @@ fn compute_detail_columns(items: &[crate::app::ListItem], now_ms: i64) -> Detail
 }
 
 /// The second row of a full-mode session card, laid out into the shared
-/// columns: model/identity left-aligned, context gauge, then activity
-/// and tokens right-anchored at the row edge (mirroring the harness
-/// label above). Columns that don't fit drop whole, right-to-left
-/// (tokens, then activity, then model — the gauge survives longest),
-/// identically on every row.
+/// columns: the context gauge leftmost (the highest-priority scan
+/// signal), then activity and tokens, with the model/identity cell
+/// right-anchored at the row edge so it stacks directly under the title
+/// row's harness label — the two "what's running this" facts read as one
+/// group, and the most variable-width field sits where ragged edges
+/// don't break alignment. Columns that don't fit drop whole (tokens,
+/// then activity; identity keeps at least a small slice and the gauge
+/// survives longest), identically on every row.
 fn session_detail_line(
     theme: &Theme,
     s: &SessionSummary,
@@ -2142,24 +2140,24 @@ fn session_detail_line(
 ) -> Line<'static> {
     let cells = session_detail_cells(s, now_ms);
     let avail = row_w.saturating_sub(prefix_w);
+    // The identity cell takes whatever the fixed columns leave, but never
+    // less than this — below it, tokens then activity drop instead.
+    const DETAIL_MODEL_W_MIN: usize = 8;
     let mut include_tok = true;
     let mut include_act = true;
-    let mut include_model = true;
-    let needed = |model: bool, act: bool, tok: bool| {
-        cols.ctx_w
-            + if model { cols.model_w + 2 } else { 0 }
-            + if act { cols.act_w + 2 } else { 0 }
-            + if tok { cols.tok_w + 2 } else { 0 }
+    let left_w = |act: bool, tok: bool| {
+        cols.ctx_w + if act { cols.act_w + 2 } else { 0 } + if tok { cols.tok_w + 2 } else { 0 }
     };
-    if needed(true, true, true) > avail {
+    if left_w(true, true) + 2 + DETAIL_MODEL_W_MIN > avail {
         include_tok = false;
     }
-    if !include_tok && needed(true, true, false) > avail {
+    if !include_tok && left_w(true, false) + 2 + DETAIL_MODEL_W_MIN > avail {
         include_act = false;
     }
-    if !include_act && needed(true, false, false) > avail {
-        include_model = false;
-    }
+    let model_room = avail
+        .saturating_sub(left_w(include_act, include_tok) + 2)
+        .min(DETAIL_MODEL_W_MAX);
+    let include_model = model_room >= 2;
 
     // Archived rows keep their single dimmed style; live rows get a
     // small hierarchy: values in the secondary style, units and
@@ -2183,13 +2181,6 @@ fn session_detail_line(
 
     let mut spans = vec![Span::raw(" ".repeat(prefix_w))];
     let mut used_w = 0usize;
-    if include_model {
-        let text = fit_name(&cells.model, cols.model_w, None);
-        let text_w = UnicodeWidthStr::width(text.as_str());
-        spans.push(Span::styled(text, value_style));
-        spans.push(Span::raw(" ".repeat(cols.model_w - text_w + 2)));
-        used_w += cols.model_w + 2;
-    }
     match &cells.ctx {
         DetailCtx::Gauge(filled, pct) => {
             spans.push(Span::styled("▰".repeat(*filled), value_style));
@@ -2215,46 +2206,49 @@ fn session_detail_line(
     }
     used_w += cols.ctx_w;
 
-    // Right block: activity + tokens anchored at the row's right edge,
-    // each right-aligned within its column so suffixes line up.
-    let right_w = if include_act { cols.act_w + 2 } else { 0 }
-        + if include_tok { cols.tok_w + 2 } else { 0 };
-    if right_w > 0 {
-        // `right_w` already counts each right column's 2-cell separator;
-        // `gap` is only the extra slack that right-anchors the block.
-        let gap = avail.saturating_sub(used_w + right_w);
-        spans.push(Span::raw(" ".repeat(gap + 2)));
-        if include_act {
-            let (text, busy) = match &cells.activity {
-                Some((text, busy)) => (text.clone(), *busy),
-                None => (DETAIL_EMPTY.to_string(), false),
-            };
-            let text_w = UnicodeWidthStr::width(text.as_str());
-            spans.push(Span::raw(" ".repeat(cols.act_w.saturating_sub(text_w))));
-            if busy {
-                spans.push(Span::styled(text, busy_style));
-            } else if let Some(value) = text.strip_suffix(" ago") {
+    // Activity and tokens continue the left block, each right-aligned
+    // within its shared column so suffixes line up down the list.
+    if include_act {
+        spans.push(Span::raw("  "));
+        let (text, busy) = match &cells.activity {
+            Some((text, busy)) => (text.clone(), *busy),
+            None => (DETAIL_EMPTY.to_string(), false),
+        };
+        let text_w = UnicodeWidthStr::width(text.as_str());
+        spans.push(Span::raw(" ".repeat(cols.act_w.saturating_sub(text_w))));
+        if busy {
+            spans.push(Span::styled(text, busy_style));
+        } else if let Some(value) = text.strip_suffix(" ago") {
+            spans.push(Span::styled(value.to_string(), value_style));
+            spans.push(Span::styled(" ago".to_string(), faint_style));
+        } else {
+            spans.push(Span::styled(text, faint_style));
+        }
+        used_w += cols.act_w + 2;
+    }
+    if include_tok {
+        spans.push(Span::raw("  "));
+        let text = cells.tokens.as_deref().unwrap_or(DETAIL_EMPTY);
+        let text_w = UnicodeWidthStr::width(text);
+        spans.push(Span::raw(" ".repeat(cols.tok_w.saturating_sub(text_w))));
+        match text.strip_suffix(" tok") {
+            Some(value) => {
                 spans.push(Span::styled(value.to_string(), value_style));
-                spans.push(Span::styled(" ago".to_string(), faint_style));
-            } else {
-                spans.push(Span::styled(text, faint_style));
+                spans.push(Span::styled(" tok".to_string(), faint_style));
             }
-            if include_tok {
-                spans.push(Span::raw("  "));
-            }
+            None => spans.push(Span::styled(text.to_string(), faint_style)),
         }
-        if include_tok {
-            let text = cells.tokens.as_deref().unwrap_or(DETAIL_EMPTY);
-            let text_w = UnicodeWidthStr::width(text);
-            spans.push(Span::raw(" ".repeat(cols.tok_w.saturating_sub(text_w))));
-            match text.strip_suffix(" tok") {
-                Some(value) => {
-                    spans.push(Span::styled(value.to_string(), value_style));
-                    spans.push(Span::styled(" tok".to_string(), faint_style));
-                }
-                None => spans.push(Span::styled(text.to_string(), faint_style)),
-            }
-        }
+        used_w += cols.tok_w + 2;
+    }
+    // Identity right-anchored at the row edge, stacking under the title
+    // row's harness label; ragged-left, so its varying width never
+    // disturbs the aligned columns to its left.
+    if include_model {
+        let text = fit_name(&cells.model, model_room, None);
+        let text_w = UnicodeWidthStr::width(text.as_str());
+        let gap = avail.saturating_sub(used_w + text_w);
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(text, value_style));
     }
     Line::from(spans)
 }
@@ -18373,29 +18367,32 @@ mod tests {
         let items = vec![item(&a), item(&b)];
         let now = 3 * 3_600_000;
         let cols = compute_detail_columns(&items, now);
-        // Model column sized by the widest visible model.
-        assert_eq!(cols.model_w, "gpt-5.6-terra\u{00b7}medium".chars().count());
 
         let theme = Theme::default();
         let line_a = session_detail_line(&theme, &a, &cols, now, 0, 60);
         let line_b = session_detail_line(&theme, &b, &cols, now, 0, 60);
         let text = |line: &Line| -> String { line.spans.iter().map(|sp| sp.content.as_ref()).collect() };
         let (ta, tb) = (text(&line_a), text(&line_b));
-        // The gauge starts at the same column on both rows even though the
-        // model labels differ in width (char positions — `find` would
+        // The gauge leads both rows at the same column, and the shared
+        // activity/tokens columns align (char positions — `find` would
         // compare byte offsets, and `·` is multi-byte)...
         assert_eq!(
             ta.chars().position(|c| c == '▰'),
             tb.chars().position(|c| c == '▰'),
             "{ta:?} vs {tb:?}"
         );
-        // ...and both rows right-anchor tokens at the row edge.
-        assert!(ta.trim_end().ends_with("83M tok"), "{ta:?}");
-        assert!(tb.trim_end().ends_with("29M tok"), "{tb:?}");
-        assert_eq!(
-            UnicodeWidthStr::width(ta.trim_end()),
-            UnicodeWidthStr::width(tb.trim_end())
-        );
+        let col_of = |t: &str, needle: &str| -> Option<usize> {
+            let byte = t.find(needle)?;
+            Some(t[..byte].chars().count())
+        };
+        assert_eq!(col_of(&ta, " ago"), col_of(&tb, " ago"), "{ta:?} vs {tb:?}");
+        assert_eq!(col_of(&ta, " tok"), col_of(&tb, " tok"), "{ta:?} vs {tb:?}");
+        // ...and the identity cell right-anchors at the row edge, stacking
+        // under the title row's harness label.
+        assert!(ta.ends_with("fable-5"), "{ta:?}");
+        assert!(tb.ends_with("gpt-5.6-terra\u{00b7}medium"), "{tb:?}");
+        assert_eq!(UnicodeWidthStr::width(ta.as_str()), 60, "{ta:?}");
+        assert_eq!(UnicodeWidthStr::width(tb.as_str()), 60, "{tb:?}");
     }
 
     #[test]
