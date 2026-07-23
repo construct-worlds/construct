@@ -29,14 +29,31 @@ Rules both modes must preserve:
   right-aligned immediately before the pane's collapse control — the same
   placement and label shape as the lineage section's full/compact toggle. The
   choice persists across launches; legacy state restores to compact.
-- The detail line only ever shows data the session actually reported — absent
-  fields are omitted, never rendered as placeholders. A session reporting no
-  model/usage data at all (e.g. a plain shell) falls back to showing where it
-  lives (its worktree or working directory).
-- On a narrow sidebar the detail line drops segments rather than wrapping,
-  least important first: tokens, then activity, then model, keeping the
-  context gauge longest. Full mode never forces the sidebar wider and never
-  horizontally scrolls.
+- The detail line is COLUMNIZED: every row lays its fields into one shared
+  set of columns — the context gauge leftmost (the highest-priority scan
+  signal), then activity and tokens, with the identity cell (model·effort)
+  right-anchored at the row edge so it stacks directly under the title
+  row's right-aligned harness label and the two "what's running this"
+  facts read as one group. The same field starts at the same position on
+  every row and the list scans vertically; the most variable-width field
+  (identity) sits where its ragged left edge cannot disturb alignment.
+  Column widths are computed across the whole list, not the viewport, so
+  nothing shifts while scrolling; one overlong identity is capped and
+  ellipsized rather than claiming the row.
+- A cell whose session lacks that datum renders a dim placeholder, holding
+  the column open — position must always mean the same field. A session
+  reporting no model (e.g. a plain shell) fills the identity column with
+  where it lives (its worktree or working directory) instead.
+- Values read one step brighter than unit suffixes and placeholders, and
+  live busy time renders in the running color, giving the line an internal
+  hierarchy instead of one undifferentiated style.
+- Labels stay bounded: busy time switches to the coarse single-unit age
+  scale past an hour, and the gauge clamps at full/100% even when a harness
+  reports usage above its inferred window.
+- On a narrow sidebar the detail line drops whole columns rather than
+  wrapping, least important first: tokens, then activity, then identity,
+  keeping the context gauge longest — and identically on every row. Full
+  mode never forces the sidebar wider and never horizontally scrolls.
 - Group headers and archived-disclosure rows stay one line in both modes.
 - The web UI's session list shows the same detail line with the same
   content and omission/fallback rules, but always on — it has no
