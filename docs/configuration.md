@@ -99,6 +99,7 @@ env = { CONSTRUCT_CODEX_CMD = "exec codex" }
 | `grok` | `CONSTRUCT_GROK_CMD` | `CONSTRUCT_GROK_BIN` |
 | `kimi` | `CONSTRUCT_KIMI_CMD` | `CONSTRUCT_KIMI_BIN` |
 | `hermes` | `CONSTRUCT_HERMES_CMD` | `CONSTRUCT_HERMES_BIN` |
+| `pi` | `CONSTRUCT_PI_CMD` | `CONSTRUCT_PI_BIN` |
 | `shell` | `CONSTRUCT_SHELL_CMD` | `CONSTRUCT_SHELL_BIN` |
 
 OpenCode discovery checks `opencode` on the daemon's `PATH`, then the standard

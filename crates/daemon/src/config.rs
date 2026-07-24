@@ -25,7 +25,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # Active config:  ~/.config/construct/config.toml  (or $CONSTRUCT_CONFIG_DIR/config.toml)
 # This template:  ~/.config/construct/config.toml.template
 #
-# All built-in adapters (shell, claude, codex, opencode, antigravity, grok, kimi, hermes, smith) are
+# All built-in adapters (shell, claude, codex, opencode, antigravity, grok, kimi, hermes, pi, smith) are
 # registered automatically — you do not need to declare them unless you want
 # to change a field.
 
@@ -44,6 +44,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 #   grok        — Grok CLI (wraps the `grok` CLI)
 #   kimi        — Kimi Code (wraps the `kimi` CLI)
 #   hermes      — Hermes Agent (wraps the `hermes` CLI)
+#   pi          — pi coding agent (wraps the `pi` CLI)
 #   smith       — native multi-provider agent (OpenAI / Anthropic / Gemini / Meta / Ollama / Grok)
 
 # [adapters.shell]
@@ -283,6 +284,7 @@ enabled = true
 #   CONSTRUCT_GROK_CMD        — command prefix for the grok adapter
 #   CONSTRUCT_KIMI_CMD        — command prefix for the kimi adapter
 #   CONSTRUCT_HERMES_CMD      — command prefix for the hermes adapter
+#   CONSTRUCT_PI_CMD          — command prefix for the pi adapter
 #   CONSTRUCT_SHELL_CMD       — command prefix for the shell adapter
 #   CONSTRUCT_CLAUDE_BIN      — binary path fallback for the claude adapter
 #   CONSTRUCT_CODEX_BIN       — binary path fallback for the codex adapter
@@ -291,6 +293,7 @@ enabled = true
 #   CONSTRUCT_GROK_BIN        — binary path fallback for the grok adapter
 #   CONSTRUCT_KIMI_BIN        — binary path fallback for the kimi adapter
 #   CONSTRUCT_HERMES_BIN      — binary path fallback for the hermes adapter
+#   CONSTRUCT_PI_BIN          — binary path fallback for the pi adapter
 "#;
 
 /// Kept for backwards-compat: `construct daemon default-config` and any
@@ -542,6 +545,12 @@ pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
         binary: "construct",
         args: &["__adapter", "hermes"],
         description: "Hermes Agent (wraps the `hermes` CLI)",
+    },
+    BuiltinAdapter {
+        name: "pi",
+        binary: "construct",
+        args: &["__adapter", "pi"],
+        description: "pi coding agent (wraps the `pi` CLI)",
     },
     BuiltinAdapter {
         name: "smith",
@@ -832,6 +841,16 @@ mod tests {
         assert_eq!(adapter.binary, "construct");
         assert_eq!(adapter.args, &["__adapter", "hermes"]);
         assert_eq!(default_usage_probe("hermes"), Some("/usage"));
+    }
+
+    #[test]
+    fn pi_is_registered_as_a_builtin_wrapper() {
+        let adapter = BUILTIN_ADAPTERS
+            .iter()
+            .find(|adapter| adapter.name == "pi")
+            .expect("pi builtin");
+        assert_eq!(adapter.binary, "construct");
+        assert_eq!(adapter.args, &["__adapter", "pi"]);
     }
 
     #[test]

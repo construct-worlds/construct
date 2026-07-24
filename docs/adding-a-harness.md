@@ -215,22 +215,22 @@ listed data surface, not by trusting this table — upstream CLIs grow
 surfaces between releases (codex's token splits and grok's context figures
 both existed for months before we consumed them).
 
-| Capability | smith | claude | codex | opencode | kimi | hermes | grok | antigravity | shell |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Interactive / headless | both | both | both | interactive | interactive | both | both | both | PTY |
-| Structured chat events | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
-| ModelChanged | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓¹ | ✓ | n/a |
-| EffortChanged | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | ✓ | n/a |
-| Token split (0103) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | gap² | none³ | n/a |
-| Context gauge (0104) | ✓ | ✓ | ✓ | ✓ | ✓ | gap | ✓ | none³ | n/a |
-| USD cost | ✓ | headless only | — | gap⁴ | — | ✓ | — | — | n/a |
-| Native resume | ✓ (own state) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | fresh shell |
-| Reset detection (0085) | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
-| Native fork | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | n/a |
-| Native subagent mirrors | n/a⁵ | ✓ | ✓ | — | — | gap | ✓ | ✓ | n/a |
-| MCP injection | native tools | ✓ | ✓ | ✓ | gap | gap | gap | gap | — |
-| Approval translation | native | ✓ | — | — | — | — | ✓ | — | n/a |
-| Usage probe (0086) | disabled | `/usage` | `/status` | — | — | `/usage` | `/usage show` | `/usage` | disabled |
+| Capability | smith | claude | codex | opencode | kimi | hermes | pi | grok | antigravity | shell |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Interactive / headless | both | both | both | interactive | interactive | both | both | both | both | PTY |
+| Structured chat events | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
+| ModelChanged | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓¹ | ✓ | n/a |
+| EffortChanged | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
+| Token split (0103) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | gap² | none³ | n/a |
+| Context gauge (0104) | ✓ | ✓ | ✓ | ✓ | ✓ | gap | ✓⁶ | ✓ | none³ | n/a |
+| USD cost | ✓ | headless only | — | gap⁴ | — | ✓ | ✓ | — | — | n/a |
+| Native resume | ✓ (own state) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | fresh shell |
+| Reset detection (0085) | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
+| Native fork | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | — | n/a |
+| Native subagent mirrors | n/a⁵ | ✓ | ✓ | — | — | gap | — | ✓ | ✓ | n/a |
+| MCP injection | native tools | ✓ | ✓ | ✓ | gap | gap | gap⁷ | gap | gap | — |
+| Approval translation | native | ✓ | — | — | — | — | — | ✓ | — | n/a |
+| Usage probe (0086) | disabled | `/usage` | `/status` | — | — | `/usage` | — | `/usage show` | `/usage` | disabled |
 
 ¹ grok reports the model, but its upstream `model_id` was observed frozen
 per session — a mid-session switch may go unreported (investigation note in
@@ -244,6 +244,11 @@ consume, still unwired.
 ⁴ opencode stores exact per-message USD `cost` in the same event the plugin
 already reads — a one-line add.
 ⁵ smith subagents are real construct sessions (spec 0014), not mirrors.
+⁶ pi states no context window in its session records, so the gauge shows
+bare usage without a denominator (its model catalog knows window sizes, but
+that is a model-name table, not a per-session report).
+⁷ pi has a JS extension system that could host construct's unified tools
+(the opencode pattern); unwired today.
 
 ## 4. Where each harness's data lives
 
@@ -259,6 +264,7 @@ short real session:
 | grok | `~/.grok/sessions/<cwd-enc>/<session>/` (`signals.json`, `updates.jsonl`, `chat_history.jsonl`) | `contextTokensUsed`/`contextWindowTokens`, `totalTokens` (unsplit), turn/tool counters, session summary |
 | hermes | `$HERMES_HOME/state.db` (`sessions`, `messages`) | source-tagged native id, model/reasoning config, full structured messages/tool calls, token split, estimated/actual USD cost |
 | antigravity | — | nothing usable found in print mode or logs |
+| pi | `<CONSTRUCT_SESSION_DATA_DIR>/pi-sessions/<ts>_<uuid>.jsonl` (private store the adapter selects via `--session-dir`; pi's global default is `~/.pi/agent/sessions/<cwd-slug>/`) | per-assistant-message `usage` (input/output/cacheRead/cacheWrite/reasoning + exact USD `cost.total`; `input` EXCLUDES cache reads), `model_change` / `thinking_level_change` records, `thinking`/`text`/`toolCall` content blocks, `toolResult` messages |
 
 ## 5. Verification checklist
 
