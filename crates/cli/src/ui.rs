@@ -170,6 +170,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.terminal_replayed_sessions_this_frame.clear();
     app.layout.dynamic_ui_popover_area = None;
     app.layout.dynamic_ui_scroll_metrics = None;
+    app.layout.suggestion_orb_hit = None;
+    app.layout.suggestion_anchor = None;
+    app.layout.suggestion_chip_hits.clear();
+    app.layout.suggestion_card_hits.clear();
     let area = f.area();
     match app.zoom {
         ZoomMode::View => {
@@ -333,6 +337,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
 }
 
 fn finish_frame(f: &mut Frame, app: &mut App) {
+    // Suggestion deck (spec 0109): the corner orb sits on the session
+    // view pane, the fan/stack overlay above every base pane — but both
+    // under the topmost modals below, which render after them.
+    if let Some(view) = app.layout.view_area {
+        crate::app::suggest_deck::render_suggestion_orb(f, view, app);
+    }
+    crate::app::suggest_deck::render_suggestion_overlay(f, app);
     // The session-picker dialog and the `/configure` dialog are the topmost
     // modals — drawn last so they sit over every base view (including
     // zoomed layouts, which return through here) and before
@@ -9575,6 +9586,8 @@ fn chat_event_kind(ev: &SessionEvent) -> ChatEventKind {
         SessionEvent::Pty { .. }
         | SessionEvent::PtyResize { .. }
         | SessionEvent::EditorState { .. }
+        // Ephemeral overlay state, never a transcript row.
+        | SessionEvent::Suggestions(_)
         // Prototype: hidden like today's `tui` ToolUse. The follow-up reads
         // `slash::COMMANDS[id].render` and shows SystemNote breadcrumbs.
         | SessionEvent::ClientCommand { .. }
@@ -9878,6 +9891,7 @@ fn format_chat_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>
         SessionEvent::Pty { .. }
         | SessionEvent::PtyResize { .. }
         | SessionEvent::EditorState { .. }
+        | SessionEvent::Suggestions(_)
         | SessionEvent::ClientCommand { .. }
         | SessionEvent::ToolApprovalResolved { .. }
         | SessionEvent::ApprovalModeChanged { .. }
@@ -10796,6 +10810,7 @@ fn shorten(s: &str, max: usize) -> String {
 
 pub fn short_event_label(ev: &SessionEvent) -> String {
     match ev {
+        SessionEvent::Suggestions(hand) => format!("suggestions {}", 1 + hand.verbs.len()),
         SessionEvent::NativeSubagentSnapshot { ids } => {
             format!("native-subagent-snapshot {}", ids.len())
         }

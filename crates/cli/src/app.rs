@@ -40,6 +40,7 @@ mod program_popup;
 mod session_picker;
 mod session_title_menu;
 mod session_title_rename;
+pub mod suggest_deck;
 mod tutorial;
 pub use configure::{
     harness_guidance, no_agent_harness_available, smith_method_guidance, ConfigurePopup,
@@ -800,6 +801,7 @@ fn chat_scroll_kind(ev: &SessionEvent) -> ChatScrollKind {
         SessionEvent::Pty { .. }
         | SessionEvent::PtyResize { .. }
         | SessionEvent::EditorState { .. }
+        | SessionEvent::Suggestions(_)
         | SessionEvent::ClientCommand { .. }
         | SessionEvent::ToolApprovalResolved { .. }
         | SessionEvent::ApprovalModeChanged { .. }
@@ -1782,6 +1784,11 @@ pub struct App {
     /// Latest browser preview per session, fed by `SessionEvent::BrowserPreview`
     /// and rendered as a top-right overlay in the terminal view.
     pub browser_previews: HashMap<String, BrowserPreviewState>,
+    /// Per-session suggestion deck (spec 0109), fed by
+    /// `SessionEvent::Suggestions` at turn end and rendered as the corner
+    /// orb / fan / card stack on the session view. Dropped the moment the
+    /// session runs again — a hand only describes the turn it was dealt for.
+    pub suggestions: HashMap<String, suggest_deck::SuggestionDeckState>,
     /// Decoded program-attachment images (spec 0099), keyed by path with the
     /// file's mtime so an overwritten attachment re-decodes. `None` records a
     /// failed decode, so a broken file isn't re-read every frame.
@@ -3304,6 +3311,15 @@ impl LineageBoxHit {
 pub struct LayoutSnapshot {
     pub list_area: Option<ratatui::layout::Rect>,
     pub view_area: Option<ratatui::layout::Rect>,
+    /// Suggestion-deck orb badge bounds from the last frame (spec 0109).
+    pub suggestion_orb_hit: Option<ratatui::layout::Rect>,
+    /// Session-view rect the deck overlay anchors its geometry to.
+    pub suggestion_anchor: Option<ratatui::layout::Rect>,
+    /// Fan chip bounds from the last frame: `(rect, fan_index)` where
+    /// index 0 is the top pick and 1.. are verbs.
+    pub suggestion_chip_hits: Vec<(ratatui::layout::Rect, usize)>,
+    /// Card-stack row bounds from the last frame: `(rect, card_index)`.
+    pub suggestion_card_hits: Vec<(ratatui::layout::Rect, usize)>,
     pub main_window_areas: Vec<WindowPaneHit>,
     pub main_window_dividers: Vec<WindowDividerHit>,
     pub pin_strip_area: Option<ratatui::layout::Rect>,
@@ -3924,6 +3940,7 @@ async fn run_with_socket_initial_selection(
         session_picker: None,
         program_popup: None,
         program_popups: HashMap::new(),
+        suggestions: HashMap::new(),
         program_view_memory: HashMap::new(),
         program_runs: HashMap::new(),
         program_run_dispatch: HashMap::new(),
@@ -7591,12 +7608,39 @@ impl App {
                             self.clear_pending_tool_approval(&payload.session_id, call_id);
                             self.dismiss_approval_prompt(&payload.session_id, call_id);
                         }
+                        // Suggestion hand arrived (spec 0109): store it and
+                        // auto-open the fan — the user explicitly requested
+                        // it via the orb, so no second activation needed.
+                        if let SessionEvent::Suggestions(hand) = &payload.event {
+                            self.suggestions
+                                .entry(payload.session_id.clone())
+                                .or_default()
+                                .deal(hand.clone());
+                        }
+                        // A new turn starting (or the session ending)
+                        // makes a dealt hand stale — drop it.
+                        match &payload.event {
+                            SessionEvent::Status {
+                                state: construct_protocol::SessionState::Running,
+                                ..
+                            }
+                            | SessionEvent::Message {
+                                role: construct_protocol::MessageRole::User,
+                                ..
+                            }
+                            | SessionEvent::Done { .. }
+                            | SessionEvent::Error { .. } => {
+                                self.suggestions.remove(&payload.session_id);
+                            }
+                            _ => {}
+                        }
                         if matches!(payload.event, SessionEvent::Reset) {
                             self.histories.remove(&payload.session_id);
                             self.block_hits.remove(&payload.session_id);
                             self.editor_states.remove(&payload.session_id);
                             self.agent_statuses.remove(&payload.session_id);
                             self.pending_tool_approvals.remove(&payload.session_id);
+                            self.suggestions.remove(&payload.session_id);
                             self.browser_previews.remove(&payload.session_id);
                             self.ui_panels.remove(&payload.session_id);
                             self.pty_activity.remove(&payload.session_id);
@@ -9236,6 +9280,11 @@ impl App {
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
         }
+        // Suggestion deck (spec 0109): orb toggle, fan chips, stack cards,
+        // and backdrop-close while the overlay is open.
+        if self.suggestion_deck_handle_click(col, row).await {
+            return;
+        }
         if let Some(menu) = self.session_title_menu.clone() {
             if let Some(action) = menu.item_at(col, row) {
                 self.run_session_title_menu_action(menu.session_id, action)
@@ -9926,6 +9975,12 @@ impl App {
                 return;
             }
         }
+        // Suggestion deck (spec 0109): consumes keys only while its
+        // fan/stack overlay is open; a printable key closes it and falls
+        // through so typing always wins.
+        if self.suggestion_deck_handle_key(&key).await {
+            return;
+        }
         // A pinned clip's inline terminal owns keyboard focus while pinned
         // (same tier as the program popup itself, checked first so the pinned
         // terminal — not the Program markdown editor — receives keystrokes).
@@ -10244,6 +10299,7 @@ impl App {
         self.tutorial_observe_action(action);
         match action {
             Quit => self.should_quit = true,
+            ToggleSuggestions => self.suggestion_deck_toggle().await,
             NextSession => self.step_selection(1).await,
             PrevSession => self.step_selection(-1).await,
             Refresh => {
@@ -13663,6 +13719,10 @@ mod tests {
         LayoutSnapshot {
             list_area: Some(Rect::new(0, 0, 20, 10)),
             view_area: Some(Rect::new(20, 0, 80, 20)),
+            suggestion_orb_hit: None,
+            suggestion_anchor: None,
+            suggestion_chip_hits: Vec::new(),
+            suggestion_card_hits: Vec::new(),
             main_window_areas: vec![WindowPaneHit {
                 id: 1,
                 area: Rect::new(20, 0, 80, 20),
@@ -13751,6 +13811,7 @@ mod tests {
             client,
             last_reported_view: None,
             sessions,
+            suggestions: HashMap::new(),
             groups: Vec::new(),
             selection: Selection::Session("s1".into()),
             focus: PaneFocus::View,

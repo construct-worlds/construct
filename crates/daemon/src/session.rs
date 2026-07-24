@@ -343,6 +343,13 @@ pub struct SessionEntry {
     /// once title-gen is claimed (`title_gen_attempted` flips to
     /// `true`); nothing is pushed after that point.
     pending_title_prompts: std::sync::Mutex<Vec<String>>,
+    /// Monotonic suggestion-generation counter (spec 0109). Bumped when a
+    /// turn ends and generation spawns; a finished generation broadcasts
+    /// its hand only if the counter still matches, so a newer turn — or a
+    /// user prompt racing the generator — silently discards a stale hand.
+    /// Also serves as the in-flight guard: a bump invalidates any older
+    /// run without needing a separate flag.
+    suggest_gen: AtomicU64,
     /// PTY-input accumulator used to derive the auto-title prompt for
     /// adapters that don't echo user input back as `SessionEvent::Message`
     /// events (shell / claude / codex interactive). Decodes printable
@@ -1630,6 +1637,7 @@ impl SessionManager {
                 unseen_activity: AtomicBool::new(false),
                 pty_burst_start_ms: AtomicI64::new(0),
                 resume_settling_since_ms: AtomicI64::new(0),
+                suggest_gen: AtomicU64::new(0),
                 osc11_tail: std::sync::Mutex::new(Vec::new()),
             };
             sessions.insert(s.id.clone(), Arc::new(entry));
@@ -4078,6 +4086,215 @@ impl SessionManager {
         });
     }
 
+    /// `session.suggest` (spec 0109): on-demand next-prompt suggestion
+    /// generation, kicked off when the user opens the suggestion orb —
+    /// never automatically. Returns whether generation started. The hand
+    /// arrives later as a broadcast `SessionEvent::Suggestions`; every
+    /// failure past this point is silent — suggestions are best-effort.
+    ///
+    /// Generation uses the target session's own harness: smith sessions
+    /// run the cheap `--suggest-mode` process one-shot; every other
+    /// harness gets a hidden probe session of the same harness (so it
+    /// uses the same credentials/subscription the user's session does).
+    pub async fn request_suggestions(self: &Arc<Self>, id: &str) -> Result<bool> {
+        if !self.config.suggest.enabled {
+            return Ok(false);
+        }
+        let entry = self
+            .get_entry(id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", id))?;
+        let harness = {
+            let s = entry.summary.read().await;
+            if s.kind != construct_protocol::SessionKind::User {
+                return Ok(false);
+            }
+            if s.state != SessionState::AwaitingInput {
+                return Ok(false);
+            }
+            s.harness.clone()
+        };
+        // Claim this generation slot; a new turn starting (which bumps
+        // the counter in `handle_event`) makes this run's result stale.
+        let my_gen = entry.suggest_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let events = match self.storage.read_transcript_tail(&entry.id, SUGGEST_CONTEXT_EVENTS) {
+            Ok(evs) if !evs.is_empty() => evs,
+            _ => return Ok(false),
+        };
+        let context = render_suggest_context(&events);
+        if context.trim().is_empty() {
+            return Ok(false);
+        }
+        let broadcast = self.broadcast.clone();
+        if harness == "smith" {
+            let Some(smith_adapter) = self.config.adapters.get("smith").cloned() else {
+                return Ok(false);
+            };
+            let binary_spec = smith_adapter
+                .binary
+                .clone()
+                .unwrap_or_else(|| "construct".to_string());
+            let prefix_args = smith_adapter.args.clone();
+            let Some(binary) = locate_binary(&binary_spec) else {
+                return Ok(false);
+            };
+            tokio::spawn(async move {
+                generate_suggestions(binary, prefix_args, entry, my_gen, context, broadcast)
+                    .await;
+            });
+        } else {
+            let mgr = self.clone();
+            tokio::spawn(async move {
+                mgr.generate_suggestions_via_probe(entry, my_gen, context, broadcast)
+                    .await;
+            });
+        }
+        Ok(true)
+    }
+
+    /// Same-harness suggestion generation (spec 0109): spawn a hidden
+    /// probe session running the target session's harness, wait for the
+    /// model's reply to land in the probe's structured transcript, parse
+    /// the hand, tear the probe down, and broadcast — unless a newer
+    /// turn made this run stale. The probe reuses the target's cwd so
+    /// harness-side trust/config resolution matches the user's session.
+    ///
+    /// For harnesses that fork natively (claude/codex/…), the probe is
+    /// created as a hidden *fork* of the target session: the harness
+    /// resumes the same native conversation, so the provider's prompt
+    /// cache already covers the entire history (the suggestion request
+    /// is one appended message, near-free on input tokens) and the model
+    /// predicts from full context instead of a rendered tail. Other
+    /// harnesses get a fresh probe fed the rendered transcript tail.
+    async fn generate_suggestions_via_probe(
+        self: Arc<Self>,
+        entry: Arc<SessionEntry>,
+        my_gen: u64,
+        context: String,
+        broadcast: tokio::sync::broadcast::Sender<BroadcastMsg>,
+    ) {
+        let now_ms = Utc::now().timestamp_millis();
+        let (harness, cwd, model, forked_from) = {
+            let s = entry.summary.read().await;
+            let native_fork = matches!(
+                s.harness.as_str(),
+                "claude" | "codex" | "opencode" | "grok" | "pi"
+            ) && s.has_pty
+                && s.mode.as_deref() != Some("headless");
+            let forked_from = native_fork.then(|| construct_protocol::ForkedFrom {
+                session_id: s.id.clone(),
+                transcript_seq: entry.transcript_count.load(Ordering::Relaxed),
+                at_ms: now_ms,
+                parent_busy_ms: s.busy_ms_at(now_ms),
+                parent_message_count: s.message_count,
+                parent_tokens: s.tokens,
+                is_reset_snapshot: false,
+            });
+            (s.harness.clone(), s.cwd.clone(), s.model.clone(), forked_from)
+        };
+        let prompt = if forked_from.is_some() {
+            // The forked native conversation already carries the history.
+            format!(
+                "{}\n\n(The transcript is this conversation itself.)\n\nJSON:",
+                construct_protocol::SuggestionHand::PROMPT_INSTRUCTIONS
+            )
+        } else {
+            format!(
+                "{}\n\nTranscript tail:\n\n{}\n\nJSON:",
+                construct_protocol::SuggestionHand::PROMPT_INSTRUCTIONS,
+                context
+            )
+        };
+        let create_params = construct_protocol::CreateSessionParams {
+            harness: harness.clone(),
+            cwd,
+            prompt: Some(prompt),
+            model,
+            title: Some("suggestion probe".to_string()),
+            mode: Some("interactive".to_string()),
+            pty_size: Some(construct_protocol::PtySize {
+                cols: 100,
+                rows: 40,
+            }),
+            worktree: false,
+            env: HashMap::new(),
+            args: Vec::new(),
+            kind: construct_protocol::SessionKind::UsageProbe,
+            parent_session_id: None,
+            group_id: None,
+            position_after_session_id: None,
+            forked_from,
+        };
+        let probe_id = match self.create(create_params).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::debug!(%harness, error = %e, "suggestion probe: create failed");
+                return;
+            }
+        };
+        let deadline = tokio::time::Instant::now() + SUGGEST_PROBE_TIMEOUT;
+        let mut hand: Option<construct_protocol::SuggestionHand> = None;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            // Stale already? Stop early and free the probe.
+            if entry.suggest_gen.load(Ordering::SeqCst) != my_gen || entry.is_deleted() {
+                break;
+            }
+            let evs = match self.storage.read_transcript_tail(&probe_id, 40) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for te in evs.iter().rev() {
+                if let SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text,
+                } = &te.event
+                {
+                    if let Ok(h) = construct_protocol::SuggestionHand::parse_loose(text) {
+                        hand = Some(h);
+                        break;
+                    }
+                }
+            }
+            if hand.is_some() {
+                break;
+            }
+            // Probe reached a terminal state without a parseable reply —
+            // one full transcript pass already ran above, so give up.
+            let probe_state = match self.get_entry(&probe_id).await {
+                Some(p) => p.summary.read().await.state,
+                None => break,
+            };
+            if matches!(probe_state, SessionState::Done | SessionState::Errored) {
+                break;
+            }
+        }
+        if let Err(e) = self.delete(&probe_id).await {
+            tracing::debug!(%probe_id, error = %e, "suggestion probe: delete failed");
+        }
+        let Some(hand) = hand else {
+            tracing::debug!(session = %entry.id, %harness, "suggestion probe: no usable reply");
+            return;
+        };
+        if entry.suggest_gen.load(Ordering::SeqCst) != my_gen || entry.is_deleted() {
+            return;
+        }
+        {
+            let s = entry.summary.read().await;
+            if s.state != SessionState::AwaitingInput {
+                return;
+            }
+        }
+        let seq = entry.transcript_count.load(Ordering::Relaxed);
+        let _ = broadcast.send(BroadcastMsg::Event(EventNotificationPayload {
+            session_id: entry.id.clone(),
+            at: Utc::now(),
+            event: SessionEvent::Suggestions(hand),
+            seq,
+        }));
+        tracing::info!(session = %entry.id, %harness, "suggestion hand broadcast (probe)");
+    }
+
     pub async fn interrupt(&self, id: &str) -> Result<()> {
         let entry = self
             .get_entry(id)
@@ -5004,6 +5221,7 @@ impl SessionManager {
             unseen_activity: AtomicBool::new(false),
             pty_burst_start_ms: AtomicI64::new(0),
             resume_settling_since_ms: AtomicI64::new(0),
+            suggest_gen: AtomicU64::new(0),
             osc11_tail: std::sync::Mutex::new(Vec::new()),
         });
 
@@ -5304,6 +5522,234 @@ async fn generate_auto_title(
         session: snapshot,
     }));
     tracing::info!(session = %entry.id, %title, "auto-title applied");
+}
+
+/// How many transcript-tail events feed suggestion generation (spec 0109).
+/// Enough to cover a long agent turn (tool calls + results) plus the user
+/// prompts before it; the rendered text is further capped by the
+/// suggest-mode process itself.
+const SUGGEST_CONTEXT_EVENTS: usize = 80;
+
+/// Hard cap on one same-harness suggestion probe's lifetime: adapter
+/// spawn plus a full model turn over a long prompt. Past this the probe
+/// is torn down and the attempt silently dropped.
+const SUGGEST_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Render a transcript tail into the plain-text context the suggest-mode
+/// one-shot consumes. Structured events (messages, tool activity, diffs)
+/// are preferred; for PTY harnesses whose tail is mostly raw terminal
+/// bytes, a cleaned tail of that output is appended so claude/codex/shell
+/// sessions still produce usable context.
+fn render_suggest_context(events: &[construct_protocol::TimestampedEvent]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut structured_signal = 0usize;
+    let mut pty_text = String::new();
+    let trunc = |s: &str, max: usize| -> String {
+        let t = s.trim();
+        if t.chars().count() <= max {
+            t.to_string()
+        } else {
+            let cut: String = t.chars().take(max).collect();
+            format!("{cut}…")
+        }
+    };
+    for te in events {
+        match &te.event {
+            SessionEvent::Message { role, text } => {
+                let tag = match role {
+                    MessageRole::User => "USER",
+                    MessageRole::Assistant => "AGENT",
+                    MessageRole::System => "SYSTEM",
+                    MessageRole::Tool => "TOOL",
+                };
+                lines.push(format!("{tag}: {}", trunc(text, 1200)));
+                structured_signal += 1;
+            }
+            SessionEvent::ToolUse { tool, args, .. } => {
+                lines.push(format!("TOOL CALL {tool}: {}", trunc(&args.to_string(), 200)));
+                structured_signal += 1;
+            }
+            SessionEvent::ToolResult { tool, ok, output, .. } => {
+                lines.push(format!(
+                    "TOOL RESULT {tool} ({}): {}",
+                    if *ok { "ok" } else { "failed" },
+                    trunc(output, 300)
+                ));
+                structured_signal += 1;
+            }
+            SessionEvent::Diff { patch } => {
+                lines.push(format!("DIFF:\n{}", trunc(patch, 1500)));
+                structured_signal += 1;
+            }
+            SessionEvent::Error { message } => {
+                lines.push(format!("ERROR: {}", trunc(message, 300)));
+            }
+            SessionEvent::Pty { .. } => {
+                if let Some(bytes) = te.event.pty_bytes() {
+                    pty_text.push_str(&strip_terminal_bytes(&bytes));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Raw terminal output is noisy; only lean on it when the structured
+    // stream is too thin to describe the turn (PTY-only harnesses).
+    if structured_signal < 3 && !pty_text.trim().is_empty() {
+        let tail: String = {
+            let chars: Vec<char> = pty_text.chars().collect();
+            let start = chars.len().saturating_sub(4000);
+            chars[start..].iter().collect()
+        };
+        lines.push(format!("TERMINAL OUTPUT (most recent last):\n{}", tail.trim()));
+    }
+    lines.join("\n")
+}
+
+/// Strip ANSI escape sequences and non-printable bytes from raw PTY
+/// output, keeping plain text and newlines. Deliberately crude: this
+/// feeds a language model, not a terminal emulator — a mangled cursor
+/// dance degrades into whitespace, which is fine.
+fn strip_terminal_bytes(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let mut iter = bytes.iter().copied().peekable();
+    while let Some(b) = iter.next() {
+        match b {
+            0x1b => {
+                // ESC sequence: skip CSI (`ESC [ ... final`), OSC
+                // (`ESC ] ... BEL/ST`), and single-char escapes.
+                match iter.next() {
+                    Some(b'[') => {
+                        for nb in iter.by_ref() {
+                            if (0x40..=0x7e).contains(&nb) {
+                                break;
+                            }
+                        }
+                    }
+                    Some(b']') => {
+                        let mut prev = 0u8;
+                        for nb in iter.by_ref() {
+                            if nb == 0x07 || (prev == 0x1b && nb == b'\\') {
+                                break;
+                            }
+                            prev = nb;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            b'\n' => out.push('\n'),
+            b'\r' | 0x07 | 0x08 => {}
+            0x20..=0x7e => out.push(b as char),
+            0x80..=0xff => {
+                // Pass UTF-8 continuation content through best-effort by
+                // buffering the byte; invalid sequences degrade to nothing.
+                out.push(b as char);
+            }
+            _ => {}
+        }
+    }
+    // Collapse runs of blank lines the stripping leaves behind.
+    let mut cleaned = String::new();
+    let mut blank_run = 0usize;
+    for line in out.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run > 1 {
+                continue;
+            }
+        } else {
+            blank_run = 0;
+        }
+        cleaned.push_str(line.trim_end());
+        cleaned.push('\n');
+    }
+    cleaned
+}
+
+/// Shell out to `construct-adapter-smith --suggest-mode`, feed the rendered
+/// transcript context on stdin, and broadcast the returned hand — unless a
+/// newer turn made this run stale. Best-effort: any failure just means no
+/// suggestions for this turn.
+async fn generate_suggestions(
+    binary: PathBuf,
+    prefix_args: Vec<String>,
+    entry: Arc<SessionEntry>,
+    my_gen: u64,
+    context: String,
+    broadcast: tokio::sync::broadcast::Sender<BroadcastMsg>,
+) {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+    let child = tokio::process::Command::new(&binary)
+        .args(&prefix_args)
+        .arg("--suggest-mode")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(error = ?e, "suggest-mode spawn failed");
+            return;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(context.as_bytes()).await.is_err() {
+            return;
+        }
+        drop(stdin);
+    }
+    let out = match tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            tracing::debug!(error = ?e, "suggest-mode wait failed");
+            return;
+        }
+        Err(_) => {
+            tracing::debug!(session = %entry.id, "suggest-mode timed out");
+            return;
+        }
+    };
+    if !out.status.success() {
+        tracing::debug!(
+            session = %entry.id,
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "suggest-mode exit non-zero; skipping",
+        );
+        return;
+    }
+    let hand: construct_protocol::SuggestionHand =
+        match serde_json::from_slice(&out.stdout) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!(session = %entry.id, error = ?e, "suggest-mode output parse failed");
+                return;
+            }
+        };
+    if entry.is_deleted() {
+        return;
+    }
+    // Stale if a newer turn ended (counter bumped) or the session moved
+    // on from AwaitingInput while we generated.
+    if entry.suggest_gen.load(Ordering::SeqCst) != my_gen {
+        return;
+    }
+    {
+        let s = entry.summary.read().await;
+        if s.state != SessionState::AwaitingInput {
+            return;
+        }
+    }
+    let seq = entry.transcript_count.load(Ordering::Relaxed);
+    let _ = broadcast.send(BroadcastMsg::Event(EventNotificationPayload {
+        session_id: entry.id.clone(),
+        at: Utc::now(),
+        event: SessionEvent::Suggestions(hand),
+        seq,
+    }));
+    tracing::info!(session = %entry.id, "suggestion hand broadcast");
 }
 
 /// PTY harnesses whose child is a full-screen TUI that holds the terminal's
@@ -6173,6 +6619,7 @@ mod tests {
             unseen_activity: AtomicBool::new(false),
             pty_burst_start_ms: AtomicI64::new(0),
             resume_settling_since_ms: AtomicI64::new(0),
+            suggest_gen: AtomicU64::new(0),
             osc11_tail: std::sync::Mutex::new(Vec::new()),
         })
     }
@@ -8175,6 +8622,7 @@ mod tests {
             unseen_activity: AtomicBool::new(false),
             pty_burst_start_ms: AtomicI64::new(0),
             resume_settling_since_ms: AtomicI64::new(0),
+            suggest_gen: AtomicU64::new(0),
             osc11_tail: std::sync::Mutex::new(Vec::new()),
         });
         manager
@@ -8323,6 +8771,7 @@ mod tests {
             unseen_activity: AtomicBool::new(false),
             pty_burst_start_ms: AtomicI64::new(0),
             resume_settling_since_ms: AtomicI64::new(0),
+            suggest_gen: AtomicU64::new(0),
             osc11_tail: std::sync::Mutex::new(Vec::new()),
         });
         manager
@@ -8532,6 +8981,7 @@ mod tests {
                 unseen_activity: AtomicBool::new(false),
                 pty_burst_start_ms: AtomicI64::new(0),
                 resume_settling_since_ms: AtomicI64::new(0),
+                suggest_gen: AtomicU64::new(0),
                 osc11_tail: std::sync::Mutex::new(Vec::new()),
             })
         };
@@ -8625,6 +9075,7 @@ mod tests {
                 unseen_activity: AtomicBool::new(false),
                 pty_burst_start_ms: AtomicI64::new(0),
                 resume_settling_since_ms: AtomicI64::new(0),
+                suggest_gen: AtomicU64::new(0),
                 osc11_tail: std::sync::Mutex::new(Vec::new()),
             })
         };
@@ -8769,6 +9220,7 @@ mod tests {
             unseen_activity: AtomicBool::new(false),
             pty_burst_start_ms: AtomicI64::new(0),
             resume_settling_since_ms: AtomicI64::new(Utc::now().timestamp_millis()),
+            suggest_gen: AtomicU64::new(0),
             osc11_tail: std::sync::Mutex::new(Vec::new()),
         });
         manager
@@ -8834,6 +9286,7 @@ mod tests {
                 unseen_activity: AtomicBool::new(false),
                 pty_burst_start_ms: AtomicI64::new(0),
                 resume_settling_since_ms: AtomicI64::new(0),
+                suggest_gen: AtomicU64::new(0),
                 osc11_tail: std::sync::Mutex::new(Vec::new()),
             })
         };
@@ -8947,6 +9400,7 @@ mod tests {
                 unseen_activity: AtomicBool::new(false),
                 pty_burst_start_ms: AtomicI64::new(0),
                 resume_settling_since_ms: AtomicI64::new(0),
+                suggest_gen: AtomicU64::new(0),
                 osc11_tail: std::sync::Mutex::new(Vec::new()),
             })
         };
@@ -9033,6 +9487,7 @@ mod tests {
                 unseen_activity: AtomicBool::new(false),
                 pty_burst_start_ms: AtomicI64::new(0),
                 resume_settling_since_ms: AtomicI64::new(0),
+                suggest_gen: AtomicU64::new(0),
                 osc11_tail: std::sync::Mutex::new(Vec::new()),
             })
         };

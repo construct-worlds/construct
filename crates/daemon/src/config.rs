@@ -183,6 +183,18 @@ enabled = true
 # The CONSTRUCT_PROGRAM_TEMPLATES_DIR env var overrides this.
 # templates_dir = "/path/to/my/program-templates"
 
+# ── Next-prompt suggestions ──────────────────────────────────────────────────
+#
+# When a user session's turn ends, the daemon generates a hand of suggested
+# next prompts (spec 0109) with a one-shot smith model call over the
+# session's transcript tail. Best-effort: with no configured smith
+# credential, generation silently no-ops.
+
+# [suggest]
+# Set to false to disable suggestion generation entirely.
+# Default: true
+# enabled = true
+
 # ── Smith named model profiles ────────────────────────────────────────────────
 #
 # Named endpoint profiles for the smith harness. Reference at runtime with
@@ -373,6 +385,30 @@ pub struct Config {
     pub orchestrator: OrchestratorConfig,
     #[serde(default)]
     pub program: ProgramConfig,
+    #[serde(default)]
+    pub suggest: SuggestConfig,
+}
+
+/// Next-prompt suggestion generation (spec 0109).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SuggestConfig {
+    /// Kill switch for turn-end suggestion generation. Default: `true`
+    /// (generation is best-effort and silently no-ops without a smith
+    /// credential, so the default costs nothing when unconfigured).
+    #[serde(default = "default_suggest_enabled")]
+    pub enabled: bool,
+}
+
+fn default_suggest_enabled() -> bool {
+    true
+}
+
+impl Default for SuggestConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_suggest_enabled(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

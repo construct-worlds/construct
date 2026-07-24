@@ -342,6 +342,10 @@ enum AdapterCommand {
         /// Auto-title mode: generate a short title for the given prompt.
         #[arg(long)]
         title_mode: Option<String>,
+        /// Suggestion mode (spec 0109): read a transcript tail from stdin,
+        /// print a generated next-prompt hand as JSON.
+        #[arg(long)]
+        suggest_mode: bool,
     },
 }
 
@@ -744,11 +748,18 @@ async fn main() -> Result<()> {
             }
             AdapterCommand::Smith {
                 title_mode: Some(prompt),
+                ..
             } => {
                 construct_adapter_smith::run_title_mode(&prompt).await?;
                 Ok(())
             }
-            AdapterCommand::Smith { title_mode: None } => {
+            AdapterCommand::Smith {
+                suggest_mode: true, ..
+            } => {
+                construct_adapter_smith::run_suggest_mode().await?;
+                Ok(())
+            }
+            AdapterCommand::Smith { .. } => {
                 construct_adapter_smith::run().await?;
                 Ok(())
             }

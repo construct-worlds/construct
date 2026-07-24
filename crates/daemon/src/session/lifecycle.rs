@@ -253,6 +253,7 @@ impl SessionManager {
             unseen_activity: AtomicBool::new(false),
             pty_burst_start_ms: AtomicI64::new(0),
             resume_settling_since_ms: AtomicI64::new(0),
+            suggest_gen: AtomicU64::new(0),
             osc11_tail: std::sync::Mutex::new(Vec::new()),
         });
 
