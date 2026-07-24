@@ -4126,7 +4126,11 @@ impl SessionManager {
             return Ok(false);
         }
         let broadcast = self.broadcast.clone();
-        if harness == "smith" {
+        // Smith generates through its own cheap process one-shot. Shell has
+        // no model at all — "same harness" is impossible — so it borrows the
+        // smith one-shot too rather than spawning a probe that can never
+        // answer.
+        if harness == "smith" || harness == "shell" {
             let Some(smith_adapter) = self.config.adapters.get("smith").cloned() else {
                 return Ok(false);
             };
