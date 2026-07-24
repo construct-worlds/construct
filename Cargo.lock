@@ -680,6 +680,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-adapter-pi"
+version = "0.15.4"
+dependencies = [
+ "anyhow",
+ "construct-adapter-common",
+ "construct-protocol",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "construct-adapter-shell"
 version = "0.15.4"
 dependencies = [
@@ -734,6 +746,7 @@ dependencies = [
  "construct-adapter-hermes",
  "construct-adapter-kimi",
  "construct-adapter-opencode",
+ "construct-adapter-pi",
  "construct-adapter-shell",
  "construct-adapter-smith",
  "construct-client",

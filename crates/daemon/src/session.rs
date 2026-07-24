@@ -2323,6 +2323,7 @@ impl SessionManager {
                     std::path::Path::new(".local/bin/hermes"),
                 ),
             ),
+            "pi" => probe_wrapper_cli("CONSTRUCT_PI_CMD", "CONSTRUCT_PI_BIN", "pi"),
             "smith" => probe_smith(&self.availability_cache).await,
             _ => probe_generic_adapter(binary_spec, resolved_binary),
         }
@@ -4871,6 +4872,7 @@ impl SessionManager {
             "grok" => Some("grok_session_id.txt"),
             "kimi" => Some("kimi_session_id.txt"),
             "hermes" => Some("hermes_session_id.txt"),
+            "pi" => Some("pi_session_id.txt"),
             _ => None,
         }
     }
@@ -5365,7 +5367,7 @@ fn effective_mode(params: &CreateSessionParams) -> String {
 fn builtin_harness_capabilities(name: &str) -> construct_protocol::Capabilities {
     match name {
         "shell" | "claude" | "codex" | "opencode" | "antigravity" | "agy" | "grok" | "kimi"
-        | "hermes" | "smith" => {
+        | "hermes" | "pi" | "smith" => {
             construct_protocol::Capabilities {
                 supports_pty: true,
                 ..Default::default()
@@ -9148,6 +9150,7 @@ mod tests {
             "grok",
             "kimi",
             "hermes",
+            "pi",
             "smith",
         ] {
             assert!(

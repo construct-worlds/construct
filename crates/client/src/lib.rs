@@ -1255,13 +1255,14 @@ impl Default for ForkOptions {
 /// id and the harness forks it byte-for-byte (claude: `--resume <id>
 /// --fork-session`; codex: `codex fork <id>`; opencode: `--session <id>
 /// --fork`; grok: `-r <id>
-/// --fork-session` — wired through the daemon's session lifecycle). For
+/// --fork-session`; pi: `--fork <session-file>` — wired through the
+/// daemon's session lifecycle). For
 /// these, `fork_session` skips the rendered seed — the harness already
 /// holds the full context with better fidelity. Antigravity has no native
 /// fork primitive (only in-place `--conversation` resume, backed by an
 /// indexed store a state-copy would desync), so it keeps the seed.
 fn harness_forks_natively(harness: &str) -> bool {
-    matches!(harness, "claude" | "codex" | "opencode" | "grok")
+    matches!(harness, "claude" | "codex" | "opencode" | "grok" | "pi")
 }
 
 fn render_fork_seed(

@@ -25,6 +25,7 @@ developer-facing integration checklist lives in
 | `antigravity` | The Antigravity CLI | You want Antigravity sessions inside the same UI and daemon. |
 | `kimi` | The Kimi Code CLI | You already use Kimi Code and want its native TUI inside the same construct session fleet. |
 | `hermes` | The Hermes Agent CLI | You use Hermes for coding and want its native UI, persisted sessions, and usage data in the same construct fleet. |
+| `pi` | The pi coding agent CLI | You already use pi and want it inside the same construct UI and session fleet. |
 
 Create a session with:
 
@@ -35,6 +36,7 @@ construct new codex "implement the failing test"
 construct new opencode "implement the failing test"
 construct new kimi "implement the failing test"
 construct new hermes "implement the failing test"
+construct new pi "implement the failing test"
 ```
 
 By default, `construct new ...` creates an interactive session and opens the TUI
@@ -88,7 +90,7 @@ See [smith built-in agent](smith.md) for details.
 
 ### CLI-backed harnesses
 
-`claude`, `codex`, `opencode`, `antigravity`, `grok`, `kimi`, and `hermes` wrap existing CLIs. Use them when you want
+`claude`, `codex`, `opencode`, `antigravity`, `grok`, `kimi`, `hermes`, and `pi` wrap existing CLIs. Use them when you want
 those tools exactly as installed on your machine, but inside the same construct
 fleet.
 
@@ -139,8 +141,9 @@ construct new --no-tui claude
 construct new smith --mode headless "summarize the last run"
 ```
 
-`smith`, `claude`, `codex`, `antigravity`, and `hermes` support both modes. `opencode` and
-`kimi` are interactive-only and always run their native TUIs. `shell` always
+`smith`, `claude`, `codex`, `antigravity`, `hermes`, and `pi` support both modes.
+`opencode` and `kimi` are interactive-only and always run their native TUIs.
+`shell` always
 owns a PTY (there is no structured "headless" shell), so it presents a terminal
 regardless of the mode label.
 
