@@ -11,7 +11,7 @@ A newly forked session initially displays a provisional title derived from its s
 
 The provisional state is durable across daemon restarts. Any explicit user rename before automatic generation completes opts the session out, including clearing the title; automatic generation must not overwrite that user choice.
 
-Leading slash commands continue to defer generation until the first non-command prompt, following the normal session auto-title rules.
+Leading slash commands are excluded from automatic-title input and defer generation until the first non-command prompt, following the normal session auto-title rules.
 
 ## Reason
 
@@ -25,4 +25,4 @@ Clients creating lineage forks must use the normal fork relationship. The daemon
 
 - Forking `Investigate cache misses` initially shows `(fork) Investigate cache misses`; entering `Compare Redis and in-memory latency` generates a new title from that prompt.
 - Renaming the empty fork to `Redis comparison` before sending its first prompt preserves `Redis comparison`.
-- Entering `/model sonnet` first keeps the provisional title; the next ordinary prompt triggers generation using the accumulated prompt context.
+- Entering `/model sonnet` first keeps the provisional title; the next ordinary prompt triggers generation using only that ordinary prompt, without `/model sonnet` in the title-generation input.

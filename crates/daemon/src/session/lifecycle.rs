@@ -245,7 +245,6 @@ impl SessionManager {
             title_gen_attempted: AtomicBool::new(
                 summary.title.is_some() && !summary.auto_title_pending,
             ),
-            pending_title_prompts: std::sync::Mutex::new(Vec::new()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
             pty_input_queue: std::sync::Mutex::new(None),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
