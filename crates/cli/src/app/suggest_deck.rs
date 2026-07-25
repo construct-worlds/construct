@@ -29,16 +29,21 @@ const ORB_PULSE_MS: u128 = 4_000;
 /// before the orb gives up and returns to idle (matches the daemon's
 /// probe cap).
 const REQUEST_STALE_MS: u128 = 125_000;
-/// Orb morph frames while generating — a diamond "breathing" open and
-/// closed with a sparkle at the peak.
-const ORB_MORPH: [&str; 6] = ["◇", "◈", "◆", "✦", "◆", "◈"];
-/// Occasional idle glint: the same sweep played once every
-/// [`ORB_GLINT_PERIOD_MS`] so the resting orb feels alive without
-/// being busy.
-const ORB_GLINT: [&str; 7] = ["◇", "◈", "◆", "✦", "◆", "◈", "◇"];
-const ORB_GLINT_PERIOD_MS: u128 = 8_000;
-const ORB_GLINT_FRAME_MS: u128 = 180;
-const ORB_IDLE_GLYPH: &str = "◇";
+/// The orb is a tiny face. Resting it watches the session; every few
+/// seconds it blinks, and every third cycle it winks instead. While
+/// the model thinks its moon-phase eyes spin; a dealt hand gets
+/// sparkle eyes.
+const ORB_FACE_IDLE: &str = "(◕‿◕)";
+const ORB_FACE_BLINK: &str = "(−‿−)";
+const ORB_FACE_WINK: &str = "(◕‿−)";
+const ORB_FACE_READY: &str = "(✦‿✦)";
+const ORB_FACE_OPEN: &str = "(^‿^)";
+/// Spinning-eye frames while generating (moon phases going around).
+const ORB_FACE_THINK: [&str; 4] = ["(◐‿◐)", "(◓‿◓)", "(◑‿◑)", "(◒‿◒)"];
+/// One blink (or wink) per period keeps the face alive without nagging.
+const ORB_BLINK_PERIOD_MS: u128 = 8_000;
+const ORB_BLINK_MS: u128 = 240;
+const ORB_WINK_MS: u128 = 380;
 
 /// Milliseconds on a process-wide clock for orb animation phases. All
 /// orbs share the phase — deliberate, so multiple visible panes glint
@@ -395,23 +400,26 @@ pub(crate) fn render_suggestion_orb(f: &mut Frame, area: Rect, app: &mut App) {
     let generating = deck.map(|d| d.generating()).unwrap_or(false);
     let t = orb_ms();
     let label = if open {
-        " ◆ ✕ ".to_string()
+        format!(" {ORB_FACE_OPEN} ✕ ")
     } else if has_hand {
-        format!(" ✦ {} ", deck.map(|d| d.fan_len()).unwrap_or(0))
+        format!(" {ORB_FACE_READY} {} ", deck.map(|d| d.fan_len()).unwrap_or(0))
     } else if generating {
-        // Breathing diamond + creeping dots while the model thinks.
-        let g = ORB_MORPH[(t / 150) as usize % ORB_MORPH.len()];
+        // Spinning moon-phase eyes + creeping dots while the model thinks.
+        let face = ORB_FACE_THINK[(t / 180) as usize % ORB_FACE_THINK.len()];
         let dots = ["   ", "·  ", "·· ", "···"][(t / 400) as usize % 4];
-        format!(" {g} thinking{dots} ")
+        format!(" {face} thinking{dots} ")
     } else {
-        // Resting orb, with a short glint sweep every few seconds.
-        let cycle = t % ORB_GLINT_PERIOD_MS;
-        let g = if cycle < ORB_GLINT.len() as u128 * ORB_GLINT_FRAME_MS {
-            ORB_GLINT[(cycle / ORB_GLINT_FRAME_MS) as usize]
+        // Resting face: blink once per period, wink on every third.
+        let cycle = t % ORB_BLINK_PERIOD_MS;
+        let period = t / ORB_BLINK_PERIOD_MS;
+        let face = if period % 3 == 2 && cycle < ORB_WINK_MS {
+            ORB_FACE_WINK
+        } else if period % 3 != 2 && cycle < ORB_BLINK_MS {
+            ORB_FACE_BLINK
         } else {
-            ORB_IDLE_GLYPH
+            ORB_FACE_IDLE
         };
-        format!(" {g} suggest ")
+        format!(" {face} suggest ")
     };
     let w = label.chars().count() as u16;
     // Inset 2 cols from the right edge: the terminal scrollbar owns the
