@@ -8833,6 +8833,11 @@ impl App {
             // already routes in-modal clicks to the modal and out-of-modal
             // clicks to dismissal.
             && self.layout.modal_area.is_none()
+            // The suggestion orb and its open fan/stack overlay (spec 0109)
+            // paint over the pane and must win over a mouse-grabbing child
+            // (e.g. Claude Code fullscreen) — otherwise the child swallows
+            // the very click that opens the deck.
+            && !self.mouse_over_suggestion_deck(ev.column, ev.row)
             && self.forward_mouse_to_child(&ev)
         {
             return;

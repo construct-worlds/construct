@@ -240,6 +240,31 @@ impl App {
         }
     }
 
+    /// True when the pointer is over the suggestion orb or the open
+    /// fan/stack overlay. `on_mouse` checks this before piping events
+    /// into a mouse-grabbing child PTY (claude fullscreen), which would
+    /// otherwise swallow the very click that operates the deck. While
+    /// the overlay is open the whole pane acts as its backdrop, so every
+    /// position counts as "over".
+    pub(crate) fn mouse_over_suggestion_deck(&self, col: u16, row: u16) -> bool {
+        let over = |r: &Rect| -> bool {
+            col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+        };
+        if self.layout.suggestion_orb_hit.as_ref().is_some_and(over) {
+            return true;
+        }
+        if self.layout.suggestion_chip_hits.iter().any(|(r, _)| over(r)) {
+            return true;
+        }
+        if self.layout.suggestion_card_hits.iter().any(|(r, _)| over(r)) {
+            return true;
+        }
+        self.selected_id()
+            .and_then(|sid| self.suggestions.get(&sid))
+            .map(|d| d.open != DeckOpen::Closed && d.hand.is_some())
+            .unwrap_or(false)
+    }
+
     /// Mouse intake. Returns true when the click was consumed.
     pub(crate) async fn suggestion_deck_handle_click(&mut self, col: u16, row: u16) -> bool {
         let hit = |r: &Rect| -> bool {
@@ -418,16 +443,41 @@ pub(crate) fn render_suggestion_overlay(f: &mut Frame, app: &mut App) {
                 .map(|t| (t.elapsed().as_millis() / CHIP_REVEAL_MS) as usize + 1)
                 .unwrap_or(n)
                 .min(n);
-            // Quarter-arc geometry, aspect-corrected for ~1:2 cells: chips
-            // sit on fixed rows every 2 cells going up, and bend left with
-            // the circle as they rise. Right edges anchor to the arc.
-            let ry = (2 * (n + 1)) as f32;
-            let rx = ry * 2.2;
+            // True quarter-circle fan around the corner orb: chip 0 sits
+            // mostly LEFT of the orb, the last chip mostly ABOVE it, and
+            // the rest sweep the arc between. The x-radius is ~2.6× the
+            // y-radius to correct for ~1:2 terminal cell aspect. Panes too
+            // short for the arc fall back to a compact stair stack.
+            let ry = ((n as u16) + 4)
+                .min(area.height.saturating_sub(3))
+                .max(3);
+            let rx = (f32::from(ry) * 2.6)
+                .round()
+                .min(f32::from(area.width.saturating_sub(24).max(8))) as u16;
+            let short = area.height < (n as u16) * 2 + 5;
+            let mut rows_used: Vec<u16> = Vec::new();
             let mut chips: Vec<(Rect, usize, Line)> = Vec::new();
             for i in 0..n.min(revealed) {
-                let dy = (2 * (i + 1)) as u16;
-                let s = f32::from(dy) / ry;
-                let dx = (rx * (1.0 - (1.0 - s * s).max(0.0).sqrt())).round() as u16;
+                let (dx, mut dy) = if short {
+                    ((2 * i) as u16, (i + 2) as u16)
+                } else {
+                    // θ sweeps 15°..85° across the chips.
+                    let t = if n == 1 {
+                        0.5
+                    } else {
+                        i as f32 / (n - 1) as f32
+                    };
+                    let th = (15.0 + 70.0 * t).to_radians();
+                    (
+                        (f32::from(rx) * th.cos()).round() as u16,
+                        ((f32::from(ry) * th.sin()).round() as u16).max(2),
+                    )
+                };
+                // One chip per row, whatever the rounding did.
+                while rows_used.contains(&dy) {
+                    dy += 1;
+                }
+                rows_used.push(dy);
                 let (text, color) = if i == 0 {
                     (format!("▶ {}", trunc(&hand.top.text, 44)), accent)
                 } else {
@@ -436,7 +486,9 @@ pub(crate) fn render_suggestion_overlay(f: &mut Frame, app: &mut App) {
                 };
                 let label = format!(" {text} ");
                 let w = (label.chars().count() as u16).min(area.width.saturating_sub(2));
-                let right = orb.x + orb.width.saturating_sub(1);
+                // The chip's RIGHT edge lands on the arc point, dx cells
+                // left of the orb's right edge.
+                let right = orb.x + orb.width;
                 let x = right.saturating_sub(dx).saturating_sub(w).max(area.x + 1);
                 let y = orb.y.saturating_sub(dy).max(area.y);
                 let mut style = Style::default().fg(color).add_modifier(Modifier::BOLD);
