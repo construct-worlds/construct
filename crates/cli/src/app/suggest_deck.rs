@@ -25,11 +25,29 @@ use std::time::Instant;
 const CHIP_REVEAL_MS: u128 = 80;
 /// How long the orb pulses after a fresh hand is dealt.
 const ORB_PULSE_MS: u128 = 4_000;
-/// How long a pending `session.suggest` shows the spinner before the
-/// orb gives up and returns to idle (matches the daemon's probe cap).
+/// How long a pending `session.suggest` shows the thinking animation
+/// before the orb gives up and returns to idle (matches the daemon's
+/// probe cap).
 const REQUEST_STALE_MS: u128 = 125_000;
-/// Spinner frames while generation is in flight.
-const SPINNER: [&str; 4] = ["⠋", "⠙", "⠸", "⠴"];
+/// Orb morph frames while generating — a diamond "breathing" open and
+/// closed with a sparkle at the peak.
+const ORB_MORPH: [&str; 6] = ["◇", "◈", "◆", "✦", "◆", "◈"];
+/// Occasional idle glint: the same sweep played once every
+/// [`ORB_GLINT_PERIOD_MS`] so the resting orb feels alive without
+/// being busy.
+const ORB_GLINT: [&str; 7] = ["◇", "◈", "◆", "✦", "◆", "◈", "◇"];
+const ORB_GLINT_PERIOD_MS: u128 = 8_000;
+const ORB_GLINT_FRAME_MS: u128 = 180;
+const ORB_IDLE_GLYPH: &str = "◇";
+
+/// Milliseconds on a process-wide clock for orb animation phases. All
+/// orbs share the phase — deliberate, so multiple visible panes glint
+/// in unison instead of flickering out of step.
+fn orb_ms() -> u128 {
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeckOpen {
@@ -160,18 +178,20 @@ impl App {
             }
             KeyCode::Up => {
                 match &mut deck.open {
-                    DeckOpen::Fan { sel } | DeckOpen::Stack { sel, .. } => {
-                        *sel = sel.saturating_sub(1)
+                    // The fan grows UPWARD from the orb (chip 0 sits at the
+                    // bottom of the arc), so Up walks toward higher indices.
+                    DeckOpen::Fan { sel } => {
+                        *sel = (*sel + 1).min(hand.verbs.len());
                     }
+                    // The stack lists cards top-to-bottom, so Up is index-down.
+                    DeckOpen::Stack { sel, .. } => *sel = sel.saturating_sub(1),
                     DeckOpen::Closed => {}
                 }
                 true
             }
             KeyCode::Down => {
                 match &mut deck.open {
-                    DeckOpen::Fan { sel } => {
-                        *sel = (*sel + 1).min(hand.verbs.len());
-                    }
+                    DeckOpen::Fan { sel } => *sel = sel.saturating_sub(1),
                     DeckOpen::Stack { verb, sel } => {
                         let max = hand
                             .verbs
@@ -373,18 +393,25 @@ pub(crate) fn render_suggestion_orb(f: &mut Frame, area: Rect, app: &mut App) {
     let has_hand = deck.map(|d| d.hand.is_some()).unwrap_or(false);
     let open = deck.map(|d| d.open != DeckOpen::Closed).unwrap_or(false);
     let generating = deck.map(|d| d.generating()).unwrap_or(false);
+    let t = orb_ms();
     let label = if open {
-        " ◈ ✕ ".to_string()
+        " ◆ ✕ ".to_string()
     } else if has_hand {
-        format!(" ◈ {} ", deck.map(|d| d.fan_len()).unwrap_or(0))
+        format!(" ✦ {} ", deck.map(|d| d.fan_len()).unwrap_or(0))
     } else if generating {
-        let frame = deck
-            .and_then(|d| d.requested_at)
-            .map(|t| (t.elapsed().as_millis() / 120) as usize % SPINNER.len())
-            .unwrap_or(0);
-        format!(" ◈ {} ", SPINNER[frame])
+        // Breathing diamond + creeping dots while the model thinks.
+        let g = ORB_MORPH[(t / 150) as usize % ORB_MORPH.len()];
+        let dots = ["   ", "·  ", "·· ", "···"][(t / 400) as usize % 4];
+        format!(" {g} thinking{dots} ")
     } else {
-        " ◈ suggest ".to_string()
+        // Resting orb, with a short glint sweep every few seconds.
+        let cycle = t % ORB_GLINT_PERIOD_MS;
+        let g = if cycle < ORB_GLINT.len() as u128 * ORB_GLINT_FRAME_MS {
+            ORB_GLINT[(cycle / ORB_GLINT_FRAME_MS) as usize]
+        } else {
+            ORB_IDLE_GLYPH
+        };
+        format!(" {g} suggest ")
     };
     let w = label.chars().count() as u16;
     // Inset 2 cols from the right edge: the terminal scrollbar owns the
@@ -398,10 +425,16 @@ pub(crate) fn render_suggestion_orb(f: &mut Frame, area: Rect, app: &mut App) {
             t.elapsed().as_millis() < ORB_PULSE_MS && (t.elapsed().as_millis() / 400) % 2 == 0
         })
         .unwrap_or(false);
-    let style = if open || pulse_on || generating {
+    let style = if open || pulse_on {
         Style::default()
             .fg(app.theme.accent)
             .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else if generating {
+        // Bold accent, not reversed: the breathing glyph should read as
+        // a little character, not a highlighted block.
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(app.theme.accent)
     };
