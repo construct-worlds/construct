@@ -40,10 +40,6 @@ const ORB_FACE_READY: &str = "(✦‿✦)";
 const ORB_FACE_OPEN: &str = "(^‿^)";
 /// Spinning-eye frames while generating (moon phases going around).
 const ORB_FACE_THINK: [&str; 4] = ["(◐‿◐)", "(◓‿◓)", "(◑‿◑)", "(◒‿◒)"];
-/// Luminance ramp for the shaded orb sprite, dark → bright. Index 0 is
-/// a faint dot rather than a space so the ball keeps its silhouette on
-/// its night side.
-const ORB_RAMP: [char; 8] = ['·', ':', '-', '=', '+', '*', '#', '@'];
 /// One blink (or wink) per period keeps the face alive without nagging.
 const ORB_BLINK_PERIOD_MS: u128 = 8_000;
 const ORB_BLINK_MS: u128 = 240;
@@ -411,9 +407,9 @@ pub(crate) fn render_suggestion_orb(f: &mut Frame, area: Rect, app: &mut App) {
         .unwrap_or(false);
     let fan_len = deck.map(|d| d.fan_len()).unwrap_or(0);
 
-    // Panes with room get the shaded ball; small panes fall back to the
-    // one-row kaomoji label.
-    if area.height >= 11 && area.width >= 30 {
+    // Panes with room get the pixel-art sentinel; small panes fall back
+    // to the one-row kaomoji label.
+    if area.height >= 12 && area.width >= 34 {
         render_orb_sprite(
             f, area, app, t, open, has_hand, generating, pulse_on, fan_len,
         );
@@ -467,13 +463,131 @@ pub(crate) fn render_suggestion_orb(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.suggestion_anchor = Some(area);
 }
 
-/// The shaded orb: a tiny sphere software-rendered per cell in the
-/// ASCII-shader style — diffuse + specular lighting from a slowly
-/// orbiting light, luminance mapped onto a character ramp and a
-/// phosphor gradient of the theme accent — with the face composited on
-/// top. Cells outside the ball are left untouched, so the sprite has
-/// true transparency against the pane. Runs at most W×H shade samples
-/// per frame on the existing animation tick, which is noise.
+/// The suggestion sentinel: a cute pixel-art squid rendered with
+/// half-block cells — each terminal cell carries two vertical pixels
+/// via `▀`/`▄`, giving crisp 2-pixels-per-cell art instead of tonal
+/// shading. The sprite is built into an 18×16 pixel buffer each frame
+/// (head bitmap + three lens eyes + five tentacles swaying on offset
+/// sine phases + a hover bob), then blitted with true transparency:
+/// cells where both pixels are empty are left untouched, and
+/// half-empty edge cells use `▀`/`▄` with only the foreground set so
+/// the pane shows through the other half.
+const SENT_PX_W: usize = 18;
+const SENT_PX_H: usize = 16;
+/// Head bitmap: `#` outline, `O` body, `R` rim highlight, `E` eye px.
+const SENT_HEAD: [&str; 8] = [
+    "....RRRRRR....",
+    "..##ORRRRO##..",
+    ".#OOOOOOOOOO#.",
+    ".#OOOOOOOOOO#.",
+    "#OOEEOOEEOOEE#",
+    "#OOOOOOOOOOOO#",
+    ".#OOOOOOOOOO#.",
+    "..##OOOOOO##..",
+];
+const SENT_HEAD_X: usize = 2;
+
+type Px = Option<(u8, u8, u8)>;
+
+const C_OUTLINE: (u8, u8, u8) = (12, 44, 26);
+const C_BODY: (u8, u8, u8) = (32, 128, 74);
+const C_RIM: (u8, u8, u8) = (92, 224, 126);
+const C_TENT: (u8, u8, u8) = (24, 96, 56);
+const C_TENT_TIP: (u8, u8, u8) = (60, 180, 104);
+const C_EYE_OFF: (u8, u8, u8) = (70, 46, 18);
+const C_EYE_AMBER: (u8, u8, u8) = (255, 176, 64);
+const C_EYE_RED: (u8, u8, u8) = (255, 84, 64);
+const C_EYE_WHITE: (u8, u8, u8) = (235, 255, 240);
+
+#[derive(Clone, Copy, PartialEq)]
+enum SentMood {
+    Idle,
+    Thinking,
+    Ready,
+    Open,
+}
+
+fn build_sentinel(t: u128, mood: SentMood) -> Vec<[Px; SENT_PX_W]> {
+    let mut px: Vec<[Px; SENT_PX_W]> = vec![[None; SENT_PX_W]; SENT_PX_H];
+    let ts = t as f32 / 1000.0;
+    // Hover bob; a happy double-bounce when the hand is ready.
+    let bob: i32 = match mood {
+        SentMood::Thinking => (ts * 3.2).sin().round() as i32,
+        SentMood::Ready => -((ts * 5.0).sin().abs() * 1.5).round() as i32,
+        _ => (ts * 1.6).sin().round() as i32,
+    };
+    let put = |px: &mut Vec<[Px; SENT_PX_W]>, x: i32, y: i32, c: (u8, u8, u8)| {
+        if x >= 0 && (x as usize) < SENT_PX_W && y >= 0 && (y as usize) < SENT_PX_H {
+            px[y as usize][x as usize] = Some(c);
+        }
+    };
+    // Head.
+    let mut eye_px: Vec<(i32, i32)> = Vec::new();
+    for (ry, row) in SENT_HEAD.iter().enumerate() {
+        let y = ry as i32 + 2 + bob;
+        for (rx, ch) in row.chars().enumerate() {
+            let x = (SENT_HEAD_X + rx) as i32;
+            match ch {
+                '#' => put(&mut px, x, y, C_OUTLINE),
+                'O' => put(&mut px, x, y, C_BODY),
+                'R' => put(&mut px, x, y, C_RIM),
+                'E' => {
+                    eye_px.push((x, y));
+                    put(&mut px, x, y, C_EYE_OFF);
+                }
+                _ => {}
+            }
+        }
+    }
+    // Three 2-pixel lenses.
+    let lenses: Vec<&[(i32, i32)]> = eye_px.chunks(2).collect();
+    match mood {
+        SentMood::Thinking => {
+            // One hot lens scans left-right across the visor.
+            let hot = [0usize, 1, 2, 1][(t / 170) as usize % 4];
+            for (i, lens) in lenses.iter().enumerate() {
+                let c = if i == hot { C_EYE_RED } else { C_EYE_OFF };
+                for &(x, y) in lens.iter() {
+                    put(&mut px, x, y, c);
+                }
+            }
+        }
+        SentMood::Ready | SentMood::Open => {
+            for lens in &lenses {
+                for &(x, y) in lens.iter() {
+                    put(&mut px, x, y, C_EYE_WHITE);
+                }
+            }
+        }
+        SentMood::Idle => {
+            let blink = t % ORB_BLINK_PERIOD_MS < ORB_BLINK_MS;
+            for lens in &lenses {
+                for &(x, y) in lens.iter() {
+                    put(&mut px, x, y, if blink { C_EYE_OFF } else { C_EYE_AMBER });
+                }
+            }
+        }
+    }
+    // Tentacles: five strands on offset phases, tips highlighted.
+    let (speed, amp) = match mood {
+        SentMood::Thinking => (7.0, 2.4),
+        _ => (2.2, 1.3),
+    };
+    for (i, ax) in [4i32, 7, 9, 11, 14].iter().enumerate() {
+        let phase = i as f32 * 1.9;
+        let len = if i == 0 || i == 4 { 5 } else { 6 };
+        for d in 0..len {
+            let y = 10 + bob + d;
+            let sway =
+                ((ts * speed + phase + d as f32 * 0.55).sin() * amp * d as f32 / len as f32)
+                    .round() as i32;
+            let c = if d == len - 1 { C_TENT_TIP } else { C_TENT };
+            put(&mut px, ax + sway, y, c);
+        }
+    }
+    px
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_orb_sprite(
     f: &mut Frame,
@@ -486,8 +600,8 @@ fn render_orb_sprite(
     pulse_on: bool,
     fan_len: usize,
 ) {
-    const W: u16 = 11;
-    const H: u16 = 5;
+    const W: u16 = SENT_PX_W as u16;
+    const H: u16 = (SENT_PX_H / 2) as u16;
     let label = if open {
         " ✕ close ".to_string()
     } else if has_hand {
@@ -507,94 +621,55 @@ fn render_orb_sprite(
     let sprite_y = label_y.saturating_sub(H);
     let label_x = right.saturating_sub(lw);
 
-    let (ar, ag, ab) = match app.theme.accent {
-        ratatui::style::Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
-        _ => (57.0, 255.0, 136.0),
-    };
-    // The light orbits faster the busier the orb is.
-    let theta = if generating {
-        t as f32 / 220.0
-    } else if has_hand || open {
-        t as f32 / 550.0
-    } else {
-        t as f32 / 950.0
-    };
-    let (lx, ly, lz) = norm3(theta.cos() * 0.8, theta.sin() * 0.5 - 0.2, 0.7);
-    let (hx, hy, hz) = norm3(lx, ly, lz + 1.0);
-    let pulse = if pulse_on { 0.25 } else { 0.0 };
-
-    let mut cols: Vec<Vec<Option<ratatui::style::Color>>> =
-        vec![vec![None; W as usize]; H as usize];
-    let buf = f.buffer_mut();
-    for yy in 0..H {
-        for xx in 0..W {
-            let nx = ((xx as f32) + 0.5 - W as f32 / 2.0) / (W as f32 / 2.0);
-            let ny = ((yy as f32) + 0.5 - H as f32 / 2.0) / (H as f32 / 2.0);
-            let d2 = nx * nx + ny * ny;
-            if d2 > 1.0 {
-                continue; // outside the ball — leave the pane showing through
-            }
-            let nz = (1.0 - d2).sqrt();
-            let diff = (nx * lx + ny * ly + nz * lz).max(0.0);
-            let spec = (nx * hx + ny * hy + nz * hz).max(0.0).powi(14);
-            let i = (0.26 + 0.64 * diff + 0.6 * spec + pulse).clamp(0.0, 1.0);
-            let ch = ORB_RAMP[((i * (ORB_RAMP.len() - 1) as f32).round() as usize)
-                .min(ORB_RAMP.len() - 1)];
-            // Phosphor gradient of the accent; specular highlights bleach
-            // toward white.
-            let blend = if spec > 0.45 { 0.6 } else { 0.0 };
-            let shade = 0.30 + 0.70 * i;
-            let col = ratatui::style::Color::Rgb(
-                ((ar * shade) * (1.0 - blend) + 255.0 * blend) as u8,
-                ((ag * shade) * (1.0 - blend) + 255.0 * blend) as u8,
-                ((ab * shade) * (1.0 - blend) + 255.0 * blend) as u8,
-            );
-            cols[yy as usize][xx as usize] = Some(col);
-            let cell = &mut buf[(sprite_x + xx, sprite_y + yy)];
-            cell.set_char(ch);
-            cell.set_fg(col);
-        }
-    }
-    // Face overlay: eyes on the upper half, mouth below — dark glyphs ON
-    // the shaded cell color (as background), so the face sits on the
-    // ball's surface and stays readable on both its lit and night sides.
-    let cycle = t % ORB_BLINK_PERIOD_MS;
-    let period = t / ORB_BLINK_PERIOD_MS;
-    let (left_eye, right_eye) = if generating {
-        let e = ['◐', '◓', '◑', '◒'][(t / 180) as usize % 4];
-        (e, e)
+    let mood = if generating {
+        SentMood::Thinking
     } else if open {
-        ('^', '^')
+        SentMood::Open
     } else if has_hand {
-        ('✦', '✦')
-    } else if period % 3 == 2 && cycle < ORB_WINK_MS {
-        ('◕', '─')
-    } else if period % 3 != 2 && cycle < ORB_BLINK_MS {
-        ('─', '─')
+        SentMood::Ready
     } else {
-        ('◕', '◕')
+        SentMood::Idle
     };
-    let face_col = ratatui::style::Color::Rgb(4, 8, 5);
-    for (dx, dy, ch) in [
-        (3u16, 1u16, left_eye),
-        (7, 1, right_eye),
-        (5, 2, '‿'),
-    ] {
-        let cell = &mut buf[(sprite_x + dx, sprite_y + dy)];
-        cell.set_char(ch);
-        cell.set_fg(face_col);
-        if let Some(bg) = cols[dy as usize][dx as usize] {
-            cell.set_bg(bg);
+    let px = build_sentinel(t, mood);
+    let buf = f.buffer_mut();
+    for cy in 0..H as usize {
+        for cx in 0..SENT_PX_W {
+            let top = px[cy * 2][cx];
+            let bot = px[cy * 2 + 1][cx];
+            let cell_x = sprite_x + cx as u16;
+            let cell_y = sprite_y + cy as u16;
+            let rgb = |c: (u8, u8, u8)| ratatui::style::Color::Rgb(c.0, c.1, c.2);
+            match (top, bot) {
+                (None, None) => {} // transparent — pane shows through
+                (Some(tc), Some(bc)) => {
+                    let cell = &mut buf[(cell_x, cell_y)];
+                    cell.set_char('▀');
+                    cell.set_fg(rgb(tc));
+                    cell.set_bg(rgb(bc));
+                }
+                (Some(tc), None) => {
+                    let cell = &mut buf[(cell_x, cell_y)];
+                    cell.set_char('▀');
+                    cell.set_fg(rgb(tc));
+                }
+                (None, Some(bc)) => {
+                    let cell = &mut buf[(cell_x, cell_y)];
+                    cell.set_char('▄');
+                    cell.set_fg(rgb(bc));
+                }
+            }
         }
     }
 
     let label_rect = Rect::new(label_x, label_y, lw, 1);
     f.render_widget(Clear, label_rect);
-    let style = Style::default().fg(app.theme.accent).add_modifier(if open || pulse_on {
-        Modifier::BOLD
-    } else {
-        Modifier::DIM
-    });
+    let style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(if open || pulse_on {
+            Modifier::BOLD
+        } else {
+            Modifier::DIM
+        });
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(label, style))),
         label_rect,
@@ -603,11 +678,6 @@ fn render_orb_sprite(
     let hit = Rect::new(hit_x, sprite_y, (right - hit_x).max(W), H + 1);
     app.layout.suggestion_orb_hit = Some(hit);
     app.layout.suggestion_anchor = Some(area);
-}
-
-fn norm3(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
-    let l = (x * x + y * y + z * z).sqrt().max(1e-6);
-    (x / l, y / l, z / l)
 }
 
 /// Topmost overlay: verb fan or card stack, anchored to the orb. Called
