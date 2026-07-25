@@ -912,6 +912,157 @@
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   }
   .browser-preview[hidden] { display: none !important; }
+
+  /* Suggestion deck (spec 0109): floating orb bottom-right of the
+     session view. Click asks the daemon to generate next-prompt
+     suggestions with the session's own harness; the dealt hand opens
+     as a fan of verb chips, then a card list per verb. Hidden unless
+     the selected session is awaiting input. */
+  .suggest-deck {
+    position: absolute;
+    right: calc(16px + env(safe-area-inset-right));
+    bottom: calc(86px + env(safe-area-inset-bottom));
+    z-index: 32;
+  }
+  .suggest-deck[hidden] { display: none !important; }
+  /* Circular orb (FAB). The fan and stack anchor to its center. */
+  .suggest-orb {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    font: 600 19px var(--font-ui);
+    color: var(--accent);
+    background: radial-gradient(
+      circle at 34% 30%,
+      color-mix(in srgb, var(--accent) 26%, var(--bg-elev)),
+      var(--bg-elev) 72%
+    );
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    cursor: pointer;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4);
+    position: relative;
+    transition: transform 0.2s;
+  }
+  .suggest-orb:active { transform: scale(0.93); }
+  .suggest-orb.generating .orb-icon { animation: suggest-spin 1.1s linear infinite; }
+  @keyframes suggest-spin { to { transform: rotate(360deg); } }
+  .orb-icon { display: inline-block; }
+  .orb-count {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font: 700 11px var(--font-ui);
+    color: var(--accent-fg, #fff);
+    background: var(--accent);
+  }
+  .orb-count[hidden] { display: none !important; }
+  /* Verb fan: chips placed along a quarter arc around the orb center,
+     right edges anchored to the arc. Positions set inline by JS. */
+  .suggest-fan {
+    position: absolute;
+    right: 26px;
+    bottom: 26px;
+    pointer-events: none;
+  }
+  .suggest-fan[hidden], .suggest-stack[hidden] { display: none !important; }
+  .suggest-chip {
+    position: absolute;
+    pointer-events: auto;
+    max-width: min(72vw, 340px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 7px 13px;
+    font: 500 13px var(--font-ui);
+    color: var(--accent-alt);
+    background: var(--bg-elev);
+    border: 1px solid color-mix(in srgb, var(--accent-alt) 40%, transparent);
+    border-radius: 12px 12px 4px 12px;
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+    transform-origin: bottom right;
+    animation: suggest-pop 0.26s cubic-bezier(0.2, 0.9, 0.3, 1.2) backwards;
+  }
+  .suggest-chip.top {
+    color: var(--accent-fg, #fff);
+    background: color-mix(in srgb, var(--accent) 78%, var(--bg-elev));
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .suggest-chip:hover { border-color: var(--accent); }
+  @keyframes suggest-pop {
+    from { opacity: 0; transform: translate(12px, 12px) scale(0.6); }
+  }
+  .suggest-stack {
+    position: absolute;
+    right: 0;
+    bottom: 62px;
+    width: min(380px, calc(100vw - 32px));
+    max-height: min(46vh, 380px);
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+    animation: suggest-pop 0.2s ease-out backwards;
+  }
+  .suggest-stack-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-faint);
+  }
+  .suggest-back {
+    font: 500 12.5px var(--font-ui);
+    color: var(--accent-alt);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 2px 4px;
+  }
+  .suggest-stack-title {
+    font: 600 11px var(--font-ui);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .suggest-cards { overflow-y: auto; display: flex; flex-direction: column; }
+  .suggest-card {
+    text-align: left;
+    padding: 10px 14px;
+    font: 400 13.5px var(--font-ui);
+    line-height: 1.45;
+    color: var(--fg);
+    background: none;
+    border: none;
+    border-bottom: 1px solid var(--border-faint);
+    cursor: pointer;
+  }
+  .suggest-card:last-child { border-bottom: none; }
+  .suggest-card:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  @media (max-width: 720px) {
+    .suggest-deck { bottom: calc(96px + env(safe-area-inset-bottom)); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .suggest-chip, .suggest-stack { animation: none; }
+    .suggest-orb.generating .orb-icon { animation: none; }
+  }
   .browser-preview img {
     display: block;
     width: 100%;
@@ -2623,6 +2774,31 @@
         </div>
         <div class="vkbd-main" id="vkbdMain"></div>
       </div>
+
+      <!--
+        Suggestion deck (spec 0109): shown while the selected session is
+        awaiting input. The orb requests generation via `session.suggest`
+        (the daemon generates with the session's own harness); the dealt
+        hand arrives as a broadcast `suggestions` event and opens as a
+        fan of verb chips, then a card list per verb. Picking anything
+        sends the text through `session.input`. Never modal: it hides
+        while the session runs and closes on any outside tap.
+      -->
+      <div id="suggestDeck" class="suggest-deck" hidden>
+        <div id="suggestFan" class="suggest-fan" hidden></div>
+        <div id="suggestStack" class="suggest-stack" hidden>
+          <div class="suggest-stack-head">
+            <button id="suggestBack" class="suggest-back" type="button">‹ back</button>
+            <span id="suggestStackTitle" class="suggest-stack-title"></span>
+          </div>
+          <div id="suggestCards" class="suggest-cards"></div>
+        </div>
+        <button id="suggestOrb" class="suggest-orb" type="button"
+                title="Suggest next prompts (generated by this session's harness)">
+          <span class="orb-icon" id="suggestOrbIcon">◇</span>
+          <span class="orb-count" id="suggestOrbCount" hidden></span>
+        </button>
+      </div>
     </section>
   </main>
 
@@ -3129,6 +3305,10 @@ const state = {
   // base64 PNG previews as UI-only events; keep them out of the
   // textual transcript and show only the selected session's image.
   browserPreviewById: new Map(),
+  // Suggestion deck (spec 0109): latest dealt hand per session, plus
+  // the in-flight `session.suggest` timestamp driving the orb spinner.
+  suggestionsById: new Map(),
+  suggestPendingById: new Map(),
   // Session requested by the URL path. Kept separate from currentId so the
   // first session.list snapshot can honor a refresh/deep link before the
   // normal first-session fallback runs.
@@ -4824,6 +5004,8 @@ async function selectSession(id, { replaceUrl = false } = {}) {
   sessionTitleEl.textContent = s ? sessionViewTitle(s) : "";
   renderViewModeToggle(s);
   renderBrowserPreviewForSession(id);
+  closeSuggestDeck();
+  updateSuggestOrb();
   // Hide the session list on narrow screens after selection.
   if (isNarrowLayout()) {
     setSessionListVisible(false, false);
@@ -9283,6 +9465,173 @@ async function loadOlderTranscriptPage(id, pane, options = {}) {
   return job.promise;
 }
 
+// ── Suggestion deck (spec 0109) ────────────────────────────────────
+// The orb sits bottom-right of the session view while the selected
+// session awaits input. Click → `session.suggest` (the daemon
+// generates with the session's own harness) → the broadcast
+// `suggestions` event deals a hand → verb-chip fan → card list.
+// Accepting sends through `session.input`. A new turn invalidates
+// the hand; the deck is never modal.
+const suggestDeckEl = $("suggestDeck");
+const suggestFanEl = $("suggestFan");
+const suggestStackEl = $("suggestStack");
+const suggestCardsEl = $("suggestCards");
+const suggestStackTitleEl = $("suggestStackTitle");
+const suggestBackEl = $("suggestBack");
+const suggestOrbEl = $("suggestOrb");
+const suggestOrbIconEl = $("suggestOrbIcon");
+const suggestOrbCountEl = $("suggestOrbCount");
+// Matches the daemon's probe cap: past this a silent generation is
+// treated as failed and the orb returns to idle.
+const SUGGEST_PENDING_STALE_MS = 125000;
+
+function suggestPendingActive(id) {
+  const at = state.suggestPendingById.get(id);
+  return typeof at === "number" && Date.now() - at < SUGGEST_PENDING_STALE_MS;
+}
+function suggestDeckIsOpen() {
+  return !suggestFanEl.hidden || !suggestStackEl.hidden;
+}
+function closeSuggestDeck() {
+  suggestFanEl.hidden = true;
+  suggestStackEl.hidden = true;
+  if (suggestOrbCountEl) suggestOrbCountEl.hidden = !state.suggestionsById.get(state.currentId);
+}
+function updateSuggestOrb() {
+  const s = state.sessions.find((x) => x.id === state.currentId) || null;
+  const awaiting = !!s && sessionStatusLabel(s) === "awaiting_input";
+  suggestDeckEl.hidden = !awaiting;
+  if (!awaiting) {
+    closeSuggestDeck();
+    return;
+  }
+  const hand = state.suggestionsById.get(state.currentId);
+  const pending = suggestPendingActive(state.currentId);
+  suggestOrbEl.classList.toggle("generating", !hand && pending);
+  if (hand) {
+    suggestOrbIconEl.textContent = "✦";
+    suggestOrbCountEl.textContent = String(1 + (hand.verbs || []).length);
+    suggestOrbCountEl.hidden = suggestDeckIsOpen();
+  } else {
+    suggestOrbIconEl.textContent = pending ? "◈" : "◇";
+    suggestOrbCountEl.hidden = true;
+  }
+}
+function renderSuggestFan() {
+  const hand = state.suggestionsById.get(state.currentId);
+  if (!hand || !hand.top) return;
+  suggestStackEl.hidden = true;
+  suggestFanEl.innerHTML = "";
+  const verbs = hand.verbs || [];
+  const total = verbs.length + 1;
+  // Chips sweep a quarter arc around the orb center: the top pick sits
+  // at the smallest angle (just above the orb), verbs fan out toward
+  // horizontal-left. Right edges anchor to the arc; the pop-in stagger
+  // reveals outward from the orb.
+  const radius = Math.min(185, Math.max(120, window.innerWidth * 0.32));
+  // Arc positions first, then a de-conflict pass: chips near the top of
+  // the arc compress vertically, so walk outward from the orb keeping a
+  // minimum vertical gap between neighbors.
+  const items = [
+    { label: `▶ ${hand.top.text}`, cls: "suggest-chip top", act: () => sendSuggestion(hand.top.text) },
+    ...verbs.map((v, i) => ({ label: `${v.label} ›`, cls: "suggest-chip", act: () => openSuggestStack(i) })),
+  ];
+  const pos = items.map((_, k) => {
+    const th = ((8 + (total === 1 ? 40 : k * (84 / (total - 1)))) * Math.PI) / 180;
+    return {
+      right: Math.round(radius * Math.sin(th)) - 20,
+      bottom: Math.round(radius * Math.cos(th) * 0.72),
+    };
+  });
+  for (let k = pos.length - 2; k >= 0; k--) {
+    if (pos[k].bottom - pos[k + 1].bottom < 40) pos[k].bottom = pos[k + 1].bottom + 40;
+  }
+  items.forEach((it, k) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = it.cls;
+    chip.textContent = it.label;
+    chip.style.right = `${pos[k].right}px`;
+    chip.style.bottom = `${pos[k].bottom}px`;
+    chip.style.animationDelay = `${k * 45}ms`;
+    chip.addEventListener("click", it.act);
+    suggestFanEl.appendChild(chip);
+  });
+  suggestFanEl.hidden = false;
+  updateSuggestOrb();
+}
+function openSuggestStack(i) {
+  const hand = state.suggestionsById.get(state.currentId);
+  const verb = hand && (hand.verbs || [])[i];
+  if (!verb) return;
+  suggestFanEl.hidden = true;
+  suggestStackTitleEl.textContent = verb.label;
+  suggestCardsEl.innerHTML = "";
+  for (const card of verb.cards || []) {
+    const el = document.createElement("button");
+    el.type = "button";
+    el.className = "suggest-card";
+    el.textContent = card.text;
+    el.addEventListener("click", () => sendSuggestion(card.text));
+    suggestCardsEl.appendChild(el);
+  }
+  suggestStackEl.hidden = false;
+}
+function sendSuggestion(text) {
+  const sid = state.currentId;
+  if (!sid || !text) return;
+  state.suggestionsById.delete(sid);
+  state.suggestPendingById.delete(sid);
+  closeSuggestDeck();
+  updateSuggestOrb();
+  // Optimistic echo, same as the composer's chat path.
+  try {
+    appendOptimisticUserMessage(sid, text);
+    startOptimisticWorkingIndicator(sid);
+  } catch (e) { /* echo is best-effort */ }
+  rpc("session.input", { session_id: sid, text }).catch((e) =>
+    console.error("suggestion send failed", e),
+  );
+}
+async function suggestOrbClick() {
+  const sid = state.currentId;
+  if (!sid) return;
+  if (state.suggestionsById.get(sid)) {
+    if (suggestDeckIsOpen()) closeSuggestDeck();
+    else renderSuggestFan();
+    return;
+  }
+  if (suggestPendingActive(sid)) return;
+  state.suggestPendingById.set(sid, Date.now());
+  updateSuggestOrb();
+  try {
+    const r = await rpc("session.suggest", { session_id: sid });
+    if (!r || !r.started) {
+      state.suggestPendingById.delete(sid);
+      updateSuggestOrb();
+    }
+  } catch (e) {
+    state.suggestPendingById.delete(sid);
+    updateSuggestOrb();
+    console.error("session.suggest failed", e);
+  }
+}
+suggestOrbEl.addEventListener("click", suggestOrbClick);
+suggestBackEl.addEventListener("click", () => renderSuggestFan());
+// Outside tap closes; Escape closes. Never modal — the composer and
+// terminal keep focus and input the whole time.
+document.addEventListener("pointerdown", (e) => {
+  if (suggestDeckIsOpen() && !suggestDeckEl.contains(e.target)) closeSuggestDeck();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && suggestDeckIsOpen()) closeSuggestDeck();
+});
+// Refresh the pending spinner label so a timed-out generation falls
+// back to the idle orb without requiring another event.
+setInterval(() => {
+  if (!suggestDeckEl.hidden) updateSuggestOrb();
+}, 3000);
+
 function handleNotification(method, params) {
   if (method === "program/state") {
     handleProgramState(params);
@@ -9337,6 +9686,34 @@ function handleNotification(method, params) {
         state.chatWorkingById.delete(session_id);
       }
       refreshSessionActivityGlyphs();
+    }
+    // Suggestion deck (spec 0109): the dealt hand is ephemeral UI
+    // state, cached per session and never rendered into the transcript.
+    if (event && event.type === "suggestions") {
+      state.suggestionsById.set(session_id, event);
+      state.suggestPendingById.delete(session_id);
+      if (session_id === state.currentId) {
+        updateSuggestOrb();
+        // The user explicitly asked via the orb — open on arrival.
+        renderSuggestFan();
+      }
+      return;
+    }
+    // A new turn starting (or the session ending) makes a hand stale.
+    if (
+      event &&
+      ((event.type === "status" && event.state === "running") ||
+        (event.type === "message" && event.role === "user") ||
+        event.type === "done" ||
+        event.type === "error" ||
+        event.type === "reset")
+    ) {
+      state.suggestionsById.delete(session_id);
+      state.suggestPendingById.delete(session_id);
+      if (session_id === state.currentId) {
+        closeSuggestDeck();
+        updateSuggestOrb();
+      }
     }
     if (programEventClearsRunButton(event)) {
       programClearRunButton(session_id);
@@ -9398,6 +9775,7 @@ function handleNotification(method, params) {
       sessionTitleEl.textContent = sessionViewTitle(session);
       renderViewModeToggle(session);
       if (state.mode !== "program") hydrateWidgets(session.id);
+      updateSuggestOrb();
     }
   } else if (method === "session/deleted") {
     // Pick neighbor before removing from the list so position is still valid.
@@ -9426,6 +9804,8 @@ function handleNotification(method, params) {
     state.program.settleById.delete(params.session_id);
     if (state.viewModeById.delete(params.session_id)) saveViewModePrefs();
     clearBrowserPreview(params.session_id);
+    state.suggestionsById.delete(params.session_id);
+    state.suggestPendingById.delete(params.session_id);
     if (params.session_id === state.currentId) {
       if (state.mode === "program") leaveProgramView();
       state.currentId = null;
