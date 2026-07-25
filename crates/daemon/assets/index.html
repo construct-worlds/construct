@@ -234,11 +234,13 @@
     .title-action { display: none; }
     .mini-matrix { width: 28px; }
     .conn { margin-left: 0; }
-    .session-runtime { flex: 0 0 106px; }
-    .session-runtime-button { flex-direction: row; align-items: center; gap: 2px; padding: 2px; }
-    .session-runtime-model { max-width: 32px; font-size: 8px; }
-    .session-runtime-button .session-runtime-bar { width: 68px; height: 14px; font-size: 8px; }
-    .session-runtime-button .session-runtime-bar > span { padding: 0 2px; }
+    .session-runtime { flex: 0 0 82px; }
+    .session-runtime-button { flex-direction: column; align-items: stretch; gap: 1px; padding: 2px; }
+    .session-runtime-model { max-width: 78px; font-size: 8px; line-height: 1.1; }
+    .session-runtime-button .session-runtime-bar { width: 78px; height: 14px; font-size: 8px; }
+    .session-runtime-button .session-runtime-bar > span {
+      display: block; overflow: hidden; text-overflow: ellipsis; padding: 0 2px;
+    }
     .view-mode-toggle { flex: 0 0 auto; margin-left: 0; }
     .view-mode-toggle.collapsed button { min-width: 24px; padding: 4px 4px; }
   }
