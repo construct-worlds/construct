@@ -12,10 +12,11 @@ use construct_protocol::{
     ProgramVerbExecuteParams, ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams,
     ProjectDeletedNotificationPayload, ProjectMoveParams, ProjectRenameParams,
     ProjectSetCollapsedParams, ProjectStateNotificationPayload, PtyReplayParams, Request, Response,
+    RouterListRoutesParams,
     SearchParams, SessionAttachClipboardParams, SessionIdParams, SessionInputParams,
     SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
     SessionSetFocusedParams, SessionSetGroupParams, SessionSetPinnedParams,
-    SessionSetProjectParams, SessionSetTitleParams, SessionSetViewParams, SessionToolActionParams,
+    SessionSetProjectParams, SessionSetRouteParams, SessionSetTitleParams, SessionSetViewParams, SessionToolActionParams,
     SessionToolDecisionParams, SetTerminalBackgroundParams, SmithSetAuthMethodParams,
     SubscribeParams, TranscriptParams, UsageQueryParams, IPC_VERSION,
 };
@@ -1370,6 +1371,23 @@ async fn dispatch(
         let p = params!(req, SessionSetApprovalModeParams);
         match manager.set_approval_mode(&p.session_id, p.mode).await {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::SESSION_SET_ROUTE, {
+        let p = params!(req, SessionSetRouteParams);
+        match manager.set_route(&p.session_id, p.route).await {
+            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::ROUTER_LIST_ROUTES, {
+        let p = params!(req, RouterListRoutesParams);
+        match manager.list_routes(p.session_id.as_deref()).await {
+            Ok(result) => match serde_json::to_value(result) {
+                Ok(v) => Response::ok(req.id.clone(), v),
+                Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+            },
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });

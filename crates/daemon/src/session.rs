@@ -1246,6 +1246,9 @@ pub struct SessionManager {
     /// otherwise a graceful `kill -TERM` of the daemon would mark
     /// every live session terminal and skip them on restart.
     is_shutting_down: AtomicBool,
+    /// Model-route transport (specs 0109/0110/0111). Present always,
+    /// inert unless `[router] enabled = true`.
+    pub(crate) router: Arc<crate::router::Router>,
     /// Remote-WS transport: `None` until `start_remote` is called
     /// (either by env-var-at-boot in `main.rs` or by the
     /// `remote.start` IPC method invoked from the TUI's
@@ -1528,6 +1531,7 @@ impl SessionManager {
         tokio::sync::mpsc::UnboundedReceiver<crate::remote_supervisor::SupervisorMsg>,
         tokio::sync::mpsc::UnboundedReceiver<RestartCommand>,
     )> {
+        let router = crate::router::Router::new(storage.data_dir().to_path_buf(), &config.router);
         let summaries = storage.list_summaries()?;
         let mut sessions = HashMap::new();
         for s in summaries {
@@ -1683,6 +1687,7 @@ impl SessionManager {
                 broadcast,
                 loops,
                 is_shutting_down: AtomicBool::new(false),
+                router,
                 remote: std::sync::Mutex::new(None),
                 remote_starter: remote_tx,
                 remote_snapshot_path,
@@ -4560,6 +4565,9 @@ impl SessionManager {
         // like an archived one (spec 0076); consuming the tracking entry
         // here also makes an archive-then-delete sequence settle once.
         self.settle_run_fork_dispatch(id).await;
+        // Release the session's routing credential so a deleted session's
+        // token can never be reused to reach a route.
+        self.router.detach_session(id);
         // Pull out the entry so the in-memory map releases the Arc; the
         // entry itself stays alive via our local Arc until the function ends.
         let entry = {
@@ -5037,6 +5045,126 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Register a session with the router, returning the environment its
+    /// harness process needs. `None` when this session gets no routing
+    /// transport — routing disabled, harness not route-capable, or the
+    /// listener never bound. That is a normal outcome, not an error: the
+    /// session runs exactly as it would in a build without routing.
+    pub(crate) fn attach_router(
+        &self,
+        session_id: &str,
+        harness: &str,
+        existing_token: Option<String>,
+    ) -> Option<HashMap<String, String>> {
+        if !self.router.can_route_harness(harness) {
+            return None;
+        }
+        match self
+            .router
+            .attach_session(session_id, harness, existing_token)
+        {
+            Ok(env) => Some(env),
+            Err(e) => {
+                tracing::warn!(
+                    session = %session_id,
+                    %harness,
+                    error = %format!("{e:#}"),
+                    "router attach failed; session runs unrouted"
+                );
+                None
+            }
+        }
+    }
+
+    /// Re-arm a persisted route after the session's transport is back
+    /// (spec 0110: a resumed session comes back on the route it was last
+    /// running).
+    pub(crate) async fn restore_route(&self, entry: &Arc<SessionEntry>) {
+        let (id, harness, route) = {
+            let s = entry.summary.read().await;
+            (s.id.clone(), s.harness.clone(), s.route.clone())
+        };
+        let Some(route) = route else { return };
+        if let Err(e) = self.router.set_route(
+            &id,
+            &harness,
+            Some(&route.name),
+            route.origin_model.clone(),
+        ) {
+            // The route no longer resolves (renamed in config, key gone).
+            // Surface it rather than silently pinning a stale endpoint or
+            // silently falling back to pass-through.
+            tracing::warn!(
+                session = %id,
+                route = %route.name,
+                error = %format!("{e:#}"),
+                "stored route could not be restored"
+            );
+        }
+    }
+
+    /// Arm, change, or clear a session's route (spec 0110).
+    pub async fn set_route(&self, session_id: &str, route: Option<String>) -> Result<()> {
+        let entry = self
+            .get_entry(session_id)
+            .await
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        let (harness, origin_model, existing) = {
+            let s = entry.summary.read().await;
+            (
+                s.harness.clone(),
+                // The model the harness reports is the origin we display
+                // the substitution against. Once a route is armed the
+                // harness keeps reporting its own model, so the value is
+                // captured on the first arm and carried across changes.
+                s.route
+                    .as_ref()
+                    .and_then(|r| r.origin_model.clone())
+                    .or_else(|| s.model.clone()),
+                s.route.clone(),
+            )
+        };
+        let armed = self
+            .router
+            .set_route(session_id, &harness, route.as_deref(), origin_model)?;
+        if armed == existing {
+            return Ok(());
+        }
+        let snapshot = {
+            let mut s = entry.summary.write().await;
+            s.route = armed;
+            s.clone()
+        };
+        self.storage.save_summary(&snapshot)?;
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::State(StateNotificationPayload {
+                session: snapshot,
+            }));
+        Ok(())
+    }
+
+    /// Routes offered for a session's picker (spec 0111).
+    pub async fn list_routes(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<construct_protocol::RouterListRoutesResult> {
+        let Some(session_id) = session_id else {
+            return Ok(self.router.list_routes("", false, None));
+        };
+        let entry = self
+            .get_entry(session_id)
+            .await
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        let (harness, active) = {
+            let s = entry.summary.read().await;
+            (s.harness.clone(), s.route.as_ref().map(|r| r.name.clone()))
+        };
+        Ok(self
+            .router
+            .list_routes(&harness, self.router.is_attached(session_id), active))
+    }
+
     /// Record the session's active model after an adapter `/model` switch.
     /// Updates the summary (so the UI label tracks the change) and persists
     /// it, so `respawn` re-injects the model into the adapter's start params
@@ -5150,6 +5278,8 @@ impl SessionManager {
             cost_usd: None,
             model: None,
             effort: None,
+            route: None,
+            route_capable: false,
             worktree: None,
             pending_input: false,
             last_prompt: None,
@@ -6060,6 +6190,8 @@ mod tests {
             cost_usd: None,
             model: None,
             effort: None,
+            route: None,
+            route_capable: false,
             worktree: None,
             pending_input: false,
             last_prompt: None,
@@ -6592,6 +6724,8 @@ mod tests {
                 cost_usd: None,
                 model: None,
                 effort: None,
+                route: None,
+                route_capable: false,
                 worktree: None,
                 pending_input: false,
                 last_prompt: None,
@@ -8591,6 +8725,8 @@ mod tests {
             cost_usd: None,
             model: None,
             effort: None,
+            route: None,
+            route_capable: false,
             worktree: None,
             pending_input: false,
             last_prompt: None,
@@ -8739,6 +8875,8 @@ mod tests {
             cost_usd: None,
             model: None,
             effort: None,
+            route: None,
+            route_capable: false,
             worktree: None,
             pending_input: false,
             last_prompt: None,

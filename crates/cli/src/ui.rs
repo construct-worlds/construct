@@ -295,6 +295,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.shortcut_hints.clear();
     app.layout.tutorial_card_area = None;
     app.layout.modeline_approval_mode_hit = None;
+    app.layout.modeline_model_hit = None;
     app.layout.modeline_context_gauge_hit = None;
     app.layout.modeline_theme_hit = None;
     app.layout.main_window_areas.clear();
@@ -320,6 +321,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_popover_area = None;
     app.layout.dynamic_ui_scroll_metrics = None;
     let area = f.area();
+    app.layout.frame_area = Some(area);
     match app.zoom {
         ZoomMode::View => {
             render_zoomed_view(f, area, app);
@@ -476,6 +478,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.layout.modal_area = Some(help_popup);
     }
     render_session_title_menu(f, app);
+    render_route_menu(f, app);
     render_tutorial_card(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
@@ -4889,6 +4892,91 @@ fn session_menu_icon_style(theme: &Theme, base: Color, hovered: bool, focused: b
     }
 }
 
+/// The model-route picker (spec 0110), anchored above the modeline's
+/// model indicator.
+fn render_route_menu(f: &mut Frame, app: &App) {
+    let Some(menu) = &app.route_menu else {
+        return;
+    };
+    let area = menu.area;
+    if area.width < 6 || area.height < 3 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
+        .title(Span::styled(
+            " route ",
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+
+    let last_row = area.y.saturating_add(area.height).saturating_sub(1);
+    for index in 0..menu.rows() {
+        let row = area.y.saturating_add(1).saturating_add(index as u16);
+        if row >= last_row {
+            break;
+        }
+        let enabled = menu.row_enabled(index);
+        let hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+            my == row && mx > area.x && mx < area.x.saturating_add(area.width).saturating_sub(1)
+        });
+        let style = if !enabled {
+            Style::default()
+                .fg(app.theme.border)
+                .add_modifier(Modifier::DIM)
+        } else if hovered || index == menu.selected {
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.inactive_highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        // A leading marker on the armed row, so the current state reads
+        // at a glance instead of only through the modeline.
+        let marker = if menu.is_active(index) { "*" } else { " " };
+        let label = format!(" {marker}{} ", menu.label(index));
+        f.render_widget(
+            Paragraph::new(Line::styled(label, style)),
+            Rect {
+                x: area.x.saturating_add(1),
+                y: row,
+                width: area.width.saturating_sub(2),
+                height: 1,
+            },
+        );
+    }
+
+    // Why routing is impossible for this session, when it is. Shown
+    // rather than presenting an empty or silently inert picker.
+    if let Some(reason) = menu.unavailable_reason.as_deref() {
+        let row = area
+            .y
+            .saturating_add(1)
+            .saturating_add(menu.rows() as u16);
+        if row < last_row {
+            f.render_widget(
+                Paragraph::new(Line::styled(
+                    format!(" {reason} "),
+                    Style::default()
+                        .fg(app.theme.border)
+                        .add_modifier(Modifier::ITALIC),
+                )),
+                Rect {
+                    x: area.x.saturating_add(1),
+                    y: row,
+                    width: area.width.saturating_sub(2),
+                    height: 1,
+                },
+            );
+        }
+    }
+}
+
 fn render_session_title_menu(f: &mut Frame, app: &App) {
     let Some(menu) = &app.session_title_menu else {
         return;
@@ -8503,6 +8591,32 @@ fn modeline_model_text(model: Option<&str>, effort: Option<&str>) -> String {
     }
 }
 
+/// The modeline's model indicator, including an armed route.
+///
+/// A routed session shows `<origin> -> <routed>`: the harness keeps
+/// reporting its own model and never learns of the substitution
+/// (spec 0110), so showing only one of the two would be actively
+/// misleading — either hiding that routing is on, or hiding what the
+/// harness thinks it is talking to.
+fn modeline_model_route_text(
+    model: Option<&str>,
+    effort: Option<&str>,
+    route: Option<&construct_protocol::SessionRoute>,
+) -> String {
+    let base = modeline_model_text(model, effort);
+    match route {
+        None => base,
+        Some(route) => {
+            let origin = route
+                .origin_model
+                .as_deref()
+                .map(|m| modeline_model_text(Some(m), effort))
+                .unwrap_or(base);
+            format!("{origin} -> {}", route.model)
+        }
+    }
+}
+
 /// The modeline's detailed context indicator and the number of its text cells
 /// covered by the filled part of its background bar.
 fn modeline_context_usage_text(
@@ -8603,10 +8717,33 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             None => "-".into(),
         },
         model = match s {
-            Some(s) => modeline_model_text(s.model.as_deref(), s.effort.as_deref()),
+            Some(s) => {
+                modeline_model_route_text(s.model.as_deref(), s.effort.as_deref(), s.route.as_ref())
+            }
             None => "-".into(),
         },
     );
+    // The model indicator's own cells, so a click can open the route
+    // picker there (spec 0110).
+    if let Some(s) = s {
+        let model_text =
+            modeline_model_route_text(s.model.as_deref(), s.effort.as_deref(), s.route.as_ref());
+        let model_w = UnicodeWidthStr::width(model_text.as_str()) as u16;
+        let start_col = area.x.saturating_add(
+            UnicodeWidthStr::width(modeline_before_context_gauge.as_str()) as u16,
+        );
+        let start_col = start_col.saturating_sub(model_w);
+        let end_col = start_col
+            .saturating_add(model_w)
+            .min(area.x.saturating_add(area.width));
+        if end_col > start_col {
+            app.layout.modeline_model_hit = Some(crate::app::ModelineModelHit {
+                row: area.y,
+                start_col,
+                end_col,
+            });
+        }
+    }
     let modeline_before_approval_mode = format!(
         "{modeline_before_context_gauge}{}  ",
         context_gauge
@@ -19514,6 +19651,60 @@ mod tests {
         );
     }
 
+    fn route(name: &str, model: &str, origin: Option<&str>) -> construct_protocol::SessionRoute {
+        construct_protocol::SessionRoute {
+            name: name.to_string(),
+            model: model.to_string(),
+            origin_model: origin.map(str::to_string),
+            observed: false,
+        }
+    }
+
+    /// An unrouted session's indicator is exactly what it was before
+    /// routing existed.
+    #[test]
+    fn modeline_model_route_text_is_unchanged_without_a_route() {
+        assert_eq!(
+            modeline_model_route_text(Some("claude-opus-5"), None, None),
+            "claude-opus-5"
+        );
+        assert_eq!(
+            modeline_model_route_text(Some("claude-opus-5"), Some("high"), None),
+            "claude-opus-5 (high)"
+        );
+    }
+
+    /// Both models are shown: the harness keeps reporting its own, and
+    /// hiding either half would misrepresent what is running (spec 0110).
+    #[test]
+    fn modeline_model_route_text_shows_the_substitution() {
+        assert_eq!(
+            modeline_model_route_text(
+                Some("claude-opus-5"),
+                None,
+                Some(&route("kimi", "kimi-k2.5", Some("claude-opus-5")))
+            ),
+            "claude-opus-5 -> kimi-k2.5"
+        );
+    }
+
+    /// Falls back to the live reported model when no origin was captured.
+    #[test]
+    fn modeline_model_route_text_falls_back_to_the_reported_model() {
+        assert_eq!(
+            modeline_model_route_text(
+                Some("claude-opus-5"),
+                None,
+                Some(&route("kimi", "kimi-k2.5", None))
+            ),
+            "claude-opus-5 -> kimi-k2.5"
+        );
+        assert_eq!(
+            modeline_model_route_text(None, None, Some(&route("kimi", "kimi-k2.5", None))),
+            "- -> kimi-k2.5"
+        );
+    }
+
     #[test]
     fn modeline_model_text_shows_model_and_effort_together() {
         assert_eq!(
@@ -19717,6 +19908,8 @@ mod tests {
             cost_usd: None,
             model: None,
             effort: None,
+            route: None,
+            route_capable: false,
             worktree: None,
             pending_input: false,
             last_prompt: None,

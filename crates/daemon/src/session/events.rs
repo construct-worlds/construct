@@ -661,6 +661,8 @@ impl SessionManager {
                 cost_usd: None,
                 model: owner_summary.model.clone(),
                 effort: owner_summary.effort.clone(),
+                route: None,
+                route_capable: false,
                 worktree: owner_summary.worktree.clone(),
                 pending_input: false,
                 last_prompt: None,

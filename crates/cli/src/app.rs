@@ -37,6 +37,7 @@ mod minibuffer;
 mod mouse;
 mod program_popup;
 mod session_picker;
+mod route_menu;
 mod session_title_menu;
 mod session_title_rename;
 mod tutorial;
@@ -1574,6 +1575,9 @@ pub struct App {
     pub layout: LayoutSnapshot,
     /// Session-view title hamburger dropdown.
     pub session_title_menu: Option<SessionTitleMenu>,
+    /// Open model-route picker, anchored to the modeline's model
+    /// indicator (spec 0110).
+    pub route_menu: Option<route_menu::RouteMenu>,
     /// In-progress inline rename of a session's title, edited directly in a
     /// pane's title bar. `None` when no rename is active.
     pub session_title_rename: Option<SessionTitleRename>,
@@ -3223,6 +3227,23 @@ impl ModelineContextGaugeHit {
     }
 }
 
+/// Clickable model indicator in the modeline. Opens the route picker
+/// (spec 0110): the model is where a substitution is visible, so it is
+/// also where the substitution is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelineModelHit {
+    pub row: u16,
+    pub start_col: u16,
+    /// Exclusive end column.
+    pub end_col: u16,
+}
+
+impl ModelineModelHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelineThemeHit {
     pub row: u16,
@@ -3332,6 +3353,11 @@ pub struct LayoutSnapshot {
     pub modeline_approval_mode_hit: Option<ModelineApprovalModeHit>,
     /// Hoverable context-window gauge in the modeline for the selected session.
     pub modeline_context_gauge_hit: Option<ModelineContextGaugeHit>,
+    /// Clickable model indicator in the modeline for the selected session.
+    pub modeline_model_hit: Option<ModelineModelHit>,
+    /// Whole-frame rect from the last render, so popups anchored to a
+    /// modeline hit can be clamped on screen.
+    pub frame_area: Option<ratatui::layout::Rect>,
     /// Clickable theme label in the modeline status bar.
     pub modeline_theme_hit: Option<ModelineThemeHit>,
     /// Number of rows of the list pane currently in use (so a click
@@ -4493,6 +4519,7 @@ async fn run_with_socket_initial_selection(
         start_instant: now,
         layout: LayoutSnapshot::default(),
         session_title_menu: None,
+        route_menu: None,
         session_title_rename: None,
         mouse_pos: None,
         mouse_moved_at: None,
@@ -9799,6 +9826,16 @@ impl App {
             }
             self.session_title_menu = None;
         }
+        if let Some(menu) = self.route_menu.clone() {
+            if let Some(index) = menu.item_at(col, row) {
+                self.apply_route_menu_selection(index).await;
+                return;
+            }
+            if menu.contains(col, row) {
+                return;
+            }
+            self.route_menu = None;
+        }
         if self.handle_dynamic_ui_overlay_click(col, row).await {
             return;
         }
@@ -9882,6 +9919,16 @@ impl App {
             .is_some_and(|hit| hit.contains(col, row))
         {
             self.cycle_approval_mode_silent().await;
+            return;
+        }
+        if self
+            .layout
+            .modeline_model_hit
+            .is_some_and(|hit| hit.contains(col, row))
+        {
+            if let Some(id) = self.selected_id() {
+                self.open_route_menu(id, col, row).await;
+            }
             return;
         }
         // Matrix-rain horizontal reveal word: jump to the session that
@@ -10409,6 +10456,33 @@ impl App {
                 KeymapResult::Unhandled => {}
             }
             return;
+        }
+        // The route picker is a small transient popup: while it is open it
+        // owns navigation keys, and any other key dismisses it rather than
+        // leaking into the session underneath.
+        if self.route_menu.is_some() {
+            match key.code {
+                KeyCode::Up => {
+                    self.move_route_menu_selection(-1);
+                    return;
+                }
+                KeyCode::Down => {
+                    self.move_route_menu_selection(1);
+                    return;
+                }
+                KeyCode::Enter => {
+                    let index = self.route_menu.as_ref().map(|m| m.selected).unwrap_or(0);
+                    self.apply_route_menu_selection(index).await;
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.route_menu = None;
+                    return;
+                }
+                _ => {
+                    self.route_menu = None;
+                }
+            }
         }
         // Help is the topmost keyboard surface. Check it before the program,
         // minibuffer, and focused child PTY routing. Up/Down/PageUp/PageDown
@@ -14217,6 +14291,8 @@ mod tests {
             minibuffer_area: Some(Rect::new(0, 29, 100, 4)),
             last_chat_areas: std::collections::HashMap::new(),
             modeline_approval_mode_hit: None,
+            modeline_model_hit: None,
+            frame_area: None,
             modeline_context_gauge_hit: None,
             modeline_theme_hit: None,
             list_row_count: 0,
@@ -14390,6 +14466,7 @@ mod tests {
             start_instant: now,
             layout: LayoutSnapshot::default(),
             session_title_menu: None,
+            route_menu: None,
             session_title_rename: None,
             mouse_pos: None,
                 mouse_moved_at: None,
@@ -14619,6 +14696,8 @@ mod tests {
             cost_usd: None,
             model: None,
             effort: None,
+            route: None,
+            route_capable: false,
             worktree: None,
             pending_input: false,
             last_prompt: None,
@@ -15525,6 +15604,181 @@ mod tests {
             "available": available,
             "detail": if available { "detected" } else { "not found" },
         })
+    }
+
+    /// Mock daemon answering just the router methods.
+    async fn route_mock_daemon(
+        routes: Vec<serde_json::Value>,
+        unavailable_reason: Option<&str>,
+    ) -> (Arc<Client>, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        use construct_protocol::ipc_method;
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let unavailable_reason = unavailable_reason.map(str::to_string);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let routes = routes.clone();
+                let unavailable_reason = unavailable_reason.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut reader = BufReader::new(reader);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        let Ok(n) = reader.read_line(&mut line).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        let req: Value = serde_json::from_str(&line).expect("json request");
+                        let id = req.get("id").cloned().unwrap_or(Value::Null);
+                        let method = req
+                            .get("method")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let result = match method.as_str() {
+                            ipc_method::ROUTER_LIST_ROUTES => serde_json::json!({
+                                "routes": routes,
+                                "unavailable_reason": unavailable_reason,
+                                "active": Value::Null,
+                            }),
+                            _ => Value::Null,
+                        };
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": result,
+                        });
+                        let mut buf = serde_json::to_vec(&reply).expect("encode");
+                        buf.push(b'\n');
+                        if writer.write_all(&buf).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let client = crate::app::connect_retrying(&sock)
+            .await
+            .expect("connect mock daemon");
+        (client, dir, server)
+    }
+
+    fn route_json(name: &str, model: &str, reason: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "dialect": "anthropic",
+            "model": model,
+            "base_url": "https://api.moonshot.ai/anthropic",
+            "unavailable_reason": reason,
+        })
+    }
+
+    fn rendered(app: &mut App, w: u16, h: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, app)).expect("draw");
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The picker opens on the model indicator and lists pass-through
+    /// plus every configured route, unavailable ones included (spec 0111).
+    #[tokio::test]
+    async fn route_menu_opens_with_pass_through_and_every_route() {
+        let (client, _dir, _server) = route_mock_daemon(
+            vec![
+                route_json("kimi", "kimi-k2.5", None),
+                route_json("glm", "glm-5", Some("GLM_API_KEY is not set")),
+            ],
+            None,
+        )
+        .await;
+        let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
+        summary.harness = "claude".into();
+        summary.model = Some("claude-opus-5".into());
+        summary.route_capable = true;
+        let mut app = test_app(client, vec![summary]);
+        app.select_session("s1".into());
+
+        // Render once so the modeline publishes its model hit region.
+        let _ = rendered(&mut app, 120, 30);
+        let hit = app
+            .layout
+            .modeline_model_hit
+            .expect("model indicator must be clickable");
+        app.handle_left_click(hit.start_col, hit.row).await;
+
+        let menu = app.route_menu.as_ref().expect("picker open");
+        assert_eq!(menu.rows(), 3);
+        assert!(menu.row_enabled(1));
+        assert!(!menu.row_enabled(2), "a route with no key is not selectable");
+
+        let frame = rendered(&mut app, 120, 30);
+        assert!(frame.contains("pass through"), "{frame}");
+        assert!(frame.contains("kimi"), "{frame}");
+        assert!(frame.contains("glm"), "{frame}");
+    }
+
+    /// A session that cannot be routed still gets an explanation rather
+    /// than an empty popup (spec 0111).
+    #[tokio::test]
+    async fn route_menu_explains_why_a_session_cannot_be_routed() {
+        let (client, _dir, _server) =
+            route_mock_daemon(vec![], Some("codex is not route-capable")).await;
+        let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
+        summary.harness = "codex".into();
+        let mut app = test_app(client, vec![summary]);
+        app.select_session("s1".into());
+        app.open_route_menu("s1".into(), 40, 29).await;
+
+        let frame = rendered(&mut app, 120, 30);
+        assert!(frame.contains("not route-capable"), "{frame}");
+        assert!(
+            frame.contains("pass through"),
+            "pass-through stays offered: {frame}"
+        );
+    }
+
+    /// The modeline shows the substitution, not just its result.
+    #[tokio::test]
+    async fn modeline_shows_the_routed_substitution() {
+        let (client, _dir, _server) = route_mock_daemon(vec![], None).await;
+        let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
+        summary.harness = "claude".into();
+        summary.model = Some("claude-opus-5".into());
+        summary.route_capable = true;
+        summary.route = Some(construct_protocol::SessionRoute {
+            name: "kimi".into(),
+            model: "kimi-k2.5".into(),
+            origin_model: Some("claude-opus-5".into()),
+            observed: true,
+        });
+        let mut app = test_app(client, vec![summary]);
+        app.select_session("s1".into());
+
+        let frame = rendered(&mut app, 160, 30);
+        assert!(
+            frame.contains("claude-opus-5 -> kimi-k2.5"),
+            "modeline must show both models: {frame}"
+        );
     }
 
     #[tokio::test]

@@ -37,6 +37,11 @@ qrcode.workspace = true
 httparse.workspace = true
 reqwest.workspace = true
 wstunnel.workspace = true
+# Router TLS interception (spec 0109). Pinned to the `ring` backend to
+# match the workspace's reqwest/rustls stack — the default `aws-lc-rs`
+# backend drags in a cmake/C build that the rest of the workspace avoids.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 
 [dev-dependencies]
 tempfile = "3"

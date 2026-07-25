@@ -863,6 +863,34 @@ impl Client {
             .await?;
         Ok(())
     }
+    /// Arm, change (`Some(name)`) or clear (`None`) a session's model
+    /// route. Applies to the running session — no restart (spec 0110).
+    pub async fn set_route(&self, id: &str, route: Option<String>) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::SESSION_SET_ROUTE,
+                &construct_protocol::SessionSetRouteParams {
+                    session_id: id.to_string(),
+                    route,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+    /// Routes offered for a session, each carrying the reason it is not
+    /// selectable when that applies (spec 0111).
+    pub async fn list_routes(
+        &self,
+        id: Option<&str>,
+    ) -> Result<construct_protocol::RouterListRoutesResult> {
+        self.request(
+            ipc_method::ROUTER_LIST_ROUTES,
+            &construct_protocol::RouterListRoutesParams {
+                session_id: id.map(str::to_string),
+            },
+        )
+        .await
+    }
     pub async fn emit_event(&self, id: &str, event: construct_protocol::SessionEvent) -> Result<()> {
         let _: serde_json::Value = self
             .request(

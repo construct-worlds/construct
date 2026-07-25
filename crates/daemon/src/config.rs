@@ -306,6 +306,36 @@ enabled = true
 #   CONSTRUCT_KIMI_BIN        — binary path fallback for the kimi adapter
 #   CONSTRUCT_HERMES_BIN      — binary path fallback for the hermes adapter
 #   CONSTRUCT_PI_BIN          — binary path fallback for the pi adapter
+#
+# ---------------------------------------------------------------------------
+# Model routing (specs 0109/0110/0111)
+# ---------------------------------------------------------------------------
+# Off by default. When enabled, route-capable sessions are spawned with
+# HTTPS_PROXY pointing at a loopback proxy the daemon owns. The proxy does
+# NOT change where a harness sends its traffic: it blind-tunnels every
+# connection to the destination the harness itself resolved, so an enabled
+# router with no route armed is byte-for-byte identical to no router at all.
+# A harness's own endpoint configuration — env vars, config files, login
+# state — is never read and never displaced.
+#
+# Arming a route (from the TUI: click the model in the modeline) redirects
+# just that session's model traffic to the named endpoint, on the running
+# session, with no restart. The choice persists across daemon restarts.
+#
+# Only same-dialect routes are possible: a route redirects an endpoint, it
+# does not translate between provider wire formats. Today that means
+# `dialect = "anthropic"` for the claude harness.
+#
+# [router]
+# enabled = true
+# port    = 8917    # fixed on purpose: harness processes outlive the daemon
+#                   # and keep dialing the port they were given at spawn
+#
+# [router.routes.kimi]
+# dialect     = "anthropic"
+# base_url    = "https://api.moonshot.ai/anthropic"
+# model       = "kimi-k2.5"
+# api_key_env = "MOONSHOT_API_KEY"
 "#;
 
 /// Kept for backwards-compat: `construct daemon default-config` and any
@@ -387,6 +417,8 @@ pub struct Config {
     pub program: ProgramConfig,
     #[serde(default)]
     pub suggest: SuggestConfig,
+    #[serde(default)]
+    pub router: RouterConfig,
 }
 
 /// Next-prompt suggestion generation (spec 0109).
@@ -408,6 +440,89 @@ impl Default for SuggestConfig {
         Self {
             enabled: default_suggest_enabled(),
         }
+    }
+}
+
+/// `[router]` — model-route transport (specs 0109/0110/0111). Off by
+/// default: with `enabled = false` the daemon injects nothing into any
+/// session's environment and no listener is ever bound, so a session's
+/// traffic is byte-identical to a build without routing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RouterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Loopback port the router listens on.
+    ///
+    /// Deliberately fixed and outside the OS ephemeral range rather than
+    /// assigned per session. A harness process is told this port once, at
+    /// spawn, and outlives the daemon
+    /// (`Adapter::spawn_reconnectable`) — so after a daemon restart the
+    /// same port *must* come back or that process can no longer reach us.
+    /// A port the OS never hands out for ephemeral binds makes reclaiming
+    /// it deterministic.
+    #[serde(default = "default_router_port")]
+    pub port: u16,
+    /// Named routes, keyed by the name shown in the picker.
+    #[serde(default)]
+    pub routes: BTreeMap<String, RouteConfig>,
+}
+
+fn default_router_port() -> u16 {
+    8917
+}
+
+impl Default for RouterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_router_port(),
+            routes: BTreeMap::new(),
+        }
+    }
+}
+
+/// One `[router.routes.<name>]` entry: an endpoint a session's model
+/// traffic can be redirected to.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RouteConfig {
+    /// Wire dialect the endpoint speaks. Only `"anthropic"` is routable
+    /// today — a route is a *same-dialect* redirect, never a translation
+    /// (spec 0109 non-goals).
+    #[serde(default = "default_route_dialect")]
+    pub dialect: String,
+    pub base_url: String,
+    /// Model substituted into outbound requests.
+    pub model: String,
+    /// Name of the env var holding the endpoint's key. Preferred over
+    /// `api_key`, which is accepted but writes a secret into config.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+fn default_route_dialect() -> String {
+    "anthropic".to_string()
+}
+
+impl RouteConfig {
+    /// Resolve the endpoint credential. `Err` carries a message fit to
+    /// show in the picker as the route's `unavailable_reason`.
+    pub fn resolve_api_key(&self) -> Result<String, String> {
+        if let Some(k) = self.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            return Ok(k.to_string());
+        }
+        let var = self
+            .api_key_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "no api_key_env or api_key configured".to_string())?;
+        std::env::var(var)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| format!("{var} is not set in the daemon's environment"))
     }
 }
 
