@@ -2843,7 +2843,11 @@ fn render_lineage_section(
     // Header bar: a full-width `─` rule (the operator panel's visual
     // language), label at the left, mode toggle + collapse button at the
     // right. The bare bar doubles as the height drag handle.
-    let line_style = Style::default().fg(app.theme.matrix_line);
+    let line_style = if focused {
+        pane_border_style(&app.theme, true)
+    } else {
+        Style::default().fg(app.theme.matrix_line)
+    };
     for x in rect.x..rect.x + rect.width {
         f.buffer_mut().set_string(x, rect.y, "─", line_style);
     }
