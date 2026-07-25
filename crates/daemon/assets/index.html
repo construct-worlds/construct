@@ -177,6 +177,73 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Runtime metadata belongs to the selected session, so it lives in the
+     persistent header rather than overlaying an individual view surface. */
+  .session-runtime { position: relative; flex: 0 1 auto; min-width: 0; }
+  .session-runtime[hidden] { display: none; }
+  .session-runtime-button {
+    display: inline-flex; align-items: center; gap: 7px; min-width: 0;
+    border: 0; border-radius: 7px; padding: 4px 6px; background: transparent;
+    color: var(--fg-dim); font: inherit; cursor: pointer;
+  }
+  .session-runtime-button:hover, .session-runtime-button[aria-expanded="true"] {
+    background: var(--bg-elev-2); color: var(--fg);
+  }
+  .session-runtime-model { font-size: 12px; white-space: nowrap; }
+  .session-runtime-bar {
+    --ctx-fill: 0%; position: relative; display: grid; place-items: center;
+    width: clamp(92px, 13vw, 132px); height: 20px; overflow: hidden;
+    border-radius: 5px; background: color-mix(in srgb, var(--fg-dim) 32%, transparent);
+    color: var(--fg); font-size: 11px; font-variant-numeric: tabular-nums;
+  }
+  .session-runtime-bar::before {
+    content: ""; position: absolute; inset: 0 auto 0 0; width: var(--ctx-fill);
+    background: var(--fg); opacity: 0.82;
+  }
+  .session-runtime-bar > span { position: relative; padding: 0 6px; white-space: nowrap; }
+  .session-runtime-popover {
+    position: absolute; z-index: 20; top: calc(100% + 6px); left: 0;
+    width: max-content; min-width: 220px; max-width: min(320px, calc(100vw - 24px));
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-elev); box-shadow: 0 10px 30px rgba(0,0,0,.38);
+    color: var(--fg); font-size: 12px; line-height: 1.5;
+  }
+  .session-runtime-popover[hidden] { display: none; }
+  .session-runtime-popover .runtime-detail-label { color: var(--fg-faint); }
+  .session-runtime-popover .runtime-detail-bar { margin-top: 7px; width: 100%; }
+  @media (max-width: 720px) {
+    /* Keep the model and graph legible on phones rather than collapsing the
+       runtime state to an ambiguous bare token count. */
+    .session-runtime-button { flex-direction: column; align-items: stretch; gap: 1px; padding: 3px 5px; }
+    .session-runtime-model { display: block; max-width: 96px; overflow: hidden; text-overflow: ellipsis; font-size: 9px; line-height: 1.1; }
+    .session-runtime-button .session-runtime-bar { width: clamp(82px, 24vw, 112px); min-width: 0; height: 15px; font-size: 9px; }
+    .session-runtime-button .session-runtime-bar > span { display: block; padding: 0 3px; }
+    .session-runtime-popover { left: auto; right: 0; }
+  }
+  /* Keep the phone header to one row: the title flexes, rename remains
+     available from the session menu, and runtime metadata contracts into a
+     small model-plus-bar chip beside the T/C/P selector. */
+  @media (max-width: 480px) {
+    header {
+      display: flex;
+      gap: 2px;
+      min-height: var(--header-h);
+      padding: 0 4px;
+    }
+    header .meta { flex: 1 1 0; }
+    .title-action { display: none; }
+    .mini-matrix { width: 28px; }
+    .conn { margin-left: 0; }
+    .session-runtime { flex: 0 0 56px; }
+    .session-runtime-button { flex-direction: column; align-items: stretch; gap: 1px; padding: 2px; }
+    .session-runtime-model { max-width: 52px; font-size: 8px; line-height: 1.1; }
+    .session-runtime-button .session-runtime-bar { width: 52px; height: 14px; font-size: 8px; }
+    .session-runtime-button .session-runtime-bar > span {
+      display: block; overflow: hidden; text-overflow: ellipsis; padding: 0 2px;
+    }
+    .view-mode-toggle { flex: 0 0 auto; margin-left: 0; }
+    .view-mode-toggle.collapsed button { min-width: 24px; padding: 4px 4px; }
+  }
   /* Segmented control for terminal / chat / program. */
   .view-mode-toggle {
     flex: 0 0 auto;
@@ -2548,6 +2615,15 @@
     <div class="meta" id="sessionTitle"></div>
     <button type="button" class="title-action" id="titleRenameBtn" hidden
             aria-label="rename session" title="Rename session">✎</button>
+    <div class="session-runtime" id="sessionRuntime" hidden>
+      <button type="button" class="session-runtime-button" id="sessionRuntimeBtn"
+              aria-label="session model and context" aria-expanded="false">
+        <span class="session-runtime-model" id="sessionRuntimeModel"></span>
+        <span class="session-runtime-bar" id="sessionRuntimeBar"><span></span></span>
+      </button>
+      <div class="session-runtime-popover" id="sessionRuntimePopover" hidden role="dialog"
+           aria-label="session runtime details"></div>
+    </div>
     <div class="view-mode-toggle" id="viewModeToggle" hidden
          role="group" aria-label="session view mode">
       <button type="button" id="viewModeTerminal" data-view-mode="terminal"
@@ -2945,6 +3021,11 @@ const mainEl = document.querySelector("main");
 const sessionListEl = $("sessionList");
 const sessionListResizerEl = $("sessionListResizer");
 const sessionTitleEl = $("sessionTitle");
+const sessionRuntimeEl = $("sessionRuntime");
+const sessionRuntimeBtn = $("sessionRuntimeBtn");
+const sessionRuntimeModelEl = $("sessionRuntimeModel");
+const sessionRuntimeBarEl = $("sessionRuntimeBar");
+const sessionRuntimePopoverEl = $("sessionRuntimePopover");
 const viewModeToggleEl = $("viewModeToggle");
 const viewModeTerminalBtn = $("viewModeTerminal");
 const viewModeChatBtn = $("viewModeChat");
@@ -5002,6 +5083,7 @@ async function selectSession(id, { replaceUrl = false } = {}) {
   renderSessions();
   const s = state.sessions.find((x) => x.id === id);
   sessionTitleEl.textContent = s ? sessionViewTitle(s) : "";
+  renderSessionRuntimeMeta(s);
   renderViewModeToggle(s);
   renderBrowserPreviewForSession(id);
   closeSuggestDeck();
@@ -9773,6 +9855,7 @@ function handleNotification(method, params) {
       selectSession(archiveNeighborId);
     } else if (session.id === state.currentId) {
       sessionTitleEl.textContent = sessionViewTitle(session);
+      renderSessionRuntimeMeta(session);
       renderViewModeToggle(session);
       if (state.mode !== "program") hydrateWidgets(session.id);
       updateSuggestOrb();
@@ -9815,6 +9898,7 @@ function handleNotification(method, params) {
       renderEditorState(null);
       renderBrowserPreviewForSession(null);
       sessionTitleEl.textContent = "";
+      renderSessionRuntimeMeta(null);
       viewModeToggleEl.hidden = true;
       refreshSessionActions();
       if (neighborId) selectSession(neighborId);
@@ -11758,6 +11842,36 @@ function sessionViewTitle(s) {
   return s.title && harness ? `${title} — ${harness}` : title;
 }
 
+function renderSessionRuntimeMeta(s) {
+  if (!sessionRuntimeEl || !sessionRuntimeBtn || !sessionRuntimeBarEl) return;
+  if (!s || (!s.model && s.context_used == null)) {
+    sessionRuntimeEl.hidden = true;
+    sessionRuntimePopoverEl.hidden = true;
+    sessionRuntimeBtn.setAttribute("aria-expanded", "false");
+    return;
+  }
+  const model = s.model ? shortModelLabel(s.model) + (s.effort ? ` · ${s.effort}` : "") : "model unknown";
+  const used = s.context_used;
+  const window = Number(s.context_window || 0);
+  const hasWindow = used != null && window > 0;
+  const percent = hasWindow ? Math.min(100, Math.floor((used * 100) / window)) : 0;
+  const fullLabel = hasWindow
+    ? `${formatTokenCount(used)} / ${formatTokenCount(window)} · ${percent}%`
+    : used != null ? `${formatTokenCount(used)} used` : "context unavailable";
+  const compactLabel = hasWindow ? `${percent}%` : used != null ? formatTokenCount(used) : "model";
+  sessionRuntimeEl.hidden = false;
+  sessionRuntimeModelEl.textContent = model;
+  sessionRuntimeBarEl.style.setProperty("--ctx-fill", `${percent}%`);
+  sessionRuntimeBarEl.dataset.compact = compactLabel;
+  sessionRuntimeBarEl.firstElementChild.textContent = fullLabel;
+  sessionRuntimeBtn.title = `${model} · ${fullLabel}`;
+  sessionRuntimeBtn.setAttribute("aria-label", `${model}; ${fullLabel}`);
+  sessionRuntimePopoverEl.innerHTML =
+    `<div><span class="runtime-detail-label">Model</span> ${escape(model)}</div>` +
+    `<div><span class="runtime-detail-label">Context</span> ${escape(fullLabel)}</div>` +
+    `<div class="session-runtime-bar runtime-detail-bar" style="--ctx-fill:${percent}%"><span>${escape(fullLabel)}</span></div>`;
+}
+
 function escape(s) {
   return String(s ?? "")
     .replace(/&/g, "&amp;")
@@ -12134,6 +12248,25 @@ closeSessionDeleteBtn.addEventListener("click", async () => {
 // re-render the list (which calls `refreshSessionActions` for us).
 $("titleRenameBtn").addEventListener("click", () => {
   handleRowAction("rename", state.currentId);
+});
+
+function closeSessionRuntimePopover() {
+  sessionRuntimePopoverEl.hidden = true;
+  sessionRuntimeBtn.setAttribute("aria-expanded", "false");
+}
+
+sessionRuntimeBtn.addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  const open = sessionRuntimePopoverEl.hidden;
+  sessionRuntimePopoverEl.hidden = !open;
+  sessionRuntimeBtn.setAttribute("aria-expanded", open ? "true" : "false");
+});
+document.addEventListener("click", (ev) => {
+  if (sessionRuntimePopoverEl.hidden || sessionRuntimeEl.contains(ev.target)) return;
+  closeSessionRuntimePopover();
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") closeSessionRuntimePopover();
 });
 
 // Session menu — the web peer of the TUI session-title menu. The pill
