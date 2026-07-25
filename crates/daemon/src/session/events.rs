@@ -133,6 +133,22 @@ impl SessionManager {
         // AgentStatus is ephemeral live UI state. The CLI may render
         // inactive statuses as display-only history rows, but they
         // should not enter the structured transcript or PTY log.
+        // Suggestions are ephemeral live UI state (spec 0109): broadcast to
+        // connected clients, never persisted — a replayed stale hand would
+        // offer prompts for a turn that no longer exists.
+        if let SessionEvent::Suggestions(_) = &event {
+            let now = Utc::now();
+            let seq = entry.transcript_count.load(Ordering::Relaxed);
+            let _ = self
+                .broadcast
+                .send(BroadcastMsg::Event(EventNotificationPayload {
+                    session_id: entry.id.clone(),
+                    at: now,
+                    event,
+                    seq,
+                }));
+            return;
+        }
         if let SessionEvent::AgentStatus(_) = &event {
             let now = Utc::now();
             let seq = entry.transcript_count.load(Ordering::Relaxed);
@@ -482,6 +498,8 @@ impl SessionManager {
                 | SessionEvent::UiPanel(_)
                 | SessionEvent::UiDelete { .. }
                 | SessionEvent::EditorState { .. }
+                // Transient; handled by the broadcast-only fast path above.
+                | SessionEvent::Suggestions(_)
                 // ClientCommand is a UI-control action; it never moves the
                 // session's top-level state. (Prototype: persistence still
                 // goes through the default append above — the policy-driven
@@ -507,6 +525,12 @@ impl SessionManager {
                         }
                     }
                     SessionState::Pending | SessionState::Paused => {}
+                }
+                // A new turn starting invalidates any suggestion
+                // generation still in flight for the turn that just
+                // ended (spec 0109).
+                if s.state == SessionState::Running {
+                    entry.suggest_gen.fetch_add(1, Ordering::SeqCst);
                 }
             }
             let snapshot = s.clone();
@@ -689,6 +713,7 @@ impl SessionManager {
                 unseen_activity: AtomicBool::new(false),
                 pty_burst_start_ms: AtomicI64::new(0),
                 resume_settling_since_ms: AtomicI64::new(0),
+                suggest_gen: AtomicU64::new(0),
                 osc11_tail: std::sync::Mutex::new(Vec::new()),
             });
             if let Err(error) = self.storage.save_summary(&summary) {

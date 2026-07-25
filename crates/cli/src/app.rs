@@ -800,6 +800,7 @@ fn chat_scroll_kind(ev: &SessionEvent) -> ChatScrollKind {
         SessionEvent::Pty { .. }
         | SessionEvent::PtyResize { .. }
         | SessionEvent::EditorState { .. }
+        | SessionEvent::Suggestions(_)
         | SessionEvent::ClientCommand { .. }
         | SessionEvent::ToolApprovalResolved { .. }
         | SessionEvent::ApprovalModeChanged { .. }

@@ -20,6 +20,7 @@ mod provider_watchdog;
 mod sandbox;
 mod skills;
 mod tasks;
+mod suggest_mode;
 mod title_mode;
 mod tools;
 
@@ -174,6 +175,26 @@ fn model_hint(params: &SessionStartParams) -> String {
         .or_else(|| params.env.get("CONSTRUCT_SMITH_MODEL").cloned())
         .or_else(|| std::env::var("CONSTRUCT_SMITH_MODEL").ok())
         .unwrap_or_else(|| "(auto-detect from available credentials)".to_string())
+}
+
+/// One-shot suggestion generation (spec 0106): read the rendered
+/// transcript tail from stdin, print the generated hand as JSON.
+/// Non-zero exit on any failure so the daemon treats the attempt as
+/// best-effort and drops it.
+pub async fn run_suggest_mode() -> anyhow::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut context = String::new();
+    tokio::io::stdin().read_to_string(&mut context).await?;
+    match suggest_mode::suggest_hand(&context).await {
+        Ok(hand) => {
+            println!("{}", serde_json::to_string(&hand)?);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("suggest-mode failed: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub async fn run_title_mode(prompt: &str) -> anyhow::Result<()> {

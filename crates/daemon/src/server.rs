@@ -1275,6 +1275,13 @@ async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
+    dispatch_entry!(ipc_method::SESSION_SUGGEST, {
+        let p = params!(req, SessionIdParams);
+        match manager.request_suggestions(&p.session_id).await {
+            Ok(started) => ok!(req, &construct_protocol::SuggestResult { started }),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
     dispatch_entry!(ipc_method::SESSION_INTERRUPT, {
         let p = params!(req, SessionIdParams);
         match manager.interrupt(&p.session_id).await {

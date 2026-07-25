@@ -688,6 +688,153 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         args: Option<String>,
     },
+    /// Generated next-prompt suggestions for the turn that just ended
+    /// (spec 0109). Produced daemon-side from the session's normalized
+    /// transcript tail — never by adapters — and delivered like
+    /// [`AgentStatus`](Self::AgentStatus): broadcast to live clients
+    /// only, never persisted to the transcript. Clients render the hand
+    /// however fits their surface (TUI corner orb, web fan); accepting a
+    /// card sends its text through the ordinary session-input path. A
+    /// hand is only valid while the session still awaits input — any
+    /// later event for the session invalidates it client-side.
+    Suggestions(SuggestionHand),
+}
+
+/// A dealt "hand" of generated next-prompt suggestions: one top pick
+/// (the single most likely next prompt, cheap to accept) plus a few
+/// generated verbs — under-specified directions, each holding its own
+/// concrete prompt cards. All text is model-generated per turn; nothing
+/// in the hand is a fixed vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestionHand {
+    /// The single best next prompt — the one-keypress case.
+    pub top: SuggestionCard,
+    /// Generated directions, each expanding to concrete cards.
+    #[serde(default)]
+    pub verbs: Vec<SuggestionVerb>,
+}
+
+/// A generated direction ("wrap up", "dig deeper", …) grouping cards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestionVerb {
+    /// Short label shown on the verb chip. Generated per turn.
+    pub label: String,
+    #[serde(default)]
+    pub cards: Vec<SuggestionCard>,
+}
+
+/// One concrete suggested prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestionCard {
+    /// Full prompt text sent verbatim when the card is accepted.
+    pub text: String,
+}
+
+/// Ack for [`ipc_method::SESSION_SUGGEST`]: whether generation was
+/// actually kicked off (false when disabled, the session isn't awaiting
+/// input, or another generation is already in flight).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestResult {
+    pub started: bool,
+}
+
+impl SuggestionHand {
+    /// Loose-in, strict-out parse of a model's reply into a hand:
+    /// accepts the JSON with or without code fences or prose around it,
+    /// then clamps every field to UI-safe sizes. Shared by the smith
+    /// `--suggest-mode` one-shot and the daemon's same-harness probe
+    /// path so every generator obeys the same contract. Errors only
+    /// when no usable top pick survives.
+    pub fn parse_loose(raw: &str) -> Result<Self, String> {
+        const MAX_CARD_CHARS: usize = 240;
+        const MAX_LABEL_CHARS: usize = 28;
+        const MAX_VERBS: usize = 4;
+        const MAX_CARDS_PER_VERB: usize = 4;
+
+        #[derive(Deserialize)]
+        struct RawVerb {
+            #[serde(default)]
+            label: String,
+            #[serde(default)]
+            cards: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct RawHand {
+            #[serde(default)]
+            top: String,
+            #[serde(default)]
+            verbs: Vec<RawVerb>,
+        }
+
+        let start = raw.find('{').ok_or("no JSON object in output")?;
+        let end = raw.rfind('}').ok_or("no JSON object in output")?;
+        if end < start {
+            return Err("malformed JSON output".to_string());
+        }
+        let parsed: RawHand = serde_json::from_str(&raw[start..=end])
+            .map_err(|e| format!("suggestion JSON parse: {e}"))?;
+
+        let clamp_card = |text: &str| -> Option<SuggestionCard> {
+            let t = text.trim();
+            if t.is_empty() {
+                return None;
+            }
+            Some(SuggestionCard {
+                text: t
+                    .chars()
+                    .take(MAX_CARD_CHARS)
+                    .collect::<String>()
+                    .trim()
+                    .to_string(),
+            })
+        };
+
+        let top = clamp_card(&parsed.top).ok_or("empty top suggestion")?;
+        let verbs = parsed
+            .verbs
+            .into_iter()
+            .filter_map(|v| {
+                let label: String = v
+                    .label
+                    .trim()
+                    .chars()
+                    .take(MAX_LABEL_CHARS)
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
+                if label.is_empty() {
+                    return None;
+                }
+                let cards: Vec<SuggestionCard> = v
+                    .cards
+                    .iter()
+                    .filter_map(|c| clamp_card(c))
+                    .take(MAX_CARDS_PER_VERB)
+                    .collect();
+                if cards.is_empty() {
+                    return None;
+                }
+                Some(SuggestionVerb { label, cards })
+            })
+            .take(MAX_VERBS)
+            .collect();
+        Ok(SuggestionHand { top, verbs })
+    }
+
+    /// The generation instructions shared by every suggestion generator
+    /// (spec 0109). Generators append the transcript context after this
+    /// and parse the reply with [`Self::parse_loose`].
+    pub const PROMPT_INSTRUCTIONS: &'static str = r#"You predict the user's next prompt in a coding-agent session. Below is the tail of the transcript: the user's prompts, the agent's replies, and tool activity. The agent just finished a turn and is waiting for input.
+
+Reply with ONLY a JSON object, no markdown fences, no commentary:
+{"top": "...", "verbs": [{"label": "...", "cards": ["...", "..."]}]}
+
+Rules:
+- "top": the single most likely next prompt, written in the user's own voice and style. Terse, imperative, immediately sendable.
+- "verbs": exactly 3 or 4 distinct directions the user might take instead. Each label is 1-3 lowercase words generated from THIS conversation (e.g. "ship it", "dig deeper", "change course" — but derive from context, never a fixed menu). No two verbs may mean the same thing, and none may restate "top".
+- Each verb has 2-4 "cards": complete, self-contained prompts under 140 characters, concrete enough to send unedited. Reference actual files, tests, errors, and names from the transcript.
+- Mirror the user's phrasing habits and any workflow conventions visible in the transcript (tests before PR, worktrees, etc.).
+- Never invent state: only reference things the transcript shows. Do not run tools; just reply with the JSON."#;
 }
 
 /// Lifecycle state surfaced by `session.list_tasks`. Derived by the
@@ -990,6 +1137,11 @@ pub mod ipc_method {
     pub const PROJECT_MOVE: &str = "project.move";
     pub const SESSION_DIFF: &str = "session.diff";
     pub const SESSION_TRANSCRIPT: &str = "session.transcript";
+    /// Request next-prompt suggestion generation for a session (spec
+    /// 0106). Fire-and-forget: the ack only says whether generation
+    /// started; the hand itself arrives later as a broadcast
+    /// [`SessionEvent::Suggestions`](crate::SessionEvent::Suggestions).
+    pub const SESSION_SUGGEST: &str = "session.suggest";
     /// Substring search across session name/metadata, stored program
     /// contents, and transcript history — see [`crate::SearchParams`] /
     /// [`crate::SearchResult`].
@@ -3389,5 +3541,75 @@ mod pty_activity_tests {
         assert!(is_pty_active_payload(b"\x1b[H"));
         // Text after ignorable sequence -> active
         assert!(is_pty_active_payload(b"\x1b[?2026hhello\x1b[?2026l"));
+    }
+}
+
+#[cfg(test)]
+mod suggestion_tests {
+    use super::*;
+
+    #[test]
+    fn parse_loose_accepts_fenced_json() {
+        let raw = "```json\n{\"top\":\"run the tests\",\"verbs\":[{\"label\":\"dig deeper\",\"cards\":[\"why did X fail?\"]}]}\n```";
+        let hand = SuggestionHand::parse_loose(raw).unwrap();
+        assert_eq!(hand.top.text, "run the tests");
+        assert_eq!(hand.verbs.len(), 1);
+        assert_eq!(hand.verbs[0].label, "dig deeper");
+        assert_eq!(hand.verbs[0].cards[0].text, "why did X fail?");
+    }
+
+    #[test]
+    fn parse_loose_clamps_counts_and_lengths() {
+        let long = "x".repeat(1000);
+        let verbs: Vec<String> = (0..8)
+            .map(|i| {
+                format!("{{\"label\":\"verb {i}\",\"cards\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\"]}}")
+            })
+            .collect();
+        let raw = format!("{{\"top\":\"{long}\",\"verbs\":[{}]}}", verbs.join(","));
+        let hand = SuggestionHand::parse_loose(&raw).unwrap();
+        assert_eq!(hand.top.text.chars().count(), 240);
+        assert_eq!(hand.verbs.len(), 4);
+        assert_eq!(hand.verbs[0].cards.len(), 4);
+    }
+
+    #[test]
+    fn parse_loose_drops_empty_verbs_and_requires_top() {
+        assert!(SuggestionHand::parse_loose("{\"top\":\"  \",\"verbs\":[]}").is_err());
+        let hand = SuggestionHand::parse_loose(
+            "{\"top\":\"ok\",\"verbs\":[{\"label\":\"\",\"cards\":[\"a\"]},{\"label\":\"real\",\"cards\":[]}]}",
+        )
+        .unwrap();
+        assert!(hand.verbs.is_empty());
+    }
+
+    #[test]
+    fn parse_loose_ignores_prose_around_json() {
+        let raw = "Sure! Here's my prediction:\n{\"top\":\"merge it\",\"verbs\":[]}\nHope that helps.";
+        let hand = SuggestionHand::parse_loose(raw).unwrap();
+        assert_eq!(hand.top.text, "merge it");
+    }
+
+    #[test]
+    fn suggestions_event_roundtrips() {
+        let ev = SessionEvent::Suggestions(SuggestionHand {
+            top: SuggestionCard {
+                text: "run tests".into(),
+            },
+            verbs: vec![SuggestionVerb {
+                label: "dig deeper".into(),
+                cards: vec![SuggestionCard { text: "why?".into() }],
+            }],
+        });
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\":\"suggestions\""));
+        let back: SessionEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionEvent::Suggestions(h) => {
+                assert_eq!(h.top.text, "run tests");
+                assert_eq!(h.verbs[0].cards[0].text, "why?");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 }

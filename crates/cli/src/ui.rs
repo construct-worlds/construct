@@ -9579,6 +9579,8 @@ fn chat_event_kind(ev: &SessionEvent) -> ChatEventKind {
         SessionEvent::Pty { .. }
         | SessionEvent::PtyResize { .. }
         | SessionEvent::EditorState { .. }
+        // Ephemeral overlay state, never a transcript row.
+        | SessionEvent::Suggestions(_)
         // Prototype: hidden like today's `tui` ToolUse. The follow-up reads
         // `slash::COMMANDS[id].render` and shows SystemNote breadcrumbs.
         | SessionEvent::ClientCommand { .. }
@@ -9882,6 +9884,7 @@ fn format_chat_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>
         SessionEvent::Pty { .. }
         | SessionEvent::PtyResize { .. }
         | SessionEvent::EditorState { .. }
+        | SessionEvent::Suggestions(_)
         | SessionEvent::ClientCommand { .. }
         | SessionEvent::ToolApprovalResolved { .. }
         | SessionEvent::ApprovalModeChanged { .. }
@@ -10800,6 +10803,7 @@ fn shorten(s: &str, max: usize) -> String {
 
 pub fn short_event_label(ev: &SessionEvent) -> String {
     match ev {
+        SessionEvent::Suggestions(hand) => format!("suggestions {}", 1 + hand.verbs.len()),
         SessionEvent::NativeSubagentSnapshot { ids } => {
             format!("native-subagent-snapshot {}", ids.len())
         }

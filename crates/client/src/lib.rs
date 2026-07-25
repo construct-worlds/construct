@@ -569,6 +569,19 @@ impl Client {
 
         Ok(new_id)
     }
+    /// Request next-prompt suggestion generation for a session (spec
+    /// 0106). Fire-and-forget: the hand arrives later as a broadcast
+    /// `SessionEvent::Suggestions` on the event subscription.
+    pub async fn suggest(&self, id: &str) -> Result<construct_protocol::SuggestResult> {
+        self.request(
+            ipc_method::SESSION_SUGGEST,
+            &construct_protocol::SessionIdParams {
+                session_id: id.to_string(),
+            },
+        )
+        .await
+    }
+
     pub async fn send_input(&self, id: &str, text: String) -> Result<()> {
         let _: serde_json::Value = self
             .request(

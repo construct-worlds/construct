@@ -37,7 +37,7 @@ impl TextSink for CaptureSink {
 /// just means a session with no configured credential quietly keeps its
 /// default (hash-derived) name instead of shelling out to an Ollama server
 /// that likely isn't running.
-fn pick_default_spec_str() -> Result<String> {
+pub(crate) fn pick_default_spec_str() -> Result<String> {
     if let Ok(s) = std::env::var("CONSTRUCT_SMITH_MODEL") {
         if !s.trim().is_empty() {
             return Ok(s);
@@ -60,7 +60,7 @@ fn pick_default_spec_str() -> Result<String> {
     ))
 }
 
-fn provider_for(p: Provider) -> Result<Box<dyn LlmProvider>> {
+pub(crate) fn provider_for(p: Provider) -> Result<Box<dyn LlmProvider>> {
     Ok(match p {
         Provider::OpenAI => Box::new(provider::openai::OpenAi::from_env()?),
         Provider::Anthropic => Box::new(provider::anthropic::Anthropic::from_env()?),
