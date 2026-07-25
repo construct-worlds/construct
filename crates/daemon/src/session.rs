@@ -38,8 +38,8 @@ mod widgets;
 
 #[cfg(test)]
 use lifecycle::{
-    force_redraw_size_on_resume, resume_redraw_ready, should_resume_on_startup,
-    start_params_for_create,
+    force_redraw_size_on_resume, install_session_identity_env, resume_redraw_ready,
+    should_resume_on_startup, start_params_for_create,
 };
 
 const BROADCAST_CAP: usize = 4096;
@@ -6180,6 +6180,22 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(empty.prompt, None);
+    }
+
+    #[test]
+    fn session_identity_env_is_daemon_owned_and_stable() {
+        let mut env = HashMap::from([(
+            construct_protocol::agent_context::ENV_SESSION_ID.to_string(),
+            "caller-supplied".to_string(),
+        )]);
+
+        install_session_identity_env(&mut env, "s-cache-stable");
+
+        assert_eq!(
+            env.get(construct_protocol::agent_context::ENV_SESSION_ID)
+                .map(String::as_str),
+            Some("s-cache-stable")
+        );
     }
 
     #[test]

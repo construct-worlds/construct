@@ -136,6 +136,11 @@ impl SessionManager {
         for (k, v) in &params.env {
             env_with_meta.insert(k.clone(), v.clone());
         }
+        // Every adapter process belongs to exactly one Construct session.
+        // Expose that identity directly so in-process providers (notably
+        // Smith's Codex OAuth transport) can use it for stable prompt-cache
+        // routing, just as child-CLI adapters already do for their MCP env.
+        install_session_identity_env(&mut env_with_meta, &id);
         // A same-harness fork can continue byte-for-byte using the
         // harness's native fork operation (claude: `--resume <id>
         // --fork-session`; codex: `codex fork <id>`; opencode:
@@ -450,6 +455,9 @@ impl SessionManager {
         start_params
             .env
             .insert("CONSTRUCT_RESUME".to_string(), "1".to_string());
+        // Reassert daemon-owned identity on resume, including for start.json
+        // records created before session-id injection was added.
+        install_session_identity_env(&mut start_params.env, id);
         // Make sure the data-dir env is present even if start.json predates
         // the meta env injection.
         start_params.env.insert(
@@ -812,6 +820,13 @@ pub(super) fn start_params_for_create(
         env,
         args,
     }
+}
+
+pub(super) fn install_session_identity_env(env: &mut HashMap<String, String>, session_id: &str) {
+    env.insert(
+        construct_protocol::agent_context::ENV_SESSION_ID.to_string(),
+        session_id.to_string(),
+    );
 }
 
 // Whether the post-resume force-redraw should fire now: the child has

@@ -217,9 +217,8 @@ struct AuthState {
 pub struct CodexOauth {
     state: Arc<Mutex<AuthState>>,
     http: reqwest::Client,
-    /// [P0 spike] Reused Responses WebSocket connection (opt-in via
-    /// CONSTRUCT_SMITH_CODEX_WS=1) to test whether a warm connection lifts
-    /// the prompt-cache hit-rate vs a stateless HTTP POST per request.
+    /// Reused Responses WebSocket connection. This is the default Codex OAuth
+    /// transport; set CONSTRUCT_SMITH_CODEX_WS=0 to opt out.
     ws: Arc<Mutex<Option<WsStream>>>,
     /// Set after a WS connect/transport failure so the session stops retrying
     /// WS and stays on the HTTP path (mirrors codex's session-scoped fallback).
@@ -951,12 +950,12 @@ impl LlmProvider for CodexOauth {
         // codex-oauth turns within a process.
         drop(state);
 
-        // Opt-in Responses WebSocket transport: a warm, reused connection caches
-        // far better (~97%) than a stateless HTTP POST per request. On a connect
-        // / pre-stream failure it falls back to HTTP and disables WS for the
-        // rest of the session; a mid-stream failure propagates (no double-emit).
-        let ws_enabled = std::env::var("CONSTRUCT_SMITH_CODEX_WS").as_deref() == Ok("1")
-            && !self.ws_disabled.load(Ordering::Relaxed);
+        // A warm, reused Responses WebSocket caches far better (~97%) than a
+        // stateless HTTP POST per request, so it is the default. Operators can
+        // explicitly opt out with CONSTRUCT_SMITH_CODEX_WS=0. On a connect /
+        // pre-stream failure it falls back to HTTP and disables WS for the rest
+        // of the session; a mid-stream failure propagates (no double-emit).
+        let ws_enabled = codex_ws_enabled() && !self.ws_disabled.load(Ordering::Relaxed);
         if ws_enabled {
             match self
                 .try_ws(body.clone(), &access_token, &account_id, sink)
@@ -1405,6 +1404,10 @@ fn short_hash(s: &str) -> String {
     format!("{:x}", h.finish())[..8].to_string()
 }
 
+fn codex_ws_enabled() -> bool {
+    std::env::var("CONSTRUCT_SMITH_CODEX_WS").as_deref() != Ok("0")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1574,6 +1577,59 @@ mod tests {
         // disliked empty arrays here).
         assert!(body.get("tools").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
+    }
+
+    /// Construct injects one stable session id into the Smith adapter
+    /// environment. Codex OAuth must copy it into every Responses request so
+    /// successive turns route to the same prompt-cache node.
+    #[test]
+    fn build_body_uses_construct_session_id_as_prompt_cache_key() {
+        struct EnvGuard(Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("CONSTRUCT_SESSION_ID", value),
+                    None => std::env::remove_var("CONSTRUCT_SESSION_ID"),
+                }
+            }
+        }
+
+        let _guard = EnvGuard(std::env::var("CONSTRUCT_SESSION_ID").ok());
+        std::env::set_var("CONSTRUCT_SESSION_ID", "s-cache-stable");
+
+        let first = build_responses_body("gpt-5-codex", "sys", &[user("one")], &[]);
+        let second = build_responses_body(
+            "gpt-5-codex",
+            "sys",
+            &[user("one"), assistant("two"), user("three")],
+            &[],
+        );
+
+        assert_eq!(first["prompt_cache_key"], "s-cache-stable");
+        assert_eq!(second["prompt_cache_key"], "s-cache-stable");
+    }
+
+    #[test]
+    fn codex_websocket_is_default_with_explicit_opt_out() {
+        struct EnvGuard(Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("CONSTRUCT_SMITH_CODEX_WS", value),
+                    None => std::env::remove_var("CONSTRUCT_SMITH_CODEX_WS"),
+                }
+            }
+        }
+
+        let _guard = EnvGuard(std::env::var("CONSTRUCT_SMITH_CODEX_WS").ok());
+        std::env::remove_var("CONSTRUCT_SMITH_CODEX_WS");
+        assert!(codex_ws_enabled());
+
+        std::env::set_var("CONSTRUCT_SMITH_CODEX_WS", "0");
+        assert!(!codex_ws_enabled());
+
+        std::env::set_var("CONSTRUCT_SMITH_CODEX_WS", "1");
+        assert!(codex_ws_enabled());
     }
 
     /// Tools are emitted in the flatter Responses shape (no
