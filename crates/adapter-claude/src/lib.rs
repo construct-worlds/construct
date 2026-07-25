@@ -1093,8 +1093,9 @@ fn claude_context_window_for_model(model: &str, used_tokens: u64) -> Option<u64>
         .and_then(|suffix| suffix.split(['-', '.']).next())
         .and_then(|version| version.parse::<u64>().ok())
         .is_some_and(|minor| minor >= 6);
-    let base = if matches!(model.as_str(), "fable-5" | "sonnet-5")
+    let base = if matches!(model.as_str(), "fable-5" | "opus-5" | "sonnet-5")
         || model.starts_with("claude-fable-5")
+        || model.starts_with("claude-opus-5")
         || model.starts_with("claude-sonnet-5")
         || opus_4_6_or_newer
     {
@@ -1637,6 +1638,14 @@ mod tests {
 
     #[test]
     fn known_claude_windows_use_long_context_and_expand_with_usage() {
+        assert_eq!(
+            claude_context_window_for_model("opus-5", 1),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            claude_context_window_for_model("claude-opus-5-20260725", 1),
+            Some(1_000_000)
+        );
         assert_eq!(
             claude_context_window_for_model("claude-sonnet-5", 1),
             Some(1_000_000)
