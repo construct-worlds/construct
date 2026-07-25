@@ -35002,6 +35002,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn focused_lineage_highlights_the_whole_header_rule() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        app.focus = PaneFocus::List;
+        app.lineage_focused = true;
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let area = app.layout.lineage_area.expect("section area");
+        let bare_rule = term
+            .backend()
+            .buffer()
+            .cell((area.x, area.y))
+            .expect("bare header-rule cell");
+        assert_eq!(bare_rule.symbol(), "─");
+        assert_eq!(
+            bare_rule.style().fg,
+            Some(app.theme.border_focused),
+            "the focused lineage section must highlight its full header rule, \
+             matching the focused sessions pane border"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn working_session_status_and_live_turn_info_animate_in_the_section() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         // s1 (shell harness, Running) with fresh PTY activity animates —
