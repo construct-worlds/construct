@@ -181,6 +181,16 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     if let Err(e) = manager.router.start().await {
         tracing::error!(error = %format!("{e:#}"), "router failed to start");
     }
+    // Persist the first proof that each armed route is really carrying
+    // traffic, so an inert route stops being reported as a working one.
+    if let Some(mut observed) = manager.router.take_observed_stream() {
+        let mgr = manager.clone();
+        tokio::spawn(async move {
+            while let Some(session_id) = observed.recv().await {
+                mgr.mark_route_observed(&session_id).await;
+            }
+        });
+    }
     {
         let mgr = manager.clone();
         tokio::spawn(async move {

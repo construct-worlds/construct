@@ -205,6 +205,12 @@ enabled = true
 #
 # OAuth-backed providers (claude-oauth / codex-oauth / grok-oauth) are not
 # configurable here — they have no base-URL/key surface.
+#
+# These profiles are ALSO the route targets used by [router] below: with
+# routing enabled, each one appears in the TUI's route picker for any
+# route-capable session. `openai` / `grok` / `anthropic` profiles are
+# selectable from a `claude` session (the first two via translation);
+# `gemini` / `meta` / `ollama` are shown with the reason they are not.
 
 # OpenAI-compatible example (DeepSeek):
 # [smith.models.deepseek]
@@ -308,7 +314,7 @@ enabled = true
 #   CONSTRUCT_PI_BIN          — binary path fallback for the pi adapter
 #
 # ---------------------------------------------------------------------------
-# Model routing (specs 0109/0110/0111)
+# Model routing (specs 0109/0110/0111/0112)
 # ---------------------------------------------------------------------------
 # Off by default. When enabled, route-capable sessions are spawned with
 # HTTPS_PROXY pointing at a loopback proxy the daemon owns. The proxy does
@@ -319,23 +325,24 @@ enabled = true
 # state — is never read and never displaced.
 #
 # Arming a route (from the TUI: click the model in the modeline) redirects
-# just that session's model traffic to the named endpoint, on the running
+# just that session's model traffic to the chosen endpoint, on the running
 # session, with no restart. The choice persists across daemon restarts.
 #
-# Only same-dialect routes are possible: a route redirects an endpoint, it
-# does not translate between provider wire formats. Today that means
-# `dialect = "anthropic"` for the claude harness.
+# Route targets are the [smith.models.*] profiles below — declare an
+# endpoint once and it is reachable from both smith and a routed session.
+# When the target's dialect differs from the harness's, the router
+# translates (currently Anthropic Messages -> OpenAI Chat Completions, so a
+# `claude` session can be routed to any `provider = "openai"` or
+# `provider = "grok"` profile). Providers with no translator — gemini,
+# meta, ollama — are listed in the picker with that reason and cannot be
+# selected. An OpenAI-compatible server (including Ollama's own /v1
+# endpoint) can be reached by declaring it as `provider = "openai"` with
+# its base_url.
 #
 # [router]
 # enabled = true
 # port    = 8917    # fixed on purpose: harness processes outlive the daemon
 #                   # and keep dialing the port they were given at spawn
-#
-# [router.routes.kimi]
-# dialect     = "anthropic"
-# base_url    = "https://api.moonshot.ai/anthropic"
-# model       = "kimi-k2.5"
-# api_key_env = "MOONSHOT_API_KEY"
 "#;
 
 /// Kept for backwards-compat: `construct daemon default-config` and any
@@ -419,6 +426,10 @@ pub struct Config {
     pub suggest: SuggestConfig,
     #[serde(default)]
     pub router: RouterConfig,
+    /// Read for its `models` table only — route targets are the
+    /// `[smith.models.*]` profiles (spec 0030).
+    #[serde(default)]
+    pub smith: SmithConfig,
 }
 
 /// Next-prompt suggestion generation (spec 0109).
@@ -447,6 +458,10 @@ impl Default for SuggestConfig {
 /// default: with `enabled = false` the daemon injects nothing into any
 /// session's environment and no listener is ever bound, so a session's
 /// traffic is byte-identical to a build without routing.
+///
+/// Route *targets* are not declared here — they are the `[smith.models.*]`
+/// profiles (spec 0030), so an endpoint is declared once and reachable
+/// from both smith and a routed harness session.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RouterConfig {
     #[serde(default)]
@@ -462,13 +477,6 @@ pub struct RouterConfig {
     /// it deterministic.
     #[serde(default = "default_router_port")]
     pub port: u16,
-    /// Named routes, keyed by the name shown in the picker.
-    #[serde(default)]
-    pub routes: BTreeMap<String, RouteConfig>,
-}
-
-fn default_router_port() -> u16 {
-    8917
 }
 
 impl Default for RouterConfig {
@@ -476,54 +484,109 @@ impl Default for RouterConfig {
         Self {
             enabled: false,
             port: default_router_port(),
-            routes: BTreeMap::new(),
         }
     }
 }
 
-/// One `[router.routes.<name>]` entry: an endpoint a session's model
-/// traffic can be redirected to.
+/// `[smith]` — only the `models` table is read by the daemon. Smith parses
+/// this same section itself for its own `/model @<name>` switching; the
+/// daemon reads it so the router can offer the same endpoints as route
+/// targets without a second place to declare them.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SmithConfig {
+    #[serde(default)]
+    pub models: BTreeMap<String, ModelProfile>,
+}
+
+/// One `[smith.models.<name>]` entry (spec 0030).
 #[derive(Debug, Clone, Deserialize)]
-pub struct RouteConfig {
-    /// Wire dialect the endpoint speaks. Only `"anthropic"` is routable
-    /// today — a route is a *same-dialect* redirect, never a translation
-    /// (spec 0109 non-goals).
-    #[serde(default = "default_route_dialect")]
-    pub dialect: String,
-    pub base_url: String,
-    /// Model substituted into outbound requests.
-    pub model: String,
-    /// Name of the env var holding the endpoint's key. Preferred over
-    /// `api_key`, which is accepted but writes a secret into config.
+pub struct ModelProfile {
+    /// Wire protocol: `openai` | `anthropic` | `gemini` | `meta` |
+    /// `ollama` | `grok`.
+    pub provider: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
     #[serde(default)]
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
-fn default_route_dialect() -> String {
-    "anthropic".to_string()
-}
+impl ModelProfile {
+    /// Endpoint base URL, falling back to the provider's default exactly
+    /// as smith resolves it — the same profile must reach the same place
+    /// whether it is used by smith or by a route.
+    pub fn resolved_base_url(&self) -> Option<String> {
+        if let Some(url) = self.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(url.trim_end_matches('/').to_string());
+        }
+        let default = match self.provider.to_ascii_lowercase().as_str() {
+            "openai" => "https://api.openai.com/v1",
+            "anthropic" => "https://api.anthropic.com/v1",
+            "grok" => "https://api.x.ai/v1",
+            "gemini" => "https://generativelanguage.googleapis.com/v1beta",
+            "meta" => "https://api.meta.ai/v1",
+            "ollama" => "http://localhost:11434",
+            _ => return None,
+        };
+        Some(default.to_string())
+    }
 
-impl RouteConfig {
+    /// Env vars consulted when the profile names no credential, mirroring
+    /// smith's per-provider fallbacks.
+    fn default_key_envs(&self) -> &'static [&'static str] {
+        match self.provider.to_ascii_lowercase().as_str() {
+            "openai" => &["OPENAI_API_KEY"],
+            "anthropic" => &["ANTHROPIC_API_KEY"],
+            "gemini" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            "meta" => &["META_API_KEY", "MODEL_API_KEY"],
+            "grok" => &["GROK_API_KEY", "XAI_API_KEY"],
+            _ => &[],
+        }
+    }
+
     /// Resolve the endpoint credential. `Err` carries a message fit to
     /// show in the picker as the route's `unavailable_reason`.
     pub fn resolve_api_key(&self) -> Result<String, String> {
-        if let Some(k) = self.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            return Ok(k.to_string());
-        }
-        let var = self
+        if let Some(var) = self
             .api_key_env
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| "no api_key_env or api_key configured".to_string())?;
-        std::env::var(var)
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| format!("{var} is not set in the daemon's environment"))
+        {
+            return std::env::var(var)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| format!("{var} is not set in the daemon's environment"));
+        }
+        if let Some(key) = self.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            return Ok(key.to_string());
+        }
+        let defaults = self.default_key_envs();
+        for var in defaults {
+            if let Ok(v) = std::env::var(var) {
+                let v = v.trim().to_string();
+                if !v.is_empty() {
+                    return Ok(v);
+                }
+            }
+        }
+        if defaults.is_empty() {
+            // Ollama and friends need no credential.
+            return Ok(String::new());
+        }
+        Err(format!(
+            "no api_key_env, and none of {} is set",
+            defaults.join(" / ")
+        ))
     }
+}
+
+fn default_router_port() -> u16 {
+    8917
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

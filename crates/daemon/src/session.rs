@@ -1531,7 +1531,11 @@ impl SessionManager {
         tokio::sync::mpsc::UnboundedReceiver<crate::remote_supervisor::SupervisorMsg>,
         tokio::sync::mpsc::UnboundedReceiver<RestartCommand>,
     )> {
-        let router = crate::router::Router::new(storage.data_dir().to_path_buf(), &config.router);
+        let router = crate::router::Router::new(
+            storage.data_dir().to_path_buf(),
+            &config.router,
+            config.smith.models.clone(),
+        );
         let summaries = storage.list_summaries()?;
         let mut sessions = HashMap::new();
         for s in summaries {
@@ -5101,6 +5105,31 @@ impl SessionManager {
                 "stored route could not be restored"
             );
         }
+    }
+
+    /// Persist the first proof that a session's armed route is actually
+    /// carrying traffic. Until this lands, a route is armed but unproven —
+    /// the harness may resolve its endpoint through a channel that ignores
+    /// our injection (spec 0111), and reporting it as working would be a
+    /// lie the user has no way to check.
+    pub(crate) async fn mark_route_observed(&self, session_id: &str) {
+        let Some(entry) = self.get_entry(session_id).await else {
+            return;
+        };
+        let snapshot = {
+            let mut s = entry.summary.write().await;
+            match s.route.as_mut() {
+                Some(route) if !route.observed => route.observed = true,
+                _ => return,
+            }
+            s.clone()
+        };
+        let _ = self.storage.save_summary(&snapshot);
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::State(StateNotificationPayload {
+                session: snapshot,
+            }));
     }
 
     /// Arm, change, or clear a session's route (spec 0110).

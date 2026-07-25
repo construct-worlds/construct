@@ -46,9 +46,12 @@ routing is indistinguishable from a harness that changed its own model.
 
 ## Consequences
 
-- The route is stored by name. A name that no longer resolves after a
-  config change must surface as an actionable error on the session, not
-  silently fall back to pass-through and not silently pin a stale endpoint.
+- The route is stored by name, and that name is a model-profile name
+  shared with the harness-agnostic profile registry — an endpoint is
+  declared once and reachable from every consumer of it. A name that no
+  longer resolves after a config change must surface as an actionable
+  error on the session, not silently fall back to pass-through and not
+  silently pin a stale endpoint.
 - Because the harness is not restarted, the harness continues to believe
   it is talking to its own model. Anything derived from the harness's
   self-report — its own context-window accounting, its displayed model —

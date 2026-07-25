@@ -54,7 +54,8 @@ the shape, not of test coverage.
 - Pass-through must never parse. Anything that inspects traffic —
   token accounting, model detection — is available only on the routed
   path, where TLS is already terminated for a reason the user asked for.
-- Routing to a different endpoint requires TLS interception, and therefore
+- Routing to a different endpoint — whether a same-dialect redirect or a
+  translation — requires TLS interception, and therefore
   requires that the harness trust the Construct CA through a
   per-process channel (see
   [0111](0111-routing-injection-is-probe-verified.md)). A harness with no
@@ -82,9 +83,9 @@ the shape, not of test coverage.
 - Routing traffic for processes Construct did not spawn.
 - Intercepting anything on the pass-through path, for any purpose,
   including observability.
-- Translating between provider wire dialects. A route targets an endpoint
-  that speaks the dialect the harness already speaks; cross-dialect
-  routing is a separate decision.
+- The translation itself. What a route *is* — including when a target
+  speaks a different dialect than the harness — is
+  [0112](0112-cross-dialect-routing-is-a-translation.md).
 
 ## Examples
 

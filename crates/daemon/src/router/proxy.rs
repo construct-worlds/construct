@@ -20,7 +20,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::{ArmedRoute, Router, SessionRouting, UpstreamProxy};
+use super::{translate, ArmedRoute, Router, SessionRouting, UpstreamProxy};
 
 /// Cap on a request head. Anthropic-dialect requests carry large bodies
 /// but small heads; this only bounds the header block.
@@ -223,7 +223,32 @@ async fn intercept_tls(
     let request = parse_request(&head)?;
     let body = read_body(&mut tls, &request).await?;
 
-    match forward(&request, body, route).await {
+    // Same dialect → redirect the bytes. Different dialect → rebuild the
+    // request and re-encode the response stream (spec 0112).
+    if route.translates() {
+        ctx.mark_observed();
+        // The harness's own token-counting endpoint has no counterpart on
+        // an OpenAI-dialect target; answering locally keeps its context
+        // bookkeeping working instead of failing the turn.
+        if request.path.contains("count_tokens") {
+            return write_simple(&mut tls, 200, &count_tokens_reply(&body)).await;
+        }
+        let streaming = wants_stream(&body);
+        return match forward_translated(body, &route).await {
+            Ok(response) => write_translated_response(&mut tls, response, &route, streaming).await,
+            Err(e) => {
+                let payload = serde_json::json!({
+                    "type": "error",
+                    "error": {"type": "api_error", "message": format!("construct router: {e:#}")},
+                })
+                .to_string();
+                write_simple(&mut tls, 502, &payload).await.ok();
+                Err(e)
+            }
+        };
+    }
+
+    match forward(&request, body, &route).await {
         Ok(response) => {
             ctx.mark_observed();
             write_response(&mut tls, response).await
@@ -420,6 +445,7 @@ pub fn target_url(base_url: &str, path: &str) -> String {
     format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'))
 }
 
+/// Same-dialect redirect: keep the request as-is, change where it goes.
 async fn forward(
     req: &ParsedRequest,
     body: Vec<u8>,
@@ -438,6 +464,158 @@ async fn forward(
     let body = rewrite_body(&body, &route.model);
     out = out.header("content-length", body.len().to_string()).body(body);
     out.send().await.with_context(|| format!("forward to {url}"))
+}
+
+/// Cross-dialect: rebuild the request for the target's API (spec 0112).
+///
+/// The client's path is deliberately not carried over — the target's
+/// endpoint is a different one, not the same path on another host.
+async fn forward_translated(body: Vec<u8>, route: &ArmedRoute) -> Result<reqwest::Response> {
+    let source: serde_json::Value =
+        serde_json::from_slice(&body).context("parse anthropic request body")?;
+    let translated = translate::request_to_openai(&source, &route.model);
+    let url = format!("{}/chat/completions", route.base_url.trim_end_matches('/'));
+    let mut out = route
+        .client
+        .post(&url)
+        .header("content-type", "application/json");
+    // OpenAI-dialect endpoints authenticate with a bearer token, not the
+    // Anthropic `x-api-key` header the client sent.
+    if !route.api_key.is_empty() {
+        out = out.header("authorization", format!("Bearer {}", route.api_key));
+    }
+    out.json(&translated)
+        .send()
+        .await
+        .with_context(|| format!("forward to {url}"))
+}
+
+/// Does this request want a streamed response?
+fn wants_stream(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("stream").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// Answer `/v1/messages/count_tokens` locally when the target has no
+/// equivalent endpoint. Refusing would break the harness's own context
+/// bookkeeping; the estimate is explicitly approximate (spec 0112).
+fn count_tokens_reply(body: &[u8]) -> String {
+    let parsed = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+    serde_json::json!({"input_tokens": translate::estimate_tokens(&parsed)}).to_string()
+}
+
+/// Stream a translated response back in the client's dialect.
+async fn write_translated_response<S>(
+    stream: &mut S,
+    response: reqwest::Response,
+    route: &ArmedRoute,
+    streaming: bool,
+) -> Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    use futures::StreamExt;
+
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {"type": "api_error", "message": text},
+        })
+        .to_string();
+        return write_simple(stream, status.as_u16(), &body).await;
+    }
+
+    if !streaming {
+        let parsed: serde_json::Value = response.json().await.context("decode upstream json")?;
+        let body = translate::response_to_anthropic(&parsed, &route.model).to_string();
+        return write_simple(stream, 200, &body).await;
+    }
+
+    stream
+        .write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+        )
+        .await
+        .context("write response head")?;
+
+    let mut encoder = translate::AnthropicStreamEncoder::new(&route.model);
+    let mut upstream = response.bytes_stream();
+    let mut pending = Vec::<u8>::new();
+    while let Some(chunk) = upstream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                // Mid-stream failure: report it inside the stream the
+                // client is already reading, then close cleanly.
+                let msg = translate::error_event(&format!("upstream stream failed: {e}"));
+                write_chunk(stream, msg.as_bytes()).await?;
+                break;
+            }
+        };
+        pending.extend_from_slice(&chunk);
+        // SSE frames are newline-delimited; hold partial lines back.
+        while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
+            let Some(data) = line.trim().strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue;
+            };
+            let out = encoder.push_chunk(&value);
+            if !out.is_empty() {
+                write_chunk(stream, out.as_bytes()).await?;
+            }
+        }
+    }
+    let tail = encoder.finish();
+    write_chunk(stream, tail.as_bytes()).await?;
+    stream.write_all(b"0\r\n\r\n").await?;
+    stream.flush().await?;
+    stream.shutdown().await.ok();
+    Ok(())
+}
+
+async fn write_chunk<S>(stream: &mut S, data: &[u8]) -> Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    if data.is_empty() {
+        return Ok(());
+    }
+    stream
+        .write_all(format!("{:x}\r\n", data.len()).as_bytes())
+        .await?;
+    stream.write_all(data).await?;
+    stream.write_all(b"\r\n").await?;
+    // Model responses stream; holding bytes back stalls the harness's
+    // incremental rendering.
+    stream.flush().await?;
+    Ok(())
+}
+
+async fn write_simple<S>(stream: &mut S, status: u16, body: &str) -> Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let head = format!(
+        "HTTP/1.1 {status} \r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body.as_bytes()).await?;
+    stream.flush().await?;
+    stream.shutdown().await.ok();
+    Ok(())
 }
 
 /// Stream the upstream response back to the client, chunk-framed.
