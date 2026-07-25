@@ -333,16 +333,6 @@ pub struct SessionEntry {
     /// title-gen processes; a failed title-gen leaves the title unset
     /// and the session keeps its hash-derived display name.
     title_gen_attempted: AtomicBool,
-    /// Every user-message text seen so far while title-gen is still
-    /// waiting to fire, slash commands (`/model gpt-5.5`, …) included.
-    /// A leading run of slash commands doesn't by itself describe what
-    /// the session is *for*, so `maybe_spawn_auto_title` holds off
-    /// spawning generation until the first non-slash message arrives —
-    /// but that generation is seeded with everything accumulated here,
-    /// so the slash commands still inform the title. Cleared implicitly
-    /// once title-gen is claimed (`title_gen_attempted` flips to
-    /// `true`); nothing is pushed after that point.
-    pending_title_prompts: std::sync::Mutex<Vec<String>>,
     /// PTY-input accumulator used to derive the auto-title prompt for
     /// adapters that don't echo user input back as `SessionEvent::Message`
     /// events (shell / claude / codex interactive). Decodes printable
@@ -1622,7 +1612,6 @@ impl SessionManager {
                 title_gen_attempted: AtomicBool::new(
                     s.title.is_some() && !s.auto_title_pending,
                 ),
-                pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
                 pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -4011,17 +4000,17 @@ impl SessionManager {
     /// hash shown in the UI is just `primary_label`'s display fallback),
     /// (b) we haven't already attempted this incarnation, (c) `prompt`
     /// is the first *non-slash-command* message seen (leading
-    /// `/model gpt-5.5`-style messages are accumulated but don't trigger
-    /// generation on their own), and (d) the smith adapter binary is
+    /// `/model gpt-5.5`-style messages are ignored entirely), and (d) the
+    /// smith adapter binary is
     /// configured + locatable. Silently no-ops on any miss.
     async fn maybe_spawn_auto_title(&self, entry: Arc<SessionEntry>, prompt: String) {
         // Cheap checks first so we don't burn the per-session attempt
         // budget (the AtomicBool flip is one-way until a daemon
         // restart) on inputs that wouldn't have produced a title
         // anyway.
-        if prompt.trim().is_empty() {
+        let Some(prompt) = auto_title_prompt(prompt) else {
             return;
-        }
+        };
         // Already claimed (title-gen ran, or the user set a title
         // directly) — skip the accumulator entirely so it doesn't grow
         // for the rest of the session's life.
@@ -4039,20 +4028,9 @@ impl SessionManager {
         let Some(binary) = locate_binary(&binary_spec) else {
             return;
         };
-        // Slash commands (`/model gpt-5.5`, `/compact`, ...) configure
-        // the session rather than describe what it's for, so hold off
-        // firing generation until a non-slash message shows up — but
-        // keep every message seen so far (slash commands included) so
-        // the eventual title still reflects any setup the user did
-        // first.
-        let combined = {
-            let mut pending = entry.pending_title_prompts.lock().unwrap();
-            pending.push(prompt.clone());
-            if is_slash_command(&prompt) {
-                return;
-            }
-            pending.join("\n")
-        };
+        // Slash commands have already returned above: only the first ordinary
+        // user prompt is sent to title generation.
+        let combined = prompt;
         // Now claim the attempt. `swap` is the one place we mark this
         // session as "tried"; the user-renamed path is handled by
         // `title_gen_attempted` being initialized to `title.is_some()`
@@ -4996,7 +4974,6 @@ impl SessionManager {
             deleted: AtomicBool::new(false),
             archived: AtomicBool::new(true),
             title_gen_attempted: AtomicBool::new(true),
-            pending_title_prompts: std::sync::Mutex::new(Vec::new()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
             pty_input_queue: std::sync::Mutex::new(None),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -5226,10 +5203,15 @@ fn program_cursor_is_visible(
 
 /// True if `text` is a slash command (`/model gpt-5.5`, `/compact`, ...)
 /// rather than a message that describes what the session is for.
-/// `maybe_spawn_auto_title` uses this to hold off firing title
-/// generation on a leading run of slash commands.
+/// `maybe_spawn_auto_title` uses this to ignore a leading run of slash
+/// commands entirely and wait for the first ordinary prompt.
 fn is_slash_command(text: &str) -> bool {
     text.trim_start().starts_with('/')
+}
+
+/// Return title-generation input only for a substantive ordinary prompt.
+fn auto_title_prompt(text: String) -> Option<String> {
+    (!text.trim().is_empty() && !is_slash_command(&text)).then_some(text)
 }
 
 /// Shell out to `construct-adapter-smith --title-mode "<prompt>"`, capture
@@ -5560,6 +5542,17 @@ mod tests {
         assert!(!is_slash_command(""));
         // A slash later in the text isn't a command.
         assert!(!is_slash_command("look at src/main.rs"));
+    }
+
+    #[test]
+    fn auto_title_prompt_ignores_commands_and_uses_next_ordinary_prompt() {
+        assert_eq!(auto_title_prompt("/model sonnet".into()), None);
+        assert_eq!(auto_title_prompt("  /compact".into()), None);
+        assert_eq!(auto_title_prompt("   ".into()), None);
+        assert_eq!(
+            auto_title_prompt("fix the login bug".into()).as_deref(),
+            Some("fix the login bug")
+        );
     }
 
     #[test]
@@ -6165,7 +6158,6 @@ mod tests {
             deleted: AtomicBool::new(false),
             archived: AtomicBool::new(false),
             title_gen_attempted: AtomicBool::new(false),
-            pending_title_prompts: std::sync::Mutex::new(Vec::new()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
             pty_input_queue: std::sync::Mutex::new(None),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -8167,7 +8159,6 @@ mod tests {
             deleted: AtomicBool::new(false),
             archived: AtomicBool::new(false),
             title_gen_attempted: AtomicBool::new(false),
-            pending_title_prompts: std::sync::Mutex::new(Vec::new()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
             pty_input_queue: std::sync::Mutex::new(None),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -8315,7 +8306,6 @@ mod tests {
             deleted: AtomicBool::new(false),
             archived: AtomicBool::new(false),
             title_gen_attempted: AtomicBool::new(false),
-            pending_title_prompts: std::sync::Mutex::new(Vec::new()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
             pty_input_queue: std::sync::Mutex::new(None),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -8524,7 +8514,6 @@ mod tests {
                 deleted: AtomicBool::new(false),
                 archived: AtomicBool::new(false),
                 title_gen_attempted: AtomicBool::new(false),
-                pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
                 pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -8617,7 +8606,6 @@ mod tests {
                 deleted: AtomicBool::new(false),
                 archived: AtomicBool::new(false),
                 title_gen_attempted: AtomicBool::new(false),
-                pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
                 pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -8761,7 +8749,6 @@ mod tests {
             deleted: AtomicBool::new(false),
             archived: AtomicBool::new(false),
             title_gen_attempted: AtomicBool::new(false),
-            pending_title_prompts: std::sync::Mutex::new(Vec::new()),
             pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
             pty_input_queue: std::sync::Mutex::new(None),
             tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -8826,7 +8813,6 @@ mod tests {
                 deleted: AtomicBool::new(false),
                 archived: AtomicBool::new(false),
                 title_gen_attempted: AtomicBool::new(false),
-                pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
                 pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -8939,7 +8925,6 @@ mod tests {
                 deleted: AtomicBool::new(false),
                 archived: AtomicBool::new(false),
                 title_gen_attempted: AtomicBool::new(false),
-                pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
                 pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -9025,7 +9010,6 @@ mod tests {
                 deleted: AtomicBool::new(false),
                 archived: AtomicBool::new(false),
                 title_gen_attempted: AtomicBool::new(false),
-                pending_title_prompts: std::sync::Mutex::new(Vec::new()),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
                 pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
