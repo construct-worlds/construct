@@ -170,10 +170,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.terminal_replayed_sessions_this_frame.clear();
     app.layout.dynamic_ui_popover_area = None;
     app.layout.dynamic_ui_scroll_metrics = None;
-    app.layout.suggestion_orb_hit = None;
-    app.layout.suggestion_anchor = None;
-    app.layout.suggestion_chip_hits.clear();
-    app.layout.suggestion_card_hits.clear();
     let area = f.area();
     match app.zoom {
         ZoomMode::View => {
@@ -337,13 +333,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
 }
 
 fn finish_frame(f: &mut Frame, app: &mut App) {
-    // Suggestion deck (spec 0109): the corner orb sits on the session
-    // view pane, the fan/stack overlay above every base pane — but both
-    // under the topmost modals below, which render after them.
-    if let Some(view) = app.layout.view_area {
-        crate::app::suggest_deck::render_suggestion_orb(f, view, app);
-    }
-    crate::app::suggest_deck::render_suggestion_overlay(f, app);
     // The session-picker dialog and the `/configure` dialog are the topmost
     // modals — drawn last so they sit over every base view (including
     // zoomed layouts, which return through here) and before

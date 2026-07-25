@@ -31,11 +31,6 @@ pub enum KeyAction {
     /// default layout. Bound to `C-x z` (emacs) / `z` (vim), matching
     /// tmux's `prefix z` (zoom-pane).
     ToggleZoom,
-    /// Suggestion deck (spec 0109): with no hand dealt, ask the daemon to
-    /// generate next-prompt suggestions for the selected session; with a
-    /// hand dealt, toggle the corner fan open/closed. Bound to `C-x s` in
-    /// both profiles.
-    ToggleSuggestions,
     /// Open the selected session's in-TUI program surface. Bound to
     /// `C-x Space` in both profiles because bare modifier double-taps are not
     /// delivered reliably by terminal emulators.
@@ -326,7 +321,6 @@ fn emacs() -> Keymap {
         (Chord(vec![key(KeyCode::Enter)]), FocusView),
         (Chord(vec![ctrl('x'), ch('t')]), ToggleView),
         (Chord(vec![ctrl('x'), ch('z')]), ToggleZoom),
-        (Chord(vec![ctrl('x'), ch('s')]), ToggleSuggestions),
         // Session actions
         (Chord(vec![ctrl('x'), ctrl('f')]), OpenNewSession),
         (Chord(vec![ctrl('x'), ch('b')]), OpenSwitchSession),
@@ -490,7 +484,6 @@ fn vim() -> Keymap {
         (Chord(vec![ctrl('w'), ch('<')]), ShrinkWindowHorizontally),
         (Chord(vec![ctrl('w'), shift('<')]), ShrinkWindowHorizontally),
         (Chord(vec![ctrl('w'), ch('z')]), ToggleZoom),
-        (Chord(vec![ctrl('x'), ch('s')]), ToggleSuggestions),
         (Chord(vec![ctrl('x'), ctrl('c')]), Quit),
         (Chord(vec![ctrl('x'), ch('t')]), ToggleView),
         (Chord(vec![ctrl('x'), ch('[')]), ScrollPageUp),
