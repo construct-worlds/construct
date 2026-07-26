@@ -59,6 +59,16 @@ routing is indistinguishable from a harness that changed its own model.
   must show the substitution.
 - A route change applies at the next request the harness makes. It must
   not apply to a request already in flight.
+- "Next request" has to account for connection reuse. A harness holding a
+  live connection would otherwise keep using the disposition that
+  connection was opened with, so a change that appears to have been made
+  silently does nothing. A connection made stale by a route change must
+  therefore be closed so the harness reconnects and is classified afresh —
+  but only once nothing is outstanding on it, since closing a connection
+  that is awaiting a response would abort the very turn this rule protects.
+  A connection whose last traffic flowed toward the harness and has since
+  gone quiet is between turns; one whose last traffic flowed away from it
+  is waiting.
 - Clearing a route returns the session to pass-through, which is always
   available. Clearing can never fail.
 - A session that was never route-capable (no proxy transport injected at

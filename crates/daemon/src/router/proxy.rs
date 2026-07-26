@@ -58,7 +58,15 @@ pub async fn serve(mut client: TcpStream, router: Arc<Router>) -> Result<()> {
             .as_ref()
             .and_then(|c| c.upstream_proxy.clone())
             .or_else(|| router.upstream_proxy().cloned());
-        return tunnel(client, &target, upstream.as_ref()).await;
+        // A tunnel to a host this session could route decides its
+        // disposition once, here. Hand it the session so it can notice a
+        // later route change and step aside; tunnels to every other host
+        // are untouched by routing and never need to.
+        let drain = ctx
+            .as_ref()
+            .filter(|c| c.intercepts_host(&target.host))
+            .cloned();
+        return tunnel(client, &target, upstream.as_ref(), drain).await;
     };
 
     client
@@ -147,11 +155,91 @@ pub fn parse_connect(head: &[u8]) -> Result<Target> {
     })
 }
 
+/// How long a routable tunnel must be quiet, after the last bytes came
+/// *from* the server, before a route change may close it.
+///
+/// Direction matters more than duration: a connection whose last bytes went
+/// client→server has a request outstanding — the model may simply not have
+/// started answering yet — and closing it would abort a turn in flight,
+/// which spec 0114 forbids. A connection whose last bytes came back from
+/// the server and has since gone quiet is between turns.
+const DRAIN_QUIET_MS: i64 = 2_000;
+const DRAIN_POLL_MS: u64 = 250;
+
+/// Last-byte bookkeeping for a tunnel, used only to decide when a stale
+/// tunnel may be closed.
+struct Activity {
+    last_ms: std::sync::atomic::AtomicI64,
+    last_from_server: std::sync::atomic::AtomicBool,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            last_ms: std::sync::atomic::AtomicI64::new(now_ms()),
+            last_from_server: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    fn stamp(&self, from_server: bool) {
+        use std::sync::atomic::Ordering;
+        self.last_ms.store(now_ms(), Ordering::SeqCst);
+        self.last_from_server.store(from_server, Ordering::SeqCst);
+    }
+
+    /// True when no request is outstanding and the line has gone quiet.
+    fn safe_to_close(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.last_from_server.load(Ordering::SeqCst)
+            && now_ms() - self.last_ms.load(Ordering::SeqCst) >= DRAIN_QUIET_MS
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Copy one direction, stamping activity so the drain check can tell a
+/// waiting request from an idle connection.
+async fn copy_tracking<R, W>(mut from: R, mut to: W, act: Arc<Activity>, from_server: bool)
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let n = match from.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        if to.write_all(&buf[..n]).await.is_err() || to.flush().await.is_err() {
+            break;
+        }
+        act.stamp(from_server);
+    }
+    let _ = to.shutdown().await;
+}
+
+/// Wait until this tunnel is both stale (the session's route changed since
+/// it opened) and safe to close.
+async fn wait_until_drainable(ctx: Arc<SessionRouting>, opened_at_epoch: u64, act: Arc<Activity>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(DRAIN_POLL_MS)).await;
+        if ctx.route_epoch() != opened_at_epoch && act.safe_to_close() {
+            return;
+        }
+    }
+}
+
 /// Blind byte splice to the destination the client named.
 async fn tunnel(
     mut client: TcpStream,
     target: &Target,
     upstream_proxy: Option<&UpstreamProxy>,
+    drain: Option<Arc<SessionRouting>>,
 ) -> Result<()> {
     let mut upstream = match upstream_proxy {
         // A pre-existing HTTPS_PROXY: chain to it rather than bypassing
@@ -165,15 +253,44 @@ async fn tunnel(
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await
         .context("ack CONNECT")?;
-    tokio::io::copy_bidirectional(&mut client, &mut upstream)
-        .await
-        .map(|_| ())
-        .or_else(|e| match e.kind() {
-            // Either side hanging up mid-stream is ordinary for long-lived
-            // model connections, not an error worth surfacing.
-            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset => Ok(()),
-            _ => Err(e).context("tunnel"),
-        })
+
+    let Some(ctx) = drain else {
+        // Not a host this session could route: nothing can make this
+        // tunnel stale, so splice it and stay out of the way.
+        return tokio::io::copy_bidirectional(&mut client, &mut upstream)
+            .await
+            .map(|_| ())
+            .or_else(|e| match e.kind() {
+                // Either side hanging up mid-stream is ordinary for
+                // long-lived model connections, not an error worth
+                // surfacing.
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset => Ok(()),
+                _ => Err(e).context("tunnel"),
+            });
+    };
+
+    let opened_at_epoch = ctx.route_epoch();
+    let act = Arc::new(Activity::new());
+    let (client_read, client_write) = client.into_split();
+    let (upstream_read, upstream_write) = upstream.into_split();
+    let to_upstream = copy_tracking(client_read, upstream_write, act.clone(), false);
+    let to_client = copy_tracking(upstream_read, client_write, act.clone(), true);
+
+    tokio::select! {
+        _ = to_upstream => {}
+        _ = to_client => {}
+        // Closing here is what makes a route change take effect on a
+        // running session: the client reconnects, and the fresh CONNECT is
+        // classified against the route that is armed now.
+        _ = wait_until_drainable(ctx.clone(), opened_at_epoch, act) => {
+            tracing::debug!(
+                session = %ctx.session_id,
+                host = %target.host,
+                "closing stale tunnel so the new route applies"
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn connect_via_proxy(proxy: &UpstreamProxy, target: &Target) -> Result<TcpStream> {
@@ -828,6 +945,183 @@ mod tests {
 
     /// The client's own credential must never ride along to a different
     /// vendor's endpoint.
+    /// Build a session whose routable host is loopback, so the drain path
+    /// can be exercised without DNS.
+    fn drainable_ctx(dir: &tempfile::TempDir) -> Arc<SessionRouting> {
+        use crate::router::{ca::RouterCa, CaChannel, CaMode, Dialect, HarnessRouting};
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        Arc::new(SessionRouting {
+            session_id: "s-drain".into(),
+            harness: HarnessRouting {
+                dialect: Dialect::AnthropicMessages,
+                intercept_hosts: &["127.0.0.1"],
+                ca_env: &[CaChannel {
+                    var: "NODE_EXTRA_CA_CERTS",
+                    mode: CaMode::Additive,
+                }],
+            },
+            ca: Arc::new(RouterCa::load_or_create(&dir.path().join("router")).unwrap()),
+            upstream_proxy: None,
+            route: std::sync::RwLock::new(None),
+            route_epoch: std::sync::atomic::AtomicU64::new(0),
+            observed: std::sync::atomic::AtomicBool::new(false),
+            observed_tx: tx,
+        })
+    }
+
+    /// Accept one connection and hand back the server side, plus a client
+    /// socket already connected to it.
+    async fn socket_pair() -> (TcpStream, TcpStream) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (server, _) = l.accept().await.unwrap();
+        (connect.await.unwrap(), server)
+    }
+
+    /// REGRESSION: arming a route must take effect on a session that is
+    /// already running.
+    ///
+    /// A tunnel decides tunnel-vs-intercept once, at CONNECT. A harness
+    /// holding a keep-alive connection would otherwise keep using the old
+    /// disposition indefinitely, and the route switch looked like it did
+    /// nothing at all.
+    #[tokio::test]
+    async fn a_route_change_closes_a_quiet_stale_tunnel() {
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = origin.accept().await.unwrap();
+            let mut buf = [0u8; 64];
+            let _ = s.read(&mut buf).await;
+            let _ = s.write_all(b"ok").await;
+            // Keep-alive: the server holds the connection open.
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = drainable_ctx(&dir);
+        let (mut client, server) = socket_pair().await;
+        let target = Target {
+            host: "127.0.0.1".into(),
+            port: origin_port,
+        };
+        let ctx_bg = ctx.clone();
+        tokio::spawn(async move {
+            let _ = tunnel(server, &target, None, Some(ctx_bg)).await;
+        });
+
+        let mut ack = [0u8; 39];
+        client.read_exact(&mut ack).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        let mut echoed = [0u8; 2];
+        client.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"ok");
+
+        // Nothing has changed yet, so the tunnel stays up.
+        let still_open = tokio::time::timeout(
+            std::time::Duration::from_millis(DRAIN_QUIET_MS as u64 + 800),
+            async {
+                let mut sink = [0u8; 8];
+                client.read(&mut sink).await
+            },
+        )
+        .await;
+        assert!(still_open.is_err(), "an unchanged route must not close anything");
+
+        // Arming a route makes this tunnel stale.
+        ctx.bump_route_epoch();
+
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut sink = [0u8; 8];
+            loop {
+                match client.read(&mut sink).await {
+                    Ok(0) | Err(_) => return true,
+                    Ok(_) => continue,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            closed,
+            "a route change must close the stale tunnel, or the switch never \
+             applies to a running session"
+        );
+    }
+
+    /// The other half of spec 0114: a route change must NOT abort a request
+    /// already in flight. A connection whose last bytes went client→server
+    /// is waiting on an answer — the model may simply be slow to start —
+    /// and must stay open.
+    #[tokio::test]
+    async fn a_route_change_does_not_cut_a_request_in_flight() {
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = origin.accept().await.unwrap();
+            let mut buf = [0u8; 64];
+            let _ = s.read(&mut buf).await;
+            // A model that takes a long time to produce its first token.
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = drainable_ctx(&dir);
+        let (mut client, server) = socket_pair().await;
+        let target = Target {
+            host: "127.0.0.1".into(),
+            port: origin_port,
+        };
+        let ctx_bg = ctx.clone();
+        tokio::spawn(async move {
+            let _ = tunnel(server, &target, None, Some(ctx_bg)).await;
+        });
+
+        let mut ack = [0u8; 39];
+        client.read_exact(&mut ack).await.unwrap();
+        // Send a request and leave it outstanding.
+        client.write_all(b"request").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        ctx.bump_route_epoch();
+
+        let cut = tokio::time::timeout(
+            std::time::Duration::from_millis(DRAIN_QUIET_MS as u64 + 2_000),
+            async {
+                let mut sink = [0u8; 8];
+                matches!(client.read(&mut sink).await, Ok(0) | Err(_))
+            },
+        )
+        .await;
+        assert!(
+            cut.is_err(),
+            "a request in flight must survive a route change (spec 0114)"
+        );
+    }
+
+    /// A tunnel to a host this session could never route is not drain
+    /// eligible: telemetry and auth connections must not be disturbed by a
+    /// route change.
+    #[test]
+    fn only_routable_hosts_are_drain_eligible() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = drainable_ctx(&dir);
+        assert!(ctx.intercepts_host("127.0.0.1"));
+        assert!(!ctx.intercepts_host("http-intake.logs.us5.datadoghq.com"));
+    }
+
+    #[test]
+    fn a_waiting_request_is_never_considered_safe_to_close() {
+        let act = Activity::new();
+        act.stamp(false); // last bytes went client -> server
+        assert!(
+            !act.safe_to_close(),
+            "an outstanding request must never look closeable, however long it waits"
+        );
+        act.stamp(true); // server answered
+        assert!(!act.safe_to_close(), "still within the quiet window");
+    }
+
     #[test]
     fn drops_client_credentials_and_hop_headers() {
         assert!(is_dropped_header("x-api-key"));
@@ -837,4 +1131,41 @@ mod tests {
         assert!(!is_dropped_header("anthropic-version"));
         assert!(!is_dropped_header("content-type"));
     }
+
+    /// The drain rule in isolation: direction decides safety, not just
+    /// elapsed time.
+    #[test]
+    fn a_connection_awaiting_a_response_is_never_safe_to_close() {
+        let act = Activity::new();
+        // Client sent a request; the model may take many seconds to start
+        // answering. Quiet does NOT mean idle here.
+        act.stamp(false);
+        act.last_ms.store(now_ms() - 60_000, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            !act.safe_to_close(),
+            "a request in flight must never be cut (spec 0114)"
+        );
+    }
+
+    #[test]
+    fn a_quiet_connection_after_a_response_is_safe_to_close() {
+        let act = Activity::new();
+        act.stamp(true);
+        act.last_ms.store(
+            now_ms() - DRAIN_QUIET_MS - 1,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        assert!(act.safe_to_close());
+    }
+
+    #[test]
+    fn a_response_that_just_arrived_is_not_yet_safe_to_close() {
+        let act = Activity::new();
+        act.stamp(true);
+        assert!(
+            !act.safe_to_close(),
+            "the client may be about to send the next request on this connection"
+        );
+    }
+
 }

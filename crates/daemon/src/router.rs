@@ -328,6 +328,12 @@ pub struct SessionRouting {
     pub ca: Arc<RouterCa>,
     pub upstream_proxy: Option<UpstreamProxy>,
     route: RwLock<Option<ArmedRoute>>,
+    /// Bumped on every route change. Open pass-through tunnels compare it
+    /// against the value they started with to notice they are stale: a
+    /// tunnel decides tunnel-vs-intercept once, at CONNECT, and a harness
+    /// that keeps its connection alive would otherwise keep using the old
+    /// disposition indefinitely.
+    route_epoch: std::sync::atomic::AtomicU64,
     observed: AtomicBool,
     /// Fired once, the first time interception actually serves a request,
     /// so the session record can stop reporting the route as unproven.
@@ -337,6 +343,14 @@ pub struct SessionRouting {
 impl SessionRouting {
     pub fn armed_route(&self) -> Option<ArmedRoute> {
         self.route.read().unwrap().clone()
+    }
+
+    pub fn route_epoch(&self) -> u64 {
+        self.route_epoch.load(Ordering::SeqCst)
+    }
+
+    fn bump_route_epoch(&self) {
+        self.route_epoch.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn intercepts_host(&self, host: &str) -> bool {
@@ -543,6 +557,7 @@ impl Router {
             ca,
             upstream_proxy: self.upstream_proxy.clone(),
             route: RwLock::new(None),
+            route_epoch: std::sync::atomic::AtomicU64::new(0),
             observed: AtomicBool::new(false),
             observed_tx: self.observed_tx.clone(),
         });
@@ -792,6 +807,7 @@ impl Router {
             // Clearing returns the session to pass-through, which is
             // always reachable and therefore cannot fail (spec 0114).
             *ctx.route.write().unwrap() = None;
+            ctx.bump_route_epoch();
             return Ok(None);
         };
         let armed = self.resolve(name, harness)?;
@@ -802,6 +818,7 @@ impl Router {
             observed: ctx.observed(),
         };
         *ctx.route.write().unwrap() = Some(armed);
+        ctx.bump_route_epoch();
         Ok(Some(summary))
     }
 
@@ -1920,6 +1937,7 @@ mod tests {
         );
         std::env::remove_var("CONSTRUCT_CLAUDE_CREDENTIALS_FILE");
     }
+
 
     /// Minimal PEM → DER, so the test trusts exactly the CA the router
     /// handed the session.
