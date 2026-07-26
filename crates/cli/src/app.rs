@@ -31821,6 +31821,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn harness_picker_tab_completion_keeps_completed_harness_selected() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.harnesses = vec![
+            construct_protocol::HarnessInfo {
+                name: "shell".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("Generic shell command runner".to_string()),
+                capabilities: Default::default(),
+            },
+            construct_protocol::HarnessInfo {
+                name: "codex".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("OpenAI Codex".to_string()),
+                capabilities: Default::default(),
+            },
+        ];
+        app.run_action(KeyAction::OpenNewSession).await;
+
+        for c in ['c', 'o', 'd'] {
+            app.handle_minibuffer_key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            ))
+            .await;
+        }
+        assert!(app.harness_picker_filter_active);
+        assert_eq!(app.harness_picker_selected, 0);
+
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+
+        let minibuffer = app.minibuffer.as_ref().expect("picker remains open");
+        assert_eq!(minibuffer.input, "codex");
+        assert!(!app.harness_picker_filter_active);
+        let entries = harness_picker_entries(&app.harnesses, false, "", false);
+        assert_eq!(
+            entries
+                .get(app.harness_picker_selected)
+                .map(|entry| entry.name.as_str()),
+            Some("codex"),
+            "the full list highlight follows the Tab-completed harness"
+        );
+
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert!(
+            app.minibuffer.is_none(),
+            "Enter after completing codex must submit codex, not open the project prompt"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn harness_picker_mouse_wheel_moves_and_wraps_the_highlight() {
         let (mut app, _dir, server) = empty_app().await;
         app.harnesses = vec![
