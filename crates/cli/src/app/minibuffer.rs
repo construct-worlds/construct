@@ -659,14 +659,6 @@ impl App {
                     Err(e) => self.set_status(format!("archive failed: {e}")),
                 }
             }
-            MinibufferIntent::MenuDeleteConfirm { session_id } => {
-                let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
-                if !yes {
-                    self.set_status("delete cancelled".to_string());
-                    return;
-                }
-                self.spawn_session_delete(session_id);
-            }
             MinibufferIntent::MenuUnarchiveConfirm { session_id } => {
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
                 if !yes {
