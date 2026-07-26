@@ -1,10 +1,57 @@
 use super::{
-    list_session_indent_cells, App, ListItem, MatrixWidgetHitKind, MinibufferChoiceAction,
-    MinibufferIntent, PaneFocus, SESSION_LIST_H_MIN,
+    harness_picker_entries, list_session_indent_cells, App, ListItem, MatrixWidgetHitKind,
+    MinibufferChoiceAction, MinibufferIntent, PaneFocus, SESSION_LIST_H_MIN,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 impl App {
+    pub(super) fn scroll_harness_picker(&mut self, ev: &MouseEvent) -> bool {
+        let direction = match ev.kind {
+            MouseEventKind::ScrollUp => -1,
+            MouseEventKind::ScrollDown => 1,
+            _ => return false,
+        };
+        let Some(area) = self.layout.minibuffer_area else {
+            return false;
+        };
+        if ev.column < area.x
+            || ev.column >= area.right()
+            || ev.row < area.y
+            || ev.row >= area.bottom()
+        {
+            return false;
+        }
+        let Some(mb) = self.minibuffer.as_ref() else {
+            return false;
+        };
+        let is_fork = match &mb.intent {
+            MinibufferIntent::NewSessionHarness => false,
+            MinibufferIntent::ForkSessionHarness { .. } => true,
+            _ => return false,
+        };
+        let entries = harness_picker_entries(
+            &self.harnesses,
+            is_fork,
+            &mb.input,
+            self.harness_picker_filter_active,
+        );
+        if entries.is_empty() {
+            return true;
+        }
+
+        let selected = self.harness_picker_selected.min(entries.len() - 1);
+        self.harness_picker_selected = if direction < 0 {
+            if selected == 0 {
+                entries.len() - 1
+            } else {
+                selected - 1
+            }
+        } else {
+            (selected + 1) % entries.len()
+        };
+        true
+    }
+
     pub(super) fn is_on_matrix_rain_title_bar(&self, col: u16, row: u16) -> bool {
         if self.matrix_rain_hidden {
             return false;
@@ -50,7 +97,12 @@ impl App {
         Some(inner_h.saturating_sub(SESSION_LIST_H_MIN))
     }
 
-    pub(super) async fn click_minibuffer(&mut self, mb_area: ratatui::layout::Rect, col: u16) {
+    pub(super) async fn click_minibuffer(
+        &mut self,
+        mb_area: ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) {
         if let Some(mb) = self.minibuffer.as_mut() {
             // Harness picker: clicking an available name submits it
             // as if the user typed and pressed Enter. Unavailable
@@ -63,7 +115,7 @@ impl App {
             ) {
                 let hits = self.layout.minibuffer_harness_hits.clone();
                 for hit in hits {
-                    if hit.y == mb_area.y && col >= hit.x_start && col < hit.x_end {
+                    if hit.y == row && col >= hit.x_start && col < hit.x_end {
                         if !hit.available {
                             let reason = hit.detail.as_deref().unwrap_or("not available");
                             self.set_status(format!("{}: {reason}", hit.name));
@@ -87,7 +139,7 @@ impl App {
             // mouse support at all.
             let choice_hits = self.layout.minibuffer_choice_hits.clone();
             for hit in choice_hits {
-                if hit.y == mb_area.y && col >= hit.x_start && col < hit.x_end {
+                if hit.y == row && col >= hit.x_start && col < hit.x_end {
                     match hit.action {
                         MinibufferChoiceAction::Key(c) => {
                             let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
@@ -101,6 +153,9 @@ impl App {
                     }
                     return;
                 }
+            }
+            if row != mb_area.bottom().saturating_sub(1) {
+                return;
             }
             let prompt_w = unicode_width::UnicodeWidthStr::width(mb.prompt.as_str()) as u16;
             let input_start = mb_area.x + prompt_w;

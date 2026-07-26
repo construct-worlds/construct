@@ -1,9 +1,9 @@
 //! Ratatui rendering for the TUI.
 
 use crate::app::{
-    harness_guidance, smith_method_guidance, App, ConfigureTab, HarnessHit, HintZone,
-    ListItem as AppListItem, MainWindowTree, Minibuffer, MinibufferChoiceAction,
-    MinibufferChoiceHit, MinibufferIntent, PaneFocus, RemoteControlHit,
+    harness_guidance, harness_picker_entries, smith_method_guidance, App, ConfigureTab,
+    HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
+    MinibufferChoiceAction, MinibufferChoiceHit, MinibufferIntent, PaneFocus, RemoteControlHit,
     RemoteControlHitAction, ScreenPoint, Selection,
     SessionTitleMenuAction, TextSelectionRange, ViewMode, WindowDividerHit, WindowPaneHit,
     WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS,
@@ -1534,100 +1534,147 @@ fn harness_hover_tooltip_rect(anchor_x: u16, anchor_y: u16, w: u16, h: u16, tota
     Rect { x, y, width: w, height: h }
 }
 
-/// Render the new-session harness picker with each name as a
-/// clickable span. Records per-name column ranges in
-/// `app.layout.minibuffer_harness_hits` so the click handler can
-/// submit the picked name without the user having to type it.
+const HARNESS_PICKER_MAX_ROWS: usize = 8;
+
+/// Render the harness picker as a filterable completion menu above its input
+/// row. Each visible row is clickable and carries the same availability
+/// semantics as keyboard selection.
 fn render_harness_picker(f: &mut Frame, area: Rect, app: &mut App, mb: &Minibuffer) {
-    // Show every registered harness. For a new session we also surface the
-    // synthetic `project` op; forking targets a real harness only.
-    // Unavailable harnesses (failed their real availability probe, spec
-    // 0068) render dimmed and strike-through; clicking them no-ops + drops
-    // a status note with the daemon's detail string; hover surfaces the
-    // same detail in a tooltip.
     let is_fork = matches!(mb.intent, MinibufferIntent::ForkSessionHarness { .. });
-    let mut entries: Vec<(String, bool, Option<String>)> = app
-        .harnesses
-        .iter()
-        .map(|h| (h.name.clone(), h.available, h.detail.clone()))
-        .collect();
-    if !is_fork {
-        entries.push(("project".to_string(), true, None));
-    }
-
-    let (hovered_x, hovered_y) = app.mouse_pos.unwrap_or((u16::MAX, u16::MAX));
-    let base_available = Style::default()
-        .fg(app.theme.info)
-        .add_modifier(Modifier::UNDERLINED);
-    let hover_available = Style::default()
-        .fg(app.theme.text)
-        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-    let base_disabled = Style::default()
-        .fg(app.theme.dim)
-        .add_modifier(Modifier::CROSSED_OUT);
-    let hover_disabled = Style::default()
-        .fg(app.theme.danger)
-        .add_modifier(Modifier::CROSSED_OUT | Modifier::BOLD);
-
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(entries.len() * 2 + 8);
-    let mut col: u16 = area.x;
-
-    let push_raw = |spans: &mut Vec<Span<'static>>, col: &mut u16, s: &str| {
-        *col += UnicodeWidthStr::width(s) as u16;
-        spans.push(Span::raw(s.to_string()));
-    };
-
-    push_raw(
-        &mut spans,
-        &mut col,
-        if is_fork { "Fork → [" } else { "New [" },
+    let entries = harness_picker_entries(
+        &app.harnesses,
+        is_fork,
+        &mb.input,
+        app.harness_picker_filter_active,
     );
-    for (i, (name, available, detail)) in entries.iter().enumerate() {
-        if i > 0 {
-            push_raw(&mut spans, &mut col, "|");
-        }
-        let w = UnicodeWidthStr::width(name.as_str()) as u16;
-        let x_start = col;
-        let x_end = col + w;
-        let hovered = hovered_y == area.y && hovered_x >= x_start && hovered_x < x_end;
-        let style = match (*available, hovered) {
-            (true, true) => hover_available,
-            (true, false) => base_available,
-            (false, true) => hover_disabled,
-            (false, false) => base_disabled,
+    let (hovered_x, hovered_y) = app.mouse_pos.unwrap_or((u16::MAX, u16::MAX));
+    let selected = app
+        .harness_picker_selected
+        .min(entries.len().saturating_sub(1));
+    let visible_rows = area.height.saturating_sub(1) as usize;
+    let start = if selected >= visible_rows {
+        selected + 1 - visible_rows
+    } else {
+        0
+    };
+    let end = (start + visible_rows).min(entries.len());
+    let name_width = entries
+        .iter()
+        .map(|entry| UnicodeWidthStr::width(entry.name.as_str()))
+        .max()
+        .unwrap_or(7)
+        .clamp(7, 18);
+
+    for (screen_row, entry) in entries[start..end].iter().enumerate() {
+        let y = area.y + screen_row as u16;
+        let hovered = hovered_y == y && hovered_x >= area.x && hovered_x < area.right();
+        let highlighted = screen_row + start == selected;
+        let row_style = if highlighted {
+            Style::default()
+                .fg(app.theme.highlight_fg)
+                .bg(app.theme.highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else if !entry.available {
+            let style = Style::default()
+                .fg(if hovered {
+                    app.theme.danger
+                } else {
+                    app.theme.dim
+                })
+                .add_modifier(Modifier::CROSSED_OUT);
+            if hovered {
+                style.bg(app.theme.inactive_highlight_bg)
+            } else {
+                style
+            }
+        } else if hovered {
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.inactive_highlight_bg)
+        } else {
+            Style::default().fg(app.theme.text)
         };
-        spans.push(Span::styled(name.clone(), style));
+        let marker = if highlighted { "› " } else { "  " };
+        let status = if entry.available {
+            "ready"
+        } else {
+            "unavailable"
+        };
+        let description = if highlighted && !entry.available {
+            entry.detail.as_deref().unwrap_or("not available")
+        } else {
+            entry.description.as_str()
+        };
+        let fixed_width = 2 + name_width + 2 + UnicodeWidthStr::width(status) + 2;
+        let description_width = (area.width as usize).saturating_sub(fixed_width);
+        let description = truncate_to_width(description, description_width);
+        let used = 2
+            + name_width
+            + 2
+            + UnicodeWidthStr::width(description.as_str())
+            + UnicodeWidthStr::width(status);
+        let gap = (area.width as usize).saturating_sub(used);
+        let line = format!(
+            "{marker}{name:<name_width$}  {description}{gap}{status}",
+            name = entry.name,
+            gap = " ".repeat(gap),
+        );
+        f.render_widget(
+            Paragraph::new(line).style(row_style),
+            Rect::new(area.x, y, area.width, 1),
+        );
         app.layout.minibuffer_harness_hits.push(HarnessHit {
-            name: name.clone(),
-            x_start,
-            x_end,
-            y: area.y,
-            available: *available,
-            detail: detail.clone(),
+            name: entry.name.clone(),
+            x_start: area.x,
+            x_end: area.right(),
+            y,
+            available: entry.available,
+            detail: entry.detail.clone(),
         });
-        col = x_end;
     }
-    push_raw(&mut spans, &mut col, "] ");
-    // Hint suffix — kept short so the prompt fits in a typical
-    // terminal width even with several adapters available.
-    push_raw(&mut spans, &mut col, "(Tab completes, click to pick): ");
-    let input_x = col;
-    spans.push(Span::raw(mb.input.clone()));
-    if let Some(err) = &mb.error {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            err.clone(),
-            Style::default().fg(app.theme.danger),
-        ));
+
+    if entries.is_empty() && area.height > 1 {
+        f.render_widget(
+            Paragraph::new("  No matching harnesses").style(Style::default().fg(app.theme.dim)),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
     }
-    let para = Paragraph::new(Line::from(spans));
-    f.render_widget(para, area);
-    // Cursor on the input — same shape as the default minibuffer
-    // render uses.
-    let cursor_x = input_x + mb.cursor as u16;
+
+    let input_y = area.bottom().saturating_sub(1);
+    let prefix = if is_fork {
+        "Fork session: "
+    } else {
+        "New session: "
+    };
+    let suffix = mb
+        .error
+        .as_deref()
+        .map(|error| format!("  {error}"))
+        .unwrap_or_else(|| {
+            let position = if entries.is_empty() {
+                "0/0".to_string()
+            } else {
+                format!("{}/{}", selected + 1, entries.len())
+            };
+            format!("  {position}  ↑/↓ C-p/C-n select  Enter choose  Tab complete  Esc cancel")
+        });
+    let suffix_style = if mb.error.is_some() {
+        Style::default().fg(app.theme.danger)
+    } else {
+        Style::default().fg(app.theme.dim)
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(app.theme.info)),
+            Span::raw(mb.input.clone()),
+            Span::styled(suffix, suffix_style),
+        ])),
+        Rect::new(area.x, input_y, area.width, 1),
+    );
+    let cursor_x = area.x + UnicodeWidthStr::width(prefix) as u16 + mb.cursor as u16;
     f.set_cursor_position(Position {
-        x: cursor_x,
-        y: area.y,
+        x: cursor_x.min(area.right().saturating_sub(1)),
+        y: input_y,
     });
 }
 
@@ -8840,6 +8887,23 @@ fn render_modeline_theme_tooltip(f: &mut Frame, app: &App) {
 /// room to render its banner + chat bubbles, leaving the main view
 /// most of the screen.
 pub fn compute_minibuffer_height(app: &App, total_h: u16) -> u16 {
+    if let Some(mb) = app.minibuffer.as_ref().filter(|mb| {
+        matches!(
+            mb.intent,
+            MinibufferIntent::NewSessionHarness | MinibufferIntent::ForkSessionHarness { .. }
+        )
+    }) {
+        let is_fork = matches!(mb.intent, MinibufferIntent::ForkSessionHarness { .. });
+        let row_count = harness_picker_entries(
+            &app.harnesses,
+            is_fork,
+            &mb.input,
+            app.harness_picker_filter_active,
+        )
+        .len()
+        .clamp(1, HARNESS_PICKER_MAX_ROWS) as u16;
+        return (row_count + 1).min(total_h.saturating_sub(2).max(1));
+    }
     let is_orch = matches!(
         app.minibuffer.as_ref().map(|m| &m.intent),
         Some(MinibufferIntent::Orchestrator)

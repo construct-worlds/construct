@@ -997,8 +997,8 @@ pub struct Minibuffer {
     pub input: String,
     pub cursor: usize,
     pub intent: MinibufferIntent,
-    /// Inline status appended after the input. Examples: "no such harness",
-    /// "matches: claude, codex". Cleared by the next text edit.
+    /// Inline status appended after the input. Examples: "no such harness"
+    /// or an unavailable-harness diagnostic. Cleared by the next text edit.
     pub error: Option<String>,
 }
 
@@ -1304,6 +1304,13 @@ pub struct App {
     /// `transcript`/`transcript_session` — see `ui::ChatLinesCache`.
     pub chat_lines_cache: ui::ChatLinesCache,
     pub minibuffer: Option<Minibuffer>,
+    /// Keyboard highlight within the expanded harness completion menu.
+    /// Kept outside `Minibuffer` because it is presentation state specific
+    /// to the two harness-picker intents.
+    pub harness_picker_selected: usize,
+    /// Fork pickers open with the source harness pre-filled but still show
+    /// every harness. Once the user edits the query, the menu filters by it.
+    pub harness_picker_filter_active: bool,
     /// Rotation index into the idle minibuffer placeholder's context hint
     /// pool: advances by the shown-window size every
     /// `MINIBUFFER_HINT_ROTATE_EVERY`, or immediately whenever
@@ -3548,6 +3555,58 @@ pub struct HarnessHit {
     pub detail: Option<String>,
 }
 
+/// One row in the minibuffer harness completion menu. The new-session
+/// picker adds the synthetic `project` action; fork only returns real
+/// harnesses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessPickerEntry {
+    pub name: String,
+    pub description: String,
+    pub available: bool,
+    pub detail: Option<String>,
+}
+
+pub fn harness_picker_entries(
+    harnesses: &[HarnessInfo],
+    is_fork: bool,
+    query: &str,
+    filter_active: bool,
+) -> Vec<HarnessPickerEntry> {
+    let mut entries = Vec::with_capacity(harnesses.len() + usize::from(!is_fork));
+    if !is_fork {
+        // This is the only non-harness action in the menu. Keep it first so
+        // project creation is discoverable without scrolling through an
+        // expanding adapter list.
+        entries.push(HarnessPickerEntry {
+            name: "project".to_string(),
+            description: "Create a new project".to_string(),
+            available: true,
+            detail: None,
+        });
+    }
+    entries.extend(harnesses
+        .iter()
+        .map(|h| HarnessPickerEntry {
+            name: h.name.clone(),
+            description: h.description.clone().unwrap_or_default(),
+            available: h.available,
+            detail: h.detail.clone(),
+        }));
+
+    if filter_active && !query.trim().is_empty() {
+        let needle = query.trim().to_ascii_lowercase();
+        entries.retain(|entry| {
+            entry.name.to_ascii_lowercase().contains(&needle)
+                || entry.description.to_ascii_lowercase().contains(&needle)
+        });
+    }
+
+    // Stable sorting leaves `project` first and keeps harness registration
+    // order within each availability group.
+    entries.sort_by_key(|entry| !entry.available);
+    entries
+}
+
 /// One clickable choice label within a minibuffer confirm/approval prompt
 /// (spec 0075) — the generalization of `HarnessHit` to every other
 /// minibuffer prompt that offers a small fixed set of keyboard choices
@@ -3866,6 +3925,8 @@ async fn run_with_socket_initial_selection(
         transcript_scroll: 0,
         chat_lines_cache: ui::ChatLinesCache::default(),
         minibuffer: None,
+        harness_picker_selected: 0,
+        harness_picker_filter_active: false,
         minibuffer_hint_offset: 0,
         minibuffer_hint_rotated_at: None,
         minibuffer_hint_context: None,
@@ -8675,6 +8736,12 @@ impl App {
                 _ => return,
             }
         }
+        // The harness completion menu is painted above the underlying panes,
+        // so vertical wheel events within its bounds navigate its highlight
+        // instead of scrolling the obscured surface below.
+        if self.scroll_harness_picker(&ev) {
+            return;
+        }
         // An in-progress inline title rename commits on any click outside its
         // own name field — clicking away applies, like blurring an edited
         // text field (`Esc` remains the cancel path). This must run before
@@ -9386,7 +9453,7 @@ impl App {
                         }
                     }
                 }
-                self.click_minibuffer(mb_area, col).await;
+                self.click_minibuffer(mb_area, col, row).await;
                 return;
             }
         }
@@ -10286,19 +10353,10 @@ impl App {
                 if self.harnesses.is_empty() {
                     self.harnesses = self.client.harnesses().await.unwrap_or_default();
                 }
-                let mut names: Vec<&str> = self
-                    .harnesses
-                    .iter()
-                    .filter(|h| h.available)
-                    .map(|h| h.name.as_str())
-                    .collect();
-                // `project` is a synthetic option that creates a project
-                // instead of a session — surfaced in the same wizard for
-                // discovery.
-                names.push("project");
-                let hint = names.join("|");
+                self.harness_picker_selected = 0;
+                self.harness_picker_filter_active = true;
                 self.minibuffer = Some(Minibuffer {
-                    prompt: format!("New [{hint}] (Tab completes): "),
+                    prompt: "New session: ".to_string(),
                     input: String::new(),
                     cursor: 0,
                     intent: MinibufferIntent::NewSessionHarness,
@@ -10317,21 +10375,20 @@ impl App {
                 if self.harnesses.is_empty() {
                     self.harnesses = self.client.harnesses().await.unwrap_or_default();
                 }
-                let names: Vec<&str> = self
-                    .harnesses
-                    .iter()
-                    .filter(|h| h.available)
-                    .map(|h| h.name.as_str())
-                    .collect();
-                let hint = names.join("|");
                 let input = if source.harness == "antigravity" {
                     "agy".to_string()
                 } else {
                     source.harness
                 };
+                let entries = harness_picker_entries(&self.harnesses, true, "", false);
+                self.harness_picker_selected = entries
+                    .iter()
+                    .position(|entry| entry.name == input)
+                    .unwrap_or(0);
+                self.harness_picker_filter_active = false;
                 let cursor = input.chars().count();
                 self.minibuffer = Some(Minibuffer {
-                    prompt: format!("Fork → [{hint}] (Tab completes): "),
+                    prompt: "Fork session: ".to_string(),
                     input,
                     cursor,
                     intent: MinibufferIntent::ForkSessionHarness {
@@ -13764,6 +13821,8 @@ mod tests {
             transcript_scroll: 0,
             chat_lines_cache: ui::ChatLinesCache::default(),
             minibuffer: None,
+            harness_picker_selected: 0,
+            harness_picker_filter_active: false,
             minibuffer_hint_offset: 0,
             minibuffer_hint_rotated_at: None,
             minibuffer_hint_context: None,
@@ -29549,7 +29608,7 @@ mod tests {
             .expect("y choice hit registered");
         assert_eq!(hit.y, mb_area.y);
 
-        app.click_minibuffer(mb_area, hit.x_start).await;
+        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
 
         assert!(
             app.minibuffer.is_none(),
@@ -29591,7 +29650,7 @@ mod tests {
             .cloned()
             .expect("N choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start).await;
+        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
 
         assert!(
             app.minibuffer.is_none(),
@@ -29735,7 +29794,7 @@ mod tests {
             .cloned()
             .expect("d choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start).await;
+        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
 
         assert!(
             app.minibuffer.is_none(),
@@ -29781,7 +29840,7 @@ mod tests {
             .cloned()
             .expect("N choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start).await;
+        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
 
         assert!(
             app.minibuffer.is_none(),
@@ -29880,7 +29939,7 @@ mod tests {
             .cloned()
             .expect("n=deny choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start).await;
+        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
 
         assert!(
             app.minibuffer.is_none(),
@@ -29925,7 +29984,7 @@ mod tests {
             .cloned()
             .expect("all choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start).await;
+        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
 
         assert!(
             app.minibuffer.is_none(),
@@ -29971,7 +30030,7 @@ mod tests {
             .cloned()
             .expect("y choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start).await;
+        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
 
         assert!(
             app.minibuffer.is_none(),
@@ -31616,7 +31675,208 @@ mod tests {
         ));
         assert_eq!(minibuffer.input, "shell");
         assert_eq!(minibuffer.cursor, "shell".chars().count());
-        assert!(minibuffer.prompt.starts_with("Fork → [shell]"));
+        assert_eq!(minibuffer.prompt, "Fork session: ");
+        assert_eq!(app.harness_picker_selected, 0);
+        assert!(!app.harness_picker_filter_active);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn harness_picker_renders_descriptions_filters_and_explains_unavailable_rows() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.harnesses = vec![
+            construct_protocol::HarnessInfo {
+                name: "shell".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("Generic shell command runner".to_string()),
+                capabilities: Default::default(),
+            },
+            construct_protocol::HarnessInfo {
+                name: "codex".to_string(),
+                available: false,
+                detail: Some("`codex` CLI not found".to_string()),
+                binary: None,
+                description: Some("OpenAI Codex".to_string()),
+                capabilities: Default::default(),
+            },
+        ];
+        app.run_action(KeyAction::OpenNewSession).await;
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw picker");
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(screen.contains("Generic shell command runner"));
+        assert!(screen.contains("OpenAI Codex"));
+        assert!(screen.contains("unavailable"));
+        assert!(app.layout.minibuffer_area.expect("picker area").height > 1);
+        assert_eq!(
+            app.layout
+                .minibuffer_harness_hits
+                .first()
+                .map(|hit| hit.name.as_str()),
+            Some("project"),
+            "project action stays at the top of the new-session picker"
+        );
+        let unavailable_hit = app
+            .layout
+            .minibuffer_harness_hits
+            .iter()
+            .find(|hit| hit.name == "codex")
+            .cloned()
+            .expect("codex row hit");
+        app.handle_left_click(unavailable_hit.x_start, unavailable_hit.y)
+            .await;
+        assert_eq!(
+            app.status.as_ref().map(|(status, _)| status.as_str()),
+            Some("codex: `codex` CLI not found")
+        );
+        assert!(app.minibuffer.is_some(), "unavailable click keeps picker open");
+
+        let mb = app.minibuffer.as_mut().expect("picker");
+        mb.input = "openai".to_string();
+        mb.cursor = mb.input.len();
+        app.harness_picker_filter_active = true;
+        app.harness_picker_selected = 0;
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw filtered picker");
+        let filtered = rendered_text(terminal.backend().buffer());
+        assert!(filtered.contains("codex"));
+        assert!(filtered.contains("`codex` CLI not found"));
+        assert!(!filtered.contains("Generic shell command runner"));
+
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        let error = app
+            .minibuffer
+            .as_ref()
+            .and_then(|mb| mb.error.as_deref());
+        assert_eq!(error, Some("`codex` CLI not found"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn harness_picker_navigation_aliases_wrap_and_tab_completes_the_highlight() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.harnesses = vec![
+            construct_protocol::HarnessInfo {
+                name: "shell".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("Generic shell command runner".to_string()),
+                capabilities: Default::default(),
+            },
+            construct_protocol::HarnessInfo {
+                name: "codex".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("OpenAI Codex".to_string()),
+                capabilities: Default::default(),
+            },
+        ];
+        app.run_action(KeyAction::OpenNewSession).await;
+
+        app.handle_minibuffer_key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ))
+            .await;
+        assert_eq!(app.harness_picker_selected, 1);
+        app.handle_minibuffer_key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        assert_eq!(app.harness_picker_selected, 2);
+        app.handle_minibuffer_key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        assert_eq!(app.harness_picker_selected, 1);
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.harness_picker_selected, 0);
+        app.handle_minibuffer_key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        assert_eq!(app.harness_picker_selected, 2);
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+
+        let minibuffer = app.minibuffer.as_ref().expect("picker remains open");
+        assert_eq!(minibuffer.input, "codex");
+        assert_eq!(minibuffer.cursor, "codex".len());
+        assert!(!app.harness_picker_filter_active);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn harness_picker_mouse_wheel_moves_and_wraps_the_highlight() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.harnesses = vec![
+            construct_protocol::HarnessInfo {
+                name: "shell".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("Generic shell command runner".to_string()),
+                capabilities: Default::default(),
+            },
+            construct_protocol::HarnessInfo {
+                name: "codex".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("OpenAI Codex".to_string()),
+                capabilities: Default::default(),
+            },
+        ];
+        app.run_action(KeyAction::OpenNewSession).await;
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw picker");
+        let area = app.layout.minibuffer_area.expect("picker area");
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        app.on_mouse(wheel(MouseEventKind::ScrollDown)).await;
+        assert_eq!(app.harness_picker_selected, 1);
+        app.on_mouse(wheel(MouseEventKind::ScrollUp)).await;
+        assert_eq!(app.harness_picker_selected, 0);
+        app.on_mouse(wheel(MouseEventKind::ScrollUp)).await;
+        assert_eq!(
+            app.harness_picker_selected, 2,
+            "wheel navigation wraps from project to the last harness"
+        );
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: area.right(),
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        assert_eq!(
+            app.harness_picker_selected, 2,
+            "wheel events outside the picker keep their existing routing"
+        );
         server.abort();
     }
 
