@@ -200,7 +200,16 @@
     content: ""; position: absolute; inset: 0 auto 0 0; width: var(--ctx-fill);
     background: var(--fg); opacity: 0.82;
   }
-  .session-runtime-bar > span { position: relative; padding: 0 6px; white-space: nowrap; }
+  .session-runtime-bar .ctx-label { position: relative; padding: 0 6px; white-space: nowrap; }
+  /* The fill is drawn in --fg, the same color as the label, so a growing bar
+     would swallow its own text. Overlay a second copy of the label painted in
+     --bg and clip it to exactly the filled width: the reading is dark-on-light
+     inside the bar and light-on-dark outside it, at every fill level. */
+  .session-runtime-bar .ctx-label-over {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    color: var(--bg); pointer-events: none;
+    clip-path: inset(0 calc(100% - var(--ctx-fill)) 0 0);
+  }
   .session-runtime-popover {
     position: absolute; z-index: 20; top: calc(100% + 6px); left: 0;
     width: max-content; min-width: 220px; max-width: min(320px, calc(100vw - 24px));
@@ -217,7 +226,7 @@
     .session-runtime-button { flex-direction: column; align-items: stretch; gap: 1px; padding: 3px 5px; }
     .session-runtime-model { display: block; max-width: 96px; overflow: hidden; text-overflow: ellipsis; font-size: 9px; line-height: 1.1; }
     .session-runtime-button .session-runtime-bar { width: clamp(82px, 24vw, 112px); min-width: 0; height: 15px; font-size: 9px; }
-    .session-runtime-button .session-runtime-bar > span { display: block; padding: 0 3px; }
+    .session-runtime-button .session-runtime-bar .ctx-label { display: block; padding: 0 3px; }
     .session-runtime-popover { left: auto; right: 0; }
   }
   /* Keep the phone header to one row: the title flexes, rename remains
@@ -238,7 +247,7 @@
     .session-runtime-button { flex-direction: column; align-items: stretch; gap: 1px; padding: 2px; }
     .session-runtime-model { max-width: 52px; font-size: 8px; line-height: 1.1; }
     .session-runtime-button .session-runtime-bar { width: 52px; height: 14px; font-size: 8px; }
-    .session-runtime-button .session-runtime-bar > span {
+    .session-runtime-button .session-runtime-bar .ctx-label {
       display: block; overflow: hidden; text-overflow: ellipsis; padding: 0 2px;
     }
     .view-mode-toggle { flex: 0 0 auto; margin-left: 0; }
@@ -2619,7 +2628,8 @@
       <button type="button" class="session-runtime-button" id="sessionRuntimeBtn"
               aria-label="session model and context" aria-expanded="false">
         <span class="session-runtime-model" id="sessionRuntimeModel"></span>
-        <span class="session-runtime-bar" id="sessionRuntimeBar"><span></span></span>
+        <span class="session-runtime-bar" id="sessionRuntimeBar"><span class="ctx-label"></span><span
+              class="ctx-label-over" aria-hidden="true"><span class="ctx-label"></span></span></span>
       </button>
       <div class="session-runtime-popover" id="sessionRuntimePopover" hidden role="dialog"
            aria-label="session runtime details"></div>
@@ -11930,13 +11940,19 @@ function renderSessionRuntimeMeta(s) {
   sessionRuntimeModelEl.textContent = model;
   sessionRuntimeBarEl.style.setProperty("--ctx-fill", `${percent}%`);
   sessionRuntimeBarEl.dataset.compact = compactLabel;
-  sessionRuntimeBarEl.firstElementChild.textContent = fullLabel;
+  // Both copies of the label (base + the one clipped to the fill) carry the
+  // same text; only their color differs.
+  sessionRuntimeBarEl.querySelectorAll(".ctx-label").forEach((el) => {
+    el.textContent = fullLabel;
+  });
   sessionRuntimeBtn.title = `${model} · ${fullLabel}`;
   sessionRuntimeBtn.setAttribute("aria-label", `${model}; ${fullLabel}`);
   sessionRuntimePopoverEl.innerHTML =
     `<div><span class="runtime-detail-label">Model</span> ${escape(model)}</div>` +
     `<div><span class="runtime-detail-label">Context</span> ${escape(fullLabel)}</div>` +
-    `<div class="session-runtime-bar runtime-detail-bar" style="--ctx-fill:${percent}%"><span>${escape(fullLabel)}</span></div>`;
+    `<div class="session-runtime-bar runtime-detail-bar" style="--ctx-fill:${percent}%">` +
+    `<span class="ctx-label">${escape(fullLabel)}</span>` +
+    `<span class="ctx-label-over" aria-hidden="true"><span class="ctx-label">${escape(fullLabel)}</span></span></div>`;
 }
 
 function escape(s) {
