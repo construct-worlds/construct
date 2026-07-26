@@ -1,7 +1,7 @@
 # 0110-minibuffer-harness-completion-menu
 
 Status: accepted
-Date: 2026-07-25
+Date: 2026-07-26
 Area: tui
 Scope: How the minibuffer presents a growing set of harness choices for new sessions and forks.
 
@@ -21,6 +21,9 @@ input, and Esc cancels. When Tab restores the full list after filtering, the
 completed entry remains highlighted so a following Enter chooses the value
 shown in the input. Rows remain clickable. The menu shows a bounded number of
 rows and scrolls to keep the current highlight visible.
+Its height is derived from the complete, unfiltered candidate set and remains
+fixed while typing narrows the visible rows, so the input and main content do
+not move between keystrokes.
 
 Unavailable harnesses remain discoverable but cannot be selected. Highlighting
 one replaces its description with the daemon's availability detail, and
@@ -52,6 +55,9 @@ The picker remains part of the minibuffer interaction model: opening it does
 not obscure the fleet with a centered dialog, and its keyboard, mouse, cancel,
 and fork-default behavior must stay consistent with other minibuffer
 completions.
+
+Filtering may leave empty menu rows because preserving a stable layout takes
+priority over collapsing the picker around a small result set.
 
 ## Non-Goals
 
