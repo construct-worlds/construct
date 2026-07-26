@@ -240,19 +240,50 @@ async fn intercept_tls(
     // The dialect the harness speaks is read from the request itself, not
     // declared: a provider-agnostic harness emits whatever its configured
     // provider speaks (spec 0112).
-    let client_dialect = serde_json::from_slice::<serde_json::Value>(&body)
+    //
+    // A shape we do not recognize is an error, never a guess. Falling back
+    // to a declared dialect would translate under an assumption we just
+    // failed to confirm, and a wrong translation corrupts the turn instead
+    // of failing it.
+    let detected = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
-        .and_then(|v| translate::detect_dialect(&v))
-        .unwrap_or(ctx.harness.dialect);
+        .as_ref()
+        .and_then(translate::detect_dialect);
+
+    // Token counting has no counterpart on most targets; answering locally
+    // keeps the harness's context bookkeeping working instead of failing
+    // the turn. Handled before dialect detection because these bodies are
+    // not always full requests.
+    if request.path.contains("count_tokens") {
+        ctx.mark_observed();
+        return write_simple(&mut tls, 200, &count_tokens_reply(&body)).await;
+    }
+
+    // Detection decides whether this request needs translating at all.
+    // When it fails, the only safe move depends on what we would do next:
+    // a same-dialect redirect never interprets the body, so an
+    // unrecognized shape is harmless there; a translation would have to
+    // interpret it, and doing that on a guess corrupts the turn.
+    let client_dialect = match detected {
+        Some(d) => d,
+        None if ctx.harness.dialect == route.target_dialect => ctx.harness.dialect,
+        None => {
+            ctx.mark_observed();
+            let payload = serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "construct router: unrecognized request dialect; refusing to translate on a guess",
+                },
+            })
+            .to_string();
+            write_simple(&mut tls, 502, &payload).await.ok();
+            bail!("unrecognized request dialect on an armed route");
+        }
+    };
 
     if client_dialect != route.target_dialect {
         ctx.mark_observed();
-        // The harness's own token-counting endpoint has no counterpart on
-        // most targets; answering locally keeps its context bookkeeping
-        // working instead of failing the turn.
-        if request.path.contains("count_tokens") {
-            return write_simple(&mut tls, 200, &count_tokens_reply(&body)).await;
-        }
         let streaming = wants_stream(&body);
         return match forward_translated(body, &route, client_dialect).await {
             Ok(response) => {

@@ -806,6 +806,7 @@ dependencies = [
  "qrcode",
  "rcgen",
  "reqwest",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "tempfile",

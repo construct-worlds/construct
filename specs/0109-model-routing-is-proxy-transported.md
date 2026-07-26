@@ -61,6 +61,15 @@ the shape, not of test coverage.
   [0111](0111-routing-injection-is-probe-verified.md)). A harness with no
   such channel is pass-through only; that is a supported, permanent state,
   not a degraded one.
+- Certificate-trust channels come in two kinds and the difference is
+  load-bearing: one *adds* a certificate authority to the platform's, the
+  other *replaces* the platform's entirely. A replacing channel handed only
+  the Construct CA leaves the session unable to reach anything except the
+  routed endpoint. Such a channel must be given the platform trust store
+  composed with the Construct CA, and a harness that needs that composition
+  must be refused routing outright when the platform store cannot be read.
+  Which kind a given variable is differs per harness and is established by
+  probe, not by its name.
 - Interception is per-destination, not per-connection. Every destination
   other than the routed one stays a blind tunnel, including the harness's
   own auth-refresh and telemetry endpoints, and everything the harness

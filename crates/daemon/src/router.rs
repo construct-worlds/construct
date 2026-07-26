@@ -101,10 +101,34 @@ pub struct HarnessRouting {
     /// Hosts that carry model traffic and may therefore be intercepted
     /// while a route is armed. Everything else always tunnels.
     pub intercept_hosts: &'static [&'static str],
-    /// Env vars through which this harness accepts an additional trusted
-    /// CA. Empty means interception is impossible: the harness can be
-    /// observed but not redirected.
-    pub ca_env: &'static [&'static str],
+    /// How this harness can be made to trust the router CA. Empty means
+    /// interception is impossible: the harness can be observed but not
+    /// redirected.
+    pub ca_env: &'static [CaChannel],
+}
+
+/// A variable through which a harness accepts a certificate authority,
+/// and — critically — what that variable *does* to the existing trust.
+///
+/// The distinction is not cosmetic. Handing a replacing variable a file
+/// containing only the router CA leaves the session unable to reach
+/// anything else at all; it must be given the composed bundle instead.
+/// Which mode a variable has is a per-harness, probe-established fact:
+/// the same `SSL_CERT_FILE` is additive for one harness and replacing for
+/// another.
+#[derive(Debug, Clone, Copy)]
+pub struct CaChannel {
+    pub var: &'static str,
+    pub mode: CaMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaMode {
+    /// Adds to the system roots. Gets the bare CA file.
+    Additive,
+    /// Replaces the system roots. Gets the composed bundle, or the
+    /// harness is not routable at all.
+    Replacing,
 }
 
 pub fn harness_routing(harness: &str) -> Option<HarnessRouting> {
@@ -114,14 +138,32 @@ pub fn harness_routing(harness: &str) -> Option<HarnessRouting> {
         "claude" => Some(HarnessRouting {
             dialect: Dialect::AnthropicMessages,
             intercept_hosts: &["api.anthropic.com"],
-            ca_env: &["NODE_EXTRA_CA_CERTS"],
+            ca_env: &[CaChannel {
+                var: "NODE_EXTRA_CA_CERTS",
+                mode: CaMode::Additive,
+            }],
         }),
         // Node. Probed end to end; a forged leaf signed by our CA was
         // accepted through NODE_EXTRA_CA_CERTS.
         "pi" => Some(HarnessRouting {
             dialect: Dialect::OpenAiResponses,
             intercept_hosts: &["chatgpt.com"],
-            ca_env: &["NODE_EXTRA_CA_CERTS"],
+            ca_env: &[CaChannel {
+                var: "NODE_EXTRA_CA_CERTS",
+                mode: CaMode::Additive,
+            }],
+        }),
+        // Rust. Honors SSL_CERT_FILE, which REPLACES the system roots —
+        // verified by pointing it at a bundle without them and watching
+        // every TLS connection fail. It therefore gets the composed
+        // bundle, and is unroutable if that bundle cannot be built.
+        "codex" => Some(HarnessRouting {
+            dialect: Dialect::OpenAiResponses,
+            intercept_hosts: &["chatgpt.com"],
+            ca_env: &[CaChannel {
+                var: "SSL_CERT_FILE",
+                mode: CaMode::Replacing,
+            }],
         }),
         // Native binary. Rejects NODE_EXTRA_CA_CERTS outright but honors
         // SSL_CERT_FILE *additively* — verified by reaching its real
@@ -132,7 +174,10 @@ pub fn harness_routing(harness: &str) -> Option<HarnessRouting> {
         "grok" => Some(HarnessRouting {
             dialect: Dialect::OpenAiResponses,
             intercept_hosts: &["cli-chat-proxy.grok.com"],
-            ca_env: &["SSL_CERT_FILE"],
+            ca_env: &[CaChannel {
+                var: "SSL_CERT_FILE",
+                mode: CaMode::Additive,
+            }],
         }),
         // codex, grok, opencode, hermes and pi have all been probed and
         // all honor the proxy environment — pass-through works for every
@@ -494,8 +539,19 @@ impl Router {
             // same variable as a REPLACEMENT for the system roots and lose
             // every other endpoint. Only harnesses whose variable is
             // additive appear in `harness_routing` at all.
-            for var in routing.ca_env {
-                env.insert((*var).to_string(), path.clone());
+            for channel in routing.ca_env {
+                let value = match channel.mode {
+                    CaMode::Additive => Some(path.clone()),
+                    // A replacing variable must never receive the bare CA:
+                    // that would narrow the session's trust to our CA
+                    // alone and break every endpoint but the routed one.
+                    CaMode::Replacing => ca
+                        .bundle_path()
+                        .map(|p| p.to_string_lossy().to_string()),
+                };
+                if let Some(value) = value {
+                    env.insert(channel.var.to_string(), value);
+                }
             }
         }
         env
@@ -544,6 +600,19 @@ impl Router {
         let routing = harness_routing(harness)?;
         if routing.ca_env.is_empty() {
             return Some(format!("{harness} cannot trust the router CA"));
+        }
+        // A harness whose only CA channel replaces the system roots needs
+        // the composed bundle. Without it, arming a route would cut the
+        // session off from every endpoint it is not being routed to.
+        let needs_bundle = routing
+            .ca_env
+            .iter()
+            .all(|c| c.mode == CaMode::Replacing);
+        if needs_bundle && self.ca().ok().and_then(|ca| ca.bundle_path()).is_none() {
+            return Some(format!(
+                "{harness} needs the system trust store composed with the router CA, \
+                 and the platform trust store could not be read"
+            ));
         }
         let Some(dialect) = provider_dialect(&profile.provider) else {
             return Some(format!(
@@ -774,8 +843,10 @@ mod tests {
     async fn unroutable_harness_is_refused_with_a_reason() {
         let dir = tempfile::tempdir().unwrap();
         let r = started(&dir, cfg_with(true)).await;
-        assert!(r.attach_session("s1", "codex", None).is_err());
-        let listed = r.list_routes("codex", false, None);
+        // `shell` runs commands and makes no model calls at all; it is
+        // the permanent example of a harness with nothing to route.
+        assert!(r.attach_session("s1", "shell", None).is_err());
+        let listed = r.list_routes("shell", false, None);
         assert!(listed
             .unavailable_reason
             .unwrap()
@@ -1500,6 +1571,54 @@ mod tests {
         assert!(
             forwarded.contains("\"function\""),
             "flat Responses tools must become nested Chat functions: {forwarded}"
+        );
+    }
+
+
+    /// A harness whose CA variable REPLACES the system roots must be handed
+    /// the composed bundle, never the bare CA — the bare CA would leave the
+    /// session trusting nothing but us.
+    #[tokio::test]
+    async fn replacing_ca_channels_receive_the_composed_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = started(&dir, cfg_with(true)).await;
+
+        let codex = r.attach_session("s-codex", "codex", None).unwrap();
+        let bundle = codex.get("SSL_CERT_FILE").expect("codex needs a CA file");
+        let text = std::fs::read_to_string(bundle).unwrap();
+        let count = text.matches("-----BEGIN CERTIFICATE-----").count();
+        assert!(
+            count > 1,
+            "the bundle must carry the system roots as well as our CA, saw {count}"
+        );
+        let ours = std::fs::read_to_string(dir.path().join("router/ca.pem")).unwrap();
+        assert!(
+            text.contains(ours.trim()),
+            "the bundle must contain the router CA"
+        );
+
+        // An additive channel keeps getting the bare CA.
+        let claude = r.attach_session("s-claude", "claude", None).unwrap();
+        let bare = claude.get("NODE_EXTRA_CA_CERTS").unwrap();
+        assert!(bare.ends_with("ca.pem"), "{bare}");
+        assert_ne!(bare, bundle);
+    }
+
+    /// grok and codex both use SSL_CERT_FILE, but only one of them
+    /// additively. Mixing them up would break every other endpoint the
+    /// session talks to, so the modes must stay distinct.
+    #[tokio::test]
+    async fn the_same_variable_gets_different_files_per_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = started(&dir, cfg_with(true)).await;
+        let grok = r.attach_session("s-grok", "grok", None).unwrap();
+        let codex = r.attach_session("s-codex", "codex", None).unwrap();
+        let grok_ca = grok.get("SSL_CERT_FILE").unwrap();
+        let codex_ca = codex.get("SSL_CERT_FILE").unwrap();
+        assert!(grok_ca.ends_with("ca.pem"), "grok is additive: {grok_ca}");
+        assert!(
+            codex_ca.ends_with("ca-bundle.pem"),
+            "codex is replacing: {codex_ca}"
         );
     }
 

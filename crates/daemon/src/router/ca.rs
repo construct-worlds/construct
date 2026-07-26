@@ -28,6 +28,9 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio_rustls::rustls::ServerConfig;
 
 const CA_CERT_FILE: &str = "ca.pem";
+/// System roots + our CA, for harnesses whose CA variable replaces the
+/// trust store instead of adding to it.
+const CA_BUNDLE_FILE: &str = "ca-bundle.pem";
 const CA_KEY_FILE: &str = "ca-key.pem";
 const CA_COMMON_NAME: &str = "Construct Router CA";
 
@@ -55,6 +58,11 @@ fn ca_params() -> CertificateParams {
 pub struct RouterCa {
     /// PEM path handed to harness processes through their CA-trust env var.
     cert_path: PathBuf,
+    bundle_path: PathBuf,
+    /// `None` until first use, `Some(None)` once composition has been
+    /// tried and failed — the failure is remembered so a harness that
+    /// needs the bundle stays unroutable rather than retrying per session.
+    bundle: Mutex<Option<Option<PathBuf>>>,
     issuer: Issuer<'static, KeyPair>,
     /// Minted leaf certs, keyed by SNI host. Handshakes are per-connection
     /// and a session reconnects constantly; minting each time would burn
@@ -86,6 +94,8 @@ impl RouterCa {
         };
 
         Ok(Self {
+            bundle_path: dir.join(CA_BUNDLE_FILE),
+            bundle: Mutex::new(None),
             cert_path,
             issuer: Issuer::new(ca_params(), key),
             leaves: Mutex::new(HashMap::new()),
@@ -95,6 +105,54 @@ impl RouterCa {
     /// Path to the CA certificate, for the harness's CA-trust env var.
     pub fn cert_path(&self) -> &Path {
         &self.cert_path
+    }
+
+    /// Path to a PEM containing the platform trust store **plus** our CA.
+    ///
+    /// `None` when the platform roots could not be read, and that is the
+    /// only safe answer: a harness whose CA variable replaces the trust
+    /// store would, if handed a bundle containing only our CA, lose every
+    /// other endpoint it talks to. Failing to compose the bundle must
+    /// leave such a harness unroutable, never partially trusted.
+    pub fn bundle_path(&self) -> Option<PathBuf> {
+        let mut slot = self.bundle.lock().unwrap();
+        if let Some(cached) = slot.as_ref() {
+            return cached.clone();
+        }
+        let composed = self.compose_bundle();
+        if composed.is_none() {
+            tracing::warn!(
+                "could not read the platform trust store; harnesses whose CA \
+                 variable replaces the system roots cannot be routed"
+            );
+        }
+        *slot = Some(composed.clone());
+        composed
+    }
+
+    fn compose_bundle(&self) -> Option<PathBuf> {
+        let result = rustls_native_certs::load_native_certs();
+        if !result.errors.is_empty() {
+            tracing::debug!(errors = ?result.errors, "platform trust store reported errors");
+        }
+        // Zero roots means we did not actually read the store. Writing a
+        // bundle here would silently narrow the session's trust to our CA
+        // alone.
+        if result.certs.is_empty() {
+            return None;
+        }
+        let mut pem = String::new();
+        for cert in &result.certs {
+            pem.push_str(&pem_encode(cert));
+        }
+        pem.push_str(&std::fs::read_to_string(&self.cert_path).ok()?);
+        std::fs::write(&self.bundle_path, pem).ok()?;
+        tracing::debug!(
+            roots = result.certs.len(),
+            path = %self.bundle_path.display(),
+            "composed router CA bundle"
+        );
+        Some(self.bundle_path.clone())
     }
 
     /// A TLS server config presenting a freshly minted certificate for
@@ -140,6 +198,19 @@ impl RouterCa {
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(config)
     }
+}
+
+/// DER → PEM, so composed bundles are plain text like every other CA file.
+fn pem_encode(der: &CertificateDer<'_>) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_ref());
+    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(line).unwrap_or_default());
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
 }
 
 fn write_private(path: &Path, contents: &str) -> Result<()> {

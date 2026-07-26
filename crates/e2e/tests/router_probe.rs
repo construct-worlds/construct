@@ -151,8 +151,9 @@ fn claude_completes_a_turn_through_the_injected_proxy() {
 /// with "no certificates found in PEM file"). Injecting only the Construct
 /// CA there would break every other TLS connection the session makes.
 /// Routing codex therefore requires composing a bundle of the system roots
-/// plus our CA — until that exists, declaring codex route-capable would
-/// hand users a session that dies the moment a route is armed.
+/// plus our CA, which the router now does — codex is given the composed
+/// bundle rather than the bare CA, and is refused entirely if the platform
+/// trust store cannot be read.
 #[test]
 #[ignore = "needs the real codex binary, credentials, and network"]
 fn codex_honors_the_proxy_environment() {
@@ -320,13 +321,14 @@ fn only_probed_harnesses_are_declared_route_capable() {
     // order (spec 0111).
     //
     // Deliberately absent despite passing the transport probe:
-    // - codex, hermes: their CA variable REPLACES the system roots, so
-    //   interception needs bundle composition first.
+    // - hermes: its CA variable replaces the system roots (handled now by
+    //   bundle composition) but its wire dialect has never been captured,
+    //   and a dialect is not something to guess.
     // - opencode: its endpoint host follows its configured provider, so
     //   there is no fixed intercept host to declare.
     // Transport capability alone is never route capability.
-    const PROBED: &[&str] = &["claude", "pi", "grok"];
-    for harness in ["codex", "smith", "shell", "opencode", "kimi", "hermes"] {
+    const PROBED: &[&str] = &["claude", "pi", "grok", "codex"];
+    for harness in ["smith", "shell", "opencode", "kimi", "hermes"] {
         assert!(
             !PROBED.contains(&harness),
             "{harness} is declared route-capable but is excluded for a documented reason"
