@@ -14,7 +14,7 @@
 //! encoder that emits deltas without the surrounding items produces a
 //! stream the harness renders as nothing.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::{
     sse, CanonBlock, CanonEvent, CanonMessage, CanonRequest, CanonRole, CanonStop, CanonTool,
@@ -217,6 +217,267 @@ pub fn parse_request(body: &Value) -> CanonRequest {
             .unwrap_or(false),
         stop: Vec::new(),
     }
+}
+
+/// Emit a canonical request as OpenAI Responses.
+///
+/// Needed because a subscription login can be a *target*: the Codex
+/// backend speaks Responses and nothing else (spec 0117).
+pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
+    let mut input: Vec<Value> = Vec::new();
+    for message in &req.messages {
+        let mut parts: Vec<Value> = Vec::new();
+        for block in &message.blocks {
+            match block {
+                CanonBlock::Text(t) => {
+                    // The text part type differs by who is speaking, and
+                    // the backend rejects the wrong one.
+                    let kind = match message.role {
+                        CanonRole::Assistant => "output_text",
+                        _ => "input_text",
+                    };
+                    parts.push(json!({"type": kind, "text": t}));
+                }
+                CanonBlock::Image(url) => {
+                    parts.push(json!({"type":"input_image","image_url":url}))
+                }
+                CanonBlock::ToolUse { id, name, input: args } => {
+                    // Function calls are their own input items, not content
+                    // parts inside a message.
+                    input.push(json!({
+                        "type":"function_call","call_id":id,"name":name,
+                        "arguments": serde_json::to_string(args).unwrap_or_else(|_| "{}".into()),
+                    }));
+                }
+                CanonBlock::ToolResult { id, text, .. } => {
+                    input.push(json!({
+                        "type":"function_call_output","call_id":id,"output":text,
+                    }));
+                }
+                // Reasoning items are encrypted and bound to the response
+                // that produced them; a foreign one is rejected.
+                CanonBlock::Thinking(_) => {}
+            }
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        input.push(json!({
+            "type":"message",
+            "role": match message.role {
+                CanonRole::Assistant => "assistant",
+                CanonRole::System => "developer",
+                _ => "user",
+            },
+            "content": parts,
+        }));
+    }
+
+    let mut out = Map::new();
+    out.insert("model".into(), json!(model));
+    if let Some(system) = &req.system {
+        out.insert("instructions".into(), json!(system));
+    }
+    out.insert("input".into(), json!(input));
+    if let Some(m) = req.max_tokens {
+        out.insert("max_output_tokens".into(), json!(m));
+    }
+    if let Some(t) = req.temperature {
+        out.insert("temperature".into(), json!(t));
+    }
+    if !req.tools.is_empty() {
+        out.insert(
+            "tools".into(),
+            json!(req
+                .tools
+                .iter()
+                .map(|t| json!({
+                    "type":"function","name":t.name,
+                    "description":t.description,"parameters":t.schema
+                }))
+                .collect::<Vec<_>>()),
+        );
+    }
+    if let Some(choice) = &req.tool_choice {
+        out.insert(
+            "tool_choice".into(),
+            match choice {
+                CanonToolChoice::Auto => json!("auto"),
+                CanonToolChoice::Required => json!("required"),
+                CanonToolChoice::None => json!("none"),
+                CanonToolChoice::Named(n) => json!({"type":"function","name":n}),
+            },
+        );
+    }
+    out.insert("stream".into(), json!(req.stream));
+    // The router keeps no server-side conversation state: every turn is
+    // sent whole, so storing it would leave orphaned state behind.
+    out.insert("store".into(), json!(false));
+    Value::Object(out)
+}
+
+/// Decode one Responses SSE payload into canonical events.
+///
+/// Dispatches on the payload's own `type`, not the SSE `event:` line, so it
+/// works on a stream where only `data:` frames are forwarded.
+pub fn decode_event(data: &Value) -> Vec<CanonEvent> {
+    let Some(kind) = data.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let output_index = data
+        .get("output_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    match kind {
+        "response.created" => vec![CanonEvent::Start {
+            id: data
+                .get("response")
+                .and_then(|r| r.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("resp_router")
+                .to_string(),
+        }],
+        "response.output_text.delta" => data
+            .get("delta")
+            .and_then(Value::as_str)
+            .filter(|d| !d.is_empty())
+            .map(|d| vec![CanonEvent::TextDelta(d.to_string())])
+            .unwrap_or_default(),
+        "response.output_item.added" => {
+            let item = data.get("item");
+            match item.and_then(|i| i.get("type")).and_then(Value::as_str) {
+                Some("function_call") => vec![CanonEvent::ToolStart {
+                    index: output_index,
+                    id: item
+                        .and_then(|i| i.get("call_id"))
+                        .or_else(|| item.and_then(|i| i.get("id")))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: item
+                        .and_then(|i| i.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                }],
+                _ => Vec::new(),
+            }
+        }
+        "response.function_call_arguments.delta" => data
+            .get("delta")
+            .and_then(Value::as_str)
+            .filter(|d| !d.is_empty())
+            .map(|d| {
+                vec![CanonEvent::ToolArgsDelta {
+                    index: output_index,
+                    json: d.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "response.completed" | "response.incomplete" | "response.failed" => {
+            let mut out = Vec::new();
+            let response = data.get("response");
+            if let Some(usage) = response.and_then(|r| r.get("usage")).filter(|u| !u.is_null()) {
+                out.push(CanonEvent::Usage {
+                    input: usage
+                        .get("input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    output: usage
+                        .get("output_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                });
+            }
+            let status = response
+                .and_then(|r| r.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("completed");
+            out.push(CanonEvent::Stop {
+                reason: match status {
+                    "incomplete" => CanonStop::MaxTokens,
+                    "completed" => CanonStop::EndTurn,
+                    other => CanonStop::Other(other.to_string()),
+                },
+            });
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Decode a non-streaming Responses body into canonical events.
+pub fn decode_full_response(body: &Value) -> Vec<CanonEvent> {
+    let mut events = vec![CanonEvent::Start {
+        id: body
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("resp_router")
+            .to_string(),
+    }];
+    let mut tool_index = 0usize;
+    for item in body
+        .get("output")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        match item.get("type").and_then(Value::as_str) {
+            Some("message") => {
+                for part in item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                {
+                    if let Some(t) = part.get("text").and_then(Value::as_str) {
+                        events.push(CanonEvent::TextDelta(t.to_string()));
+                    }
+                }
+            }
+            Some("function_call") => {
+                events.push(CanonEvent::ToolStart {
+                    index: tool_index,
+                    id: item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                });
+                events.push(CanonEvent::ToolArgsDelta {
+                    index: tool_index,
+                    json: item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("{}")
+                        .to_string(),
+                });
+                tool_index += 1;
+            }
+            _ => {}
+        }
+    }
+    if let Some(usage) = body.get("usage").filter(|u| !u.is_null()) {
+        events.push(CanonEvent::Usage {
+            input: usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
+            output: usage
+                .get("output_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        });
+    }
+    events.push(CanonEvent::Stop {
+        reason: match body.get("status").and_then(Value::as_str) {
+            Some("incomplete") => CanonStop::MaxTokens,
+            _ => CanonStop::EndTurn,
+        },
+    });
+    events
 }
 
 /// Builds a Responses event stream from canonical events.

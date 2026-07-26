@@ -314,7 +314,7 @@ enabled = true
 #   CONSTRUCT_PI_BIN          — binary path fallback for the pi adapter
 #
 # ---------------------------------------------------------------------------
-# Model routing (specs 0113/0114/0115/0116)
+# Model routing (specs 0113/0114/0115/0116/0117)
 # ---------------------------------------------------------------------------
 # Off by default. When enabled, route-capable sessions are spawned with
 # HTTPS_PROXY pointing at a loopback proxy the daemon owns. The proxy does
@@ -339,10 +339,27 @@ enabled = true
 # endpoint) can be reached by declaring it as `provider = "openai"` with
 # its base_url.
 #
+# Subscription logins already on this machine (Claude, ChatGPT/Codex, Grok)
+# are offered as route targets automatically — nothing to declare, because a
+# login has no base URL or key to write down (spec 0117). The router READS
+# those credentials and never refreshes them: refresh writes back to a store
+# the owning CLI owns, and a second refresher can invalidate that tool's
+# token mid-turn. An expired login is reported with the command to renew it.
+#
+# Antigravity's login is not offered: its backend speaks a Gemini-shaped
+# protocol the router has no translator for.
+#
 # [router]
 # enabled = true
 # port    = 8917    # fixed on purpose: harness processes outlive the daemon
 #                   # and keep dialing the port they were given at spawn
+#
+# [router.oauth]
+# # Model each subscription login sends. Optional — each has a built-in
+# # default, which may lag a vendor release.
+# claude-oauth = "claude-sonnet-4-6"
+# codex-oauth  = "gpt-5.5"
+# grok-oauth   = "grok-4.5"
 "#;
 
 /// Kept for backwards-compat: `construct daemon default-config` and any
@@ -477,6 +494,13 @@ pub struct RouterConfig {
     /// it deterministic.
     #[serde(default = "default_router_port")]
     pub port: u16,
+    /// `[router.oauth]` — model each subscription login sends, keyed by
+    /// provider name (`claude-oauth`, `codex-oauth`, `grok-oauth`).
+    /// Optional: each provider has a built-in default, which may lag a
+    /// vendor release. A subscription login has no base URL or key to
+    /// declare, so this is the only thing there is to configure.
+    #[serde(default)]
+    pub oauth: BTreeMap<String, String>,
 }
 
 impl Default for RouterConfig {
@@ -484,6 +508,7 @@ impl Default for RouterConfig {
         Self {
             enabled: false,
             port: default_router_port(),
+            oauth: BTreeMap::new(),
         }
     }
 }

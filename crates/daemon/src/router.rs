@@ -16,6 +16,7 @@
 //! touched.
 
 pub mod ca;
+pub mod oauth;
 pub mod proxy;
 pub mod translate;
 
@@ -31,6 +32,7 @@ use tokio::net::TcpListener;
 
 use crate::config::{ModelProfile, RouterConfig};
 use ca::RouterCa;
+use oauth::OauthProvider;
 
 /// Env var carrying the proxy the harness should use. This is the only
 /// channel Construct injects for transport; the harness's own endpoint
@@ -274,9 +276,19 @@ impl UpstreamProxy {
 #[derive(Clone)]
 pub struct ArmedRoute {
     pub name: String,
+    /// Exact URL to send to. For a profile this is its base URL plus the
+    /// target dialect's path; for a subscription login it is that login's
+    /// own backend, which is not relocatable.
+    pub endpoint: String,
     pub base_url: String,
     pub model: String,
     pub api_key: String,
+    /// Auth scheme and any headers the target requires beyond the key.
+    pub auth: TargetAuth,
+    /// Text the target requires the system prompt to open with, if any.
+    pub system_prefix: Option<&'static str>,
+    /// Extra headers the target rejects requests without.
+    pub extra_headers: Vec<(String, String)>,
     /// Dialect the *target* speaks. When it differs from the harness's,
     /// the proxy translates instead of merely redirecting (spec 0116).
     pub target_dialect: Dialect,
@@ -285,9 +297,26 @@ pub struct ArmedRoute {
     pub client: reqwest::Client,
 }
 
+/// How a target authenticates. Not cosmetic: sending an OAuth bearer in
+/// an `x-api-key` header (or the reverse) is rejected outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetAuth {
+    /// Anthropic API key header.
+    ApiKeyHeader,
+    /// `Authorization: Bearer …`.
+    Bearer,
+}
+
 impl ArmedRoute {
     pub fn translates(&self) -> bool {
         self.target_dialect != self.client_dialect
+    }
+
+    /// Subscription targets always go through the translating path, even
+    /// when the dialects match: their backends need required headers and a
+    /// required system prefix that byte-forwarding would not apply.
+    pub fn needs_rebuild(&self) -> bool {
+        self.translates() || self.system_prefix.is_some() || !self.extra_headers.is_empty()
     }
 }
 
@@ -337,6 +366,8 @@ pub struct Router {
     /// Route targets: the `[smith.models.*]` profiles, so an endpoint is
     /// declared once and reachable from both smith and a routed session.
     profiles: BTreeMap<String, ModelProfile>,
+    /// `[router.oauth]` model overrides, keyed by provider name.
+    oauth_models: BTreeMap<String, String>,
     state_dir: PathBuf,
     ca: RwLock<Option<Arc<RouterCa>>>,
     upstream_proxy: Option<UpstreamProxy>,
@@ -369,6 +400,7 @@ impl Router {
             enabled: cfg.enabled,
             port: cfg.port,
             profiles,
+            oauth_models: cfg.oauth.clone(),
             state_dir,
             ca: RwLock::new(None),
             upstream_proxy,
@@ -641,9 +673,70 @@ impl Router {
         profile.resolve_api_key().err()
     }
 
+    /// Resolve a subscription login into an armed route.
+    fn resolve_oauth(&self, provider: OauthProvider, harness: &str) -> Result<ArmedRoute> {
+        let routing = harness_routing(harness)
+            .ok_or_else(|| anyhow!("harness {harness} is not route-capable"))?;
+        if let Some(reason) = self.oauth_blocker(provider, harness) {
+            return Err(anyhow!("route \"{}\": {reason}", provider.name()));
+        }
+        let cred = oauth::read_credential(provider).map_err(|e| anyhow!(e))?;
+        Ok(ArmedRoute {
+            name: provider.name().to_string(),
+            endpoint: provider.endpoint().to_string(),
+            base_url: provider.endpoint().to_string(),
+            model: self.oauth_model(provider),
+            api_key: cred.access_token.clone(),
+            // Every subscription backend here takes a bearer; none accepts
+            // the Anthropic key header, even the Anthropic one.
+            auth: TargetAuth::Bearer,
+            system_prefix: oauth::required_system_prefix(provider),
+            extra_headers: oauth::extra_headers(provider, &cred)
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            target_dialect: provider.dialect(),
+            client_dialect: routing.dialect,
+            client: reqwest::Client::new(),
+        })
+    }
+
+    /// Model a subscription target sends, from `[router.oauth]` or the
+    /// provider's built-in default.
+    fn oauth_model(&self, provider: OauthProvider) -> String {
+        self.oauth_models
+            .get(provider.name())
+            .map(String::as_str)
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| provider.default_model())
+            .to_string()
+    }
+
+    /// Why a subscription login cannot serve as a route for `harness`.
+    fn oauth_blocker(&self, provider: OauthProvider, harness: &str) -> Option<String> {
+        let routing = harness_routing(harness)?;
+        if routing.ca_env.is_empty() {
+            return Some(format!("{harness} cannot trust the router CA"));
+        }
+        let needs_bundle = routing.ca_env.iter().all(|c| c.mode == CaMode::Replacing);
+        if needs_bundle && self.ca().ok().and_then(|ca| ca.bundle_path()).is_none() {
+            return Some(format!(
+                "{harness} needs the system trust store composed with the router CA, \
+                 and the platform trust store could not be read"
+            ));
+        }
+        oauth::read_credential(provider).err()
+    }
+
     fn resolve(&self, name: &str, harness: &str) -> Result<ArmedRoute> {
+        if let Some(provider) = OauthProvider::ALL.iter().find(|p| p.name() == name) {
+            return self.resolve_oauth(*provider, harness);
+        }
         let profile = self.profiles.get(name).ok_or_else(|| {
-            anyhow!("no model profile named \"{name}\" is configured under [smith.models]")
+            anyhow!(
+                "no route named \"{name}\": it is neither a [smith.models] profile \
+                 nor a known subscription login"
+            )
         })?;
         let routing = harness_routing(harness)
             .ok_or_else(|| anyhow!("harness {harness} is not route-capable"))?;
@@ -652,13 +745,21 @@ impl Router {
         }
         let target_dialect = provider_dialect(&profile.provider)
             .ok_or_else(|| anyhow!("route \"{name}\": unsupported provider"))?;
+        let base_url = profile
+            .resolved_base_url()
+            .ok_or_else(|| anyhow!("route \"{name}\": no base_url"))?;
         Ok(ArmedRoute {
             name: name.to_string(),
-            base_url: profile
-                .resolved_base_url()
-                .ok_or_else(|| anyhow!("route \"{name}\": no base_url"))?,
+            endpoint: format!("{base_url}{}", translate::target_path(target_dialect)),
+            base_url,
             model: profile.model.clone().unwrap_or_default(),
             api_key: profile.resolve_api_key().map_err(|e| anyhow!(e))?,
+            auth: match target_dialect {
+                Dialect::AnthropicMessages => TargetAuth::ApiKeyHeader,
+                _ => TargetAuth::Bearer,
+            },
+            system_prefix: None,
+            extra_headers: Vec::new(),
             target_dialect,
             client_dialect: routing.dialect,
             client: reqwest::Client::new(),
@@ -724,13 +825,23 @@ impl Router {
                 "this session started before routing was enabled; new sessions can be routed"
                     .to_string(),
             )
-        } else if self.profiles.is_empty() {
-            Some("no model profiles configured; add a [smith.models.<name>] block".to_string())
         } else {
             None
         };
 
-        let routes = self
+        // Subscription logins first: they need no configuration, so a
+        // machine with a login and no profiles still has something to pick.
+        let mut routes: Vec<RouteOption> = OauthProvider::ALL
+            .iter()
+            .map(|p| RouteOption {
+                name: p.name().to_string(),
+                dialect: p.dialect().label().to_string(),
+                model: self.oauth_model(*p),
+                base_url: p.endpoint().to_string(),
+                unavailable_reason: routing.and_then(|_| self.oauth_blocker(*p, harness)),
+            })
+            .collect();
+        routes.extend(self
             .profiles
             .iter()
             .map(|(name, profile)| RouteOption {
@@ -742,8 +853,7 @@ impl Router {
                 base_url: profile.resolved_base_url().unwrap_or_default(),
                 unavailable_reason: routing
                     .and_then(|_| self.profile_blocker(profile, harness)),
-            })
-            .collect();
+            }));
 
         RouterListRoutesResult {
             routes,
@@ -761,7 +871,11 @@ mod tests {
     /// Router config: the OS picks the port so concurrent tests don't
     /// collide on the fixed production one.
     fn cfg_with(enabled: bool) -> RouterConfig {
-        RouterConfig { enabled, port: 0 }
+        RouterConfig {
+            enabled,
+            port: 0,
+            oauth: BTreeMap::new(),
+        }
     }
 
     fn profiles(entries: Vec<(&str, ModelProfile)>) -> BTreeMap<String, ModelProfile> {
@@ -789,6 +903,19 @@ mod tests {
         let r = Router::new(dir.path().to_path_buf(), &cfg, profiles);
         r.start().await.unwrap();
         r
+    }
+
+    /// Look a route up by name. Index-based lookup is brittle now that
+    /// subscription logins are listed alongside profiles.
+    fn route_named<'a>(
+        listed: &'a RouterListRoutesResult,
+        name: &str,
+    ) -> &'a construct_protocol::RouteOption {
+        listed
+            .routes
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("no route named {name} in {:?}", listed.routes.iter().map(|r| &r.name).collect::<Vec<_>>()))
     }
 
     async fn started(dir: &tempfile::TempDir, cfg: RouterConfig) -> Arc<Router> {
@@ -920,7 +1047,10 @@ mod tests {
         r.attach_session("s1", "claude", None).unwrap();
         let listed = r.list_routes("claude", true, None);
         assert!(listed.unavailable_reason.is_none());
-        let reason = listed.routes[0].unavailable_reason.as_deref().unwrap();
+        let reason = route_named(&listed, "gemini-pro")
+            .unavailable_reason
+            .as_deref()
+            .unwrap();
         assert!(reason.contains("no translator"), "{reason}");
         assert!(r.set_route("s1", "claude", Some("gemini-pro"), None).is_err());
     }
@@ -949,11 +1079,12 @@ mod tests {
         r.attach_session("s1", "claude", None).unwrap();
 
         let listed = r.list_routes("claude", true, None);
-        assert_eq!(listed.routes[0].unavailable_reason, None);
-        assert_eq!(listed.routes[0].dialect, "openai-chat");
+        let gpt = route_named(&listed, "gpt");
+        assert_eq!(gpt.unavailable_reason, None);
+        assert_eq!(gpt.dialect, "openai-chat");
         // The provider's own default endpoint is resolved, exactly as
         // smith would resolve it.
-        assert_eq!(listed.routes[0].base_url, "https://api.openai.com/v1");
+        assert_eq!(gpt.base_url, "https://api.openai.com/v1");
 
         let armed = r
             .set_route("s1", "claude", Some("gpt"), None)
@@ -992,7 +1123,7 @@ mod tests {
         .await;
         r.attach_session("s1", "claude", None).unwrap();
         let listed = r.list_routes("claude", true, None);
-        assert!(listed.routes[0]
+        assert!(route_named(&listed, "bare")
             .unavailable_reason
             .as_deref()
             .unwrap()
@@ -1631,6 +1762,163 @@ mod tests {
             codex_ca.ends_with("ca-bundle.pem"),
             "codex is replacing: {codex_ca}"
         );
+    }
+
+
+    /// End-to-end for a subscription login as a target (spec 0117): a
+    /// Responses-speaking harness routed onto the Claude subscription. The
+    /// request must arrive as Anthropic Messages, bearer-authenticated,
+    /// carrying the beta header and the identity line that backend
+    /// requires — and never the harness's own credential.
+    #[tokio::test]
+    async fn routes_a_harness_onto_a_subscription_login() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        // A live Claude login, read-only.
+        let creds = dir.path().join("creds.json");
+        let future = (chrono::Utc::now().timestamp() + 3600) * 1000;
+        std::fs::write(
+            &creds,
+            serde_json::json!({"claudeAiOauth":{"accessToken":"sub-token","expiresAt":future}})
+                .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("CONSTRUCT_CLAUDE_CREDENTIALS_FILE", &creds);
+
+        let r = started(&dir, cfg_with(true)).await;
+        let listed = r.list_routes("pi", true, None);
+        let option = route_named(&listed, "claude-oauth");
+        assert_eq!(
+            option.unavailable_reason, None,
+            "a live login must be selectable with no config at all"
+        );
+        assert_eq!(option.dialect, "anthropic");
+
+        let env = r.attach_session("s1", "pi", None).unwrap();
+        let token = Router::token_from_env(&env).unwrap();
+        let armed = r
+            .set_route("s1", "pi", Some("claude-oauth"), Some("gpt-5.6-sol".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(armed.name, "claude-oauth");
+
+        // Point the armed route's endpoint at a local stand-in.
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_w = seen.clone();
+        tokio::spawn(async move {
+            let (mut s, _) = upstream.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = s.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            *seen_w.lock().unwrap() = String::from_utf8_lossy(&buf).to_string();
+            let sse = concat!(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\"}}\n\n",
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"pong\"}}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            );
+            s.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{sse}",
+                    sse.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+            s.flush().await.unwrap();
+        });
+        {
+            let ctx = r.sessions.read().unwrap()["s1"].clone();
+            let mut slot = ctx.route.write().unwrap();
+            let route = slot.as_mut().unwrap();
+            route.endpoint = format!("http://127.0.0.1:{upstream_port}/v1/messages");
+            assert_eq!(route.auth, TargetAuth::Bearer);
+            assert!(route.needs_rebuild(), "a login target always rebuilds");
+        }
+
+        let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
+            .await
+            .unwrap();
+        use base64::Engine;
+        let cred = base64::engine::general_purpose::STANDARD.encode(format!("{token}:construct"));
+        sock.write_all(
+            format!("CONNECT chatgpt.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {cred}\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut ack = [0u8; 39];
+        sock.read_exact(&mut ack).await.unwrap();
+
+        let ca_pem = std::fs::read_to_string(env.get("NODE_EXTRA_CA_CERTS").unwrap()).unwrap();
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        roots
+            .add(tokio_rustls::rustls::pki_types::CertificateDer::from(
+                pem_to_der(&ca_pem),
+            ))
+            .unwrap();
+        let provider = tokio_rustls::rustls::crypto::ring::default_provider();
+        let client_cfg = tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_cfg));
+        let domain = tokio_rustls::rustls::pki_types::ServerName::try_from("chatgpt.com").unwrap();
+        let mut tls = connector.connect(domain, sock).await.unwrap();
+
+        let body = br#"{"model":"gpt-5.6-sol","stream":true,"instructions":"be terse","input":[{"role":"user","content":[{"type":"input_text","text":"say pong"}]}]}"#;
+        tls.write_all(
+            format!(
+                "POST /backend-api/codex/responses HTTP/1.1\r\nhost: chatgpt.com\r\nauthorization: Bearer harness-own-token\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        tls.write_all(body).await.unwrap();
+        tls.flush().await.unwrap();
+
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response).to_string();
+        // The harness still receives its own dialect.
+        assert!(response.contains("event: response.created"), "{response}");
+        assert!(response.contains("\"delta\":\"pong\""), "{response}");
+        assert!(response.contains("event: response.completed"), "{response}");
+
+        let forwarded = seen.lock().unwrap().clone();
+        assert!(
+            forwarded.contains("authorization: Bearer sub-token"),
+            "the subscription token must be used as a bearer: {forwarded}"
+        );
+        assert!(
+            !forwarded.contains("harness-own-token"),
+            "the harness's own credential must never be forwarded: {forwarded}"
+        );
+        assert!(
+            forwarded.contains("anthropic-beta: oauth-2025-04-20"),
+            "the backend requires its beta header: {forwarded}"
+        );
+        assert!(
+            forwarded.contains("Claude Code"),
+            "the backend requires its identity line in the system prompt: {forwarded}"
+        );
+        assert!(
+            forwarded.contains("be terse"),
+            "the harness's own instructions must survive the prefix: {forwarded}"
+        );
+        assert!(
+            forwarded.contains("\"messages\""),
+            "Responses must be translated to Anthropic Messages: {forwarded}"
+        );
+        std::env::remove_var("CONSTRUCT_CLAUDE_CREDENTIALS_FILE");
     }
 
     /// Minimal PEM → DER, so the test trusts exactly the CA the router

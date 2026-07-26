@@ -20,7 +20,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::{translate, ArmedRoute, Dialect, Router, SessionRouting, UpstreamProxy};
+use super::{translate, ArmedRoute, Dialect, Router, SessionRouting, TargetAuth, UpstreamProxy};
 
 /// Cap on a request head. Anthropic-dialect requests carry large bodies
 /// but small heads; this only bounds the header block.
@@ -282,7 +282,7 @@ async fn intercept_tls(
         }
     };
 
-    if client_dialect != route.target_dialect {
+    if route.needs_rebuild() || client_dialect != route.target_dialect {
         ctx.mark_observed();
         let streaming = wants_stream(&body);
         return match forward_translated(body, &route, client_dialect).await {
@@ -531,26 +531,36 @@ async fn forward_translated(
 ) -> Result<reqwest::Response> {
     let source: serde_json::Value =
         serde_json::from_slice(&body).context("parse intercepted request body")?;
-    let canon = translate::parse_request(client_dialect, &source);
+    let mut canon = translate::parse_request(client_dialect, &source);
+    // Some backends refuse a request whose system prompt does not open with
+    // a specific line. Prepending rather than replacing keeps the harness's
+    // own instructions intact.
+    if let Some(prefix) = route.system_prefix {
+        canon.system = Some(match canon.system.take() {
+            Some(existing) if existing.starts_with(prefix) => existing,
+            Some(existing) => format!("{prefix}\n\n{existing}"),
+            None => prefix.to_string(),
+        });
+    }
     let translated = translate::emit_request(route.target_dialect, &canon, &route.model);
-    let url = format!(
-        "{}{}",
-        route.base_url.trim_end_matches('/'),
-        translate::target_path(route.target_dialect)
-    );
+    let url = route.endpoint.clone();
     let mut out = route
         .client
         .post(&url)
         .header("content-type", "application/json");
-    // Each dialect authenticates differently; the client's own credential
-    // is never forwarded to another vendor.
+    // Auth scheme is a property of the target, not of its dialect: the
+    // Anthropic subscription backend takes a bearer where the Anthropic API
+    // takes a key header. The client's own credential is never forwarded.
     if !route.api_key.is_empty() {
-        out = match route.target_dialect {
-            Dialect::AnthropicMessages => out
+        out = match route.auth {
+            TargetAuth::ApiKeyHeader => out
                 .header("x-api-key", &route.api_key)
                 .header("anthropic-version", "2023-06-01"),
-            _ => out.header("authorization", format!("Bearer {}", route.api_key)),
+            TargetAuth::Bearer => out.header("authorization", format!("Bearer {}", route.api_key)),
         };
+    }
+    for (name, value) in &route.extra_headers {
+        out = out.header(name, value);
     }
     out.json(&translated)
         .send()

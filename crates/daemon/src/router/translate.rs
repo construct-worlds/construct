@@ -161,10 +161,7 @@ pub fn emit_request(dialect: Dialect, req: &CanonRequest, model: &str) -> Value 
     match dialect {
         Dialect::AnthropicMessages => anthropic::emit_request(req, model),
         Dialect::OpenAiChat => openai_chat::emit_request(req, model),
-        // No configurable profile targets Responses; a route never emits
-        // it. Falling back to Chat keeps this total rather than panicking
-        // on a shape that cannot currently be constructed.
-        Dialect::OpenAiResponses => openai_chat::emit_request(req, model),
+        Dialect::OpenAiResponses => responses::emit_request(req, model),
     }
 }
 
@@ -172,7 +169,8 @@ pub fn emit_request(dialect: Dialect, req: &CanonRequest, model: &str) -> Value 
 pub fn target_path(dialect: Dialect) -> &'static str {
     match dialect {
         Dialect::AnthropicMessages => "/messages",
-        Dialect::OpenAiChat | Dialect::OpenAiResponses => "/chat/completions",
+        Dialect::OpenAiChat => "/chat/completions",
+        Dialect::OpenAiResponses => "/responses",
     }
 }
 
@@ -180,7 +178,8 @@ pub fn target_path(dialect: Dialect) -> &'static str {
 pub fn decode_target_event(dialect: Dialect, data: &Value) -> Vec<CanonEvent> {
     match dialect {
         Dialect::AnthropicMessages => anthropic::decode_event(data),
-        Dialect::OpenAiChat | Dialect::OpenAiResponses => openai_chat::decode_event(data),
+        Dialect::OpenAiChat => openai_chat::decode_event(data),
+        Dialect::OpenAiResponses => responses::decode_event(data),
     }
 }
 
@@ -242,7 +241,8 @@ pub fn encode_response(
 ) -> Value {
     let events = match target {
         Dialect::AnthropicMessages => anthropic::decode_full_response(body),
-        _ => openai_chat::decode_full_response(body),
+        Dialect::OpenAiResponses => responses::decode_full_response(body),
+        Dialect::OpenAiChat => openai_chat::decode_full_response(body),
     };
     match dialect {
         Dialect::OpenAiResponses => responses::encode_full(&events, model),
