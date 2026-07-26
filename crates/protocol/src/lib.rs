@@ -1108,6 +1108,12 @@ pub mod ipc_method {
     pub const CLIENT_SET_TERMINAL_BACKGROUND: &str = "client.set_terminal_background";
     pub const SESSION_SET_TITLE: &str = "session.set_title";
     pub const SESSION_SET_APPROVAL_MODE: &str = "session.set_approval_mode";
+    /// Arm, change, or clear a session's model route (spec 0114). Takes
+    /// effect on the running session without restarting it.
+    pub const SESSION_SET_ROUTE: &str = "session.set_route";
+    /// Enumerate the routes configured on this daemon, plus whether the
+    /// named session can currently be routed and why not (spec 0115).
+    pub const ROUTER_LIST_ROUTES: &str = "router.list_routes";
     pub const SESSION_TOOL_DECISION: &str = "session.tool_decision";
     pub const SESSION_TOOL_ACTION: &str = "session.tool_action";
     pub const SESSION_LIST_TASKS: &str = "session.list_tasks";
@@ -2175,6 +2181,19 @@ pub struct SessionSummary {
     /// no such concept or none has been observed yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Active model route (spec 0114). `None` — the overwhelmingly common
+    /// case — means the session's model traffic passes through untouched.
+    /// Note `model` keeps reporting what the *harness* believes it is
+    /// running: the harness is not restarted by a route change and never
+    /// learns of the substitution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<SessionRoute>,
+    /// True when the daemon injected routing transport into this session
+    /// at spawn, i.e. a route can be armed on it later. Sessions started
+    /// before routing was enabled, or on a harness that is not
+    /// route-capable, are `false` and can never be routed (spec 0115).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub route_capable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     #[serde(default)]
@@ -2515,6 +2534,87 @@ pub struct SessionSetTitleParams {
 pub struct SessionSetApprovalModeParams {
     pub session_id: String,
     pub mode: ApprovalMode,
+}
+
+/// A session's active model route (spec 0114). Present on
+/// [`SessionSummary`] only while a route is armed; absent means the
+/// session is passing through to whatever endpoint its harness resolved
+/// on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRoute {
+    /// Name of the configured route (the `[router.routes.<name>]` key).
+    pub name: String,
+    /// Model the route substitutes into outbound requests.
+    pub model: String,
+    /// The model the harness itself last reported, captured when the
+    /// route was armed. Lets a client render `<origin> -> <routed>` even
+    /// though the harness keeps reporting its own model (spec 0114).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_model: Option<String>,
+    /// Set once the proxy has served at least one intercepted request for
+    /// this session. Until then the route is armed but unproven: the
+    /// harness may resolve its endpoint through a channel that ignores our
+    /// injection (spec 0115).
+    #[serde(default)]
+    pub observed: bool,
+}
+
+/// Params for `session.set_route`. `route: None` clears the route and
+/// returns the session to pass-through, which can never fail (spec 0114).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSetRouteParams {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    /// Which of the target's models to send. `None` takes the target's
+    /// configured or default model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouterListRoutesParams {
+    /// Session the routes would be applied to. Determines
+    /// [`RouterListRoutesResult::unavailable_reason`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// One selectable route, as offered to a client's picker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteOption {
+    pub name: String,
+    /// Wire dialect the target speaks (`"anthropic"`, `"openai"`, ...).
+    pub dialect: String,
+    /// The model armed when none is chosen explicitly.
+    pub model: String,
+    /// Models selectable for this target. Always contains `model`; a
+    /// client offers these as a second step after picking the target.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Endpoint host, for display. Never carries a credential.
+    pub base_url: String,
+    /// `None` when the route is selectable. `Some(reason)` when it is
+    /// shown but not selectable — a missing API key, or a dialect the
+    /// session's harness does not speak. Rendered rather than hidden
+    /// (spec 0115).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouterListRoutesResult {
+    pub routes: Vec<RouteOption>,
+    /// `None` when the session can be routed. `Some(reason)` when routing
+    /// is impossible for this session as a whole — the harness is not
+    /// route-capable, the session started before routing was enabled, or
+    /// the router is disabled. Clients show the reason instead of an
+    /// empty picker (spec 0115).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+    /// The route currently armed on the session, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
 }
 
 /// Params for `session.tool_action` — the client asks the adapter

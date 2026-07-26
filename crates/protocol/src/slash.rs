@@ -423,6 +423,23 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "grok-oauth:grok-build-0.1",
 ];
 
+/// The models [`MODEL_COMPLETIONS`] lists for one provider prefix, with the
+/// prefix stripped.
+///
+/// One curated list serves both smith's `/model` completion and the
+/// router's model picker. Keeping a second list in the router would let
+/// the two disagree about what a provider offers — and the provider
+/// vocabulary is identical, because a route target is named after the same
+/// billing/auth path a model spec selects.
+pub fn models_for_provider(provider: &str) -> Vec<String> {
+    let prefix = format!("{provider}:");
+    MODEL_COMPLETIONS
+        .iter()
+        .filter_map(|spec| spec.strip_prefix(&prefix))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Completion rows for the current `/model` input buffer.
 pub fn model_completion_matches(buf: &str) -> Vec<String> {
     let Some(rest) = buf.strip_prefix("/model") else {

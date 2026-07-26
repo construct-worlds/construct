@@ -22,6 +22,7 @@ mod loops;
 mod program_verbs;
 mod remote;
 mod remote_supervisor;
+mod router;
 mod server;
 mod session;
 mod storage;
@@ -172,6 +173,24 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     // Both steps are best-effort and log-only on failure: resume marks
     // un-resumable sessions Errored; a failed orchestrator spawn just
     // leaves clients in palette mode.
+    // Bind the router's listener BEFORE resume: sessions spawned by a
+    // previous daemon were told this port at spawn and outlive us, so it
+    // has to be back before any of them are reattached. Failure is
+    // logged, never fatal — a daemon without a router still runs every
+    // session, they just cannot be routed.
+    if let Err(e) = manager.router.start().await {
+        tracing::error!(error = %format!("{e:#}"), "router failed to start");
+    }
+    // Persist the first proof that each armed route is really carrying
+    // traffic, so an inert route stops being reported as a working one.
+    if let Some(mut observed) = manager.router.take_observed_stream() {
+        let mgr = manager.clone();
+        tokio::spawn(async move {
+            while let Some(session_id) = observed.recv().await {
+                mgr.mark_route_observed(&session_id).await;
+            }
+        });
+    }
     {
         let mgr = manager.clone();
         tokio::spawn(async move {

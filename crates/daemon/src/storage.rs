@@ -2473,6 +2473,8 @@ mod search_tests {
             cost_usd: None,
             model: None,
             effort: None,
+            route: None,
+            route_capable: false,
             worktree: None,
             pending_input: false,
             last_prompt: None,

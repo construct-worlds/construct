@@ -74,6 +74,8 @@ impl SessionManager {
             last_event_at: None,
             last_message_at: None,
             cost_usd: None,
+            route: None,
+            route_capable: false,
             model: params.model.clone(),
             effort: None,
             worktree: worktree_path
@@ -193,6 +195,18 @@ impl SessionManager {
             .to_string(),
         );
         self.install_memory_env(&mut env_with_meta, params.group_id.as_deref());
+        // Routing transport (spec 0113). A harness reads its proxy and CA
+        // env once, at spawn, so a session that isn't given them here can
+        // never be routed later — which is exactly why this is gated on
+        // config rather than done per route: arming a route must not
+        // require a restart.
+        summary.route_capable = match self.attach_router(&id, harness, None) {
+            Some(router_env) => {
+                env_with_meta.extend(router_env);
+                true
+            }
+            None => false,
+        };
         if summary.operator_loop_disabled {
             env_with_meta.insert(
                 "CONSTRUCT_OPERATOR_LOOP_DISABLED".to_string(),
@@ -514,6 +528,27 @@ impl SessionManager {
             let s = entry.summary.read().await;
             s.harness.clone()
         };
+        // Re-adopt this session's routing credential before the adapter
+        // comes back. A reattached (still-live) harness keeps presenting
+        // the credential it was issued at spawn, so the router has to
+        // recognize it again or the session silently stops being routable.
+        // A respawned one gets the same value re-injected below, because
+        // it rides in the persisted start-params env.
+        let router_env = self.attach_router(
+            id,
+            &harness,
+            crate::router::Router::token_from_env(&start_params.env),
+        );
+        let route_capable = router_env.is_some();
+        if let Some(router_env) = router_env {
+            start_params.env.extend(router_env);
+        }
+        {
+            let mut s = entry.summary.write().await;
+            s.route_capable = route_capable;
+        }
+        // Re-arm whatever route this session was last running on.
+        self.restore_route(&entry).await;
         let (msg_tx, msg_rx) = mpsc::channel::<AdapterMessage>(ADAPTER_DRAIN_CAP);
 
         match Adapter::attach(
