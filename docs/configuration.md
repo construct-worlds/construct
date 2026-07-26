@@ -150,13 +150,17 @@ The palette is authored in 24-bit color. Terminals that only speak 256 colors
 get it quantized to the closest indexed color on the way out — including Apple
 Terminal, which cannot render `38;2` truecolor sequences at all and garbles
 them rather than approximating (green-on-yellow bars, blue blocks, washed-out
-text). When the palette has been quantized, the modeline says so next to the
-theme name: `theme:matrix | 256 colors`.
+text).
 
 Matching favors hue over exact lightness, so a color whose hue carries meaning
 never comes back gray. The cost is that dark saturated fills — a status-bar
 tint, say — render brighter than authored, since the reduced palettes have no
-dark desaturated hues to offer.
+dark desaturated hues to offer. Where two slots that are drawn on top of each
+other would land on the same entry, the lighter one is nudged further away so
+the pair stays readable.
+
+The resolved depth is written to the daemon/client log at startup; nothing is
+shown in the status bar.
 
 Detection reads the environment, in order: `TERM=dumb`/`linux`/`vt100`/`ansi`
 means the 16 basic colors; `TERM_PROGRAM=Apple_Terminal` means 256, even if

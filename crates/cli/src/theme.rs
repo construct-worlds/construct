@@ -524,6 +524,36 @@ impl Theme {
             .title(Line::from(title.into()))
     }
 
+    /// Slot pairs this theme draws directly against each other, and so must
+    /// stay distinguishable even after the palette is quantized for a terminal
+    /// with fewer colors (spec 0111).
+    ///
+    /// Quantizing each slot on its own cannot guarantee this — two slots may
+    /// have no two entries near them, and each lookup is individually right —
+    /// so the pairs whose contrast carries meaning are named here. Add a pair
+    /// when a new surface draws one slot on top of another; leave decorative
+    /// neighbours out, since spreading those would distort the palette to
+    /// protect contrast nobody reads.
+    pub fn contrast_pairs(&self) -> Vec<(Color, Color)> {
+        let mut pairs = vec![
+            // The modeline's own text, and the filled part of the context gauge.
+            (self.modeline_bg, self.modeline_fg),
+            // The gauge's *remaining* cells are drawn on the modeline bar; when
+            // these collapse together the gauge looks like it lost its track.
+            (self.modeline_bg, self.dim),
+            // The gauge's filled cells while the pointer is over it.
+            (self.modeline_bg, self.text),
+            // Selected rows, focused and unfocused.
+            (self.highlight_bg, self.highlight_fg),
+            (self.inactive_highlight_bg, self.text),
+        ];
+        if let Some(background) = self.background {
+            pairs.push((background, self.text));
+            pairs.push((background, self.inactive_highlight_bg));
+        }
+        pairs
+    }
+
     /// The frame background this theme paints, as 8-bit RGB, reported to the
     /// daemon so it can answer child OSC 11 background probes (spec 0073).
     /// Matrix/basic return `None` so the outer terminal remains the authority.

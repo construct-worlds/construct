@@ -8517,14 +8517,6 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     let theme_label = format!("theme:{}", app.theme_name.label());
     let mut persistent_notices: Vec<Vec<(String, Option<KeyAction>)>> =
         vec![vec![(theme_label, Some(KeyAction::CycleTheme))]];
-    // A quantized palette gets its own notice, so "the colors look flatter than
-    // the screenshots" has a visible cause instead of being a mystery the user
-    // has to file an issue about (spec 0111). It is deliberately *not* part of
-    // the theme segment: that segment cycles the theme on click, and the depth
-    // isn't something clicking can change.
-    if let Some(depth) = app.color_depth.label() {
-        persistent_notices.push(vec![(depth.to_string(), None)]);
-    }
     persistent_notices.push(vec![(
         modeline_remote_text(app.remote_enabled, app.remote_clients),
         Some(KeyAction::OpenRemoteControl),
@@ -19376,6 +19368,47 @@ mod tests {
             modeline_model_text(Some("gpt-5.6-terra"), Some("high")),
             "gpt-5.6-terra (high)"
         );
+    }
+
+    /// End-to-end companion to the palette-level test in `color`: paint the
+    /// real gauge spans, push the resulting cells through the real quantizer,
+    /// and check the track is still distinguishable from the bar it sits on at
+    /// 256 colors. Reported against #960, where it wasn't.
+    #[test]
+    fn context_gauge_track_survives_quantization_to_256_colors() {
+        use crate::color::{ColorDepth, Quantizer};
+        let theme = crate::theme::Theme::dark();
+        let (gauge, filled_cells) =
+            modeline_context_usage_text(Some(50_000), Some(200_000)).expect("a gauge");
+        assert!(filled_cells > 0 && filled_cells < gauge.chars().count() - 1);
+
+        // The same background choice `render_modeline` makes per gauge cell.
+        let backgrounds: Vec<Color> = gauge
+            .chars()
+            .enumerate()
+            .map(|(index, _)| {
+                if index == 0 {
+                    theme.modeline_bg
+                } else if index - 1 < filled_cells {
+                    theme.modeline_fg
+                } else {
+                    theme.dim
+                }
+            })
+            .collect();
+
+        let mut quantizer = Quantizer::new(ColorDepth::Ansi256);
+        quantizer.keep_apart(&theme.contrast_pairs());
+        let painted: Vec<Color> = backgrounds
+            .iter()
+            .map(|c| quantizer.map(*c))
+            .collect();
+
+        let bar = painted[0];
+        let filled = painted[1];
+        let track = *painted.last().expect("a trailing cell");
+        assert_ne!(track, bar, "the gauge's remaining stretch merged into the bar");
+        assert_ne!(filled, track, "filled and remaining became one color");
     }
 
     #[test]

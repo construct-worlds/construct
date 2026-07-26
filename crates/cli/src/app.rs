@@ -1381,10 +1381,11 @@ pub struct App {
     pub theme: crate::theme::Theme,
     pub theme_name: crate::theme::ThemeName,
     /// Color depth the attached terminal is trusted with, resolved once at
-    /// startup. Rendering quantizes to it; the modeline names it when it is
-    /// anything less than truecolor, so a downgrade is visible rather than
-    /// mysterious.
+    /// startup; rendering quantizes to it (spec 0111).
     pub color_depth: crate::color::ColorDepth,
+    /// Bumped whenever `theme` is replaced, so the render loop knows to
+    /// recompute the quantizer's contrast repairs for the new palette.
+    pub theme_revision: u64,
     terminal_background_is_light: Option<bool>,
     pub help_visible: bool,
     /// Wrapped-row scroll offset into the help dialog's content, clamped to
@@ -3949,6 +3950,7 @@ async fn run_with_socket_initial_selection(
         theme,
         theme_name: theme_config.active_name(None),
         color_depth: crate::color::ColorDepth::default(),
+        theme_revision: 0,
         terminal_background_is_light: None,
         help_visible: false,
         help_scroll_offset: 0,
@@ -4172,6 +4174,7 @@ async fn run_with_socket_initial_selection(
     // in 24-bit RGB; terminals that only speak 256 colors get it quantized on
     // the way out rather than mangled by the terminal (spec 0111).
     app.color_depth = crate::color::detect();
+    app.theme_revision += 1;
     tracing::info!(mode = ?theme_config.mode, theme = ?app.theme_name, ?detected_light, depth = ?app.color_depth, "tui theme resolved");
     app.report_terminal_background();
     let mut stdout = std::io::stdout();
@@ -4437,6 +4440,12 @@ async fn run_loop(
         app.report_view();
         let skip_draw = std::mem::take(&mut app.skip_redraw_after_event);
         if !skip_draw {
+            // Repair palette collisions before painting, and again whenever the
+            // theme changes underneath us (spec 0111). A no-op on a truecolor
+            // terminal, and a `u64` comparison otherwise.
+            terminal
+                .backend_mut()
+                .sync_palette(app.theme_revision, || app.theme.contrast_pairs());
             terminal.draw(|f| ui::render(f, app))?;
             last_draw = Instant::now();
         }
@@ -11016,6 +11025,7 @@ impl App {
             Ok(theme) => {
                 self.theme = theme;
                 self.theme_name = name;
+                self.theme_revision += 1;
                 self.report_terminal_background();
                 self.set_status(format!("theme: {}", name.label()));
             }
@@ -13850,6 +13860,7 @@ mod tests {
             theme: crate::theme::Theme::default(),
             theme_name: crate::theme::ThemeName::Matrix,
             color_depth: crate::color::ColorDepth::default(),
+            theme_revision: 0,
             terminal_background_is_light: None,
             help_visible: false,
             help_scroll_offset: 0,
