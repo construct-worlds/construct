@@ -189,11 +189,16 @@ impl App {
         let Some(hit) = self.layout.terminal_scrollbar else {
             return false;
         };
-        if !Self::rect_contains(hit.area, col, row) {
+        // A scrollbar whose top scrolled off the viewport (spec 0112) keeps
+        // its full span so the thumb math stays proportional; the rows it lost
+        // put its recorded rect that far below where it paints, so the pointer
+        // moves the same distance to meet it.
+        let hit_row = row.saturating_add(self.layout.terminal_scrollbar_hidden);
+        if !Self::rect_contains(hit.area, col, hit_row) {
             return false;
         }
-        let grab_offset = if Self::rect_contains(hit.thumb, col, row) {
-            row.saturating_sub(hit.thumb.y)
+        let grab_offset = if Self::rect_contains(hit.thumb, col, hit_row) {
+            hit_row.saturating_sub(hit.thumb.y)
         } else {
             hit.thumb.height / 2
         };
@@ -206,11 +211,12 @@ impl App {
         let Some(hit) = self.layout.list_scrollbar else {
             return false;
         };
-        if !Self::rect_contains(hit.area, col, row) {
+        let hit_row = row.saturating_add(self.layout.list_scrollbar_hidden);
+        if !Self::rect_contains(hit.area, col, hit_row) {
             return false;
         }
-        let grab = if Self::rect_contains(hit.thumb, col, row) {
-            row.saturating_sub(hit.thumb.y)
+        let grab = if Self::rect_contains(hit.thumb, col, hit_row) {
+            hit_row.saturating_sub(hit.thumb.y)
         } else {
             hit.thumb.height / 2
         };
@@ -232,6 +238,7 @@ impl App {
         if max_thumb_top == 0 || max_scroll == 0 {
             return;
         }
+        let row = row.saturating_add(self.layout.list_scrollbar_hidden);
         let top = row
             .saturating_sub(grab)
             .saturating_sub(hit.area.y)
@@ -255,6 +262,7 @@ impl App {
         if max_thumb_top == 0 {
             return;
         }
+        let row = row.saturating_add(self.layout.terminal_scrollbar_hidden);
         let thumb_top = row
             .saturating_sub(grab_offset)
             .saturating_sub(hit.area.y)
@@ -265,6 +273,16 @@ impl App {
         self.show_terminal_scrollbar();
     }
 
+    /// Rows a lineage scrollbar lost off the top of the viewport to the main
+    /// block's slide (spec 0112).
+    fn lineage_scrollbar_hidden(&self, horizontal: bool) -> u16 {
+        if horizontal {
+            self.layout.lineage_hscrollbar_hidden
+        } else {
+            self.layout.lineage_scrollbar_hidden
+        }
+    }
+
     pub(super) fn begin_lineage_scrollbar_drag_or_jump(&mut self, col: u16, row: u16) -> bool {
         let hit = [
             self.layout.lineage_vscrollbar,
@@ -272,15 +290,29 @@ impl App {
         ]
         .into_iter()
         .flatten()
-        .find(|hit| Self::rect_contains(hit.area, col, row));
+        .find(|hit| {
+            Self::rect_contains(
+                hit.area,
+                col,
+                row.saturating_add(self.lineage_scrollbar_hidden(hit.horizontal)),
+            )
+        });
         let Some(hit) = hit else { return false };
-        let cursor = if hit.horizontal { col } else { row };
+        let cursor = if hit.horizontal {
+            col
+        } else {
+            row.saturating_add(self.lineage_scrollbar_hidden(false))
+        };
         let thumb_start = if hit.horizontal {
             hit.thumb.x
         } else {
             hit.thumb.y
         };
-        let grab = if Self::rect_contains(hit.thumb, col, row) {
+        let grab = if Self::rect_contains(
+            hit.thumb,
+            col,
+            row.saturating_add(self.lineage_scrollbar_hidden(hit.horizontal)),
+        ) {
             cursor.saturating_sub(thumb_start)
         } else if hit.horizontal {
             hit.thumb.width / 2
@@ -309,7 +341,12 @@ impl App {
         let (start, span, thumb_span, cursor) = if horizontal {
             (hit.area.x, hit.area.width, hit.thumb.width, col)
         } else {
-            (hit.area.y, hit.area.height, hit.thumb.height, row)
+            (
+                hit.area.y,
+                hit.area.height,
+                hit.thumb.height,
+                row.saturating_add(self.lineage_scrollbar_hidden(false)),
+            )
         };
         let max_thumb = span.saturating_sub(thumb_span) as usize;
         if max_thumb == 0 || max_scroll == 0 {
@@ -387,9 +424,12 @@ impl App {
             return false;
         }
         let encoding = history.mouse_protocol_encoding();
-        // Translate to 1-based coordinates local to the child's screen.
+        // Translate to 1-based coordinates local to the child's screen. A pane
+        // whose top scrolled off the viewport (spec 0112) still renders its
+        // full height, so the rows it lost count toward the child's row.
         let col = ev.column.saturating_sub(hit.inner_area.x) + 1;
-        let row = ev.row.saturating_sub(hit.inner_area.y) + 1;
+        let row =
+            ev.row.saturating_sub(hit.inner_area.y) + self.layout.pane_hidden_rows(hit.id) + 1;
         let Some(bytes) = crate::mouse_forward::encode(ev, col, row, mode, encoding) else {
             // Child tracks the mouse but doesn't report this event kind under
             // its mode (e.g. plain motion in press/release mode). Let construct

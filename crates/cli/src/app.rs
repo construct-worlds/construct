@@ -1550,6 +1550,9 @@ pub struct App {
     /// `Some((anchor_row, anchor_height))` while the user drags the
     /// orchestrator panel's top border.
     pub resizing_orchestrator_panel: Option<(u16, u16)>,
+    /// Animated vertical offset of the main block while a multi-row footer is
+    /// open (spec 0112).
+    pub main_slide: MainSlideState,
     /// `Some((thumb_grab_offset, max_scrollback))` while dragging the terminal
     /// scrollbar thumb. `thumb_grab_offset` is the row delta from the thumb top
     /// to the cursor at mouse-down, so dragging preserves where the user grabbed.
@@ -3541,6 +3544,468 @@ pub struct LayoutSnapshot {
     /// Clickable tab-header regions of the `/configure` dialog from the last
     /// frame (spec 0069) — the only mouse interaction it supports.
     pub configure_tab_hits: Vec<(ConfigureTab, ratatui::layout::Rect)>,
+    /// Rows the main block was slid up by this frame (spec 0112). Zero
+    /// whenever the footer is a single row.
+    pub main_slide: u16,
+    /// Rows each main-window pane lost off the top of the viewport to the
+    /// slide, keyed by window id. Anything mapping a screen row back into a
+    /// pane's own coordinates (mouse forwarding into a child PTY) has to add
+    /// this back.
+    pub main_window_hidden: HashMap<u64, u16>,
+    /// `hidden` companions for the geometry that is shifted with its height
+    /// preserved (so viewport math keeps working) instead of being clipped.
+    pub program_modal_hidden: u16,
+    pub program_base_hidden: u16,
+    pub terminal_scrollbar_hidden: u16,
+    pub list_scrollbar_hidden: u16,
+    pub lineage_scrollbar_hidden: u16,
+    pub lineage_hscrollbar_hidden: u16,
+}
+
+/// How long the main block takes to slide to a new offset (spec 0112). Matches
+/// the program view's slide so the two reveals read as the same gesture.
+pub const MAIN_SLIDE_MS: u64 = PROGRAM_REVEAL_MS;
+
+/// Eased vertical offset of the main block while a multi-row footer is open
+/// (spec 0112). The footer's demand changes in one step — the panel opens at
+/// its full height — and the block glides to meet it instead of jumping, so
+/// the reveal reads as motion rather than a relayout.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MainSlideState {
+    /// Offset the current animation started from.
+    from: f32,
+    /// Offset the block is heading for: the footer's extra rows.
+    target: u16,
+    /// When the current animation started; `None` before the first frame.
+    changed_at: Option<Instant>,
+}
+
+impl MainSlideState {
+    /// Point the block at a new offset, easing from wherever it is now so a
+    /// footer that opens and closes mid-flight reverses smoothly.
+    pub fn retarget(&mut self, target: u16, now: Instant) {
+        if self.target == target {
+            return;
+        }
+        self.from = self.offset(now);
+        self.target = target;
+        self.changed_at = Some(now);
+    }
+
+    /// Jump straight to an offset, no easing. Used while the user drags the
+    /// panel's top border: the panel follows the pointer frame for frame, so
+    /// the block has to as well or it visibly lags behind the drag.
+    pub fn snap_to(&mut self, target: u16) {
+        self.from = target as f32;
+        self.target = target;
+        self.changed_at = None;
+    }
+
+    /// Offset in rows for this frame.
+    pub fn offset(&self, now: Instant) -> f32 {
+        let target = self.target as f32;
+        let Some(changed_at) = self.changed_at else {
+            return target;
+        };
+        let progress = (now.saturating_duration_since(changed_at).as_secs_f32()
+            / (MAIN_SLIDE_MS as f32 / 1000.0))
+            .clamp(0.0, 1.0);
+        self.from + (target - self.from) * progress
+    }
+
+    /// Whether the block is still moving — the render loop keeps drawing
+    /// until it settles.
+    pub fn animating(&self, now: Instant) -> bool {
+        (self.offset(now) - self.target as f32).abs() > f32::EPSILON
+    }
+}
+
+/// Vertical translation applied to the main block's recorded geometry once the
+/// frame buffer has been scrolled (spec 0112).
+///
+/// The main block — session list, split panes, lineage, pin strip, program
+/// popups — is always laid out at the size it has when the footer occupies a
+/// single row. A taller footer (operator panel, harness picker) slides that
+/// block up out of the viewport instead of shrinking it, so no pane changes
+/// size and no child PTY sees a resize. Rendering runs in the block's own
+/// unslid coordinates; this maps the hit geometry it recorded back into screen
+/// coordinates so every consumer downstream — mouse handling, text selection,
+/// the captured frame text — keeps working in one coordinate space.
+#[derive(Debug, Clone, Copy)]
+pub struct MainBlockShift {
+    /// Rows the block moved up by.
+    pub delta: u16,
+    /// Rows of the viewport the block is still visible through, from the top.
+    pub visible_h: u16,
+}
+
+impl MainBlockShift {
+    /// Screen row for a main-block row, or `None` once it has scrolled past
+    /// the top edge (or sits under the footer).
+    fn row(&self, y: u16) -> Option<u16> {
+        let y = y.checked_sub(self.delta)?;
+        (y < self.visible_h).then_some(y)
+    }
+
+    /// How many rows a rect starting at `y` lost off the top edge.
+    fn hidden(&self, y: u16) -> u16 {
+        self.delta.saturating_sub(y)
+    }
+
+    /// Shift a rect, clipping whatever scrolled off the top. `None` once
+    /// nothing of it is left on screen.
+    fn rect(&self, r: ratatui::layout::Rect) -> Option<ratatui::layout::Rect> {
+        let hidden = self.hidden(r.y);
+        let height = r.height.checked_sub(hidden)?;
+        let y = r.y.saturating_sub(self.delta);
+        (height > 0 && y < self.visible_h).then_some(ratatui::layout::Rect { y, height, ..r })
+    }
+
+    /// Shift a rect keeping its full height — for geometry whose height feeds
+    /// layout math (viewport rows, scrollbar spans) rather than hit-testing.
+    /// Callers compensate for the clipped rows with the matching `*_hidden`
+    /// row count.
+    fn rect_keep_height(&self, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
+        ratatui::layout::Rect {
+            y: r.y.saturating_sub(self.delta),
+            ..r
+        }
+    }
+
+    fn opt_rect(&self, r: &mut Option<ratatui::layout::Rect>) {
+        *r = r.and_then(|r| self.rect(r));
+    }
+
+    /// `(x_start, x_end, row)` hit triple, dropped when its row scrolled off.
+    fn triple(&self, t: (u16, u16, u16)) -> Option<(u16, u16, u16)> {
+        self.row(t.2).map(|y| (t.0, t.1, y))
+    }
+
+    fn opt_triple(&self, t: &mut Option<(u16, u16, u16)>) {
+        *t = t.and_then(|t| self.triple(t));
+    }
+
+    /// Retain only the entries whose row survives the slide, rewriting it.
+    fn retain_rows<T>(&self, items: &mut Vec<T>, row: impl Fn(&mut T) -> &mut u16) {
+        items.retain_mut(|item| match self.row(*row(item)) {
+            Some(y) => {
+                *row(item) = y;
+                true
+            }
+            None => false,
+        });
+    }
+
+    fn retain_rects<T>(
+        &self,
+        items: &mut Vec<T>,
+        rect: impl Fn(&mut T) -> &mut ratatui::layout::Rect,
+    ) {
+        items.retain_mut(|item| match self.rect(*rect(item)) {
+            Some(r) => {
+                *rect(item) = r;
+                true
+            }
+            None => false,
+        });
+    }
+}
+
+impl LayoutSnapshot {
+    /// Translate every main-block hit target recorded this frame into screen
+    /// coordinates (spec 0112). Called once, right after the frame buffer is
+    /// scrolled and before any footer/modal surface renders — so at this point
+    /// the snapshot holds main-block geometry only, and the footer surfaces
+    /// overwrite their own fields afterwards in screen coordinates.
+    ///
+    /// The destructuring below is deliberately exhaustive: a new
+    /// [`LayoutSnapshot`] field fails to compile until it has been classified
+    /// as main-block (translate here) or footer/modal (leave alone).
+    pub fn shift_main_block(&mut self, shift: MainBlockShift) {
+        if shift.delta == 0 {
+            self.main_slide = 0;
+            self.main_window_hidden.clear();
+            return;
+        }
+        let LayoutSnapshot {
+            // Main block: everything below is translated.
+            list_area,
+            view_area,
+            main_window_areas,
+            main_window_dividers,
+            pin_strip_area,
+            matrix_rain_area,
+            list_items_area,
+            list_visible_rows,
+            list_mode_toggle_hit,
+            list_scrollbar,
+            shortcut_hints,
+            modal_area,
+            session_title_name_hits,
+            session_harness_hits,
+            lineage_area,
+            lineage_header_hit,
+            lineage_collapse_hit,
+            lineage_toggle_hit,
+            lineage_hscroll_hit,
+            lineage_vscrollbar,
+            lineage_hscrollbar,
+            lineage_box_hits,
+            lineage_subagent_toggle_hits,
+            program_title_run_hit,
+            program_title_toggle_hit,
+            program_title_close_hit,
+            program_title_name_hit,
+            program_selection_run_hit,
+            program_selection_verb_hits,
+            program_inner_area,
+            program_base_area,
+            program_resize_hit,
+            program_smart_clip_anchor,
+            program_clip_hits,
+            program_attachment_hits,
+            program_attachment_image_rects,
+            program_attachment_resize_zones,
+            program_pinned_card_rect,
+            program_action_link_hits,
+            program_template_hits,
+            browser_preview_area,
+            browser_preview_close,
+            terminal_scrollbar,
+            dynamic_ui_action_hits,
+            dynamic_ui_url_hits,
+            dynamic_ui_widget_hits,
+            dynamic_ui_panel_close_hits,
+            dynamic_ui_inline_hit,
+            matrix_operator_loop_hit,
+            matrix_operator_title_hit,
+            matrix_theme_hit,
+            matrix_widget_hits,
+            dynamic_ui_trigger,
+            dynamic_ui_triggers,
+            dynamic_ui_popover_area,
+            dynamic_ui_dropdown_area,
+            // Footer, modeline and modal surfaces render *after* the slide, in
+            // screen coordinates already — they must not be translated.
+            minibuffer_area: _,
+            modeline_approval_mode_hit: _,
+            modeline_context_gauge_hit: _,
+            modeline_theme_hit: _,
+            tutorial_card_area: _,
+            minibuffer_harness_hits: _,
+            minibuffer_choice_hits: _,
+            remote_control_hits: _,
+            configure_tab_hits: _,
+            // Consumed inside the main block's own render pass (or carries no
+            // geometry at all), so it stays in main-block coordinates.
+            last_chat_areas: _,
+            lineage_segment_tooltip: _,
+            list_row_count: _,
+            list_scroll_offset: _,
+            lineage_v_overflow: _,
+            lineage_h_overflow: _,
+            program_title_name_window_start: _,
+            dynamic_ui_scroll_metrics: _,
+            // Written below.
+            main_slide,
+            main_window_hidden,
+            program_modal_hidden,
+            program_base_hidden,
+            terminal_scrollbar_hidden,
+            list_scrollbar_hidden,
+            lineage_scrollbar_hidden,
+            lineage_hscrollbar_hidden,
+        } = self;
+
+        *main_slide = shift.delta;
+        main_window_hidden.clear();
+
+        shift.opt_rect(list_area);
+        shift.opt_rect(view_area);
+        shift.opt_rect(pin_strip_area);
+        shift.opt_rect(matrix_rain_area);
+        shift.opt_rect(lineage_area);
+        shift.opt_rect(lineage_header_hit);
+        shift.opt_rect(lineage_collapse_hit);
+        shift.opt_rect(lineage_toggle_hit);
+        shift.opt_rect(lineage_hscroll_hit);
+        shift.opt_rect(list_mode_toggle_hit);
+        shift.opt_rect(browser_preview_area);
+        shift.opt_rect(dynamic_ui_popover_area);
+        shift.opt_rect(dynamic_ui_dropdown_area);
+        shift.opt_rect(program_resize_hit);
+        shift.opt_rect(program_pinned_card_rect);
+
+        // The list's row map is indexed by offset from the items area's top
+        // row, so rows clipped off the top have to leave the map too.
+        if let Some(items) = list_items_area.as_mut() {
+            let hidden = shift.hidden(items.y).min(items.height) as usize;
+            list_visible_rows.drain(..hidden.min(list_visible_rows.len()));
+        }
+        shift.opt_rect(list_items_area);
+
+        for pane in main_window_areas.iter_mut() {
+            main_window_hidden.insert(pane.id, shift.hidden(pane.inner_area.y));
+        }
+        main_window_areas.retain_mut(|pane| {
+            let Some(area) = shift.rect(pane.area) else {
+                main_window_hidden.remove(&pane.id);
+                return false;
+            };
+            let Some(inner) = shift.rect(pane.inner_area) else {
+                main_window_hidden.remove(&pane.id);
+                return false;
+            };
+            pane.area = area;
+            pane.inner_area = inner;
+            true
+        });
+        main_window_dividers.retain_mut(|divider| {
+            let Some(area) = shift.rect(divider.area) else {
+                return false;
+            };
+            divider.area = area;
+            // The parent span only ever feeds the drag's delta-to-percent
+            // math, so it keeps its full height.
+            divider.parent_area = shift.rect_keep_height(divider.parent_area);
+            true
+        });
+
+        shift.retain_rows(shortcut_hints, |hit| &mut hit.y);
+        shift.retain_rows(session_title_name_hits, |hit| &mut hit.row);
+        shift.retain_rows(session_harness_hits, |hit| &mut hit.y);
+        shift.retain_rows(dynamic_ui_action_hits, |hit| &mut hit.row);
+        shift.retain_rows(dynamic_ui_url_hits, |hit| &mut hit.row);
+        shift.retain_rows(dynamic_ui_widget_hits, |hit| &mut hit.row);
+        shift.retain_rows(dynamic_ui_panel_close_hits, |hit| &mut hit.row);
+        shift.retain_rows(matrix_widget_hits, |hit| &mut hit.row);
+        shift.retain_rows(program_clip_hits, |hit| &mut hit.row);
+        shift.retain_rows(program_attachment_hits, |hit| &mut hit.row);
+        shift.retain_rows(program_action_link_hits, |hit| &mut hit.row);
+        shift.retain_rows(dynamic_ui_triggers, |hit| &mut hit.2);
+        shift.retain_rects(lineage_box_hits, |hit| &mut hit.area);
+        shift.retain_rects(lineage_subagent_toggle_hits, |hit| &mut hit.area);
+
+        *dynamic_ui_inline_hit = dynamic_ui_inline_hit.take().and_then(|mut hit| {
+            shift.rect(hit.area).map(|area| {
+                hit.area = area;
+                hit
+            })
+        });
+        *dynamic_ui_trigger = dynamic_ui_trigger
+            .take()
+            .and_then(|(xs, xe, y, id)| shift.row(y).map(|y| (xs, xe, y, id)));
+        program_template_hits.retain_mut(|hit| {
+            // The box spans several rows; keep it while any row survives.
+            let Some(row_end) = shift.row(hit.row_end) else {
+                return false;
+            };
+            hit.row_start = hit.row_start.saturating_sub(shift.delta);
+            hit.row_end = row_end;
+            true
+        });
+        program_selection_verb_hits.retain_mut(|hit| match shift.row(hit.2) {
+            Some(y) => {
+                hit.2 = y;
+                true
+            }
+            None => false,
+        });
+        program_attachment_image_rects.retain_mut(|(rect, _, _)| match shift.rect(*rect) {
+            Some(r) => {
+                *rect = r;
+                true
+            }
+            None => false,
+        });
+        program_attachment_resize_zones.retain_mut(|(rect, _, top)| match shift.rect(*rect) {
+            Some(r) => {
+                *rect = r;
+                *top = top.saturating_sub(shift.delta);
+                true
+            }
+            None => false,
+        });
+
+        shift.opt_triple(program_title_run_hit);
+        shift.opt_triple(program_title_toggle_hit);
+        shift.opt_triple(program_title_close_hit);
+        shift.opt_triple(program_title_name_hit);
+        shift.opt_triple(program_selection_run_hit);
+        shift.opt_triple(matrix_operator_loop_hit);
+        shift.opt_triple(matrix_operator_title_hit);
+        shift.opt_triple(matrix_theme_hit);
+        shift.opt_triple(browser_preview_close);
+
+        *program_smart_clip_anchor = program_smart_clip_anchor.take().and_then(|(pos, rect)| {
+            let y = shift.row(pos.y)?;
+            let rect = shift.rect(rect)?;
+            Some((ratatui::layout::Position { y, ..pos }, rect))
+        });
+
+        // Height-preserving cases: the program's viewport math and the
+        // scrollbar drags read these heights, so they keep them and pair with
+        // a `hidden` row count instead.
+        *program_modal_hidden = modal_area.map(|r| shift.hidden(r.y)).unwrap_or(0);
+        *modal_area = modal_area.map(|r| shift.rect_keep_height(r));
+        *program_base_hidden = program_base_area.map(|r| shift.hidden(r.y)).unwrap_or(0);
+        *program_base_area = program_base_area.map(|r| shift.rect_keep_height(r));
+        *program_inner_area = program_inner_area.map(|r| shift.rect_keep_height(r));
+        *terminal_scrollbar_hidden = terminal_scrollbar
+            .map(|s| shift.hidden(s.area.y))
+            .unwrap_or(0);
+        *terminal_scrollbar = terminal_scrollbar.map(|mut s| {
+            s.area = shift.rect_keep_height(s.area);
+            s.thumb = shift.rect_keep_height(s.thumb);
+            s
+        });
+        *list_scrollbar_hidden = list_scrollbar.map(|s| shift.hidden(s.area.y)).unwrap_or(0);
+        *list_scrollbar = list_scrollbar.map(|mut s| {
+            s.area = shift.rect_keep_height(s.area);
+            s.thumb = shift.rect_keep_height(s.thumb);
+            s
+        });
+        *lineage_scrollbar_hidden = lineage_vscrollbar
+            .map(|s| shift.hidden(s.area.y))
+            .unwrap_or(0);
+        *lineage_vscrollbar = lineage_vscrollbar.map(|mut s| {
+            s.area = shift.rect_keep_height(s.area);
+            s.thumb = shift.rect_keep_height(s.thumb);
+            s
+        });
+        *lineage_hscrollbar_hidden = lineage_hscrollbar
+            .map(|s| shift.hidden(s.area.y))
+            .unwrap_or(0);
+        *lineage_hscrollbar = lineage_hscrollbar.map(|mut s| {
+            s.area = shift.rect_keep_height(s.area);
+            s.thumb = shift.rect_keep_height(s.thumb);
+            s
+        });
+    }
+
+    /// The main-block row a screen row lands on (spec 0112). The inverse of
+    /// the slide, for the few places that have to speak the block's own
+    /// coordinates — placing something the block will render itself.
+    pub fn main_block_row(&self, row: u16) -> u16 {
+        row.saturating_add(self.main_slide)
+    }
+
+    /// A height-preserved rect back in the block's own coordinates. `hidden`
+    /// is the matching `*_hidden` row count recorded by the slide.
+    pub fn main_block_rect(&self, r: ratatui::layout::Rect, hidden: u16) -> ratatui::layout::Rect {
+        ratatui::layout::Rect {
+            y: r.y.saturating_add(self.main_slide).saturating_sub(hidden),
+            ..r
+        }
+    }
+
+    /// Rows a pane lost off the top of the viewport to the slide.
+    pub fn pane_hidden_rows(&self, window_id: u64) -> u16 {
+        self.main_window_hidden
+            .get(&window_id)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -4020,6 +4485,7 @@ async fn run_with_socket_initial_selection(
         operator_utterance: String::new(),
         orchestrator_panel_h: persisted.orchestrator_panel_h,
         resizing_orchestrator_panel: None,
+        main_slide: MainSlideState::default(),
         dragging_terminal_scrollbar: None,
         dragging_list_scrollbar: None,
         dragging_lineage_scrollbar: None,
@@ -13815,6 +14281,14 @@ mod tests {
             dynamic_ui_dropdown_area: None,
             dynamic_ui_scroll_metrics: None,
             configure_tab_hits: Vec::new(),
+            main_slide: 0,
+            main_window_hidden: HashMap::new(),
+            program_modal_hidden: 0,
+            program_base_hidden: 0,
+            terminal_scrollbar_hidden: 0,
+            list_scrollbar_hidden: 0,
+            lineage_scrollbar_hidden: 0,
+            lineage_hscrollbar_hidden: 0,
         }
     }
 
@@ -13908,6 +14382,7 @@ mod tests {
             operator_utterance: String::new(),
             orchestrator_panel_h: None,
             resizing_orchestrator_panel: None,
+            main_slide: MainSlideState::default(),
             dragging_terminal_scrollbar: None,
             dragging_list_scrollbar: None,
             dragging_lineage_scrollbar: None,
@@ -30281,6 +30756,138 @@ mod tests {
         s2.id = "s2".into();
         let app = test_app(client, vec![s1, s2]);
         (app, dir, server)
+    }
+
+    /// Spec 0112: a hit target that slid off the top of the viewport is gone,
+    /// not clamped to row 0 — otherwise the top visible row would fire
+    /// whatever affordance used to sit above it.
+    #[test]
+    fn main_block_slide_drops_hit_targets_that_left_the_viewport() {
+        let mut layout = test_layout();
+        layout.session_harness_hits = vec![
+            SessionHarnessHit {
+                session_id: "hidden".into(),
+                x_start: 2,
+                x_end: 8,
+                y: 3,
+            },
+            SessionHarnessHit {
+                session_id: "visible".into(),
+                x_start: 2,
+                x_end: 8,
+                y: 14,
+            },
+        ];
+        layout.list_items_area = Some(Rect::new(0, 1, 20, 20));
+        layout.list_visible_rows = (0..20)
+            .map(|i| ListRowHit {
+                item_index: i,
+                first_line: true,
+            })
+            .collect();
+
+        layout.shift_main_block(MainBlockShift {
+            delta: 8,
+            visible_h: 20,
+        });
+
+        assert_eq!(layout.main_slide, 8);
+        assert_eq!(
+            layout
+                .session_harness_hits
+                .iter()
+                .map(|h| (h.session_id.as_str(), h.y))
+                .collect::<Vec<_>>(),
+            vec![("visible", 6)],
+            "rows above the fold are dropped; the rest move up by the slide"
+        );
+        // The row map is indexed from the items area's top row, so the rows
+        // that scrolled off leave the map with it.
+        let items = layout.list_items_area.expect("items area still on screen");
+        assert_eq!(items.y, 0);
+        assert_eq!(items.height, 13, "7 rows of it scrolled off");
+        assert_eq!(layout.list_visible_rows.len(), 13);
+        assert_eq!(
+            layout.list_visible_rows[0].item_index, 7,
+            "the top visible row still maps to the item actually painted there"
+        );
+    }
+
+    /// Spec 0112: opening the operator panel must not resize anything. The
+    /// panes keep the geometry they had with a one-row footer; the block just
+    /// slides up behind the panel.
+    #[tokio::test]
+    async fn opening_the_operator_panel_slides_the_view_instead_of_resizing_it() {
+        let (mut app, _dir, _server) = two_session_app().await;
+        let draw = |app: &mut App| {
+            let backend = ratatui::backend::TestBackend::new(80, 40);
+            let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+            terminal.draw(|f| crate::ui::render(f, app)).expect("draw");
+            terminal.backend().buffer().clone()
+        };
+
+        let closed = draw(&mut app);
+        let pane_size = app.terminal_pane_size;
+        let pane_sizes = app.window_pane_sizes.clone();
+        let list_area = app.layout.list_area.expect("list pane rendered");
+
+        app.minibuffer = Some(Minibuffer {
+            prompt: String::new(),
+            input: String::new(),
+            cursor: 0,
+            intent: MinibufferIntent::Orchestrator,
+            error: None,
+        });
+        // Land the slide animation so the frame renders at the full offset.
+        let panel_h = crate::ui::compute_minibuffer_height(&app, 40);
+        app.main_slide.retarget(
+            panel_h - 1,
+            Instant::now() - Duration::from_millis(MAIN_SLIDE_MS * 4),
+        );
+        let open = draw(&mut app);
+
+        assert_eq!(
+            app.terminal_pane_size, pane_size,
+            "the view pane must not resize when the panel opens"
+        );
+        assert_eq!(
+            app.window_pane_sizes, pane_sizes,
+            "no split pane may resize either — that is what reaches the child PTYs"
+        );
+        assert_eq!(
+            app.layout.main_slide,
+            panel_h - 1,
+            "the block slid by the panel's extra rows"
+        );
+
+        // The block's own top rows left the viewport: row `delta` of the
+        // unslid frame is what the top row now shows.
+        let row_text = |buf: &ratatui::buffer::Buffer, y: u16| {
+            (0..80)
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                .collect::<String>()
+        };
+        assert_eq!(
+            row_text(&open, 0),
+            row_text(&closed, panel_h - 1),
+            "the top of the viewport now shows the row that was `delta` rows down"
+        );
+        assert_ne!(
+            row_text(&open, 0),
+            row_text(&closed, 0),
+            "the block really moved"
+        );
+
+        // Hit geometry follows the pixels: the list pane's recorded rect moved
+        // up by the same amount and lost exactly those rows.
+        let slid_list = app.layout.list_area.expect("list pane still rendered");
+        assert_eq!(slid_list.x, list_area.x);
+        assert_eq!(slid_list.y, list_area.y, "the pane still starts at the top");
+        assert_eq!(
+            slid_list.height,
+            list_area.height - (panel_h - 1),
+            "…showing that many fewer rows"
+        );
     }
 
     /// Spec 0074: a `@{session:…}` chip in a widget resolves live status from

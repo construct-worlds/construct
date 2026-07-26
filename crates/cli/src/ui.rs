@@ -125,6 +125,155 @@ fn clear_pane_side_borders(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Rows the modeline occupies in the full layout. The zoom layouts drop it.
+const MODELINE_H: u16 = 1;
+
+/// How one frame splits between the sliding main block and the pinned footer
+/// (spec 0112).
+///
+/// The block — session list, split panes, lineage, pin strip, program popups —
+/// is laid out at `main`, the size it has when the footer is a single row, no
+/// matter how tall the footer actually gets. A taller footer slides the block
+/// up by `shift.delta` rows and crops what leaves the viewport, so panes keep
+/// their geometry and no child PTY is asked to reflow.
+pub(crate) struct FrameSlide {
+    /// The block's own coordinate space.
+    main: Rect,
+    /// Translation applied to the block once it has finished rendering.
+    shift: crate::app::MainBlockShift,
+    /// The modeline's row, pinned directly above the footer strip.
+    modeline: Rect,
+    /// Rows the minibuffer renders into — the bottom of the footer strip.
+    minibuffer: Rect,
+    /// Footer rows above the minibuffer, left over while the block slides back
+    /// down after a tall footer closed. Cleared, never drawn into.
+    gap: Option<Rect>,
+}
+
+impl FrameSlide {
+    /// The pointer's position in the block's coordinates, or `None` when it is
+    /// over the footer and so over nothing the block drew.
+    fn main_block_pos(&self, pos: Option<(u16, u16)>) -> Option<(u16, u16)> {
+        if self.shift.delta == 0 {
+            return pos;
+        }
+        pos.and_then(|(x, y)| {
+            (y < self.shift.visible_h).then(|| (x, y.saturating_add(self.shift.delta)))
+        })
+    }
+}
+
+/// Split `area` into the sliding main block and the footer strip below it,
+/// advancing the slide animation toward whatever the footer now demands.
+pub(crate) fn frame_layout(app: &mut App, area: Rect, modeline_h: u16, now: Instant) -> FrameSlide {
+    let demand = compute_minibuffer_height(app, area.height);
+    if app.resizing_orchestrator_panel.is_some() {
+        app.main_slide.snap_to(demand.saturating_sub(1));
+    } else {
+        app.main_slide.retarget(demand.saturating_sub(1), now);
+    }
+    let slide = frame_slide_geometry(area, modeline_h, demand, app.main_slide.offset(now));
+    // Published before the block renders so anything placing the hardware
+    // cursor mid-render knows how far the block will travel.
+    app.layout.main_slide = slide.shift.delta;
+    slide
+}
+
+/// The geometry half of [`frame_layout`], with the slide's current offset
+/// already resolved.
+fn frame_slide_geometry(area: Rect, modeline_h: u16, demand: u16, offset: f32) -> FrameSlide {
+    // The block's height never depends on the footer: one row for the footer,
+    // one for the modeline, the rest is the block's forever.
+    let main_h = area
+        .height
+        .saturating_sub(modeline_h.saturating_add(1))
+        .max(1);
+    let delta = (offset.round().max(0.0) as u16).min(main_h.saturating_sub(1));
+    // While the block is still sliding down after a tall footer closed, the
+    // footer keeps covering the rows the block has not reached yet.
+    let footer_h = demand.max(delta.saturating_add(1)).min(main_h);
+    let delta = delta.min(footer_h.saturating_sub(1));
+    let visible_h = area.height.saturating_sub(modeline_h + footer_h);
+    let footer_y = area.y + visible_h + modeline_h;
+    let minibuffer_h = demand.min(footer_h);
+    let minibuffer_y = area.y + area.height - minibuffer_h;
+    FrameSlide {
+        main: Rect {
+            height: main_h,
+            ..area
+        },
+        shift: crate::app::MainBlockShift { delta, visible_h },
+        modeline: Rect {
+            y: area.y + visible_h,
+            height: modeline_h,
+            ..area
+        },
+        minibuffer: Rect {
+            y: minibuffer_y,
+            height: minibuffer_h,
+            ..area
+        },
+        gap: (minibuffer_y > footer_y).then(|| Rect {
+            y: footer_y,
+            height: minibuffer_y - footer_y,
+            ..area
+        }),
+    }
+}
+
+/// Place the hardware cursor for a caret the main block drew (spec 0112). The
+/// block paints in its own coordinates and slides afterwards, but the cursor
+/// is frame state rather than cells, so it goes straight to where the caret
+/// will land — and nowhere at all when that row slid out of the viewport.
+fn set_main_block_cursor(f: &mut Frame, app: &App, x: u16, y: u16) {
+    if let Some(y) = y.checked_sub(app.layout.main_slide) {
+        f.set_cursor_position(Position { x, y });
+    }
+}
+
+/// Scroll the rendered main block up into place and translate the hit geometry
+/// it recorded into screen coordinates (spec 0112). Also clears the footer
+/// strip, which the block has just painted over on its way past.
+fn apply_main_block_slide(f: &mut Frame, app: &mut App, slide: &FrameSlide) {
+    let shift = slide.shift;
+    if shift.delta > 0 {
+        let buf = f.buffer_mut();
+        for y in slide.main.y..slide.main.y + shift.visible_h {
+            for x in slide.main.left()..slide.main.right() {
+                let source = buf
+                    .cell(Position {
+                        x,
+                        y: y + shift.delta,
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(cell) = buf.cell_mut(Position { x, y }) {
+                    *cell = source;
+                }
+            }
+        }
+        // Rows below the block belong to the modeline and footer; whatever the
+        // block painted there while it was still laid out full-height goes.
+        let covered = Rect {
+            y: slide.main.y + shift.visible_h,
+            height: slide
+                .main
+                .height
+                .saturating_sub(shift.visible_h)
+                .max(slide.modeline.height + slide.minibuffer.height),
+            ..slide.main
+        }
+        .intersection(*f.buffer_mut().area());
+        if covered.height > 0 {
+            f.render_widget(Clear, covered);
+        }
+    }
+    if let Some(gap) = slide.gap {
+        f.render_widget(Clear, gap);
+    }
+    app.layout.shift_main_block(shift);
+}
+
 pub fn render(f: &mut Frame, app: &mut App) {
     // Re-attach image-expansion state to edited lines before any layout
     // math runs this frame (spec 0099); no-op while the buffer is unchanged.
@@ -184,18 +333,17 @@ pub fn render(f: &mut Frame, app: &mut App) {
         }
         ZoomMode::None => {}
     }
-    let footer_h = compute_minibuffer_height(app, area.height);
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(footer_h),
-        ])
-        .split(area);
-    let main_area = vertical[0];
-    let modeline_area = vertical[1];
-    let minibuffer_area = vertical[2];
+    // Spec 0112: a multi-row footer slides the main block up instead of
+    // shrinking it, so `main_area` is always the geometry the block has with a
+    // one-row footer and no pane ever sees a resize.
+    let slide = frame_layout(app, area, MODELINE_H, Instant::now());
+    let main_area = slide.main;
+    let modeline_area = slide.modeline;
+    let minibuffer_area = slide.minibuffer;
+    // Hover is tracked in screen coordinates; the block renders in its own, so
+    // the pointer moves with it and comes back before the footer renders.
+    let screen_mouse = app.mouse_pos;
+    app.mouse_pos = slide.main_block_pos(screen_mouse);
 
     // Avoid per-frame full-surface clears; they cause faint background
     // blinking on some terminals. Only clear when we know geometry likely
@@ -297,10 +445,29 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if effective_collapsed {
         render_view_uncollapse_glyph(f, app, detail_area);
     }
-    render_modeline(f, modeline_area, app);
-    render_minibuffer(f, minibuffer_area, app);
     app.sync_program_popup_with_selection();
     render_program_popup(f, app);
+
+    // Tooltips anchored to the block (spec 0081) travel with it, so they are
+    // painted while the block still owns its own coordinates.
+    render_diamond_tooltip(f, app);
+    render_pin_diamond_tooltip(f, app, &pinned_ids);
+    render_view_program_toggle_tooltip(f, app);
+    render_view_close_tooltip(f, app);
+    render_browser_preview_close_tooltip(f, app);
+    render_list_title_button_tooltips(f, app);
+    render_view_uncollapse_tooltip(f, app);
+    render_lineage_segment_tooltip(f, app);
+    render_harness_hover_tooltip(f, app);
+
+    // The block is complete: slide it, translate everything it recorded into
+    // screen coordinates, and hand the pointer back. Everything below paints
+    // over the footer strip in screen coordinates.
+    apply_main_block_slide(f, app, &slide);
+    app.mouse_pos = screen_mouse;
+
+    render_modeline(f, modeline_area, app);
+    render_minibuffer(f, minibuffer_area, app);
     render_resize_handle_cursor(f, app);
     render_tasks_popup(f, app);
     render_remote_control_popup(f, app);
@@ -310,19 +477,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     render_session_title_menu(f, app);
     render_tutorial_card(f, app);
-
-    // Tooltips (spec 0081): transient hover boxes rendered last so they
-    // sit on top of all base panes, menus, program popups, and task panels.
-    render_diamond_tooltip(f, app);
-    render_pin_diamond_tooltip(f, app, &pinned_ids);
-    render_view_program_toggle_tooltip(f, app);
-    render_view_close_tooltip(f, app);
-    render_browser_preview_close_tooltip(f, app);
-    render_list_title_button_tooltips(f, app);
-    render_view_uncollapse_tooltip(f, app);
-    render_lineage_segment_tooltip(f, app);
     render_harness_unavailable_tooltip(f, app);
-    render_harness_hover_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
     render_modeline_context_gauge_tooltip(f, app);
     render_modeline_version_notice_tooltip(f, app);
@@ -1952,13 +2107,14 @@ pub fn matrix_rain_panel_height(preferred: Option<u16>, available_h: u16) -> u16
 /// whatever is running) gets the most real estate possible. Matches
 /// tmux's `prefix z` zoomed-pane behavior.
 fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
-    let footer_h = compute_minibuffer_height(app, area.height);
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(footer_h)])
-        .split(area);
-    let main_area = vertical[0];
-    let minibuffer_area = vertical[1];
+    // Same slide contract as the full layout (spec 0112): the zoomed pane
+    // keeps its full-screen geometry and a tall footer slides it, so zooming
+    // with the operator panel open never reflows the child.
+    let slide = frame_layout(app, area, 0, Instant::now());
+    let main_area = slide.main;
+    let minibuffer_area = slide.minibuffer;
+    let screen_mouse = app.mouse_pos;
+    app.mouse_pos = slide.main_block_pos(screen_mouse);
 
     app.terminal_pane_size = (main_area.width, main_area.height);
     // Items model rebuilds parsers per-frame at the current size —
@@ -1982,6 +2138,8 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
             ViewMode::Chat => render_chat(f, main_area, app),
         }
     }
+    apply_main_block_slide(f, app, &slide);
+    app.mouse_pos = screen_mouse;
     render_minibuffer(f, minibuffer_area, app);
     if app.help_visible {
         let help_popup = render_help(f, area, app);
@@ -1993,13 +2151,11 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
 /// minibuffer line. `C-x o` from here flips to the view-zoom layout
 /// for the selected session, matching tmux's pane-cycling feel.
 fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
-    let footer_h = compute_minibuffer_height(app, area.height);
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(footer_h)])
-        .split(area);
-    let main_area = vertical[0];
-    let minibuffer_area = vertical[1];
+    let slide = frame_layout(app, area, 0, Instant::now());
+    let main_area = slide.main;
+    let minibuffer_area = slide.minibuffer;
+    let screen_mouse = app.mouse_pos;
+    app.mouse_pos = slide.main_block_pos(screen_mouse);
 
     // Zoomed-list layout snapshot: only the list + minibuffer exist.
     app.layout.list_area = Some(main_area);
@@ -2013,6 +2169,8 @@ fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_scroll_offset = 0;
 
     render_sessions(f, main_area, app);
+    apply_main_block_slide(f, app, &slide);
+    app.mouse_pos = screen_mouse;
     render_minibuffer(f, minibuffer_area, app);
     if app.help_visible {
         let help_popup = render_help(f, area, app);
@@ -4960,10 +5118,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
                     window_start_chars,
                 });
             if active_rename.is_some() {
-                f.set_cursor_position(Position {
-                    x: name_x_start.saturating_add(cursor_col),
-                    y: area.y,
-                });
+                set_main_block_cursor(f, app, name_x_start.saturating_add(cursor_col), area.y);
             }
             Line::from(vec![
                 Span::raw(" "),
@@ -12714,10 +12869,7 @@ fn render_program_popup_at(
             clamp_title_hit_to_pane(Some((left.name.0, left.name.1, rect.y)), pane_right);
         app.layout.program_title_name_window_start = left.name_window_start;
         if let Some(cursor_col) = left.cursor_col {
-            f.set_cursor_position(Position {
-                x: left.name.0.saturating_add(cursor_col),
-                y: rect.y,
-            });
+            set_main_block_cursor(f, app, left.name.0.saturating_add(cursor_col), rect.y);
         }
     }
     // `block_inner`/`inner`/`safe_inner`/`safe_block_inner` were computed
@@ -14379,7 +14531,7 @@ fn render_program_selection_context_menu(
             let y = inner_y.saturating_add(visible_row as u16);
             let x =
                 inner_x.saturating_add((cursor_col.min(comment_width.saturating_sub(1))) as u16);
-            f.set_cursor_position(Position { x, y });
+            set_main_block_cursor(f, app, x, y);
         }
         let mut verb_hits = Vec::with_capacity(verb_rows);
         for (idx, verb) in verbs.iter().take(verb_rows).enumerate() {
@@ -20424,6 +20576,86 @@ mod tests {
             "inactive program border should dim without switching hue"
         );
         assert_ne!(active_program.fg, pane_border_style(&theme, true).fg);
+    }
+
+    /// Spec 0112: the block's own geometry is the geometry it has with a
+    /// one-row footer, whatever the footer grows to. That is what keeps every
+    /// pane — and every child PTY — at a fixed size.
+    #[test]
+    fn tall_footer_slides_the_main_block_instead_of_shrinking_it() {
+        let area = Rect::new(0, 0, 80, 40);
+        let closed = frame_slide_geometry(area, MODELINE_H, 1, 0.0);
+        let open = frame_slide_geometry(area, MODELINE_H, 13, 12.0);
+
+        assert_eq!(
+            open.main, closed.main,
+            "the block keeps its size when the operator panel opens"
+        );
+        assert_eq!(closed.shift.delta, 0, "a one-row footer never slides");
+        assert_eq!(open.shift.delta, 12, "the block slides the footer's growth");
+        assert_eq!(
+            open.shift.visible_h,
+            closed.shift.visible_h - 12,
+            "what the block shows through shrinks by exactly the slide"
+        );
+        assert_eq!(
+            open.modeline.y + open.modeline.height,
+            open.minibuffer.y,
+            "the modeline stays pinned directly above the panel"
+        );
+        assert_eq!(
+            open.minibuffer.y + open.minibuffer.height,
+            area.height,
+            "the panel sits on the bottom edge"
+        );
+        assert!(open.gap.is_none(), "an open panel fills the footer strip");
+
+        // The block's last row lands on its last visible row: content is
+        // cropped off the top only, so the newest PTY output stays put.
+        assert_eq!(
+            open.main.height - open.shift.delta,
+            open.shift.visible_h,
+            "the bottom of the block meets the modeline"
+        );
+    }
+
+    #[test]
+    fn main_block_slide_eases_between_flush_and_fully_slid() {
+        let area = Rect::new(0, 0, 80, 40);
+        let midway = frame_slide_geometry(area, MODELINE_H, 13, 6.0);
+        assert_eq!(midway.shift.delta, 6, "mid-flight offsets are honored");
+        assert_eq!(
+            midway.minibuffer,
+            frame_slide_geometry(area, MODELINE_H, 13, 12.0).minibuffer,
+            "the panel is at full height from the first frame; only the block moves"
+        );
+        assert!(
+            midway.main.height - midway.shift.delta > midway.shift.visible_h,
+            "before the block catches up its last rows are still behind the panel"
+        );
+
+        // Closing: the footer's demand drops to one row while the block is
+        // still slid, so the strip it has not reached yet is held clear.
+        let closing = frame_slide_geometry(area, MODELINE_H, 1, 6.0);
+        assert_eq!(closing.shift.delta, 6);
+        assert_eq!(closing.minibuffer.height, 1);
+        assert_eq!(
+            closing.gap.map(|g| g.height),
+            Some(6),
+            "the rows the block has yet to slide back down over stay cleared"
+        );
+    }
+
+    #[test]
+    fn main_block_slide_leaves_a_usable_viewport_on_a_tiny_terminal() {
+        // A footer taller than the terminal cannot slide the block away
+        // entirely: at least one row of it, plus the modeline, survives.
+        let area = Rect::new(0, 0, 40, 6);
+        let slide = frame_slide_geometry(area, MODELINE_H, 40, 40.0);
+        assert!(slide.shift.visible_h >= 1, "the block keeps a visible row");
+        assert_eq!(slide.main.height, 4, "the block's own size is unchanged");
+        assert!(slide.minibuffer.height >= 1);
+        assert_eq!(slide.minibuffer.y + slide.minibuffer.height, area.height);
     }
 
     #[test]
