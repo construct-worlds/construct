@@ -2100,8 +2100,16 @@ async fn web_client_loads_and_websocket_connects() {
               };
               input.value = 'line one\nline two';
               resetInputHeightPreservingTerminalScroll();
+              state.pendingPtyResize = null;
               refitTerminal();
               await new Promise((resolve) => requestAnimationFrame(resolve));
+              // Composer auto-grow must not fire SIGWINCH per keystroke, but it
+              // must not silently drop the row change either — xterm was already
+              // refit, so an unsent resize would leave the child painting into a
+              // grid of a different height. It is deferred, not discarded.
+              const composerDeferred = state.pendingPtyResize
+                ? { cols: state.pendingPtyResize.cols, rows: state.pendingPtyResize.rows }
+                : null;
 
               state.sessions = [{ id: 's-fit', has_pty: true, mode: 'interactive' }];
               state.lastReportedSize = { cols: 100, rows: 40 };
@@ -2122,7 +2130,7 @@ async fn web_client_loads_and_websocket_connects() {
               state.ptyResizeTimer = oldTimer;
               state.pendingPtyResize = oldPending;
               rpc = oldRpc;
-              return { calls, bottom, scrolledUp, composerBottom, composerScrolledUp, composerSuppressed };
+              return { calls, bottom, scrolledUp, composerBottom, composerScrolledUp, composerSuppressed, composerDeferred };
             })()
             "#,
         )
@@ -2159,7 +2167,13 @@ async fn web_client_loads_and_websocket_connects() {
         .count();
     assert_eq!(
         row_resize_count, 1,
-        "only the engaged row-only fit should send pty_resize: {fit_scroll:?}"
+        "only the engaged row-only fit should send pty_resize immediately: {fit_scroll:?}"
+    );
+    assert_eq!(
+        fit_scroll["composerDeferred"],
+        serde_json::json!({ "cols": 100, "rows": 25 }),
+        "a composer-suppressed row change must be deferred, not dropped, or xterm \
+         and the child disagree about the row count forever: {fit_scroll:?}"
     );
     assert!(
         calls.iter().any(|v| {
@@ -2254,6 +2268,62 @@ async fn web_client_loads_and_websocket_connects() {
             { "method": "session.pty_input", "data": "\r" },
         ]),
         "Codex composer submit should let Codex flush paste-burst detection before Enter: {codex_submit_delay:?}"
+    );
+
+    // A grid rebuilt from replayed PTY deltas can disagree with the child's real
+    // screen, and the daemon drops a same-size resize, so without a deliberate
+    // one-column bump the child never repaints and the drift survives until the
+    // user manually resizes the window. See spec 0082.
+    let hydration_redraw: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const oldCurrent = state.currentId;
+              const oldRpc = rpc;
+              const oldFollow = state.resizeFollowBottomUntil;
+              const oldSize = state.lastReportedSize;
+              const calls = [];
+              rpc = async (method, params) => {
+                if (method === 'session.pty_resize') {
+                  calls.push({ cols: params.cols, rows: params.rows });
+                }
+                return null;
+              };
+              state.currentId = 's-hydrate';
+              sendTerminalPtyResize(100, 40, false, 's-hydrate', true);
+              await new Promise((resolve) => setTimeout(resolve, 0));
+              const forced = calls.slice();
+
+              calls.length = 0;
+              sendTerminalPtyResize(100, 40, false, 's-hydrate', false);
+              await new Promise((resolve) => setTimeout(resolve, 0));
+              const plain = calls.slice();
+
+              rpc = oldRpc;
+              state.currentId = oldCurrent;
+              state.resizeFollowBottomUntil = oldFollow;
+              state.lastReportedSize = oldSize;
+              return { forced, plain };
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate hydration forced redraw")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        hydration_redraw["forced"],
+        serde_json::json!([
+            { "cols": 101, "rows": 40 },
+            { "cols": 100, "rows": 40 },
+        ]),
+        "a post-replay resize must bump one column first so the child really repaints, \
+         then settle at the geometry this client renders: {hydration_redraw:?}"
+    );
+    assert_eq!(
+        hydration_redraw["plain"],
+        serde_json::json!([{ "cols": 100, "rows": 40 }]),
+        "an ordinary resize must not pay for the extra repaint: {hydration_redraw:?}"
     );
 
     let optimistic_send: serde_json::Value = page
