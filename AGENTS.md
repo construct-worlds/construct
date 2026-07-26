@@ -24,9 +24,9 @@ Use [vhs](https://github.com/charmbracelet/vhs) to capture deterministic mp4 / g
 - **Build the worktree's binaries.** vhs records whatever `construct` you point it at, so make sure the worktree has been built (`cargo build` per the workflow above) before recording. For a before/after pair, prepare two worktrees so each side has its own binaries — never re-record `before` from a tree that already has the change applied.
 - **Isolated daemon.** Run vhs against a fresh `CONSTRUCT_RUNTIME_DIR` / `CONSTRUCT_STATE_DIR` / `CONSTRUCT_DATA_DIR` / `CONSTRUCT_CONFIG_DIR` under `/tmp/` so it doesn't collide with the user's running daemon. Each recording gets its own dir and its own daemon process; tear them down at the end.
 - **Put the TUI in a state that actually shows your change.** This part varies most by change — pick whichever shape fits:
-  - **Specific harness features** (a smith tool, codex output rendering, claude resume, …): spawn that harness with a representative prompt, e.g. `construct new smith "<task>"`. Use a prompt whose output exercises the diff (tool calls if you changed tool rendering, long messages if you changed wrapping, etc.).
+  - **Specific harness features** (a smith tool, codex output rendering, claude resume, …): spawn that harness with a representative prompt, e.g. `construct new --prompt "<task>" smith`. Use a prompt whose output exercises the diff (tool calls if you changed tool rendering, long messages if you changed wrapping, etc.).
   - **Minibuffer / keymap / popup / palette**: send the keystrokes from inside the vhs tape with `Type`, `Ctrl+X`, `Enter`, `Sleep`, etc. — no extra sessions needed if the feature is reachable from a stock TUI.
-  - **Session-list / modeline / matrix rain / anything driven by fleet activity**: spawn 2–4 sessions producing ambient activity. The most robust pattern is `construct new shell ""` (interactive shell) followed by `construct send <id> "<command>"` pushing a noise loop into each. *Don't* pass the loop as the `new shell` prompt — both bash and zsh observed to fall back to interactive mode under PTY and never actually run `-lc <cmd>`, leaving the daemon silent.
+  - **Session-list / modeline / matrix rain / anything driven by fleet activity**: spawn 2–4 sessions producing ambient activity. The most robust pattern is `construct new shell` (interactive shell) followed by `construct send <id> "<command>"` pushing a noise loop into each. *Don't* pass the loop as the `new shell` prompt — both bash and zsh observed to fall back to interactive mode under PTY and never actually run `-lc <cmd>`, leaving the daemon silent.
   - **Single-session views** (transcript, scrollback, diff): spawn one session, then trigger the view via tape keystrokes (`C-x z` for zoom, mouse-wheel events, etc.).
   Whatever the shape, give the daemon a few seconds to settle (`sleep 3`) after setup so the first frames the tape captures aren't a half-loaded UI.
 - **Inherit env into vhs, don't `Env` it.** vhs's `Env` directive splits on whitespace, so a `PATH` with colons errors out and writing one `Env` per variable is fragile. Export the env in the outer shell that invokes `vhs`; the spawned `ttyd` / `bash` inside the tape inherit it. Inside the tape, type the absolute path of the worktree's `construct` binary instead of relying on `PATH`.
@@ -59,7 +59,7 @@ Use [vhs](https://github.com/charmbracelet/vhs) to capture deterministic mp4 / g
 
   SESSION_IDS=()
   for _ in 1 2 3; do
-    SID=$("$BIN_DIR/construct" new shell "" | tr -d '[:space:]')
+    SID=$("$BIN_DIR/construct" new shell | tr -d '[:space:]')
     [[ -n "$SID" ]] && SESSION_IDS+=("$SID")
   done
   sleep 1

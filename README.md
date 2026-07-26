@@ -100,6 +100,14 @@ Use `?` for help and `M-x` for the command palette. From the TUI you can create
 sessions, switch between agents, send input, inspect diffs, and interrupt or stop
 work without leaving the flow.
 
+You can also launch straight into construct by prepending `construct new` to your
+favorite CLI harness command:
+
+```sh
+construct new codex
+construct new claude --model opus
+```
+
 MIDI controllers can drive those same native TUI actions without keyboard
 emulation. See [MIDI control surfaces](docs/midi.md) for device discovery and
 the `construct midi learn` workflow, including OP–XY setup.
