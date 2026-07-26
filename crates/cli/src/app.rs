@@ -15816,9 +15816,13 @@ mod tests {
         let menu = app.route_menu.as_ref().unwrap();
         assert!(menu.models().is_empty());
 
-        // Click the target: it previews rather than arming.
-        let area = app.route_menu.as_ref().unwrap().area;
-        app.handle_left_click(area.x + 2, area.y + 2).await;
+        // Click the first target: it previews rather than arming. The
+        // targets start below Default, the rule and the description.
+        let (area, header) = {
+            let menu = app.route_menu.as_ref().unwrap();
+            (menu.area, menu.header_rows())
+        };
+        app.handle_left_click(area.x + 2, area.y + 1 + header).await;
         let menu = app.route_menu.as_ref().expect("still open");
         assert_eq!(menu.models(), vec!["gpt-5.6-sol", "gpt-5.5"]);
 

@@ -4911,7 +4911,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " route ",
+            " model routing ",
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -4950,9 +4950,76 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         }
     };
 
+    // Default sits above the rule: it is the absence of a route, not one
+    // of the targets listed under it.
+    {
+        let hovered = app
+            .mouse_pos
+            .is_some_and(|(mx, my)| my == first_row && mx >= inner_x && mx < inner_x + inner_w);
+        let style = row_style(true, menu.selected == 0 || hovered, targets_focused || hovered);
+        let marker = if menu.target_is_active(0) { "*" } else { " " };
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                format!(" {marker} {}", menu.target_label(0)),
+                style,
+            )),
+            Rect {
+                x: inner_x,
+                y: first_row,
+                width: inner_w,
+                height: 1,
+            },
+        );
+    }
+
+    let rule_row = first_row.saturating_add(1);
+    if rule_row < last_row {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                "─".repeat(inner_w as usize),
+                Style::default().fg(app.theme.border),
+            )),
+            Rect {
+                x: inner_x,
+                y: rule_row,
+                width: inner_w,
+                height: 1,
+            },
+        );
+    }
+
+    // What the targets below it do, said once.
+    for (i, line) in menu
+        .description(inner_w.saturating_sub(2))
+        .iter()
+        .enumerate()
+    {
+        let row = rule_row.saturating_add(1).saturating_add(i as u16);
+        if row >= last_row {
+            break;
+        }
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                format!(" {line}"),
+                Style::default()
+                    .fg(app.theme.border)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+            Rect {
+                x: inner_x,
+                y: row,
+                width: inner_w,
+                height: 1,
+            },
+        );
+    }
+
+    let body_start = first_row.saturating_add(menu.header_rows());
+
     // Target column.
-    for index in 0..menu.target_rows() {
-        let row = first_row.saturating_add(index as u16);
+    for (offset, _) in menu.routes.iter().enumerate() {
+        let index = offset + 1;
+        let row = body_start.saturating_add(offset as u16);
         if row >= last_row {
             break;
         }
@@ -4983,9 +5050,9 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         );
     }
 
-    // Divider.
-    for index in 0..menu.rows() {
-        let row = first_row.saturating_add(index as u16);
+    // Column divider, spanning the two-column body only.
+    for index in 0..menu.body_rows() {
+        let row = body_start.saturating_add(index as u16);
         if row >= last_row {
             break;
         }
@@ -5015,14 +5082,14 @@ fn render_route_menu(f: &mut Frame, app: &App) {
             .wrap(ratatui::widgets::Wrap { trim: true }),
             Rect {
                 x: model_x,
-                y: first_row,
+                y: body_start,
                 width: model_w,
-                height: last_row.saturating_sub(first_row).max(1),
+                height: last_row.saturating_sub(body_start).max(1),
             },
         );
     } else {
         for (index, model) in menu.models().iter().enumerate() {
-            let row = first_row.saturating_add(index as u16);
+            let row = body_start.saturating_add(index as u16);
             if row >= last_row {
                 break;
             }
@@ -5054,7 +5121,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
 
     // Why routing is impossible for this session as a whole, when it is.
     if let Some(reason) = menu.unavailable_reason.as_deref() {
-        let row = first_row.saturating_add(menu.rows() as u16);
+        let row = body_start.saturating_add(menu.body_rows() as u16);
         if row < last_row {
             f.render_widget(
                 Paragraph::new(Line::styled(

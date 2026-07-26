@@ -37,6 +37,7 @@ impl App {
             model_selected: 0,
             anchor: (col, row),
             target_col_w: 0,
+            desc_lines: 0,
         };
         menu.model_selected = menu.active_model_index();
         self.route_menu = Some(menu.anchored(self.frame_area()));
@@ -183,6 +184,12 @@ impl App {
     }
 }
 
+/// One line on what routing does, shown once between Default and the
+/// targets it contrasts with. Short on purpose: the picker is a menu, not
+/// documentation, and the sentence has to earn its two rows.
+pub const ROUTE_DESCRIPTION: &str =
+    "Send this session's model requests to another provider. Nothing restarts.";
+
 /// Which column the keyboard is driving. Both are always visible; focus
 /// only decides what moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +224,9 @@ pub struct RouteMenu {
     /// Width of the target column, including its padding. Set when the
     /// menu is placed so render and hit-testing agree on one number.
     pub target_col_w: u16,
+    /// Rows the description wraps to. Set when the menu is placed, for the
+    /// same reason.
+    pub desc_lines: u16,
 }
 
 impl RouteMenu {
@@ -246,8 +256,48 @@ impl RouteMenu {
         route.models.clone()
     }
 
+    /// Rows above the two columns: Default, a rule, and the description.
+    /// Default sits apart because it is the absence of a route, not one of
+    /// the targets listed under it.
+    pub fn header_rows(&self) -> u16 {
+        2 + self.desc_lines
+    }
+
+    /// Rows in the two-column body — one per target, beside the models.
+    pub fn body_rows(&self) -> usize {
+        self.routes.len().max(self.models().len())
+    }
+
     pub fn rows(&self) -> usize {
-        self.target_rows().max(self.models().len())
+        self.header_rows() as usize + self.body_rows()
+    }
+
+    /// Wrap the description to `width`, capped at two lines so the menu
+    /// stays a menu.
+    pub fn description(&self, width: u16) -> Vec<String> {
+        let width = width.max(8) as usize;
+        let mut lines: Vec<String> = Vec::new();
+        let mut line = String::new();
+        for word in ROUTE_DESCRIPTION.split_whitespace() {
+            let candidate = if line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{line} {word}")
+            };
+            if candidate.chars().count() > width && !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+                line = word.to_string();
+            } else {
+                line = candidate;
+            }
+            if lines.len() == 2 {
+                break;
+            }
+        }
+        if lines.len() < 2 && !line.is_empty() {
+            lines.push(line);
+        }
+        lines
     }
 
     pub fn target_label(&self, index: usize) -> String {
@@ -334,10 +384,13 @@ impl RouteMenu {
             .as_deref()
             .map(|r| r.chars().count() + 3)
             .unwrap_or(0) as u16;
+        // The description spans both columns, so it argues for width too —
+        // two cramped lines read worse than one clear one.
         let mut width = targets_w
             .saturating_add(models_w)
             .saturating_add(3)
-            .max(reason_w);
+            .max(reason_w)
+            .max(46);
         if width > max_w {
             // Give the target column its share first: the model column can
             // truncate a long id more gracefully than a target name.
@@ -346,6 +399,7 @@ impl RouteMenu {
         }
         self.target_col_w = target_col_w;
 
+        self.desc_lines = self.description(width.saturating_sub(2)).len() as u16;
         let reason_rows = if self.unavailable_reason.is_some() { 1 } else { 0 };
         let height = (self.rows() as u16)
             .saturating_add(2)
@@ -379,10 +433,16 @@ impl RouteMenu {
             return None;
         }
         let first = self.area.y.saturating_add(1);
-        let index = row.checked_sub(first)? as usize;
+        // Default is its own row above the rule; the rule and description
+        // are not selectable.
+        if row == first {
+            return Some(RouteHit::Target(0));
+        }
+        let body_start = first.saturating_add(self.header_rows());
+        let index = row.checked_sub(body_start)? as usize;
         let divider = self.area.x.saturating_add(1).saturating_add(self.target_col_w);
         if col <= divider {
-            (index < self.target_rows()).then_some(RouteHit::Target(index))
+            (index < self.routes.len()).then_some(RouteHit::Target(index + 1))
         } else {
             (index < self.models().len()).then_some(RouteHit::Model(index))
         }
@@ -416,6 +476,7 @@ mod tests {
             model_selected: 0,
             anchor: (40, 23),
             target_col_w: 0,
+            desc_lines: 0,
         };
         m = m.anchored(ratatui::layout::Rect::new(0, 0, 120, 30));
         m
@@ -452,14 +513,15 @@ mod tests {
     }
 
     #[test]
-    fn rows_span_the_taller_of_the_two_columns() {
+    fn the_body_spans_the_taller_of_the_two_columns() {
         let mut m = menu(
             vec![option("codex-oauth", &["a", "b", "c", "d"], None)],
             None,
         );
-        assert_eq!(m.target_rows(), 2);
+        assert_eq!(m.target_rows(), 2, "Default plus one target");
         m.selected = 1;
-        assert_eq!(m.rows(), 4, "the model column is taller here");
+        assert_eq!(m.body_rows(), 4, "the model column is taller here");
+        assert_eq!(m.rows(), m.header_rows() as usize + 4);
     }
 
     /// A target that cannot be used shows why, in place of models.
@@ -515,14 +577,51 @@ mod tests {
         m.selected = 1;
         let m = m.anchored(ratatui::layout::Rect::new(0, 0, 120, 30));
         let first = m.area.y + 1;
+        let body = first + m.header_rows();
         let divider = m.area.x + 1 + m.target_col_w;
 
+        // Default owns its own row above the rule.
         assert_eq!(m.hit_at(m.area.x + 2, first), Some(RouteHit::Target(0)));
-        assert_eq!(m.hit_at(m.area.x + 2, first + 1), Some(RouteHit::Target(1)));
-        assert_eq!(m.hit_at(divider + 2, first), Some(RouteHit::Model(0)));
-        assert_eq!(m.hit_at(divider + 2, first + 1), Some(RouteHit::Model(1)));
+        // The rule and description are not selectable.
+        assert_eq!(m.hit_at(m.area.x + 2, first + 1), None, "the rule");
+        assert_eq!(m.hit_at(m.area.x + 2, first + 2), None, "the description");
+        // Targets and models sit side by side below them.
+        assert_eq!(m.hit_at(m.area.x + 2, body), Some(RouteHit::Target(1)));
+        assert_eq!(m.hit_at(divider + 2, body), Some(RouteHit::Model(0)));
+        assert_eq!(m.hit_at(divider + 2, body + 1), Some(RouteHit::Model(1)));
         assert_eq!(m.hit_at(m.area.x + 2, m.area.y), None, "top border");
         assert_eq!(m.hit_at(m.area.x.saturating_sub(1), first), None);
+    }
+
+    /// Default is separated from the targets by a rule and one line about
+    /// what those targets do — it is the absence of a route, not one of
+    /// them.
+    #[test]
+    fn a_rule_and_a_description_separate_default_from_the_targets() {
+        let m = menu(vec![option("kimi", &["kimi-k2.5"], None)], None);
+        assert_eq!(m.header_rows(), 2 + m.desc_lines);
+        assert!(m.desc_lines >= 1, "the description occupies real rows");
+        assert_eq!(
+            m.rows(),
+            m.header_rows() as usize + m.body_rows(),
+            "the header is counted in the height"
+        );
+    }
+
+    #[test]
+    fn the_description_wraps_to_at_most_two_lines() {
+        let m = menu(vec![option("kimi", &["kimi-k2.5"], None)], None);
+        for width in [20u16, 30, 46, 80] {
+            let lines = m.description(width);
+            assert!(!lines.is_empty(), "width {width} produced nothing");
+            assert!(lines.len() <= 2, "width {width} wrapped to {lines:?}");
+            for line in &lines {
+                assert!(
+                    line.chars().count() <= width.max(8) as usize,
+                    "width {width}: {line:?} overflows"
+                );
+            }
+        }
     }
 
     /// The model column is sized for the widest model any target offers,
