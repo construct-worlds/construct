@@ -7,7 +7,7 @@ Scope: Grok's harness-native reset detection must not mistake a sibling construc
 
 ## Decision
 
-Grok stores its own native sessions per-cwd (`~/.grok/sessions/<cwd>/<uuid>/`), not per construct-session, and has no originator-tag construct can stamp and match on ([0079](0079-harness-native-session-id-tracks-clear.md)). Its native-reset discovery falls back to "the non-fork session directory with the newest mtime under this cwd."
+Grok stores its own native sessions per-cwd (`~/.grok/sessions/<cwd>/<uuid>/`), not per construct-session, and has no originator-tag construct can stamp and match on ([0138](0138-harness-native-session-id-tracks-clear.md)). Its native-reset discovery falls back to "the non-fork session directory with the newest mtime under this cwd."
 
 When multiple construct sessions run Grok against the same cwd, that heuristic must exclude any directory that another live, same-cwd, same-harness construct session currently reports as its own native id (each session's own tracked native id is readable from its own on-disk record). A sibling's routine turn-taking touches its own directory's mtime; without exclusion that alone can look identical to this session's own conversation having been cleared.
 

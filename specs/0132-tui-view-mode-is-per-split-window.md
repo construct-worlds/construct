@@ -1,4 +1,4 @@
-# 0065-tui-view-mode-is-per-split-window
+# 0132-tui-view-mode-is-per-split-window
 
 Status: accepted
 Date: 2026-06-30

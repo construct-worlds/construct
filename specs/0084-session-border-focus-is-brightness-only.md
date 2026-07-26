@@ -54,7 +54,7 @@ other three, so a future edit can't silently reintroduce a colored-but-wrong
 border or a hue collision with the Program frame.
 
 The `[colors]` `theme.toml` escape hatch can still override `border` and
-`border_focused` independently per spec [[0070-client-ui-themes]] — this
+`border_focused` independently per spec [[0134-client-ui-themes]] — this
 decision governs the *default* palettes shipped for each named theme, not
 what a user's custom override is allowed to do.
 

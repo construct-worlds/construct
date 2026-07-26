@@ -1,4 +1,4 @@
-# 0069-client-daemon-build-mismatch-warning
+# 0133-client-daemon-build-mismatch-warning
 
 Status: accepted
 Date: 2026-07-06

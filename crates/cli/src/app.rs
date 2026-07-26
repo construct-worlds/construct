@@ -5023,7 +5023,7 @@ async fn run_loop(
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
     // Lineage preview, keyboard-focused mode (spec 0080; supersedes the old
-    // `C-x q` / `q` popup, spec 0079): its per-node elapsed-time/cost stats
+    // `C-x q` / `q` popup, spec 0139): its per-node elapsed-time/cost stats
     // are recomputed at render time from `SessionSummary` fields that are
     // already kept live by the ordinary STATE broadcast subscription (same
     // path the branch-rail fork badge uses) — this ticker's only job is a

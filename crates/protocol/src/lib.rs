@@ -1991,7 +1991,7 @@ pub struct ProgramVerbExecuteParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_version: Option<u64>,
     /// Optional one-line instruction composed onto the verb's purpose prompt,
-    /// same convention as `program.execute`'s `comment` (spec 0076).
+    /// same convention as `program.execute`'s `comment` (spec 0137).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

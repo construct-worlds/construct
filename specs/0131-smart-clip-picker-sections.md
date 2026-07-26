@@ -1,4 +1,4 @@
-# 0060-smart-clip-picker-sections
+# 0131-smart-clip-picker-sections
 
 Status: accepted
 Date: 2026-06-29

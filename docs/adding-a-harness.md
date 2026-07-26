@@ -111,7 +111,7 @@ assistant prose.
 - **Resume**: on `CONSTRUCT_RESUME=1`, relaunch with the harness's resume
   flag (`--resume <id>`, `--session <id>`, …) and skip already-seen
   transcript history.
-- **Reset detection** (specs 0079/0085): when the native id changes
+- **Reset detection** (specs 0138/0085): when the native id changes
   mid-session, emit `SessionEvent::NativeIdChanged` — the daemon synthesizes
   the archived reset-snapshot fork and lineage edge. Suppress the one
   expected rebind a fresh fork produces (placeholder id → real id) so it

@@ -1,4 +1,4 @@
-# 0093-remote-control-exposure-is-chosen
+# 0143-remote-control-exposure-is-chosen
 
 Status: accepted
 Date: 2026-07-13
