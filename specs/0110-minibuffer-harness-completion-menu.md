@@ -10,12 +10,14 @@ Scope: How the minibuffer presents a growing set of harness choices for new sess
 The new-session and fork harness pickers render as a completion menu anchored
 above the minibuffer input. Each row shows the harness name, its short
 description, and current availability. Available entries precede unavailable
-entries while preserving registration order within each group.
+entries while preserving registration order within each group. The synthetic
+`project` action is always the first new-session entry.
 
 Typing filters rows case-insensitively by name or description. Up and Down move
-the highlighted row, Enter chooses it, Tab completes its name into the input,
-and Esc cancels. Rows remain clickable. The menu shows a bounded number of rows
-and scrolls to keep the keyboard highlight visible.
+the highlighted row, with Control-P and Control-N as equivalent previous/next
+bindings. Enter chooses it, Tab completes its name into the input, and Esc
+cancels. Rows remain clickable. The menu shows a bounded number of rows and
+scrolls to keep the keyboard highlight visible.
 
 Unavailable harnesses remain discoverable but cannot be selected. Highlighting
 one replaces its description with the daemon's availability detail, and

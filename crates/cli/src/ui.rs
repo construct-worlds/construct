@@ -1656,7 +1656,7 @@ fn render_harness_picker(f: &mut Frame, area: Rect, app: &mut App, mb: &Minibuff
             } else {
                 format!("{}/{}", selected + 1, entries.len())
             };
-            format!("  {position}  ↑/↓ select  Enter choose  Tab complete  Esc cancel")
+            format!("  {position}  ↑/↓ C-p/C-n select  Enter choose  Tab complete  Esc cancel")
         });
     let suffix_style = if mb.error.is_some() {
         Style::default().fg(app.theme.danger)

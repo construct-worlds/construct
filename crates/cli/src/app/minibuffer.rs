@@ -297,7 +297,9 @@ impl App {
             }
             KeyCode::Home => mb.cursor = 0,
             KeyCode::End => mb.cursor = mb.input.chars().count(),
-            KeyCode::Up if is_harness_picker => {
+            KeyCode::Up | KeyCode::Char('p')
+                if is_harness_picker && (key.code == KeyCode::Up || ctrl) =>
+            {
                 if !picker_entries.is_empty() {
                     self.harness_picker_selected = if self.harness_picker_selected == 0 {
                         picker_entries.len() - 1
@@ -306,7 +308,9 @@ impl App {
                     };
                 }
             }
-            KeyCode::Down if is_harness_picker => {
+            KeyCode::Down | KeyCode::Char('n')
+                if is_harness_picker && (key.code == KeyCode::Down || ctrl) =>
+            {
                 if !picker_entries.is_empty() {
                     self.harness_picker_selected =
                         (self.harness_picker_selected + 1) % picker_entries.len();

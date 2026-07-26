@@ -3572,16 +3572,11 @@ pub fn harness_picker_entries(
     query: &str,
     filter_active: bool,
 ) -> Vec<HarnessPickerEntry> {
-    let mut entries: Vec<HarnessPickerEntry> = harnesses
-        .iter()
-        .map(|h| HarnessPickerEntry {
-            name: h.name.clone(),
-            description: h.description.clone().unwrap_or_default(),
-            available: h.available,
-            detail: h.detail.clone(),
-        })
-        .collect();
+    let mut entries = Vec::with_capacity(harnesses.len() + usize::from(!is_fork));
     if !is_fork {
+        // This is the only non-harness action in the menu. Keep it first so
+        // project creation is discoverable without scrolling through an
+        // expanding adapter list.
         entries.push(HarnessPickerEntry {
             name: "project".to_string(),
             description: "Create a new project".to_string(),
@@ -3589,6 +3584,14 @@ pub fn harness_picker_entries(
             detail: None,
         });
     }
+    entries.extend(harnesses
+        .iter()
+        .map(|h| HarnessPickerEntry {
+            name: h.name.clone(),
+            description: h.description.clone().unwrap_or_default(),
+            available: h.available,
+            detail: h.detail.clone(),
+        }));
 
     if filter_active && !query.trim().is_empty() {
         let needle = query.trim().to_ascii_lowercase();
@@ -3598,8 +3601,8 @@ pub fn harness_picker_entries(
         });
     }
 
-    // Keep registration order within each group so the menu remains
-    // predictable while moving unavailable choices out of the main path.
+    // Stable sorting leaves `project` first and keeps harness registration
+    // order within each availability group.
     entries.sort_by_key(|entry| !entry.available);
     entries
 }
@@ -31705,6 +31708,14 @@ mod tests {
         assert!(screen.contains("OpenAI Codex"));
         assert!(screen.contains("unavailable"));
         assert!(app.layout.minibuffer_area.expect("picker area").height > 1);
+        assert_eq!(
+            app.layout
+                .minibuffer_harness_hits
+                .first()
+                .map(|hit| hit.name.as_str()),
+            Some("project"),
+            "project action stays at the top of the new-session picker"
+        );
         let unavailable_hit = app
             .layout
             .minibuffer_harness_hits
@@ -31744,7 +31755,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn harness_picker_arrow_navigation_and_tab_complete_the_highlight() {
+    async fn harness_picker_navigation_aliases_wrap_and_tab_completes_the_highlight() {
         let (mut app, _dir, server) = empty_app().await;
         app.harnesses = vec![
             construct_protocol::HarnessInfo {
@@ -31766,9 +31777,33 @@ mod tests {
         ];
         app.run_action(KeyAction::OpenNewSession).await;
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        app.handle_minibuffer_key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ))
             .await;
         assert_eq!(app.harness_picker_selected, 1);
+        app.handle_minibuffer_key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        assert_eq!(app.harness_picker_selected, 2);
+        app.handle_minibuffer_key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        assert_eq!(app.harness_picker_selected, 1);
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.harness_picker_selected, 0);
+        app.handle_minibuffer_key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        assert_eq!(app.harness_picker_selected, 2);
         app.handle_minibuffer_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
 
