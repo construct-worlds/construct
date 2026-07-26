@@ -744,11 +744,25 @@ impl Router {
         if !configured.is_empty() {
             return configured;
         }
-        provider
-            .seed_models()
-            .iter()
-            .map(|m| (*m).to_string())
-            .collect()
+        provider.seed_models()
+    }
+
+    /// Models a profile offers: the one it declares first, then the rest of
+    /// its provider's catalog. A profile pins one model, but the endpoint
+    /// behind it serves the whole family, so the picker offers them.
+    fn profile_model_list(&self, profile: &ModelProfile) -> Vec<String> {
+        let mut models: Vec<String> = profile
+            .model
+            .clone()
+            .into_iter()
+            .filter(|m| !m.trim().is_empty())
+            .collect();
+        for model in construct_protocol::slash::models_for_provider(&profile.provider) {
+            if !models.contains(&model) {
+                models.push(model);
+            }
+        }
+        models
     }
 
     /// Model a subscription target sends when none is chosen explicitly.
@@ -905,7 +919,7 @@ impl Router {
                     .map(|d| d.label().to_string())
                     .unwrap_or_else(|| profile.provider.clone()),
                 model: profile.model.clone().unwrap_or_default(),
-                models: profile.model.clone().into_iter().collect(),
+                models: self.profile_model_list(profile),
                 base_url: profile.resolved_base_url().unwrap_or_default(),
                 unavailable_reason: routing
                     .and_then(|_| self.profile_blocker(profile, harness)),
@@ -2035,6 +2049,65 @@ mod tests {
         // grok-oauth speaks the same dialect and accepts both, so the
         // stripping must not be applied dialect-wide.
         std::env::remove_var("CODEX_HOME");
+    }
+
+
+    /// A profile pins one model but its endpoint serves the family, so the
+    /// picker offers the provider's catalog behind the declared default.
+    #[tokio::test]
+    async fn a_profile_offers_its_declared_model_first_then_its_provider_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CONSTRUCT_TEST_CATALOG_KEY", "sk");
+        let r = started_with(
+            &dir,
+            cfg_with(true),
+            profiles(vec![(
+                "gpt",
+                ModelProfile {
+                    provider: "openai".to_string(),
+                    base_url: None,
+                    api_key_env: Some("CONSTRUCT_TEST_CATALOG_KEY".to_string()),
+                    api_key: None,
+                    model: Some("gpt-5.5".to_string()),
+                },
+            )]),
+        )
+        .await;
+        r.attach_session("s1", "claude", None).unwrap();
+        let listed = r.list_routes("claude", true, None);
+        let gpt = route_named(&listed, "gpt");
+        assert_eq!(
+            gpt.models.first().map(String::as_str),
+            Some("gpt-5.5"),
+            "the declared model leads"
+        );
+        assert!(
+            gpt.models.len() > 1,
+            "the provider catalog follows it: {:?}",
+            gpt.models
+        );
+        assert_eq!(
+            gpt.models.iter().filter(|m| *m == "gpt-5.5").count(),
+            1,
+            "no duplicate when the declared model is also in the catalog"
+        );
+    }
+
+    /// A subscription target's models likewise come from the shared
+    /// catalog, so the picker and smith's `/model` agree.
+    #[tokio::test]
+    async fn subscription_targets_offer_the_shared_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = started(&dir, cfg_with(true)).await;
+        r.attach_session("s1", "claude", None).unwrap();
+        let listed = r.list_routes("claude", true, None);
+        let claude = route_named(&listed, "claude-oauth");
+        assert!(
+            claude.models.iter().any(|m| m == "sonnet"),
+            "the subscription path takes short aliases: {:?}",
+            claude.models
+        );
+        assert_eq!(claude.model, claude.models[0]);
     }
 
     /// Minimal PEM → DER, so the test trusts exactly the CA the router

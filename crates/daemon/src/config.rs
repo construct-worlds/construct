@@ -355,10 +355,13 @@ enabled = true
 #                   # and keep dialing the port they were given at spawn
 #
 # [router.oauth]
-# # Models each subscription login offers. Optional — each has a built-in
-# # list, which may lag a vendor release. One string pins a single model; a
-# # list is what the route picker's second step offers, first entry default.
-# claude-oauth = ["claude-opus-5", "claude-sonnet-4-6"]
+# # Models each subscription login offers in the route picker. Optional:
+# # without it, the models come from the same curated list that backs
+# # smith's `/model` completion, so the two never disagree. Set this only to
+# # narrow the choice or to use a model newer than that list.
+# # One string pins a single model; a list becomes the picker's second step,
+# # first entry the default.
+# claude-oauth = ["opus", "sonnet"]
 # codex-oauth  = ["gpt-5.6-sol", "gpt-5.5"]
 # grok-oauth   = "grok-4.5"
 "#;

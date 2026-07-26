@@ -81,22 +81,23 @@ impl OauthProvider {
     /// A default that lags a vendor release produces a clean API error
     /// naming the model, which is recoverable; requiring configuration for
     /// a login the machine already has is friction for everyone.
-    pub fn default_model(self) -> &'static str {
-        self.seed_models().first().copied().unwrap_or("")
+    pub fn default_model(self) -> String {
+        self.seed_models().first().cloned().unwrap_or_default()
     }
 
     /// Models offered for this login before any are configured.
     ///
-    /// Every name here was observed in a real request or response during
-    /// probing, not recalled — but a vendor release will still outdate the
-    /// list, so `[router.oauth]` overrides it and the picker's second step
-    /// exists to make the choice visible.
-    pub fn seed_models(self) -> &'static [&'static str] {
-        match self {
-            OauthProvider::Claude => &["claude-opus-5", "claude-sonnet-4-6"],
-            OauthProvider::Codex => &["gpt-5.6-sol", "gpt-5.5"],
-            OauthProvider::Grok => &["grok-4.5"],
-        }
+    /// Taken from the one curated list that already backs smith's `/model`
+    /// completion, rather than a second list here. The provider vocabulary
+    /// is the same on both sides — a route target is named after the same
+    /// billing/auth path a model spec selects — so a private copy would
+    /// only create somewhere for the two to disagree.
+    ///
+    /// This matters beyond tidiness: the Claude subscription path takes
+    /// short aliases (`sonnet`, `opus`) rather than full model ids, which a
+    /// hand-written list is unlikely to get right.
+    pub fn seed_models(self) -> Vec<String> {
+        construct_protocol::slash::models_for_provider(self.name())
     }
 
     /// Which CLI to use to renew the login, for the unavailable message.
@@ -426,6 +427,29 @@ mod tests {
             assert!(!p.default_model().is_empty(), "{}", p.name());
             assert!(!p.name().is_empty());
         }
+    }
+
+    /// The seed list must come from the shared completion catalog, so the
+    /// router and smith cannot disagree about what a provider offers.
+    #[test]
+    fn seed_models_come_from_the_shared_catalog() {
+        for p in OauthProvider::ALL {
+            let seeds = p.seed_models();
+            assert!(!seeds.is_empty(), "{} has no models listed", p.name());
+            for model in &seeds {
+                let spec = format!("{}:{model}", p.name());
+                assert!(
+                    construct_protocol::slash::MODEL_COMPLETIONS.contains(&spec.as_str()),
+                    "{spec} is not in the shared catalog"
+                );
+            }
+        }
+        // The subscription path's short aliases are exactly what a
+        // hand-written list would have got wrong.
+        assert!(OauthProvider::Claude
+            .seed_models()
+            .iter()
+            .any(|m| m == "sonnet"));
     }
 
     /// Antigravity is excluded on purpose: no Gemini dialect exists, so a

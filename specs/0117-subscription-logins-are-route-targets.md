@@ -73,10 +73,14 @@ failure than a corrupted credential store.
 - Because credentials are read at arm time, a route armed with a valid
   token can still fail later in the session. That failure surfaces as an
   upstream error, not as a corrupted turn.
-- Default models are built in per provider so that zero configuration
-  works. A default that lags a vendor release produces a clean error naming
-  the model; that is accepted in exchange for not demanding configuration
-  for a login the machine already has.
+- The models a target offers come from the single curated catalog the rest
+  of the product already uses for model selection, never a list private to
+  routing. The provider vocabulary is shared, so a second list would only
+  create somewhere for the two to disagree — and the details a private list
+  gets wrong are exactly the ones that matter, such as a subscription path
+  that takes short aliases rather than full model ids. Configuration
+  overrides the catalog for narrowing the choice or naming a model newer
+  than it.
 - Adding a login means establishing its endpoint, dialect, auth scheme,
   required headers and required prompt text — the same evidentiary standard
   as adding a routable harness. None of it may be guessed.
