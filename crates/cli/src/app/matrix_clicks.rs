@@ -1,10 +1,57 @@
 use super::{
-    list_session_indent_cells, App, ListItem, MatrixWidgetHitKind, MinibufferChoiceAction,
-    MinibufferIntent, PaneFocus, SESSION_LIST_H_MIN,
+    harness_picker_entries, list_session_indent_cells, App, ListItem, MatrixWidgetHitKind,
+    MinibufferChoiceAction, MinibufferIntent, PaneFocus, SESSION_LIST_H_MIN,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 impl App {
+    pub(super) fn scroll_harness_picker(&mut self, ev: &MouseEvent) -> bool {
+        let direction = match ev.kind {
+            MouseEventKind::ScrollUp => -1,
+            MouseEventKind::ScrollDown => 1,
+            _ => return false,
+        };
+        let Some(area) = self.layout.minibuffer_area else {
+            return false;
+        };
+        if ev.column < area.x
+            || ev.column >= area.right()
+            || ev.row < area.y
+            || ev.row >= area.bottom()
+        {
+            return false;
+        }
+        let Some(mb) = self.minibuffer.as_ref() else {
+            return false;
+        };
+        let is_fork = match &mb.intent {
+            MinibufferIntent::NewSessionHarness => false,
+            MinibufferIntent::ForkSessionHarness { .. } => true,
+            _ => return false,
+        };
+        let entries = harness_picker_entries(
+            &self.harnesses,
+            is_fork,
+            &mb.input,
+            self.harness_picker_filter_active,
+        );
+        if entries.is_empty() {
+            return true;
+        }
+
+        let selected = self.harness_picker_selected.min(entries.len() - 1);
+        self.harness_picker_selected = if direction < 0 {
+            if selected == 0 {
+                entries.len() - 1
+            } else {
+                selected - 1
+            }
+        } else {
+            (selected + 1) % entries.len()
+        };
+        true
+    }
+
     pub(super) fn is_on_matrix_rain_title_bar(&self, col: u16, row: u16) -> bool {
         if self.matrix_rain_hidden {
             return false;

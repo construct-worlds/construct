@@ -8736,6 +8736,12 @@ impl App {
                 _ => return,
             }
         }
+        // The harness completion menu is painted above the underlying panes,
+        // so vertical wheel events within its bounds navigate its highlight
+        // instead of scrolling the obscured surface below.
+        if self.scroll_harness_picker(&ev) {
+            return;
+        }
         // An in-progress inline title rename commits on any click outside its
         // own name field — clicking away applies, like blurring an edited
         // text field (`Esc` remains the cancel path). This must run before
@@ -31811,6 +31817,66 @@ mod tests {
         assert_eq!(minibuffer.input, "codex");
         assert_eq!(minibuffer.cursor, "codex".len());
         assert!(!app.harness_picker_filter_active);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn harness_picker_mouse_wheel_moves_and_wraps_the_highlight() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.harnesses = vec![
+            construct_protocol::HarnessInfo {
+                name: "shell".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("Generic shell command runner".to_string()),
+                capabilities: Default::default(),
+            },
+            construct_protocol::HarnessInfo {
+                name: "codex".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("OpenAI Codex".to_string()),
+                capabilities: Default::default(),
+            },
+        ];
+        app.run_action(KeyAction::OpenNewSession).await;
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw picker");
+        let area = app.layout.minibuffer_area.expect("picker area");
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        app.on_mouse(wheel(MouseEventKind::ScrollDown)).await;
+        assert_eq!(app.harness_picker_selected, 1);
+        app.on_mouse(wheel(MouseEventKind::ScrollUp)).await;
+        assert_eq!(app.harness_picker_selected, 0);
+        app.on_mouse(wheel(MouseEventKind::ScrollUp)).await;
+        assert_eq!(
+            app.harness_picker_selected, 2,
+            "wheel navigation wraps from project to the last harness"
+        );
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: area.right(),
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        assert_eq!(
+            app.harness_picker_selected, 2,
+            "wheel events outside the picker keep their existing routing"
+        );
         server.abort();
     }
 

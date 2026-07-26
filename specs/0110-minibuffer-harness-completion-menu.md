@@ -15,9 +15,10 @@ entries while preserving registration order within each group. The synthetic
 
 Typing filters rows case-insensitively by name or description. Up and Down move
 the highlighted row, with Control-P and Control-N as equivalent previous/next
-bindings. Enter chooses it, Tab completes its name into the input, and Esc
-cancels. Rows remain clickable. The menu shows a bounded number of rows and
-scrolls to keep the keyboard highlight visible.
+bindings. Scrolling the mouse wheel over the picker moves the highlight with
+the same wrapping behavior. Enter chooses it, Tab completes its name into the
+input, and Esc cancels. Rows remain clickable. The menu shows a bounded number
+of rows and scrolls to keep the current highlight visible.
 
 Unavailable harnesses remain discoverable but cannot be selected. Highlighting
 one replaces its description with the daemon's availability detail, and
