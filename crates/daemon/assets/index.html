@@ -757,7 +757,13 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 6px;
+    /* Fixed height, not content height. The focused pane carries a control
+       the others don't (the session-menu pill), and letting that size the
+       bar would make focusing a pane nudge its title and everything below
+       it — a visible jump every time focus moves. */
+    height: 26px;
+    box-sizing: border-box;
+    padding: 0 6px;
     background: var(--bg-elev);
     border-bottom: 1px solid var(--border-faint);
     color: var(--fg-dim);
@@ -772,20 +778,90 @@
     white-space: nowrap;
   }
   .pane.is-focused .pane-head { color: var(--fg); }
+  /* Every head control shares one box, so none of them can size the bar. */
   .pane-head button {
     flex: 0 0 auto;
     appearance: none;
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    box-sizing: border-box;
     border: 0;
     border-radius: 5px;
-    padding: 2px 6px;
+    padding: 0 6px;
     background: transparent;
     color: var(--fg-faint);
     font: inherit;
     font-size: 11px;
-    line-height: 1.2;
+    line-height: 1;
     cursor: pointer;
   }
   .pane-head button:hover { background: var(--bg-elev-2); color: var(--fg); }
+  /* Hover tooltip. The native `title` popup takes about a second to appear
+     and can't be styled, which is too slow for icon-only controls whose
+     meaning isn't guessable. `aria-label` carries the same text for
+     assistive tech, so the visual tip is pure affordance. */
+  .has-tip { position: relative; }
+  .has-tip::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 70;
+    padding: 3px 7px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elev);
+    color: var(--fg);
+    font-size: 11px;
+    line-height: 1.3;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(-2px);
+    transition: opacity 90ms ease, transform 90ms ease;
+  }
+  .has-tip:hover::after,
+  .has-tip:focus-visible::after { opacity: 1; transform: translateY(0); }
+  @media (prefers-reduced-motion: reduce) {
+    .has-tip::after { transition: none; }
+  }
+  /* Touch has no hover state, and a tip that sticks after a tap reads as a
+     stuck popup. */
+  @media (hover: none) {
+    .has-tip::after { display: none; }
+  }
+  /* The menu pill, once it lives in a pane head, is a head control like the
+     split buttons rather than a floating overlay. */
+  .pane-head .session-menu-overlay {
+    position: static;
+    flex: 0 0 auto;
+    top: auto;
+    right: auto;
+    pointer-events: auto;
+  }
+  .pane-head .session-menu-overlay button {
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    box-sizing: border-box;
+    padding: 0 7px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--fg-faint);
+    box-shadow: none;
+    font-size: 11px;
+    line-height: 1;
+  }
+  .pane-head .session-menu-overlay button:hover,
+  .pane-head .session-menu-overlay button[aria-expanded="true"] {
+    background: var(--bg-elev-2);
+    color: var(--fg);
+  }
+  /* The dropdown anchors to the pane body, which starts just under the
+     head, so a small offset puts it beneath the pill. */
+  .pane .session-menu { top: 6px; right: 4px; }
   .pane-body {
     position: relative;
     flex: 1 1 0;
@@ -2785,8 +2861,10 @@
       views the shared layout but never edits it.
     -->
     <div class="split-controls" id="splitControls" hidden>
-      <button type="button" id="splitRightBtn" title="Split right">▥</button>
-      <button type="button" id="splitBelowBtn" title="Split below">▤</button>
+      <button type="button" id="splitRightBtn" class="has-tip"
+              data-tip="split horizontal" aria-label="split horizontal">▥</button>
+      <button type="button" id="splitBelowBtn" class="has-tip"
+              data-tip="split vertical" aria-label="split vertical">▤</button>
     </div>
     <div class="view-mode-toggle" id="viewModeToggle" hidden
          role="group" aria-label="session view mode">
@@ -2951,10 +3029,13 @@
         <button type="button" id="widgetsTrigger" aria-label="toggle widgets" hidden>widgets</button>
       </div>
       <!--
-        Session menu — the web peer of the TUI's session-title menu
-        (top-right of the session view). Holds the lifecycle actions
-        that used to sit in the list toolbar. The split-pane entries
-        of the TUI menu are omitted: the web UI has no split panes.
+        Session menu — the web peer of the TUI's session-title menu. It
+        floats over the view's top-right corner normally; once a pane title
+        bar exists (split layout) it is moved INTO that bar's right end, the
+        way the TUI hangs its menu off the pane title.
+
+        The split entries mirror the TUI's set, including "close split" —
+        which is why the title bar carries no separate × of its own.
       -->
       <div class="session-menu-overlay" id="sessionMenuOverlay" hidden>
         <button type="button" id="sessionMenuBtn" aria-haspopup="menu"
@@ -2964,6 +3045,12 @@
         <button type="button" role="menuitem" data-menu-action="rename">rename</button>
         <button type="button" role="menuitem" data-menu-action="pin" id="sessionMenuPinItem">pin</button>
         <button type="button" role="menuitem" data-menu-action="fork">fork conversation</button>
+        <button type="button" role="menuitem" data-menu-action="split-horizontal"
+                id="sessionMenuSplitHBtn">split horizontal</button>
+        <button type="button" role="menuitem" data-menu-action="split-vertical"
+                id="sessionMenuSplitVBtn">split vertical</button>
+        <button type="button" role="menuitem" data-menu-action="close-split"
+                id="sessionMenuCloseSplitBtn">close split</button>
         <button type="button" role="menuitem" data-menu-action="restart">restart</button>
         <button type="button" role="menuitem" data-menu-action="archive" id="sessionMenuArchiveItem">archive</button>
         <button type="button" role="menuitem" data-menu-action="merge">merge and archive</button>
@@ -4880,7 +4967,11 @@ function refreshSessionActions() {
   // The menu pill overlays the view's top-right corner; the program
   // view's own bar (Find/Run/Save) occupies that spot, so hide it there.
   const overlay = $("sessionMenuOverlay");
-  if (overlay) overlay.hidden = !sel || state.mode === "program";
+  // In program mode the view's own bar (Find/Run/Save) occupies the
+  // top-right corner the floating pill would cover. Inside a pane head the
+  // pill has its own slot and collides with nothing, so it stays.
+  const inPaneHead = !!overlay && overlay.parentElement !== sessionMenuHomeEl;
+  if (overlay) overlay.hidden = !sel || (state.mode === "program" && !inPaneHead);
   if (overlay && overlay.hidden) closeSessionMenu();
   const menu = $("sessionMenu");
   if (menu) {
@@ -4888,6 +4979,13 @@ function refreshSessionActions() {
       rename: isUserSession,
       pin: isUserSession,
       fork: isUserSession && !archived,
+      // Splitting needs a viewport that can render panes; closing needs a
+      // split to close. Below the threshold both are shown but disabled, so
+      // the menu keeps a stable shape rather than shifting under the cursor
+      // between viewports.
+      "split-horizontal": splitLayoutAvailable(),
+      "split-vertical": splitLayoutAvailable(),
+      "close-split": splitLayoutActive(),
       restart: !!sel && terminal && !archived,
       archive: isUserSession,
       merge: !!(sel && sel.forked_from),
@@ -9530,6 +9628,10 @@ window.addEventListener("resize", () => {
 const SPLIT_MIN_WIDTH = 1100;
 const paneGridEl = $("paneGrid");
 const viewStackEl = $("viewStack");
+const sessionMenuOverlayEl = $("sessionMenuOverlay");
+// Where the menu pill lives when there is no pane title bar to hang it off:
+// floating over the view's top-right corner, as it did before splits.
+const sessionMenuHomeEl = sessionMenuOverlayEl.parentElement;
 
 function layoutLeaves(node, out = []) {
   if (!node) return out;
@@ -9744,11 +9846,31 @@ function focusPane(paneId, { selectSessionToo = true } = {}) {
  * Cheap to call: the expensive things (xterm instances, transcript panes) are
  * cached per session and only re-parented here, never recreated.
  */
+function paneHeadButton(glyph, tip, onClick) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "has-tip";
+  btn.dataset.tip = tip;
+  btn.setAttribute("aria-label", tip);
+  btn.textContent = glyph;
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    onClick();
+  });
+  return btn;
+}
+
 function renderPaneGrid() {
   if (!splitLayoutActive()) {
     // Single-session mode — the pre-split layout, verbatim. Any mirrored
     // terminal hosts go home so the normal show/hide logic owns them again.
     releaseMirrors();
+    // The pill was parented into a pane head; with no head to live in it
+    // goes back to floating over the view.
+    if (sessionMenuOverlayEl.parentElement !== sessionMenuHomeEl) {
+      sessionMenuHomeEl.appendChild(sessionMenuOverlayEl);
+      closeSessionMenu();
+    }
     if (paneGridEl.firstChild) paneGridEl.replaceChildren();
     paneGridEl.hidden = true;
     const view = document.querySelector(".view");
@@ -9757,6 +9879,7 @@ function renderPaneGrid() {
   }
 
   releaseMirrors();
+  closeSessionMenu();
   paneGridEl.hidden = false;
   const focusedId = state.focusedPaneId;
 
@@ -9795,33 +9918,20 @@ function renderPaneGrid() {
         : "empty pane";
     head.appendChild(title);
 
-    const splitRight = document.createElement("button");
-    splitRight.type = "button";
-    splitRight.title = "Split right";
-    splitRight.textContent = "▥";
-    splitRight.addEventListener("click", (ev) => {
-      ev.stopPropagation();
+    // Naming follows the TUI's menu: "horizontal" puts the panes side by
+    // side, "vertical" stacks them.
+    const splitH = paneHeadButton("▥", "split horizontal", () => {
       focusPane(leaf.id);
       splitFocusedPane("right");
     });
-    const splitBelow = document.createElement("button");
-    splitBelow.type = "button";
-    splitBelow.title = "Split below";
-    splitBelow.textContent = "▤";
-    splitBelow.addEventListener("click", (ev) => {
-      ev.stopPropagation();
+    const splitV = paneHeadButton("▤", "split vertical", () => {
       focusPane(leaf.id);
       splitFocusedPane("below");
     });
-    const close = document.createElement("button");
-    close.type = "button";
-    close.title = "Close pane";
-    close.textContent = "×";
-    close.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      closePane(leaf.id);
-    });
-    head.append(splitRight, splitBelow, close);
+    head.append(splitH, splitV);
+    // No × here: closing a pane lives in the session menu ("close split"),
+    // which hangs off the right end of this same bar.
+    if (leaf.id === focusedId) head.appendChild(sessionMenuOverlayEl);
     pane.appendChild(head);
 
     const body = document.createElement("div");
@@ -13092,8 +13202,14 @@ $("sessionMenuBtn").addEventListener("click", (ev) => {
 $("sessionMenu").addEventListener("click", (ev) => {
   const btn = ev.target.closest("[data-menu-action]");
   if (!btn || btn.disabled) return;
+  const action = btn.dataset.menuAction;
   closeSessionMenu();
-  handleRowAction(btn.dataset.menuAction, state.currentId);
+  // Split actions act on the layout, not on the session, so they don't go
+  // through the session-action path.
+  if (action === "split-horizontal") return splitFocusedPane("right");
+  if (action === "split-vertical") return splitFocusedPane("below");
+  if (action === "close-split") return closePane(state.focusedPaneId);
+  handleRowAction(action, state.currentId);
 });
 
 document.addEventListener("click", (ev) => {

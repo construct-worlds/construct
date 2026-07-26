@@ -122,16 +122,175 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         "panes must show session titles once the list loads, not raw ids"
     );
 
-    // Every pane offers its own split/close controls, and nothing from the
-    // interactive stack overlaps them.
-    let head_buttons: f64 = eval_number(
+    // The title bar carries the two split buttons, each with a hover tooltip
+    // (icon-only controls whose meaning isn't guessable), and NO close × —
+    // closing a pane lives in the session menu as "close split".
+    let split_tips: String = page
+        .evaluate(
+            "JSON.stringify(Array.from(
+               document.querySelectorAll('#paneGrid .pane.is-focused .pane-head button[data-tip]')
+             ).map((b) => b.dataset.tip))",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    assert!(
+        split_tips.contains("split horizontal") && split_tips.contains("split vertical"),
+        "both split buttons need hover tooltips, got {split_tips}"
+    );
+
+    let close_x: f64 = eval_number(
         &page,
-        "document.querySelectorAll('#paneGrid .pane.is-focused .pane-head button').length",
+        "Array.from(document.querySelectorAll('#paneGrid .pane-head button'))
+           .filter((b) => b.textContent.trim() === '×').length",
     )
     .await;
     assert_eq!(
-        head_buttons, 3.0,
-        "the focused pane keeps its split-right / split-below / close controls"
+        close_x, 0.0,
+        "the title bar carries no × — 'close split' in the session menu replaces it"
+    );
+
+    // Focus must not move anything. The focused pane carries an extra
+    // control (the menu pill) that the others don't, so its title bar has to
+    // be sized independently of what it contains — otherwise focusing a pane
+    // nudges its title bar and every pixel below it.
+    let head_geometry: String = page
+        .evaluate(
+            "JSON.stringify(Array.from(document.querySelectorAll('#paneGrid .pane-head'))
+               .map((h) => {
+                 const r = h.getBoundingClientRect();
+                 return [Math.round(r.height), Math.round(r.top)];
+               }))",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    let heads: Vec<(i64, i64)> = serde_json::from_str(&head_geometry).unwrap_or_default();
+    assert!(heads.len() >= 2, "expected two title bars, got {head_geometry}");
+    assert_eq!(
+        heads[0].0, heads[1].0,
+        "title bars must be the same height focused or not — got {head_geometry}"
+    );
+    assert_eq!(
+        heads[0].1, heads[1].1,
+        "title bars must sit at the same y — got {head_geometry}"
+    );
+
+    // ...and switching focus between panes must not move any of it. This is
+    // the whole-geometry version of the check above: focus changes which
+    // pane is highlighted and which one holds the interactive stack, and
+    // neither may shift the grid.
+    let geometry_js = "JSON.stringify(Array.from(document.querySelectorAll('#paneGrid .pane'))
+         .map((p) => {
+           const r = p.getBoundingClientRect();
+           const h = p.querySelector('.pane-head').getBoundingClientRect();
+           return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height),
+                   Math.round(h.top), Math.round(h.height)];
+         }))";
+    let before_focus: String = page
+        .evaluate(geometry_js)
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+
+    page.evaluate(
+        "(() => {
+           const panes = document.querySelectorAll('#paneGrid .pane');
+           const other = Array.from(panes).find((p) => !p.classList.contains('is-focused'));
+           other.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+           return true;
+         })()",
+    )
+    .await
+    .ok();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let after_focus: String = page
+        .evaluate(geometry_js)
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    assert_eq!(
+        before_focus, after_focus,
+        "changing pane focus must not move the panes or their title bars"
+    );
+
+    // The menu pill moves into the title bar's right end, the way the TUI
+    // hangs its menu off the pane title.
+    let menu_in_head: bool = eval_bool(
+        &page,
+        "!!document.querySelector('#paneGrid .pane.is-focused .pane-head #sessionMenuOverlay')",
+    )
+    .await;
+    assert!(
+        menu_in_head,
+        "the session menu pill belongs in the pane title bar once one exists"
+    );
+
+    // ...and that menu is what now offers the split/close actions.
+    let menu_actions: String = page
+        .evaluate(
+            "JSON.stringify(Array.from(
+               document.querySelectorAll('#sessionMenu [data-menu-action]')
+             ).map((b) => b.dataset.menuAction))",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    for action in ["split-horizontal", "split-vertical", "close-split"] {
+        assert!(
+            menu_actions.contains(action),
+            "session menu must offer {action}, got {menu_actions}"
+        );
+    }
+
+    // Closing a split through the menu really collapses the layout, and the
+    // collapse is published like any other layout edit.
+    let before_close = d.client.layout().await.expect("layout").version;
+    page.evaluate(
+        "(() => { document.querySelector('#sessionMenu [data-menu-action=\"close-split\"]').click(); return true; })()",
+    )
+    .await
+    .ok();
+    let collapsed_ok = wait_for_bool(
+        &page,
+        "document.getElementById('paneGrid').hidden || document.querySelectorAll('#paneGrid .pane').length === 1",
+    )
+    .await;
+    assert!(collapsed_ok, "\"close split\" must close the focused pane");
+    let after_close = d.client.layout().await.expect("layout");
+    assert!(
+        after_close.version > before_close,
+        "closing a pane is a layout edit and must be published to other clients"
+    );
+
+    // Put the split back for the narrow-viewport checks below.
+    let restore = LayoutNode::Split {
+        direction: LayoutSplitDirection::Right,
+        ratio_percent: 60,
+        first: Box::new(LayoutNode::Leaf {
+            id: 1,
+            session_id: Some(a.clone()),
+        }),
+        second: Box::new(LayoutNode::Leaf {
+            id: 2,
+            session_id: Some(b.clone()),
+        }),
+    };
+    d.client
+        .set_layout(restore, Some(after_close.version))
+        .await
+        .expect("restore split");
+    assert!(
+        wait_for_number(&page, "document.querySelectorAll('#paneGrid .pane').length", 2.0)
+            .await
+            .is_some(),
+        "the restored split reaches the browser"
     );
 
     let focused: f64 = eval_number(&page, "document.querySelectorAll('#paneGrid .pane.is-focused').length").await;
@@ -147,7 +306,9 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
     );
 
     // Leave a reviewable artifact of the split actually rendering, the way
-    // `web_smoke` leaves a video.
+    // `web_smoke` leaves a video. Park the pointer over a split button first
+    // so the capture shows the hover tooltip rather than a bare glyph.
+    hover_split_button(&page).await;
     save_screenshot(&page, "split_layout_wide.png").await;
 
     // --- narrow: one session, no panes, and NO write back -----------------
@@ -212,6 +373,74 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+/// Move the real pointer over the focused pane's first split button. CSS
+/// `:hover` only responds to genuine input events, so this has to go through
+/// CDP rather than a synthetic DOM event.
+async fn hover_split_button(page: &Page) {
+    use chromiumoxide::layout::Point;
+    let rect: String = page
+        .evaluate(
+            "(() => {
+               const b = document.querySelector('#paneGrid .pane.is-focused .pane-head button[data-tip]');
+               if (!b) return '';
+               const r = b.getBoundingClientRect();
+               return JSON.stringify([r.left + r.width / 2, r.top + r.height / 2]);
+             })()",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    let Ok(xy) = serde_json::from_str::<(f64, f64)>(&rect) else {
+        return;
+    };
+    // Two moves: Chrome only re-runs hit-testing when the pointer actually
+    // changes position, so a single move into a fresh page can land before
+    // layout settles and never raise :hover.
+    let _ = page.move_mouse(Point::new(xy.0 - 40.0, xy.1 + 40.0)).await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let _ = page.move_mouse(Point::new(xy.0, xy.1)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Hovering does apply — the button takes its hover background — but the
+    // tooltip itself cannot be asserted here. Headless Chrome has no
+    // pointing device, so it reports `hover: none`, and the tooltip's own
+    // touch guard (`@media (hover: none)`) correctly suppresses it. Neither
+    // `Emulation.setEmulatedMedia` nor Blink's hover-type switches move that
+    // media query in this headless build.
+    //
+    // So what is checked here is what headless can honestly prove: the
+    // tooltip's content resolves from `data-tip`, and the hover rule that
+    // reveals it exists. Its appearance on a real desktop pointer is left to
+    // manual review.
+    let wired: bool = page
+        .evaluate(
+            "(() => {
+               const b = document.querySelector('#paneGrid .pane.is-focused .pane-head button[data-tip]');
+               if (!b) return false;
+               const tip = getComputedStyle(b, '::after');
+               if (!tip.content.includes('split')) return false;
+               // The `:hover` rule must exist, or the tip could never appear
+               // on a pointer device either.
+               return Array.from(document.styleSheets).some((sheet) => {
+                 let rules;
+                 try { rules = sheet.cssRules; } catch (_) { return false; }
+                 return Array.from(rules || []).some(
+                   (r) => r.selectorText && r.selectorText.includes('.has-tip:hover::after')
+                 );
+               });
+             })()",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<bool>().ok())
+        .unwrap_or(false);
+    assert!(
+        wired,
+        "the tooltip must resolve its text from data-tip and have a :hover reveal rule"
+    );
+}
 
 async fn save_screenshot(page: &Page, name: &str) {
     use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, CaptureScreenshotParams};
