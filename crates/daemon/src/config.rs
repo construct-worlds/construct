@@ -37,14 +37,14 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 #
 # Built-in adapters registered automatically (no config required):
 #   shell       — generic shell command runner
-#   claude      — Claude Code (wraps the `claude` CLI)
-#   codex       — OpenAI Codex (wraps the `codex` CLI)
-#   opencode    — OpenCode (wraps the `opencode` CLI)
-#   antigravity — Google Antigravity (wraps the `agy` CLI)
-#   grok        — Grok CLI (wraps the `grok` CLI)
-#   kimi        — Kimi Code (wraps the `kimi` CLI)
-#   hermes      — Hermes Agent (wraps the `hermes` CLI)
-#   pi          — pi coding agent (wraps the `pi` CLI)
+#   claude      — Claude Code
+#   codex       — OpenAI Codex
+#   opencode    — OpenCode
+#   antigravity — Google Antigravity
+#   grok        — Grok CLI
+#   kimi        — Kimi Code
+#   hermes      — Hermes Agent
+#   pi          — pi coding agent
 #   smith       — native multi-provider agent (OpenAI / Anthropic / Gemini / Meta / Ollama / Grok)
 
 # [adapters.shell]
@@ -55,27 +55,27 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # [adapters.claude]
 # binary      = "construct"
 # args        = ["__adapter", "claude"]
-# description = "Claude Code (wraps the `claude` CLI)"
+# description = "Claude Code"
 
 # [adapters.codex]
 # binary      = "construct"
 # args        = ["__adapter", "codex"]
-# description = "OpenAI Codex (wraps the `codex` CLI)"
+# description = "OpenAI Codex"
 
 # [adapters.opencode]
 # binary      = "construct"
 # args        = ["__adapter", "opencode"]
-# description = "OpenCode (wraps the `opencode` CLI)"
+# description = "OpenCode"
 
 # [adapters.agy]
 # binary      = "construct"
 # args        = ["__adapter", "agy"]
-# description = "Google Antigravity (wraps the `agy` CLI)"
+# description = "Google Antigravity"
 
 # [adapters.grok]
 # binary      = "construct"
 # args        = ["__adapter", "grok"]
-# description = "Grok CLI (wraps the `grok` CLI)"
+# description = "Grok CLI"
 
 # [adapters.smith]
 # binary      = "construct"
@@ -544,49 +544,49 @@ pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
         name: "claude",
         binary: "construct",
         args: &["__adapter", "claude"],
-        description: "Claude Code (wraps the `claude` CLI)",
+        description: "Claude Code",
     },
     BuiltinAdapter {
         name: "codex",
         binary: "construct",
         args: &["__adapter", "codex"],
-        description: "OpenAI Codex (wraps the `codex` CLI)",
+        description: "OpenAI Codex",
     },
     BuiltinAdapter {
         name: "opencode",
         binary: "construct",
         args: &["__adapter", "opencode"],
-        description: "OpenCode (wraps the `opencode` CLI)",
+        description: "OpenCode",
     },
     BuiltinAdapter {
         name: "agy",
         binary: "construct",
         args: &["__adapter", "agy"],
-        description: "Google Antigravity (wraps the `agy` CLI)",
+        description: "Google Antigravity",
     },
     BuiltinAdapter {
         name: "grok",
         binary: "construct",
         args: &["__adapter", "grok"],
-        description: "Grok CLI (wraps the `grok` CLI)",
+        description: "Grok CLI",
     },
     BuiltinAdapter {
         name: "kimi",
         binary: "construct",
         args: &["__adapter", "kimi"],
-        description: "Kimi Code (wraps the `kimi` CLI)",
+        description: "Kimi Code",
     },
     BuiltinAdapter {
         name: "hermes",
         binary: "construct",
         args: &["__adapter", "hermes"],
-        description: "Hermes Agent (wraps the `hermes` CLI)",
+        description: "Hermes Agent",
     },
     BuiltinAdapter {
         name: "pi",
         binary: "construct",
         args: &["__adapter", "pi"],
-        description: "pi coding agent (wraps the `pi` CLI)",
+        description: "pi coding agent",
     },
     BuiltinAdapter {
         name: "smith",
@@ -796,6 +796,14 @@ mod tests {
             smith.env.get("CONSTRUCT_SMITH_MODEL").map(String::as_str),
             Some("codex-oauth:gpt-5.5"),
         );
+    }
+
+    #[test]
+    fn builtin_harness_descriptions_omit_wrapper_implementation_details() {
+        assert!(BUILTIN_ADAPTERS
+            .iter()
+            .all(|adapter| !adapter.description.contains("wraps the")));
+        assert!(!CONFIG_TOML_TEMPLATE.contains("wraps the"));
     }
 
     /// `[program].templates_dir` parses out of TOML.
