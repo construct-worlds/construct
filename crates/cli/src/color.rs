@@ -29,19 +29,6 @@ pub enum ColorDepth {
     Ansi16,
 }
 
-impl ColorDepth {
-    /// Modeline label, spelled out rather than abbreviated: it appears without
-    /// any surrounding explanation, so "256 colors" has to answer "what is
-    /// this?" on its own. `None` when nothing was downgraded.
-    pub fn label(self) -> Option<&'static str> {
-        match self {
-            Self::TrueColor => None,
-            Self::Ansi256 => Some("256 colors"),
-            Self::Ansi16 => Some("16 colors"),
-        }
-    }
-}
-
 /// Environment variable that overrides detection outright, for terminals that
 /// misreport (a truecolor terminal behind an old `screen`, say) and for tests.
 pub const COLOR_ENV: &str = "CONSTRUCT_COLOR";
@@ -158,21 +145,34 @@ const LIGHTNESS_WEIGHT: f32 = 2.0;
 /// profile, so a palette slot mapped onto one would drift with the profile
 /// instead of staying put.
 fn nearest_indexed(r: u8, g: u8, b: u8) -> u8 {
-    let hued = is_hued((r, g, b));
-    let mut best = (f32::MAX, 16u8);
-    for idx in 16u8..=255 {
-        let candidate = indexed_rgb(idx);
-        // A hued color must never come back gray: losing the hue loses what
-        // the palette was using the color to say.
-        if hued && is_gray(candidate) {
+    best_candidate((r, g, b), indexed_candidates(), |_| true).unwrap_or(16)
+}
+
+/// Every candidate the 256-color depth may answer with, as `(index, rgb)`.
+fn indexed_candidates() -> impl Iterator<Item = (u8, (u8, u8, u8))> {
+    (16u8..=255).map(|idx| (idx, indexed_rgb(idx)))
+}
+
+/// The candidate with the lowest [`perceptual_cost`], among those `accept`
+/// allows. A hued source never accepts a gray: losing the hue loses what the
+/// palette was using the color to say.
+fn best_candidate<T>(
+    src: (u8, u8, u8),
+    candidates: impl Iterator<Item = (T, (u8, u8, u8))>,
+    accept: impl Fn((u8, u8, u8)) -> bool,
+) -> Option<T> {
+    let hued = is_hued(src);
+    let mut best: Option<(f32, T)> = None;
+    for (item, rgb) in candidates {
+        if (hued && is_gray(rgb)) || !accept(rgb) {
             continue;
         }
-        let cost = perceptual_cost((r, g, b), candidate);
-        if cost < best.0 {
-            best = (cost, idx);
+        let cost = perceptual_cost(src, rgb);
+        if best.as_ref().is_none_or(|(best_cost, _)| cost < *best_cost) {
+            best = Some((cost, item));
         }
     }
-    best.1
+    best.map(|(_, item)| item)
 }
 
 /// Nearest of the 16 basic colors, returned as ratatui's named variants — which
@@ -181,35 +181,34 @@ fn nearest_indexed(r: u8, g: u8, b: u8) -> u8 {
 /// profile that redefines them shifts the rendered hue, which is exactly the
 /// bargain at this depth.
 fn nearest_basic(r: u8, g: u8, b: u8) -> Color {
-    const BASIC: [(Color, (u8, u8, u8)); 16] = [
-        (Color::Black, (0, 0, 0)),
-        (Color::Red, (170, 0, 0)),
-        (Color::Green, (0, 170, 0)),
-        (Color::Yellow, (170, 85, 0)),
-        (Color::Blue, (0, 0, 170)),
-        (Color::Magenta, (170, 0, 170)),
-        (Color::Cyan, (0, 170, 170)),
-        (Color::Gray, (170, 170, 170)),
-        (Color::DarkGray, (85, 85, 85)),
-        (Color::LightRed, (255, 85, 85)),
-        (Color::LightGreen, (85, 255, 85)),
-        (Color::LightYellow, (255, 255, 85)),
-        (Color::LightBlue, (85, 85, 255)),
-        (Color::LightMagenta, (255, 85, 255)),
-        (Color::LightCyan, (85, 255, 255)),
-        (Color::White, (255, 255, 255)),
-    ];
-    let hued = is_hued((r, g, b));
-    BASIC
-        .iter()
-        .filter(|(_, rgb)| !(hued && is_gray(*rgb)))
-        .min_by(|(_, a), (_, b2)| {
-            perceptual_cost((r, g, b), *a)
-                .partial_cmp(&perceptual_cost((r, g, b), *b2))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(color, _)| *color)
-        .unwrap_or(Color::Reset)
+    best_candidate((r, g, b), basic_candidates(), |_| true).unwrap_or(Color::Reset)
+}
+
+/// The 16 basic colors as candidates, paired with the conventional RGB of each.
+fn basic_candidates() -> impl Iterator<Item = (Color, (u8, u8, u8))> {
+    (0u8..16).map(|idx| (basic_color(idx), indexed_rgb(idx)))
+}
+
+/// The ratatui named color for one of the low 16 indices.
+fn basic_color(idx: u8) -> Color {
+    match idx {
+        0 => Color::Black,
+        1 => Color::Red,
+        2 => Color::Green,
+        3 => Color::Yellow,
+        4 => Color::Blue,
+        5 => Color::Magenta,
+        6 => Color::Cyan,
+        7 => Color::Gray,
+        8 => Color::DarkGray,
+        9 => Color::LightRed,
+        10 => Color::LightGreen,
+        11 => Color::LightYellow,
+        12 => Color::LightBlue,
+        13 => Color::LightMagenta,
+        14 => Color::LightCyan,
+        _ => Color::White,
+    }
 }
 
 /// How wrong `candidate` is as a stand-in for `src`, as lightness error plus
@@ -227,6 +226,31 @@ fn perceptual_cost(src: (u8, u8, u8), candidate: (u8, u8, u8)) -> f32 {
     let (cr, cg, cb) = chroma_vector(candidate);
     let d_chroma = (sr - cr).powi(2) + (sg - cg).powi(2) + (sb - cb).powi(2);
     LIGHTNESS_WEIGHT * d_light.powi(2) + d_chroma
+}
+
+/// How closely two colors have to point the same way out of neutral to count
+/// as the same hue, as a cosine: about 18 degrees. Used only when repairing a
+/// collision, where the whole point is to move a slot in lightness while
+/// leaving its hue alone.
+const SAME_HUE_ALIGNMENT: f32 = 0.95;
+
+/// Cosine of the angle between two colors' chroma vectors — 1.0 for the same
+/// hue. A neutral has no hue to compare, so it aligns with nothing but another
+/// neutral.
+fn hue_alignment(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
+    let (av, bv) = (chroma_vector(a), chroma_vector(b));
+    let (a_mag, b_mag) = (
+        (av.0 * av.0 + av.1 * av.1 + av.2 * av.2).sqrt(),
+        (bv.0 * bv.0 + bv.1 * bv.1 + bv.2 * bv.2).sqrt(),
+    );
+    if a_mag < f32::EPSILON || b_mag < f32::EPSILON {
+        return if a_mag < f32::EPSILON && b_mag < f32::EPSILON {
+            1.0
+        } else {
+            -1.0
+        };
+    }
+    ((av.0 * bv.0 + av.1 * bv.1 + av.2 * bv.2) / (a_mag * b_mag)).clamp(-1.0, 1.0)
 }
 
 /// Perceived lightness, Rec. 601 weights.
@@ -329,6 +353,120 @@ impl Quantizer {
             other => quantize(other, depth),
         }
     }
+
+    /// Pull apart palette slots that the theme draws directly against each
+    /// other but that quantization has collapsed onto one entry.
+    ///
+    /// Quantizing colors one at a time cannot prevent this: two colors the
+    /// theme keeps distinct may simply have no two entries near them, and each
+    /// lookup is individually correct. Contrast, though, is a property of a
+    /// *pair* — so pairs that matter are named by the theme and repaired here,
+    /// by moving the lighter slot further from the darker one. Everything else
+    /// is left to collapse where the palette has nothing better; a flattened
+    /// gradient is cosmetic, whereas a fill that merges into what it is drawn
+    /// on top of reads as missing.
+    pub fn keep_apart(&mut self, pairs: &[(Color, Color)]) {
+        if self.depth == ColorDepth::TrueColor {
+            return;
+        }
+        for (first, second) in pairs {
+            let (Color::Rgb(..), Color::Rgb(..)) = (first, second) else {
+                continue;
+            };
+            if self.map(*first) != self.map(*second) {
+                continue;
+            }
+            let (Some(first_rgb), Some(second_rgb)) = (rgb_of(*first), rgb_of(*second)) else {
+                continue;
+            };
+            // Move whichever slot is already the lighter one further up, so the
+            // pair keeps the lightness order the theme gave it. When the
+            // palette has nothing lighter, push the darker slot down instead.
+            let (lighter, darker) = if luma(first_rgb) >= luma(second_rgb) {
+                (first_rgb, second_rgb)
+            } else {
+                (second_rgb, first_rgb)
+            };
+            let Some(collision) = rgb_of(self.map(Color::Rgb(lighter.0, lighter.1, lighter.2)))
+            else {
+                continue;
+            };
+            if let Some(moved) = self.nearest_beyond(lighter, luma(collision), Side::Lighter) {
+                self.cache.insert(lighter, moved);
+            } else if let Some(moved) = self.nearest_beyond(darker, luma(collision), Side::Darker) {
+                self.cache.insert(darker, moved);
+            }
+        }
+    }
+
+    /// The best replacement for `src` among candidates strictly beyond
+    /// `boundary` in lightness, on the given side.
+    ///
+    /// Tried twice: first among entries of the same hue, so a repaired slot
+    /// still reads as the color the theme asked for, then among anything
+    /// distinguishable. The second pass matters at 16 colors, which frequently
+    /// has no second entry of a given hue — there, a track that turns cyan
+    /// still does its job, and an invisible one doesn't.
+    fn nearest_beyond(&self, src: (u8, u8, u8), boundary: f32, side: Side) -> Option<Color> {
+        self.search_beyond(src, boundary, side, SAME_HUE_ALIGNMENT)
+            .or_else(|| self.search_beyond(src, boundary, side, -1.0))
+    }
+
+    fn search_beyond(
+        &self,
+        src: (u8, u8, u8),
+        boundary: f32,
+        side: Side,
+        min_alignment: f32,
+    ) -> Option<Color> {
+        let accept = |rgb: (u8, u8, u8)| {
+            let beyond = match side {
+                Side::Lighter => luma(rgb) > boundary,
+                Side::Darker => luma(rgb) < boundary,
+            };
+            beyond && hue_alignment(src, rgb) >= min_alignment
+        };
+        match self.depth {
+            ColorDepth::TrueColor => None,
+            ColorDepth::Ansi256 => {
+                best_candidate(src, indexed_candidates(), accept).map(Color::Indexed)
+            }
+            ColorDepth::Ansi16 => best_candidate(src, basic_candidates(), accept),
+        }
+    }
+}
+
+/// Which way to move a slot that collided with another.
+#[derive(Clone, Copy)]
+enum Side {
+    Lighter,
+    Darker,
+}
+
+/// The RGB a color stands for, for the palette entries we ourselves emit.
+/// `Reset` and the terminal-owned named colors have no fixed RGB.
+fn rgb_of(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Indexed(idx) => Some(indexed_rgb(idx)),
+        Color::Black => Some(indexed_rgb(0)),
+        Color::Red => Some(indexed_rgb(1)),
+        Color::Green => Some(indexed_rgb(2)),
+        Color::Yellow => Some(indexed_rgb(3)),
+        Color::Blue => Some(indexed_rgb(4)),
+        Color::Magenta => Some(indexed_rgb(5)),
+        Color::Cyan => Some(indexed_rgb(6)),
+        Color::Gray => Some(indexed_rgb(7)),
+        Color::DarkGray => Some(indexed_rgb(8)),
+        Color::LightRed => Some(indexed_rgb(9)),
+        Color::LightGreen => Some(indexed_rgb(10)),
+        Color::LightYellow => Some(indexed_rgb(11)),
+        Color::LightBlue => Some(indexed_rgb(12)),
+        Color::LightMagenta => Some(indexed_rgb(13)),
+        Color::LightCyan => Some(indexed_rgb(14)),
+        Color::White => Some(indexed_rgb(15)),
+        Color::Reset => None,
+    }
 }
 
 /// A [`ratatui::backend::Backend`] that quantizes every cell color on its way
@@ -347,6 +485,8 @@ pub struct QuantizingBackend<W: std::io::Write> {
     /// per-cell vector on every draw.
     scratch: Vec<(u16, u16, ratatui::buffer::Cell)>,
     quantizer: Quantizer,
+    /// Theme revision the current contrast repairs were computed for.
+    palette_revision: Option<u64>,
 }
 
 impl<W: std::io::Write> QuantizingBackend<W> {
@@ -356,7 +496,23 @@ impl<W: std::io::Write> QuantizingBackend<W> {
             depth,
             scratch: Vec::new(),
             quantizer: Quantizer::new(depth),
+            palette_revision: None,
         }
+    }
+}
+
+impl<W: std::io::Write> QuantizingBackend<W> {
+    /// Recompute contrast repairs if the palette has changed since the last
+    /// call. `pairs` is only consulted when the revision actually moved, so the
+    /// steady-state cost is one integer comparison per frame.
+    pub fn sync_palette(&mut self, revision: u64, pairs: impl FnOnce() -> Vec<(Color, Color)>) {
+        if self.depth == ColorDepth::TrueColor || self.palette_revision == Some(revision) {
+            return;
+        }
+        self.palette_revision = Some(revision);
+        // A new palette invalidates every earlier answer, repaired or not.
+        self.quantizer = Quantizer::new(self.depth);
+        self.quantizer.keep_apart(&pairs());
     }
 }
 
@@ -707,6 +863,86 @@ mod tests {
         assert_eq!(narrow.map(dark_green), Color::Green);
         assert_ne!(wide_answer, Color::Green);
         assert_eq!(wide.map(dark_green), wide_answer);
+    }
+
+    /// Reported against #960: on the matrix theme at 256 colors the context
+    /// gauge lost the background on its *remaining* stretch. `modeline_bg`
+    /// (a very dark green) and `dim` (a mid green) both quantized to index 22,
+    /// so the gauge's track became the same color as the bar it sits on.
+    #[test]
+    fn the_context_gauge_keeps_a_visible_track_over_the_modeline() {
+        let theme = crate::theme::Theme::dark();
+        // Individually, the two slots really do collapse together — no
+        // per-color rule can prevent that, which is why the pair is repaired.
+        assert_eq!(
+            quantize(theme.modeline_bg, ColorDepth::Ansi256),
+            quantize(theme.dim, ColorDepth::Ansi256),
+        );
+
+        let mut q = Quantizer::new(ColorDepth::Ansi256);
+        q.keep_apart(&theme.contrast_pairs());
+        let bar = q.map(theme.modeline_bg);
+        let track = q.map(theme.dim);
+        let filled = q.map(theme.modeline_fg);
+        assert_ne!(bar, track, "the gauge's track merged into the bar");
+        assert_ne!(filled, track);
+        assert_ne!(filled, bar);
+        // The repair keeps the theme's lightness order: the track is the
+        // lighter of the two, before and after.
+        let (bar_rgb, track_rgb) = (rgb_of(bar).unwrap(), rgb_of(track).unwrap());
+        assert!(
+            luma(track_rgb) > luma(bar_rgb),
+            "track {track_rgb:?} is not lighter than bar {bar_rgb:?}"
+        );
+        // ...and it stays a green rather than being shoved onto some other hue.
+        assert!(track_rgb.1 > track_rgb.0 && track_rgb.1 > track_rgb.2);
+    }
+
+    #[test]
+    fn every_shipped_theme_keeps_its_contrast_pairs_apart() {
+        let themes = [
+            ("matrix dark", crate::theme::Theme::dark()),
+            ("matrix light", crate::theme::Theme::light()),
+            ("basic dark", crate::theme::Theme::basic_dark()),
+            ("basic light", crate::theme::Theme::basic_light()),
+            ("dark_ui", crate::theme::Theme::dark_ui()),
+            ("light_ui", crate::theme::Theme::light_ui()),
+        ];
+        for depth in [ColorDepth::Ansi256, ColorDepth::Ansi16] {
+            for (name, theme) in &themes {
+                let pairs = theme.contrast_pairs();
+                let mut q = Quantizer::new(depth);
+                q.keep_apart(&pairs);
+                for (first, second) in &pairs {
+                    assert_ne!(
+                        q.map(*first),
+                        q.map(*second),
+                        "{name} at {depth:?}: {first:?} and {second:?} collapsed together"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keeping_pairs_apart_is_a_no_op_without_a_collision() {
+        let theme = crate::theme::Theme::dark();
+        let mut plain = Quantizer::new(ColorDepth::Ansi256);
+        let mut repaired = Quantizer::new(ColorDepth::Ansi256);
+        repaired.keep_apart(&theme.contrast_pairs());
+        // Slots outside a repaired pair answer exactly as before.
+        for color in [theme.accent, theme.danger, theme.warning, theme.success] {
+            assert_eq!(plain.map(color), repaired.map(color), "{color:?}");
+        }
+    }
+
+    #[test]
+    fn a_truecolor_terminal_is_never_repaired() {
+        let theme = crate::theme::Theme::dark();
+        let mut q = Quantizer::new(ColorDepth::TrueColor);
+        q.keep_apart(&theme.contrast_pairs());
+        assert_eq!(q.map(theme.dim), theme.dim);
+        assert_eq!(q.map(theme.modeline_bg), theme.modeline_bg);
     }
 
     #[test]

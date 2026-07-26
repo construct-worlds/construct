@@ -36,11 +36,14 @@ grayscale ramp), and the 16 basic SGR colors.
   color-direction error, not as raw channel distance.
 - **Colors the user pinned to a specific index stay at that index** when the
   depth can express it.
-- **A downgrade is visible in the modeline**, as its own notice next to the
-  theme, spelled out rather than abbreviated — it appears with no surrounding
-  explanation, so it has to answer "what is this?" on its own. It is kept out of
-  the theme notice because that one cycles the theme when clicked, and clicking
-  cannot change what the terminal supports.
+- **Slot pairs the theme draws against each other stay distinguishable.** The
+  theme names those pairs; quantization repairs any that collapse onto one
+  entry, by moving the lighter slot further from the darker one — same hue where
+  the palette has one, and keeping the lightness order the theme gave them.
+  Everything else may collapse.
+- **A downgrade is not announced in the UI.** It is recorded in the startup log
+  and documented, but the status bar stays about the session, not the terminal's
+  capabilities.
 
 ## Reason
 
@@ -68,6 +71,15 @@ has little chroma but a lot relative to its brightness, and a pale tint has the
 opposite. Neither is about its hue — one is a dark gray, the other an off-white
 — so both are left free to use the fine grayscale ramp.
 
+Pair contrast has to be handled as a relationship, not a property of one color.
+Quantizing colors one at a time cannot preserve it: two slots the theme keeps
+distinct may have no two entries near them, so each lookup is individually
+correct and the pair still merges. That is how a status bar and the usage gauge
+drawn on top of it became one flat color — the gauge looked like it had lost its
+track, which reads as a bug, while the same collapse inside a decorative
+gradient reads as nothing at all. Hence: repair the pairs whose contrast carries
+meaning, and let the rest collapse.
+
 Quantizing at the backend rather than in the palette is what makes the rule
 total. A frame carries three sources of color: the theme, colors computed
 during rendering (fades, blends, gauges), and colors that child harnesses wrote
@@ -88,8 +100,12 @@ before the terminal sees all three.
   palettes have no dark desaturated hues to offer. A theme that wants a barely
   there tint must accept that it reads more strongly at reduced depth.
 - Detection is heuristic and will occasionally be wrong. That is acceptable
-  only because the forced override exists and the modeline shows what was
-  chosen.
+  only because the forced override exists, and because the resolved depth is
+  logged at startup for anyone diagnosing it.
+- Repairing a pair moves a whole slot, not one use of it: a slot nudged to keep
+  a gauge readable renders slightly differently everywhere else it appears. Keep
+  the declared pairs to contrasts a user actually reads, or the palette drifts
+  to protect nothing.
 - The terminal-background probe (light/dark detection) and the background color
   we report to child sessions stay in true RGB: they describe intent, and
   quantization is a rendering concern.
@@ -118,3 +134,6 @@ before the terminal sees all three.
 - A very dark green status-bar fill on a 256-color terminal: a green, brighter
   than authored, rather than the numerically-closer dark gray that would make
   the bar look absent.
+- The usage gauge's unfilled track, whose color quantizes onto the same entry as
+  the status bar beneath it: moved to the next lighter green, so the track is
+  still visible as a track.
