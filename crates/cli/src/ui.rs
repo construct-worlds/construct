@@ -8907,11 +8907,17 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             None => "-".into(),
         },
     );
+    // Computed once, before any layout field is written: `s` borrows from
+    // `app`, and writing a layout field ends that borrow.
+    let model_text: String = match s {
+        Some(s) => {
+            modeline_model_route_text(s.model.as_deref(), s.effort.as_deref(), s.route.as_ref())
+        }
+        None => "-".into(),
+    };
     // The model indicator's own cells, so a click can open the route
     // picker there (spec 0114).
-    if let Some(s) = s {
-        let model_text =
-            modeline_model_route_text(s.model.as_deref(), s.effort.as_deref(), s.route.as_ref());
+    if s.is_some() {
         let model_w = UnicodeWidthStr::width(model_text.as_str()) as u16;
         let start_col = area.x.saturating_add(
             UnicodeWidthStr::width(modeline_before_context_gauge.as_str()) as u16,
@@ -9032,7 +9038,29 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     let mut hint_col = area
         .x
         .saturating_add(UnicodeWidthStr::width(modeline_before_approval_mode.as_str()) as u16);
-    spans.push(Span::raw(modeline_before_context_gauge));
+    // The model indicator is clickable (it opens the route picker), so it
+    // says so on hover. Everything else on this row is inert text, and a
+    // control that looks identical to inert text is one nobody finds.
+    let model_hovered = app
+        .mouse_pos
+        .zip(app.layout.modeline_model_hit)
+        .is_some_and(|((col, row), hit)| hit.contains(col, row));
+    match modeline_before_context_gauge
+        .strip_suffix(&model_text)
+        .filter(|_| model_hovered)
+    {
+        Some(prefix) => {
+            spans.push(Span::raw(prefix.to_string()));
+            spans.push(Span::styled(
+                model_text,
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::UNDERLINED)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        None => spans.push(Span::raw(modeline_before_context_gauge)),
+    }
     if let Some((gauge, filled_cells)) = context_gauge {
         let hovered = app
             .mouse_pos

@@ -15913,6 +15913,53 @@ mod tests {
         );
     }
 
+
+    /// The model indicator opens the route picker, so hovering it must look
+    /// different from the inert text around it — a control that renders
+    /// identically to plain text is one nobody discovers.
+    #[tokio::test]
+    async fn hovering_the_model_indicator_highlights_it() {
+        let (client, _dir, _server) = route_mock_daemon(vec![], None).await;
+        let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
+        summary.harness = "claude".into();
+        summary.model = Some("claude-opus-5".into());
+        summary.route_capable = true;
+        let mut app = test_app(client, vec![summary]);
+        app.select_session("s1".into());
+
+        fn model_cell_style(app: &mut App) -> ratatui::style::Style {
+            let backend = ratatui::backend::TestBackend::new(120, 30);
+            let mut term = ratatui::Terminal::new(backend).expect("terminal");
+            term.draw(|f| crate::ui::render(f, app)).expect("draw");
+            let hit = app.layout.modeline_model_hit.expect("clickable");
+            let buf = term.backend().buffer().clone();
+            buf[(hit.start_col, hit.row)].style()
+        }
+
+        // Establish the hit region, then park the cursor off it.
+        app.mouse_pos = None;
+        let cold = model_cell_style(&mut app);
+
+        let hit = app.layout.modeline_model_hit.expect("clickable");
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        let hot = model_cell_style(&mut app);
+        assert_ne!(cold, hot, "hovering must change how the model renders");
+        assert!(
+            hot.add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED),
+            "underline is the affordance: {hot:?}"
+        );
+
+        // A cell just outside the region stays inert, so the highlight
+        // marks the control rather than the whole row.
+        app.mouse_pos = Some((hit.start_col.saturating_sub(2), hit.row));
+        assert_eq!(
+            model_cell_style(&mut app),
+            cold,
+            "hovering beside the indicator must not highlight it"
+        );
+    }
+
     /// The modeline shows the substitution, not just its result.
     #[tokio::test]
     async fn modeline_shows_the_routed_substitution() {
