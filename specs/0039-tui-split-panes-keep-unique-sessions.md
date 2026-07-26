@@ -19,6 +19,13 @@ Swapping preserves all visible context instead of discarding one pane's prior se
 
 ## Consequences
 
+Since the layout became shared daemon state
+([0113-split-layout-is-shared-daemon-state](0113-split-layout-is-shared-daemon-state.md)),
+this rule applies to every client that renders panes, not just the TUI — a
+session selected into a pane in one client swaps the same way it would in
+another. Clients that show a single session (narrow viewports) are outside the
+rule entirely, because they do not assign sessions to panes at all.
+
 Selection paths that target a session from the list, switch-session picker, or other shared selection flows should maintain the same swap behavior. A pane that receives the swapped-in prior selection should reset view-local scrollback because it is now showing different content.
 
 Future UI affordances that intentionally duplicate a session into another split should be explicit and separate from normal session selection.

@@ -649,7 +649,7 @@ pub enum WindowSplitDirection {
     Right,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MainWindowTree {
     Leaf {
         id: u64,
@@ -668,6 +668,108 @@ impl MainWindowTree {
         Self::Leaf { id, selection }
     }
 
+    /// Project onto the wire shape shared with every other client.
+    ///
+    /// A pane's `Selection` is richer than a shared pane needs to be — it can
+    /// name a group header or an archived-row disclosure, neither of which
+    /// means anything to a client that doesn't have this TUI's session list.
+    /// Those project to an empty pane; `merge_shared` below is what keeps the
+    /// local nuance from being destroyed by the round trip.
+    pub fn to_shared(&self) -> construct_protocol::LayoutNode {
+        match self {
+            Self::Leaf { id, selection } => construct_protocol::LayoutNode::Leaf {
+                id: *id,
+                session_id: selection.session_id().map(str::to_string),
+            },
+            Self::Split {
+                direction,
+                ratio_percent,
+                first,
+                second,
+            } => construct_protocol::LayoutNode::Split {
+                direction: match direction {
+                    WindowSplitDirection::Below => construct_protocol::LayoutSplitDirection::Below,
+                    WindowSplitDirection::Right => construct_protocol::LayoutSplitDirection::Right,
+                },
+                ratio_percent: *ratio_percent,
+                first: Box::new(first.to_shared()),
+                second: Box::new(second.to_shared()),
+            },
+        }
+    }
+
+    /// Build a local tree from the shared one. Panes with no session become
+    /// `Selection::None` — an empty pane, which the view already renders as
+    /// its own empty state.
+    pub fn from_shared(node: &construct_protocol::LayoutNode) -> Self {
+        match node {
+            construct_protocol::LayoutNode::Leaf { id, session_id } => Self::Leaf {
+                id: *id,
+                selection: session_id
+                    .as_ref()
+                    .map(|s| Selection::Session(s.clone()))
+                    .unwrap_or(Selection::None),
+            },
+            construct_protocol::LayoutNode::Split {
+                direction,
+                ratio_percent,
+                first,
+                second,
+            } => Self::Split {
+                direction: match direction {
+                    construct_protocol::LayoutSplitDirection::Below => WindowSplitDirection::Below,
+                    construct_protocol::LayoutSplitDirection::Right => WindowSplitDirection::Right,
+                },
+                ratio_percent: *ratio_percent,
+                first: Box::new(Self::from_shared(first)),
+                second: Box::new(Self::from_shared(second)),
+            },
+        }
+    }
+
+    /// Adopt the shared tree while preserving selections the wire can't carry.
+    ///
+    /// The shared tree is authoritative for *shape* — splits, ratios, which
+    /// session each pane shows. But a pane the local user has parked on a
+    /// group header serializes as empty, and blindly adopting that would
+    /// clear the header selection every time any client touched the layout.
+    /// So an incoming empty pane keeps a local non-session selection if the
+    /// leaf id still exists locally; an incoming session always wins.
+    pub fn merge_shared(&self, incoming: &construct_protocol::LayoutNode) -> Self {
+        match incoming {
+            construct_protocol::LayoutNode::Leaf { id, session_id } => {
+                let selection = match session_id {
+                    Some(s) => Selection::Session(s.clone()),
+                    None => match self.find_selection(*id) {
+                        // Only a non-session selection is worth preserving:
+                        // an empty pane that used to show a session means the
+                        // session was cleared, and that must be honored.
+                        Some(local) if local.session_id().is_none() => local.clone(),
+                        _ => Selection::None,
+                    },
+                };
+                Self::Leaf {
+                    id: *id,
+                    selection,
+                }
+            }
+            construct_protocol::LayoutNode::Split {
+                direction,
+                ratio_percent,
+                first,
+                second,
+            } => Self::Split {
+                direction: match direction {
+                    construct_protocol::LayoutSplitDirection::Below => WindowSplitDirection::Below,
+                    construct_protocol::LayoutSplitDirection::Right => WindowSplitDirection::Right,
+                },
+                ratio_percent: *ratio_percent,
+                first: Box::new(self.merge_shared(first)),
+                second: Box::new(self.merge_shared(second)),
+            },
+        }
+    }
+
     fn max_id(&self) -> u64 {
         match self {
             Self::Leaf { id, .. } => *id,
@@ -680,6 +782,23 @@ impl MainWindowTree {
             Self::Leaf { id, .. } => Some(*id),
             Self::Split { first, .. } => first.first_leaf_id(),
         }
+    }
+
+    /// Every pane id, in layout order. Used to garbage-collect per-pane local
+    /// state after the shared tree changes underneath us.
+    pub fn leaf_ids(&self) -> Vec<u64> {
+        fn walk(node: &MainWindowTree, out: &mut Vec<u64>) {
+            match node {
+                MainWindowTree::Leaf { id, .. } => out.push(*id),
+                MainWindowTree::Split { first, second, .. } => {
+                    walk(first, out);
+                    walk(second, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut out);
+        out
     }
 
     fn find_selection(&self, target: u64) -> Option<&Selection> {
@@ -1296,6 +1415,14 @@ pub struct App {
     pub main_windows: MainWindowTree,
     pub active_window_id: u64,
     pub next_window_id: u64,
+    /// Version of the shared layout this TUI last saw, for optimistic
+    /// concurrency on `layout.set`. Shared with the fire-and-forget push
+    /// tasks so a successful write updates it without routing back through
+    /// the event loop.
+    pub layout_version: Arc<std::sync::atomic::AtomicU64>,
+    /// Queue into the single task that writes the shared layout. See
+    /// [`App::push_layout`] for why writes are serialized.
+    pub layout_push_tx: mpsc::UnboundedSender<construct_protocol::LayoutNode>,
     pub children_collapsed: HashSet<String>,
     pub transcript: Vec<TimestampedEvent>,
     pub transcript_session: Option<String>,
@@ -4369,11 +4496,30 @@ async fn run_with_socket_initial_selection(
                 .map(|s| Selection::Session(s.id.clone()))
         })
         .unwrap_or(Selection::None);
-    let mut initial_main_windows = persisted
-        .main_windows
-        .clone()
-        .map(|tree| prune_window_tree(tree, &sessions, &groups, &initial_sel))
-        .unwrap_or_else(|| MainWindowTree::single(1, initial_sel.clone()));
+    // The split layout is shared daemon state, so a split made in the web UI
+    // or another TUI is already on screen when this one starts. The locally
+    // persisted tree is only a migration path: it seeds the shared layout
+    // once, for a TUI upgrading from before splits were shared.
+    //
+    // The shared tree is deliberately NOT run through `prune_window_tree`.
+    // The daemon prunes it, and it prunes by *emptying* a dead pane; running
+    // the local pruner here would refill those panes with the fallback
+    // session and then push that back up, undoing the daemon's work.
+    let shared_layout = client.layout().await.ok();
+    let initial_layout_version = shared_layout.as_ref().map(|d| d.version).unwrap_or(0);
+    let mut seed_shared_layout = false;
+    let mut initial_main_windows = match shared_layout.as_ref() {
+        Some(doc) if doc.tree.leaf_count() > 1 || !doc.tree.session_ids().is_empty() => {
+            MainWindowTree::from_shared(&doc.tree)
+        }
+        _ => match persisted.main_windows.clone() {
+            Some(tree) => {
+                seed_shared_layout = true;
+                prune_window_tree(tree, &sessions, &groups, &initial_sel)
+            }
+            None => MainWindowTree::single(1, initial_sel.clone()),
+        },
+    };
     let mut initial_active_window_id = persisted
         .active_window_id
         .filter(|id| initial_main_windows.find_selection(*id).is_some())
@@ -4390,6 +4536,33 @@ async fn run_with_socket_initial_selection(
             .cloned()
             .unwrap_or_else(|| initial_sel.clone())
     };
+
+    // Single writer for the shared layout. Serializing the writes is what
+    // makes optimistic concurrency safe here: each one is composed against
+    // the version the previous one produced, so a burst of edits can't
+    // conflict with itself.
+    let layout_version = Arc::new(std::sync::atomic::AtomicU64::new(initial_layout_version));
+    let (layout_push_tx, mut layout_push_rx) =
+        mpsc::unbounded_channel::<construct_protocol::LayoutNode>();
+    {
+        let client = client.clone();
+        let version = layout_version.clone();
+        tokio::spawn(async move {
+            while let Some(tree) = layout_push_rx.recv().await {
+                let base = version.load(std::sync::atomic::Ordering::SeqCst);
+                match client.set_layout(tree, Some(base)).await {
+                    Ok(doc) => version.store(doc.version, std::sync::atomic::Ordering::SeqCst),
+                    Err(e) => {
+                        // Another client wrote first. Their broadcast is
+                        // already on its way to us; re-pushing over it would
+                        // start a write war, so we lose this round on
+                        // purpose and adopt what they sent.
+                        tracing::debug!(error = %e, "layout push rejected");
+                    }
+                }
+            }
+        });
+    }
 
     let now = Instant::now();
     let socket = client.socket_path().to_path_buf();
@@ -4415,6 +4588,8 @@ async fn run_with_socket_initial_selection(
         // is one `C-x o` / `Tab` away.
         focus: initial_focus,
         next_window_id: initial_main_windows.max_id().saturating_add(1),
+        layout_version,
+        layout_push_tx,
         active_window_id: initial_active_window_id,
         main_windows: initial_main_windows,
         children_collapsed: initial_children_collapsed,
@@ -4647,6 +4822,12 @@ async fn run_with_socket_initial_selection(
     }
 
     app.maybe_auto_open_configure_popup().await;
+    // One-time migration: this TUI had panes from before the layout was
+    // shared, and the daemon has none. Publish ours so the upgrade doesn't
+    // silently drop the user's splits.
+    if seed_shared_layout {
+        app.push_layout();
+    }
 
     // Terminal setup.
     enable_raw_mode().context("enable raw mode")?;
@@ -6407,6 +6588,63 @@ impl App {
         });
     }
 
+    /// Push the local window tree to the daemon so every other client shows
+    /// the same panes. Fire-and-forget: layout is presentation state, and a
+    /// failed push is not worth interrupting the user for — the next
+    /// mutation re-pushes, and `layout_version` only advances on success, so
+    /// a dropped write leaves us correctly stale rather than falsely current.
+    ///
+    /// Deliberately *not* called on every selection change while a pane is
+    /// merely being browsed with arrow keys — see `sync_active_window_selection`.
+    fn push_layout(&self) {
+        // Queued rather than spawned: two pushes racing would both be
+        // composed against the same base version, the daemon would reject
+        // the second, and that edit would be silently lost. Holding down an
+        // arrow key is enough to trigger it. The drain task applies them one
+        // at a time, so each push sees the version the previous one produced.
+        let _ = self.layout_push_tx.send(self.main_windows.to_shared());
+    }
+
+    /// Adopt a layout broadcast from another client (or from the daemon
+    /// pruning a deleted session's pane).
+    ///
+    /// Focus is *not* part of the shared state: `active_window_id` is what
+    /// decides where this user's keystrokes go, and letting a remote layout
+    /// move it would redirect typing into another session mid-sentence. If
+    /// the focused pane no longer exists we fall back to the first pane in
+    /// layout order rather than following the writer's focus.
+    pub(crate) fn apply_shared_layout(&mut self, doc: &construct_protocol::LayoutDocument) {
+        self.layout_version
+            .store(doc.version, std::sync::atomic::Ordering::SeqCst);
+        let merged = self.main_windows.merge_shared(&doc.tree);
+        if merged == self.main_windows {
+            return;
+        }
+        self.main_windows = merged;
+        self.next_window_id = self.main_windows.max_id().saturating_add(1);
+        if self.selection_for_window(self.active_window_id).is_none() {
+            self.active_window_id = self.main_windows.first_leaf_id().unwrap_or(1);
+        }
+        // The focused pane may now be showing a different session than the
+        // list selection thinks, so re-derive it rather than leaving the two
+        // out of step.
+        if let Some(sel) = self.selection_for_window(self.active_window_id) {
+            self.selection = sel;
+        }
+        self.prune_window_state();
+    }
+
+    /// Drop per-pane local state (scrollback, view mode, sizes) for panes
+    /// that no longer exist. Without this a long-lived TUI accumulates
+    /// entries for every pane any client ever created.
+    fn prune_window_state(&mut self) {
+        let live: std::collections::HashSet<u64> =
+            self.main_windows.leaf_ids().into_iter().collect();
+        self.window_scrollback.retain(|id, _| live.contains(id));
+        self.window_views.retain(|id, _| live.contains(id));
+        self.window_pane_sizes.retain(|id, _| live.contains(id));
+    }
+
     /// Tell the daemon we've switched to (and thus consumed) a session, so it
     /// clears that session's `needs_attention` marker and records it as the
     /// focused session. Fire-and-forget.
@@ -7552,7 +7790,10 @@ impl App {
                 }
             }
         }
-        self.main_windows.set_selection(active_id, replacement);
+        let changed = self.main_windows.set_selection(active_id, replacement);
+        if changed {
+            self.push_layout();
+        }
     }
 
     pub(crate) fn selection_for_window(&self, target: u64) -> Option<Selection> {
@@ -7824,6 +8065,7 @@ impl App {
                 }
                 .into(),
             );
+            self.push_layout();
         }
     }
 
@@ -7858,6 +8100,8 @@ impl App {
                 self.focus_main_window(id);
             }
             self.set_status("window deleted".into());
+            self.prune_window_state();
+            self.push_layout();
         }
     }
 
@@ -7867,6 +8111,8 @@ impl App {
         self.main_windows = MainWindowTree::single(self.active_window_id, selection);
         self.set_status("only current window".into());
         self.report_focused_sessions();
+        self.prune_window_state();
+        self.push_layout();
     }
 
     fn set_split_ratio_by_order(&mut self, target_parent: u64, ratio: u16) -> bool {
@@ -7892,7 +8138,11 @@ impl App {
             }
         }
         let mut next = 1;
-        set(&mut self.main_windows, target_parent, &mut next, ratio)
+        let changed = set(&mut self.main_windows, target_parent, &mut next, ratio);
+        if changed {
+            self.push_layout();
+        }
+        changed
     }
 
     fn resize_active_window(&mut self, delta: i16, direction: WindowSplitDirection) {
@@ -7933,6 +8183,7 @@ impl App {
             direction,
         ) {
             self.set_status("window resized".into());
+            self.push_layout();
         }
     }
 
@@ -8628,6 +8879,16 @@ impl App {
                     >(p)
                     {
                         self.on_group_deleted(&payload.project_id).await;
+                    }
+                }
+            }
+            m if m == construct_protocol::ipc_notif::LAYOUT_STATE => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        construct_protocol::LayoutStateNotificationPayload,
+                    >(p)
+                    {
+                        self.apply_shared_layout(&payload.layout);
                     }
                 }
             }
@@ -14402,6 +14663,76 @@ mod tests {
     /// `pub(super)` (rather than private) so `app::session_picker`'s own
     /// test module can build a real `App` for tests that exercise dialog
     /// methods without needing a full mock-daemon round trip.
+    #[test]
+    fn shared_round_trip_preserves_shape_ratios_and_sessions() {
+        let tree = MainWindowTree::Split {
+            direction: WindowSplitDirection::Below,
+            ratio_percent: 30,
+            first: Box::new(MainWindowTree::single(1, Selection::Session("a".into()))),
+            second: Box::new(MainWindowTree::single(2, Selection::Session("b".into()))),
+        };
+        let back = MainWindowTree::from_shared(&tree.to_shared());
+        assert_eq!(back, tree);
+    }
+
+    #[test]
+    fn a_group_selection_projects_as_an_empty_pane() {
+        // The wire has no notion of a group header, so it must not pretend to.
+        let tree = MainWindowTree::single(1, Selection::Group("g1".into()));
+        match tree.to_shared() {
+            construct_protocol::LayoutNode::Leaf { session_id, .. } => {
+                assert_eq!(session_id, None);
+            }
+            other => panic!("expected a leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merging_keeps_a_local_group_selection_an_incoming_empty_pane_cannot_carry() {
+        // Another client touching the layout must not clear the header this
+        // user has parked on — the wire simply can't express it.
+        let local = MainWindowTree::single(1, Selection::Group("g1".into()));
+        let incoming = local.to_shared();
+        let merged = local.merge_shared(&incoming);
+        assert_eq!(merged, local);
+    }
+
+    #[test]
+    fn merging_honors_a_pane_that_was_genuinely_emptied() {
+        // A pane that *was* showing a session and now shows none means the
+        // session went away (deleted, or moved elsewhere) — that must win
+        // over the local copy, or a deleted session would linger on screen.
+        let local = MainWindowTree::single(1, Selection::Session("gone".into()));
+        let incoming = construct_protocol::LayoutNode::Leaf {
+            id: 1,
+            session_id: None,
+        };
+        assert_eq!(
+            local.merge_shared(&incoming),
+            MainWindowTree::single(1, Selection::None)
+        );
+    }
+
+    #[test]
+    fn merging_adopts_an_incoming_split_made_by_another_client() {
+        let local = MainWindowTree::single(1, Selection::Session("a".into()));
+        let incoming = construct_protocol::LayoutNode::Split {
+            direction: construct_protocol::LayoutSplitDirection::Right,
+            ratio_percent: 40,
+            first: Box::new(construct_protocol::LayoutNode::Leaf {
+                id: 1,
+                session_id: Some("a".into()),
+            }),
+            second: Box::new(construct_protocol::LayoutNode::Leaf {
+                id: 2,
+                session_id: Some("b".into()),
+            }),
+        };
+        let merged = local.merge_shared(&incoming);
+        assert_eq!(merged.leaf_ids(), vec![1, 2]);
+        assert_eq!(merged.visible_session_ids(), vec!["a", "b"]);
+    }
+
     pub(super) fn test_app(client: Arc<Client>, sessions: Vec<SessionSummary>) -> App {
         let now = Instant::now();
         let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
@@ -14415,6 +14746,10 @@ mod tests {
             main_windows: MainWindowTree::single(1, Selection::Session("s1".into())),
             active_window_id: 1,
             next_window_id: 2,
+            layout_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // Tests don't run the drain task; pushes land in a dropped
+            // receiver and are harmlessly discarded.
+            layout_push_tx: mpsc::unbounded_channel().0,
             children_collapsed: HashSet::new(),
             transcript: Vec::new(),
             transcript_session: None,

@@ -1160,6 +1160,20 @@ pub mod ipc_method {
     /// view. Used by the `construct ask-gate` hook to decide whether to degrade
     /// `AskUserQuestion` to a plain-text question.
     pub const SESSION_CHAT_VIEWER_ACTIVE: &str = "session.chat_viewer_active";
+    /// Read the shared split layout: the window tree every client renders
+    /// its panes from, plus the version to pass back to [`LAYOUT_SET`].
+    pub const LAYOUT_GET: &str = "layout.get";
+    /// Replace the shared split layout wholesale. `base_version` makes the
+    /// write last-writer-wins against a known state: a stale base is
+    /// rejected rather than silently clobbering a concurrent edit. There is
+    /// no merge semantics for a split tree — an edit is always a whole-tree
+    /// replace.
+    ///
+    /// Only clients wide enough to *render* the layout may call this. A
+    /// client that has clamped the tree down to a single pane for its
+    /// viewport must never write its clamped view back, or opening the web
+    /// UI on a phone would collapse the layout on every other client.
+    pub const LAYOUT_SET: &str = "layout.set";
     pub const SUBSCRIBE_EVENTS: &str = "subscribe.events";
     pub const UNSUBSCRIBE_EVENTS: &str = "unsubscribe.events";
     /// Bind the remote WS listener (idempotent) and return a URL + QR
@@ -1225,6 +1239,10 @@ pub mod ipc_notif {
     pub const GROUP_DELETED: &str = "group/deleted";
     pub const PROJECT_STATE: &str = "project/state";
     pub const PROJECT_DELETED: &str = "project/deleted";
+    /// The shared split layout changed — either because a client wrote it
+    /// or because the daemon pruned a pane whose session went away.
+    /// Carries the whole tree; there are no incremental layout deltas.
+    pub const LAYOUT_STATE: &str = "layout/state";
     /// Aggregate state for the daemon's remote WebSocket transport:
     /// how many remote clients are currently attached. Broadcast on
     /// every connect / disconnect so the local TUI can render a
@@ -3354,6 +3372,240 @@ pub struct ProjectMoveParams {
     pub direction: MoveDirection,
 }
 
+/// Which way a [`LayoutNode::Split`] divides its area. Mirrors the TUI's
+/// window-split directions so the same tree renders identically in a
+/// character grid and a pixel viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutSplitDirection {
+    Below,
+    Right,
+}
+
+/// The shared split layout: a recursive binary tree of panes.
+///
+/// A leaf is a *pane*, and a pane shows at most one session. Ratios are
+/// percentages rather than absolute sizes precisely so the tree is
+/// client-agnostic — the same 60/40 split is meaningful in an 80-column
+/// terminal and in a 3440px browser window.
+///
+/// `session_id` is optional because a pane can legitimately be empty: a TUI
+/// window whose selection is a group header or an archived-row disclosure
+/// has no session to show, and a freshly split pane may not have picked one
+/// yet. Clients must treat `None` as "empty pane", never as an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LayoutNode {
+    Leaf {
+        /// Stable per-pane id. Clients key per-pane local state (scrollback,
+        /// view mode, focus) off this, so it must survive a round trip
+        /// through the daemon unchanged.
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    Split {
+        direction: LayoutSplitDirection,
+        /// Share of the split's area given to `first`, 1..=99.
+        ratio_percent: u16,
+        first: Box<LayoutNode>,
+        second: Box<LayoutNode>,
+    },
+}
+
+impl Default for LayoutNode {
+    fn default() -> Self {
+        Self::Leaf {
+            id: 1,
+            session_id: None,
+        }
+    }
+}
+
+impl LayoutNode {
+    /// Every leaf id, in layout order (first before second). Layout order is
+    /// the shared pane ordering clients use for "pane N" — see spec 0061.
+    pub fn leaf_ids(&self) -> Vec<u64> {
+        let mut out = Vec::new();
+        self.collect_leaf_ids(&mut out);
+        out
+    }
+
+    fn collect_leaf_ids(&self, out: &mut Vec<u64>) {
+        match self {
+            Self::Leaf { id, .. } => out.push(*id),
+            Self::Split { first, second, .. } => {
+                first.collect_leaf_ids(out);
+                second.collect_leaf_ids(out);
+            }
+        }
+    }
+
+    /// Session ids of every pane, in layout order, skipping empty panes.
+    pub fn session_ids(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        self.collect_session_ids(&mut out);
+        out
+    }
+
+    fn collect_session_ids<'a>(&'a self, out: &mut Vec<&'a str>) {
+        match self {
+            Self::Leaf { session_id, .. } => {
+                if let Some(id) = session_id.as_deref() {
+                    out.push(id);
+                }
+            }
+            Self::Split { first, second, .. } => {
+                first.collect_session_ids(out);
+                second.collect_session_ids(out);
+            }
+        }
+    }
+
+    pub fn max_leaf_id(&self) -> u64 {
+        match self {
+            Self::Leaf { id, .. } => *id,
+            Self::Split { first, second, .. } => first.max_leaf_id().max(second.max_leaf_id()),
+        }
+    }
+
+    pub fn leaf_count(&self) -> usize {
+        match self {
+            Self::Leaf { .. } => 1,
+            Self::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
+        }
+    }
+
+    /// The first leaf in layout order — the fallback pane a client focuses
+    /// when it has no remembered focus of its own.
+    pub fn first_leaf_id(&self) -> u64 {
+        match self {
+            Self::Leaf { id, .. } => *id,
+            Self::Split { first, .. } => first.first_leaf_id(),
+        }
+    }
+
+    pub fn session_for_leaf(&self, target: u64) -> Option<&str> {
+        match self {
+            Self::Leaf { id, session_id } if *id == target => session_id.as_deref(),
+            Self::Leaf { .. } => None,
+            Self::Split { first, second, .. } => first
+                .session_for_leaf(target)
+                .or_else(|| second.session_for_leaf(target)),
+        }
+    }
+
+    /// Clear every pane showing `session_id`, leaving the pane in place but
+    /// empty. Used by the daemon when a session is deleted: the *shape* of
+    /// the layout is the user's, so a vanished session empties its pane
+    /// rather than collapsing the split out from under them.
+    pub fn clear_session(&mut self, session_id: &str) -> bool {
+        match self {
+            Self::Leaf { session_id: sid, .. } => {
+                if sid.as_deref() == Some(session_id) {
+                    *sid = None;
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::Split { first, second, .. } => {
+                // Not `||` — both halves must be visited, and `||`
+                // short-circuits as soon as the first one matches.
+                let a = first.clear_session(session_id);
+                let b = second.clear_session(session_id);
+                a || b
+            }
+        }
+    }
+
+    /// Clear panes whose session is not in `live`. Runs daemon-side on load
+    /// and after deletion so every client sees the same repaired tree
+    /// instead of each repairing it independently.
+    pub fn retain_sessions<F>(&mut self, live: &F) -> bool
+    where
+        F: Fn(&str) -> bool,
+    {
+        match self {
+            Self::Leaf { session_id, .. } => match session_id.as_deref() {
+                Some(id) if !live(id) => {
+                    *session_id = None;
+                    true
+                }
+                _ => false,
+            },
+            Self::Split { first, second, .. } => {
+                let a = first.retain_sessions(live);
+                let b = second.retain_sessions(live);
+                a || b
+            }
+        }
+    }
+
+    /// Clamp `ratio_percent` into 1..=99 and de-duplicate leaf ids, so a
+    /// malformed or hand-edited tree can't wedge a client's renderer. Leaf
+    /// ids must be unique because clients key per-pane state off them.
+    pub fn normalize(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        let mut next = self.max_leaf_id().saturating_add(1);
+        self.normalize_inner(&mut seen, &mut next);
+    }
+
+    fn normalize_inner(&mut self, seen: &mut std::collections::HashSet<u64>, next: &mut u64) {
+        match self {
+            Self::Leaf { id, .. } => {
+                if !seen.insert(*id) {
+                    *id = *next;
+                    seen.insert(*next);
+                    *next = next.saturating_add(1);
+                }
+            }
+            Self::Split {
+                ratio_percent,
+                first,
+                second,
+                ..
+            } => {
+                *ratio_percent = (*ratio_percent).clamp(1, 99);
+                first.normalize_inner(seen, next);
+                second.normalize_inner(seen, next);
+            }
+        }
+    }
+}
+
+/// The shared layout plus its version. `version` is bumped on every accepted
+/// write and passed back as `base_version` to detect a stale writer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayoutDocument {
+    pub tree: LayoutNode,
+    pub version: u64,
+}
+
+impl Default for LayoutDocument {
+    fn default() -> Self {
+        Self {
+            tree: LayoutNode::default(),
+            version: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayoutSetParams {
+    pub tree: LayoutNode,
+    /// Version this write was composed against. `None` forces the write
+    /// through — for a client that deliberately has no prior state, not as
+    /// a way to win a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_version: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayoutStateNotificationPayload {
+    pub layout: LayoutDocument,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupStateNotificationPayload {
     pub group: GroupSummary,
@@ -3711,5 +3963,94 @@ mod suggestion_tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn leaf(id: u64, session: Option<&str>) -> LayoutNode {
+        LayoutNode::Leaf {
+            id,
+            session_id: session.map(str::to_string),
+        }
+    }
+
+    fn split(first: LayoutNode, second: LayoutNode, ratio: u16) -> LayoutNode {
+        LayoutNode::Split {
+            direction: LayoutSplitDirection::Right,
+            ratio_percent: ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    #[test]
+    fn tree_round_trips_through_json() {
+        let tree = split(leaf(1, Some("s1")), leaf(2, None), 60);
+        let json = serde_json::to_string(&tree).unwrap();
+        assert!(json.contains("\"kind\":\"split\""));
+        assert!(json.contains("\"direction\":\"right\""));
+        // An empty pane omits the key entirely rather than sending null.
+        assert!(!json.contains("null"));
+        let back: LayoutNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, tree);
+    }
+
+    #[test]
+    fn leaf_order_is_layout_order() {
+        let tree = split(leaf(7, None), split(leaf(3, None), leaf(9, None), 50), 50);
+        assert_eq!(tree.leaf_ids(), vec![7, 3, 9]);
+        assert_eq!(tree.first_leaf_id(), 7);
+        assert_eq!(tree.leaf_count(), 3);
+        assert_eq!(tree.max_leaf_id(), 9);
+    }
+
+    #[test]
+    fn session_ids_skip_empty_panes() {
+        let tree = split(leaf(1, Some("a")), split(leaf(2, None), leaf(3, Some("b")), 50), 50);
+        assert_eq!(tree.session_ids(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn clearing_a_session_empties_every_pane_showing_it() {
+        // Both halves must be visited: a short-circuiting `||` would leave
+        // the second copy of the session behind.
+        let mut tree = split(leaf(1, Some("dup")), leaf(2, Some("dup")), 50);
+        assert!(tree.clear_session("dup"));
+        assert_eq!(tree.session_ids(), Vec::<&str>::new());
+        assert!(!tree.clear_session("dup"));
+    }
+
+    #[test]
+    fn pruning_empties_dead_panes_but_keeps_the_shape() {
+        let mut tree = split(leaf(1, Some("live")), leaf(2, Some("dead")), 70);
+        let changed = tree.retain_sessions(&|id: &str| id == "live");
+        assert!(changed);
+        assert_eq!(tree.leaf_count(), 2, "shape is the user's, not ours");
+        assert_eq!(tree.session_ids(), vec!["live"]);
+        assert_eq!(tree.session_for_leaf(2), None);
+    }
+
+    #[test]
+    fn normalize_clamps_ratios_and_dedupes_leaf_ids() {
+        let mut tree = split(leaf(1, Some("a")), leaf(1, Some("b")), 0);
+        tree.normalize();
+        match &tree {
+            LayoutNode::Split { ratio_percent, .. } => assert_eq!(*ratio_percent, 1),
+            _ => panic!("expected a split"),
+        }
+        let ids = tree.leaf_ids();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "clients key per-pane state off leaf ids");
+    }
+
+    #[test]
+    fn a_bare_leaf_is_the_default_layout() {
+        let doc = LayoutDocument::default();
+        assert_eq!(doc.version, 0);
+        assert_eq!(doc.tree.leaf_count(), 1);
+        assert_eq!(doc.tree.session_ids(), Vec::<&str>::new());
     }
 }
