@@ -362,6 +362,16 @@ mod tests {
         });
         assert_eq!(detect_dialect(&grok), Some(Dialect::OpenAiResponses));
 
+        // hermes (inference-api.nousresearch.com /v1/chat/completions):
+        // messages with no top-level system and no max_tokens.
+        let hermes = json!({
+            "model": "tencent/hy3:free", "stream": true,
+            "messages": [{"role":"system","content":"..."},{"role":"user","content":"say pong"}],
+            "tools": [{"type":"function","function":{"name":"browser_back"}}],
+            "reasoning": {}, "stream_options": {}, "tags": []
+        });
+        assert_eq!(detect_dialect(&hermes), Some(Dialect::OpenAiChat));
+
         // claude
         let claude = json!({
             "model": "claude-opus-5", "max_tokens": 32, "stream": true,

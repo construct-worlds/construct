@@ -179,26 +179,37 @@ pub fn harness_routing(harness: &str) -> Option<HarnessRouting> {
                 mode: CaMode::Additive,
             }],
         }),
-        // codex, grok, opencode, hermes and pi have all been probed and
+        // Python. Honors SSL_CERT_FILE, which REPLACES the system roots
+        // (same class as codex), so it also gets the composed bundle.
+        // Speaks plain Chat Completions to its inference host; the portal
+        // host it also talks to is deliberately NOT in the intercept list.
+        //
+        // hermes can be pointed at another provider, and its endpoint host
+        // moves with it. A session on a non-default provider simply never
+        // matches this host, so it stays a pass-through — inert and
+        // reported, never mis-intercepted.
+        "hermes" => Some(HarnessRouting {
+            dialect: Dialect::OpenAiChat,
+            intercept_hosts: &["inference-api.nousresearch.com"],
+            ca_env: &[CaChannel {
+                var: "SSL_CERT_FILE",
+                mode: CaMode::Replacing,
+            }],
+        }),
+        // grok, opencode and pi have all been probed and
         // all honor the proxy environment — pass-through works for every
         // one of them. They are absent anyway, for two distinct reasons
         // that matter to anyone extending this:
         //
-        // - Their wire dialect is one the router cannot yet accept FROM a
-        //   harness. Captured by interception: codex, pi, grok and
-        //   opencode all send OpenAI **Responses** requests (`input`,
-        //   `instructions`, `store`, `reasoning`, flat `tools[].name`) —
-        //   codex and pi to chatgpt.com/backend-api/codex/responses, grok
-        //   and opencode to /v1/responses on their own hosts. The router
-        //   accepts Anthropic Messages from a harness and nothing else, so
-        //   a single Responses translator is what unlocks all four.
-        // - `codex` and `hermes` additionally cannot be intercepted yet:
-        //   their CA channel (`SSL_CERT_FILE`) *replaces* the system roots
-        //   rather than adding to them, so injecting only our CA would
-        //   break every other TLS connection in the session. They need a
-        //   composed bundle (system roots + our CA) first. `grok` also
-        //   uses `SSL_CERT_FILE` but additively; `opencode` and `pi` take
-        //   `NODE_EXTRA_CA_CERTS`, additive, like claude.
+        // - `opencode` has no fixed endpoint host: it follows whatever
+        //   provider the user configured, so there is nothing static to
+        //   put in `intercept_hosts`. Its dialect is already handled by
+        //   detection; the host is the open problem.
+        // - `codex` and `hermes` take their CA through `SSL_CERT_FILE`,
+        //   which *replaces* the system roots rather than adding to them;
+        //   both are handed the composed bundle instead of the bare CA.
+        //   `grok` also uses `SSL_CERT_FILE` but additively; `opencode`
+        //   and `pi` take `NODE_EXTRA_CA_CERTS`, additive, like claude.
         // - `opencode` needs more than a table entry in any case: it was
         //   observed speaking Responses only because its configured
         //   provider is Meta. Its dialect AND its endpoint host both

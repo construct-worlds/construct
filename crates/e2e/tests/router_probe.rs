@@ -272,6 +272,7 @@ fn other_harnesses_honor_the_proxy_environment() {
 /// | pi       | chatgpt.com `/backend-api/codex/responses` | OpenAI Responses |
 /// | grok     | cli-chat-proxy.grok.com `/v1/responses`    | OpenAI Responses |
 /// | opencode | api.meta.ai `/v1/responses`                | OpenAI Responses |
+/// | hermes   | inference-api.nousresearch.com `/v1/chat/completions` | Chat Completions |
 ///
 /// The Responses bodies were identified by their distinctive keys —
 /// `input` (not `messages`), `instructions`, `store`, `reasoning`,
@@ -297,6 +298,7 @@ fn captured_dialects_are_recorded_not_guessed() {
         ("pi", "openai-responses"),
         ("grok", "openai-responses"),
         ("opencode", "openai-responses/provider-dependent"),
+        ("hermes", "openai-chat"),
     ];
     // Both dialects are now accepted from a harness. What still gates a
     // harness is the CA channel and, for provider-agnostic ones, having a
@@ -310,6 +312,10 @@ fn captured_dialects_are_recorded_not_guessed() {
         "one Responses translator covers four harnesses"
     );
     assert!(CAPTURED.iter().any(|(h, _)| *h == "claude"));
+    // Every captured dialect is one the router can accept from a harness.
+    assert!(CAPTURED.iter().all(|(_, d)| d.starts_with("openai-responses")
+        || *d == "anthropic-messages"
+        || *d == "openai-chat"));
 }
 
 /// Guards the other half of the claim:/// Guards the other half of the claim: a harness with no probe must not be
@@ -321,14 +327,12 @@ fn only_probed_harnesses_are_declared_route_capable() {
     // order (spec 0111).
     //
     // Deliberately absent despite passing the transport probe:
-    // - hermes: its CA variable replaces the system roots (handled now by
-    //   bundle composition) but its wire dialect has never been captured,
-    //   and a dialect is not something to guess.
     // - opencode: its endpoint host follows its configured provider, so
-    //   there is no fixed intercept host to declare.
+    //   there is no fixed intercept host to declare. Its dialect is
+    //   handled by detection; the host is the open problem.
     // Transport capability alone is never route capability.
-    const PROBED: &[&str] = &["claude", "pi", "grok", "codex"];
-    for harness in ["smith", "shell", "opencode", "kimi", "hermes"] {
+    const PROBED: &[&str] = &["claude", "pi", "grok", "codex", "hermes"];
+    for harness in ["smith", "shell", "opencode", "kimi"] {
         assert!(
             !PROBED.contains(&harness),
             "{harness} is declared route-capable but is excluded for a documented reason"
