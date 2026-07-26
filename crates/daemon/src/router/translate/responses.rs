@@ -502,6 +502,11 @@ pub struct StreamEncoder {
     text: String,
     /// Accumulated arguments per open function call, for the same reason.
     tool_args: Vec<String>,
+    /// Items already closed, replayed on `response.completed`. A client
+    /// that reconstructs the turn from the terminal event needs them.
+    completed_items: Vec<Value>,
+    /// Unix seconds. Part of the response object every client deserializes.
+    created_at: i64,
     stop: CanonStop,
     usage: Option<(u64, u64)>,
 }
@@ -518,6 +523,11 @@ impl StreamEncoder {
             tools: Vec::new(),
             text: String::new(),
             tool_args: Vec::new(),
+            completed_items: Vec::new(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
             stop: CanonStop::EndTurn,
             usage: None,
         }
@@ -529,17 +539,59 @@ impl StreamEncoder {
         n
     }
 
+    /// The `response` object carried by `response.created`,
+    /// `response.in_progress` and `response.completed`.
+    ///
+    /// Clients deserialize this into a struct with required fields, so a
+    /// minimal object is rejected outright — a real harness failed with
+    /// `missing field created_at` against an earlier version of this. The
+    /// shape below is a **superset of a captured response from a live
+    /// endpoint**: every field the real backend sends is emitted here, so
+    /// no client struct can find one absent. Fields are present even when
+    /// null, because absent and null are not the same thing to a strict
+    /// deserializer. Extra fields are ignored by every client; missing ones
+    /// fail the whole turn.
     fn response_object(&self, status: &str) -> Value {
         json!({
             "id": self.response_id,
             "object": "response",
-            "model": self.model,
+            "created_at": self.created_at,
+            "completed_at": if status == "in_progress" {
+                Value::Null
+            } else {
+                json!(self.created_at)
+            },
             "status": status,
-            "output": [],
+            "model": self.model,
+            "output": self.completed_items,
+            "error": Value::Null,
+            "incomplete_details": Value::Null,
+            "instructions": Value::Null,
+            "max_output_tokens": Value::Null,
+            "previous_response_id": Value::Null,
+            "parallel_tool_calls": true,
+            "reasoning": {"effort": Value::Null, "summary": Value::Null},
+            "store": false,
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "text": {"format": {"type": "text"}},
+            "tool_choice": "auto",
+            "tools": [],
+            "truncation": "disabled",
+            "metadata": {},
+            "user": Value::Null,
+            "background": false,
+            "service_tier": "default",
+            "top_logprobs": 0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "prompt_cache_key": Value::Null,
             "usage": match self.usage {
                 Some((i, o)) => json!({
                     "input_tokens": i,
+                    "input_tokens_details": {"cached_tokens": 0},
                     "output_tokens": o,
+                    "output_tokens_details": {"reasoning_tokens": 0},
                     "total_tokens": i + o,
                 }),
                 None => Value::Null,
@@ -599,7 +651,7 @@ impl StreamEncoder {
                 "output_index": self.output_index,
                 "content_index": 0,
                 "item_id": item_id,
-                "part": {"type":"output_text","text":"","annotations":[]},
+                "part": {"type":"output_text","text":"","annotations":[],"logprobs":[]},
             }),
         ));
         self.message_open = true;
@@ -633,7 +685,7 @@ impl StreamEncoder {
                 "output_index": self.output_index,
                 "content_index": 0,
                 "item_id": item_id,
-                "part": {"type":"output_text","text":text,"annotations":[]},
+                "part": {"type":"output_text","text":text,"annotations":[],"logprobs":[]},
             }),
         ));
         let seq = self.next();
@@ -648,10 +700,17 @@ impl StreamEncoder {
                     "type": "message",
                     "status": "completed",
                     "role": "assistant",
-                    "content": [{"type":"output_text","text":text,"annotations":[]}],
+                    "content": [{"type":"output_text","text":text,"annotations":[],"logprobs":[]}],
                 },
             }),
         ));
+        self.completed_items.push(json!({
+            "id": item_id,
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type":"output_text","text":text,"annotations":[],"logprobs":[]}],
+        }));
         self.message_open = false;
         self.output_index += 1;
         out
@@ -684,6 +743,7 @@ impl StreamEncoder {
                         "content_index": 0,
                         "item_id": item_id,
                         "delta": text,
+                        "logprobs": [],
                     }),
                 ));
             }
@@ -780,6 +840,12 @@ impl StreamEncoder {
                     },
                 }),
             ));
+            self.completed_items.push(json!({
+                "id": item_id,
+                "type": "function_call",
+                "status": "completed",
+                "arguments": args,
+            }));
             self.output_index += 1;
         }
         let status = match self.stop {
@@ -1086,4 +1152,137 @@ mod tests {
         assert_eq!(completed["response"]["usage"]["input_tokens"], 10);
         assert_eq!(completed["response"]["usage"]["total_tokens"], 13);
     }
+
+    /// REGRESSION: a strict client deserializes the `response` object into
+    /// a struct with required fields and rejects the whole turn when one is
+    /// missing. A real harness failed with `missing field created_at`
+    /// against an encoder that emitted only id/object/model/status/output.
+    ///
+    /// Event names and ordering were already asserted and were correct the
+    /// whole time — the payloads were not. This checks the fields.
+    #[test]
+    fn the_response_object_carries_what_a_strict_client_requires() {
+        let mut enc = StreamEncoder::new("gpt-5.5");
+        let mut raw = String::new();
+        raw.push_str(&enc.push(&CanonEvent::TextDelta("hi".into())));
+        raw.push_str(&enc.push(&CanonEvent::Usage { input: 4, output: 1 }));
+        raw.push_str(&enc.push(&CanonEvent::Stop {
+            reason: CanonStop::EndTurn,
+        }));
+        raw.push_str(&enc.finish());
+
+        let events = sse_events(&raw);
+        for name in [
+            "response.created",
+            "response.in_progress",
+            "response.completed",
+        ] {
+            let (_, payload) = events
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("no {name}"));
+            let response = &payload["response"];
+            for field in [
+                "id",
+                "object",
+                "created_at",
+                "status",
+                "model",
+                "output",
+                "error",
+                "incomplete_details",
+                "parallel_tool_calls",
+                "tools",
+                "tool_choice",
+                "text",
+                "metadata",
+                "usage",
+            ] {
+                assert!(
+                    response.get(field).is_some(),
+                    "{name}: response object is missing `{field}`; a strict \
+                     client rejects the turn"
+                );
+            }
+            assert!(
+                response["created_at"].as_i64().unwrap_or(0) > 0,
+                "{name}: created_at must be a real timestamp"
+            );
+        }
+
+        // The terminal event replays what was produced, so a client that
+        // reconstructs the turn from it sees the text.
+        let (_, completed) = events
+            .iter()
+            .find(|(n, _)| n == "response.completed")
+            .unwrap();
+        assert_eq!(completed["response"]["output"][0]["type"], "message");
+        assert_eq!(
+            completed["response"]["output"][0]["content"][0]["text"],
+            "hi"
+        );
+        assert_eq!(completed["response"]["usage"]["total_tokens"], 5);
+    }
+
+    /// A tool call must also appear in the terminal event's output.
+    #[test]
+    fn completed_replays_function_call_items() {
+        let mut enc = StreamEncoder::new("m");
+        let mut raw = String::new();
+        raw.push_str(&enc.push(&CanonEvent::ToolStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "ls".into(),
+        }));
+        raw.push_str(&enc.push(&CanonEvent::ToolArgsDelta {
+            index: 0,
+            json: "{}".into(),
+        }));
+        raw.push_str(&enc.finish());
+        let events = sse_events(&raw);
+        let (_, completed) = events
+            .iter()
+            .find(|(n, _)| n == "response.completed")
+            .unwrap();
+        let out = &completed["response"]["output"][0];
+        assert_eq!(out["type"], "function_call");
+        assert_eq!(out["call_id"].as_str().or(out["id"].as_str()).is_some(), true);
+        assert_eq!(out["arguments"], "{}");
+    }
+
+
+    /// The encoder's response object must stay a superset of what the real
+    /// endpoint sends. A client struct is written against the real payload,
+    /// so any field the backend emits and we omit is a `missing field`
+    /// failure for the entire turn — which is exactly how this was found.
+    #[test]
+    fn the_response_object_is_a_superset_of_the_real_endpoints() {
+        // Observed on a live Responses endpoint by interception.
+        const OBSERVED: &[&str] = &[
+            "created_at", "completed_at", "id", "max_output_tokens", "model",
+            "object", "output", "parallel_tool_calls", "previous_response_id",
+            "reasoning", "temperature", "text", "tool_choice", "tools",
+            "usage", "user", "incomplete_details", "status", "store",
+            "metadata", "background", "service_tier", "truncation",
+            "top_logprobs", "presence_penalty", "frequency_penalty",
+            "prompt_cache_key",
+        ];
+        let mut enc = StreamEncoder::new("m");
+        let events = sse_events(&enc.finish());
+        let (_, created) = events
+            .iter()
+            .find(|(n, _)| n == "response.created")
+            .unwrap();
+        let response = created["response"].as_object().unwrap();
+        let missing: Vec<&str> = OBSERVED
+            .iter()
+            .copied()
+            .filter(|f| !response.contains_key(*f))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the real endpoint sends these and we do not: {missing:?}"
+        );
+    }
+
 }
