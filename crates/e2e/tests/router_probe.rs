@@ -297,22 +297,18 @@ fn captured_dialects_are_recorded_not_guessed() {
         ("grok", "openai-responses"),
         ("opencode", "openai-responses/provider-dependent"),
     ];
-    // Only claude's dialect is one the router can currently accept from a
-    // harness; the rest await a Responses translator.
-    let translatable: Vec<&str> = CAPTURED
-        .iter()
-        .filter(|(_, d)| *d == "anthropic-messages")
-        .map(|(h, _)| *h)
-        .collect();
-    assert_eq!(translatable, vec!["claude"]);
+    // Both dialects are now accepted from a harness. What still gates a
+    // harness is the CA channel and, for provider-agnostic ones, having a
+    // fixed intercept host.
     assert_eq!(
         CAPTURED
             .iter()
             .filter(|(_, d)| d.starts_with("openai-responses"))
             .count(),
         4,
-        "one Responses translator would cover four harnesses"
+        "one Responses translator covers four harnesses"
     );
+    assert!(CAPTURED.iter().any(|(h, _)| *h == "claude"));
 }
 
 /// Guards the other half of the claim:/// Guards the other half of the claim: a harness with no probe must not be
@@ -323,18 +319,19 @@ fn only_probed_harnesses_are_declared_route_capable() {
     // a harness there, add its probe above and its name here — in that
     // order (spec 0111).
     //
-    // codex is deliberately NOT here despite passing the transport probe:
-    // its CA channel replaces the system roots, so interception needs
-    // bundle composition first. Transport capability alone is not route
-    // capability.
-    const PROBED: &[&str] = &["claude"];
-    for harness in ["codex", "smith", "shell", "opencode", "grok", "kimi", "pi"] {
+    // Deliberately absent despite passing the transport probe:
+    // - codex, hermes: their CA variable REPLACES the system roots, so
+    //   interception needs bundle composition first.
+    // - opencode: its endpoint host follows its configured provider, so
+    //   there is no fixed intercept host to declare.
+    // Transport capability alone is never route capability.
+    const PROBED: &[&str] = &["claude", "pi", "grok"];
+    for harness in ["codex", "smith", "shell", "opencode", "kimi", "hermes"] {
         assert!(
             !PROBED.contains(&harness),
-            "{harness} is listed as probed but has no probe test"
+            "{harness} is declared route-capable but is excluded for a documented reason"
         );
     }
-    assert_eq!(PROBED, &["claude"]);
 }
 
 /// The probe's own instrument must be sound: if the tunneling proxy did

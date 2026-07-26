@@ -7,6 +7,13 @@ Scope: What a route does when the endpoint it targets speaks a different wire di
 
 ## Decision
 
+Translation goes through a **canonical intermediate form**, never pairwise.
+Each dialect contributes a parser and an emitter; a request is parsed from
+the harness's dialect into the canonical form and emitted in the target's,
+and a response stream is decoded from the target's event vocabulary into
+canonical events and re-encoded into the harness's. Adding a dialect costs
+two pieces, not one per existing dialect.
+
 A route may target an endpoint whose wire dialect differs from the one the
 harness speaks. When it does, Construct **translates**: it rebuilds the
 request in the target's dialect and re-encodes the response stream back
@@ -53,11 +60,15 @@ component.
 
 ## Consequences
 
-- Every supported dialect pair is a maintained translator, and each is a
-  standing cost: the request shape, the streaming event vocabulary, the
+- Every supported dialect is a maintained parser and emitter, and each is
+  a standing cost: the request shape, the streaming event vocabulary, the
   tool-call encoding, and the stop/finish taxonomy all evolve
-  independently on both sides. Adding a target dialect means committing to
-  that, not just adding a case.
+  independently. Adding a dialect means committing to that, not just
+  adding a case.
+- A dialect's event vocabulary must be established from a captured real
+  exchange, not from memory or documentation. Streaming formats carry
+  structure that is easy to get subtly wrong and whose failure mode is a
+  stream that parses but displays nothing.
 - Streaming translation must preserve **framing**, not only content. A
   dialect that brackets content blocks with explicit start/stop events
   cannot be fed a flat delta stream: an unbracketed or misnumbered stream

@@ -54,16 +54,20 @@ const CREDENTIAL_FILLER: &str = "construct";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     /// Anthropic Messages (`/v1/messages`).
-    Anthropic,
+    AnthropicMessages,
     /// OpenAI Chat Completions (`/chat/completions`).
     OpenAiChat,
+    /// OpenAI Responses (`/responses`). A *client* dialect only: four
+    /// harnesses speak it, no configurable route target does.
+    OpenAiResponses,
 }
 
 impl Dialect {
     pub fn label(self) -> &'static str {
         match self {
-            Dialect::Anthropic => "anthropic",
+            Dialect::AnthropicMessages => "anthropic",
             Dialect::OpenAiChat => "openai-chat",
+            Dialect::OpenAiResponses => "openai-responses",
         }
     }
 }
@@ -76,7 +80,7 @@ impl Dialect {
 /// translator would corrupt turns rather than fail cleanly.
 pub fn provider_dialect(provider: &str) -> Option<Dialect> {
     match provider.to_ascii_lowercase().as_str() {
-        "anthropic" => Some(Dialect::Anthropic),
+        "anthropic" => Some(Dialect::AnthropicMessages),
         // Grok is served by smith's OpenAI client and speaks the same wire
         // format.
         "openai" | "grok" => Some(Dialect::OpenAiChat),
@@ -108,9 +112,27 @@ pub fn harness_routing(harness: &str) -> Option<HarnessRouting> {
         // Node/undici: honors HTTPS_PROXY and NODE_EXTRA_CA_CERTS.
         // Probed: completes a full turn through the injected proxy.
         "claude" => Some(HarnessRouting {
-            dialect: Dialect::Anthropic,
+            dialect: Dialect::AnthropicMessages,
             intercept_hosts: &["api.anthropic.com"],
             ca_env: &["NODE_EXTRA_CA_CERTS"],
+        }),
+        // Node. Probed end to end; a forged leaf signed by our CA was
+        // accepted through NODE_EXTRA_CA_CERTS.
+        "pi" => Some(HarnessRouting {
+            dialect: Dialect::OpenAiResponses,
+            intercept_hosts: &["chatgpt.com"],
+            ca_env: &["NODE_EXTRA_CA_CERTS"],
+        }),
+        // Native binary. Rejects NODE_EXTRA_CA_CERTS outright but honors
+        // SSL_CERT_FILE *additively* — verified by reaching its real
+        // endpoint while trusting our CA through that variable. Do not
+        // copy this entry to another harness without re-probing: the same
+        // variable REPLACES the system roots for codex and hermes, and
+        // setting it there would break all of their TLS.
+        "grok" => Some(HarnessRouting {
+            dialect: Dialect::OpenAiResponses,
+            intercept_hosts: &["cli-chat-proxy.grok.com"],
+            ca_env: &["SSL_CERT_FILE"],
         }),
         // codex, grok, opencode, hermes and pi have all been probed and
         // all honor the proxy environment — pass-through works for every
@@ -442,10 +464,10 @@ impl Router {
             .insert(session_id.to_string(), ctx.clone());
         self.tokens.write().unwrap().insert(token.clone(), ctx);
 
-        Ok(self.session_env(&token))
+        Ok(self.session_env(&token, routing))
     }
 
-    fn session_env(&self, token: &str) -> HashMap<String, String> {
+    fn session_env(&self, token: &str, routing: HarnessRouting) -> HashMap<String, String> {
         let mut env = HashMap::new();
         // The credential rides in the proxy URL's userinfo, which is how
         // proxy clients carry `Proxy-Authorization`. One listener with
@@ -466,8 +488,14 @@ impl Router {
             // Trusting the router CA changes nothing until a route is
             // armed — no interception happens without one — but it has to
             // be present at spawn, because the harness reads it once.
-            for var in ["NODE_EXTRA_CA_CERTS"] {
-                env.insert(var.to_string(), path.clone());
+            //
+            // Which variable is per-harness and probe-established: some
+            // harnesses take an ADDITIONAL ca here, others would treat the
+            // same variable as a REPLACEMENT for the system roots and lose
+            // every other endpoint. Only harnesses whose variable is
+            // additive appear in `harness_routing` at all.
+            for var in routing.ca_env {
+                env.insert((*var).to_string(), path.clone());
             }
         }
         env
@@ -1319,6 +1347,159 @@ mod tests {
         assert!(
             forwarded.contains("\"model\":\"gpt-5.5\""),
             "the route's model must be substituted: {forwarded}"
+        );
+    }
+
+
+    /// End-to-end for a Responses-speaking harness (spec 0112): a `pi`
+    /// session sends an OpenAI Responses request, the router translates it
+    /// to Chat Completions for the target, and re-encodes the reply as a
+    /// Responses event stream the harness can render.
+    #[tokio::test]
+    async fn translates_a_responses_harness_onto_a_chat_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_w = seen.clone();
+        tokio::spawn(async move {
+            let (mut s, _) = upstream.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = s.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            *seen_w.lock().unwrap() = String::from_utf8_lossy(&buf).to_string();
+            let sse = concat!(
+                "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"po\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ng\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            s.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{sse}",
+                    sse.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+            s.flush().await.unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let r = started_with(
+            &dir,
+            cfg_with(true),
+            profiles(vec![(
+                "gpt",
+                ModelProfile {
+                    provider: "openai".to_string(),
+                    base_url: Some(format!("http://127.0.0.1:{upstream_port}")),
+                    api_key_env: None,
+                    api_key: Some("sk-openai".to_string()),
+                    model: Some("gpt-5.5".to_string()),
+                },
+            )]),
+        )
+        .await;
+        let env = r.attach_session("s1", "pi", None).unwrap();
+        let token = Router::token_from_env(&env).unwrap();
+        assert!(
+            env.contains_key("NODE_EXTRA_CA_CERTS"),
+            "pi takes its CA through the Node variable"
+        );
+        r.set_route("s1", "pi", Some("gpt"), Some("gpt-5.6-sol".into()))
+            .unwrap();
+
+        let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
+            .await
+            .unwrap();
+        use base64::Engine;
+        let cred = base64::engine::general_purpose::STANDARD.encode(format!("{token}:construct"));
+        sock.write_all(
+            format!("CONNECT chatgpt.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {cred}\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut ack = [0u8; 39];
+        sock.read_exact(&mut ack).await.unwrap();
+
+        let ca_pem = std::fs::read_to_string(env.get("NODE_EXTRA_CA_CERTS").unwrap()).unwrap();
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        roots
+            .add(tokio_rustls::rustls::pki_types::CertificateDer::from(
+                pem_to_der(&ca_pem),
+            ))
+            .unwrap();
+        let provider = tokio_rustls::rustls::crypto::ring::default_provider();
+        let client_cfg = tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_cfg));
+        let domain = tokio_rustls::rustls::pki_types::ServerName::try_from("chatgpt.com").unwrap();
+        let mut tls = connector.connect(domain, sock).await.unwrap();
+
+        // A real Responses request, in the shape captured from pi.
+        let body = br#"{"model":"gpt-5.6-sol","stream":true,"store":false,"instructions":"be terse","input":[{"role":"user","content":[{"type":"input_text","text":"say pong"}]}],"tools":[{"type":"function","name":"read","description":"read a file","parameters":{"type":"object","properties":{}}}]}"#;
+        tls.write_all(
+            format!(
+                "POST /backend-api/codex/responses HTTP/1.1\r\nhost: chatgpt.com\r\nauthorization: Bearer users-own-token\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        tls.write_all(body).await.unwrap();
+        tls.flush().await.unwrap();
+
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response).to_string();
+
+        // The harness gets Responses framing back — items and parts, not
+        // bare deltas.
+        for expected in [
+            "event: response.created",
+            "event: response.output_item.added",
+            "event: response.content_part.added",
+            "event: response.output_text.delta",
+            "event: response.output_item.done",
+            "event: response.completed",
+        ] {
+            assert!(response.contains(expected), "missing {expected}: {response}");
+        }
+        assert!(response.contains("\"delta\":\"po\""), "{response}");
+
+        // The target saw Chat Completions, translated from Responses.
+        let forwarded = seen.lock().unwrap().clone();
+        assert!(
+            forwarded.starts_with("POST /chat/completions"),
+            "must hit the chat endpoint: {forwarded}"
+        );
+        assert!(
+            forwarded.contains("authorization: Bearer sk-openai"),
+            "route credential must be used: {forwarded}"
+        );
+        assert!(
+            !forwarded.contains("users-own-token"),
+            "the harness credential must never reach another vendor: {forwarded}"
+        );
+        assert!(
+            forwarded.contains("\"role\":\"system\"") && forwarded.contains("be terse"),
+            "instructions must become a system message: {forwarded}"
+        );
+        assert!(
+            forwarded.contains("\"model\":\"gpt-5.5\""),
+            "route model must be substituted: {forwarded}"
+        );
+        assert!(
+            forwarded.contains("\"function\""),
+            "flat Responses tools must become nested Chat functions: {forwarded}"
         );
     }
 

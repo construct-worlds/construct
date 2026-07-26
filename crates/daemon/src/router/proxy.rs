@@ -20,7 +20,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::{translate, ArmedRoute, Router, SessionRouting, UpstreamProxy};
+use super::{translate, ArmedRoute, Dialect, Router, SessionRouting, UpstreamProxy};
 
 /// Cap on a request head. Anthropic-dialect requests carry large bodies
 /// but small heads; this only bounds the header block.
@@ -237,17 +237,28 @@ async fn intercept_tls(
 
     // Same dialect → redirect the bytes. Different dialect → rebuild the
     // request and re-encode the response stream (spec 0112).
-    if route.translates() {
+    // The dialect the harness speaks is read from the request itself, not
+    // declared: a provider-agnostic harness emits whatever its configured
+    // provider speaks (spec 0112).
+    let client_dialect = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| translate::detect_dialect(&v))
+        .unwrap_or(ctx.harness.dialect);
+
+    if client_dialect != route.target_dialect {
         ctx.mark_observed();
         // The harness's own token-counting endpoint has no counterpart on
-        // an OpenAI-dialect target; answering locally keeps its context
-        // bookkeeping working instead of failing the turn.
+        // most targets; answering locally keeps its context bookkeeping
+        // working instead of failing the turn.
         if request.path.contains("count_tokens") {
             return write_simple(&mut tls, 200, &count_tokens_reply(&body)).await;
         }
         let streaming = wants_stream(&body);
-        return match forward_translated(body, &route).await {
-            Ok(response) => write_translated_response(&mut tls, response, &route, streaming).await,
+        return match forward_translated(body, &route, client_dialect).await {
+            Ok(response) => {
+                write_translated_response(&mut tls, response, &route, client_dialect, streaming)
+                    .await
+            }
             Err(e) => {
                 let payload = serde_json::json!({
                     "type": "error",
@@ -482,19 +493,33 @@ async fn forward(
 ///
 /// The client's path is deliberately not carried over — the target's
 /// endpoint is a different one, not the same path on another host.
-async fn forward_translated(body: Vec<u8>, route: &ArmedRoute) -> Result<reqwest::Response> {
+async fn forward_translated(
+    body: Vec<u8>,
+    route: &ArmedRoute,
+    client_dialect: Dialect,
+) -> Result<reqwest::Response> {
     let source: serde_json::Value =
-        serde_json::from_slice(&body).context("parse anthropic request body")?;
-    let translated = translate::request_to_openai(&source, &route.model);
-    let url = format!("{}/chat/completions", route.base_url.trim_end_matches('/'));
+        serde_json::from_slice(&body).context("parse intercepted request body")?;
+    let canon = translate::parse_request(client_dialect, &source);
+    let translated = translate::emit_request(route.target_dialect, &canon, &route.model);
+    let url = format!(
+        "{}{}",
+        route.base_url.trim_end_matches('/'),
+        translate::target_path(route.target_dialect)
+    );
     let mut out = route
         .client
         .post(&url)
         .header("content-type", "application/json");
-    // OpenAI-dialect endpoints authenticate with a bearer token, not the
-    // Anthropic `x-api-key` header the client sent.
+    // Each dialect authenticates differently; the client's own credential
+    // is never forwarded to another vendor.
     if !route.api_key.is_empty() {
-        out = out.header("authorization", format!("Bearer {}", route.api_key));
+        out = match route.target_dialect {
+            Dialect::AnthropicMessages => out
+                .header("x-api-key", &route.api_key)
+                .header("anthropic-version", "2023-06-01"),
+            _ => out.header("authorization", format!("Bearer {}", route.api_key)),
+        };
     }
     out.json(&translated)
         .send()
@@ -510,8 +535,8 @@ fn wants_stream(body: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-/// Answer `/v1/messages/count_tokens` locally when the target has no
-/// equivalent endpoint. Refusing would break the harness's own context
+/// Answer a token-counting endpoint locally when the target has no
+/// equivalent. Refusing would break the harness's own context
 /// bookkeeping; the estimate is explicitly approximate (spec 0112).
 fn count_tokens_reply(body: &[u8]) -> String {
     let parsed = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
@@ -523,6 +548,7 @@ async fn write_translated_response<S>(
     stream: &mut S,
     response: reqwest::Response,
     route: &ArmedRoute,
+    client_dialect: Dialect,
     streaming: bool,
 ) -> Result<()>
 where
@@ -543,7 +569,13 @@ where
 
     if !streaming {
         let parsed: serde_json::Value = response.json().await.context("decode upstream json")?;
-        let body = translate::response_to_anthropic(&parsed, &route.model).to_string();
+        let body = translate::encode_response(
+            client_dialect,
+            route.target_dialect,
+            &parsed,
+            &route.model,
+        )
+        .to_string();
         return write_simple(stream, 200, &body).await;
     }
 
@@ -554,7 +586,7 @@ where
         .await
         .context("write response head")?;
 
-    let mut encoder = translate::AnthropicStreamEncoder::new(&route.model);
+    let mut encoder = translate::ClientEncoder::new(client_dialect, &route.model);
     let mut upstream = response.bytes_stream();
     let mut pending = Vec::<u8>::new();
     while let Some(chunk) = upstream.next().await {
@@ -562,8 +594,9 @@ where
             Ok(c) => c,
             Err(e) => {
                 // Mid-stream failure: report it inside the stream the
-                // client is already reading, then close cleanly.
-                let msg = translate::error_event(&format!("upstream stream failed: {e}"));
+                // client is already reading, then close it cleanly so the
+                // turn still terminates.
+                let msg = encoder.error(&format!("upstream stream failed: {e}"));
                 write_chunk(stream, msg.as_bytes()).await?;
                 break;
             }
@@ -577,15 +610,17 @@ where
                 continue;
             };
             let data = data.trim();
-            if data.is_empty() || data == "[DONE]" {
+            if data.is_empty() || translate::is_done_sentinel(data) {
                 continue;
             }
             let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
                 continue;
             };
-            let out = encoder.push_chunk(&value);
-            if !out.is_empty() {
-                write_chunk(stream, out.as_bytes()).await?;
+            for event in translate::decode_target_event(route.target_dialect, &value) {
+                let out = encoder.push(&event);
+                if !out.is_empty() {
+                    write_chunk(stream, out.as_bytes()).await?;
+                }
             }
         }
     }
