@@ -41,6 +41,18 @@ pub async fn serve(mut client: TcpStream, router: Arc<Router>) -> Result<()> {
         .filter(|c| c.intercepts_host(&target.host))
         .and_then(|c| c.armed_route());
 
+    // Every connection is logged with how it was classified. Without this
+    // there is no way to answer "is this session actually going through
+    // the router?" — a harness that quietly bypasses us looks identical to
+    // one that never made a request.
+    tracing::debug!(
+        session = ctx.as_ref().map(|c| c.session_id.as_str()).unwrap_or("-"),
+        host = %target.host,
+        port = target.port,
+        disposition = if armed.is_some() { "intercept" } else { "tunnel" },
+        "router connection"
+    );
+
     let Some(route) = armed else {
         let upstream = ctx
             .as_ref()

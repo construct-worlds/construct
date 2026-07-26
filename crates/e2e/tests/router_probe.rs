@@ -2,51 +2,82 @@
 //!
 //! Whether a harness honors Construct's routing injection is an empirical,
 //! per-harness, per-version fact — never a reading of that harness's
-//! documentation. This is the test that establishes it: point `HTTPS_PROXY`
-//! at a local stub, run the real harness binary, and see whether a
-//! `CONNECT` arrives.
+//! documentation. This is the test that establishes it.
+//!
+//! **It asserts the harness completes a turn, not merely that a
+//! connection arrives.** An earlier version of this probe checked only for
+//! an inbound `CONNECT` and passed while the harness was in fact failing
+//! every request: the injected proxy URL carried a username-only
+//! credential (`http://token@host`), which the client accepted far enough
+//! to send `CONNECT` and then failed with a DNS-shaped error. Reachability
+//! is not function, and only the stricter assertion catches that.
 //!
 //! `harness_routing()` in the daemon lists the harnesses claimed to be
-//! route-capable. Every entry there must have passed this probe, and it has
-//! to be re-run when a harness version changes — a CLI release can move its
-//! networking onto a client that ignores proxy environment entirely, and
-//! the resulting failure is silent (the session simply stops being
-//! routable) unless something checks.
+//! route-capable. Every entry there must have passed this probe, and it
+//! must be re-run when a harness version changes.
 //!
-//! Ignored by default: it needs the real harness binary installed, makes a
-//! genuine outbound connection attempt, and is therefore unfit for CI.
-//! Run it deliberately:
+//! Ignored by default: needs the real harness binary, working credentials,
+//! and network. Run it deliberately:
 //!
 //! ```text
 //! cargo test -p construct-e2e --test router_probe -- --ignored --nocapture
 //! ```
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Accept one connection and report the `CONNECT` authority it carried.
-///
-/// Answers with `502` on purpose: the probe only asks whether the harness
-/// *routes through us*, and refusing keeps it from making a real API call.
-fn spawn_probe_listener() -> (u16, mpsc::Receiver<String>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe listener");
+/// A real tunneling `CONNECT` proxy, so the harness under probe reaches
+/// its actual endpoint and can complete a turn. A stub that refuses would
+/// only prove the harness *tried*.
+fn spawn_tunneling_proxy() -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe proxy");
     let port = listener.local_addr().unwrap().port();
-    let (tx, rx) = mpsc::channel();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_w = seen.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_ok() && !line.trim().is_empty() {
-                let _ = tx.send(line.trim().to_string());
-            }
-            let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n");
+            let Ok(client) = stream else { continue };
+            let seen_w = seen_w.clone();
+            std::thread::spawn(move || {
+                let _ = tunnel_one(client, seen_w);
+            });
         }
     });
-    (port, rx)
+    (port, seen)
+}
+
+fn tunnel_one(mut client: TcpStream, seen: Arc<Mutex<Vec<String>>>) -> std::io::Result<()> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if client.read(&mut byte)? == 0 {
+            return Ok(());
+        }
+        head.push(byte[0]);
+        if head.len() > 16 * 1024 {
+            return Ok(());
+        }
+    }
+    let text = String::from_utf8_lossy(&head).to_string();
+    let line = text.lines().next().unwrap_or_default().to_string();
+    seen.lock().unwrap().push(line.clone());
+
+    let Some(authority) = line.split_whitespace().nth(1) else {
+        return Ok(());
+    };
+    let upstream = TcpStream::connect(authority)?;
+    client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+
+    // Blind splice, both directions.
+    let (mut a_in, mut a_out) = (client.try_clone()?, client);
+    let (mut b_in, mut b_out) = (upstream.try_clone()?, upstream);
+    let up = std::thread::spawn(move || std::io::copy(&mut a_in, &mut b_out));
+    let _ = std::io::copy(&mut b_in, &mut a_out);
+    let _ = up.join();
+    Ok(())
 }
 
 fn harness_bin(name: &str) -> Option<std::path::PathBuf> {
@@ -56,45 +87,54 @@ fn harness_bin(name: &str) -> Option<std::path::PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// The proxy URL shape the daemon injects, reproduced exactly.
+///
+/// The password half is the whole point of reproducing it: a
+/// username-only credential is what broke the harness while still
+/// producing a healthy-looking `CONNECT`. If the daemon's construction
+/// changes, this must change with it or the probe stops testing reality.
+fn injected_proxy_url(port: u16) -> String {
+    format!("http://probe0token:construct@127.0.0.1:{port}")
+}
+
 /// The claim recorded for `claude` in the daemon's routing table.
 #[test]
-#[ignore = "needs the real claude binary and makes an outbound connection attempt"]
-fn claude_honors_the_proxy_environment() {
+#[ignore = "needs the real claude binary, credentials, and network"]
+fn claude_completes_a_turn_through_the_injected_proxy() {
     let Some(bin) = harness_bin("claude") else {
         panic!("claude is not installed; the probe cannot prove route capability");
     };
-    let (port, rx) = spawn_probe_listener();
-    let proxy = format!("http://probe-token@127.0.0.1:{port}");
+    let (port, seen) = spawn_tunneling_proxy();
+    let proxy = injected_proxy_url(port);
 
-    let mut child = Command::new(bin)
-        .args(["-p", "say hi"])
+    let out = Command::new(bin)
+        .args(["-p", "reply with exactly one word: pong"])
         .env("HTTPS_PROXY", &proxy)
         .env("https_proxy", &proxy)
-        // A key must be present or the CLI may never attempt a request at
-        // all; it does not need to be valid, because our stub refuses.
-        .env("ANTHROPIC_API_KEY", "sk-probe-not-a-real-key")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn claude");
+        .expect("spawn claude")
+        .wait_with_output()
+        .expect("wait for claude");
 
-    let seen = rx.recv_timeout(Duration::from_secs(60));
-    let _ = child.kill();
-    let _ = child.wait();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let connects = seen.lock().unwrap().clone();
 
-    let line = seen.expect(
-        "claude made no proxied connection: it is NOT route-capable on this version. \
-         Remove it from the daemon's harness_routing table until a probe passes.",
-    );
     assert!(
-        line.to_ascii_uppercase().starts_with("CONNECT"),
-        "expected a CONNECT through the proxy, got: {line}"
+        connects.iter().any(|l| l.contains("api.anthropic.com")),
+        "claude made no proxied connection to the API: it is NOT route-capable \
+         on this version. Remove it from the daemon's harness_routing table \
+         until a probe passes. saw={connects:?}"
     );
+    // The assertion that actually matters: a connection arriving proves
+    // reachability, not that the harness works through us.
     assert!(
-        line.contains("api.anthropic.com"),
-        "probe saw an unexpected destination — the intercept-host list in \
-         harness_routing may be stale: {line}"
+        !stdout.trim().is_empty() && !stdout.contains("API Error"),
+        "claude reached the proxy but could not complete a turn through it. \
+         stdout={stdout:?} stderr={stderr:?}"
     );
 }
 
@@ -113,4 +153,34 @@ fn only_probed_harnesses_are_declared_route_capable() {
         );
     }
     assert_eq!(PROBED, &["claude"]);
+}
+
+/// The probe's own instrument must be sound: if the tunneling proxy did
+/// not actually tunnel, the probe above would fail for the wrong reason
+/// and look like a harness regression.
+#[test]
+fn the_probe_proxy_really_tunnels() {
+    let (port, seen) = spawn_tunneling_proxy();
+    let origin = TcpListener::bind("127.0.0.1:0").expect("bind origin");
+    let origin_port = origin.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut s, _)) = origin.accept() {
+            let mut buf = [0u8; 5];
+            let _ = s.read_exact(&mut buf);
+            let _ = s.write_all(&buf);
+        }
+    });
+
+    let mut c = TcpStream::connect(("127.0.0.1", port)).expect("connect proxy");
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write!(c, "CONNECT 127.0.0.1:{origin_port} HTTP/1.1\r\n\r\n").unwrap();
+    let mut ack = [0u8; 39];
+    c.read_exact(&mut ack).unwrap();
+    assert!(String::from_utf8_lossy(&ack).starts_with("HTTP/1.1 200"));
+
+    c.write_all(b"hello").unwrap();
+    let mut echoed = [0u8; 5];
+    c.read_exact(&mut echoed).unwrap();
+    assert_eq!(&echoed, b"hello");
+    assert_eq!(seen.lock().unwrap().len(), 1);
 }

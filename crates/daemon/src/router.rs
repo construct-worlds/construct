@@ -40,6 +40,11 @@ pub const PROXY_ENV: &str = "HTTPS_PROXY";
 /// uppercase one. Both are set to the same value.
 pub const PROXY_ENV_LOWER: &str = "https_proxy";
 
+/// Password half of the injected proxy credential. Carries no meaning —
+/// only the username identifies the session — but must be present; see
+/// `session_env`.
+const CREDENTIAL_FILLER: &str = "construct";
+
 /// A wire dialect the router understands.
 ///
 /// This is the axis that decides whether a route is a redirect or a
@@ -416,7 +421,14 @@ impl Router {
         // proxy clients carry `Proxy-Authorization`. One listener with
         // per-session credentials beats one listener per session: only a
         // single port has to be reclaimed after a daemon restart.
-        let url = format!("http://{token}@127.0.0.1:{}", self.port());
+        //
+        // The password half is NOT optional, even though nothing reads it.
+        // A username-only userinfo (`http://token@host`) is accepted by the
+        // URL grammar but breaks at least one real harness: the CONNECT
+        // still arrives, so the proxy looks healthy, and the client then
+        // fails the request with a DNS-shaped error. Always emitting
+        // `token:<filler>` keeps us on the form clients actually handle.
+        let url = format!("http://{token}:{CREDENTIAL_FILLER}@127.0.0.1:{}", self.port());
         env.insert(PROXY_ENV.to_string(), url.clone());
         env.insert(PROXY_ENV_LOWER.to_string(), url);
         if let Ok(ca) = self.ca() {
@@ -668,6 +680,11 @@ mod tests {
             proxy.starts_with("http://") && proxy.contains(&format!("@127.0.0.1:{}", r.port())),
             "{proxy}"
         );
+        assert!(
+            proxy_userinfo(proxy).contains(':'),
+            "the credential must carry a password half; see \
+             injected_credential_is_never_username_only: {proxy}"
+        );
         assert_eq!(env.get(PROXY_ENV_LOWER), Some(proxy));
         assert!(env.contains_key("NODE_EXTRA_CA_CERTS"));
 
@@ -872,6 +889,39 @@ mod tests {
         assert!(UpstreamProxy::from_env_value("   ").is_none());
     }
 
+    fn proxy_userinfo(url: &str) -> String {
+        let rest = url.strip_prefix("http://").unwrap_or(url);
+        rest.rsplit_once('@').map(|(u, _)| u.to_string()).unwrap_or_default()
+    }
+
+    /// REGRESSION: the injected proxy URL must never be `token@host`.
+    ///
+    /// A username with no password is legal in the URL grammar and looks
+    /// fine end to end — the `CONNECT` still arrives and the proxy tunnels
+    /// it — but the claude harness then fails every request with a
+    /// DNS-shaped error (`ENOTFOUND`). Verified by hand against both this
+    /// router and an unrelated third-party proxy: `token@host` fails,
+    /// `token:anything@host` succeeds. Nothing reads the password; it
+    /// exists only to keep us on the form clients handle.
+    #[tokio::test]
+    async fn injected_credential_is_never_username_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = started(&dir, cfg_with(true)).await;
+        let env = r.attach_session("s1", "claude", None).unwrap();
+        for var in [PROXY_ENV, PROXY_ENV_LOWER] {
+            let userinfo = proxy_userinfo(env.get(var).unwrap());
+            let (user, pass) = userinfo.split_once(':').unwrap_or((&userinfo, ""));
+            assert!(!user.is_empty(), "{var}: no session credential");
+            assert!(
+                !pass.is_empty(),
+                "{var}: username-only userinfo breaks the claude harness"
+            );
+        }
+        // The session must still be resolvable from the credential.
+        let token = Router::token_from_env(&env).unwrap();
+        assert!(r.session_for_token(&token).is_some());
+    }
+
     #[test]
     fn reads_back_a_persisted_credential() {
         let env: HashMap<String, String> = [(
@@ -882,6 +932,15 @@ mod tests {
         .collect();
         assert_eq!(Router::token_from_env(&env).as_deref(), Some("abc123"));
         assert_eq!(Router::token_from_env(&HashMap::new()), None);
+
+        // The password half is ignored on the way back in.
+        let with_pass: HashMap<String, String> = [(
+            PROXY_ENV.to_string(),
+            "http://abc123:construct@127.0.0.1:8917".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(Router::token_from_env(&with_pass).as_deref(), Some("abc123"));
     }
 
     /// The whole safety claim in one test: an unrouted session's bytes
