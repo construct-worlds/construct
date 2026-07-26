@@ -106,11 +106,25 @@ pub struct HarnessRouting {
 pub fn harness_routing(harness: &str) -> Option<HarnessRouting> {
     match harness {
         // Node/undici: honors HTTPS_PROXY and NODE_EXTRA_CA_CERTS.
+        // Probed: completes a full turn through the injected proxy.
         "claude" => Some(HarnessRouting {
             dialect: Dialect::Anthropic,
             intercept_hosts: &["api.anthropic.com"],
             ca_env: &["NODE_EXTRA_CA_CERTS"],
         }),
+        // Everything else is absent for one of two reasons, and the
+        // difference matters when someone comes to extend this:
+        //
+        // - `codex`: probed, and it DOES honor the proxy environment —
+        //   pass-through already works. What is missing is interception:
+        //   its CA channel (`SSL_CERT_FILE` / `CODEX_CA_CERTIFICATE`)
+        //   *replaces* the system roots instead of adding to them, so
+        //   injecting only our CA would break every other TLS connection
+        //   the session makes. Routing it needs a composed bundle
+        //   (system roots + our CA) first. Transport capability alone is
+        //   not route capability.
+        // - everything else: simply unprobed. Unprobed means not offered
+        //   (spec 0111); add a probe first, then an entry.
         _ => None,
     }
 }

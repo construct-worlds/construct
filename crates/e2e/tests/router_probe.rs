@@ -138,6 +138,57 @@ fn claude_completes_a_turn_through_the_injected_proxy() {
     );
 }
 
+/// codex honors the proxy environment — measured, not assumed.
+///
+/// It reaches its endpoint (`chatgpt.com`, the subscription backend) through
+/// the injected proxy and completes a turn, so pass-through works today.
+///
+/// It is nonetheless absent from the daemon's routing table, for a reason
+/// that is about *interception*, not transport: codex takes its extra CA
+/// through `SSL_CERT_FILE` / `CODEX_CA_CERTIFICATE`, and those **replace**
+/// the system roots rather than adding to them (verified: pointing
+/// `SSL_CERT_FILE` at an empty file makes codex fail every TLS connection
+/// with "no certificates found in PEM file"). Injecting only the Construct
+/// CA there would break every other TLS connection the session makes.
+/// Routing codex therefore requires composing a bundle of the system roots
+/// plus our CA — until that exists, declaring codex route-capable would
+/// hand users a session that dies the moment a route is armed.
+#[test]
+#[ignore = "needs the real codex binary, credentials, and network"]
+fn codex_honors_the_proxy_environment() {
+    let Some(bin) = harness_bin("codex") else {
+        panic!("codex is not installed; cannot probe it");
+    };
+    let (port, seen) = spawn_tunneling_proxy();
+    let proxy = injected_proxy_url(port);
+
+    let out = Command::new(bin)
+        .args(["exec", "--skip-git-repo-check", "reply with exactly one word: pong"])
+        .env("HTTPS_PROXY", &proxy)
+        .env("https_proxy", &proxy)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn codex")
+        .wait_with_output()
+        .expect("wait for codex");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let connects = seen.lock().unwrap().clone();
+    assert!(
+        !connects.is_empty(),
+        "codex made no proxied connection — it would no longer be a routing \
+         candidate. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.trim().is_empty(),
+        "codex reached the proxy but could not complete a turn through it. \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
 /// Guards the other half of the claim: a harness with no probe must not be
 /// offered as routable. Cheap, no binary required, runs in CI.
 #[test]
@@ -145,6 +196,11 @@ fn only_probed_harnesses_are_declared_route_capable() {
     // Kept in sync by hand with the daemon's `harness_routing`. If you add
     // a harness there, add its probe above and its name here — in that
     // order (spec 0111).
+    //
+    // codex is deliberately NOT here despite passing the transport probe:
+    // its CA channel replaces the system roots, so interception needs
+    // bundle composition first. Transport capability alone is not route
+    // capability.
     const PROBED: &[&str] = &["claude"];
     for harness in ["codex", "smith", "shell", "opencode", "grok", "kimi", "pi"] {
         assert!(
