@@ -40,11 +40,15 @@ construct new --prompt "implement the failing test" pi
 ```
 
 Construct-owned options go before the harness name. Tokens after the harness name
-are passed verbatim to that harness's CLI:
+are passed verbatim to that harness's CLI. That means `--model` before the
+harness is construct metadata, while `--model` after the harness is passed to the
+harness itself:
 
 ```sh
 construct new --title "server logs" shell -lc 'tail -f server.log'
 construct new --prompt "fix tests" claude --permission-mode acceptEdits
+construct new --model opus claude      # construct model metadata
+construct new claude --model opus      # raw claude CLI argv
 ```
 
 By default, `construct new ...` creates an interactive session and opens the TUI
