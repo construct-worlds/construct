@@ -9319,6 +9319,9 @@ impl App {
                     | MouseEventKind::ScrollRight
             )
             && self.session_title_menu.is_none()
+            // An open popup owns the mouse, or its rows scroll the child
+            // underneath instead of the menu.
+            && self.route_menu.is_none()
             && self.resizing_list.is_none()
             && self.resizing_pin_strip.is_none()
             && self.resizing_orchestrator_panel.is_none()
@@ -9351,6 +9354,10 @@ impl App {
             }
         }
         if self.session_title_menu.is_none()
+            // The route picker floats over the view pane, so without this a
+            // click on it is forwarded to the child PTY and the popup never
+            // sees it — the menu looks dead while rendering perfectly.
+            && self.route_menu.is_none()
             && self.resizing_list.is_none()
             && self.resizing_pin_strip.is_none()
             && self.resizing_orchestrator_panel.is_none()
@@ -15958,6 +15965,118 @@ mod tests {
             cold,
             "hovering beside the indicator must not highlight it"
         );
+    }
+
+
+    /// REGRESSION: clicking the picker did nothing in the real TUI while
+    /// every picker test passed.
+    ///
+    /// The sibling tests call `handle_left_click` directly, which skips the
+    /// `on_mouse` dispatch that decides whether the child PTY swallows the
+    /// event first. The picker floats over the view pane, so without an
+    /// explicit claim there, every click on it was forwarded to the child
+    /// and the menu rendered perfectly while behaving as if it were not
+    /// there. This drives the full Down/Up path against live geometry.
+    #[tokio::test]
+    async fn on_mouse_click_reaches_the_route_picker() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (client, _dir, _server) = route_mock_daemon(
+            vec![route_json_models(
+                "codex-oauth",
+                &["gpt-5.6-sol", "gpt-5.5"],
+                None,
+            )],
+            None,
+        )
+        .await;
+        let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
+        summary.harness = "claude".into();
+        summary.model = Some("claude-opus-5".into());
+        summary.route_capable = true;
+        // A PTY session renders in terminal mode, which is what gives the
+        // history a live parser to track mouse mode in.
+        summary.has_pty = true;
+        let mut app = test_app(client, vec![summary]);
+        app.select_session("s1".into());
+        app.view = ViewMode::Terminal;
+        // The view pane must be focused, and — the part that matters — the
+        // session's child must have grabbed the mouse. That is the live
+        // condition under which `on_mouse` forwards to the PTY and never
+        // reaches the click pipeline; without it this test passes whether
+        // the picker claims the mouse or not.
+        app.focus = PaneFocus::View;
+        {
+            let mut history = crate::pty_render::ItemHistory::new();
+            // DECSET ?1002h + SGR ?1006h: what a full-screen harness sends
+            // when it starts tracking the mouse.
+            history.feed_pty(b"\x1b[?1002h\x1b[?1006h");
+            app.histories.insert("s1".to_string(), history);
+        }
+        // Render so the pane replays the PTY and the parser picks the mode
+        // up — it is only observable after a replay.
+        let _ = rendered(&mut app, 120, 30);
+        assert_ne!(
+            app.histories["s1"].mouse_protocol_mode(),
+            vt100::MouseProtocolMode::None,
+            "the child must be tracking the mouse or this test proves nothing"
+        );
+
+        let click = |col, row, kind| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let hit = app.layout.modeline_model_hit.expect("clickable");
+        app.on_mouse(click(
+            hit.start_col,
+            hit.row,
+            MouseEventKind::Down(MouseButton::Left),
+        ))
+        .await;
+        app.on_mouse(click(
+            hit.start_col,
+            hit.row,
+            MouseEventKind::Up(MouseButton::Left),
+        ))
+        .await;
+        assert!(
+            app.route_menu.is_some(),
+            "clicking the model indicator must open the picker"
+        );
+        let _ = rendered(&mut app, 120, 30);
+
+        // Click a target through the same path: it must preview its models
+        // rather than the click vanishing into the session below.
+        let (area, header) = {
+            let menu = app.route_menu.as_ref().unwrap();
+            (menu.area, menu.header_rows())
+        };
+        let row = area.y + 1 + header;
+        app.on_mouse(click(area.x + 2, row, MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(click(area.x + 2, row, MouseEventKind::Up(MouseButton::Left)))
+            .await;
+        let menu = app.route_menu.as_ref().expect("picker still open");
+        assert_eq!(
+            menu.models(),
+            vec!["gpt-5.6-sol", "gpt-5.5"],
+            "the target click must reach the picker"
+        );
+
+        // And a model click through the same path arms it and closes.
+        let (area, header, target_w) = {
+            let menu = app.route_menu.as_ref().unwrap();
+            (menu.area, menu.header_rows(), menu.target_col_w)
+        };
+        let model_col = area.x + 1 + target_w + 2;
+        let row = area.y + 1 + header;
+        app.on_mouse(click(model_col, row, MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(click(model_col, row, MouseEventKind::Up(MouseButton::Left)))
+            .await;
+        assert!(app.route_menu.is_none(), "arming closes the picker");
     }
 
     /// The modeline shows the substitution, not just its result.

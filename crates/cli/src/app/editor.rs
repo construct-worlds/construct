@@ -98,6 +98,22 @@ impl App {
         let Some(modal) = self.layout.modal_area else {
             return false;
         };
+        // The route picker can float over a modal, so it gets first refusal
+        // on the mouse there too.
+        if let Some(menu) = self.route_menu.clone() {
+            if let Some(hit) = menu.hit_at(ev.column, ev.row) {
+                if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    self.hit_route_menu(hit).await;
+                }
+                return true;
+            }
+            if menu.contains(ev.column, ev.row) {
+                return true;
+            }
+            if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.route_menu = None;
+            }
+        }
         if let Some(menu) = self.session_title_menu.clone() {
             if let Some(action) = menu.item_at(ev.column, ev.row) {
                 if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
