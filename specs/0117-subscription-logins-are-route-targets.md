@@ -27,6 +27,12 @@ required.
   headers, and any mandatory system-prompt text its backend rejects
   requests without — is part of the target definition, not optional
   polish. A target whose decoration is unknown is not offered.
+- A target's **accepted parameter set** is likewise part of its definition.
+  A dialect defines what shape a request may take; a target decides which
+  of that shape it will accept, and the two are not the same question. Two
+  targets speaking one dialect can disagree about a parameter, so the
+  accepted set is recorded per target and established by observing real
+  requests, never assumed from the dialect.
 - A login whose backend speaks a dialect the router cannot translate is
   **not offered at all**, on the same principle that governs profiles: an
   unusable option is better absent than mistranslating.
@@ -60,6 +66,10 @@ failure than a corrupted credential store.
   maintains. Sessions must expect a route to become unavailable between
   turns, and the reason shown must distinguish *expired* (use the tool
   again) from *absent* (sign in), because the user's next action differs.
+- Parameters a target refuses are dropped rather than passed through, and
+  dropping is lossy: a harness that asked for a token cap does not get one
+  enforced at the target. That is accepted because the alternative is a
+  request the target will never serve at all.
 - Because credentials are read at arm time, a route armed with a valid
   token can still fail later in the session. That failure surfaces as an
   upstream error, not as a corrupted turn.

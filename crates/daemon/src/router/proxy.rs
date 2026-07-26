@@ -659,7 +659,17 @@ async fn forward_translated(
             None => prefix.to_string(),
         });
     }
-    let translated = translate::emit_request(route.target_dialect, &canon, &route.model);
+    let mut translated = translate::emit_request(route.target_dialect, &canon, &route.model);
+    // A target can refuse a parameter its own dialect defines — the Codex
+    // backend 400s on `max_output_tokens`. Strip rather than refuse the
+    // turn; the alternative is a request the target will never accept.
+    if !route.drop_params.is_empty() {
+        if let Some(obj) = translated.as_object_mut() {
+            for key in route.drop_params {
+                obj.remove(*key);
+            }
+        }
+    }
     let url = route.endpoint.clone();
     let mut out = route
         .client

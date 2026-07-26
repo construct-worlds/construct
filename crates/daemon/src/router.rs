@@ -289,6 +289,10 @@ pub struct ArmedRoute {
     pub system_prefix: Option<&'static str>,
     /// Extra headers the target rejects requests without.
     pub extra_headers: Vec<(String, String)>,
+    /// Parameters this target rejects, stripped after the request is
+    /// emitted. The dialect decides the shape; the target decides which of
+    /// it is accepted.
+    pub drop_params: &'static [&'static str],
     /// Dialect the *target* speaks. When it differs from the harness's,
     /// the proxy translates instead of merely redirecting (spec 0116).
     pub target_dialect: Dialect,
@@ -316,7 +320,10 @@ impl ArmedRoute {
     /// when the dialects match: their backends need required headers and a
     /// required system prefix that byte-forwarding would not apply.
     pub fn needs_rebuild(&self) -> bool {
-        self.translates() || self.system_prefix.is_some() || !self.extra_headers.is_empty()
+        self.translates()
+            || self.system_prefix.is_some()
+            || !self.extra_headers.is_empty()
+            || !self.drop_params.is_empty()
     }
 }
 
@@ -706,6 +713,7 @@ impl Router {
             // the Anthropic key header, even the Anthropic one.
             auth: TargetAuth::Bearer,
             system_prefix: oauth::required_system_prefix(provider),
+            drop_params: oauth::unsupported_params(provider),
             extra_headers: oauth::extra_headers(provider, &cred)
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
@@ -775,6 +783,7 @@ impl Router {
             },
             system_prefix: None,
             extra_headers: Vec::new(),
+            drop_params: &[],
             target_dialect,
             client_dialect: routing.dialect,
             client: reqwest::Client::new(),
@@ -1938,6 +1947,65 @@ mod tests {
         std::env::remove_var("CONSTRUCT_CLAUDE_CREDENTIALS_FILE");
     }
 
+
+
+    /// REGRESSION: claude routed to codex-oauth failed with
+    /// `400 Unsupported parameter: max_output_tokens`.
+    ///
+    /// Anthropic requires `max_tokens`, so every claude request carries one
+    /// and every translation to Responses produced the parameter the Codex
+    /// backend refuses. The dialect defines it; that target does not accept
+    /// it, and those are different questions.
+    #[tokio::test]
+    async fn a_targets_rejected_parameters_are_stripped() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex_home = dir.path().join("codex");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(
+            codex_home.join("auth.json"),
+            serde_json::json!({"tokens":{"access_token":"at","account_id":"acct"}}).to_string(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let r = started(&dir, cfg_with(true)).await;
+        r.attach_session("s1", "claude", None).unwrap();
+        r.set_route("s1", "claude", Some("codex-oauth"), None)
+            .unwrap();
+        let ctx = r.sessions.read().unwrap()["s1"].clone();
+        let route = ctx.armed_route().unwrap();
+        assert!(route.drop_params.contains(&"max_output_tokens"));
+
+        // A claude request always carries max_tokens; after translation the
+        // parameter must be gone, while everything else survives.
+        let claude_request = serde_json::json!({
+            "model": "claude-opus-5",
+            "max_tokens": 32000,
+            "temperature": 0.7,
+            "system": "be terse",
+            "messages": [{"role":"user","content":"hi"}],
+        });
+        let canon = translate::parse_request(Dialect::AnthropicMessages, &claude_request);
+        let mut emitted = translate::emit_request(route.target_dialect, &canon, &route.model);
+        assert!(
+            emitted.get("max_output_tokens").is_some(),
+            "the dialect does define it — the target is what refuses it"
+        );
+        if let Some(obj) = emitted.as_object_mut() {
+            for key in route.drop_params {
+                obj.remove(*key);
+            }
+        }
+        assert!(emitted.get("max_output_tokens").is_none(), "{emitted}");
+        assert!(emitted.get("temperature").is_none(), "{emitted}");
+        assert_eq!(emitted["instructions"], "be terse");
+        assert_eq!(emitted["model"], route.model);
+        assert!(emitted["input"].as_array().is_some_and(|i| !i.is_empty()));
+
+        // grok-oauth speaks the same dialect and accepts both, so the
+        // stripping must not be applied dialect-wide.
+        std::env::remove_var("CODEX_HOME");
+    }
 
     /// Minimal PEM → DER, so the test trusts exactly the CA the router
     /// handed the session.

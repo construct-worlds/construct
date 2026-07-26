@@ -369,6 +369,28 @@ pub fn extra_headers(provider: OauthProvider, cred: &OauthCredential) -> Vec<(&'
     }
 }
 
+/// Request parameters a login's backend rejects outright.
+///
+/// A dialect says what shape a request takes; a *target* decides which of
+/// that shape it accepts, and the two are not the same. The Codex backend
+/// speaks Responses but refuses `max_output_tokens` with a 400 — while the
+/// public Responses endpoint requires nothing of the sort and grok's
+/// accepts it happily. Both lists below come from intercepted real
+/// requests, not from documentation.
+///
+/// Dropping a cap is lossy: a harness that asked for a token limit does not
+/// get one enforced at the target. That is the accepted cost of a
+/// translation whose alternative is a refused turn (spec 0116).
+pub fn unsupported_params(provider: OauthProvider) -> &'static [&'static str] {
+    match provider {
+        // Observed accepted set: include, input, instructions, model,
+        // parallel_tool_calls, prompt_cache_key, reasoning, store, stream,
+        // text, tool_choice, tools. Anything else is a 400.
+        OauthProvider::Codex => &["max_output_tokens", "temperature", "top_p"],
+        OauthProvider::Claude | OauthProvider::Grok => &[],
+    }
+}
+
 /// System-prompt text a login's backend requires the request to open with.
 ///
 /// The Claude subscription backend expects the Claude Code identity line;
@@ -506,6 +528,20 @@ mod tests {
         let err = read_credential(OauthProvider::Grok).unwrap_err();
         assert!(err.contains("expired"), "{err}");
         std::env::remove_var("GROK_HOME");
+    }
+
+    /// REGRESSION: claude routed to codex-oauth failed with
+    /// `400 Unsupported parameter: max_output_tokens`. Anthropic requires
+    /// `max_tokens`, so every claude request carried one and every
+    /// translation produced the parameter the Codex backend refuses.
+    #[test]
+    fn the_codex_backend_rejects_parameters_the_others_accept() {
+        assert!(unsupported_params(OauthProvider::Codex).contains(&"max_output_tokens"));
+        assert!(unsupported_params(OauthProvider::Codex).contains(&"temperature"));
+        // grok's Responses endpoint takes both; this is per-target, not
+        // per-dialect, even though both targets speak Responses.
+        assert!(unsupported_params(OauthProvider::Grok).is_empty());
+        assert!(unsupported_params(OauthProvider::Claude).is_empty());
     }
 
     #[test]
