@@ -9119,14 +9119,11 @@ pub fn compute_minibuffer_height(app: &App, total_h: u16) -> u16 {
         )
     }) {
         let is_fork = matches!(mb.intent, MinibufferIntent::ForkSessionHarness { .. });
-        let row_count = harness_picker_entries(
-            &app.harnesses,
-            is_fork,
-            &mb.input,
-            app.harness_picker_filter_active,
-        )
-        .len()
-        .clamp(1, HARNESS_PICKER_MAX_ROWS) as u16;
+        // Size from the complete candidate set so filtering does not move the
+        // input row or the main content above the picker (spec 0110).
+        let row_count = harness_picker_entries(&app.harnesses, is_fork, "", false)
+            .len()
+            .clamp(1, HARNESS_PICKER_MAX_ROWS) as u16;
         return (row_count + 1).min(total_h.saturating_sub(2).max(1));
     }
     let is_orch = matches!(

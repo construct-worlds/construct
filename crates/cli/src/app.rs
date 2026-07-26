@@ -32341,7 +32341,8 @@ mod tests {
         assert!(screen.contains("Generic shell command runner"));
         assert!(screen.contains("OpenAI Codex"));
         assert!(screen.contains("unavailable"));
-        assert!(app.layout.minibuffer_area.expect("picker area").height > 1);
+        let unfiltered_picker_height = app.layout.minibuffer_area.expect("picker area").height;
+        assert!(unfiltered_picker_height > 1);
         assert_eq!(
             app.layout
                 .minibuffer_harness_hits
@@ -32377,6 +32378,11 @@ mod tests {
         assert!(filtered.contains("codex"));
         assert!(filtered.contains("`codex` CLI not found"));
         assert!(!filtered.contains("Generic shell command runner"));
+        assert_eq!(
+            app.layout.minibuffer_area.expect("filtered picker area").height,
+            unfiltered_picker_height,
+            "filtering keeps the picker height stable"
+        );
 
         app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
@@ -32385,6 +32391,36 @@ mod tests {
             .as_ref()
             .and_then(|mb| mb.error.as_deref());
         assert_eq!(error, Some("`codex` CLI not found"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fork_harness_picker_height_stays_stable_while_filtering() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.harnesses = ["shell", "codex", "claude"]
+            .into_iter()
+            .map(|name| construct_protocol::HarnessInfo {
+                name: name.to_string(),
+                available: true,
+                detail: None,
+                binary: None,
+                description: None,
+                capabilities: Default::default(),
+            })
+            .collect();
+        app.run_action(KeyAction::OpenFork).await;
+
+        let unfiltered_height = crate::ui::compute_minibuffer_height(&app, 30);
+        let mb = app.minibuffer.as_mut().expect("fork picker");
+        mb.input = "codex".to_string();
+        mb.cursor = mb.input.len();
+        app.harness_picker_filter_active = true;
+
+        assert_eq!(
+            crate::ui::compute_minibuffer_height(&app, 30),
+            unfiltered_height,
+            "filtering keeps the fork picker height stable"
+        );
         server.abort();
     }
 
