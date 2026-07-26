@@ -1,4 +1,4 @@
-//! End-to-end: the split layout is shared daemon state (spec 0113).
+//! End-to-end: the split layout is shared daemon state (spec 0118).
 //!
 //! The wire-level rules (versioning, conflict rejection, pruning) are unit
 //! tested in the daemon. What only an end-to-end test can show is the part

@@ -20,7 +20,7 @@ Swapping preserves all visible context instead of discarding one pane's prior se
 ## Consequences
 
 Since the layout became shared daemon state
-([0113-split-layout-is-shared-daemon-state](0113-split-layout-is-shared-daemon-state.md)),
+([0118-split-layout-is-shared-daemon-state](0118-split-layout-is-shared-daemon-state.md)),
 this rule applies to every client that renders panes, not just the TUI — a
 session selected into a pane in one client swaps the same way it would in
 another. Clients that show a single session (narrow viewports) are outside the

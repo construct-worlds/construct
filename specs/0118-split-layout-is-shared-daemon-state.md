@@ -1,4 +1,4 @@
-# 0113-split-layout-is-shared-daemon-state
+# 0118-split-layout-is-shared-daemon-state
 
 Status: accepted
 Date: 2026-07-26
