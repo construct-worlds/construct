@@ -79,12 +79,13 @@ enum Command {
         scopes: Vec<SearchScopeArg>,
     },
     /// Create a new interactive session and open the TUI.
+    ///
+    /// Construct-owned options must appear before the harness name. Every
+    /// token after the harness is passed verbatim to that harness's CLI.
     New {
-        /// Harness name (shell, claude, codex, …).
-        harness: String,
-        /// Initial prompt (empty = interactive PTY for adapters that support it).
-        #[arg(default_value = "")]
-        prompt: String,
+        /// Initial prompt submitted to the harness (empty = interactive PTY for adapters that support it).
+        #[arg(short, long)]
+        prompt: Option<String>,
         #[arg(long, default_value = ".")]
         cwd: PathBuf,
         #[arg(long)]
@@ -99,6 +100,9 @@ enum Command {
         no_tui: bool,
         #[arg(long, default_value_t = false)]
         worktree: bool,
+        /// Harness name followed by arguments passed verbatim to the harness CLI.
+        #[arg(value_name = "HARNESS [ARGS]", required = true, num_args = 1.., allow_hyphen_values = true)]
+        harness_and_args: Vec<String>,
     },
     /// Fork a session into a new sibling session backed by a (possibly
     /// different) harness. The fork inherits the source's cwd and group and,
@@ -512,7 +516,6 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::New {
-            harness,
             prompt,
             cwd,
             model,
@@ -520,7 +523,13 @@ async fn main() -> Result<()> {
             mode,
             no_tui,
             worktree,
+            harness_and_args,
         } => {
+            let mut harness_and_args = harness_and_args.into_iter();
+            let harness = harness_and_args
+                .next()
+                .expect("clap requires at least the harness name");
+            let args: Vec<String> = harness_and_args.collect();
             let mode = mode.unwrap_or_else(|| "interactive".to_string());
             let open_tui = mode == "interactive" && !no_tui;
             ensure_daemon_running(&socket).await;
@@ -533,18 +542,14 @@ async fn main() -> Result<()> {
                 .create(construct_protocol::CreateSessionParams {
                     harness,
                     cwd,
-                    prompt: if prompt.trim().is_empty() {
-                        None
-                    } else {
-                        Some(prompt)
-                    },
+                    prompt: prompt.filter(|p| !p.trim().is_empty()),
                     model,
                     title,
                     mode: Some(mode),
                     pty_size: None,
                     worktree,
                     env: Default::default(),
-                    args: Vec::new(),
+                    args,
                     kind: construct_protocol::SessionKind::User,
                     parent_session_id: None,
                     group_id: None,
@@ -1095,5 +1100,71 @@ async fn daemon_restart_cmd(socket_override: Option<PathBuf>, sessions: bool) ->
         Ok(())
     } else {
         anyhow::bail!("construct daemon did not come back within 20s after restart")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_parses_construct_options_before_harness_and_harness_args_after() {
+        let cli = Cli::try_parse_from([
+            "construct",
+            "new",
+            "--prompt",
+            "fix tests",
+            "--mode",
+            "headless",
+            "codex",
+            "--approval-mode",
+            "never",
+        ])
+        .expect("parse construct new");
+
+        let Some(Command::New {
+            prompt,
+            mode,
+            harness_and_args,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected new command");
+        };
+
+        assert_eq!(prompt.as_deref(), Some("fix tests"));
+        assert_eq!(mode.as_deref(), Some("headless"));
+        assert_eq!(harness_and_args, ["codex", "--approval-mode", "never"]);
+    }
+
+    #[test]
+    fn new_treats_construct_like_flags_after_harness_as_harness_args() {
+        let cli = Cli::try_parse_from([
+            "construct",
+            "new",
+            "claude",
+            "--model",
+            "opus",
+            "--title",
+            "raw",
+        ])
+        .expect("parse construct new");
+
+        let Some(Command::New {
+            model,
+            title,
+            harness_and_args,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected new command");
+        };
+
+        assert_eq!(model, None);
+        assert_eq!(title, None);
+        assert_eq!(
+            harness_and_args,
+            ["claude", "--model", "opus", "--title", "raw"]
+        );
     }
 }

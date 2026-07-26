@@ -277,7 +277,7 @@ short real session:
   harness's naming pattern).
 - Drive the real thing end-to-end with the `/verify` flow (isolated daemon,
   fresh `CONSTRUCT_*_DIR`s) and confirm events arrive in the transcript:
-  `construct new <name> "<prompt that exercises the change>"`.
+  `construct new --prompt "<prompt that exercises the change>" <name>`.
 - Update the matrix in §3 and the user-facing tables in
   [harnesses.md](harnesses.md) / [configuration.md](configuration.md).
 - Record a TUI clip when the change is user-visible (AGENTS.md, "Recording

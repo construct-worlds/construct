@@ -40,11 +40,15 @@ pub async fn run() -> anyhow::Result<()> {
         // working.
         let resuming = std::env::var("CONSTRUCT_RESUME").as_deref() == Ok("1");
         let mut args: Vec<String> = command.args.clone();
-        match params.prompt.as_deref() {
-            Some(p) if !p.trim().is_empty() && !resuming => {
-                args.extend(["-lc".to_string(), p.to_string()]);
+        if params.args.is_empty() {
+            match params.prompt.as_deref() {
+                Some(p) if !p.trim().is_empty() && !resuming => {
+                    args.extend(["-lc".to_string(), p.to_string()]);
+                }
+                _ => args.push("-il".to_string()),
             }
-            _ => args.push("-il".to_string()),
+        } else {
+            args.extend(params.args.clone());
         }
 
         let label = command.argv_preview();

@@ -21,7 +21,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # or  grok login, then use --model grok-oauth:grok-4.3
 # or  run a local ollama (default http://localhost:11434)
 
-construct new smith "list the rust files in this repo and summarize what each crate does"
+construct new --prompt "list the rust files in this repo and summarize what each crate does" smith
 ```
 
 ### Model selection
@@ -126,7 +126,7 @@ model       = "muse-spark-1.1"
 ```
 
 ```text
-construct new smith "..." --model @deepseek   # start on a profile
+construct new --model @deepseek --prompt "..." smith   # start on a profile
 /model openai:gpt-5                            # first-party OpenAI
 /model @deepseek                               # DeepSeek
 /model @groq-llama:llama-3.1-8b-instant        # Groq, one-off model override

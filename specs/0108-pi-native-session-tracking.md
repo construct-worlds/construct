@@ -89,8 +89,8 @@ history.
 
 ## Examples
 
-- `construct new pi "fix the failing test"` runs pi's TUI in the PTY with
-  the prompt as a launch argument; the transcript shows the user message,
+- `construct new --prompt "fix the failing test" pi` runs pi's TUI in the PTY
+  with the prompt as a launch argument; the transcript shows the user message,
   reasoning, tool calls/results, and per-call cost mirrored from the
   session file as pi writes it.
 - Restarting the daemon relaunches pi on the same conversation file; the

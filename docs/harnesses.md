@@ -30,13 +30,21 @@ developer-facing integration checklist lives in
 Create a session with:
 
 ```sh
-construct new smith "review this repo"
+construct new --prompt "review this repo" smith
 construct new shell
-construct new codex "implement the failing test"
-construct new opencode "implement the failing test"
-construct new kimi "implement the failing test"
-construct new hermes "implement the failing test"
-construct new pi "implement the failing test"
+construct new --prompt "implement the failing test" codex
+construct new --prompt "implement the failing test" opencode
+construct new --prompt "implement the failing test" kimi
+construct new --prompt "implement the failing test" hermes
+construct new --prompt "implement the failing test" pi
+```
+
+Construct-owned options go before the harness name. Tokens after the harness name
+are passed verbatim to that harness's CLI:
+
+```sh
+construct new --title "server logs" shell -lc 'tail -f server.log'
+construct new --prompt "fix tests" claude --permission-mode acceptEdits
 ```
 
 By default, `construct new ...` creates an interactive session and opens the TUI
@@ -123,7 +131,7 @@ is *interactive* when the creating client supplied a PTY size or used the
 `construct new` CLI, and *headless* when it did not. The TUI always supplies one,
 so TUI sessions default to interactive.
 
-**The initial prompt does not pick the mode.** `construct new <harness> "<prompt>"`
+**The initial prompt does not pick the mode.** `construct new --prompt "<prompt>" <harness>`
 and `construct new <harness>` both create interactive sessions unless you pass
 `--mode headless`; the prompt only decides what the session does once it starts:
 
@@ -138,7 +146,7 @@ Pass `--mode` to choose explicitly (optionally alongside a seed prompt):
 ```sh
 construct new claude
 construct new --no-tui claude
-construct new smith --mode headless "summarize the last run"
+construct new --mode headless --prompt "summarize the last run" smith
 ```
 
 `smith`, `claude`, `codex`, `antigravity`, `hermes`, and `pi` support both modes.
