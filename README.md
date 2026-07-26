@@ -104,13 +104,9 @@ You can also launch straight into construct by prepending `construct new` to you
 favorite CLI harness command:
 
 ```sh
+construct new codex
 construct new claude --model opus
-construct new codex --approval-mode never
-construct new shell -lc 'cargo test'
 ```
-
-Construct-owned options go before the harness name, for example
-`construct new --prompt "review this repo" claude`.
 
 MIDI controllers can drive those same native TUI actions without keyboard
 emulation. See [MIDI control surfaces](docs/midi.md) for device discovery and
