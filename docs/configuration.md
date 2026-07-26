@@ -143,3 +143,31 @@ matrix_dim = "indexed:34"
 
 Colors accept `#rrggbb`, `indexed:N`, or ANSI names such as `green`, `cyan`,
 `dark_gray`, and `light_yellow`. Omitted slots keep the variant's default.
+
+### Color depth
+
+The palette is authored in 24-bit color. Terminals that only speak 256 colors
+get it quantized to the closest indexed color on the way out — including Apple
+Terminal, which cannot render `38;2` truecolor sequences at all and garbles
+them rather than approximating (green-on-yellow bars, blue blocks, washed-out
+text). When the palette has been quantized, the modeline says so next to the
+theme name: `theme:matrix | 256 colors`.
+
+Matching favors hue over exact lightness, so a color whose hue carries meaning
+never comes back gray. The cost is that dark saturated fills — a status-bar
+tint, say — render brighter than authored, since the reduced palettes have no
+dark desaturated hues to offer.
+
+Detection reads the environment, in order: `TERM=dumb`/`linux`/`vt100`/`ansi`
+means the 16 basic colors; `TERM_PROGRAM=Apple_Terminal` means 256, even if
+`COLORTERM` claims otherwise, since Apple Terminal cannot honor that claim;
+`COLORTERM=truecolor`/`24bit` or a `*-direct` `TERM` means 24-bit; a `screen*`
+`TERM` that said nothing about truecolor means 256; anything else is assumed to
+handle 24-bit. Override it when that guess is wrong:
+
+```sh
+CONSTRUCT_COLOR=truecolor   # or: 256, 16
+```
+
+For the full-color experience on macOS, use a truecolor terminal — iTerm2,
+Ghostty, WezTerm, kitty, or Alacritty — instead of Apple Terminal.

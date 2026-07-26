@@ -17,7 +17,6 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures::{FutureExt, StreamExt};
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -1381,6 +1380,11 @@ pub struct App {
     pub harness_usage_last_query: HashMap<String, Instant>,
     pub theme: crate::theme::Theme,
     pub theme_name: crate::theme::ThemeName,
+    /// Color depth the attached terminal is trusted with, resolved once at
+    /// startup. Rendering quantizes to it; the modeline names it when it is
+    /// anything less than truecolor, so a downgrade is visible rather than
+    /// mysterious.
+    pub color_depth: crate::color::ColorDepth,
     terminal_background_is_light: Option<bool>,
     pub help_visible: bool,
     /// Wrapped-row scroll offset into the help dialog's content, clamped to
@@ -3944,6 +3948,7 @@ async fn run_with_socket_initial_selection(
         harness_usage_last_query: HashMap::new(),
         theme,
         theme_name: theme_config.active_name(None),
+        color_depth: crate::color::ColorDepth::default(),
         terminal_background_is_light: None,
         help_visible: false,
         help_scroll_offset: 0,
@@ -4163,7 +4168,11 @@ async fn run_with_socket_initial_selection(
     app.theme = theme_config.resolve(detected_light);
     app.theme_name = theme_config.active_name(detected_light);
     app.terminal_background_is_light = detected_light;
-    tracing::info!(mode = ?theme_config.mode, theme = ?app.theme_name, ?detected_light, "tui theme resolved");
+    // How much color the terminal can be trusted with. The palette is authored
+    // in 24-bit RGB; terminals that only speak 256 colors get it quantized on
+    // the way out rather than mangled by the terminal (spec 0111).
+    app.color_depth = crate::color::detect();
+    tracing::info!(mode = ?theme_config.mode, theme = ?app.theme_name, ?detected_light, depth = ?app.color_depth, "tui theme resolved");
     app.report_terminal_background();
     let mut stdout = std::io::stdout();
     execute!(
@@ -4190,7 +4199,7 @@ async fn run_with_socket_initial_selection(
             )
         );
     }
-    let backend = CrosstermBackend::new(stdout);
+    let backend = crate::color::QuantizingBackend::new(stdout, app.color_depth);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
     let result = run_loop(&mut terminal, &mut app, socket).await;
@@ -4258,7 +4267,7 @@ async fn run_with_socket_initial_selection(
 }
 
 async fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<crate::color::QuantizingBackend<Stdout>>,
     app: &mut App,
     socket: std::path::PathBuf,
 ) -> Result<()> {
@@ -13840,6 +13849,7 @@ mod tests {
             harness_usage_last_query: HashMap::new(),
             theme: crate::theme::Theme::default(),
             theme_name: crate::theme::ThemeName::Matrix,
+            color_depth: crate::color::ColorDepth::default(),
             terminal_background_is_light: None,
             help_visible: false,
             help_scroll_offset: 0,
