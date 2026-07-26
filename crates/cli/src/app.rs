@@ -915,9 +915,6 @@ pub enum MinibufferIntent {
     MenuArchiveConfirm {
         session_id: String,
     },
-    MenuDeleteConfirm {
-        session_id: String,
-    },
     MenuUnarchiveConfirm {
         session_id: String,
     },
@@ -1152,6 +1149,7 @@ pub struct DynamicUiHover {
 pub enum SessionTitleMenuAction {
     Rename,
     Fork,
+    ProgramTerminalMode,
     SplitHorizontal,
     SplitVertical,
     CloseSplit,
@@ -1163,9 +1161,10 @@ pub enum SessionTitleMenuAction {
 }
 
 impl SessionTitleMenuAction {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Rename,
         Self::Fork,
+        Self::ProgramTerminalMode,
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::CloseSplit,
@@ -1177,7 +1176,8 @@ impl SessionTitleMenuAction {
     pub fn label(self) -> &'static str {
         match self {
             Self::Rename => "rename",
-            Self::Fork => "fork conversation",
+            Self::Fork => "fork",
+            Self::ProgramTerminalMode => "program mode",
             Self::SplitHorizontal => "split horizontal",
             Self::SplitVertical => "split vertical",
             Self::CloseSplit => "close split",
@@ -26618,7 +26618,7 @@ mod tests {
 
     #[test]
     fn session_menu_only_activates_merge_for_forks() {
-        let area = ratatui::layout::Rect::new(10, 5, 26, 10);
+        let area = ratatui::layout::Rect::new(10, 5, 34, 11);
         let merge_row = area.y
             + 1
             + SessionTitleMenuAction::ALL
@@ -30006,7 +30006,7 @@ mod tests {
     async fn menu_archive_confirm_click_y_archives_session() {
         // Covers the shared plain-y/N typed-submit cluster used by
         // `ArchivedDeleteConfirm` / `MenuArchiveConfirm` /
-        // `MenuUnarchiveConfirm` / `MenuDeleteConfirm`.
+        // `MenuUnarchiveConfirm`.
         let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
             construct_protocol::SessionKind::User,
         )])

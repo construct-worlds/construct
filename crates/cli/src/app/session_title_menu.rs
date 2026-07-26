@@ -2,7 +2,7 @@ use super::*;
 
 impl App {
     pub fn open_session_title_menu(&mut self, session_id: String, view: ratatui::layout::Rect) {
-        const MENU_W: u16 = 26;
+        const MENU_W: u16 = 34;
         let menu_h = SessionTitleMenuAction::ALL.len() as u16 + 2;
         let width = MENU_W.min(view.width.saturating_sub(2).max(1));
         let x = view
@@ -42,6 +42,9 @@ impl App {
             SessionTitleMenuAction::Fork => {
                 self.run_action(crate::keymap::KeyAction::OpenFork).await
             }
+            SessionTitleMenuAction::ProgramTerminalMode => {
+                self.run_action(crate::keymap::KeyAction::OpenProgram).await;
+            }
             SessionTitleMenuAction::Merge => {
                 self.run_action(crate::keymap::KeyAction::OpenMerge).await;
             }
@@ -53,45 +56,27 @@ impl App {
             }
             SessionTitleMenuAction::CloseSplit => self.delete_active_window(),
             SessionTitleMenuAction::Archive => {
-                let archived = self
+                if self
                     .sessions
                     .iter()
                     .find(|s| s.id == session_id)
-                    .is_some_and(|s| s.archived);
-                let (verb, intent) = if archived {
-                    (
-                        "Unarchive",
-                        MinibufferIntent::MenuUnarchiveConfirm {
-                            session_id: session_id.clone(),
-                        },
-                    )
+                    .is_some_and(|s| s.archived)
+                {
+                    self.minibuffer = Some(Minibuffer {
+                        prompt: format!("Unarchive session {}? ", short_id(&session_id)),
+                        input: String::new(),
+                        cursor: 0,
+                        intent: MinibufferIntent::MenuUnarchiveConfirm { session_id },
+                        error: None,
+                    });
                 } else {
-                    (
-                        "Archive",
-                        MinibufferIntent::MenuArchiveConfirm {
-                            session_id: session_id.clone(),
-                        },
-                    )
-                };
-                self.minibuffer = Some(Minibuffer {
-                    prompt: format!("{verb} session {}? ", short_id(&session_id)),
-                    input: String::new(),
-                    cursor: 0,
-                    intent,
-                    error: None,
-                });
+                    self.run_action(crate::keymap::KeyAction::OpenDeleteConfirm)
+                        .await;
+                }
             }
             SessionTitleMenuAction::Delete => {
-                self.minibuffer = Some(Minibuffer {
-                    prompt: format!(
-                        "Delete session {}? This drops transcript + worktree. ",
-                        short_id(&session_id)
-                    ),
-                    input: String::new(),
-                    cursor: 0,
-                    intent: MinibufferIntent::MenuDeleteConfirm { session_id },
-                    error: None,
-                });
+                self.run_action(crate::keymap::KeyAction::OpenDeleteConfirm)
+                    .await;
             }
         }
     }

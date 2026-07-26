@@ -1805,10 +1805,7 @@ fn minibuffer_choice_suffix(intent: &MinibufferIntent) -> Option<Vec<PromptPart>
             PromptPart::Text(" = cancel): "),
         ],
         // Typed-then-submit path, plain y/N.
-        ArchivedDeleteConfirm { .. }
-        | MenuArchiveConfirm { .. }
-        | MenuUnarchiveConfirm { .. }
-        | MenuDeleteConfirm { .. } => vec![
+        ArchivedDeleteConfirm { .. } | MenuArchiveConfirm { .. } | MenuUnarchiveConfirm { .. } => vec![
             PromptPart::Text("("),
             PromptPart::Choice {
                 label: "y",
@@ -4738,6 +4735,15 @@ fn render_session_title_menu(f: &mut Frame, app: &App) {
     let Some(menu) = &app.session_title_menu else {
         return;
     };
+    let program_open = app
+        .program_popup
+        .as_ref()
+        .is_some_and(|popup| popup.program.session_id == menu.session_id && !popup.closing);
+    let terminal_focus = app
+        .program_popup
+        .as_ref()
+        .is_some_and(|popup| popup.program.session_id == menu.session_id && popup.terminal_focus);
+
     let area = menu.area;
     if area.width < 4 || area.height < 3 {
         return;
@@ -4777,22 +4783,86 @@ fn render_session_title_menu(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(app.theme.text)
         };
-        let label_text = if matches!(action, SessionTitleMenuAction::Archive)
-            && app
-                .sessions
-                .iter()
-                .find(|s| s.id == menu.session_id)
-                .is_some_and(|s| s.archived)
-        {
-            "unarchive"
-        } else {
-            action.label()
-        };
-        let label = format!(" {label_text} ");
-        let text = truncate_to_width(&label, area.width.saturating_sub(2) as usize);
-        f.buffer_mut()
-            .set_string(area.x.saturating_add(1), row, text, style);
+        let (label_text, binding) = session_title_menu_action_label(app, action, menu.session_id.as_str(), program_open, terminal_focus);
+        render_session_title_menu_row(f, area, row, label_text, binding, style);
     }
+}
+
+fn render_session_title_menu_row(
+    f: &mut Frame,
+    area: Rect,
+    row: u16,
+    label_text: &str,
+    binding: Option<&str>,
+    style: Style,
+) {
+    let content_x = area.x.saturating_add(1);
+    let content_w = area.width.saturating_sub(2) as usize;
+    if content_w == 0 {
+        return;
+    }
+    f.buffer_mut()
+        .set_string(content_x, row, " ".repeat(content_w), style);
+
+    let label_budget = binding.map_or(content_w, |binding| {
+        let binding_w = UnicodeWidthStr::width(binding);
+        content_w.saturating_sub(binding_w.saturating_add(1))
+    });
+    let label = truncate_to_width(label_text, label_budget);
+    f.buffer_mut().set_string(content_x, row, label, style);
+
+    if let Some(binding) = binding {
+        let binding_w = UnicodeWidthStr::width(binding) as u16;
+        if binding_w < area.width.saturating_sub(2) {
+            let binding_x = area
+                .x
+                .saturating_add(area.width)
+                .saturating_sub(1)
+                .saturating_sub(binding_w);
+            f.buffer_mut().set_string(binding_x, row, binding, style);
+        }
+    }
+}
+
+fn session_title_menu_action_label(
+    app: &App,
+    action: SessionTitleMenuAction,
+    session_id: &str,
+    program_open: bool,
+    terminal_focus: bool,
+) -> (&'static str, Option<&'static str>) {
+    let archived = app
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .is_some_and(|s| s.archived);
+    let label = match action {
+        SessionTitleMenuAction::Archive if archived => "unarchive",
+        SessionTitleMenuAction::ProgramTerminalMode if program_open && terminal_focus => {
+            "program mode"
+        }
+        SessionTitleMenuAction::ProgramTerminalMode if program_open => "terminal mode",
+        _ => action.label(),
+    };
+    let binding = match (action, app.profile) {
+        (SessionTitleMenuAction::Rename, Profile::Emacs) => Some("C-x r"),
+        (SessionTitleMenuAction::Rename, Profile::Vim) => Some("r"),
+        (SessionTitleMenuAction::Fork, Profile::Emacs) => Some("C-x f"),
+        (SessionTitleMenuAction::Fork, Profile::Vim) => Some("f"),
+        (SessionTitleMenuAction::ProgramTerminalMode, _) => Some("C-x Space"),
+        (SessionTitleMenuAction::SplitHorizontal, Profile::Emacs) => Some("C-x 3"),
+        (SessionTitleMenuAction::SplitHorizontal, Profile::Vim) => Some("C-w v"),
+        (SessionTitleMenuAction::SplitVertical, Profile::Emacs) => Some("C-x 2"),
+        (SessionTitleMenuAction::SplitVertical, Profile::Vim) => Some("C-w s"),
+        (SessionTitleMenuAction::CloseSplit, Profile::Emacs) => Some("C-x 0"),
+        (SessionTitleMenuAction::CloseSplit, Profile::Vim) => Some("C-w c"),
+        (SessionTitleMenuAction::Archive, Profile::Emacs)
+        | (SessionTitleMenuAction::Delete, Profile::Emacs) => Some("C-x k"),
+        (SessionTitleMenuAction::Archive, Profile::Vim)
+        | (SessionTitleMenuAction::Delete, Profile::Vim) => Some("d d"),
+        _ => None,
+    };
+    (label, binding)
 }
 
 fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64>) {
