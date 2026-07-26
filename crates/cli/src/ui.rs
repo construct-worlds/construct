@@ -8444,15 +8444,17 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     // left-side hint underneath (CI-only failure: the notice width varies
     // with BUILD_ID, so the collision point moves between a clean and a
     // `-dirty` build).
-    // A quantized palette is named next to the theme, so "the colors look
-    // flatter than the screenshots" has a visible cause instead of being a
-    // mystery the user has to file an issue about (spec 0111).
-    let theme_label = match app.color_depth.label() {
-        Some(depth) => format!("theme:{} {depth}", app.theme_name.label()),
-        None => format!("theme:{}", app.theme_name.label()),
-    };
+    let theme_label = format!("theme:{}", app.theme_name.label());
     let mut persistent_notices: Vec<Vec<(String, Option<KeyAction>)>> =
         vec![vec![(theme_label, Some(KeyAction::CycleTheme))]];
+    // A quantized palette gets its own notice, so "the colors look flatter than
+    // the screenshots" has a visible cause instead of being a mystery the user
+    // has to file an issue about (spec 0111). It is deliberately *not* part of
+    // the theme segment: that segment cycles the theme on click, and the depth
+    // isn't something clicking can change.
+    if let Some(depth) = app.color_depth.label() {
+        persistent_notices.push(vec![(depth.to_string(), None)]);
+    }
     persistent_notices.push(vec![(
         modeline_remote_text(app.remote_enabled, app.remote_clients),
         Some(KeyAction::OpenRemoteControl),

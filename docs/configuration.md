@@ -147,11 +147,16 @@ Colors accept `#rrggbb`, `indexed:N`, or ANSI names such as `green`, `cyan`,
 ### Color depth
 
 The palette is authored in 24-bit color. Terminals that only speak 256 colors
-get it quantized to the nearest indexed color on the way out — including Apple
+get it quantized to the closest indexed color on the way out — including Apple
 Terminal, which cannot render `38;2` truecolor sequences at all and garbles
 them rather than approximating (green-on-yellow bars, blue blocks, washed-out
 text). When the palette has been quantized, the modeline says so next to the
-theme name: `theme:matrix 256c`.
+theme name: `theme:matrix | 256 colors`.
+
+Matching favors hue over exact lightness, so a color whose hue carries meaning
+never comes back gray. The cost is that dark saturated fills — a status-bar
+tint, say — render brighter than authored, since the reduced palettes have no
+dark desaturated hues to offer.
 
 Detection reads the environment, in order: `TERM=dumb`/`linux`/`vt100`/`ansi`
 means the 16 basic colors; `TERM_PROGRAM=Apple_Terminal` means 256, even if

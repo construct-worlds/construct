@@ -31,9 +31,16 @@ grayscale ramp), and the 16 basic SGR colors.
   with the profile instead of holding the color the theme asked for. (At the
   16-color depth, where there is nothing else to target, this necessarily
   yields.)
+- **A color whose hue is the point of it never comes back gray**, and hue is
+  matched ahead of exact lightness. Matching is scored as lightness error plus
+  color-direction error, not as raw channel distance.
 - **Colors the user pinned to a specific index stay at that index** when the
   depth can express it.
-- **A downgrade is visible in the modeline**, alongside the theme name.
+- **A downgrade is visible in the modeline**, as its own notice next to the
+  theme, spelled out rather than abbreviated — it appears with no surrounding
+  explanation, so it has to answer "what is this?" on its own. It is kept out of
+  the theme notice because that one cycles the theme when clicked, and clicking
+  cannot change what the terminal supports.
 
 ## Reason
 
@@ -45,6 +52,21 @@ bright-blue background, one carrying 92 and 103 paints green-on-yellow, and the
 `2` of the introducer switches on the faint attribute everywhere. The result is
 an unreadable frame, and the user has no way to tell that the cause is their
 terminal rather than the app.
+
+Hue is protected because the reduced palettes are not uniformly dense: their
+dark regions are coarse, while their neutrals are fine. Raw channel distance
+therefore answers a dark hued color with a gray — the nearest neutral really is
+closer, numerically, than any hue the palette can offer. That is the wrong
+trade for a UI: a subtle dark-green bar that becomes a dark gray one reads as
+*missing*, because the only thing distinguishing it from the surface behind it
+was the hue. A visibly brighter green is a smaller error than a fill that
+disappears, and the same logic prevents a dim green from sliding into teal
+when green and blue error are allowed to trade off freely.
+
+The exception is colors that only look hued arithmetically: a dark near-neutral
+has little chroma but a lot relative to its brightness, and a pale tint has the
+opposite. Neither is about its hue — one is a dark gray, the other an off-white
+— so both are left free to use the fine grayscale ramp.
 
 Quantizing at the backend rather than in the palette is what makes the rule
 total. A frame carries three sources of color: the theme, colors computed
@@ -62,6 +84,9 @@ before the terminal sees all three.
 - Themes must stay legible after quantization: slots that differ only in a few
   RGB steps may collapse onto the same indexed color, so palettes should not
   rely on near-identical hues to carry meaning.
+- Dark, saturated fills come back brighter than authored, because the reduced
+  palettes have no dark desaturated hues to offer. A theme that wants a barely
+  there tint must accept that it reads more strongly at reduced depth.
 - Detection is heuristic and will occasionally be wrong. That is acceptable
   only because the forced override exists and the modeline shows what was
   chosen.
@@ -71,8 +96,10 @@ before the terminal sees all three.
 
 ## Non-Goals
 
-- Dithering, perceptual color-space matching, or contrast repair after
-  quantization. Nearest-neighbor in RGB is enough to keep a frame readable.
+- Dithering, a real perceptual color space (CIELAB and friends), or contrast
+  repair after quantization. The lightness-plus-hue score is a cheap
+  approximation, chosen because it is enough to keep a frame readable and
+  recognizable.
 - Runtime re-detection or a user-facing depth switcher. The environment is
   read once; changing it means restarting the client.
 - Making 16-color terminals look like the 24-bit palette. At four bits the
@@ -88,3 +115,6 @@ before the terminal sees all three.
 - A light theme's near-white frame background on a 256-color terminal: the
   nearest light neutral, so the frame still reads as a light background instead
   of falling back to the terminal's own.
+- A very dark green status-bar fill on a 256-color terminal: a green, brighter
+  than authored, rather than the numerically-closer dark gray that would make
+  the bar look absent.

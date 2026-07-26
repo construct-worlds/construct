@@ -30,12 +30,14 @@ pub enum ColorDepth {
 }
 
 impl ColorDepth {
-    /// Short modeline tag; `None` when nothing was downgraded.
+    /// Modeline label, spelled out rather than abbreviated: it appears without
+    /// any surrounding explanation, so "256 colors" has to answer "what is
+    /// this?" on its own. `None` when nothing was downgraded.
     pub fn label(self) -> Option<&'static str> {
         match self {
             Self::TrueColor => None,
-            Self::Ansi256 => Some("256c"),
-            Self::Ansi16 => Some("16c"),
+            Self::Ansi256 => Some("256 colors"),
+            Self::Ansi16 => Some("16 colors"),
         }
     }
 }
@@ -111,7 +113,7 @@ pub fn quantize(color: Color, depth: ColorDepth) -> Color {
     match depth {
         ColorDepth::TrueColor => color,
         ColorDepth::Ansi256 => match color {
-            Color::Rgb(r, g, b) => Color::Indexed(nearest_cube_or_gray(r, g, b)),
+            Color::Rgb(r, g, b) => Color::Indexed(nearest_indexed(r, g, b)),
             other => other,
         },
         ColorDepth::Ansi16 => match color {
@@ -128,38 +130,49 @@ pub fn quantize(color: Color, depth: ColorDepth) -> Color {
 /// The six levels the xterm 6×6×6 color cube samples each channel at.
 const CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
 
-/// Nearest 256-color index, choosing between the color cube (16..232) and the
-/// grayscale ramp (232..256) by squared RGB distance. Indices 0..16 are never
-/// returned: their hues belong to the user's terminal profile, so a palette
-/// slot mapped onto one would drift with the profile instead of staying put.
-fn nearest_cube_or_gray(r: u8, g: u8, b: u8) -> u8 {
-    let cube_idx = |c: u8| -> usize {
-        CUBE_LEVELS
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, level)| (**level as i32 - c as i32).abs())
-            .map(|(i, _)| i)
-            .unwrap_or(0)
-    };
-    let (ri, gi, bi) = (cube_idx(r), cube_idx(g), cube_idx(b));
-    let cube = 16 + 36 * ri as u8 + 6 * gi as u8 + bi as u8;
-    let cube_dist = dist(
-        (CUBE_LEVELS[ri], CUBE_LEVELS[gi], CUBE_LEVELS[bi]),
-        (r, g, b),
-    );
+/// Absolute chroma (max channel − min channel) a color needs before it counts
+/// as *hued*. Below it, the color is a neutral that merely isn't perfectly
+/// balanced, and the grayscale ramp — far finer than the cube's neutrals — is
+/// the better answer.
+const HUED_CHROMA: i32 = 24;
 
-    // Grayscale ramp: levels 8, 18, .. 238 at indices 232..256.
-    let avg = (r as u32 + g as u32 + b as u32) / 3;
-    let step = ((avg as i32 - 8).clamp(0, 238) as f32 / 10.0).round() as i32;
-    let step = step.clamp(0, 23) as u8;
-    let gray_level = 8 + 10 * step;
-    let gray_dist = dist((gray_level, gray_level, gray_level), (r, g, b));
+/// Chroma *relative to* the brightest channel that a color needs before it
+/// counts as hued. Both floors have to be met, because either one alone
+/// misjudges an end of the range: a dark near-neutral like `(12, 18, 27)` has
+/// little chroma but a lot of it relative to its brightness, while a pale tint
+/// like `(190, 255, 205)` has the opposite. Neither is really about its hue —
+/// the first is a dark gray, the second is off-white — so neither should be
+/// forced away from the neutrals.
+const HUED_SATURATION: f32 = 0.35;
 
-    if gray_dist < cube_dist {
-        232 + step
-    } else {
-        cube
+/// Weight on the lightness term relative to the hue/chroma term. Above 1
+/// because two candidates can match a hue equally well while sitting at very
+/// different lightnesses, and lightness is what keeps text legible against its
+/// background.
+const LIGHTNESS_WEIGHT: f32 = 2.0;
+
+/// Nearest 256-color index: the best of the color cube (16..232) and the
+/// grayscale ramp (232..256) under [`perceptual_cost`].
+///
+/// Indices 0..16 are never returned: their hues belong to the user's terminal
+/// profile, so a palette slot mapped onto one would drift with the profile
+/// instead of staying put.
+fn nearest_indexed(r: u8, g: u8, b: u8) -> u8 {
+    let hued = is_hued((r, g, b));
+    let mut best = (f32::MAX, 16u8);
+    for idx in 16u8..=255 {
+        let candidate = indexed_rgb(idx);
+        // A hued color must never come back gray: losing the hue loses what
+        // the palette was using the color to say.
+        if hued && is_gray(candidate) {
+            continue;
+        }
+        let cost = perceptual_cost((r, g, b), candidate);
+        if cost < best.0 {
+            best = (cost, idx);
+        }
     }
+    best.1
 }
 
 /// Nearest of the 16 basic colors, returned as ratatui's named variants — which
@@ -186,11 +199,60 @@ fn nearest_basic(r: u8, g: u8, b: u8) -> Color {
         (Color::LightCyan, (85, 255, 255)),
         (Color::White, (255, 255, 255)),
     ];
+    let hued = is_hued((r, g, b));
     BASIC
         .iter()
-        .min_by_key(|(_, rgb)| dist(*rgb, (r, g, b)))
+        .filter(|(_, rgb)| !(hued && is_gray(*rgb)))
+        .min_by(|(_, a), (_, b2)| {
+            perceptual_cost((r, g, b), *a)
+                .partial_cmp(&perceptual_cost((r, g, b), *b2))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|(color, _)| *color)
         .unwrap_or(Color::Reset)
+}
+
+/// How wrong `candidate` is as a stand-in for `src`, as lightness error plus
+/// hue/saturation error rather than plain RGB distance.
+///
+/// Plain RGB distance is what made a dark green fill land on a dark gray: the
+/// ramp's 10-step neutrals sit closer, in raw distance, to a dark hued color
+/// than anything in the cube's sparse dark corner does, and it also let a dim
+/// green land on a teal because green and blue error trade off freely. Scoring
+/// lightness and color-direction separately keeps the hue that carries the
+/// palette's meaning.
+fn perceptual_cost(src: (u8, u8, u8), candidate: (u8, u8, u8)) -> f32 {
+    let d_light = luma(src) - luma(candidate);
+    let (sr, sg, sb) = chroma_vector(src);
+    let (cr, cg, cb) = chroma_vector(candidate);
+    let d_chroma = (sr - cr).powi(2) + (sg - cg).powi(2) + (sb - cb).powi(2);
+    LIGHTNESS_WEIGHT * d_light.powi(2) + d_chroma
+}
+
+/// Perceived lightness, Rec. 601 weights.
+fn luma((r, g, b): (u8, u8, u8)) -> f32 {
+    0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
+}
+
+/// The color with its lightness removed, i.e. what direction (and how far) it
+/// points away from neutral. Comparing these keeps hue *and* saturation
+/// together in one term.
+fn chroma_vector(rgb: (u8, u8, u8)) -> (f32, f32, f32) {
+    let l = luma(rgb);
+    (rgb.0 as f32 - l, rgb.1 as f32 - l, rgb.2 as f32 - l)
+}
+
+/// Whether a color's hue is the point of it, and so must not be answered with
+/// a gray. See [`HUED_CHROMA`] and [`HUED_SATURATION`].
+fn is_hued((r, g, b): (u8, u8, u8)) -> bool {
+    let max = r.max(g).max(b) as i32;
+    let min = r.min(g).min(b) as i32;
+    let chroma = max - min;
+    chroma >= HUED_CHROMA && max > 0 && chroma as f32 / max as f32 >= HUED_SATURATION
+}
+
+fn is_gray((r, g, b): (u8, u8, u8)) -> bool {
+    r == g && g == b
 }
 
 /// RGB of a 256-color index (cube + grayscale ramp; 0..16 use the terminal's
@@ -233,11 +295,40 @@ fn indexed_rgb(idx: u8) -> (u8, u8, u8) {
     }
 }
 
-fn dist((r1, g1, b1): (u8, u8, u8), (r2, g2, b2): (u8, u8, u8)) -> i32 {
-    let dr = r1 as i32 - r2 as i32;
-    let dg = g1 as i32 - g2 as i32;
-    let db = b1 as i32 - b2 as i32;
-    dr * dr + dg * dg + db * db
+/// A [`quantize`] with a memo, so the 240-candidate search runs once per
+/// distinct color rather than once per cell per frame. A frame draws thousands
+/// of cells from a few dozen distinct colors, so the cache is tiny and hits
+/// almost always.
+///
+/// The depth is fixed at construction and part of the identity of the cache:
+/// keying entries by color alone would serve a 256-color answer to a 16-color
+/// terminal the moment one process used both.
+pub struct Quantizer {
+    depth: ColorDepth,
+    cache: std::collections::HashMap<(u8, u8, u8), Color>,
+}
+
+impl Quantizer {
+    pub fn new(depth: ColorDepth) -> Self {
+        Self {
+            depth,
+            cache: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn map(&mut self, color: Color) -> Color {
+        if self.depth == ColorDepth::TrueColor {
+            return color;
+        }
+        let depth = self.depth;
+        match color {
+            Color::Rgb(r, g, b) => *self
+                .cache
+                .entry((r, g, b))
+                .or_insert_with(|| quantize(color, depth)),
+            other => quantize(other, depth),
+        }
+    }
 }
 
 /// A [`ratatui::backend::Backend`] that quantizes every cell color on its way
@@ -255,6 +346,7 @@ pub struct QuantizingBackend<W: std::io::Write> {
     /// Reused across frames so a downgraded terminal doesn't allocate a
     /// per-cell vector on every draw.
     scratch: Vec<(u16, u16, ratatui::buffer::Cell)>,
+    quantizer: Quantizer,
 }
 
 impl<W: std::io::Write> QuantizingBackend<W> {
@@ -263,6 +355,7 @@ impl<W: std::io::Write> QuantizingBackend<W> {
             inner: ratatui::backend::CrosstermBackend::new(writer),
             depth,
             scratch: Vec::new(),
+            quantizer: Quantizer::new(depth),
         }
     }
 }
@@ -293,9 +386,9 @@ impl<W: std::io::Write> ratatui::backend::Backend for QuantizingBackend<W> {
         scratch.clear();
         for (x, y, cell) in content {
             let mut cell = cell.clone();
-            cell.fg = quantize(cell.fg, self.depth);
-            cell.bg = quantize(cell.bg, self.depth);
-            cell.underline_color = quantize(cell.underline_color, self.depth);
+            cell.fg = self.quantizer.map(cell.fg);
+            cell.bg = self.quantizer.map(cell.bg);
+            cell.underline_color = self.quantizer.map(cell.underline_color);
             scratch.push((x, y, cell));
         }
         let result = self
@@ -529,6 +622,93 @@ mod tests {
         );
     }
 
+    /// Reported on #960: the matrix modeline/minibuffer fill vanished at 256
+    /// colors. Its slot is a very dark green, and raw RGB distance answered
+    /// with a dark *gray* from the ramp — indistinguishable from the frame
+    /// behind it, so the bar read as missing rather than as a different green.
+    #[test]
+    fn dark_hued_fills_keep_their_hue_instead_of_collapsing_to_gray() {
+        let matrix_modeline_bg = Color::Rgb(8, 46, 24);
+        let Color::Indexed(idx) = quantize(matrix_modeline_bg, ColorDepth::Ansi256) else {
+            panic!("expected an indexed color");
+        };
+        let (r, g, b) = indexed_rgb(idx);
+        assert!(!is_gray((r, g, b)), "{idx} is the gray {r},{g},{b}");
+        assert!(g > r && g > b, "expected a green, got {idx} = {r},{g},{b}");
+        // And at 16 colors, where the only alternative to a hue is black.
+        assert_eq!(
+            quantize(matrix_modeline_bg, ColorDepth::Ansi16),
+            Color::Green
+        );
+    }
+
+    #[test]
+    fn hues_survive_the_cubes_sparse_dark_corner() {
+        // The matrix `dim`/`inactive_highlight_bg` greens are dark enough that
+        // channelwise rounding used to swing them to a teal (equal G and B).
+        for (r, g, b) in [(32, 112, 58), (28, 78, 42), (24, 96, 48), (18, 92, 42)] {
+            let Color::Indexed(idx) = quantize(Color::Rgb(r, g, b), ColorDepth::Ansi256) else {
+                panic!("expected an indexed color");
+            };
+            let got = indexed_rgb(idx);
+            assert!(
+                got.1 > got.0 && got.1 > got.2,
+                "({r},{g},{b}) -> {idx} = {got:?}, which isn't green-dominant"
+            );
+        }
+    }
+
+    #[test]
+    fn near_neutrals_still_use_the_fine_grayscale_ramp() {
+        // Slightly-blue dark neutrals (the dark_ui frame background) are better
+        // served by the ramp's 10-unit steps than by a saturated cube entry.
+        for (r, g, b) in [(12, 18, 27), (29, 38, 52), (43, 52, 66)] {
+            match quantize(Color::Rgb(r, g, b), ColorDepth::Ansi256) {
+                Color::Indexed(idx) => assert!(
+                    idx >= 232 || is_gray(indexed_rgb(idx)),
+                    "({r},{g},{b}) -> {idx} = {:?}, expected a neutral",
+                    indexed_rgb(idx)
+                ),
+                other => panic!("expected an indexed color, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_memo_agrees_with_the_uncached_search_at_every_depth() {
+        for depth in [
+            ColorDepth::TrueColor,
+            ColorDepth::Ansi256,
+            ColorDepth::Ansi16,
+        ] {
+            let mut q = Quantizer::new(depth);
+            for color in [
+                Color::Rgb(8, 46, 24),
+                Color::Rgb(190, 255, 205),
+                Color::Indexed(34),
+                Color::Green,
+                Color::Reset,
+            ] {
+                // Twice, so the second call is served from the cache.
+                assert_eq!(q.map(color), quantize(color, depth), "{depth:?} {color:?}");
+                assert_eq!(q.map(color), quantize(color, depth), "{depth:?} {color:?}");
+            }
+        }
+    }
+
+    /// One quantizer per depth, and no cross-talk between them: the same RGB
+    /// has to answer differently for a 256-color and a 16-color terminal.
+    #[test]
+    fn separate_quantizers_do_not_share_answers() {
+        let dark_green = Color::Rgb(8, 46, 24);
+        let mut wide = Quantizer::new(ColorDepth::Ansi256);
+        let mut narrow = Quantizer::new(ColorDepth::Ansi16);
+        let wide_answer = wide.map(dark_green);
+        assert_eq!(narrow.map(dark_green), Color::Green);
+        assert_ne!(wide_answer, Color::Green);
+        assert_eq!(wide.map(dark_green), wide_answer);
+    }
+
     #[test]
     fn quantized_colors_never_use_the_profile_owned_low_16() {
         for (r, g, b) in [
@@ -554,8 +734,9 @@ mod tests {
             quantize(Color::Rgb(57, 255, 136), ColorDepth::Ansi16),
             Color::LightGreen
         );
-        // ...while the palette's near-white body text reads as plain white,
-        // which is the honest answer at four bits.
+        // ...while the palette's near-white body text reads as plain white:
+        // a pale tint is off-white, not a green, so it is not held away from
+        // the neutrals the way a saturated color is.
         assert_eq!(
             quantize(Color::Rgb(190, 255, 205), ColorDepth::Ansi16),
             Color::White
