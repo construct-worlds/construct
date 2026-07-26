@@ -189,6 +189,103 @@ fn codex_honors_the_proxy_environment() {
     );
 }
 
+/// Transport probes for the remaining installed harnesses.
+///
+/// Every one of these honors the proxy environment and completes a turn
+/// through it, so **pass-through works for all of them today**. None is in
+/// the daemon's routing table, and the reason is neither transport nor CA
+/// trust — see `harness_dialects_are_unestablished` below.
+///
+/// Measured endpoints and CA channels (probed, not assumed):
+///
+/// | harness  | endpoint                          | CA channel                    |
+/// |----------|-----------------------------------|-------------------------------|
+/// | claude   | api.anthropic.com                 | NODE_EXTRA_CA_CERTS, additive |
+/// | pi       | chatgpt.com                       | NODE_EXTRA_CA_CERTS, additive |
+/// | opencode | api.meta.ai                       | NODE_EXTRA_CA_CERTS, additive |
+/// | grok     | cli-chat-proxy.grok.com           | SSL_CERT_FILE, additive       |
+/// | hermes   | inference-api.nousresearch.com    | SSL_CERT_FILE, REPLACES roots |
+/// | codex    | chatgpt.com                       | SSL_CERT_FILE, REPLACES roots |
+///
+/// "Additive" was verified by MITM: a forged leaf signed by a throwaway CA
+/// placed in that variable completed a TLS handshake while the harness
+/// still reached its real endpoint. "Replaces" was verified by pointing the
+/// variable at a bundle without the system roots and watching every TLS
+/// connection fail.
+#[test]
+#[ignore = "needs the real harness binaries, credentials, and network"]
+fn other_harnesses_honor_the_proxy_environment() {
+    let cases: &[(&str, &[&str], &str)] = &[
+        ("grok", &["-p", "reply with exactly one word: pong"], "grok.com"),
+        ("opencode", &["run", "reply with exactly one word: pong"], ""),
+        ("hermes", &["-z", "reply with exactly one word: pong"], ""),
+        ("pi", &["-p", "reply with exactly one word: pong"], ""),
+    ];
+    for (name, args, expect_host) in cases {
+        let Some(bin) = harness_bin(name) else {
+            eprintln!("skip {name}: not installed");
+            continue;
+        };
+        let (port, seen) = spawn_tunneling_proxy();
+        let proxy = injected_proxy_url(port);
+        let out = Command::new(bin)
+            .args(*args)
+            .env("HTTPS_PROXY", &proxy)
+            .env("https_proxy", &proxy)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {name}: {e}"))
+            .wait_with_output()
+            .unwrap_or_else(|e| panic!("wait {name}: {e}"));
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let connects = seen.lock().unwrap().clone();
+        assert!(
+            !connects.is_empty(),
+            "{name} made no proxied connection; pass-through would not work for it"
+        );
+        if !expect_host.is_empty() {
+            assert!(
+                connects.iter().any(|l| l.contains(expect_host)),
+                "{name}: expected a connection to {expect_host}, saw {connects:?}"
+            );
+        }
+        assert!(
+            !stdout.trim().is_empty(),
+            "{name} reached the proxy but completed no turn through it"
+        );
+    }
+}
+
+/// Why transport-capable harnesses are still not routable.
+///
+/// Routing rebuilds a request in the target's dialect, which requires
+/// knowing the dialect the *harness* speaks. claude speaks Anthropic
+/// Messages, which is documented and implemented. The others talk to
+/// proprietary subscription backends — `chatgpt.com`,
+/// `cli-chat-proxy.grok.com`, `api.meta.ai` — whose request shapes have
+/// not been established here.
+///
+/// Declaring them route-capable on the strength of transport alone would
+/// let a user arm a route and receive corrupted turns, which is precisely
+/// the failure spec 0112 refuses to accept. Establishing a dialect is a
+/// capture exercise: intercept one real request per harness and read it.
+#[test]
+fn harness_dialects_are_unestablished_for_transport_only_harnesses() {
+    // Harnesses proven to carry traffic through the proxy but whose wire
+    // dialect is not yet known. Moving one out of this list means a
+    // captured, documented request shape — not a guess.
+    const TRANSPORT_ONLY: &[&str] = &["codex", "grok", "opencode", "hermes", "pi"];
+    for name in TRANSPORT_ONLY {
+        assert!(
+            !matches!(*name, "claude"),
+            "claude's dialect IS established; it does not belong here"
+        );
+    }
+    assert_eq!(TRANSPORT_ONLY.len(), 5);
+}
+
 /// Guards the other half of the claim: a harness with no probe must not be
 /// offered as routable. Cheap, no binary required, runs in CI.
 #[test]

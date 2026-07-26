@@ -112,19 +112,28 @@ pub fn harness_routing(harness: &str) -> Option<HarnessRouting> {
             intercept_hosts: &["api.anthropic.com"],
             ca_env: &["NODE_EXTRA_CA_CERTS"],
         }),
-        // Everything else is absent for one of two reasons, and the
-        // difference matters when someone comes to extend this:
+        // codex, grok, opencode, hermes and pi have all been probed and
+        // all honor the proxy environment — pass-through works for every
+        // one of them. They are absent anyway, for two distinct reasons
+        // that matter to anyone extending this:
         //
-        // - `codex`: probed, and it DOES honor the proxy environment —
-        //   pass-through already works. What is missing is interception:
-        //   its CA channel (`SSL_CERT_FILE` / `CODEX_CA_CERTIFICATE`)
-        //   *replaces* the system roots instead of adding to them, so
-        //   injecting only our CA would break every other TLS connection
-        //   the session makes. Routing it needs a composed bundle
-        //   (system roots + our CA) first. Transport capability alone is
-        //   not route capability.
-        // - everything else: simply unprobed. Unprobed means not offered
-        //   (spec 0111); add a probe first, then an entry.
+        // - Their wire dialect is unknown. Routing rebuilds a request in
+        //   the target's dialect, which requires knowing the dialect the
+        //   harness speaks. These talk to proprietary subscription
+        //   backends (chatgpt.com, cli-chat-proxy.grok.com, api.meta.ai)
+        //   whose request shapes have not been captured. Offering a route
+        //   without that produces corrupted turns, which spec 0112
+        //   refuses.
+        // - `codex` and `hermes` additionally cannot be intercepted yet:
+        //   their CA channel (`SSL_CERT_FILE`) *replaces* the system roots
+        //   rather than adding to them, so injecting only our CA would
+        //   break every other TLS connection in the session. They need a
+        //   composed bundle (system roots + our CA) first. `grok` also
+        //   uses `SSL_CERT_FILE` but additively; `opencode` and `pi` take
+        //   `NODE_EXTRA_CA_CERTS`, additive, like claude.
+        //
+        // Measurements live in the e2e router_probe suite. Transport
+        // capability alone is never route capability.
         _ => None,
     }
 }
