@@ -188,7 +188,7 @@ impl App {
 /// targets it contrasts with. Short on purpose: the picker is a menu, not
 /// documentation, and the sentence has to earn its two rows.
 pub const ROUTE_DESCRIPTION: &str =
-    "Send this session's model requests to another provider. Nothing restarts.";
+    "Send this session's model request to another provider. No restart required";
 
 /// Which column the keyboard is driving. Both are always visible; focus
 /// only decides what moves.
