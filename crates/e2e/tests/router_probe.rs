@@ -258,35 +258,64 @@ fn other_harnesses_honor_the_proxy_environment() {
     }
 }
 
-/// Why transport-capable harnesses are still not routable.
+/// Captured harness dialects (spec 0112).
 ///
-/// Routing rebuilds a request in the target's dialect, which requires
-/// knowing the dialect the *harness* speaks. claude speaks Anthropic
-/// Messages, which is documented and implemented. The others talk to
-/// proprietary subscription backends — `chatgpt.com`,
-/// `cli-chat-proxy.grok.com`, `api.meta.ai` — whose request shapes have
-/// not been established here.
+/// Established by interception, not inference: each harness was run
+/// through a MITM proxy holding a forged leaf for its own endpoint, and
+/// its first real request body was decompressed and read.
 ///
-/// Declaring them route-capable on the strength of transport alone would
-/// let a user arm a route and receive corrupted turns, which is precisely
-/// the failure spec 0112 refuses to accept. Establishing a dialect is a
-/// capture exercise: intercept one real request per harness and read it.
+/// | harness  | endpoint                                  | request shape    |
+/// |----------|-------------------------------------------|------------------|
+/// | claude   | api.anthropic.com `/v1/messages`           | Anthropic Msgs   |
+/// | codex    | chatgpt.com `/backend-api/codex/responses` | OpenAI Responses |
+/// | pi       | chatgpt.com `/backend-api/codex/responses` | OpenAI Responses |
+/// | grok     | cli-chat-proxy.grok.com `/v1/responses`    | OpenAI Responses |
+/// | opencode | api.meta.ai `/v1/responses`                | OpenAI Responses |
+///
+/// The Responses bodies were identified by their distinctive keys —
+/// `input` (not `messages`), `instructions`, `store`, `reasoning`,
+/// `max_output_tokens`, and flat `tools[].name` — which no Chat
+/// Completions or Anthropic request carries.
+///
+/// Two consequences the routing table must respect:
+///
+/// 1. Four of five non-claude harnesses converge on ONE dialect. A single
+///    Responses translator is what unlocks them, not four bespoke ones.
+/// 2. opencode's dialect is NOT a property of opencode. It was observed
+///    speaking Responses only because its configured provider is Meta;
+///    pointed at an Anthropic provider it would emit Anthropic Messages,
+///    to a different host. Its dialect and its intercept host are both
+///    provider-dependent, so neither can be hardcoded for it.
 #[test]
-fn harness_dialects_are_unestablished_for_transport_only_harnesses() {
-    // Harnesses proven to carry traffic through the proxy but whose wire
-    // dialect is not yet known. Moving one out of this list means a
-    // captured, documented request shape — not a guess.
-    const TRANSPORT_ONLY: &[&str] = &["codex", "grok", "opencode", "hermes", "pi"];
-    for name in TRANSPORT_ONLY {
-        assert!(
-            !matches!(*name, "claude"),
-            "claude's dialect IS established; it does not belong here"
-        );
-    }
-    assert_eq!(TRANSPORT_ONLY.len(), 5);
+fn captured_dialects_are_recorded_not_guessed() {
+    // (harness, wire dialect observed). Changing an entry means a new
+    // capture, not a new assumption.
+    const CAPTURED: &[(&str, &str)] = &[
+        ("claude", "anthropic-messages"),
+        ("codex", "openai-responses"),
+        ("pi", "openai-responses"),
+        ("grok", "openai-responses"),
+        ("opencode", "openai-responses/provider-dependent"),
+    ];
+    // Only claude's dialect is one the router can currently accept from a
+    // harness; the rest await a Responses translator.
+    let translatable: Vec<&str> = CAPTURED
+        .iter()
+        .filter(|(_, d)| *d == "anthropic-messages")
+        .map(|(h, _)| *h)
+        .collect();
+    assert_eq!(translatable, vec!["claude"]);
+    assert_eq!(
+        CAPTURED
+            .iter()
+            .filter(|(_, d)| d.starts_with("openai-responses"))
+            .count(),
+        4,
+        "one Responses translator would cover four harnesses"
+    );
 }
 
-/// Guards the other half of the claim: a harness with no probe must not be
+/// Guards the other half of the claim:/// Guards the other half of the claim: a harness with no probe must not be
 /// offered as routable. Cheap, no binary required, runs in CI.
 #[test]
 fn only_probed_harnesses_are_declared_route_capable() {

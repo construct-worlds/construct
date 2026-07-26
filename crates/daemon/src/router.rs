@@ -117,13 +117,14 @@ pub fn harness_routing(harness: &str) -> Option<HarnessRouting> {
         // one of them. They are absent anyway, for two distinct reasons
         // that matter to anyone extending this:
         //
-        // - Their wire dialect is unknown. Routing rebuilds a request in
-        //   the target's dialect, which requires knowing the dialect the
-        //   harness speaks. These talk to proprietary subscription
-        //   backends (chatgpt.com, cli-chat-proxy.grok.com, api.meta.ai)
-        //   whose request shapes have not been captured. Offering a route
-        //   without that produces corrupted turns, which spec 0112
-        //   refuses.
+        // - Their wire dialect is one the router cannot yet accept FROM a
+        //   harness. Captured by interception: codex, pi, grok and
+        //   opencode all send OpenAI **Responses** requests (`input`,
+        //   `instructions`, `store`, `reasoning`, flat `tools[].name`) —
+        //   codex and pi to chatgpt.com/backend-api/codex/responses, grok
+        //   and opencode to /v1/responses on their own hosts. The router
+        //   accepts Anthropic Messages from a harness and nothing else, so
+        //   a single Responses translator is what unlocks all four.
         // - `codex` and `hermes` additionally cannot be intercepted yet:
         //   their CA channel (`SSL_CERT_FILE`) *replaces* the system roots
         //   rather than adding to them, so injecting only our CA would
@@ -131,6 +132,12 @@ pub fn harness_routing(harness: &str) -> Option<HarnessRouting> {
         //   composed bundle (system roots + our CA) first. `grok` also
         //   uses `SSL_CERT_FILE` but additively; `opencode` and `pi` take
         //   `NODE_EXTRA_CA_CERTS`, additive, like claude.
+        // - `opencode` needs more than a table entry in any case: it was
+        //   observed speaking Responses only because its configured
+        //   provider is Meta. Its dialect AND its endpoint host both
+        //   follow whatever provider it is pointed at, so neither can be
+        //   hardcoded here — it needs dialect detected from the
+        //   intercepted request instead of declared.
         //
         // Measurements live in the e2e router_probe suite. Transport
         // capability alone is never route capability.

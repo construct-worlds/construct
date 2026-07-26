@@ -78,6 +78,13 @@ component.
 - Prompt caching, provider-specific request fields, and reasoning content
   generally do not survive translation. A routed turn can therefore cost
   or perform differently than the same turn unrouted.
+- A harness's dialect is not always a property of the harness. Some
+  harnesses are provider-agnostic: the dialect they emit, and the host
+  they emit it to, follow whatever provider the user configured. For those,
+  a per-harness declaration is wrong by construction, and the dialect must
+  be recognized from the intercepted request itself. A declaration table is
+  an optimization for harnesses that speak exactly one dialect, not the
+  general mechanism.
 
 ## Non-Goals
 
