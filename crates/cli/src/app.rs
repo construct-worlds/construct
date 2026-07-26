@@ -16079,6 +16079,51 @@ mod tests {
         assert!(app.route_menu.is_none(), "arming closes the picker");
     }
 
+
+    /// The picker's explanatory text must be readable. `border` is the
+    /// dimmest colour in the palette and belongs to rules and frames; prose
+    /// rendered in it disappears against the background.
+    #[tokio::test]
+    async fn the_picker_description_is_not_rendered_in_the_border_colour() {
+        let (client, _dir, _server) = route_mock_daemon(
+            vec![route_json("kimi", "kimi-k2.5", None)],
+            None,
+        )
+        .await;
+        let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
+        summary.harness = "claude".into();
+        summary.route_capable = true;
+        let mut app = test_app(client, vec![summary]);
+        app.select_session("s1".into());
+        app.open_route_menu("s1".into(), 40, 29).await;
+
+        let (area, header) = {
+            let menu = app.route_menu.as_ref().unwrap();
+            (menu.area, menu.header_rows())
+        };
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let buf = term.backend().buffer().clone();
+
+        // Rows: Default, then the rule, then the description. The rule is
+        // legitimately border-coloured; the prose below it is not.
+        assert!(header >= 3, "the description occupies at least one row");
+        let rule_row = area.y + 2;
+        assert_eq!(
+            buf[(area.x + 2, rule_row)].style().fg,
+            Some(app.theme.border),
+            "the rule itself stays a rule"
+        );
+        let cell = &buf[(area.x + 2, rule_row + 1)];
+        assert_ne!(
+            cell.style().fg,
+            Some(app.theme.border),
+            "explanatory text must not use the border colour"
+        );
+        assert_eq!(cell.style().fg, Some(app.theme.muted));
+    }
+
     /// The modeline shows the substitution, not just its result.
     #[tokio::test]
     async fn modeline_shows_the_routed_substitution() {

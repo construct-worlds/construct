@@ -5001,8 +5001,11 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         f.render_widget(
             Paragraph::new(Line::styled(
                 format!(" {line}"),
+                // `muted`, not `border`: this is explanatory text meant to
+                // be read once, and border is the dimmest colour in the
+                // palette — it belongs to rules and frames, not prose.
                 Style::default()
-                    .fg(app.theme.border)
+                    .fg(app.theme.muted)
                     .add_modifier(Modifier::ITALIC),
             )),
             Rect {
@@ -5075,8 +5078,11 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         f.render_widget(
             Paragraph::new(Line::styled(
                 format!(" {}", truncate(reason, model_w.saturating_sub(1) as usize)),
+                // Also `muted`: an explanation nobody can read is no
+                // explanation. The row it belongs to already carries the
+                // disabled styling.
                 Style::default()
-                    .fg(app.theme.border)
+                    .fg(app.theme.muted)
                     .add_modifier(Modifier::ITALIC),
             ))
             .wrap(ratatui::widgets::Wrap { trim: true }),
@@ -5127,7 +5133,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
                 Paragraph::new(Line::styled(
                     format!(" {}", truncate(reason, inner_w.saturating_sub(1) as usize)),
                     Style::default()
-                        .fg(app.theme.border)
+                        .fg(app.theme.muted)
                         .add_modifier(Modifier::ITALIC),
                 )),
                 Rect {
