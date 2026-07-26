@@ -209,16 +209,6 @@ impl RouteMenu {
         }
     }
 
-    /// Trailing detail for a row — the dialect, or nothing in the model
-    /// step where the row is already the whole answer.
-    pub fn detail(&self, index: usize) -> Option<String> {
-        if self.current_route().is_some() {
-            return None;
-        }
-        let route = self.routes.get(index.checked_sub(1)?)?;
-        Some(route.dialect.clone())
-    }
-
     pub fn row_enabled(&self, index: usize) -> bool {
         if self.current_route().is_some() {
             return true;
@@ -280,10 +270,7 @@ impl RouteMenu {
 
     fn desired_width(&self) -> u16 {
         let widest = (0..self.rows())
-            .map(|i| {
-                self.label(i).chars().count()
-                    + self.detail(i).map(|d| d.chars().count() + 3).unwrap_or(0)
-            })
+            .map(|i| self.label(i).chars().count())
             .max()
             .unwrap_or(0);
         let reason = self
@@ -361,7 +348,6 @@ mod tests {
         );
         assert_eq!(m.rows(), 3);
         assert_eq!(m.label(1), "claude-oauth");
-        assert_eq!(m.detail(1).as_deref(), Some("anthropic"));
         assert!(m.is_active(2));
         assert!(m.row_descends(1), "a target opens its model step");
     }
@@ -377,7 +363,6 @@ mod tests {
         assert_eq!(m.label(0), "gpt-5.6-sol");
         assert_eq!(m.label(1), "gpt-5.5");
         assert_eq!(m.title(), " codex-oauth ");
-        assert!(m.detail(0).is_none(), "the model row is the whole answer");
         assert!(
             m.is_active(0),
             "the target's current model is marked in the model step"

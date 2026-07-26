@@ -4944,14 +4944,14 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         // A leading marker on the armed row, so the current state reads at
         // a glance instead of only through the modeline.
         let marker = if menu.is_active(index) { "*" } else { " " };
-        let left = format!(" {marker}{}", menu.label(index));
-        // Trailing detail, right-aligned: the dialect on a target row, and
-        // a chevron where a second step follows.
-        let right = match (menu.detail(index), menu.row_descends(index)) {
-            (Some(d), true) => format!("{d} \u{203a} "),
-            (Some(d), false) => format!("{d}  "),
-            (None, true) => "\u{203a} ".to_string(),
-            (None, false) => " ".to_string(),
+        let left = format!(" {marker} {}", menu.label(index));
+        // A chevron where a second step follows. The wire dialect is
+        // deliberately not shown: which protocol a target speaks is the
+        // router's problem to solve, not a choice the user is making.
+        let right = if menu.row_descends(index) {
+            "\u{203a} ".to_string()
+        } else {
+            " ".to_string()
         };
         let pad = (inner_w as usize)
             .saturating_sub(UnicodeWidthStr::width(left.as_str()))

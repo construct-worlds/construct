@@ -10489,9 +10489,10 @@ impl App {
                     self.activate_route_menu_row(index).await;
                     return;
                 }
-                // Esc steps back out of the model list before closing, so
-                // picking the wrong target is one keystroke to undo.
-                KeyCode::Esc => {
+                // Esc and Left both step back out of the model list before
+                // closing, so picking the wrong target is one keystroke to
+                // undo. Left mirrors the chevron that led in.
+                KeyCode::Esc | KeyCode::Left => {
                     self.route_menu_back();
                     return;
                 }
@@ -15765,9 +15766,17 @@ mod tests {
         assert!(!menu.row_enabled(2), "a target with no key is not selectable");
 
         let frame = rendered(&mut app, 120, 30);
-        assert!(frame.contains("Default"), "{frame}");
+        assert!(frame.contains("* Default"), "marker is spaced: {frame}");
         assert!(frame.contains("kimi"), "{frame}");
         assert!(frame.contains("glm"), "{frame}");
+        // The wire dialect is the router's problem, not a user-facing
+        // choice, so it must not appear in the picker.
+        for dialect in ["anthropic", "openai-chat", "openai-responses"] {
+            assert!(
+                !frame.contains(dialect),
+                "dialect `{dialect}` leaked into the picker: {frame}"
+            );
+        }
     }
 
     /// Clicking a target opens its models; clicking a model arms the route.
@@ -15802,11 +15811,18 @@ mod tests {
         let frame = rendered(&mut app, 120, 30);
         assert!(frame.contains("gpt-5.6-sol"), "{frame}");
 
-        // Esc steps back to the targets rather than closing outright.
-        app.route_menu_back();
+        // Left steps back to the targets rather than closing outright,
+        // mirroring the chevron that led in. Esc does the same.
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .await;
         let menu = app.route_menu.as_ref().expect("back on the target step");
         assert_eq!(menu.label(0), "Default");
         assert_eq!(menu.selected, 1, "returns to the target just left");
+
+        // From the target step, Left closes the picker.
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .await;
+        assert!(app.route_menu.is_none());
     }
 
     /// C-n / C-p move the selection, matching the motion keys the rest of
