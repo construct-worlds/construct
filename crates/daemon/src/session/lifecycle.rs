@@ -195,7 +195,7 @@ impl SessionManager {
             .to_string(),
         );
         self.install_memory_env(&mut env_with_meta, params.group_id.as_deref());
-        // Routing transport (spec 0109). A harness reads its proxy and CA
+        // Routing transport (spec 0113). A harness reads its proxy and CA
         // env once, at spawn, so a session that isn't given them here can
         // never be routed later — which is exactly why this is gated on
         // config rather than done per route: arming a route must not

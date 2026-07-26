@@ -1,4 +1,4 @@
-//! Model-route transport (specs 0109 / 0110 / 0111).
+//! Model-route transport (spec 0113 / 0110 / 0111).
 //!
 //! The router owns one loopback `CONNECT` listener and a per-session
 //! routing table the proxy consults on every connection. Changing a
@@ -34,7 +34,7 @@ use ca::RouterCa;
 
 /// Env var carrying the proxy the harness should use. This is the only
 /// channel Construct injects for transport; the harness's own endpoint
-/// configuration is never displaced (spec 0109).
+/// configuration is never displaced (spec 0113).
 pub const PROXY_ENV: &str = "HTTPS_PROXY";
 /// Lowercase spelling, honored by some clients in preference to the
 /// uppercase one. Both are set to the same value.
@@ -50,7 +50,7 @@ const CREDENTIAL_FILLER: &str = "construct";
 /// This is the axis that decides whether a route is a redirect or a
 /// translation: same dialect on both sides means rewrite the destination
 /// and forward the bytes; different dialects means the request and the
-/// response stream are rebuilt (spec 0112).
+/// response stream are rebuilt (spec 0116).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     /// Anthropic Messages (`/v1/messages`).
@@ -90,7 +90,7 @@ pub fn provider_dialect(provider: &str) -> Option<Dialect> {
 
 /// How a harness can be routed.
 ///
-/// Per spec 0111 each entry is an empirical claim about a specific
+/// Per spec 0115 each entry is an empirical claim about a specific
 /// harness, established by a probe (see `router_probe` in the e2e suite),
 /// not a reading of that harness's documentation. A harness absent from
 /// this table is not route-capable, and offering to route it is a bug.
@@ -278,7 +278,7 @@ pub struct ArmedRoute {
     pub model: String,
     pub api_key: String,
     /// Dialect the *target* speaks. When it differs from the harness's,
-    /// the proxy translates instead of merely redirecting (spec 0112).
+    /// the proxy translates instead of merely redirecting (spec 0116).
     pub target_dialect: Dialect,
     /// Dialect the harness speaks, i.e. what the response must look like.
     pub client_dialect: Dialect,
@@ -319,7 +319,7 @@ impl SessionRouting {
 
     /// Record that interception actually served a request. Until this
     /// flips, an armed route is unproven: the harness may resolve its
-    /// endpoint through a channel that ignores our injection (spec 0111).
+    /// endpoint through a channel that ignores our injection (spec 0115).
     pub fn mark_observed(&self) {
         if !self.observed.swap(true, Ordering::Relaxed) {
             let _ = self.observed_tx.send(self.session_id.clone());
@@ -596,7 +596,7 @@ impl Router {
 
     /// Whether the router has actually served an intercepted request for
     /// this session — the difference between a route that is armed and one
-    /// that is working (spec 0111).
+    /// that is working (spec 0115).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn observed(&self, session_id: &str) -> bool {
         self.sessions
@@ -689,7 +689,7 @@ impl Router {
             })?;
         let Some(name) = name else {
             // Clearing returns the session to pass-through, which is
-            // always reachable and therefore cannot fail (spec 0110).
+            // always reachable and therefore cannot fail (spec 0114).
             *ctx.route.write().unwrap() = None;
             return Ok(None);
         };
@@ -704,7 +704,7 @@ impl Router {
         Ok(Some(summary))
     }
 
-    /// Routes offered for a session's picker (spec 0111: render the
+    /// Routes offered for a session's picker (spec 0115: render the
     /// reason, never an empty list).
     pub fn list_routes(
         &self,
@@ -902,12 +902,12 @@ mod tests {
         assert_eq!(armed.origin_model.as_deref(), Some("claude-opus-5"));
         assert!(!armed.observed, "nothing has been proxied yet");
 
-        // Clearing always succeeds (spec 0110).
+        // Clearing always succeeds (spec 0114).
         assert!(r.set_route("s1", "claude", None, None).unwrap().is_none());
     }
 
     /// A provider with no translator is offered but not selectable, with
-    /// the reason attached rather than hidden (spec 0111).
+    /// the reason attached rather than hidden (spec 0115).
     #[tokio::test]
     async fn untranslatable_providers_are_listed_unavailable() {
         let dir = tempfile::tempdir().unwrap();
@@ -926,7 +926,7 @@ mod tests {
     }
 
     /// An OpenAI-dialect profile IS selectable from an Anthropic-dialect
-    /// harness — that is what the translator is for (spec 0112).
+    /// harness — that is what the translator is for (spec 0116).
     #[tokio::test]
     async fn openai_profiles_are_selectable_and_marked_as_translating() {
         let dir = tempfile::tempdir().unwrap();
@@ -1285,7 +1285,7 @@ mod tests {
     }
 
 
-    /// End-to-end cross-dialect routing (spec 0112): an Anthropic-dialect
+    /// End-to-end cross-dialect routing (spec 0116): an Anthropic-dialect
     /// client reaches an OpenAI-dialect endpoint. The request arrives
     /// translated and bearer-authenticated; the response comes back as a
     /// well-formed Anthropic SSE stream.
@@ -1433,7 +1433,7 @@ mod tests {
     }
 
 
-    /// End-to-end for a Responses-speaking harness (spec 0112): a `pi`
+    /// End-to-end for a Responses-speaking harness (spec 0116): a `pi`
     /// session sends an OpenAI Responses request, the router translates it
     /// to Chat Completions for the target, and re-encodes the reply as a
     /// Responses event stream the harness can render.

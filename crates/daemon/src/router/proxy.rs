@@ -1,4 +1,4 @@
-//! The per-session proxy connection handler (spec 0109).
+//! The per-session proxy connection handler (spec 0113).
 //!
 //! Two paths, and the split between them is the whole safety argument:
 //!
@@ -236,10 +236,10 @@ async fn intercept_tls(
     let body = read_body(&mut tls, &request).await?;
 
     // Same dialect → redirect the bytes. Different dialect → rebuild the
-    // request and re-encode the response stream (spec 0112).
+    // request and re-encode the response stream (spec 0116).
     // The dialect the harness speaks is read from the request itself, not
     // declared: a provider-agnostic harness emits whatever its configured
-    // provider speaks (spec 0112).
+    // provider speaks (spec 0116).
     //
     // A shape we do not recognize is an error, never a guess. Falling back
     // to a declared dialect would translate under an assumption we just
@@ -520,7 +520,7 @@ async fn forward(
     out.send().await.with_context(|| format!("forward to {url}"))
 }
 
-/// Cross-dialect: rebuild the request for the target's API (spec 0112).
+/// Cross-dialect: rebuild the request for the target's API (spec 0116).
 ///
 /// The client's path is deliberately not carried over — the target's
 /// endpoint is a different one, not the same path on another host.
@@ -568,7 +568,7 @@ fn wants_stream(body: &[u8]) -> bool {
 
 /// Answer a token-counting endpoint locally when the target has no
 /// equivalent. Refusing would break the harness's own context
-/// bookkeeping; the estimate is explicitly approximate (spec 0112).
+/// bookkeeping; the estimate is explicitly approximate (spec 0116).
 fn count_tokens_reply(body: &[u8]) -> String {
     let parsed = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
     serde_json::json!({"input_tokens": translate::estimate_tokens(&parsed)}).to_string()

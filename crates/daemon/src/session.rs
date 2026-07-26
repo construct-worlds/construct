@@ -1246,7 +1246,7 @@ pub struct SessionManager {
     /// otherwise a graceful `kill -TERM` of the daemon would mark
     /// every live session terminal and skip them on restart.
     is_shutting_down: AtomicBool,
-    /// Model-route transport (specs 0109/0110/0111). Present always,
+    /// Model-route transport (specs 0113/0114/0115). Present always,
     /// inert unless `[router] enabled = true`.
     pub(crate) router: Arc<crate::router::Router>,
     /// Remote-WS transport: `None` until `start_remote` is called
@@ -5081,7 +5081,7 @@ impl SessionManager {
     }
 
     /// Re-arm a persisted route after the session's transport is back
-    /// (spec 0110: a resumed session comes back on the route it was last
+    /// (spec 0114: a resumed session comes back on the route it was last
     /// running).
     pub(crate) async fn restore_route(&self, entry: &Arc<SessionEntry>) {
         let (id, harness, route) = {
@@ -5110,7 +5110,7 @@ impl SessionManager {
     /// Persist the first proof that a session's armed route is actually
     /// carrying traffic. Until this lands, a route is armed but unproven —
     /// the harness may resolve its endpoint through a channel that ignores
-    /// our injection (spec 0111), and reporting it as working would be a
+    /// our injection (spec 0115), and reporting it as working would be a
     /// lie the user has no way to check.
     pub(crate) async fn mark_route_observed(&self, session_id: &str) {
         let Some(entry) = self.get_entry(session_id).await else {
@@ -5132,7 +5132,7 @@ impl SessionManager {
             }));
     }
 
-    /// Arm, change, or clear a session's route (spec 0110).
+    /// Arm, change, or clear a session's route (spec 0114).
     pub async fn set_route(&self, session_id: &str, route: Option<String>) -> Result<()> {
         let entry = self
             .get_entry(session_id)
@@ -5173,7 +5173,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Routes offered for a session's picker (spec 0111).
+    /// Routes offered for a session's picker (spec 0115).
     pub async fn list_routes(
         &self,
         session_id: Option<&str>,

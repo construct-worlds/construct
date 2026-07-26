@@ -1,4 +1,4 @@
-//! Dialect translation (spec 0112).
+//! Dialect translation (spec 0116).
 //!
 //! Every translation goes through a canonical form rather than being
 //! written pairwise. With three dialects in play, pairwise would mean six

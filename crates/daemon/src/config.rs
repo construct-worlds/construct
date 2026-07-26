@@ -314,7 +314,7 @@ enabled = true
 #   CONSTRUCT_PI_BIN          — binary path fallback for the pi adapter
 #
 # ---------------------------------------------------------------------------
-# Model routing (specs 0109/0110/0111/0112)
+# Model routing (specs 0113/0114/0115/0116)
 # ---------------------------------------------------------------------------
 # Off by default. When enabled, route-capable sessions are spawned with
 # HTTPS_PROXY pointing at a loopback proxy the daemon owns. The proxy does
@@ -454,7 +454,7 @@ impl Default for SuggestConfig {
     }
 }
 
-/// `[router]` — model-route transport (specs 0109/0110/0111). Off by
+/// `[router]` — model-route transport (specs 0113/0114/0115). Off by
 /// default: with `enabled = false` the daemon injects nothing into any
 /// session's environment and no listener is ever bound, so a session's
 /// traffic is byte-identical to a build without routing.

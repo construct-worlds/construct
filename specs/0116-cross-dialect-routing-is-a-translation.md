@@ -1,4 +1,4 @@
-# 0112-cross-dialect-routing-is-a-translation
+# 0116-cross-dialect-routing-is-a-translation
 
 Status: accepted
 Date: 2026-07-25
@@ -85,7 +85,7 @@ component.
   from its own protocol — context accounting, model identity, cache
   behavior — reflects its beliefs, not the target's reality. Displaying
   the substitution is what keeps that honest
-  ([0110](0110-session-route-is-durable-session-state.md)).
+  ([0114](0114-session-route-is-durable-session-state.md)).
 - Prompt caching, provider-specific request fields, and reasoning content
   generally do not survive translation. A routed turn can therefore cost
   or perform differently than the same turn unrouted.

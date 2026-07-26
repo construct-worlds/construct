@@ -1,4 +1,4 @@
-//! The router's local certificate authority (spec 0109).
+//! The router's local certificate authority (spec 0113).
 //!
 //! Interception — and *only* interception — needs to answer a TLS
 //! handshake in the origin's name. That requires a CA the harness process

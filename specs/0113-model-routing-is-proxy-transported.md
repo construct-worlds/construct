@@ -1,4 +1,4 @@
-# 0109-model-routing-is-proxy-transported
+# 0113-model-routing-is-proxy-transported
 
 Status: accepted
 Date: 2026-07-25
@@ -58,7 +58,7 @@ the shape, not of test coverage.
   translation — requires TLS interception, and therefore
   requires that the harness trust the Construct CA through a
   per-process channel (see
-  [0111](0111-routing-injection-is-probe-verified.md)). A harness with no
+  [0115](0115-routing-injection-is-probe-verified.md)). A harness with no
   such channel is pass-through only; that is a supported, permanent state,
   not a degraded one.
 - Certificate-trust channels come in two kinds and the difference is
@@ -94,7 +94,7 @@ the shape, not of test coverage.
   including observability.
 - The translation itself. What a route *is* — including when a target
   speaks a different dialect than the harness — is
-  [0112](0112-cross-dialect-routing-is-a-translation.md).
+  [0116](0116-cross-dialect-routing-is-a-translation.md).
 
 ## Examples
 

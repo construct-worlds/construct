@@ -1576,7 +1576,7 @@ pub struct App {
     /// Session-view title hamburger dropdown.
     pub session_title_menu: Option<SessionTitleMenu>,
     /// Open model-route picker, anchored to the modeline's model
-    /// indicator (spec 0110).
+    /// indicator (spec 0114).
     pub route_menu: Option<route_menu::RouteMenu>,
     /// In-progress inline rename of a session's title, edited directly in a
     /// pane's title bar. `None` when no rename is active.
@@ -3228,7 +3228,7 @@ impl ModelineContextGaugeHit {
 }
 
 /// Clickable model indicator in the modeline. Opens the route picker
-/// (spec 0110): the model is where a substitution is visible, so it is
+/// (spec 0114): the model is where a substitution is visible, so it is
 /// also where the substitution is chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelineModelHit {
@@ -3816,6 +3816,7 @@ impl LayoutSnapshot {
             minibuffer_area: _,
             modeline_approval_mode_hit: _,
             modeline_context_gauge_hit: _,
+            modeline_model_hit: _,
             modeline_theme_hit: _,
             tutorial_card_area: _,
             minibuffer_harness_hits: _,
@@ -3824,6 +3825,7 @@ impl LayoutSnapshot {
             configure_tab_hits: _,
             // Consumed inside the main block's own render pass (or carries no
             // geometry at all), so it stays in main-block coordinates.
+            frame_area: _,
             last_chat_areas: _,
             lineage_segment_tooltip: _,
             list_row_count: _,
@@ -15700,7 +15702,7 @@ mod tests {
     }
 
     /// The picker opens on the model indicator and lists pass-through
-    /// plus every configured route, unavailable ones included (spec 0111).
+    /// plus every configured route, unavailable ones included (spec 0115).
     #[tokio::test]
     async fn route_menu_opens_with_pass_through_and_every_route() {
         let (client, _dir, _server) = route_mock_daemon(
@@ -15738,7 +15740,7 @@ mod tests {
     }
 
     /// A session that cannot be routed still gets an explanation rather
-    /// than an empty popup (spec 0111).
+    /// than an empty popup (spec 0115).
     #[tokio::test]
     async fn route_menu_explains_why_a_session_cannot_be_routed() {
         let (client, _dir, _server) =

@@ -1,4 +1,4 @@
-# 0111-routing-injection-is-probe-verified
+# 0115-routing-injection-is-probe-verified
 
 Status: accepted
 Date: 2026-07-25
@@ -19,7 +19,7 @@ from documentation or from reading the harness's configuration.
   but no trust channel is pass-through only.
 - Construct never parses a harness's own configuration files to discover
   its endpoint. The origin is observed from the connection
-  ([0109](0109-model-routing-is-proxy-transported.md)).
+  ([0113](0113-model-routing-is-proxy-transported.md)).
 - When a routed-capable session produces no proxied connection, Construct
   records the session as **routing inert** and says so. It never reports
   the session as routed.
@@ -58,7 +58,7 @@ would have been without Construct, which is always a correct outcome.
 - Enforcement mechanisms that would prove the absence of a bypass by
   denying direct egress are diagnostic only. Arming them in normal use
   would convert a benign inert session into a dead one, which contradicts
-  [0109](0109-model-routing-is-proxy-transported.md)'s rule that a
+  [0113](0113-model-routing-is-proxy-transported.md)'s rule that a
   routing failure must not degrade the session.
 - Because capability is per-version, the set of routable harnesses on a
   given machine is discoverable at runtime and may differ between

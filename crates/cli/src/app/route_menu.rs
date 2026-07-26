@@ -1,7 +1,7 @@
 use super::*;
 
 /// The modeline's model indicator is the affordance for routing: clicking
-/// it opens this menu (spec 0110 — the substitution is shown where the
+/// it opens this menu (spec 0114 — the substitution is shown where the
 /// model is shown, so the two are never confused).
 impl App {
     pub(super) async fn open_route_menu(&mut self, session_id: String, col: u16, row: u16) {
@@ -81,7 +81,7 @@ pub struct RouteMenu {
     pub routes: Vec<construct_protocol::RouteOption>,
     /// Why this session cannot be routed at all, if it cannot. The menu
     /// still opens and still offers pass-through — an empty popup would
-    /// leave the user with no explanation (spec 0111).
+    /// leave the user with no explanation (spec 0115).
     pub unavailable_reason: Option<String>,
     pub active: Option<String>,
     pub selected: usize,

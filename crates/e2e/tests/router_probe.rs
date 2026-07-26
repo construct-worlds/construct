@@ -1,4 +1,4 @@
-//! Route-capability probe (spec 0111).
+//! Route-capability probe (spec 0115).
 //!
 //! Whether a harness honors Construct's routing injection is an empirical,
 //! per-harness, per-version fact — never a reading of that harness's
@@ -259,7 +259,7 @@ fn other_harnesses_honor_the_proxy_environment() {
     }
 }
 
-/// Captured harness dialects (spec 0112).
+/// Captured harness dialects (spec 0116).
 ///
 /// Established by interception, not inference: each harness was run
 /// through a MITM proxy holding a forged leaf for its own endpoint, and
@@ -324,7 +324,7 @@ fn captured_dialects_are_recorded_not_guessed() {
 fn only_probed_harnesses_are_declared_route_capable() {
     // Kept in sync by hand with the daemon's `harness_routing`. If you add
     // a harness there, add its probe above and its name here — in that
-    // order (spec 0111).
+    // order (spec 0115).
     //
     // Deliberately absent despite passing the transport probe:
     // - opencode: its endpoint host follows its configured provider, so

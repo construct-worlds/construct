@@ -864,7 +864,7 @@ impl Client {
         Ok(())
     }
     /// Arm, change (`Some(name)`) or clear (`None`) a session's model
-    /// route. Applies to the running session — no restart (spec 0110).
+    /// route. Applies to the running session — no restart (spec 0114).
     pub async fn set_route(&self, id: &str, route: Option<String>) -> Result<()> {
         let _: serde_json::Value = self
             .request(
@@ -878,7 +878,7 @@ impl Client {
         Ok(())
     }
     /// Routes offered for a session, each carrying the reason it is not
-    /// selectable when that applies (spec 0111).
+    /// selectable when that applies (spec 0115).
     pub async fn list_routes(
         &self,
         id: Option<&str>,

@@ -4892,7 +4892,7 @@ fn session_menu_icon_style(theme: &Theme, base: Color, hovered: bool, focused: b
     }
 }
 
-/// The model-route picker (spec 0110), anchored above the modeline's
+/// The model-route picker (spec 0114), anchored above the modeline's
 /// model indicator.
 fn render_route_menu(f: &mut Frame, app: &App) {
     let Some(menu) = &app.route_menu else {
@@ -8595,7 +8595,7 @@ fn modeline_model_text(model: Option<&str>, effort: Option<&str>) -> String {
 ///
 /// A routed session shows `<origin> -> <routed>`: the harness keeps
 /// reporting its own model and never learns of the substitution
-/// (spec 0110), so showing only one of the two would be actively
+/// (spec 0114), so showing only one of the two would be actively
 /// misleading — either hiding that routing is on, or hiding what the
 /// harness thinks it is talking to.
 fn modeline_model_route_text(
@@ -8724,7 +8724,7 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         },
     );
     // The model indicator's own cells, so a click can open the route
-    // picker there (spec 0110).
+    // picker there (spec 0114).
     if let Some(s) = s {
         let model_text =
             modeline_model_route_text(s.model.as_deref(), s.effort.as_deref(), s.route.as_ref());
@@ -19675,7 +19675,7 @@ mod tests {
     }
 
     /// Both models are shown: the harness keeps reporting its own, and
-    /// hiding either half would misrepresent what is running (spec 0110).
+    /// hiding either half would misrepresent what is running (spec 0114).
     #[test]
     fn modeline_model_route_text_shows_the_substitution() {
         assert_eq!(
