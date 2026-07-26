@@ -869,7 +869,6 @@
     overflow: hidden;
     opacity: 0.82;
   }
-  .pane-mirror .transcript-pane { padding: 10px 12px 14px; }
   .pane-empty {
     flex: 1 1 0;
     display: grid;
@@ -9964,7 +9963,13 @@ function buildMirror(leaf) {
     const handle = initTerminalForSession(id);
     if (handle) {
       handle.host.hidden = false;
-      mirror.appendChild(handle.host);
+      // Reuse the focused pane's own wrapper class: the terminal is inset by
+      // that element's padding and top border, and mounting the host bare
+      // here shifted the whole grid by those pixels whenever focus moved.
+      const wrap = document.createElement("div");
+      wrap.className = "terminal-wrap";
+      wrap.appendChild(handle.host);
+      mirror.appendChild(wrap);
       state.mirroredSessionIds.add(id);
       // A mirrored terminal that has never loaded shows nothing at all
       // until the user focuses it, which reads as a broken pane. Hydrate it

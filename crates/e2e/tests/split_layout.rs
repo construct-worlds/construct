@@ -181,6 +181,54 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         "title bars must sit at the same y — got {head_geometry}"
     );
 
+    // Content must sit at the same offset inside its pane whether that pane
+    // is focused or not. The focused pane nests its surface in the
+    // interactive stack while the others mirror it, and any difference in
+    // padding between the two shows up as the rendering jumping every time
+    // focus moves.
+    // A mirrored surface must be laid out exactly like the focused one, or
+    // the rendering jumps every time focus moves.
+    //
+    // Measuring the two panes against each other isn't possible here — the
+    // focused pane's transcript only materializes once the session has
+    // content, and these shells produce none. So assert the two properties
+    // that made them differ instead.
+    //
+    // 1. The mirror must not re-pad the transcript. The shared rule floors
+    //    the inset at 16px; the mirror used to override it to 12/10px.
+    let mirror_padding: String = page
+        .evaluate(
+            "(() => {
+               const el = document.querySelector('#paneGrid .pane-mirror .transcript-pane');
+               if (!el) return '';
+               const cs = getComputedStyle(el);
+               return JSON.stringify([cs.paddingLeft, cs.paddingTop]);
+             })()",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    assert_eq!(
+        mirror_padding, "[\"16px\",\"16px\"]",
+        "a mirrored transcript must keep the same insets it has when focused"
+    );
+
+    // 2. A mirrored terminal must sit inside the same wrapper the focused
+    //    one uses — that element supplies the terminal's padding and top
+    //    border. Inert while no PTY session is mirrored; it bites the moment
+    //    one is mounted bare.
+    let terminal_mirror_ok: bool = eval_bool(
+        &page,
+        "Array.from(document.querySelectorAll('#paneGrid .pane-mirror .terminal-host'))
+           .every((h) => !!h.closest('.terminal-wrap'))",
+    )
+    .await;
+    assert!(
+        terminal_mirror_ok,
+        "a mirrored terminal must be wrapped the way the focused one is"
+    );
+
     // ...and switching focus between panes must not move any of it. This is
     // the whole-geometry version of the check above: focus changes which
     // pane is highlighted and which one holds the interactive stack, and
