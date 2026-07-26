@@ -50,7 +50,12 @@ impl App {
         Some(inner_h.saturating_sub(SESSION_LIST_H_MIN))
     }
 
-    pub(super) async fn click_minibuffer(&mut self, mb_area: ratatui::layout::Rect, col: u16) {
+    pub(super) async fn click_minibuffer(
+        &mut self,
+        mb_area: ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) {
         if let Some(mb) = self.minibuffer.as_mut() {
             // Harness picker: clicking an available name submits it
             // as if the user typed and pressed Enter. Unavailable
@@ -63,7 +68,7 @@ impl App {
             ) {
                 let hits = self.layout.minibuffer_harness_hits.clone();
                 for hit in hits {
-                    if hit.y == mb_area.y && col >= hit.x_start && col < hit.x_end {
+                    if hit.y == row && col >= hit.x_start && col < hit.x_end {
                         if !hit.available {
                             let reason = hit.detail.as_deref().unwrap_or("not available");
                             self.set_status(format!("{}: {reason}", hit.name));
@@ -87,7 +92,7 @@ impl App {
             // mouse support at all.
             let choice_hits = self.layout.minibuffer_choice_hits.clone();
             for hit in choice_hits {
-                if hit.y == mb_area.y && col >= hit.x_start && col < hit.x_end {
+                if hit.y == row && col >= hit.x_start && col < hit.x_end {
                     match hit.action {
                         MinibufferChoiceAction::Key(c) => {
                             let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
@@ -101,6 +106,9 @@ impl App {
                     }
                     return;
                 }
+            }
+            if row != mb_area.bottom().saturating_sub(1) {
+                return;
             }
             let prompt_w = unicode_width::UnicodeWidthStr::width(mb.prompt.as_str()) as u16;
             let input_start = mb_area.x + prompt_w;

@@ -15,22 +15,18 @@ impl App {
         // Fork shares the new-session harness picker (completion + Enter
         // validation), but offers only real harnesses — no `project`/`group`.
         let is_harness_picker = is_new_harness || is_fork_harness;
-        let available_harnesses: Vec<String> = if is_new_harness {
-            let mut v: Vec<String> = self
-                .harnesses
-                .iter()
-                .filter(|h| h.available)
-                .map(|h| h.name.clone())
-                .collect();
-            v.push("project".to_string());
-            v.push("group".to_string());
-            v
-        } else if is_fork_harness {
-            self.harnesses
-                .iter()
-                .filter(|h| h.available)
-                .map(|h| h.name.clone())
-                .collect()
+        let picker_entries = if is_harness_picker {
+            let query = self
+                .minibuffer
+                .as_ref()
+                .map(|mb| mb.input.as_str())
+                .unwrap_or_default();
+            harness_picker_entries(
+                &self.harnesses,
+                is_fork_harness,
+                query,
+                self.harness_picker_filter_active,
+            )
         } else {
             Vec::new()
         };
@@ -216,6 +212,7 @@ impl App {
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let input_before = mb.input.clone();
 
         match key.code {
             KeyCode::Esc => {
@@ -228,21 +225,55 @@ impl App {
             }
             KeyCode::Tab => {
                 if is_harness_picker {
-                    apply_harness_completion(mb, &available_harnesses);
+                    if let Some(entry) = picker_entries.get(
+                        self.harness_picker_selected
+                            .min(picker_entries.len().saturating_sub(1)),
+                    ) {
+                        mb.input = entry.name.clone();
+                        mb.cursor = mb.input.chars().count();
+                        mb.error = None;
+                        self.harness_picker_filter_active = false;
+                    } else {
+                        mb.error = Some("no matching harnesses".to_string());
+                    }
                 }
                 return;
             }
             KeyCode::Enter => {
                 if is_harness_picker {
-                    let trimmed = mb.input.trim().to_string();
-                    if trimmed.is_empty() {
-                        mb.error = Some("pick a harness".to_string());
+                    let selected = picker_entries
+                        .get(
+                            self.harness_picker_selected
+                                .min(picker_entries.len().saturating_sub(1)),
+                        )
+                        .cloned();
+                    let selected = match selected {
+                        Some(entry) => entry,
+                        None if is_new_harness && mb.input.trim() == "group" => {
+                            HarnessPickerEntry {
+                                name: "group".to_string(),
+                                description: String::new(),
+                                available: true,
+                                detail: None,
+                            }
+                        }
+                        None => {
+                            mb.error = Some("no matching harnesses".to_string());
+                            return;
+                        }
+                    };
+                    if !selected.available {
+                        mb.error = Some(
+                            selected
+                                .detail
+                                .unwrap_or_else(|| "harness unavailable".to_string()),
+                        );
                         return;
                     }
-                    if !available_harnesses.iter().any(|h| h == &trimmed) {
-                        mb.error = Some(format!("unknown: {trimmed} (Tab to complete)"));
-                        return;
-                    }
+                    let intent = mb.intent.clone();
+                    self.minibuffer = None;
+                    self.run_minibuffer_submit(intent, selected.name).await;
+                    return;
                 }
                 let intent = mb.intent.clone();
                 let input = std::mem::take(&mut mb.input);
@@ -266,6 +297,21 @@ impl App {
             }
             KeyCode::Home => mb.cursor = 0,
             KeyCode::End => mb.cursor = mb.input.chars().count(),
+            KeyCode::Up if is_harness_picker => {
+                if !picker_entries.is_empty() {
+                    self.harness_picker_selected = if self.harness_picker_selected == 0 {
+                        picker_entries.len() - 1
+                    } else {
+                        self.harness_picker_selected - 1
+                    };
+                }
+            }
+            KeyCode::Down if is_harness_picker => {
+                if !picker_entries.is_empty() {
+                    self.harness_picker_selected =
+                        (self.harness_picker_selected + 1) % picker_entries.len();
+                }
+            }
 
             // Emacs editing chords on Ctrl.
             KeyCode::Char('a') if ctrl => mb.cursor = 0,
@@ -303,6 +349,11 @@ impl App {
                 insert_minibuffer_text(mb, &c.to_string());
             }
             _ => {}
+        }
+
+        if is_harness_picker && mb.input != input_before {
+            self.harness_picker_selected = 0;
+            self.harness_picker_filter_active = true;
         }
     }
 
@@ -910,46 +961,4 @@ fn kill_word_forward(mb: &mut Minibuffer) {
     let end_b = byte_pos(&mb.input, end);
     mb.input.drain(start_b..end_b);
     mb.error = None;
-}
-
-fn apply_harness_completion(mb: &mut Minibuffer, options: &[String]) {
-    let current = mb.input.clone();
-    let matches: Vec<&String> = options.iter().filter(|o| o.starts_with(&current)).collect();
-    if matches.is_empty() {
-        mb.error = if options.is_empty() {
-            Some("(no harnesses available)".to_string())
-        } else {
-            Some(format!("no match for {current}"))
-        };
-        return;
-    }
-    if matches.len() == 1 {
-        mb.input = matches[0].clone();
-        mb.cursor = mb.input.chars().count();
-        mb.error = None;
-        return;
-    }
-    let prefix = longest_common_prefix(&matches);
-    if prefix.len() > mb.input.len() {
-        mb.input = prefix;
-        mb.cursor = mb.input.chars().count();
-    }
-    let listed: Vec<&str> = matches.iter().map(|s| s.as_str()).collect();
-    mb.error = Some(format!("matches: {}", listed.join(", ")));
-}
-
-fn longest_common_prefix(strs: &[&String]) -> String {
-    let mut out = String::new();
-    let Some(first) = strs.first() else {
-        return out;
-    };
-    'outer: for (i, c) in first.chars().enumerate() {
-        for s in &strs[1..] {
-            if s.chars().nth(i) != Some(c) {
-                break 'outer;
-            }
-        }
-        out.push(c);
-    }
-    out
 }
