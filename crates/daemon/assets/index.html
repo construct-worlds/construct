@@ -284,31 +284,6 @@
     min-width: 28px;
     padding: 4px 6px;
   }
-  .split-controls {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    margin-left: 4px;
-    padding: 2px;
-    border-radius: 8px;
-    background: var(--bg-elev-2);
-  }
-  .split-controls[hidden] { display: none; }
-  .split-controls button {
-    appearance: none;
-    border: 0;
-    border-radius: 6px;
-    padding: 4px 8px;
-    background: transparent;
-    color: var(--fg-dim);
-    font: inherit;
-    font-size: 12px;
-    line-height: 1.3;
-    cursor: pointer;
-  }
-  .split-controls button:hover { background: var(--bg); color: var(--fg); }
-
   .conn {
     margin-left: auto;
     display: inline-flex;
@@ -2854,17 +2829,6 @@
       </button>
       <div class="session-runtime-popover" id="sessionRuntimePopover" hidden role="dialog"
            aria-label="session runtime details"></div>
-    </div>
-    <!--
-      Split controls. Only meaningful on a viewport wide enough to render
-      panes, so it is hidden below the split threshold — a narrow client
-      views the shared layout but never edits it.
-    -->
-    <div class="split-controls" id="splitControls" hidden>
-      <button type="button" id="splitRightBtn" class="has-tip"
-              data-tip="split horizontal" aria-label="split horizontal">▥</button>
-      <button type="button" id="splitBelowBtn" class="has-tip"
-              data-tip="split vertical" aria-label="split vertical">▤</button>
     </div>
     <div class="view-mode-toggle" id="viewModeToggle" hidden
          role="group" aria-label="session view mode">
@@ -5422,7 +5386,6 @@ async function selectSession(id, { replaceUrl = false, fromPane = false } = {}) 
   // sessions, `session.input` for chat-only adapters. Just block
   // on disconnect / no-selection.
   setComposerEnabled(!!(state.ws && state.ws.readyState === 1 && state.currentId));
-  refreshSplitControls();
   reportView();
 }
 
@@ -9831,7 +9794,6 @@ function focusPane(paneId, { selectSessionToo = true } = {}) {
   if (!leaf) return;
   state.focusedPaneId = paneId;
   renderPaneGrid();
-  refreshSplitControls();
   if (selectSessionToo && leaf.session_id && leaf.session_id !== state.currentId) {
     // Moving focus to a pane means looking at its session, so the singleton
     // stack follows. `fromPane` stops selectSession from writing the session
@@ -10109,16 +10071,7 @@ function schedulePaneGridRefresh() {
   requestAnimationFrame(() => {
     paneGridRefreshQueued = false;
     if (splitLayoutActive()) renderPaneGrid();
-    refreshSplitControls();
   });
-}
-
-const splitControlsEl = $("splitControls");
-$("splitRightBtn").addEventListener("click", () => splitFocusedPane("right"));
-$("splitBelowBtn").addEventListener("click", () => splitFocusedPane("below"));
-
-function refreshSplitControls() {
-  splitControlsEl.hidden = !splitLayoutAvailable() || !state.currentId;
 }
 
 /**
@@ -10128,7 +10081,6 @@ function refreshSplitControls() {
  */
 window.addEventListener("resize", () => {
   renderPaneGrid();
-  refreshSplitControls();
 });
 
 // --- Transcript rendering -------------------------------------------------

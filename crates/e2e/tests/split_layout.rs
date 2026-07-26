@@ -269,28 +269,46 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         "closing a pane is a layout edit and must be published to other clients"
     );
 
-    // Put the split back for the narrow-viewport checks below.
-    let restore = LayoutNode::Split {
-        direction: LayoutSplitDirection::Right,
-        ratio_percent: 60,
-        first: Box::new(LayoutNode::Leaf {
-            id: 1,
-            session_id: Some(a.clone()),
-        }),
-        second: Box::new(LayoutNode::Leaf {
-            id: 2,
-            session_id: Some(b.clone()),
-        }),
-    };
-    d.client
-        .set_layout(restore, Some(after_close.version))
-        .await
-        .expect("restore split");
+    // Split back from a SINGLE pane through the session menu. This is the
+    // only path to a first split now that the main title bar carries no
+    // split buttons — with one pane there is no pane title bar to hold
+    // them — so it has to work from here.
+    let menu_reachable = wait_for_bool(
+        &page,
+        "(() => {
+           const btn = document.getElementById('sessionMenuBtn');
+           const item = document.querySelector('#sessionMenu [data-menu-action=\"split-horizontal\"]');
+           return !!btn && !btn.closest('[hidden]') && !!item && !item.disabled;
+         })()",
+    )
+    .await;
+    assert!(
+        menu_reachable,
+        "with one pane, the session menu must still offer a split"
+    );
+
+    page.evaluate(
+        "(() => { document.querySelector('#sessionMenu [data-menu-action=\"split-horizontal\"]').click(); return true; })()",
+    )
+    .await
+    .ok();
     assert!(
         wait_for_number(&page, "document.querySelectorAll('#paneGrid .pane').length", 2.0)
             .await
             .is_some(),
-        "the restored split reaches the browser"
+        "splitting from the session menu must produce a second pane"
+    );
+
+    // That split is a layout edit like any other, so it must be published.
+    let after_menu_split = d.client.layout().await.expect("layout");
+    assert!(
+        after_menu_split.version > after_close.version,
+        "a split made from the menu must reach other clients"
+    );
+    assert_eq!(
+        after_menu_split.tree.leaf_count(),
+        2,
+        "the shared tree gained the pane too"
     );
 
     let focused: f64 = eval_number(&page, "document.querySelectorAll('#paneGrid .pane.is-focused').length").await;
