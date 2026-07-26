@@ -1409,7 +1409,7 @@
   .terminal-host .xterm:focus { outline: none; }
   /* Passive wide-PTY mode: the owning client made the terminal wider than our
      viewport, so render at full width and scroll horizontally instead of
-     wrapping (see applyPassiveTerminalWidth). */
+     wrapping (see applyPassiveTerminalGeometry). */
   .terminal-host.pty-wide { overflow-x: auto; touch-action: pan-x pan-y; }
   /* xterm.js paints into the host element; ensure it fills the wrap. */
   .terminal-host .xterm,
@@ -8036,6 +8036,10 @@ async function enterTerminalMode(id, options = {}) {
   if (hydrating) setTerminalLoadingMessage("loading terminal history...");
   else hideTerminalLoading();
 
+  // A grid rebuilt from replayed PTY deltas cannot be trusted to match the
+  // child's real screen; only the child can repaint it authoritatively.
+  let hydratedFromPtyReplay = false;
+
   if (!handle.loaded) {
     // Buffer PTY events that arrive while we're waiting on the
     // snapshot RPC. Drained after the snapshot is written so
@@ -8078,6 +8082,7 @@ async function enterTerminalMode(id, options = {}) {
         rememberPtyReplayChunk(handle, r);
         updateTerminalHistoryButton(handle);
         await replayPtyChunks(handle);
+        hydratedFromPtyReplay = true;
       }
       handle.term.scrollToBottom();
       handle.loaded = true;
@@ -8127,8 +8132,13 @@ async function enterTerminalMode(id, options = {}) {
   // cols/rows on session A vs session B mean different things to
   // the daemon's active-wins policy. Reset the dedup so this
   // refit always fires `pty_resize`.
+  //
+  // After a replay that dedup reset is still not enough: if our fit happens
+  // to equal the size the daemon already has, `SessionManager::pty_resize`
+  // drops it and the child never repaints over the reconstructed grid.
+  // `forceRedraw` bumps a column so the SIGWINCH is real.
   state.lastReportedSize = { cols: 0, rows: 0 };
-  refitTerminal({ claim: true, immediate: true });
+  refitTerminal({ claim: true, immediate: true, forceRedraw: hydratedFromPtyReplay });
   if (options.focusTerminal) {
     state.term.focus();
   } else {
@@ -8588,7 +8598,23 @@ function refitTerminal(options = {}) {
   if (state.mode !== "terminal") return;
   const claim = !!options.claim;
   const immediate = !!options.immediate;
+  // Set after a history replay rebuilt the grid from PTY deltas. See
+  // `sendTerminalPtyResize` for why a same-size resize isn't enough.
+  const forceRedraw = !!options.forceRedraw;
   if (claim) noteWebPtyEngagement();
+  if (!claim && !webPtyRecentlyEngaged()) {
+    // Passive browser layout churn (background tab, phone keyboard, viewport
+    // settle) must not steal the single OS PTY geometry from an active TUI.
+    // Decide this BEFORE fitting: fitting first would reflow the buffer to our
+    // viewport — a geometry the child does not have and will never paint for —
+    // and we would then have to reflow a second time to undo it. Mirror the
+    // owning client's grid instead. Once the web terminal is clicked or typed
+    // into, recent engagement takes us down the claim path below, so row-only
+    // changes reach the child and full-screen apps like codex stay aligned.
+    state.resizeFollowBottomUntil = 0;
+    applyPassiveTerminalGeometry();
+    return;
+  }
   const wasAtBottom = terminalIsAtBottom();
   if (!fitTerminalPreservingScroll(wasAtBottom)) return;
   const cols = state.term.cols;
@@ -8597,70 +8623,78 @@ function refitTerminal(options = {}) {
   if (!wasAtBottom) state.resizeFollowBottomUntil = 0;
   const colsChanged = cols !== state.lastReportedSize.cols;
   const rowsChanged = rows !== state.lastReportedSize.rows;
-  if (!colsChanged && !rowsChanged) {
+  if (!colsChanged && !rowsChanged && !forceRedraw) {
     return;
   }
   if (!claim && !colsChanged && rowsChanged && shouldSuppressComposerRowResize()) {
     state.resizeFollowBottomUntil = 0;
-    return;
-  }
-  if (!claim && !webPtyRecentlyEngaged()) {
-    // Passive browser layout churn (background tab, phone keyboard,
-    // viewport settle) should refit local xterm but must not steal the
-    // single OS PTY geometry from an active TUI. Once the web terminal
-    // is clicked/typed into, recent engagement lets row-only changes
-    // claim the PTY too, keeping full-screen apps like codex aligned.
-    state.resizeFollowBottomUntil = 0;
-    // Passive: if the owning client made the PTY wider than our viewport,
-    // render at the real width (horizontal scroll) instead of wrapping.
-    applyPassiveTerminalWidth();
+    // Composer auto-grow just changed our row count. `fitAddon.fit()`
+    // above ALREADY resized the local grid, so dropping this on the
+    // floor would leave xterm and the child permanently disagreeing
+    // about how many rows exist — and a child that repaints its footer
+    // with relative cursor moves (claude's spinner, the mode line) then
+    // overwrites the wrong rows. Defer rather than suppress: one
+    // coalesced SIGWINCH once the composer settles, not one per
+    // keystroke, which is what the suppression window was really for.
+    scheduleTerminalPtyResize(cols, rows, wasAtBottom, {
+      delayMs: COMPOSER_RESIZE_SUPPRESS_PTY_RESIZE_MS,
+    });
     return;
   }
   // Active/claim path: we own geometry now, so render at our own fit.
   const host = state.term.element && state.term.element.closest(".terminal-host");
   if (host) host.classList.remove("pty-wide");
   if (immediate) {
-    sendTerminalPtyResize(cols, rows, wasAtBottom);
+    sendTerminalPtyResize(cols, rows, wasAtBottom, state.currentId, forceRedraw);
   } else {
-    scheduleTerminalPtyResize(cols, rows, wasAtBottom);
+    scheduleTerminalPtyResize(cols, rows, wasAtBottom, { forceRedraw });
   }
 }
 
-// Passive width handling: when this web terminal does NOT own the PTY
-// geometry and the owning client (e.g. the TUI) made it wider than our
-// viewport, size xterm to the PTY's columns so output isn't wrapped and let
-// `.terminal-host` scroll horizontally. Snap back to our own fit when we take
-// over or the PTY is no longer wider. Rows are left to the local fit.
-function applyPassiveTerminalWidth() {
+function resizeTermTo(cols, rows) {
+  if (!state.term || !cols || !rows) return;
+  if (state.term.cols === cols && state.term.rows === rows) return;
+  const wasAtBottom = terminalIsAtBottom();
+  state.term.resize(cols, rows);
+  restoreTerminalBottom(wasAtBottom);
+}
+
+// Passive geometry handling: when this web terminal does NOT own the PTY, it
+// must render the owning client's grid rather than its own fit. A passive
+// viewer sized differently from the child disagrees with it about where lines
+// wrap and where the screen scrolls, so the child's cursor-addressed repaints
+// (claude's spinner, a mode line, any DECSTBM footer) land on the wrong rows —
+// the same corruption a stale replay produces. Columns wider than our viewport
+// get horizontal scroll via `.terminal-host.pty-wide`; rows taller than we can
+// show are the one case we clamp, because clipping the newest output at the
+// bottom is worse than the residual mismatch. Taking over is not handled here:
+// the claim path in `refitTerminal` snaps back to our own fit and propagates it.
+function applyPassiveTerminalGeometry() {
   if (!state.term || !state.fitAddon || state.mode !== "terminal") return;
   const host = state.term.element && state.term.element.closest(".terminal-host");
   if (!host) return;
-  const sz = state.currentId ? state.ptySizeById.get(state.currentId) : null;
-  const ptyCols = sz && sz.cols;
   let proposed = null;
   try { proposed = state.fitAddon.proposeDimensions(); } catch (_) {}
   const fitCols = (proposed && proposed.cols) || state.term.cols;
   const fitRows = (proposed && proposed.rows) || state.term.rows;
-  if (!webPtyRecentlyEngaged() && ptyCols && fitCols && ptyCols > fitCols) {
-    if (state.term.cols !== ptyCols || state.term.rows !== fitRows) {
-      const wasAtBottom = terminalIsAtBottom();
-      state.term.resize(ptyCols, fitRows);
-      restoreTerminalBottom(wasAtBottom);
-    }
-    host.classList.add("pty-wide");
-  } else if (host.classList.contains("pty-wide")) {
-    // Leaving wide mode — snap xterm back to the container fit.
+  const sz = state.currentId ? state.ptySizeById.get(state.currentId) : null;
+  const ptyCols = sz && sz.cols;
+  const ptyRows = sz && sz.rows;
+  if (!ptyCols || !ptyRows) {
+    // The child's grid is unknown, so our own fit is the only information we
+    // have. Render at it rather than freezing at a stale size.
     host.classList.remove("pty-wide");
-    if (proposed) {
-      const wasAtBottom = terminalIsAtBottom();
-      state.term.resize(proposed.cols, proposed.rows);
-      restoreTerminalBottom(wasAtBottom);
-    }
+    resizeTermTo(fitCols, fitRows);
+    return;
   }
+  host.classList.toggle("pty-wide", ptyCols > fitCols);
+  resizeTermTo(ptyCols, Math.min(ptyRows, fitRows));
 }
 
-function scheduleTerminalPtyResize(cols, rows, wasAtBottom) {
-  state.pendingPtyResize = { sessionId: state.currentId, cols, rows, wasAtBottom };
+function scheduleTerminalPtyResize(cols, rows, wasAtBottom, options = {}) {
+  const forceRedraw = !!options.forceRedraw;
+  const delayMs = options.delayMs || WEB_PTY_RESIZE_DEBOUNCE_MS;
+  state.pendingPtyResize = { sessionId: state.currentId, cols, rows, wasAtBottom, forceRedraw };
   state.lastReportedSize = { cols, rows };
   if (state.ptyResizeTimer) clearTimeout(state.ptyResizeTimer);
   state.ptyResizeTimer = setTimeout(() => {
@@ -8668,16 +8702,43 @@ function scheduleTerminalPtyResize(cols, rows, wasAtBottom) {
     const pending = state.pendingPtyResize;
     state.pendingPtyResize = null;
     if (!pending) return;
-    sendTerminalPtyResize(pending.cols, pending.rows, pending.wasAtBottom, pending.sessionId);
-  }, WEB_PTY_RESIZE_DEBOUNCE_MS);
+    sendTerminalPtyResize(
+      pending.cols,
+      pending.rows,
+      pending.wasAtBottom,
+      pending.sessionId,
+      pending.forceRedraw,
+    );
+  }, delayMs);
 }
 
-function sendTerminalPtyResize(cols, rows, wasAtBottom, sessionId = state.currentId) {
+function sendTerminalPtyResize(
+  cols,
+  rows,
+  wasAtBottom,
+  sessionId = state.currentId,
+  forceRedraw = false,
+) {
   state.lastReportedSize = { cols, rows };
   if (!sessionId || sessionId !== state.currentId) return;
   if (wasAtBottom) state.resizeFollowBottomUntil = performance.now() + 1500;
-  rpc("session.pty_resize", { session_id: sessionId, cols, rows })
-    .catch((e) => console.warn("pty_resize failed:", e));
+  const send = (c, r) =>
+    rpc("session.pty_resize", { session_id: sessionId, cols: c, rows: r })
+      .catch((e) => console.warn("pty_resize failed:", e));
+  // PTY history is a delta stream, not a geometry-independent snapshot, so a
+  // replayed grid can differ from the child's real screen — and the fit that
+  // follows a replay reflows those absolutely-positioned bytes to a geometry
+  // they were never painted at. The daemon deduplicates a same-size resize
+  // (SessionManager::pty_resize), so the child would never get SIGWINCH and
+  // the drift would survive until the user manually resized the window. Bump
+  // one column first to guarantee a real repaint — the same trick spec 0082
+  // uses for a freshly hydrated SSH TUI. Sequenced, not fired in parallel:
+  // the daemon must observe the bump as a distinct size.
+  if (forceRedraw && cols > 1) {
+    send(cols + 1, rows).then(() => send(cols, rows));
+    return;
+  }
+  send(cols, rows);
 }
 
 function claimTerminalGeometryNow() {
@@ -9751,10 +9812,16 @@ function handleNotification(method, params) {
     }
     if (event && event.type === "pty_resize") {
       // The PTY was resized by whichever client owns geometry (e.g. the TUI).
-      // Track it so a passive web viewer renders at the real width instead of
-      // wrapping wide output.
+      // Track it so a passive web viewer renders at the owner's real grid
+      // instead of its own fit — a viewer whose rows or columns disagree with
+      // the child misplaces every cursor-addressed repaint it receives.
       state.ptySizeById.set(session_id, { cols: event.cols, rows: event.rows });
-      if (session_id === state.currentId) applyPassiveTerminalWidth();
+      // Skip while we are the engaged owner: these broadcasts are echoes of
+      // our own resizes, including the transient one-column hydration bump,
+      // and adopting them would reflow the grid twice for nothing.
+      if (session_id === state.currentId && !webPtyRecentlyEngaged()) {
+        applyPassiveTerminalGeometry();
+      }
       return;
     }
     if (event && event.type === "pty") {
