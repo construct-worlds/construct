@@ -19,7 +19,7 @@
 //! findable by suffix. The uuid from the `session` header record is the
 //! native id persisted to `pi_session_id.txt` (resume via `--session
 //! <path>`, native fork via `--fork <path>` — spec 0031/0078; reset
-//! detection via newest-file rebinds — specs 0079/0085).
+//! detection via newest-file rebinds — specs 0138/0085).
 //!
 //! Interactive mode runs pi's TUI under construct's PTY with the initial
 //! prompt passed as a CLI argument (pi submits leading message arguments
@@ -591,7 +591,7 @@ struct WatcherSetup {
 
 /// Watch the private session store: bind to the newest session file, mirror
 /// its records into session events, follow rebinds (pi's `/new` mints a new
-/// file — spec 0079/0085), and keep `pi_session_id.txt` pointing at the
+/// file — spec 0138/0085), and keep `pi_session_id.txt` pointing at the
 /// live conversation.
 fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
     tokio::spawn(async move {

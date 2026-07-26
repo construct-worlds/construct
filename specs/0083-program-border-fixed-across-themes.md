@@ -12,7 +12,7 @@ that border, and the session-title mode glyph that stands in for it — always
 uses the same accent (the Matrix theme's cyan, in its dark- or light-background
 variant) regardless of which named UI theme (`matrix`, `basic`, `dark`,
 `light`) is active. This is an intentional, narrow exception to
-[[0070-client-ui-themes]]'s general rule that UI colors route through the
+[[0134-client-ui-themes]]'s general rule that UI colors route through the
 active theme palette.
 
 The frame still adapts to whether the terminal/painted background is light or

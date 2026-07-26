@@ -1,4 +1,4 @@
-# 0035-tui-clipboard-targets-user-terminal
+# 0127-tui-clipboard-targets-user-terminal
 
 Status: accepted
 Date: 2026-06-23

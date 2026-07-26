@@ -18,7 +18,7 @@ The dialect is shared across surfaces:
 Extension semantics are surface-independent; execution semantics stay surface-bound:
 
 - A session chip, a live clip, a timeline, or an action link renders and resolves the same way in a program and in a widget.
-- Action links express user intent wherever they appear, subject to normal approval policy. Program execution interprets only the program document as instructions (per 0073-session-markdown-surfaces-have-distinct-roles); running a program does not activate its action links, and widget content is never runnable.
+- Action links express user intent wherever they appear, subject to normal approval policy. Program execution interprets only the program document as instructions (per 0136-session-markdown-surfaces-have-distinct-roles); running a program does not activate its action links, and widget content is never runnable.
 
 Surfaces compose by reference, not by merging:
 
@@ -46,7 +46,7 @@ A single registry exists for the same reason the program run contract already ge
 
 ## Non-Goals
 
-- Does not merge program, widgets, or memory into one surface; roles and boundaries are governed by 0073-session-markdown-surfaces-have-distinct-roles.
+- Does not merge program, widgets, or memory into one surface; roles and boundaries are governed by 0136-session-markdown-surfaces-have-distinct-roles.
 - Does not require pixel parity across clients or surfaces; equivalent semantics matter, identical presentation does not.
 - Does not define transport, persistence, or versioning of any surface.
 - Does not require memory files to adopt extensions; memory stays useful as plain prose, and graceful degradation is the ceiling of what is asked of it.

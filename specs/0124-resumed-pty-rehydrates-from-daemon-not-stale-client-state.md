@@ -1,4 +1,4 @@
-# 0023-resumed-pty-rehydrates-from-daemon-not-stale-client-state
+# 0124-resumed-pty-rehydrates-from-daemon-not-stale-client-state
 
 Status: accepted
 Date: 2026-06-06

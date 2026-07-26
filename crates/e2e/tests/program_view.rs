@@ -1574,7 +1574,7 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // Closing the fork settles its dispatched shimmer (spec 0076): this
+    // Closing the fork settles its dispatched shimmer (spec 0137): this
     // fork (a plain shell) never made a settle edit, so without the
     // daemon-side backstop the annotated block would shimmer forever
     // after the fork archives. The settle runs inside archive itself, so

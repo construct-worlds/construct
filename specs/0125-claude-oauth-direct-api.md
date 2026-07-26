@@ -1,4 +1,4 @@
-# 0031-claude-oauth-direct-api
+# 0125-claude-oauth-direct-api
 
 Status: accepted
 Date: 2026-06-17

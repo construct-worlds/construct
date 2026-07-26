@@ -1,4 +1,4 @@
-# 0079-fork-and-subagent-lineage-view
+# 0139-fork-and-subagent-lineage-view
 
 Status: superseded by spec 0080
 Date: 2026-07-09

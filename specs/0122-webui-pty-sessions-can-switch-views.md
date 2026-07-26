@@ -1,4 +1,4 @@
-# 0013-webui-pty-sessions-can-switch-views
+# 0122-webui-pty-sessions-can-switch-views
 
 Status: accepted
 Date: 2026-05-31

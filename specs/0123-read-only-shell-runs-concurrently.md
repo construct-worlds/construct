@@ -1,4 +1,4 @@
-# 0017-read-only-shell-runs-concurrently
+# 0123-read-only-shell-runs-concurrently
 
 Status: accepted
 Date: 2026-06-02

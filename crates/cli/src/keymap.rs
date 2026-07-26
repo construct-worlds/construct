@@ -71,7 +71,7 @@ pub enum KeyAction {
     /// re-pointed), so `C-x Tab` … pick … `C-x Tab` is the switch-and-return
     /// loop. Bound to `C-x Tab` in both profiles: a chord, so
     /// it works in every terminal — unlike the `C-1` accelerator, which
-    /// needs the kitty keyboard protocol (spec 0082) that e.g. macOS
+    /// needs the kitty keyboard protocol (spec 0140) that e.g. macOS
     /// Terminal.app lacks.
     FocusList,
     /// Move keyboard focus to the spatially adjacent split window in a

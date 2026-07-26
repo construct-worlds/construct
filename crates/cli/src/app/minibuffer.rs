@@ -828,7 +828,7 @@ impl App {
     /// channel — spec 0078), then records the outcome and archives the
     /// fork. Shared by the session-end prompt's `[m] merge and archive`, the
     /// session title menu, and the lineage view popup's direct `m`/`d` keys
-    /// (spec 0079) so there is exactly one merge/discard code path.
+    /// (spec 0139) so there is exactly one merge/discard code path.
     pub(crate) async fn apply_fork_merge(
         &mut self,
         session_id: String,

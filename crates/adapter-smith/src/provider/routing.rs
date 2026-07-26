@@ -18,7 +18,7 @@
 //!
 //! `claude-oauth:` uses the user's Claude Code subscription: it reads the
 //! Claude Code login credentials and calls the Anthropic API directly with the
-//! subscription OAuth token (see spec 0031). It is distinct from `anthropic:`,
+//! subscription OAuth token (see spec 0125). It is distinct from `anthropic:`,
 //! which uses `ANTHROPIC_API_KEY`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub enum Provider {
     /// against the user's ChatGPT subscription.
     CodexOauth,
     /// Claude Code subscription path; reads the Claude Code OAuth
-    /// credentials and calls the Anthropic API directly (spec 0031).
+    /// credentials and calls the Anthropic API directly (spec 0125).
     ClaudeOauth,
 }
 

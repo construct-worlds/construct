@@ -663,7 +663,7 @@ fn forked_program_execution_prompt(
     prompt
 }
 
-/// A selection-Run execution fork's dispatch record (spec 0076), tracked
+/// A selection-Run execution fork's dispatch record (spec 0137), tracked
 /// from dispatch until the fork closes (archive or delete). Closing the
 /// fork settles the shimmer of the blocks it was dispatched for — the
 /// deterministic backstop behind the prompt's own settle-then-archive
@@ -728,7 +728,7 @@ const PROGRAM_VERB_INLINE_DOC_MAX_CHARS: usize = 100_000;
 /// verb's own purpose prompt, the full Program document as background
 /// context, the selection framed as the session's entire jurisdiction, the
 /// optional free-text instruction (same composition rule as selection Run's
-/// comment, spec 0076), and the structured-return contract — including that
+/// comment, spec 0137), and the structured-return contract — including that
 /// the session has no Program-editing tool and must not attempt to act like
 /// it does.
 ///
@@ -3557,7 +3557,7 @@ impl SessionManager {
         self.broadcast_program_state(program);
     }
 
-    /// Deterministic backstop for a closing selection-Run fork (spec 0076):
+    /// Deterministic backstop for a closing selection-Run fork (spec 0137):
     /// settle the shimmer of every block the fork was dispatched for, so a
     /// fork that archives (or is deleted) without making its own settle
     /// edit can never leave the owner Program shimmering forever. Two
@@ -4663,7 +4663,7 @@ impl SessionManager {
             }
         }
         // A deleted Run fork settles its dispatched blocks' shimmer just
-        // like an archived one (spec 0076); consuming the tracking entry
+        // like an archived one (spec 0137); consuming the tracking entry
         // here also makes an archive-then-delete sequence settle once.
         self.settle_run_fork_dispatch(id).await;
         // Release the session's routing credential so a deleted session's

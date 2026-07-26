@@ -1,4 +1,4 @@
-# 0088-missing-adapter-closes-session
+# 0141-missing-adapter-closes-session
 
 Status: accepted
 Date: 2026-07-12

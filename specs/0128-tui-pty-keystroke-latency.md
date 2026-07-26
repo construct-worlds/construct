@@ -1,4 +1,4 @@
-# 0037-tui-pty-keystroke-latency
+# 0128-tui-pty-keystroke-latency
 
 Status: accepted
 Date: 2026-07-10

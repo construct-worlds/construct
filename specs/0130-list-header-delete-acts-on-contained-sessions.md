@@ -1,4 +1,4 @@
-# 0054-list-header-delete-acts-on-contained-sessions
+# 0130-list-header-delete-acts-on-contained-sessions
 
 Status: accepted
 Date: 2026-06-28

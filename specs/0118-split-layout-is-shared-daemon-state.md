@@ -1,4 +1,4 @@
-# 0113-split-layout-is-shared-daemon-state
+# 0118-split-layout-is-shared-daemon-state
 
 Status: accepted
 Date: 2026-07-26
@@ -28,7 +28,7 @@ What is deliberately **not** shared, and must stay per-client:
 - **Zoom**, scrollback position, selection, and per-pane view mode. View mode
   in particular is resolved locally by each client (see
   [0062-webui-view-mode-is-per-session](0062-webui-view-mode-is-per-session.md)
-  and [0065-tui-view-mode-is-per-split-window](0065-tui-view-mode-is-per-split-window.md));
+  and [0132-tui-view-mode-is-per-split-window](0132-tui-view-mode-is-per-split-window.md));
   the clients do not agree on a single set of view modes because they do not
   offer the same surfaces.
 

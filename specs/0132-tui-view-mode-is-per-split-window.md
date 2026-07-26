@@ -1,4 +1,4 @@
-# 0065-tui-view-mode-is-per-split-window
+# 0132-tui-view-mode-is-per-split-window
 
 Status: accepted
 Date: 2026-06-30
@@ -40,7 +40,7 @@ not a client-persisted per-session preference.
 ## Consequences
 
 - The *window* a mode attaches to is shared state now
-  ([0113-split-layout-is-shared-daemon-state](0113-split-layout-is-shared-daemon-state.md)),
+  ([0118-split-layout-is-shared-daemon-state](0118-split-layout-is-shared-daemon-state.md)),
   but the mode itself is not: each client resolves view mode locally. Two
   clients may therefore show the same pane as a terminal and as a transcript
   at the same time, which is intended — they do not offer the same surfaces.

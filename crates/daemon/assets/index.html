@@ -700,7 +700,7 @@
   }
   .drop-overlay[hidden] { display: none; }
 
-  /* --- Split panes (spec 0113) ------------------------------------------
+  /* --- Split panes (spec 0118) ------------------------------------------
      The pane grid renders the shared layout tree. Below the split threshold
      it is hidden entirely and `.view-stack` sits directly in `.view`,
      which is exactly the pre-split layout — narrow screens show one
@@ -2918,7 +2918,7 @@
       -->
       <div class="drop-overlay" id="dropOverlay" hidden>Drop file to attach</div>
       <!--
-        Split panes (spec 0113). The pane grid renders the SHARED layout
+        Split panes (spec 0118). The pane grid renders the SHARED layout
         tree — the same tree the TUI renders — as nested rows/columns with
         draggable dividers. It is empty and hidden below the split
         threshold, where this client shows exactly one session as it always
@@ -3621,7 +3621,7 @@ const state = {
   // mounted avoids repainting long headless sessions from the beginning when
   // the user switches away and back.
   transcriptPaneById: new Map(),
-  // The SHARED split layout (spec 0113). `tree` is the same tree the TUI
+  // The SHARED split layout (spec 0118). `tree` is the same tree the TUI
   // renders; `version` is what optimistic writes are composed against.
   // `focusedPaneId` is deliberately NOT part of it — focus is per-client.
   layout: { tree: null, version: 0 },
@@ -9605,7 +9605,7 @@ window.addEventListener("resize", () => {
   setSessionListVisible(state.sessionListVisible, false);
 });
 
-// --- Shared split layout (spec 0113) ---------------------------------------
+// --- Shared split layout (spec 0118) ---------------------------------------
 //
 // The layout tree is daemon state, not ours: a split made in the TUI shows up
 // here and vice versa. Two rules make that safe, and both live in this file:
@@ -10037,7 +10037,7 @@ function refitMirrors() {
  * Load a mirrored terminal's scrollback once. Mirrors are passive: they never
  * claim PTY geometry, because the daemon sizes the child to whoever claimed
  * it last and a mirror stealing that would resize the child under the pane
- * actually driving it (spec 0112).
+ * actually driving it (spec 0121).
  */
 async function hydrateMirrorTerminal(id) {
   const handle = state.terminalById.get(id);
