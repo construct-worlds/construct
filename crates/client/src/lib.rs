@@ -865,13 +865,19 @@ impl Client {
     }
     /// Arm, change (`Some(name)`) or clear (`None`) a session's model
     /// route. Applies to the running session — no restart (spec 0114).
-    pub async fn set_route(&self, id: &str, route: Option<String>) -> Result<()> {
+    pub async fn set_route(
+        &self,
+        id: &str,
+        route: Option<String>,
+        model: Option<String>,
+    ) -> Result<()> {
         let _: serde_json::Value = self
             .request(
                 ipc_method::SESSION_SET_ROUTE,
                 &construct_protocol::SessionSetRouteParams {
                     session_id: id.to_string(),
                     route,
+                    model,
                 },
             )
             .await?;

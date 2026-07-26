@@ -5093,6 +5093,9 @@ impl SessionManager {
             &id,
             &harness,
             Some(&route.name),
+            // A resumed session comes back on the model it was running,
+            // not the target's current default (spec 0114).
+            Some(route.model.as_str()),
             route.origin_model.clone(),
         ) {
             // The route no longer resolves (renamed in config, key gone).
@@ -5133,7 +5136,12 @@ impl SessionManager {
     }
 
     /// Arm, change, or clear a session's route (spec 0114).
-    pub async fn set_route(&self, session_id: &str, route: Option<String>) -> Result<()> {
+    pub async fn set_route(
+        &self,
+        session_id: &str,
+        route: Option<String>,
+        model: Option<String>,
+    ) -> Result<()> {
         let entry = self
             .get_entry(session_id)
             .await
@@ -5155,7 +5163,13 @@ impl SessionManager {
         };
         let armed = self
             .router
-            .set_route(session_id, &harness, route.as_deref(), origin_model)?;
+            .set_route(
+                session_id,
+                &harness,
+                route.as_deref(),
+                model.as_deref(),
+                origin_model,
+            )?;
         if armed == existing {
             return Ok(());
         }

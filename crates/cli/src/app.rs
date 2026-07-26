@@ -9830,7 +9830,7 @@ impl App {
         }
         if let Some(menu) = self.route_menu.clone() {
             if let Some(index) = menu.item_at(col, row) {
-                self.apply_route_menu_selection(index).await;
+                self.activate_route_menu_row(index).await;
                 return;
             }
             if menu.contains(col, row) {
@@ -10463,22 +10463,36 @@ impl App {
         // owns navigation keys, and any other key dismisses it rather than
         // leaking into the session underneath.
         if self.route_menu.is_some() {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
-                KeyCode::Up => {
-                    self.move_route_menu_selection(-1);
-                    return;
-                }
+                // C-n / C-p alongside the arrows: this menu is reached from
+                // the modeline, where the rest of the UI already answers to
+                // emacs motion.
                 KeyCode::Down => {
                     self.move_route_menu_selection(1);
                     return;
                 }
-                KeyCode::Enter => {
-                    let index = self.route_menu.as_ref().map(|m| m.selected).unwrap_or(0);
-                    self.apply_route_menu_selection(index).await;
+                KeyCode::Char('n') if ctrl => {
+                    self.move_route_menu_selection(1);
                     return;
                 }
+                KeyCode::Up => {
+                    self.move_route_menu_selection(-1);
+                    return;
+                }
+                KeyCode::Char('p') if ctrl => {
+                    self.move_route_menu_selection(-1);
+                    return;
+                }
+                KeyCode::Enter => {
+                    let index = self.route_menu.as_ref().map(|m| m.selected).unwrap_or(0);
+                    self.activate_route_menu_row(index).await;
+                    return;
+                }
+                // Esc steps back out of the model list before closing, so
+                // picking the wrong target is one keystroke to undo.
                 KeyCode::Esc => {
-                    self.route_menu = None;
+                    self.route_menu_back();
                     return;
                 }
                 _ => {
@@ -15676,11 +15690,27 @@ mod tests {
         (client, dir, server)
     }
 
+    fn route_json_models(
+        name: &str,
+        models: &[&str],
+        reason: Option<&str>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "dialect": "anthropic",
+            "model": models.first().copied().unwrap_or_default(),
+            "models": models,
+            "base_url": "https://api.moonshot.ai/anthropic",
+            "unavailable_reason": reason,
+        })
+    }
+
     fn route_json(name: &str, model: &str, reason: Option<&str>) -> serde_json::Value {
         serde_json::json!({
             "name": name,
             "dialect": "anthropic",
             "model": model,
+            "models": [model],
             "base_url": "https://api.moonshot.ai/anthropic",
             "unavailable_reason": reason,
         })
@@ -15701,10 +15731,10 @@ mod tests {
             .join("\n")
     }
 
-    /// The picker opens on the model indicator and lists pass-through
-    /// plus every configured route, unavailable ones included (spec 0115).
+    /// The picker opens on the model indicator and lists Default plus
+    /// every target, unavailable ones included (spec 0115).
     #[tokio::test]
-    async fn route_menu_opens_with_pass_through_and_every_route() {
+    async fn route_menu_opens_with_default_and_every_target() {
         let (client, _dir, _server) = route_mock_daemon(
             vec![
                 route_json("kimi", "kimi-k2.5", None),
@@ -15730,13 +15760,85 @@ mod tests {
 
         let menu = app.route_menu.as_ref().expect("picker open");
         assert_eq!(menu.rows(), 3);
+        assert_eq!(menu.label(0), "Default");
         assert!(menu.row_enabled(1));
-        assert!(!menu.row_enabled(2), "a route with no key is not selectable");
+        assert!(!menu.row_enabled(2), "a target with no key is not selectable");
 
         let frame = rendered(&mut app, 120, 30);
-        assert!(frame.contains("pass through"), "{frame}");
+        assert!(frame.contains("Default"), "{frame}");
         assert!(frame.contains("kimi"), "{frame}");
         assert!(frame.contains("glm"), "{frame}");
+    }
+
+    /// Clicking a target opens its models; clicking a model arms the route.
+    #[tokio::test]
+    async fn clicking_a_target_opens_its_models() {
+        let (client, _dir, _server) = route_mock_daemon(
+            vec![route_json_models(
+                "codex-oauth",
+                &["gpt-5.6-sol", "gpt-5.5"],
+                None,
+            )],
+            None,
+        )
+        .await;
+        let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
+        summary.harness = "claude".into();
+        summary.route_capable = true;
+        let mut app = test_app(client, vec![summary]);
+        app.select_session("s1".into());
+        let _ = rendered(&mut app, 120, 30);
+        let hit = app.layout.modeline_model_hit.expect("clickable");
+        app.handle_left_click(hit.start_col, hit.row).await;
+
+        // Row 1 is the target; clicking it descends rather than arming.
+        let area = app.route_menu.as_ref().unwrap().area;
+        app.handle_left_click(area.x + 2, area.y + 2).await;
+        let menu = app.route_menu.as_ref().expect("still open on the model step");
+        assert_eq!(menu.rows(), 2, "the target's two models");
+        assert_eq!(menu.label(0), "gpt-5.6-sol");
+        assert_eq!(menu.title(), " codex-oauth ");
+
+        let frame = rendered(&mut app, 120, 30);
+        assert!(frame.contains("gpt-5.6-sol"), "{frame}");
+
+        // Esc steps back to the targets rather than closing outright.
+        app.route_menu_back();
+        let menu = app.route_menu.as_ref().expect("back on the target step");
+        assert_eq!(menu.label(0), "Default");
+        assert_eq!(menu.selected, 1, "returns to the target just left");
+    }
+
+    /// C-n / C-p move the selection, matching the motion keys the rest of
+    /// the UI uses.
+    #[tokio::test]
+    async fn ctrl_n_and_ctrl_p_move_the_route_selection() {
+        let (client, _dir, _server) = route_mock_daemon(
+            vec![
+                route_json("kimi", "kimi-k2.5", None),
+                route_json("glm", "glm-5", None),
+            ],
+            None,
+        )
+        .await;
+        let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
+        summary.harness = "claude".into();
+        summary.route_capable = true;
+        let mut app = test_app(client, vec![summary]);
+        app.select_session("s1".into());
+        app.open_route_menu("s1".into(), 40, 29).await;
+        assert_eq!(app.route_menu.as_ref().unwrap().selected, 0);
+
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        app.on_key(ctrl('n')).await;
+        assert_eq!(app.route_menu.as_ref().unwrap().selected, 1);
+        app.on_key(ctrl('n')).await;
+        assert_eq!(app.route_menu.as_ref().unwrap().selected, 2);
+        // Wraps, like the arrow keys.
+        app.on_key(ctrl('n')).await;
+        assert_eq!(app.route_menu.as_ref().unwrap().selected, 0);
+        app.on_key(ctrl('p')).await;
+        assert_eq!(app.route_menu.as_ref().unwrap().selected, 2);
     }
 
     /// A session that cannot be routed still gets an explanation rather
@@ -15754,8 +15856,8 @@ mod tests {
         let frame = rendered(&mut app, 120, 30);
         assert!(frame.contains("not route-capable"), "{frame}");
         assert!(
-            frame.contains("pass through"),
-            "pass-through stays offered: {frame}"
+            frame.contains("Default"),
+            "unrouting stays offered: {frame}"
         );
     }
 

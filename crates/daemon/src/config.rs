@@ -355,10 +355,11 @@ enabled = true
 #                   # and keep dialing the port they were given at spawn
 #
 # [router.oauth]
-# # Model each subscription login sends. Optional — each has a built-in
-# # default, which may lag a vendor release.
-# claude-oauth = "claude-sonnet-4-6"
-# codex-oauth  = "gpt-5.5"
+# # Models each subscription login offers. Optional — each has a built-in
+# # list, which may lag a vendor release. One string pins a single model; a
+# # list is what the route picker's second step offers, first entry default.
+# claude-oauth = ["claude-opus-5", "claude-sonnet-4-6"]
+# codex-oauth  = ["gpt-5.6-sol", "gpt-5.5"]
 # grok-oauth   = "grok-4.5"
 "#;
 
@@ -500,7 +501,7 @@ pub struct RouterConfig {
     /// vendor release. A subscription login has no base URL or key to
     /// declare, so this is the only thing there is to configure.
     #[serde(default)]
-    pub oauth: BTreeMap<String, String>,
+    pub oauth: BTreeMap<String, OauthModels>,
 }
 
 impl Default for RouterConfig {
@@ -607,6 +608,25 @@ impl ModelProfile {
             "no api_key_env, and none of {} is set",
             defaults.join(" / ")
         ))
+    }
+}
+
+/// `[router.oauth] <provider>` accepts one model or a list of them. One
+/// model is the common case; a list is what makes the picker's second step
+/// worth having.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum OauthModels {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OauthModels {
+    pub fn to_vec(&self) -> Vec<String> {
+        match self {
+            OauthModels::One(m) => vec![m.clone()],
+            OauthModels::Many(m) => m.clone(),
+        }
     }
 }
 

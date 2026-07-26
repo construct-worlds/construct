@@ -2566,6 +2566,10 @@ pub struct SessionSetRouteParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
+    /// Which of the target's models to send. `None` takes the target's
+    /// configured or default model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2582,7 +2586,12 @@ pub struct RouteOption {
     pub name: String,
     /// Wire dialect the target speaks (`"anthropic"`, `"openai"`, ...).
     pub dialect: String,
+    /// The model armed when none is chosen explicitly.
     pub model: String,
+    /// Models selectable for this target. Always contains `model`; a
+    /// client offers these as a second step after picking the target.
+    #[serde(default)]
+    pub models: Vec<String>,
     /// Endpoint host, for display. Never carries a credential.
     pub base_url: String,
     /// `None` when the route is selectable. `Some(reason)` when it is

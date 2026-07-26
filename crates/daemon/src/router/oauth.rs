@@ -82,10 +82,20 @@ impl OauthProvider {
     /// naming the model, which is recoverable; requiring configuration for
     /// a login the machine already has is friction for everyone.
     pub fn default_model(self) -> &'static str {
+        self.seed_models().first().copied().unwrap_or("")
+    }
+
+    /// Models offered for this login before any are configured.
+    ///
+    /// Every name here was observed in a real request or response during
+    /// probing, not recalled — but a vendor release will still outdate the
+    /// list, so `[router.oauth]` overrides it and the picker's second step
+    /// exists to make the choice visible.
+    pub fn seed_models(self) -> &'static [&'static str] {
         match self {
-            OauthProvider::Claude => "claude-sonnet-4-6",
-            OauthProvider::Codex => "gpt-5.5",
-            OauthProvider::Grok => "grok-4.5",
+            OauthProvider::Claude => &["claude-opus-5", "claude-sonnet-4-6"],
+            OauthProvider::Codex => &["gpt-5.6-sol", "gpt-5.5"],
+            OauthProvider::Grok => &["grok-4.5"],
         }
     }
 

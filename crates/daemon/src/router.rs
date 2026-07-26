@@ -388,7 +388,7 @@ pub struct Router {
     /// declared once and reachable from both smith and a routed session.
     profiles: BTreeMap<String, ModelProfile>,
     /// `[router.oauth]` model overrides, keyed by provider name.
-    oauth_models: BTreeMap<String, String>,
+    oauth_models: BTreeMap<String, crate::config::OauthModels>,
     state_dir: PathBuf,
     ca: RwLock<Option<Arc<RouterCa>>>,
     upstream_proxy: Option<UpstreamProxy>,
@@ -696,7 +696,12 @@ impl Router {
     }
 
     /// Resolve a subscription login into an armed route.
-    fn resolve_oauth(&self, provider: OauthProvider, harness: &str) -> Result<ArmedRoute> {
+    fn resolve_oauth(
+        &self,
+        provider: OauthProvider,
+        harness: &str,
+        model: Option<&str>,
+    ) -> Result<ArmedRoute> {
         let routing = harness_routing(harness)
             .ok_or_else(|| anyhow!("harness {harness} is not route-capable"))?;
         if let Some(reason) = self.oauth_blocker(provider, harness) {
@@ -707,7 +712,9 @@ impl Router {
             name: provider.name().to_string(),
             endpoint: provider.endpoint().to_string(),
             base_url: provider.endpoint().to_string(),
-            model: self.oauth_model(provider),
+            model: model
+                .map(str::to_string)
+                .unwrap_or_else(|| self.oauth_model(provider)),
             api_key: cred.access_token.clone(),
             // Every subscription backend here takes a bearer; none accepts
             // the Anthropic key header, even the Anthropic one.
@@ -724,15 +731,32 @@ impl Router {
         })
     }
 
-    /// Model a subscription target sends, from `[router.oauth]` or the
-    /// provider's built-in default.
-    fn oauth_model(&self, provider: OauthProvider) -> String {
-        self.oauth_models
+    /// Models a subscription target offers, configured or built-in.
+    fn oauth_model_list(&self, provider: OauthProvider) -> Vec<String> {
+        let configured: Vec<String> = self
+            .oauth_models
             .get(provider.name())
-            .map(String::as_str)
+            .map(|m| m.to_vec())
+            .unwrap_or_default()
+            .into_iter()
             .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| provider.default_model())
-            .to_string()
+            .collect();
+        if !configured.is_empty() {
+            return configured;
+        }
+        provider
+            .seed_models()
+            .iter()
+            .map(|m| (*m).to_string())
+            .collect()
+    }
+
+    /// Model a subscription target sends when none is chosen explicitly.
+    fn oauth_model(&self, provider: OauthProvider) -> String {
+        self.oauth_model_list(provider)
+            .first()
+            .cloned()
+            .unwrap_or_else(|| provider.default_model().to_string())
     }
 
     /// Why a subscription login cannot serve as a route for `harness`.
@@ -751,9 +775,9 @@ impl Router {
         oauth::read_credential(provider).err()
     }
 
-    fn resolve(&self, name: &str, harness: &str) -> Result<ArmedRoute> {
+    fn resolve(&self, name: &str, harness: &str, model: Option<&str>) -> Result<ArmedRoute> {
         if let Some(provider) = OauthProvider::ALL.iter().find(|p| p.name() == name) {
-            return self.resolve_oauth(*provider, harness);
+            return self.resolve_oauth(*provider, harness, model);
         }
         let profile = self.profiles.get(name).ok_or_else(|| {
             anyhow!(
@@ -775,7 +799,10 @@ impl Router {
             name: name.to_string(),
             endpoint: format!("{base_url}{}", translate::target_path(target_dialect)),
             base_url,
-            model: profile.model.clone().unwrap_or_default(),
+            model: model
+                .map(str::to_string)
+                .or_else(|| profile.model.clone())
+                .unwrap_or_default(),
             api_key: profile.resolve_api_key().map_err(|e| anyhow!(e))?,
             auth: match target_dialect {
                 Dialect::AnthropicMessages => TargetAuth::ApiKeyHeader,
@@ -798,6 +825,7 @@ impl Router {
         session_id: &str,
         harness: &str,
         name: Option<&str>,
+        model: Option<&str>,
         origin_model: Option<String>,
     ) -> Result<Option<SessionRoute>> {
         let ctx = self
@@ -819,7 +847,7 @@ impl Router {
             ctx.bump_route_epoch();
             return Ok(None);
         };
-        let armed = self.resolve(name, harness)?;
+        let armed = self.resolve(name, harness, model)?;
         let summary = SessionRoute {
             name: armed.name.clone(),
             model: armed.model.clone(),
@@ -863,6 +891,7 @@ impl Router {
                 name: p.name().to_string(),
                 dialect: p.dialect().label().to_string(),
                 model: self.oauth_model(*p),
+                models: self.oauth_model_list(*p),
                 base_url: p.endpoint().to_string(),
                 unavailable_reason: routing.and_then(|_| self.oauth_blocker(*p, harness)),
             })
@@ -876,6 +905,7 @@ impl Router {
                     .map(|d| d.label().to_string())
                     .unwrap_or_else(|| profile.provider.clone()),
                 model: profile.model.clone().unwrap_or_default(),
+                models: profile.model.clone().into_iter().collect(),
                 base_url: profile.resolved_base_url().unwrap_or_default(),
                 unavailable_reason: routing
                     .and_then(|_| self.profile_blocker(profile, harness)),
@@ -1027,7 +1057,7 @@ mod tests {
         )
         .await;
         r.attach_session("s1", "claude", None).unwrap();
-        let err = r.set_route("s1", "claude", Some("kimi"), None).unwrap_err();
+        let err = r.set_route("s1", "claude", Some("kimi"), None, None).unwrap_err();
         assert!(err.to_string().contains("NOT_SET_ANYWHERE"), "{err}");
     }
 
@@ -1047,7 +1077,7 @@ mod tests {
         r.attach_session("s1", "claude", None).unwrap();
 
         let armed = r
-            .set_route("s1", "claude", Some("kimi"), Some("claude-opus-5".into()))
+            .set_route("s1", "claude", Some("kimi"), None, Some("claude-opus-5".into()))
             .unwrap()
             .unwrap();
         assert_eq!(armed.name, "kimi");
@@ -1056,7 +1086,7 @@ mod tests {
         assert!(!armed.observed, "nothing has been proxied yet");
 
         // Clearing always succeeds (spec 0114).
-        assert!(r.set_route("s1", "claude", None, None).unwrap().is_none());
+        assert!(r.set_route("s1", "claude", None, None, None).unwrap().is_none());
     }
 
     /// A provider with no translator is offered but not selectable, with
@@ -1078,7 +1108,7 @@ mod tests {
             .as_deref()
             .unwrap();
         assert!(reason.contains("no translator"), "{reason}");
-        assert!(r.set_route("s1", "claude", Some("gemini-pro"), None).is_err());
+        assert!(r.set_route("s1", "claude", Some("gemini-pro"), None, None).is_err());
     }
 
     /// An OpenAI-dialect profile IS selectable from an Anthropic-dialect
@@ -1113,7 +1143,7 @@ mod tests {
         assert_eq!(gpt.base_url, "https://api.openai.com/v1");
 
         let armed = r
-            .set_route("s1", "claude", Some("gpt"), None)
+            .set_route("s1", "claude", Some("gpt"), None, None)
             .unwrap()
             .unwrap();
         assert_eq!(armed.model, "gpt-5.5");
@@ -1166,7 +1196,7 @@ mod tests {
         )
         .await;
         let err = r
-            .set_route("never-attached", "claude", Some("kimi"), None)
+            .set_route("never-attached", "claude", Some("kimi"), None, None)
             .unwrap_err();
         assert!(err.to_string().contains("no routing transport"), "{err}");
     }
@@ -1363,7 +1393,7 @@ mod tests {
         .await;
         let env = r.attach_session("s1", "claude", None).unwrap();
         let token = Router::token_from_env(&env).unwrap();
-        r.set_route("s1", "claude", Some("kimi"), Some("claude-opus-5".into()))
+        r.set_route("s1", "claude", Some("kimi"), None, Some("claude-opus-5".into()))
             .unwrap();
 
         // Client: CONNECT through the router, then TLS with the router CA
@@ -1497,7 +1527,7 @@ mod tests {
         .await;
         let env = r.attach_session("s1", "claude", None).unwrap();
         let token = Router::token_from_env(&env).unwrap();
-        r.set_route("s1", "claude", Some("gpt"), Some("claude-opus-5".into()))
+        r.set_route("s1", "claude", Some("gpt"), None, Some("claude-opus-5".into()))
             .unwrap();
 
         let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
@@ -1648,7 +1678,7 @@ mod tests {
             env.contains_key("NODE_EXTRA_CA_CERTS"),
             "pi takes its CA through the Node variable"
         );
-        r.set_route("s1", "pi", Some("gpt"), Some("gpt-5.6-sol".into()))
+        r.set_route("s1", "pi", Some("gpt"), None, Some("gpt-5.6-sol".into()))
             .unwrap();
 
         let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
@@ -1824,7 +1854,7 @@ mod tests {
         let env = r.attach_session("s1", "pi", None).unwrap();
         let token = Router::token_from_env(&env).unwrap();
         let armed = r
-            .set_route("s1", "pi", Some("claude-oauth"), Some("gpt-5.6-sol".into()))
+            .set_route("s1", "pi", Some("claude-oauth"), None, Some("gpt-5.6-sol".into()))
             .unwrap()
             .unwrap();
         assert_eq!(armed.name, "claude-oauth");
@@ -1970,7 +2000,7 @@ mod tests {
 
         let r = started(&dir, cfg_with(true)).await;
         r.attach_session("s1", "claude", None).unwrap();
-        r.set_route("s1", "claude", Some("codex-oauth"), None)
+        r.set_route("s1", "claude", Some("codex-oauth"), None, None)
             .unwrap();
         let ctx = r.sessions.read().unwrap()["s1"].clone();
         let route = ctx.armed_route().unwrap();

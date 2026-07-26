@@ -4894,6 +4894,10 @@ fn session_menu_icon_style(theme: &Theme, base: Color, hovered: bool, focused: b
 
 /// The model-route picker (spec 0114), anchored above the modeline's
 /// model indicator.
+///
+/// Two steps: targets, then that target's models. The title names the
+/// target once the second step is open, so there is never a bare list of
+/// model names with no context.
 fn render_route_menu(f: &mut Frame, app: &App) {
     let Some(menu) = &app.route_menu else {
         return;
@@ -4906,7 +4910,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " route ",
+            menu.title(),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -4915,6 +4919,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
     f.render_widget(block, area);
 
     let last_row = area.y.saturating_add(area.height).saturating_sub(1);
+    let inner_w = area.width.saturating_sub(2);
     for index in 0..menu.rows() {
         let row = area.y.saturating_add(1).saturating_add(index as u16);
         if row >= last_row {
@@ -4936,28 +4941,37 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(app.theme.text)
         };
-        // A leading marker on the armed row, so the current state reads
-        // at a glance instead of only through the modeline.
+        // A leading marker on the armed row, so the current state reads at
+        // a glance instead of only through the modeline.
         let marker = if menu.is_active(index) { "*" } else { " " };
-        let label = format!(" {marker}{} ", menu.label(index));
+        let left = format!(" {marker}{}", menu.label(index));
+        // Trailing detail, right-aligned: the dialect on a target row, and
+        // a chevron where a second step follows.
+        let right = match (menu.detail(index), menu.row_descends(index)) {
+            (Some(d), true) => format!("{d} \u{203a} "),
+            (Some(d), false) => format!("{d}  "),
+            (None, true) => "\u{203a} ".to_string(),
+            (None, false) => " ".to_string(),
+        };
+        let pad = (inner_w as usize)
+            .saturating_sub(UnicodeWidthStr::width(left.as_str()))
+            .saturating_sub(UnicodeWidthStr::width(right.as_str()));
+        let line = format!("{left}{}{right}", " ".repeat(pad));
         f.render_widget(
-            Paragraph::new(Line::styled(label, style)),
+            Paragraph::new(Line::styled(line, style)),
             Rect {
                 x: area.x.saturating_add(1),
                 y: row,
-                width: area.width.saturating_sub(2),
+                width: inner_w,
                 height: 1,
             },
         );
     }
 
-    // Why routing is impossible for this session, when it is. Shown
-    // rather than presenting an empty or silently inert picker.
+    // Why routing is impossible for this session, when it is. Shown rather
+    // than presenting an empty or silently inert picker.
     if let Some(reason) = menu.unavailable_reason.as_deref() {
-        let row = area
-            .y
-            .saturating_add(1)
-            .saturating_add(menu.rows() as u16);
+        let row = area.y.saturating_add(1).saturating_add(menu.rows() as u16);
         if row < last_row {
             f.render_widget(
                 Paragraph::new(Line::styled(
@@ -4969,7 +4983,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
                 Rect {
                     x: area.x.saturating_add(1),
                     y: row,
-                    width: area.width.saturating_sub(2),
+                    width: inner_w,
                     height: 1,
                 },
             );

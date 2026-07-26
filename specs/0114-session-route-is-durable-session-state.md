@@ -57,6 +57,9 @@ routing is indistinguishable from a harness that changed its own model.
   self-report — its own context-window accounting, its displayed model —
   reflects the harness's belief, not the route. Construct's own display
   must show the substitution.
+- A route is a target *and* a model, chosen separately. A target may offer
+  several models, so arming records both, and a resumed session comes back
+  on the model it was running rather than the target's current default.
 - A route change applies at the next request the harness makes. It must
   not apply to a request already in flight.
 - "Next request" has to account for connection reuse. A harness holding a
