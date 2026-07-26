@@ -187,16 +187,23 @@ impl App {
                 _ => {}
             }
         }
+        // The program's own rect and the pane it rolls down inside keep their
+        // full height through the main block's slide (spec 0112) so the
+        // document lays out the same either way — which puts them that many
+        // rows below where they paint, so the pointer travels the same
+        // distance to meet them.
+        let modal_row = ev.row.saturating_add(self.layout.program_modal_hidden);
+        let base_row = ev.row.saturating_add(self.layout.program_base_hidden);
         let contains = ev.column >= modal.x
             && ev.column < modal.x.saturating_add(modal.width)
-            && ev.row >= modal.y
-            && ev.row < modal.y.saturating_add(modal.height);
+            && modal_row >= modal.y
+            && modal_row < modal.y.saturating_add(modal.height);
         if !contains {
             if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
                 && self
                     .layout
                     .program_base_area
-                    .is_some_and(|base| Self::rect_contains(base, ev.column, ev.row))
+                    .is_some_and(|base| Self::rect_contains(base, ev.column, base_row))
             {
                 self.focus = PaneFocus::View;
                 self.set_program_terminal_focus(true);
@@ -492,7 +499,7 @@ impl App {
                         modal,
                         popup.scroll_offset,
                         ev.column,
-                        ev.row,
+                        modal_row,
                     )
                     .unwrap_or(0)
                 };
@@ -545,7 +552,7 @@ impl App {
                         modal,
                         popup.scroll_offset,
                         ev.column,
-                        ev.row,
+                        modal_row,
                     )
                     .unwrap_or(0)
                 };
@@ -605,6 +612,10 @@ impl App {
         let Some(base) = self.layout.program_base_area else {
             return;
         };
+        // The pane keeps its full height while the main block is slid
+        // (spec 0112), so a pane top that left the viewport moves the pointer
+        // the same distance down its recorded rect.
+        let row = row.saturating_add(self.layout.program_base_hidden);
         let Some(popup) = self.program_popup.as_mut() else {
             return;
         };
@@ -854,6 +865,13 @@ impl App {
         let Some(modal) = self.layout.modal_area else {
             return;
         };
+        // The card's position is stored for the program's own renderer, so it
+        // is placed in the main block's coordinates, not the viewport's
+        // (spec 0112).
+        let modal = self
+            .layout
+            .main_block_rect(modal, self.layout.program_modal_hidden);
+        let block_row = self.layout.main_block_row(ev.row);
         let Some(popup) = self.program_popup.as_mut() else {
             return;
         };
@@ -867,22 +885,24 @@ impl App {
                 let d_rows = i32::from(ev.row) - i32::from(from.1);
                 let max_cols = i32::from(modal.width.saturating_sub(4).max(1));
                 let max_rows = i32::from(modal.height.saturating_sub(4).max(1));
-                popup.pinned_card_cols = (i32::from(start_cols) + d_cols)
-                    .clamp(i32::from(crate::app::PROGRAM_PINNED_CARD_MIN_COLS), max_cols)
-                    as u16;
-                popup.pinned_card_rows = (i32::from(start_rows) + d_rows)
-                    .clamp(i32::from(crate::app::PROGRAM_PINNED_CARD_MIN_ROWS), max_rows)
-                    as u16;
+                popup.pinned_card_cols = (i32::from(start_cols) + d_cols).clamp(
+                    i32::from(crate::app::PROGRAM_PINNED_CARD_MIN_COLS),
+                    max_cols,
+                ) as u16;
+                popup.pinned_card_rows = (i32::from(start_rows) + d_rows).clamp(
+                    i32::from(crate::app::PROGRAM_PINNED_CARD_MIN_ROWS),
+                    max_rows,
+                ) as u16;
             }
             crate::app::PinnedCardDrag::Move { grab } => {
-                let x = ev
-                    .column
-                    .saturating_sub(grab.0)
-                    .clamp(modal.x, modal.x.saturating_add(modal.width.saturating_sub(1)));
-                let y = ev
-                    .row
-                    .saturating_sub(grab.1)
-                    .clamp(modal.y, modal.y.saturating_add(modal.height.saturating_sub(1)));
+                let x = ev.column.saturating_sub(grab.0).clamp(
+                    modal.x,
+                    modal.x.saturating_add(modal.width.saturating_sub(1)),
+                );
+                let y = block_row.saturating_sub(grab.1).clamp(
+                    modal.y,
+                    modal.y.saturating_add(modal.height.saturating_sub(1)),
+                );
                 popup.pinned_card_pos = Some((x, y));
             }
         }
