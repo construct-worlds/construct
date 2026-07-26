@@ -1842,6 +1842,7 @@ mod tests {
     /// requires — and never the harness's own credential.
     #[tokio::test]
     async fn routes_a_harness_onto_a_subscription_login() {
+        let _env = oauth::test_env_guard();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let dir = tempfile::tempdir().unwrap();
@@ -2002,6 +2003,7 @@ mod tests {
     /// it, and those are different questions.
     #[tokio::test]
     async fn a_targets_rejected_parameters_are_stripped() {
+        let _env = oauth::test_env_guard();
         let dir = tempfile::tempdir().unwrap();
         let codex_home = dir.path().join("codex");
         std::fs::create_dir_all(&codex_home).unwrap();

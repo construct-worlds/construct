@@ -424,9 +424,25 @@ pub fn required_system_prefix(provider: OauthProvider) -> Option<&'static str> {
     }
 }
 
+/// Serializes tests that steer credential discovery through environment
+/// variables.
+///
+/// Those variables are process-global while Rust runs tests in parallel
+/// threads, so two tests pointing `CODEX_HOME` at different directories
+/// interleave — one clearing it between the other's set and read, which
+/// surfaces as "not logged in" for a login that is plainly there. Every
+/// test that sets or clears one takes this lock first; the rest of the
+/// suite still runs in parallel.
+#[cfg(test)]
+pub(crate) fn test_env_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn every_provider_has_a_reachable_shape() {
@@ -472,6 +488,7 @@ mod tests {
 
     #[test]
     fn claude_reads_a_credentials_file_and_checks_expiry() {
+        let _env = test_env_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
         let future = (chrono::Utc::now().timestamp() + 3600) * 1000;
@@ -502,6 +519,7 @@ mod tests {
 
     #[test]
     fn codex_reads_auth_json_and_its_account_id() {
+        let _env = test_env_guard();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("auth.json"),
@@ -523,6 +541,7 @@ mod tests {
 
     #[test]
     fn missing_logins_say_how_to_sign_in() {
+        let _env = test_env_guard();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("CODEX_HOME", dir.path());
         let err = read_credential(OauthProvider::Codex).unwrap_err();
@@ -533,6 +552,7 @@ mod tests {
 
     #[test]
     fn grok_picks_the_longest_lived_unexpired_entry() {
+        let _env = test_env_guard();
         let dir = tempfile::tempdir().unwrap();
         let grok = dir.path().join(".grok");
         std::fs::create_dir_all(&grok).unwrap();
@@ -557,6 +577,7 @@ mod tests {
 
     #[test]
     fn all_grok_entries_expired_reports_expiry_not_absence() {
+        let _env = test_env_guard();
         let dir = tempfile::tempdir().unwrap();
         let grok = dir.path().join(".grok");
         std::fs::create_dir_all(&grok).unwrap();
