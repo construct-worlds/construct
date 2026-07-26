@@ -168,10 +168,22 @@
   @media (max-width: 720px) {
     .mini-matrix { width: 32px; }
   }
+  /* Takes the header's spare width so its contents can grow and shrink
+     without moving anything after it. */
+  .title-cluster {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
   header .meta {
     color: var(--fg);
     font-size: 13px;
     font-weight: 600;
+    /* `0 1 auto`: the name shrinks and ellipsizes inside the cluster rather
+       than growing the cluster, keeping ✎ next to the text. */
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -230,7 +242,7 @@
       min-height: var(--header-h);
       padding: 0 4px;
     }
-    header .meta { flex: 1 1 0; }
+    .title-cluster { flex: 1 1 0; }
     .title-action { display: none; }
     .mini-matrix { width: 28px; }
     .conn { margin-left: 0; }
@@ -2818,9 +2830,17 @@
       to the session name, mirroring where the eye already is when
       thinking about "this session". Pin lives in the session menu.
     -->
-    <div class="meta" id="sessionTitle"></div>
-    <button type="button" class="title-action" id="titleRenameBtn" hidden
-            aria-label="rename session" title="Rename session">✎</button>
+    <!--
+      Title + rename travel together as one flexible cluster. Sizing them
+      to their content instead would make every session switch shift the
+      controls that follow — a visible jolt in the header each time focus
+      moves between split panes.
+    -->
+    <div class="title-cluster" id="titleCluster">
+      <div class="meta" id="sessionTitle"></div>
+      <button type="button" class="title-action" id="titleRenameBtn" hidden
+              aria-label="rename session" title="Rename session">✎</button>
+    </div>
     <div class="session-runtime" id="sessionRuntime" hidden>
       <button type="button" class="session-runtime-button" id="sessionRuntimeBtn"
               aria-label="session model and context" aria-expanded="false">

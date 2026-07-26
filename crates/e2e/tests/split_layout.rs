@@ -40,7 +40,10 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         .expect("create alpha");
     let b = d
         .client
-        .create(shell_session_params(&cwd, "beta"))
+        .create(shell_session_params(
+            &cwd,
+            "beta with a deliberately much longer session name",
+        ))
         .await
         .expect("create beta");
 
@@ -189,6 +192,15 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
            return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height),
                    Math.round(h.top), Math.round(h.height)];
          }))";
+    // Everything after the title cluster must hold still. The session name
+    // itself legitimately changes, so the cluster's own width is not part of
+    // the comparison — the controls that follow it are.
+    let header_js = "JSON.stringify(Array.from(
+         document.querySelectorAll('#viewModeToggle, #conn, #sessionRuntime')
+       ).map((e) => {
+         const r = e.getBoundingClientRect();
+         return [e.id, Math.round(r.left), Math.round(r.width)];
+       }))";
     let before_focus: String = page
         .evaluate(geometry_js)
         .await
@@ -214,10 +226,48 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         .ok()
         .and_then(|r| r.into_value::<String>().ok())
         .unwrap_or_default();
+
     assert_eq!(
         before_focus, after_focus,
         "changing pane focus must not move the panes or their title bars"
     );
+
+    // The header must not reflow when the session name changes length.
+    // Focusing another pane switches the selected session, and sizing the
+    // title to its text made every control after it slide — the visible
+    // jolt in the header on each focus change. Driven directly rather than
+    // through a focus switch so it can't be confused with async hydration
+    // of the incoming session's capabilities.
+    let title_probe = |text: &str| {
+        format!(
+            "(() => {{
+               document.getElementById('sessionTitle').textContent = {text:?};
+               void document.body.offsetWidth;
+               return JSON.stringify(Array.from(
+                 document.querySelectorAll('#viewModeToggle, #conn, #sessionRuntime')
+               ).map((e) => [e.id, Math.round(e.getBoundingClientRect().left)]));
+             }})()"
+        )
+    };
+    let with_short: String = page
+        .evaluate(title_probe("a"))
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    let with_long: String = page
+        .evaluate(title_probe(
+            "a considerably longer session name than the other one",
+        ))
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    assert_eq!(
+        with_short, with_long,
+        "header controls must not move when the session name's length changes"
+    );
+
 
     // The menu pill moves into the title bar's right end, the way the TUI
     // hangs its menu off the pane title.
@@ -458,6 +508,19 @@ async fn hover_split_button(page: &Page) {
         wired,
         "the tooltip must resolve its text from data-tip and have a :hover reveal rule"
     );
+}
+
+/// Focus the first pane in layout order, whichever it is.
+async fn focus_first_pane(page: &Page) {
+    let _ = page
+        .evaluate(
+            "(() => {
+               const p = document.querySelector('#paneGrid .pane');
+               if (p) p.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+               return true;
+             })()",
+        )
+        .await;
 }
 
 async fn save_screenshot(page: &Page, name: &str) {
