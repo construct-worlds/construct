@@ -47,8 +47,16 @@ pub struct TuiState {
     pub matrix_rain_hidden: bool,
     #[serde(default = "default_hide_pane_side_borders")]
     pub hide_pane_side_borders: bool,
+    /// Legacy local copy of the split layout. The layout is shared daemon
+    /// state now, so this is no longer the source of truth — it survives
+    /// only to migrate a TUI upgrading from before the layout was shared:
+    /// when the daemon has no layout yet, this one seeds it. Still written
+    /// on quit so a downgrade doesn't lose the user's panes.
     #[serde(default)]
     pub main_windows: Option<crate::app::MainWindowTree>,
+    /// Which pane this client has focused. Deliberately NOT shared: focus
+    /// decides where *this* user's keystrokes go, and syncing it would let
+    /// another client redirect their typing into a different session.
     #[serde(default)]
     pub active_window_id: Option<u64>,
     #[serde(default)]

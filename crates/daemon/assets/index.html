@@ -284,6 +284,31 @@
     min-width: 28px;
     padding: 4px 6px;
   }
+  .split-controls {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 4px;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--bg-elev-2);
+  }
+  .split-controls[hidden] { display: none; }
+  .split-controls button {
+    appearance: none;
+    border: 0;
+    border-radius: 6px;
+    padding: 4px 8px;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.3;
+    cursor: pointer;
+  }
+  .split-controls button:hover { background: var(--bg); color: var(--fg); }
+
   .conn {
     margin-left: auto;
     display: inline-flex;
@@ -678,6 +703,136 @@
     pointer-events: none;
   }
   .drop-overlay[hidden] { display: none; }
+
+  /* --- Split panes (spec 0113) ------------------------------------------
+     The pane grid renders the shared layout tree. Below the split threshold
+     it is hidden entirely and `.view-stack` sits directly in `.view`,
+     which is exactly the pre-split layout — narrow screens show one
+     session and never render, or write, a split. */
+  .view-stack {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .pane-grid {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+  }
+  .pane-grid[hidden] { display: none; }
+  /* A split node: `row` lays its halves out left/right, `column`
+     top/bottom. Ratios come from the shared tree as percentages, which is
+     what lets the same tree mean the same thing in a character grid and a
+     pixel viewport. */
+  .pane-split {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+  }
+  .pane-split.dir-right { flex-direction: row; }
+  .pane-split.dir-below { flex-direction: column; }
+  .pane {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid transparent;
+    border-radius: 8px;
+  }
+  /* Focus is per-client, never shared: it decides where THIS user's
+     keystrokes go. Brightness-only, matching the TUI's pane focus
+     treatment (spec 0084). */
+  .pane.is-focused { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+  .pane-head {
+    position: relative;
+    z-index: 41;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 6px;
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--border-faint);
+    color: var(--fg-dim);
+    font-size: 11px;
+    min-width: 0;
+  }
+  .pane-head .pane-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pane.is-focused .pane-head { color: var(--fg); }
+  .pane-head button {
+    flex: 0 0 auto;
+    appearance: none;
+    border: 0;
+    border-radius: 5px;
+    padding: 2px 6px;
+    background: transparent;
+    color: var(--fg-faint);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1.2;
+    cursor: pointer;
+  }
+  .pane-head button:hover { background: var(--bg-elev-2); color: var(--fg); }
+  .pane-body {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  /* An unfocused pane mirrors its session's live surface but takes no
+     input — click it to focus, then type. Dimmed so the focused pane is
+     unambiguous at a glance. */
+  .pane-mirror {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+    opacity: 0.82;
+  }
+  .pane-mirror .transcript-pane { padding: 10px 12px 14px; }
+  .pane-empty {
+    flex: 1 1 0;
+    display: grid;
+    place-items: center;
+    padding: 12px;
+    color: var(--fg-faint);
+    font-size: 12px;
+    text-align: center;
+  }
+  .pane-divider {
+    flex: 0 0 auto;
+    position: relative;
+    z-index: 5;
+    background: var(--border-faint);
+  }
+  .pane-divider.dir-right { width: 1px; cursor: col-resize; }
+  .pane-divider.dir-below { height: 1px; cursor: row-resize; }
+  /* Hit area wider than the visible hairline, so the divider is grabbable
+     without drawing a thick line. */
+  .pane-divider::after {
+    content: "";
+    position: absolute;
+    inset: -3px;
+  }
+  .pane-divider:hover, .pane-divider.is-dragging { background: var(--accent); }
+  .pane-split.is-resizing { user-select: none; }
   .transcript {
     flex: 1 1 0;
     min-height: 0;
@@ -2624,6 +2779,15 @@
       <div class="session-runtime-popover" id="sessionRuntimePopover" hidden role="dialog"
            aria-label="session runtime details"></div>
     </div>
+    <!--
+      Split controls. Only meaningful on a viewport wide enough to render
+      panes, so it is hidden below the split threshold — a narrow client
+      views the shared layout but never edits it.
+    -->
+    <div class="split-controls" id="splitControls" hidden>
+      <button type="button" id="splitRightBtn" title="Split right">▥</button>
+      <button type="button" id="splitBelowBtn" title="Split below">▤</button>
+    </div>
     <div class="view-mode-toggle" id="viewModeToggle" hidden
          role="group" aria-label="session view mode">
       <button type="button" id="viewModeTerminal" data-view-mode="terminal"
@@ -2682,6 +2846,23 @@
         `enterChatMode` / `enterTerminalMode`.
       -->
       <div class="drop-overlay" id="dropOverlay" hidden>Drop file to attach</div>
+      <!--
+        Split panes (spec 0113). The pane grid renders the SHARED layout
+        tree — the same tree the TUI renders — as nested rows/columns with
+        draggable dividers. It is empty and hidden below the split
+        threshold, where this client shows exactly one session as it always
+        has.
+
+        `#viewStack` below is the one interactive surface stack (transcript,
+        terminal, program, composer, widgets). In split mode it is MOVED into
+        whichever pane is focused; the other panes get a read-only mirror of
+        their session's cached terminal / transcript element. That is why
+        there is one stack rather than one per pane: the composer, program
+        editor and widget machinery are singletons keyed off the focused
+        session, and duplicating them per pane would duplicate all of it.
+      -->
+      <div class="pane-grid" id="paneGrid" hidden></div>
+      <div class="view-stack" id="viewStack">
       <div class="transcript" id="transcript"></div>
       <div class="terminal-wrap" id="terminalWrap" hidden>
         <div class="terminal-host" id="terminal"></div>
@@ -2875,6 +3056,7 @@
           <span class="orb-count" id="suggestOrbCount" hidden></span>
         </button>
       </div>
+      </div><!-- /#viewStack -->
     </section>
   </main>
 
@@ -3359,6 +3541,15 @@ const state = {
   // mounted avoids repainting long headless sessions from the beginning when
   // the user switches away and back.
   transcriptPaneById: new Map(),
+  // The SHARED split layout (spec 0113). `tree` is the same tree the TUI
+  // renders; `version` is what optimistic writes are composed against.
+  // `focusedPaneId` is deliberately NOT part of it — focus is per-client.
+  layout: { tree: null, version: 0 },
+  focusedPaneId: null,
+  // Sessions currently mounted in an unfocused pane. Their cached terminal
+  // hosts must stay visible and keep receiving live PTY bytes even though
+  // they are not `currentId`.
+  mirroredSessionIds: new Set(),
   // At most one upward-history page request per transcript pane.
   transcriptHistoryLoadById: new Map(),
   // Scroll anchor captured before leaving chat view. Restored when the cached
@@ -3878,6 +4069,12 @@ function connect() {
     // disconnected (program/state pushes were missed); drop them so the next
     // widget render refetches.
     state.widgetProgramById.clear();
+    // Fetch the shared layout on every (re)connect, not just the first: a
+    // client that was disconnected missed the broadcasts, so its tree is
+    // stale by definition.
+    rpc("layout.get", null)
+      .then((doc) => applySharedLayout(doc))
+      .catch(() => {/* older daemon with no shared layout — stay single-pane */});
     refreshSessions();
     refreshCurrentSessionAfterReconnect();
   });
@@ -4600,6 +4797,11 @@ function sessionRowDescriptor(item) {
 }
 
 function renderSessions() {
+  // Pane titles and mirrors are derived from the session list, so keep the
+  // grid in step with it. Scheduled rather than immediate: renderSessions
+  // runs on every list delta, and rebuilding the grid inside it would
+  // re-parent live terminals mid-update.
+  schedulePaneGridRefresh();
   // A re-render mid-drag would replace the very rows the pointer is
   // tracking; park it and replay once the drag settles.
   if (listDrag.active) {
@@ -5070,8 +5272,16 @@ async function switchCurrentViewMode(mode) {
   reportView();
 }
 
-async function selectSession(id, { replaceUrl = false } = {}) {
+async function selectSession(id, { replaceUrl = false, fromPane = false } = {}) {
   rpc("session.mark_seen", { session_id: id }).catch(() => {});
+  // Picking a session from the list points the FOCUSED pane at it, which is
+  // shared state. `fromPane` is the one exception: focusing a pane already
+  // showing this session must not write it back into the layout it came from.
+  //
+  // Narrow clients skip this entirely — `setFocusedPaneSession` refuses to
+  // write below the split threshold, so browsing the fleet on a phone can't
+  // reshuffle a desktop's panes.
+  if (!fromPane) setFocusedPaneSession(id);
   if (state.currentId === id) {
     setLocationSessionId(id, { replace: replaceUrl });
     return;
@@ -5114,6 +5324,7 @@ async function selectSession(id, { replaceUrl = false } = {}) {
   // sessions, `session.input` for chat-only adapters. Just block
   // on disconnect / no-selection.
   setComposerEnabled(!!(state.ws && state.ws.readyState === 1 && state.currentId));
+  refreshSplitControls();
   reportView();
 }
 
@@ -7953,6 +8164,9 @@ function showTerminalForSession(id, options = {}) {
   const reveal = options.reveal !== false;
   const handle = terminalHandleForSession(id);
   for (const [sessionId, h] of state.terminalById.entries()) {
+    // A host mounted in another pane is that pane's business — hiding it
+    // here would blank a mirror every time the focused session changed.
+    if (state.mirroredSessionIds.has(sessionId)) continue;
     h.host.hidden = sessionId !== id || (sessionId === id && !reveal);
   }
   if (handle) {
@@ -9301,6 +9515,512 @@ window.addEventListener("resize", () => {
   setSessionListVisible(state.sessionListVisible, false);
 });
 
+// --- Shared split layout (spec 0113) ---------------------------------------
+//
+// The layout tree is daemon state, not ours: a split made in the TUI shows up
+// here and vice versa. Two rules make that safe, and both live in this file:
+//
+//   1. Focus is NOT shared. `state.focusedPaneId` is local, because focus
+//      decides where this user's keystrokes go — a remote client moving it
+//      would redirect typing into another session mid-sentence.
+//   2. A client too narrow to render the tree shows a single session and
+//      NEVER writes the layout back. Otherwise opening this page on a phone
+//      would collapse the panes on every other client.
+
+const SPLIT_MIN_WIDTH = 1100;
+const paneGridEl = $("paneGrid");
+const viewStackEl = $("viewStack");
+
+function layoutLeaves(node, out = []) {
+  if (!node) return out;
+  if (node.kind === "leaf") out.push(node);
+  else {
+    layoutLeaves(node.first, out);
+    layoutLeaves(node.second, out);
+  }
+  return out;
+}
+
+function layoutLeafCount(node) {
+  return layoutLeaves(node).length;
+}
+
+function layoutFindLeaf(node, paneId) {
+  return layoutLeaves(node).find((l) => l.id === paneId) || null;
+}
+
+function layoutMaxLeafId(node) {
+  return layoutLeaves(node).reduce((m, l) => Math.max(m, l.id), 0);
+}
+
+function cloneLayout(node) {
+  return node ? JSON.parse(JSON.stringify(node)) : null;
+}
+
+/** Does this viewport render the shared tree as panes? */
+function splitLayoutActive() {
+  return (
+    window.innerWidth >= SPLIT_MIN_WIDTH &&
+    !!state.layout.tree &&
+    layoutLeafCount(state.layout.tree) > 1
+  );
+}
+
+/** Wide enough to offer split controls at all (even from a single pane). */
+function splitLayoutAvailable() {
+  return window.innerWidth >= SPLIT_MIN_WIDTH;
+}
+
+/**
+ * Push the local tree to the daemon.
+ *
+ * Refuses to write from a viewport that isn't rendering the layout. This is
+ * the clamp-on-render rule: a narrow client is a viewer of the shared layout,
+ * never an editor of it.
+ */
+async function pushLayout(tree) {
+  if (!splitLayoutAvailable()) return;
+  const base = state.layout.version;
+  try {
+    const doc = await rpc("layout.set", { tree, base_version: base });
+    applySharedLayout(doc);
+  } catch (e) {
+    // A conflict means another client wrote first; its broadcast is already
+    // on the way. Re-pushing over it would start a write war, so adopt
+    // theirs instead of insisting on ours.
+    console.debug("layout push rejected:", e && e.message);
+  }
+}
+
+/** Adopt a layout from the daemon (initial fetch or another client's write). */
+function applySharedLayout(doc) {
+  if (!doc || !doc.tree) return;
+  state.layout = { tree: doc.tree, version: doc.version || 0 };
+  // Focus never comes from the wire. Keep ours if the pane still exists;
+  // otherwise fall back to the first pane in layout order.
+  const leaves = layoutLeaves(state.layout.tree);
+  if (!leaves.some((l) => l.id === state.focusedPaneId)) {
+    state.focusedPaneId = leaves.length ? leaves[0].id : null;
+  }
+  renderPaneGrid();
+  // With panes on screen, the focused pane's session is shared: another
+  // client moving it moves what this pane shows. With a single pane the
+  // selection is local and stays put.
+  if (splitLayoutActive()) {
+    const focused = focusedPaneSessionId();
+    if (focused && focused !== state.currentId) {
+      selectSession(focused, { fromPane: true });
+    }
+  }
+}
+
+/**
+ * The session a *narrow* client should open on when it has no URL and no
+ * remembered selection: whatever the shared layout has focused. Read-only —
+ * this is the one way a narrow client touches the layout.
+ */
+function layoutStartingSessionId() {
+  const leaves = layoutLeaves(state.layout.tree);
+  for (const leaf of leaves) {
+    if (leaf.session_id && state.sessions.some((s) => s.id === leaf.session_id)) {
+      return leaf.session_id;
+    }
+  }
+  return null;
+}
+
+/** The focused pane's session — the one the singleton view stack shows. */
+function focusedPaneSessionId() {
+  const leaf = layoutFindLeaf(state.layout.tree, state.focusedPaneId);
+  return leaf ? leaf.session_id || null : null;
+}
+
+/**
+ * Point the focused pane at `sessionId`, honoring the TUI's uniqueness rule
+ * (spec 0039): if another pane already shows it, the two panes swap rather
+ * than both showing the same session. Swapping keeps both panes' context and
+ * makes the move reversible.
+ */
+function setFocusedPaneSession(sessionId) {
+  // Only a client rendering the layout as panes participates in it. With a
+  // single pane every client keeps its own current session, exactly as
+  // before splits were shared — otherwise merely browsing the list in the
+  // TUI would drag every other client's view along with it.
+  if (!splitLayoutActive() || !state.layout.tree) return false;
+  const tree = cloneLayout(state.layout.tree);
+  const focused = layoutFindLeaf(tree, state.focusedPaneId);
+  if (!focused) return false;
+  if (focused.session_id === sessionId) return false;
+  const previous = focused.session_id || null;
+  const other = layoutLeaves(tree).find(
+    (l) => l.id !== focused.id && l.session_id === sessionId
+  );
+  if (other) {
+    if (previous) other.session_id = previous;
+    else delete other.session_id;
+  }
+  if (sessionId) focused.session_id = sessionId;
+  else delete focused.session_id;
+  state.layout.tree = tree;
+  renderPaneGrid();
+  pushLayout(tree);
+  return true;
+}
+
+function splitFocusedPane(direction) {
+  if (!splitLayoutAvailable() || !state.layout.tree) return;
+  const tree = cloneLayout(state.layout.tree);
+  const newId = layoutMaxLeafId(tree) + 1;
+  // Until now this client's session was local (single pane). Splitting is
+  // the moment it joins the shared layout, so publish what it is showing.
+  const seed = layoutFindLeaf(tree, state.focusedPaneId);
+  if (seed && !seed.session_id && state.currentId) seed.session_id = state.currentId;
+  const replaceLeaf = (node) => {
+    if (node.kind === "leaf") {
+      if (node.id !== state.focusedPaneId) return node;
+      // The new pane starts on the same session, exactly as the TUI's split
+      // does; picking a different session in it is a separate gesture.
+      const copy = { kind: "leaf", id: newId };
+      if (node.session_id) copy.session_id = node.session_id;
+      return {
+        kind: "split",
+        direction,
+        ratio_percent: 50,
+        first: node,
+        second: copy,
+      };
+    }
+    return {
+      ...node,
+      first: replaceLeaf(node.first),
+      second: replaceLeaf(node.second),
+    };
+  };
+  const next = replaceLeaf(tree);
+  state.layout.tree = next;
+  state.focusedPaneId = newId;
+  renderPaneGrid();
+  pushLayout(next);
+}
+
+function closePane(paneId) {
+  if (!state.layout.tree || layoutLeafCount(state.layout.tree) <= 1) return;
+  const prune = (node) => {
+    if (node.kind === "leaf") return node;
+    const first = prune(node.first);
+    const second = prune(node.second);
+    if (first.kind === "leaf" && first.id === paneId) return second;
+    if (second.kind === "leaf" && second.id === paneId) return first;
+    return { ...node, first, second };
+  };
+  const next = prune(cloneLayout(state.layout.tree));
+  state.layout.tree = next;
+  const leaves = layoutLeaves(next);
+  if (!leaves.some((l) => l.id === state.focusedPaneId)) {
+    state.focusedPaneId = leaves.length ? leaves[0].id : null;
+  }
+  renderPaneGrid();
+  pushLayout(next);
+}
+
+function focusPane(paneId, { selectSessionToo = true } = {}) {
+  if (state.focusedPaneId === paneId) return;
+  const leaf = layoutFindLeaf(state.layout.tree, paneId);
+  if (!leaf) return;
+  state.focusedPaneId = paneId;
+  renderPaneGrid();
+  refreshSplitControls();
+  if (selectSessionToo && leaf.session_id && leaf.session_id !== state.currentId) {
+    // Moving focus to a pane means looking at its session, so the singleton
+    // stack follows. `fromPane` stops selectSession from writing the session
+    // straight back into the layout it just came from.
+    selectSession(leaf.session_id, { fromPane: true });
+  }
+}
+
+/**
+ * Rebuild the pane DOM from the shared tree.
+ *
+ * Cheap to call: the expensive things (xterm instances, transcript panes) are
+ * cached per session and only re-parented here, never recreated.
+ */
+function renderPaneGrid() {
+  if (!splitLayoutActive()) {
+    // Single-session mode — the pre-split layout, verbatim. Any mirrored
+    // terminal hosts go home so the normal show/hide logic owns them again.
+    releaseMirrors();
+    if (paneGridEl.firstChild) paneGridEl.replaceChildren();
+    paneGridEl.hidden = true;
+    const view = document.querySelector(".view");
+    if (view && viewStackEl.parentElement !== view) view.appendChild(viewStackEl);
+    return;
+  }
+
+  releaseMirrors();
+  paneGridEl.hidden = false;
+  const focusedId = state.focusedPaneId;
+
+  const buildNode = (node) => {
+    if (node.kind === "leaf") return buildPane(node);
+    const wrap = document.createElement("div");
+    wrap.className = `pane-split dir-${node.direction === "below" ? "below" : "right"}`;
+    const first = buildNode(node.first);
+    const second = buildNode(node.second);
+    const ratio = Math.min(99, Math.max(1, node.ratio_percent || 50));
+    first.style.flex = `${ratio} 1 0`;
+    second.style.flex = `${100 - ratio} 1 0`;
+    const divider = document.createElement("div");
+    divider.className = `pane-divider dir-${node.direction === "below" ? "below" : "right"}`;
+    installDividerDrag(divider, wrap, node);
+    wrap.append(first, divider, second);
+    return wrap;
+  };
+
+  const buildPane = (leaf) => {
+    const pane = document.createElement("div");
+    pane.className = "pane" + (leaf.id === focusedId ? " is-focused" : "");
+    pane.dataset.paneId = String(leaf.id);
+
+    const head = document.createElement("div");
+    head.className = "pane-head";
+    const title = document.createElement("span");
+    title.className = "pane-title";
+    const session = leaf.session_id
+      ? state.sessions.find((s) => s.id === leaf.session_id)
+      : null;
+    title.textContent = session
+      ? sessionViewTitle(session)
+      : leaf.session_id
+        ? leaf.session_id
+        : "empty pane";
+    head.appendChild(title);
+
+    const splitRight = document.createElement("button");
+    splitRight.type = "button";
+    splitRight.title = "Split right";
+    splitRight.textContent = "▥";
+    splitRight.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      focusPane(leaf.id);
+      splitFocusedPane("right");
+    });
+    const splitBelow = document.createElement("button");
+    splitBelow.type = "button";
+    splitBelow.title = "Split below";
+    splitBelow.textContent = "▤";
+    splitBelow.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      focusPane(leaf.id);
+      splitFocusedPane("below");
+    });
+    const close = document.createElement("button");
+    close.type = "button";
+    close.title = "Close pane";
+    close.textContent = "×";
+    close.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      closePane(leaf.id);
+    });
+    head.append(splitRight, splitBelow, close);
+    pane.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "pane-body";
+    pane.appendChild(body);
+
+    if (leaf.id === focusedId) {
+      body.appendChild(viewStackEl);
+    } else {
+      body.appendChild(buildMirror(leaf));
+    }
+
+    pane.addEventListener("mousedown", () => focusPane(leaf.id));
+    return pane;
+  };
+
+  paneGridEl.replaceChildren(buildNode(state.layout.tree));
+  // Re-parenting moves xterm's canvas; it needs a refit to pick up the new
+  // box before the next paint.
+  requestAnimationFrame(() => {
+    refitTerminal();
+    refitMirrors();
+  });
+}
+
+/**
+ * A read-only view of an unfocused pane's session.
+ *
+ * Reuses the session's cached surface rather than building a second one: the
+ * xterm instance and the rendered transcript DOM already exist per session,
+ * so a mirror is a re-parent, not a second subscription.
+ */
+function buildMirror(leaf) {
+  const mirror = document.createElement("div");
+  mirror.className = "pane-mirror";
+  mirror.dataset.paneId = String(leaf.id);
+  const id = leaf.session_id;
+  if (!id) {
+    const empty = document.createElement("div");
+    empty.className = "pane-empty";
+    empty.textContent = "empty pane — pick a session from the list";
+    mirror.appendChild(empty);
+    return mirror;
+  }
+  const session = state.sessions.find((s) => s.id === id);
+  const mode = session ? preferredViewModeForSession(session) : "chat";
+  if (mode === "terminal" && session) {
+    const handle = initTerminalForSession(id);
+    if (handle) {
+      handle.host.hidden = false;
+      mirror.appendChild(handle.host);
+      state.mirroredSessionIds.add(id);
+      // A mirrored terminal that has never loaded shows nothing at all
+      // until the user focuses it, which reads as a broken pane. Hydrate it
+      // the same way the focused pane would.
+      if (!handle.loaded) hydrateMirrorTerminal(id);
+      return mirror;
+    }
+  }
+  const pane = state.transcriptPaneById.get(id);
+  if (pane) {
+    pane.hidden = false;
+    mirror.appendChild(pane);
+    state.mirroredSessionIds.add(id);
+    return mirror;
+  }
+  const empty = document.createElement("div");
+  empty.className = "pane-empty";
+  empty.textContent = session ? "loading…" : "session unavailable";
+  mirror.appendChild(empty);
+  if (session) loadTranscript(id).then(() => renderPaneGrid()).catch(() => {});
+  return mirror;
+}
+
+/** Put mirrored elements back where their owners expect them. */
+function releaseMirrors() {
+  if (!state.mirroredSessionIds.size) return;
+  for (const id of state.mirroredSessionIds) {
+    const handle = state.terminalById.get(id);
+    if (handle && handle.host && handle.host.parentElement !== terminalEl) {
+      handle.host.hidden = id === state.currentId ? handle.host.hidden : true;
+      terminalEl.appendChild(handle.host);
+    }
+    const pane = state.transcriptPaneById.get(id);
+    if (pane && pane.parentElement && pane.parentElement !== transcriptEl) {
+      transcriptEl.appendChild(pane);
+      pane.hidden = id !== state.currentId;
+    }
+  }
+  state.mirroredSessionIds.clear();
+}
+
+function refitMirrors() {
+  for (const id of state.mirroredSessionIds) {
+    const handle = state.terminalById.get(id);
+    if (!handle || !handle.fitAddon) continue;
+    try {
+      handle.fitAddon.fit();
+    } catch (_) {
+      /* a pane mid-layout can measure zero; the next refit catches it */
+    }
+  }
+}
+
+/**
+ * Load a mirrored terminal's scrollback once. Mirrors are passive: they never
+ * claim PTY geometry, because the daemon sizes the child to whoever claimed
+ * it last and a mirror stealing that would resize the child under the pane
+ * actually driving it (spec 0112).
+ */
+async function hydrateMirrorTerminal(id) {
+  const handle = state.terminalById.get(id);
+  if (!handle || handle.loaded || handle.mirrorHydrating) return;
+  handle.mirrorHydrating = true;
+  try {
+    const r = await rpc("session.pty_replay", { session_id: id });
+    if (r && r.data) {
+      await writeTermBytes(handle.term, decodeBase64ToBytes(r.data));
+    }
+    handle.loaded = true;
+  } catch (_) {
+    /* best effort: a mirror that can't replay still shows live bytes */
+  } finally {
+    handle.mirrorHydrating = false;
+  }
+}
+
+function installDividerDrag(divider, wrap, node) {
+  divider.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    divider.classList.add("is-dragging");
+    wrap.classList.add("is-resizing");
+    divider.setPointerCapture(ev.pointerId);
+    const vertical = node.direction === "below";
+    const onMove = (moveEv) => {
+      const rect = wrap.getBoundingClientRect();
+      const span = vertical ? rect.height : rect.width;
+      if (span <= 0) return;
+      const offset = vertical ? moveEv.clientY - rect.top : moveEv.clientX - rect.left;
+      const pct = Math.round((offset / span) * 100);
+      node.ratio_percent = Math.min(90, Math.max(10, pct));
+      const first = wrap.children[0];
+      const second = wrap.children[2];
+      if (first) first.style.flex = `${node.ratio_percent} 1 0`;
+      if (second) second.style.flex = `${100 - node.ratio_percent} 1 0`;
+      refitTerminal();
+      refitMirrors();
+    };
+    const onEnd = () => {
+      divider.classList.remove("is-dragging");
+      wrap.classList.remove("is-resizing");
+      divider.removeEventListener("pointermove", onMove);
+      divider.removeEventListener("pointerup", onEnd);
+      divider.removeEventListener("pointercancel", onEnd);
+      // Only the settled ratio is worth broadcasting — streaming every
+      // intermediate pixel would spam every other client mid-drag.
+      pushLayout(state.layout.tree);
+    };
+    divider.addEventListener("pointermove", onMove);
+    divider.addEventListener("pointerup", onEnd);
+    divider.addEventListener("pointercancel", onEnd);
+  });
+}
+
+/**
+ * Crossing the split threshold must be lossless in both directions: going
+ * narrow hides the panes without writing anything, so going wide again
+ * restores the tree exactly as other clients still have it.
+ */
+let paneGridRefreshQueued = false;
+function schedulePaneGridRefresh() {
+  if (paneGridRefreshQueued) return;
+  paneGridRefreshQueued = true;
+  requestAnimationFrame(() => {
+    paneGridRefreshQueued = false;
+    if (splitLayoutActive()) renderPaneGrid();
+    refreshSplitControls();
+  });
+}
+
+const splitControlsEl = $("splitControls");
+$("splitRightBtn").addEventListener("click", () => splitFocusedPane("right"));
+$("splitBelowBtn").addEventListener("click", () => splitFocusedPane("below"));
+
+function refreshSplitControls() {
+  splitControlsEl.hidden = !splitLayoutAvailable() || !state.currentId;
+}
+
+/**
+ * Crossing the split threshold must be lossless in both directions: going
+ * narrow hides the panes without writing anything, so going wide again
+ * restores the tree exactly as the other clients still have it.
+ */
+window.addEventListener("resize", () => {
+  renderPaneGrid();
+  refreshSplitControls();
+});
+
 // --- Transcript rendering -------------------------------------------------
 
 function transcriptPaneForSession(id) {
@@ -9776,6 +10496,10 @@ setInterval(() => {
 }, 3000);
 
 function handleNotification(method, params) {
+  if (method === "layout/state") {
+    applySharedLayout(params && params.layout);
+    return;
+  }
   if (method === "program/state") {
     handleProgramState(params);
     return;
@@ -9827,6 +10551,17 @@ function handleNotification(method, params) {
     if (event && event.type === "pty") {
       observeSessionPtyActivity(session_id, params.at);
       programWriteHoverPty(session_id, decodeBase64ToBytes(event.data || ""));
+      // A session mirrored in an unfocused pane is on screen and has to stay
+      // live. It isn't `currentId`, so the focused-session path below never
+      // reaches it — write straight to its own cached terminal. Guarded on
+      // `replayingPty` so a mirror still hydrating its scrollback doesn't
+      // interleave live bytes into the middle of the replay.
+      if (state.mirroredSessionIds.has(session_id)) {
+        const mirrored = state.terminalById.get(session_id);
+        if (mirrored && mirrored.term && !mirrored.replayingPty && !mirrored.mirrorHydrating) {
+          writeTermBytes(mirrored.term, decodeBase64ToBytes(event.data || ""));
+        }
+      }
     }
     if (event && event.type === "agent_status") {
       if (event.active) state.agentStatusById.set(session_id, event);

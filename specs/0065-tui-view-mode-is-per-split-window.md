@@ -39,6 +39,11 @@ not a client-persisted per-session preference.
 
 ## Consequences
 
+- The *window* a mode attaches to is shared state now
+  ([0113-split-layout-is-shared-daemon-state](0113-split-layout-is-shared-daemon-state.md)),
+  but the mode itself is not: each client resolves view mode locally. Two
+  clients may therefore show the same pane as a terminal and as a transcript
+  at the same time, which is intended — they do not offer the same surfaces.
 - Rendering a split pane must resolve the mode for *that* pane's window, not read
   the single focused-pane mode. Any new per-pane surface must follow suit.
 - Every code path that sets the focused pane's mode (toggling, selecting a
@@ -56,6 +61,9 @@ not a client-persisted per-session preference.
   selection persist; the per-window view mode is recomputed from natural mode on
   load.
 - Hydrating non-focused panes' transcripts so they can render chat content. Until
-  that exists, chat mode is effectively a focused-pane surface.
+  that exists, chat mode is effectively a focused-pane surface *in the TUI*.
+  This is a hydration constraint of this client, not a cross-client design rule:
+  a client that already holds several sessions' transcripts in memory may render
+  chat in every pane, and the web client does.
 - Changing how splits are created, resized, deleted, or how a pane picks its
   session.

@@ -4,7 +4,8 @@ use construct_protocol::jsonrpc::{self, MessageKind};
 use construct_protocol::{
     ipc_method, transport, ChatViewerActiveResult, ClientView, CreateSessionParams, DiffResult,
     ErrorObject, GroupCreateParams, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
-    GroupSetCollapsedParams, GroupSummary, HarnessInfo, MoveDirection, Notification, PingResult,
+    GroupSetCollapsedParams, GroupSummary, HarnessInfo, LayoutDocument, LayoutNode,
+    LayoutSetParams, MoveDirection, Notification, PingResult,
     ProgramCursorParams, ProgramCursorResult, ProgramEditParams, ProgramExecuteParams,
     ProgramExecuteResult, ProgramGetParams, ProgramGetResult, ProgramListTemplatesResult,
     ProgramListVerbsResult, ProgramUpdateActor, ProgramUpdateParams, ProgramUpdateResult,
@@ -1021,6 +1022,33 @@ impl Client {
             .await?;
         Ok(())
     }
+    /// Read the shared split layout. Safe for any client to call — reading
+    /// the layout is how a narrow client picks a session to open on.
+    pub async fn layout(&self) -> Result<LayoutDocument> {
+        self.request(ipc_method::LAYOUT_GET, &serde_json::Value::Null)
+            .await
+    }
+
+    /// Replace the shared split layout. `base_version` is the version this
+    /// edit was composed against; a stale one is rejected rather than
+    /// clobbering a concurrent write.
+    ///
+    /// Only call this from a client actually rendering the layout. A client
+    /// that clamped the tree to fit a narrow viewport must not write its
+    /// clamped view back — that is how a phone would collapse a desktop's
+    /// panes.
+    pub async fn set_layout(
+        &self,
+        tree: LayoutNode,
+        base_version: Option<u64>,
+    ) -> Result<LayoutDocument> {
+        self.request(
+            ipc_method::LAYOUT_SET,
+            &LayoutSetParams { tree, base_version },
+        )
+        .await
+    }
+
     pub async fn list_groups(&self) -> Result<Vec<GroupSummary>> {
         self.request(ipc_method::GROUP_LIST, &serde_json::Value::Null)
             .await

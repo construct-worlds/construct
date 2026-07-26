@@ -11,7 +11,8 @@ use construct_protocol::dialect;
 use construct_protocol::{
     agent_context, ahp_method, ClientView, CreateSessionParams, DeletedNotificationPayload,
     EventNotificationPayload, GroupDeletedNotificationPayload, GroupStateNotificationPayload,
-    GroupSummary, HarnessInfo, MessageRole, MoveDirection, NativeSubagentRef, ProgramDocument,
+    GroupSummary, HarnessInfo, LayoutDocument, LayoutStateNotificationPayload, MessageRole,
+    MoveDirection, NativeSubagentRef, ProgramDocument,
     ProgramEditParams, ProgramExecuteParams, ProgramExecuteResult, ProgramGetResult,
     ProgramListTemplatesResult, ProgramListVerbsResult, ProgramRunProgress,
     ProgramStateNotificationPayload, ProgramUpdateParams, ProgramUpdateResult,
@@ -308,6 +309,10 @@ pub enum BroadcastMsg {
     /// listener starts/stops and on every client accept/drop so the local TUI
     /// can show a persistent remote-control affordance.
     RemoteState(construct_protocol::RemoteStateNotificationPayload),
+    /// The shared split layout changed — a client wrote it, or the daemon
+    /// emptied a pane whose session went away. Carries the whole tree: there
+    /// are no incremental layout deltas.
+    LayoutState(LayoutStateNotificationPayload),
 }
 
 pub struct SessionEntry {
@@ -1233,6 +1238,12 @@ pub struct SessionManager {
     /// Suppresses the `needs_attention` marker for these sessions. In-memory only. See spec 0054.
     focused_sessions: std::sync::Mutex<std::collections::HashSet<String>>,
     groups: RwLock<HashMap<String, Arc<GroupEntry>>>,
+    /// The shared split layout every wide client renders its panes from.
+    /// Daemon-owned rather than client-owned so a split made in the TUI shows
+    /// up in the browser, and so pane pruning happens once here instead of
+    /// each client repairing the tree independently and racing to write the
+    /// result back.
+    layout: std::sync::Mutex<LayoutDocument>,
     broadcast: broadcast::Sender<BroadcastMsg>,
     /// Recurring-prompt loops attached to sessions. The scheduler
     /// task (`crate::loops::run_scheduler`) iterates these.
@@ -1652,6 +1663,24 @@ impl SessionManager {
         // registry. Missing or unreadable per-session loop files
         // are logged + skipped.
         let session_ids: Vec<String> = sessions.keys().cloned().collect();
+        // Prune the shared layout against the sessions that actually came
+        // back. Sessions can vanish while the daemon is down (a deleted
+        // worktree, a hand-edited data dir), and every client would otherwise
+        // have to repair the tree itself and race the others writing it back.
+        // Pruning empties a dead pane rather than collapsing it: the *shape*
+        // of the layout is the user's.
+        let layout = {
+            let mut doc = storage.load_layout();
+            let live: std::collections::HashSet<&str> =
+                session_ids.iter().map(String::as_str).collect();
+            if doc.tree.retain_sessions(&|id: &str| live.contains(id)) {
+                doc.version = doc.version.saturating_add(1);
+                if let Err(e) = storage.save_layout(&doc) {
+                    tracing::warn!(error = ?e, "save pruned layout failed");
+                }
+            }
+            doc
+        };
         let loops = Arc::new(crate::loops::LoopRegistry::new(
             storage.data_dir().to_path_buf(),
         ));
@@ -1680,6 +1709,7 @@ impl SessionManager {
                 sessions: RwLock::new(sessions),
                 focused_sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
                 groups: RwLock::new(groups),
+                layout: std::sync::Mutex::new(layout),
                 broadcast,
                 loops,
                 is_shutting_down: AtomicBool::new(false),
@@ -1947,6 +1977,73 @@ impl SessionManager {
 
     pub fn subscribe(&self) -> broadcast::Receiver<BroadcastMsg> {
         self.broadcast.subscribe()
+    }
+
+    /// The shared split layout and its version. Every client calls this on
+    /// connect; narrow clients use it only to pick a starting session and
+    /// must never write back.
+    pub fn layout(&self) -> LayoutDocument {
+        self.layout.lock().expect("layout mutex poisoned").clone()
+    }
+
+    /// Replace the shared layout wholesale. A split tree has no useful merge
+    /// semantics, so `base_version` is the entire concurrency story: a writer
+    /// that composed its edit against an older version is rejected and must
+    /// re-read. `None` forces the write through, for a client that genuinely
+    /// has no prior state.
+    pub fn set_layout(
+        &self,
+        mut tree: construct_protocol::LayoutNode,
+        base_version: Option<u64>,
+    ) -> Result<LayoutDocument> {
+        tree.normalize();
+        let doc = {
+            let mut guard = self.layout.lock().expect("layout mutex poisoned");
+            if let Some(base) = base_version {
+                if base != guard.version {
+                    anyhow::bail!(
+                        "layout conflict: current version is {}, attempted base version is {}",
+                        guard.version,
+                        base
+                    );
+                }
+            }
+            guard.tree = tree;
+            guard.version = guard.version.saturating_add(1);
+            guard.clone()
+        };
+        if let Err(e) = self.storage.save_layout(&doc) {
+            tracing::warn!(error = ?e, "save layout failed");
+        }
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::LayoutState(LayoutStateNotificationPayload {
+                layout: doc.clone(),
+            }));
+        Ok(doc)
+    }
+
+    /// Empty every pane showing `session_id`, if any. Called when a session
+    /// is deleted or archived so panes don't point at something that no
+    /// longer exists. Silent no-op when the session wasn't on screen, so it
+    /// is safe to call on every removal path.
+    fn clear_layout_session(&self, session_id: &str) {
+        let doc = {
+            let mut guard = self.layout.lock().expect("layout mutex poisoned");
+            if !guard.tree.clear_session(session_id) {
+                return;
+            }
+            guard.version = guard.version.saturating_add(1);
+            guard.clone()
+        };
+        if let Err(e) = self.storage.save_layout(&doc) {
+            tracing::warn!(error = ?e, "save layout after session removal failed");
+        }
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::LayoutState(LayoutStateNotificationPayload {
+                layout: doc,
+            }));
     }
 
     /// Snapshot whether the remote listener is running and its current client
@@ -4590,6 +4687,11 @@ impl SessionManager {
             .send(BroadcastMsg::Deleted(DeletedNotificationPayload {
                 session_id: id.to_string(),
             }));
+
+        // Empty any pane that was showing it, so every client sees the same
+        // repaired tree instead of each deciding for itself what a pane
+        // pointing at a deleted session should do.
+        self.clear_layout_session(id);
 
         // The rest (sleep, worktree remove, storage, loops, mcp file) can be
         // slow. Spawn it so delete() returns promptly and does not hang the TUI.
@@ -10164,6 +10266,134 @@ mod tests {
         assert!(
             !other.summary.read().await.archived,
             "a subagent of a different parent must not be archived",
+        );
+    }
+
+    async fn layout_test_manager(dir: &std::path::Path) -> SessionManager {
+        let storage = Arc::new(crate::storage::Storage::new(dir.join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, dir.join("run"))
+                .await
+                .expect("session manager");
+        mgr
+    }
+
+    fn layout_leaf(id: u64, session: Option<&str>) -> construct_protocol::LayoutNode {
+        construct_protocol::LayoutNode::Leaf {
+            id,
+            session_id: session.map(str::to_string),
+        }
+    }
+
+    fn layout_split(
+        first: construct_protocol::LayoutNode,
+        second: construct_protocol::LayoutNode,
+    ) -> construct_protocol::LayoutNode {
+        construct_protocol::LayoutNode::Split {
+            direction: construct_protocol::LayoutSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    #[tokio::test]
+    async fn layout_starts_as_one_empty_pane_and_versions_each_write() {
+        use tempfile::tempdir;
+        let tmp = tempdir().expect("tempdir");
+        let mgr = layout_test_manager(tmp.path()).await;
+
+        let initial = mgr.layout();
+        assert_eq!(initial.version, 0);
+        assert_eq!(initial.tree.leaf_count(), 1);
+
+        let doc = mgr
+            .set_layout(layout_split(layout_leaf(1, Some("a")), layout_leaf(2, Some("b"))), Some(0))
+            .expect("first write");
+        assert_eq!(doc.version, 1);
+        assert_eq!(doc.tree.session_ids(), vec!["a", "b"]);
+        assert_eq!(mgr.layout().version, 1);
+    }
+
+    #[tokio::test]
+    async fn a_stale_writer_is_rejected_rather_than_clobbering() {
+        use tempfile::tempdir;
+        let tmp = tempdir().expect("tempdir");
+        let mgr = layout_test_manager(tmp.path()).await;
+
+        // Two clients both read version 0; the first one wins.
+        mgr.set_layout(layout_leaf(1, Some("first")), Some(0))
+            .expect("first writer");
+        let err = mgr
+            .set_layout(layout_leaf(1, Some("second")), Some(0))
+            .expect_err("stale writer must be rejected");
+        assert!(err.to_string().contains("layout conflict"), "{err}");
+        assert_eq!(
+            mgr.layout().tree.session_ids(),
+            vec!["first"],
+            "the rejected write must not have landed"
+        );
+
+        // Re-reading and retrying against the current version succeeds.
+        let current = mgr.layout().version;
+        mgr.set_layout(layout_leaf(1, Some("second")), Some(current))
+            .expect("retry after re-read");
+        assert_eq!(mgr.layout().tree.session_ids(), vec!["second"]);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_empties_its_pane_and_keeps_the_split() {
+        use tempfile::tempdir;
+        let tmp = tempdir().expect("tempdir");
+        let mgr = layout_test_manager(tmp.path()).await;
+
+        let doomed = "s-doomed";
+        mgr.sessions.write().await.insert(
+            doomed.into(),
+            synthetic_entry(doomed, construct_protocol::SessionKind::User, 0),
+        );
+        mgr.set_layout(
+            layout_split(layout_leaf(1, Some("keeper")), layout_leaf(2, Some(doomed))),
+            Some(0),
+        )
+        .expect("seed layout");
+        let before = mgr.layout().version;
+
+        mgr.delete(doomed).await.expect("delete");
+
+        let after = mgr.layout();
+        assert!(after.version > before, "removal must bump the version");
+        assert_eq!(
+            after.tree.leaf_count(),
+            2,
+            "the split shape is the user's; only the pane empties"
+        );
+        assert_eq!(after.tree.session_ids(), vec!["keeper"]);
+        assert_eq!(after.tree.session_for_leaf(2), None);
+    }
+
+    #[tokio::test]
+    async fn layout_survives_a_daemon_restart_and_is_pruned_on_load() {
+        use tempfile::tempdir;
+        let tmp = tempdir().expect("tempdir");
+        {
+            let mgr = layout_test_manager(tmp.path()).await;
+            // "ghost" is never a real session, so it should not survive load.
+            mgr.set_layout(
+                layout_split(layout_leaf(1, Some("ghost")), layout_leaf(2, None)),
+                Some(0),
+            )
+            .expect("seed layout");
+        }
+
+        let mgr = layout_test_manager(tmp.path()).await;
+        let doc = mgr.layout();
+        assert_eq!(doc.tree.leaf_count(), 2, "the tree itself persists");
+        assert_eq!(
+            doc.tree.session_ids(),
+            Vec::<&str>::new(),
+            "a pane pointing at a session that did not come back is emptied"
         );
     }
 

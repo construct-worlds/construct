@@ -15,9 +15,9 @@
 //! ```
 
 use construct_protocol::{
-    GroupSummary, ProgramBlockView, ProgramDocument, ProgramEdit, ProgramRevision, ProgramTemplate,
-    ProgramUpdateActor, SearchHit, SearchParams, SearchResult, SearchScope, SessionSummary,
-    TimestampedEvent, TranscriptResult, UiPanel, UiPlacement,
+    GroupSummary, LayoutDocument, ProgramBlockView, ProgramDocument, ProgramEdit, ProgramRevision,
+    ProgramTemplate, ProgramUpdateActor, SearchHit, SearchParams, SearchResult, SearchScope,
+    SessionSummary, TimestampedEvent, TranscriptResult, UiPanel, UiPlacement,
 };
 use anyhow::{Context, Result};
 use std::io::{BufRead, Write};
@@ -269,6 +269,47 @@ impl Storage {
             &self.project_memory_path(project_id),
             PROJECT_MEMORY_TEMPLATE,
         )
+    }
+
+    /// The shared split layout lives at the data-dir root, not under a
+    /// session: it is fleet-wide state, and it must survive every session in
+    /// it being deleted.
+    pub fn layout_path(&self) -> PathBuf {
+        self.data_dir.join("layout.json")
+    }
+
+    /// Read the shared layout. A missing or unreadable file is not an error:
+    /// layout is presentation state, and a corrupt one must degrade to the
+    /// default single pane rather than fail daemon startup.
+    pub fn load_layout(&self) -> LayoutDocument {
+        let path = self.layout_path();
+        if !path.exists() {
+            return LayoutDocument::default();
+        }
+        match std::fs::read(&path)
+            .and_then(|b| serde_json::from_slice::<LayoutDocument>(&b).map_err(Into::into))
+        {
+            Ok(mut doc) => {
+                doc.tree.normalize();
+                doc
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "unreadable layout; resetting");
+                LayoutDocument::default()
+            }
+        }
+    }
+
+    pub fn save_layout(&self, doc: &LayoutDocument) -> Result<()> {
+        let path = self.layout_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_string_pretty(doc)?;
+        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
+        Ok(())
     }
 
     pub fn groups_root(&self) -> PathBuf {

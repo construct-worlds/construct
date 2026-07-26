@@ -7,7 +7,8 @@ use construct_protocol::jsonrpc::{self, MessageKind};
 use construct_protocol::{
     ipc_method, ipc_notif, transport, ChatViewerActiveResult, CreateSessionParams, ErrorObject,
     GroupCreateParams, GroupCreateResult, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
-    GroupSetCollapsedParams, Notification, PingResult, ProgramCursorParams, ProgramEditParams,
+    GroupSetCollapsedParams, LayoutSetParams, Notification, PingResult, ProgramCursorParams,
+    ProgramEditParams,
     ProgramExecuteParams, ProgramGetParams, ProgramUpdateActor, ProgramUpdateParams,
     ProgramVerbExecuteParams, ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams,
     ProjectDeletedNotificationPayload, ProjectMoveParams, ProjectRenameParams,
@@ -963,13 +964,17 @@ fn forward_broadcast(
             BroadcastMsg::Deleted(d) => d.session_id == *f,
             BroadcastMsg::ProgramState(c) => c.program.session_id == *f,
             BroadcastMsg::ProgramCursor { payload, .. } => payload.cursor.session_id == *f,
-            // Group + remote-state notifications aren't session-
+            // Group, remote-state and layout notifications aren't session-
             // specific; always forward even when a session filter
             // is set so the local TUI's remote badge stays accurate
-            // while a single-session view is active.
+            // while a single-session view is active. Layout in particular
+            // describes panes across many sessions, so filtering it to one
+            // session would mean a client with a filter never learns its
+            // other panes moved.
             BroadcastMsg::GroupState(_)
             | BroadcastMsg::GroupDeleted(_)
-            | BroadcastMsg::RemoteState(_) => true,
+            | BroadcastMsg::RemoteState(_)
+            | BroadcastMsg::LayoutState(_) => true,
         };
         if !matches {
             return;
@@ -1047,6 +1052,13 @@ fn forward_broadcast(
                 Err(_) => return,
             };
             Notification::new(ipc_notif::REMOTE_STATE, Some(p))
+        }
+        BroadcastMsg::LayoutState(l) => {
+            let p = match serde_json::to_value(&l) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            Notification::new(ipc_notif::LAYOUT_STATE, Some(p))
         }
     };
     notifs.insert(0, notif);
@@ -1471,6 +1483,16 @@ async fn dispatch(
             .await
         {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::LAYOUT_GET, {
+        ok!(req, &manager.layout())
+    });
+    dispatch_entry!(ipc_method::LAYOUT_SET, {
+        let p = params!(req, LayoutSetParams);
+        match manager.set_layout(p.tree, p.base_version) {
+            Ok(doc) => ok!(req, &doc),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
