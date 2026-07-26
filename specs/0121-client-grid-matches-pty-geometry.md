@@ -1,4 +1,4 @@
-# 0112-client-grid-matches-pty-geometry
+# 0121-client-grid-matches-pty-geometry
 
 Status: accepted
 Date: 2026-07-26

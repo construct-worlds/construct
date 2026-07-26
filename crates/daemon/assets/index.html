@@ -10037,7 +10037,7 @@ function refitMirrors() {
  * Load a mirrored terminal's scrollback once. Mirrors are passive: they never
  * claim PTY geometry, because the daemon sizes the child to whoever claimed
  * it last and a mirror stealing that would resize the child under the pane
- * actually driving it (spec 0112).
+ * actually driving it (spec 0121).
  */
 async function hydrateMirrorTerminal(id) {
   const handle = state.terminalById.get(id);
