@@ -81,6 +81,11 @@ failure than a corrupted credential store.
   that takes short aliases rather than full model ids. Configuration
   overrides the catalog for narrowing the choice or naming a model newer
   than it.
+- Where a target's models come from is decided per target, not uniformly.
+  Some backends serve a models endpoint and some do not, and which is which
+  is established by observation rather than assumed from the others. A
+  target with no observed endpoint stays on the curated list permanently;
+  that is a settled answer, not a gap awaiting discovery.
 - Adding a login means establishing its endpoint, dialect, auth scheme,
   required headers and required prompt text — the same evidentiary standard
   as adding a routable harness. None of it may be guessed.

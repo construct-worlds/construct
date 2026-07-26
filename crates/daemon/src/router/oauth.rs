@@ -96,6 +96,14 @@ impl OauthProvider {
     /// This matters beyond tidiness: the Claude subscription path takes
     /// short aliases (`sonnet`, `opus`) rather than full model ids, which a
     /// hand-written list is unlikely to get right.
+    ///
+    /// For `claude-oauth` and `codex-oauth` this list is the only source,
+    /// by decision: their backends are private and neither was observed to
+    /// serve a models endpoint, so there is nothing to discover from and
+    /// nothing to fall back to. Do not add live discovery for them on the
+    /// assumption that an endpoint exists — the grok subscription backend
+    /// does serve one, and that difference was established by interception,
+    /// not by symmetry.
     pub fn seed_models(self) -> Vec<String> {
         construct_protocol::slash::models_for_provider(self.name())
     }
