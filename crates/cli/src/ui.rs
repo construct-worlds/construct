@@ -4895,22 +4895,23 @@ fn session_menu_icon_style(theme: &Theme, base: Color, hovered: bool, focused: b
 /// The model-route picker (spec 0114), anchored above the modeline's
 /// model indicator.
 ///
-/// Two steps: targets, then that target's models. The title names the
-/// target once the second step is open, so there is never a bare list of
-/// model names with no context.
+/// Two columns: targets on the left, the highlighted target's models on the
+/// right. Both are visible at once so choosing a target shows what it can
+/// offer before committing to it — the two decisions stay separate without
+/// hiding one behind the other.
 fn render_route_menu(f: &mut Frame, app: &App) {
     let Some(menu) = &app.route_menu else {
         return;
     };
     let area = menu.area;
-    if area.width < 6 || area.height < 3 {
+    if area.width < 10 || area.height < 3 {
         return;
     }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            menu.title(),
+            " route ",
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -4918,70 +4919,152 @@ fn render_route_menu(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     f.render_widget(block, area);
 
+    let first_row = area.y.saturating_add(1);
     let last_row = area.y.saturating_add(area.height).saturating_sub(1);
+    let inner_x = area.x.saturating_add(1);
     let inner_w = area.width.saturating_sub(2);
-    for index in 0..menu.rows() {
-        let row = area.y.saturating_add(1).saturating_add(index as u16);
-        if row >= last_row {
-            break;
-        }
-        let enabled = menu.row_enabled(index);
-        let hovered = app.mouse_pos.is_some_and(|(mx, my)| {
-            my == row && mx > area.x && mx < area.x.saturating_add(area.width).saturating_sub(1)
-        });
-        let style = if !enabled {
+    let target_w = menu.target_col_w.min(inner_w);
+    let divider_x = inner_x.saturating_add(target_w);
+    let model_x = divider_x.saturating_add(1);
+    let model_w = inner_w.saturating_sub(target_w).saturating_sub(1);
+
+    let targets_focused = menu.focus == crate::app::route_menu::RouteFocus::Targets;
+    let row_style = |enabled: bool, highlighted: bool, focused: bool| {
+        if !enabled {
             Style::default()
                 .fg(app.theme.border)
                 .add_modifier(Modifier::DIM)
-        } else if hovered || index == menu.selected {
+        } else if highlighted && focused {
             Style::default()
                 .fg(app.theme.text)
                 .bg(app.theme.inactive_highlight_bg)
                 .add_modifier(Modifier::BOLD)
+        } else if highlighted {
+            // The unfocused column still shows where the cursor would
+            // land, just without claiming the eye.
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(app.theme.text)
-        };
-        // A leading marker on the armed row, so the current state reads at
-        // a glance instead of only through the modeline.
-        let marker = if menu.is_active(index) { "*" } else { " " };
-        let left = format!(" {marker} {}", menu.label(index));
-        // A chevron where a second step follows. The wire dialect is
-        // deliberately not shown: which protocol a target speaks is the
-        // router's problem to solve, not a choice the user is making.
-        let right = if menu.row_descends(index) {
-            "\u{203a} ".to_string()
-        } else {
-            " ".to_string()
-        };
-        let pad = (inner_w as usize)
-            .saturating_sub(UnicodeWidthStr::width(left.as_str()))
-            .saturating_sub(UnicodeWidthStr::width(right.as_str()));
-        let line = format!("{left}{}{right}", " ".repeat(pad));
+        }
+    };
+
+    // Target column.
+    for index in 0..menu.target_rows() {
+        let row = first_row.saturating_add(index as u16);
+        if row >= last_row {
+            break;
+        }
+        let enabled = menu.target_enabled(index);
+        let hovered = app
+            .mouse_pos
+            .is_some_and(|(mx, my)| my == row && mx >= inner_x && mx <= divider_x);
+        let style = row_style(
+            enabled,
+            index == menu.selected || hovered,
+            targets_focused || hovered,
+        );
+        let marker = if menu.target_is_active(index) { "*" } else { " " };
+        let chevron = if menu.target_descends(index) { "›" } else { " " };
+        let label = truncate(&menu.target_label(index), target_w.saturating_sub(5) as usize);
+        let pad = (target_w as usize)
+            .saturating_sub(UnicodeWidthStr::width(label.as_str()))
+            .saturating_sub(5);
+        let line = format!(" {marker} {label}{}{chevron} ", " ".repeat(pad));
         f.render_widget(
             Paragraph::new(Line::styled(line, style)),
             Rect {
-                x: area.x.saturating_add(1),
+                x: inner_x,
                 y: row,
-                width: inner_w,
+                width: target_w,
                 height: 1,
             },
         );
     }
 
-    // Why routing is impossible for this session, when it is. Shown rather
-    // than presenting an empty or silently inert picker.
+    // Divider.
+    for index in 0..menu.rows() {
+        let row = first_row.saturating_add(index as u16);
+        if row >= last_row {
+            break;
+        }
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                "│",
+                Style::default().fg(app.theme.border),
+            )),
+            Rect {
+                x: divider_x,
+                y: row,
+                width: 1,
+                height: 1,
+            },
+        );
+    }
+
+    // Model column, or why this target cannot be used.
+    if let Some(reason) = menu.focused_blocker() {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                format!(" {}", truncate(reason, model_w.saturating_sub(1) as usize)),
+                Style::default()
+                    .fg(app.theme.border)
+                    .add_modifier(Modifier::ITALIC),
+            ))
+            .wrap(ratatui::widgets::Wrap { trim: true }),
+            Rect {
+                x: model_x,
+                y: first_row,
+                width: model_w,
+                height: last_row.saturating_sub(first_row).max(1),
+            },
+        );
+    } else {
+        for (index, model) in menu.models().iter().enumerate() {
+            let row = first_row.saturating_add(index as u16);
+            if row >= last_row {
+                break;
+            }
+            let hovered = app
+                .mouse_pos
+                .is_some_and(|(mx, my)| my == row && mx > divider_x);
+            let style = row_style(
+                true,
+                index == menu.model_selected || hovered,
+                !targets_focused || hovered,
+            );
+            let marker = if menu.model_is_active(index) { "*" } else { " " };
+            let label = truncate(model, model_w.saturating_sub(4) as usize);
+            let pad = (model_w as usize)
+                .saturating_sub(UnicodeWidthStr::width(label.as_str()))
+                .saturating_sub(4);
+            let line = format!(" {marker} {label}{} ", " ".repeat(pad));
+            f.render_widget(
+                Paragraph::new(Line::styled(line, style)),
+                Rect {
+                    x: model_x,
+                    y: row,
+                    width: model_w,
+                    height: 1,
+                },
+            );
+        }
+    }
+
+    // Why routing is impossible for this session as a whole, when it is.
     if let Some(reason) = menu.unavailable_reason.as_deref() {
-        let row = area.y.saturating_add(1).saturating_add(menu.rows() as u16);
+        let row = first_row.saturating_add(menu.rows() as u16);
         if row < last_row {
             f.render_widget(
                 Paragraph::new(Line::styled(
-                    format!(" {reason} "),
+                    format!(" {}", truncate(reason, inner_w.saturating_sub(1) as usize)),
                     Style::default()
                         .fg(app.theme.border)
                         .add_modifier(Modifier::ITALIC),
                 )),
                 Rect {
-                    x: area.x.saturating_add(1),
+                    x: inner_x,
                     y: row,
                     width: inner_w,
                     height: 1,
@@ -4989,6 +5072,26 @@ fn render_route_menu(f: &mut Frame, app: &App) {
             );
         }
     }
+}
+
+/// Clip a label to `width` cells, marking the cut so a truncated model id
+/// is not mistaken for a shorter one.
+fn truncate(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        if UnicodeWidthStr::width(out.as_str()) + 1 >= width {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 fn render_session_title_menu(f: &mut Frame, app: &App) {

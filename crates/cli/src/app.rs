@@ -37,7 +37,7 @@ mod minibuffer;
 mod mouse;
 mod program_popup;
 mod session_picker;
-mod route_menu;
+pub mod route_menu;
 mod session_title_menu;
 mod session_title_rename;
 mod tutorial;
@@ -9829,8 +9829,8 @@ impl App {
             self.session_title_menu = None;
         }
         if let Some(menu) = self.route_menu.clone() {
-            if let Some(index) = menu.item_at(col, row) {
-                self.activate_route_menu_row(index).await;
+            if let Some(hit) = menu.hit_at(col, row) {
+                self.hit_route_menu(hit).await;
                 return;
             }
             if menu.contains(col, row) {
@@ -10485,15 +10485,22 @@ impl App {
                     return;
                 }
                 KeyCode::Enter => {
-                    let index = self.route_menu.as_ref().map(|m| m.selected).unwrap_or(0);
-                    self.activate_route_menu_row(index).await;
+                    self.activate_route_menu().await;
                     return;
                 }
-                // Esc and Left both step back out of the model list before
-                // closing, so picking the wrong target is one keystroke to
-                // undo. Left mirrors the chevron that led in.
-                KeyCode::Esc | KeyCode::Left => {
+                // Right moves into the model column, Left back out of it;
+                // both mirror the chevron between them. From the targets,
+                // Left closes, as Esc does anywhere.
+                KeyCode::Right => {
+                    self.route_menu_focus_models();
+                    return;
+                }
+                KeyCode::Left => {
                     self.route_menu_back();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.route_menu = None;
                     return;
                 }
                 _ => {
@@ -15760,10 +15767,13 @@ mod tests {
         app.handle_left_click(hit.start_col, hit.row).await;
 
         let menu = app.route_menu.as_ref().expect("picker open");
-        assert_eq!(menu.rows(), 3);
-        assert_eq!(menu.label(0), "Default");
-        assert!(menu.row_enabled(1));
-        assert!(!menu.row_enabled(2), "a target with no key is not selectable");
+        assert_eq!(menu.target_rows(), 3);
+        assert_eq!(menu.target_label(0), "Default");
+        assert!(menu.target_enabled(1));
+        assert!(
+            !menu.target_enabled(2),
+            "a target with no key is not selectable"
+        );
 
         let frame = rendered(&mut app, 120, 30);
         assert!(frame.contains("* Default"), "marker is spaced: {frame}");
@@ -15779,9 +15789,10 @@ mod tests {
         }
     }
 
-    /// Clicking a target opens its models; clicking a model arms the route.
+    /// Clicking a target previews its models; clicking a model arms it.
+    /// One click to look, one to choose.
     #[tokio::test]
-    async fn clicking_a_target_opens_its_models() {
+    async fn clicking_a_target_previews_its_models() {
         let (client, _dir, _server) = route_mock_daemon(
             vec![route_json_models(
                 "codex-oauth",
@@ -15800,26 +15811,38 @@ mod tests {
         let hit = app.layout.modeline_model_hit.expect("clickable");
         app.handle_left_click(hit.start_col, hit.row).await;
 
-        // Row 1 is the target; clicking it descends rather than arming.
+        // Both columns are visible from the start; Default previews
+        // nothing because it is the absence of a route.
+        let menu = app.route_menu.as_ref().unwrap();
+        assert!(menu.models().is_empty());
+
+        // Click the target: it previews rather than arming.
         let area = app.route_menu.as_ref().unwrap().area;
         app.handle_left_click(area.x + 2, area.y + 2).await;
-        let menu = app.route_menu.as_ref().expect("still open on the model step");
-        assert_eq!(menu.rows(), 2, "the target's two models");
-        assert_eq!(menu.label(0), "gpt-5.6-sol");
-        assert_eq!(menu.title(), " codex-oauth ");
+        let menu = app.route_menu.as_ref().expect("still open");
+        assert_eq!(menu.models(), vec!["gpt-5.6-sol", "gpt-5.5"]);
 
         let frame = rendered(&mut app, 120, 30);
-        assert!(frame.contains("gpt-5.6-sol"), "{frame}");
+        assert!(
+            frame.contains("codex-oauth") && frame.contains("gpt-5.6-sol"),
+            "both columns render at once: {frame}"
+        );
 
-        // Left steps back to the targets rather than closing outright,
-        // mirroring the chevron that led in. Esc does the same.
+        // Right/Left move focus between the columns rather than closing.
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.route_menu.as_ref().unwrap().focus,
+            crate::app::route_menu::RouteFocus::Models
+        );
         app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
             .await;
-        let menu = app.route_menu.as_ref().expect("back on the target step");
-        assert_eq!(menu.label(0), "Default");
-        assert_eq!(menu.selected, 1, "returns to the target just left");
+        assert_eq!(
+            app.route_menu.as_ref().unwrap().focus,
+            crate::app::route_menu::RouteFocus::Targets
+        );
 
-        // From the target step, Left closes the picker.
+        // From the targets, Left closes.
         app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
             .await;
         assert!(app.route_menu.is_none());
@@ -15832,7 +15855,7 @@ mod tests {
         let (client, _dir, _server) = route_mock_daemon(
             vec![
                 route_json("kimi", "kimi-k2.5", None),
-                route_json("glm", "glm-5", None),
+                route_json_models("glm", &["glm-5", "glm-4"], None),
             ],
             None,
         )
@@ -15855,6 +15878,15 @@ mod tests {
         assert_eq!(app.route_menu.as_ref().unwrap().selected, 0);
         app.on_key(ctrl('p')).await;
         assert_eq!(app.route_menu.as_ref().unwrap().selected, 2);
+
+        // With focus in the model column they move models instead.
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await;
+        let before = app.route_menu.as_ref().unwrap().model_selected;
+        app.on_key(ctrl('n')).await;
+        let menu = app.route_menu.as_ref().unwrap();
+        assert_eq!(menu.selected, 2, "the target no longer moves");
+        assert_ne!(menu.model_selected, before, "the model does");
     }
 
     /// A session that cannot be routed still gets an explanation rather

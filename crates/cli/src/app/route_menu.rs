@@ -26,16 +26,19 @@ impl App {
             .position(|r| Some(&r.name) == active.as_ref())
             .map(|i| i + 1)
             .unwrap_or(0);
-        let menu = RouteMenu {
+        let mut menu = RouteMenu {
             session_id,
             area: ratatui::layout::Rect::default(),
             routes: listed.routes,
             unavailable_reason: listed.unavailable_reason,
             active,
-            stage: RouteStage::Target,
+            focus: RouteFocus::Targets,
             selected,
+            model_selected: 0,
             anchor: (col, row),
+            target_col_w: 0,
         };
+        menu.model_selected = menu.active_model_index();
         self.route_menu = Some(menu.anchored(self.frame_area()));
     }
 
@@ -45,54 +48,129 @@ impl App {
             .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24))
     }
 
-    /// Activate the highlighted row: descend into a target's models, or
-    /// arm the selection.
-    pub(super) async fn activate_route_menu_row(&mut self, index: usize) {
-        let Some(menu) = self.route_menu.clone() else {
-            return;
-        };
-        match menu.stage {
-            RouteStage::Target => {
-                // Row 0 is Default: clearing needs no model, and can never
-                // fail, so it arms straight away.
-                let Some(route_index) = index.checked_sub(1) else {
-                    self.route_menu = None;
-                    self.apply_route(menu.session_id, None, None).await;
-                    return;
-                };
-                let Some(route) = menu.routes.get(route_index) else {
-                    return;
-                };
-                if let Some(reason) = route.unavailable_reason.as_deref() {
-                    self.set_status(format!("{}: {reason}", route.name));
-                    return;
-                }
-                if let Some(menu) = self.route_menu.as_mut() {
-                    // Preselect the model already armed on this target, if
-                    // any, so re-opening lands on the current choice.
-                    menu.selected = 0;
-                    menu.stage = RouteStage::Model { route_index };
-                }
-                let frame = self.frame_area();
-                if let Some(menu) = self.route_menu.take() {
-                    self.route_menu = Some(menu.anchored(frame));
-                }
-            }
-            RouteStage::Model { route_index } => {
-                let Some(route) = menu.routes.get(route_index) else {
-                    return;
-                };
-                let Some(model) = menu.model_rows(route).get(index).cloned() else {
-                    return;
-                };
-                self.route_menu = None;
-                self.apply_route(menu.session_id, Some(route.name.clone()), Some(model))
-                    .await;
-            }
+    fn replace_route_menu(&mut self, menu: RouteMenu) {
+        let frame = self.frame_area();
+        self.route_menu = Some(menu.anchored(frame));
+    }
+
+    /// A click: in the target column it selects and previews; in the model
+    /// column it commits. One click to look, one to choose.
+    pub(super) async fn hit_route_menu(&mut self, hit: RouteHit) {
+        match hit {
+            RouteHit::Target(index) => self.select_route_target(index).await,
+            RouteHit::Model(index) => self.arm_route_model(index).await,
         }
     }
 
-    async fn apply_route(&mut self, session_id: String, route: Option<String>, model: Option<String>) {
+    async fn select_route_target(&mut self, index: usize) {
+        let Some(mut menu) = self.route_menu.clone() else {
+            return;
+        };
+        // Default is the absence of a route: it has nothing to preview, so
+        // selecting it arms straight away.
+        if index == 0 {
+            self.route_menu = None;
+            self.apply_route(menu.session_id, None, None).await;
+            return;
+        }
+        menu.selected = index;
+        menu.model_selected = menu.active_model_index();
+        menu.focus = RouteFocus::Targets;
+        self.replace_route_menu(menu);
+    }
+
+    async fn arm_route_model(&mut self, index: usize) {
+        let Some(menu) = self.route_menu.clone() else {
+            return;
+        };
+        let Some(route) = menu.focused_target() else {
+            return;
+        };
+        if let Some(reason) = route.unavailable_reason.as_deref() {
+            self.set_status(format!("{}: {reason}", route.name));
+            return;
+        }
+        let Some(model) = menu.models().get(index).cloned() else {
+            return;
+        };
+        let (session, name) = (menu.session_id.clone(), route.name.clone());
+        self.route_menu = None;
+        self.apply_route(session, Some(name), Some(model)).await;
+    }
+
+    /// Enter: from the target column, step into the models; from the model
+    /// column, arm the highlighted one.
+    pub(super) async fn activate_route_menu(&mut self) {
+        let Some(menu) = self.route_menu.clone() else {
+            return;
+        };
+        match menu.focus {
+            RouteFocus::Targets => {
+                if menu.selected == 0 {
+                    self.select_route_target(0).await;
+                } else {
+                    self.route_menu_focus_models();
+                }
+            }
+            RouteFocus::Models => self.arm_route_model(menu.model_selected).await,
+        }
+    }
+
+    pub(super) fn route_menu_focus_models(&mut self) {
+        let Some(menu) = self.route_menu.as_mut() else {
+            return;
+        };
+        if menu.target_descends(menu.selected) && !menu.models().is_empty() {
+            menu.focus = RouteFocus::Models;
+        }
+    }
+
+    /// Left: hand focus back to the targets, or close if it is already
+    /// there.
+    pub(super) fn route_menu_back(&mut self) {
+        let Some(menu) = self.route_menu.as_mut() else {
+            return;
+        };
+        match menu.focus {
+            RouteFocus::Models => menu.focus = RouteFocus::Targets,
+            RouteFocus::Targets => self.route_menu = None,
+        }
+    }
+
+    pub(super) fn move_route_menu_selection(&mut self, delta: isize) {
+        let Some(mut menu) = self.route_menu.clone() else {
+            return;
+        };
+        match menu.focus {
+            RouteFocus::Targets => {
+                let len = menu.target_rows();
+                if len == 0 {
+                    return;
+                }
+                menu.selected = (menu.selected as isize + delta).rem_euclid(len as isize) as usize;
+                // Moving the target repoints the preview, so the model
+                // highlight follows it rather than pointing at a row that
+                // now belongs to a different target.
+                menu.model_selected = menu.active_model_index();
+            }
+            RouteFocus::Models => {
+                let len = menu.models().len();
+                if len == 0 {
+                    return;
+                }
+                menu.model_selected =
+                    (menu.model_selected as isize + delta).rem_euclid(len as isize) as usize;
+            }
+        }
+        self.replace_route_menu(menu);
+    }
+
+    async fn apply_route(
+        &mut self,
+        session_id: String,
+        route: Option<String>,
+        model: Option<String>,
+    ) {
         let label = match (&route, &model) {
             (Some(r), Some(m)) => format!("{r} · {m}"),
             (Some(r), None) => r.clone(),
@@ -103,44 +181,21 @@ impl App {
             Err(e) => self.set_status(format!("route failed: {e}")),
         }
     }
-
-    /// Step back a stage, or close from the first. Returns false when the
-    /// menu closed, so the caller knows the key was fully consumed.
-    pub(super) fn route_menu_back(&mut self) {
-        let Some(menu) = self.route_menu.as_mut() else {
-            return;
-        };
-        match menu.stage {
-            RouteStage::Model { route_index } => {
-                menu.stage = RouteStage::Target;
-                menu.selected = route_index + 1;
-                let frame = self.frame_area();
-                if let Some(menu) = self.route_menu.take() {
-                    self.route_menu = Some(menu.anchored(frame));
-                }
-            }
-            RouteStage::Target => self.route_menu = None,
-        }
-    }
-
-    pub(super) fn move_route_menu_selection(&mut self, delta: isize) {
-        let Some(menu) = self.route_menu.as_mut() else {
-            return;
-        };
-        let len = menu.rows();
-        if len == 0 {
-            return;
-        }
-        menu.selected = (menu.selected as isize + delta).rem_euclid(len as isize) as usize;
-    }
 }
 
+/// Which column the keyboard is driving. Both are always visible; focus
+/// only decides what moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteStage {
-    /// Pick where traffic goes: Default, then each target.
-    Target,
-    /// Pick which model to ask that target for.
-    Model { route_index: usize },
+pub enum RouteFocus {
+    Targets,
+    Models,
+}
+
+/// Where a click landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteHit {
+    Target(usize),
+    Model(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -153,108 +208,150 @@ pub struct RouteMenu {
     /// the user with no explanation (spec 0115).
     pub unavailable_reason: Option<String>,
     pub active: Option<String>,
-    pub stage: RouteStage,
+    pub focus: RouteFocus,
+    /// Highlighted target row; row 0 is Default.
     pub selected: usize,
+    /// Highlighted model row within the highlighted target.
+    pub model_selected: usize,
     anchor: (u16, u16),
+    /// Width of the target column, including its padding. Set when the
+    /// menu is placed so render and hit-testing agree on one number.
+    pub target_col_w: u16,
 }
 
 impl RouteMenu {
-    /// Models offered for a target. Always at least its default, so the
-    /// second step never dead-ends.
-    pub fn model_rows(&self, route: &construct_protocol::RouteOption) -> Vec<String> {
+    /// Rows in the target column: Default, then one per target.
+    pub fn target_rows(&self) -> usize {
+        1 + self.routes.len()
+    }
+
+    pub fn target_at(&self, index: usize) -> Option<&construct_protocol::RouteOption> {
+        self.routes.get(index.checked_sub(1)?)
+    }
+
+    /// The target the model column is currently showing.
+    pub fn focused_target(&self) -> Option<&construct_protocol::RouteOption> {
+        self.target_at(self.selected)
+    }
+
+    /// Models for the highlighted target. Empty for Default, which is the
+    /// absence of a route rather than a target with models.
+    pub fn models(&self) -> Vec<String> {
+        let Some(route) = self.focused_target() else {
+            return Vec::new();
+        };
         if route.models.is_empty() {
             return vec![route.model.clone()];
         }
         route.models.clone()
     }
 
-    fn current_route(&self) -> Option<&construct_protocol::RouteOption> {
-        match self.stage {
-            RouteStage::Model { route_index } => self.routes.get(route_index),
-            RouteStage::Target => None,
-        }
-    }
-
-    pub fn title(&self) -> String {
-        match self.current_route() {
-            Some(route) => format!(" {} ", route.name),
-            None => " route ".to_string(),
-        }
-    }
-
     pub fn rows(&self) -> usize {
-        match self.current_route() {
-            Some(route) => self.model_rows(route).len(),
-            // Default plus one row per target.
-            None => 1 + self.routes.len(),
-        }
+        self.target_rows().max(self.models().len())
     }
 
-    pub fn label(&self, index: usize) -> String {
-        if let Some(route) = self.current_route() {
-            return self
-                .model_rows(route)
-                .get(index)
-                .cloned()
-                .unwrap_or_default();
-        }
-        match index.checked_sub(1) {
+    pub fn target_label(&self, index: usize) -> String {
+        match self.target_at(index) {
+            Some(r) => r.name.clone(),
             // Not "pass through": from the user's side this is simply the
             // session's own model, unrouted.
-            None => "Default".to_string(),
-            Some(i) => match self.routes.get(i) {
-                Some(r) => r.name.clone(),
-                None => String::new(),
-            },
+            None if index == 0 => "Default".to_string(),
+            None => String::new(),
         }
     }
 
-    pub fn row_enabled(&self, index: usize) -> bool {
-        if self.current_route().is_some() {
-            return true;
-        }
-        match index.checked_sub(1) {
-            None => true,
-            Some(i) => self
-                .routes
-                .get(i)
-                .is_some_and(|r| r.unavailable_reason.is_none()),
+    pub fn target_enabled(&self, index: usize) -> bool {
+        match self.target_at(index) {
+            Some(r) => r.unavailable_reason.is_none(),
+            None => index == 0,
         }
     }
 
-    /// Whether a row is what the session is on right now.
-    pub fn is_active(&self, index: usize) -> bool {
-        if let Some(route) = self.current_route() {
-            return self
-                .model_rows(route)
-                .get(index)
-                .is_some_and(|m| *m == route.model);
-        }
-        match index.checked_sub(1) {
-            None => self.active.is_none(),
-            Some(i) => self
-                .routes
-                .get(i)
-                .is_some_and(|r| Some(&r.name) == self.active.as_ref()),
+    pub fn target_is_active(&self, index: usize) -> bool {
+        match self.target_at(index) {
+            Some(r) => Some(&r.name) == self.active.as_ref(),
+            None => index == 0 && self.active.is_none(),
         }
     }
 
-    /// Row 0 of the target step opens no submenu; every other target row
-    /// does. Used to hint the descent in the render.
-    pub fn row_descends(&self, index: usize) -> bool {
-        self.current_route().is_none() && index > 0 && self.row_enabled(index)
+    /// Whether this target has a model column to move into.
+    pub fn target_descends(&self, index: usize) -> bool {
+        index > 0 && self.target_enabled(index)
+    }
+
+    pub fn model_is_active(&self, index: usize) -> bool {
+        let Some(route) = self.focused_target() else {
+            return false;
+        };
+        self.target_is_active(self.selected)
+            && self.models().get(index).is_some_and(|m| *m == route.model)
+    }
+
+    /// Row of the model this target is currently armed on, so moving the
+    /// highlight lands on the live choice rather than the top of the list.
+    pub fn active_model_index(&self) -> usize {
+        let models = self.models();
+        self.focused_target()
+            .and_then(|r| models.iter().position(|m| *m == r.model))
+            .unwrap_or(0)
+    }
+
+    /// Reason the highlighted target cannot be used, shown in the model
+    /// column where its models would otherwise be.
+    pub fn focused_blocker(&self) -> Option<&str> {
+        self.focused_target()?.unavailable_reason.as_deref()
     }
 
     /// Place the menu above its anchor when there isn't room below — the
     /// modeline sits at the bottom of the frame, so downward is almost
     /// never available.
     pub fn anchored(mut self, size: ratatui::layout::Rect) -> Self {
-        let (col, row) = self.anchor;
-        let width = self.desired_width().min(size.width.saturating_sub(2).max(8));
+        let targets_w = (0..self.target_rows())
+            .map(|i| self.target_label(i).chars().count())
+            .max()
+            .unwrap_or(0)
+            // marker, spaces, chevron
+            .saturating_add(6) as u16;
+        // The model column is sized for the widest model any target
+        // offers, so the layout does not jump as the highlight moves.
+        let models_w = self
+            .routes
+            .iter()
+            .flat_map(|r| r.models.iter().map(|m| m.chars().count()))
+            .chain(self.routes.iter().map(|r| r.model.chars().count()))
+            .max()
+            .unwrap_or(0)
+            .max(self.focused_blocker().map(|b| b.chars().count()).unwrap_or(0).min(40))
+            .saturating_add(4) as u16;
+
+        let max_w = size.width.saturating_sub(2).max(12);
+        let mut target_col_w = targets_w;
+        // The session-level reason spans both columns, so it gets a say in
+        // the width — otherwise the one message explaining why nothing can
+        // be routed is the thing that gets truncated.
+        let reason_w = self
+            .unavailable_reason
+            .as_deref()
+            .map(|r| r.chars().count() + 3)
+            .unwrap_or(0) as u16;
+        let mut width = targets_w
+            .saturating_add(models_w)
+            .saturating_add(3)
+            .max(reason_w);
+        if width > max_w {
+            // Give the target column its share first: the model column can
+            // truncate a long id more gracefully than a target name.
+            width = max_w;
+            target_col_w = targets_w.min(width.saturating_sub(8));
+        }
+        self.target_col_w = target_col_w;
+
+        let reason_rows = if self.unavailable_reason.is_some() { 1 } else { 0 };
         let height = (self.rows() as u16)
             .saturating_add(2)
-            .saturating_add(if self.unavailable_reason.is_some() { 1 } else { 0 })
+            .saturating_add(reason_rows)
             .min(size.height.max(3));
+        let (col, row) = self.anchor;
         let x = col.min(size.width.saturating_sub(width));
         let y = row
             .saturating_sub(height)
@@ -268,19 +365,6 @@ impl RouteMenu {
         self
     }
 
-    fn desired_width(&self) -> u16 {
-        let widest = (0..self.rows())
-            .map(|i| self.label(i).chars().count())
-            .max()
-            .unwrap_or(0);
-        let reason = self
-            .unavailable_reason
-            .as_deref()
-            .map(|r| r.chars().count())
-            .unwrap_or(0);
-        (widest.max(reason).max(14) as u16).saturating_add(6)
-    }
-
     pub fn contains(&self, col: u16, row: u16) -> bool {
         col >= self.area.x
             && col < self.area.x.saturating_add(self.area.width)
@@ -288,14 +372,20 @@ impl RouteMenu {
             && row < self.area.y.saturating_add(self.area.height)
     }
 
-    /// Which row a click landed on, if any.
-    pub fn item_at(&self, col: u16, row: u16) -> Option<usize> {
+    /// Which column and row a click landed on. A click in the target
+    /// column selects a target; one in the model column commits it.
+    pub fn hit_at(&self, col: u16, row: u16) -> Option<RouteHit> {
         if !self.contains(col, row) {
             return None;
         }
         let first = self.area.y.saturating_add(1);
         let index = row.checked_sub(first)? as usize;
-        (index < self.rows()).then_some(index)
+        let divider = self.area.x.saturating_add(1).saturating_add(self.target_col_w);
+        if col <= divider {
+            (index < self.target_rows()).then_some(RouteHit::Target(index))
+        } else {
+            (index < self.models().len()).then_some(RouteHit::Model(index))
+        }
     }
 }
 
@@ -315,71 +405,92 @@ mod tests {
     }
 
     fn menu(routes: Vec<construct_protocol::RouteOption>, active: Option<&str>) -> RouteMenu {
-        RouteMenu {
+        let mut m = RouteMenu {
             session_id: "s1".into(),
             area: ratatui::layout::Rect::default(),
             routes,
             unavailable_reason: None,
             active: active.map(str::to_string),
-            stage: RouteStage::Target,
+            focus: RouteFocus::Targets,
             selected: 0,
+            model_selected: 0,
             anchor: (40, 23),
-        }
+            target_col_w: 0,
+        };
+        m = m.anchored(ratatui::layout::Rect::new(0, 0, 120, 30));
+        m
     }
 
     #[test]
-    fn the_first_row_is_default_and_always_selectable() {
+    fn the_first_target_is_default_and_always_selectable() {
         let m = menu(vec![option("kimi", &["kimi-k2.5"], Some("no key"))], None);
-        assert_eq!(m.label(0), "Default");
-        assert!(m.row_enabled(0));
-        assert!(!m.row_descends(0), "Default has no second step");
-        assert!(!m.row_enabled(1), "an unusable target is not selectable");
-        assert!(m.is_active(0), "no route armed means Default is current");
+        assert_eq!(m.target_label(0), "Default");
+        assert!(m.target_enabled(0));
+        assert!(!m.target_descends(0), "Default has no models to move into");
+        assert!(!m.target_enabled(1), "an unusable target is not selectable");
+        assert!(m.target_is_active(0), "no route armed means Default is current");
     }
 
+    /// The model column previews the highlighted target without committing
+    /// to it — that is the point of showing both at once.
     #[test]
-    fn the_target_step_lists_default_plus_every_target() {
-        let m = menu(
-            vec![
-                option("claude-oauth", &["claude-opus-5"], None),
-                option("kimi", &["kimi-k2.5"], None),
-            ],
-            Some("kimi"),
-        );
-        assert_eq!(m.rows(), 3);
-        assert_eq!(m.label(1), "claude-oauth");
-        assert!(m.is_active(2));
-        assert!(m.row_descends(1), "a target opens its model step");
-    }
-
-    #[test]
-    fn the_model_step_lists_that_targets_models() {
+    fn the_model_column_follows_the_highlighted_target() {
         let mut m = menu(
-            vec![option("codex-oauth", &["gpt-5.6-sol", "gpt-5.5"], None)],
+            vec![
+                option("claude-oauth", &["sonnet", "opus"], None),
+                option("codex-oauth", &["gpt-5.6-sol", "gpt-5.5"], None),
+            ],
             None,
         );
-        m.stage = RouteStage::Model { route_index: 0 };
-        assert_eq!(m.rows(), 2);
-        assert_eq!(m.label(0), "gpt-5.6-sol");
-        assert_eq!(m.label(1), "gpt-5.5");
-        assert_eq!(m.title(), " codex-oauth ");
-        assert!(
-            m.is_active(0),
-            "the target's current model is marked in the model step"
-        );
+        // Default highlighted: nothing to preview.
+        assert!(m.models().is_empty());
+
+        m.selected = 1;
+        assert_eq!(m.models(), vec!["sonnet", "opus"]);
+        m.selected = 2;
+        assert_eq!(m.models(), vec!["gpt-5.6-sol", "gpt-5.5"]);
     }
 
-    /// A target that reports no model list still gets one row, so the
-    /// second step never dead-ends.
     #[test]
-    fn a_target_without_a_model_list_still_offers_its_default() {
+    fn rows_span_the_taller_of_the_two_columns() {
+        let mut m = menu(
+            vec![option("codex-oauth", &["a", "b", "c", "d"], None)],
+            None,
+        );
+        assert_eq!(m.target_rows(), 2);
+        m.selected = 1;
+        assert_eq!(m.rows(), 4, "the model column is taller here");
+    }
+
+    /// A target that cannot be used shows why, in place of models.
+    #[test]
+    fn an_unusable_target_shows_its_reason_instead_of_models() {
+        let mut m = menu(vec![option("glm", &["glm-5"], Some("GLM_API_KEY is not set"))], None);
+        m.selected = 1;
+        assert_eq!(m.focused_blocker(), Some("GLM_API_KEY is not set"));
+    }
+
+    #[test]
+    fn the_armed_model_is_marked_and_preselected() {
+        let mut route = option("codex-oauth", &["gpt-5.6-sol", "gpt-5.5"], None);
+        route.model = "gpt-5.5".into();
+        let mut m = menu(vec![route], Some("codex-oauth"));
+        m.selected = 1;
+        assert_eq!(m.active_model_index(), 1, "lands on the live choice");
+        assert!(m.model_is_active(1));
+        assert!(!m.model_is_active(0));
+    }
+
+    /// A target that reports no model list still previews its default, so
+    /// the right column never sits empty for a usable target.
+    #[test]
+    fn a_target_without_a_model_list_still_previews_its_default() {
         let mut route = option("bare", &[], None);
         route.model = "some-model".into();
         route.models.clear();
         let mut m = menu(vec![route], None);
-        m.stage = RouteStage::Model { route_index: 0 };
-        assert_eq!(m.rows(), 1);
-        assert_eq!(m.label(0), "some-model");
+        m.selected = 1;
+        assert_eq!(m.models(), vec!["some-model"]);
     }
 
     #[test]
@@ -396,16 +507,38 @@ mod tests {
         );
     }
 
+    /// Which column a click lands in decides what it means: the left
+    /// selects, the right commits.
     #[test]
-    fn maps_clicks_to_rows_and_ignores_the_border() {
-        let size = ratatui::layout::Rect::new(0, 0, 80, 24);
-        let mut m = menu(vec![option("kimi", &["kimi-k2.5"], None)], None);
-        m.anchor = (10, 23);
-        let m = m.anchored(size);
+    fn clicks_are_routed_to_the_column_they_land_in() {
+        let mut m = menu(vec![option("kimi", &["kimi-k2.5", "kimi-k2"], None)], None);
+        m.selected = 1;
+        let m = m.anchored(ratatui::layout::Rect::new(0, 0, 120, 30));
         let first = m.area.y + 1;
-        assert_eq!(m.item_at(m.area.x + 2, first), Some(0));
-        assert_eq!(m.item_at(m.area.x + 2, first + 1), Some(1));
-        assert_eq!(m.item_at(m.area.x + 2, m.area.y), None, "top border");
-        assert_eq!(m.item_at(m.area.x.saturating_sub(1), first), None);
+        let divider = m.area.x + 1 + m.target_col_w;
+
+        assert_eq!(m.hit_at(m.area.x + 2, first), Some(RouteHit::Target(0)));
+        assert_eq!(m.hit_at(m.area.x + 2, first + 1), Some(RouteHit::Target(1)));
+        assert_eq!(m.hit_at(divider + 2, first), Some(RouteHit::Model(0)));
+        assert_eq!(m.hit_at(divider + 2, first + 1), Some(RouteHit::Model(1)));
+        assert_eq!(m.hit_at(m.area.x + 2, m.area.y), None, "top border");
+        assert_eq!(m.hit_at(m.area.x.saturating_sub(1), first), None);
+    }
+
+    /// The model column is sized for the widest model any target offers,
+    /// so the layout does not jump as the highlight moves.
+    #[test]
+    fn the_layout_does_not_resize_as_the_highlight_moves() {
+        let mut m = menu(
+            vec![
+                option("short", &["a"], None),
+                option("long", &["a-very-long-model-identifier"], None),
+            ],
+            None,
+        );
+        let width_at_default = m.area.width;
+        m.selected = 1;
+        let m = m.anchored(ratatui::layout::Rect::new(0, 0, 120, 30));
+        assert_eq!(m.area.width, width_at_default);
     }
 }
