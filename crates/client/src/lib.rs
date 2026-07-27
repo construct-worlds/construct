@@ -9,7 +9,7 @@ use construct_protocol::{
     ProgramCursorParams, ProgramCursorResult, ProgramEditParams, ProgramExecuteParams,
     ProgramExecuteResult, ProgramGetParams, ProgramGetResult, ProgramListTemplatesResult,
     ProgramListVerbsResult, ProgramUpdateActor, ProgramUpdateParams, ProgramUpdateResult,
-    ProgramVerbExecuteParams, ProgramVerbExecuteResult, ProjectCreateParams,
+    ProgramVerbExecuteParams, ProgramVerbExecuteResult, FeaturesStatusResult, ProjectCreateParams,
     ProjectCreateResult, ProjectDeleteParams, ProjectMoveParams, ProjectRenameParams,
     ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, PtySize, Request, Response,
     SearchParams, SearchResult, SessionAttachClipboardParams, SessionAttachClipboardResult,
@@ -220,6 +220,11 @@ impl Client {
     }
     pub async fn smith_auth_status(&self) -> Result<SmithAuthStatusResult> {
         self.request(ipc_method::SMITH_AUTH_STATUS, &serde_json::Value::Null)
+            .await
+    }
+    /// Live status of the daemon's ambient features (spec 0151).
+    pub async fn features_status(&self) -> Result<FeaturesStatusResult> {
+        self.request(ipc_method::FEATURES_STATUS, &serde_json::Value::Null)
             .await
     }
     pub async fn smith_set_auth_method(&self, method: &str) -> Result<SmithSetAuthMethodResult> {

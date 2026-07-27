@@ -114,52 +114,7 @@ pub async fn suggest_title(user_prompt: &str) -> Result<String> {
             &mut sink,
         )
         .await?;
-    Ok(sanitize_title(&sink.text))
-}
-
-/// Strip leading/trailing whitespace + quotes/markdown the model is
-/// fond of adding, and cap the length so a misbehaving model can't
-/// blow out the modeline. 5 words at ≤ 7 chars each ≈ 40 chars + a
-/// safety buffer.
-fn sanitize_title(raw: &str) -> String {
-    let line = raw.lines().next().unwrap_or("");
-    let mut s = line
-        .trim()
-        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '*' || c == '#');
-    // Strip a single pair of surrounding quotes after the trim-match above
-    // catches the easy cases.
-    while let (Some('"'), Some('"')) = (s.chars().next(), s.chars().last()) {
-        s = &s[1..s.len() - 1];
-        s = s.trim();
-    }
-    let truncated: String = s.chars().take(48).collect();
-    truncated.trim().to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sanitize_strips_quotes_and_markdown() {
-        assert_eq!(
-            sanitize_title("\"Refactor Adapter Spawning\""),
-            "Refactor Adapter Spawning"
-        );
-        assert_eq!(sanitize_title("`Add Pty Logging`"), "Add Pty Logging");
-        assert_eq!(sanitize_title("**Plan The Refactor**"), "Plan The Refactor");
-    }
-    #[test]
-    fn sanitize_first_line_only() {
-        assert_eq!(
-            sanitize_title("Title Here\nextra explanation"),
-            "Title Here"
-        );
-    }
-    #[test]
-    fn sanitize_caps_length() {
-        let huge = "Word ".repeat(50);
-        let out = sanitize_title(&huge);
-        assert!(out.len() <= 48);
-    }
+    // Shared with the daemon's same-harness title-probe fallback (spec
+    // 0151) so both generators produce identically shaped titles.
+    Ok(construct_protocol::sanitize_auto_title(&sink.text))
 }

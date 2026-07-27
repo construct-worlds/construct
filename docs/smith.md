@@ -187,6 +187,29 @@ of the model's window drops the oldest turn pair, always keeping the
 two most-recent. Smith starts Muse Spark 1.1 with its advertised one-million-
 token input window and retains the normal runtime limit-learning fallback.
 
+### Ambient features that use smith
+
+Beyond running its own sessions, smith powers several daemon-level
+conveniences. If none of the credentials above exist, these degrade — and
+the daemon tells you how (spec 0151):
+
+- **Session auto-naming** — every new session's title is generated from its
+  first prompt via a cheap smith one-shot. Without a smith credential,
+  sessions on model harnesses (claude, codex, …) fall back to a hidden
+  one-shot on their *own* harness; smith and shell sessions keep their
+  default hash names.
+- **Next-prompt suggestions** — smith and shell sessions generate
+  suggestions via smith; other harnesses always use their own model.
+- **The operator session** — the bottom input strip is a smith session by
+  default. Without a credential it still handles slash commands but cannot
+  act as an agent (spec 0071).
+
+Inspect the live status with `construct harnesses` (the `ambient features:`
+block) or the `/configure` dialog's **Features** tab, which maps each
+feature to its cause and fix. The first time a feature actually skips work
+for lack of a credential, the TUI shows a clickable `smith: no credential`
+notice in the status bar that opens `/configure`.
+
 ### Opt-out / customization
 
 - `CONSTRUCT_SMITH_AUTOMODE=1` — start with automode on.

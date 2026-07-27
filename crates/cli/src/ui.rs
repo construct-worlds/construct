@@ -1,7 +1,8 @@
 //! Ratatui rendering for the TUI.
 
 use crate::app::{
-    harness_guidance, harness_picker_entries, smith_method_guidance, App, ConfigureTab,
+    feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
+    ConfigureTab,
     HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
     MinibufferChoiceAction, MinibufferChoiceHit, MinibufferIntent, PaneFocus, RemoteControlHit,
     RemoteControlHitAction, ScreenPoint, Selection,
@@ -9015,6 +9016,22 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some(connected) = app.op_xy_link_connected {
         persistent_notices.push(vec![(modeline_midi_text(connected), None)]);
     }
+    // Ambient-feature degradation notice (spec 0151): shown only when the
+    // daemon has actually skipped auto-naming/suggestions for lack of a
+    // smith credential this run — a credential-less machine that never hit
+    // the gap is never nagged. Click opens the configure dialog, whose
+    // Features tab maps the degradation back to its cause.
+    if app.features_degradation_observed
+        && app
+            .features
+            .iter()
+            .any(|feat| feat.status != construct_protocol::FeatureStatus::Ok)
+    {
+        persistent_notices.push(vec![(
+            "smith: no credential".to_string(),
+            Some(KeyAction::OpenConfigure),
+        )]);
+    }
     persistent_notices.push(version_notice_segments(app));
     if let Some(latest) = app.latest_version.as_deref() {
         persistent_notices.push(vec![(
@@ -9810,9 +9827,10 @@ fn render_help(f: &mut Frame, area: Rect, app: &mut App) -> Rect {
 }
 
 /// `/configure` onboarding dialog (spec 0069): tabs across the top
-/// (Harnesses, Smith auth), a selectable list, and a diagnosis/guidance
-/// pane underneath the selected row. Modeled on [`render_help`]'s centered
-/// popup shell, but interactive rather than static.
+/// (Harnesses, Smith auth, Features), a selectable list, and a
+/// diagnosis/guidance pane underneath the selected row. Modeled on
+/// [`render_help`]'s centered popup shell, but interactive rather than
+/// static.
 fn render_configure_popup(f: &mut Frame, app: &mut App) {
     let Some(popup) = app.configure_popup.clone() else {
         return;
@@ -9865,6 +9883,7 @@ fn render_configure_popup(f: &mut Frame, app: &mut App) {
     match popup.tab {
         ConfigureTab::Harnesses => render_configure_harness_list(f, sections[2], app, &popup),
         ConfigureTab::SmithAuth => render_configure_smith_list(f, sections[2], app, &popup),
+        ConfigureTab::Features => render_configure_feature_list(f, sections[2], app, &popup),
     }
     render_configure_rule(f, sections[3], &app.theme);
     render_configure_diagnosis(f, sections[4], app, &popup);
@@ -10000,6 +10019,47 @@ fn render_configure_smith_list(
     f.render_widget(Paragraph::new(lines), area);
 }
 
+fn render_configure_feature_list(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    popup: &crate::app::ConfigurePopup,
+) {
+    use construct_protocol::FeatureStatus;
+    let width = area.width.max(1) as usize;
+    let mut lines: Vec<Line<'static>> = app
+        .features
+        .iter()
+        .enumerate()
+        .map(|(i, feat)| {
+            let selected = i == popup.feature_selected;
+            let marker = if selected { "› " } else { "  " };
+            let status = match feat.status {
+                FeatureStatus::Ok => "working",
+                FeatureStatus::Degraded => "degraded",
+                FeatureStatus::Off => "off",
+            };
+            let text = format!("{marker}{:<24}{status}", feat.label);
+            let mut style = Style::default().fg(match feat.status {
+                FeatureStatus::Ok => app.theme.success,
+                FeatureStatus::Degraded => app.theme.warning,
+                FeatureStatus::Off => app.theme.danger,
+            });
+            if selected {
+                style = style.fg(app.theme.highlight_fg).bg(app.theme.highlight_bg);
+            }
+            Line::from(Span::styled(format!("{text:<width$}"), style))
+        })
+        .collect();
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no feature data (daemon predates features.status?)",
+            Style::default().fg(app.theme.dim),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
 fn render_configure_diagnosis(
     f: &mut Frame,
     area: Rect,
@@ -10026,6 +10086,10 @@ fn render_configure_diagnosis(
             }
             None => "no smith auth data yet".to_string(),
         },
+        ConfigureTab::Features => match app.features.get(popup.feature_selected) {
+            Some(feat) => format!("{}\n\n{}", feat.detail, feature_guidance(&feat.id)),
+            None => "no feature data".to_string(),
+        },
     };
     let para = Paragraph::new(text)
         .style(Style::default().fg(app.theme.text))
@@ -10037,6 +10101,7 @@ fn render_configure_footer(f: &mut Frame, area: Rect, app: &App, tab: ConfigureT
     let hint = match tab {
         ConfigureTab::Harnesses => "↑/↓ select   ←/→ switch tab   Esc close",
         ConfigureTab::SmithAuth => "↑/↓ select   ←/→ switch tab   Enter pick   Esc close",
+        ConfigureTab::Features => "↑/↓ select   ←/→ switch tab   Esc close",
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(

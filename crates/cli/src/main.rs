@@ -446,6 +446,25 @@ async fn main() -> Result<()> {
                     desc = h.description.unwrap_or_default()
                 );
             }
+            // Ambient features (spec 0151): the smith-credential-dependent
+            // conveniences whose absence is otherwise invisible. Best-effort
+            // — an older daemon without `features.status` just omits the
+            // block.
+            if let Ok(status) = c.features_status().await {
+                println!("\nambient features:");
+                for feat in status.features {
+                    let mark = match feat.status {
+                        construct_protocol::FeatureStatus::Ok => "ok",
+                        construct_protocol::FeatureStatus::Degraded => "degraded",
+                        construct_protocol::FeatureStatus::Off => "off",
+                    };
+                    println!(
+                        "{name:<24} [{mark}]  {detail}",
+                        name = feat.label,
+                        detail = feat.detail,
+                    );
+                }
+            }
             Ok(())
         }
         Command::List => {

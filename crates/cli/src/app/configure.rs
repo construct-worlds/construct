@@ -9,6 +9,7 @@ use super::*;
 pub enum ConfigureTab {
     Harnesses,
     SmithAuth,
+    Features,
 }
 
 impl ConfigureTab {
@@ -16,11 +17,16 @@ impl ConfigureTab {
         match self {
             ConfigureTab::Harnesses => "Harnesses",
             ConfigureTab::SmithAuth => "Smith auth",
+            ConfigureTab::Features => "Features",
         }
     }
 }
 
-pub const CONFIGURE_TABS: [ConfigureTab; 2] = [ConfigureTab::Harnesses, ConfigureTab::SmithAuth];
+pub const CONFIGURE_TABS: [ConfigureTab; 3] = [
+    ConfigureTab::Harnesses,
+    ConfigureTab::SmithAuth,
+    ConfigureTab::Features,
+];
 
 /// `App::configure_popup == None` means closed.
 #[derive(Debug, Clone)]
@@ -28,6 +34,10 @@ pub struct ConfigurePopup {
     pub tab: ConfigureTab,
     pub harness_selected: usize,
     pub smith_selected: usize,
+    /// Selection on the ambient-features tab (spec 0151); the rows
+    /// themselves live in `App::features`, refreshed with the same cadence
+    /// as `App::harnesses`.
+    pub feature_selected: usize,
     pub smith_methods: Vec<construct_protocol::SmithAuthMethodInfo>,
     /// Which `smith_methods` entry the daemon's config currently pins, if
     /// any recognized one — see `SmithAuthStatusResult::current`.
@@ -123,6 +133,33 @@ pub fn smith_method_guidance(id: &str) -> &'static str {
     }
 }
 
+/// Client-side "what this feature is" guidance for the ambient-features
+/// tab (spec 0151), keyed by `FeatureInfo::id`. The daemon's `detail`
+/// says what state the feature is in; this says what the feature does and
+/// where its dependency lives — static local knowledge, like
+/// [`harness_guidance`].
+pub fn feature_guidance(id: &str) -> &'static str {
+    match id {
+        "auto_title" => {
+            "names each session from its first prompt. Uses smith when a credential exists; \
+             without one, sessions on model harnesses fall back to a hidden one-shot on their \
+             own harness. Fix: configure a smith credential in the Smith auth tab (←)"
+        }
+        "suggestions" => {
+            "offers next-prompt suggestions when a turn ends. smith and shell sessions \
+             generate via smith; other harnesses use their own model. Fix: configure a smith \
+             credential in the Smith auth tab (←)"
+        }
+        "operator" => {
+            "the fleet-dispatcher session behind the bottom input strip. Runs on the \
+             orchestrator harness (smith by default); without a smith credential it still \
+             handles slash commands but cannot act on its own. Fix: configure a smith \
+             credential in the Smith auth tab (←)"
+        }
+        _ => "",
+    }
+}
+
 /// Cyclic index shift used for both tab switching and row selection —
 /// `delta` steps forward/back through `count` items, wrapping either way.
 fn wrap_index(current: usize, delta: isize, count: usize) -> usize {
@@ -164,6 +201,7 @@ impl App {
         self.chord_label.clear();
         crate::tui_state::mark_configure_dialog_seen();
         self.harnesses = self.client.harnesses().await.unwrap_or_default();
+        self.refresh_features().await;
         let (smith_methods, smith_current) = self.fetch_smith_auth_status().await;
         let harness_selected = self
             .configure_popup
@@ -174,10 +212,21 @@ impl App {
             tab: ConfigureTab::Harnesses,
             harness_selected,
             smith_selected: 0,
+            feature_selected: 0,
             smith_methods,
             smith_current,
             note: None,
         });
+    }
+
+    /// Refetch the ambient-feature rows (spec 0151). Errors (an older
+    /// daemon without `features.status`) just leave the current rows in
+    /// place — an empty list renders as "no feature data".
+    pub async fn refresh_features(&mut self) {
+        if let Ok(status) = self.client.features_status().await {
+            self.features = status.features;
+            self.features_degradation_observed = status.degradation_observed;
+        }
     }
 
     /// Auto-open condition (spec 0069): first run (no dismiss marker yet) or
@@ -207,9 +256,12 @@ impl App {
             return;
         }
         self.harnesses = self.client.harnesses().await.unwrap_or_default();
+        self.refresh_features().await;
+        let feature_count = self.features.len();
         let (methods, current) = self.fetch_smith_auth_status().await;
         if let Some(popup) = self.configure_popup.as_mut() {
             popup.smith_selected = popup.smith_selected.min(methods.len().saturating_sub(1));
+            popup.feature_selected = popup.feature_selected.min(feature_count.saturating_sub(1));
             popup.smith_methods = methods;
             popup.smith_current = current;
         }
@@ -232,6 +284,7 @@ impl App {
 
     fn configure_move_selection(&mut self, delta: isize) {
         let harness_count = self.harnesses.len();
+        let feature_count = self.features.len();
         let Some(popup) = self.configure_popup.as_mut() else {
             return;
         };
@@ -242,6 +295,9 @@ impl App {
             ConfigureTab::SmithAuth => {
                 let count = popup.smith_methods.len();
                 popup.smith_selected = wrap_index(popup.smith_selected, delta, count);
+            }
+            ConfigureTab::Features => {
+                popup.feature_selected = wrap_index(popup.feature_selected, delta, feature_count);
             }
         }
     }
