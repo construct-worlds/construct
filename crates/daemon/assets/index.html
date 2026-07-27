@@ -13487,6 +13487,11 @@ const chordState = { pending: [], timer: null, echoTimer: null };
  * Ctrl — not Meta — carries the `C-` prefix, matching the TUI and leaving
  * macOS ⌘ shortcuts (⌘W, ⌘T, ⌘L) alone. A browser that swallowed those
  * would feel broken in a way a terminal never does.
+ *
+ * Known cost: on Windows and Linux `Ctrl+X` is the system cut shortcut, and
+ * the prefix takes it over there (spec 0150). Accepted deliberately — cut
+ * stays on the context menu, and diverging on what `C-x` means would defeat
+ * the point of sharing the keymap at all.
  */
 function keyToken(ev) {
   const named = {

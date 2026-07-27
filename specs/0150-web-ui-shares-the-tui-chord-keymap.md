@@ -28,6 +28,7 @@ Sharing the spelling rather than inventing browser-native equivalents is the del
 - The two keymap tables must be maintained together. Adding a chord to one client without the other reintroduces exactly the divergence this decision exists to prevent.
 - Actions the web UI cannot perform still occupy their chord. They are reserved, not free for reassignment, so the spelling stays stable when the surface eventually exists.
 - Claiming `C-x` globally means a full-screen editor running inside a session's PTY cannot receive it. This is accepted and matches the TUI, which makes the same trade for the same reason.
+- **`Ctrl+X` is the system cut shortcut on Windows and Linux, and the prefix takes it over there.** This is the real cost of sharing the spelling, and it is accepted for the same reason emacs accepts it: the prefix is worth more than the one editing shortcut it displaces, and cut remains available from the context menu everywhere and on `⌘X` on macOS. If this proves too disruptive, the fix is a keymap-profile setting shared with the TUI — not a web-only divergence in what `C-x` means.
 - Pane focus, zoom, and the chord echo are per-client. Chords that move focus or zoom must not write to the shared layout, per [0118-split-layout-is-shared-daemon-state](0118-split-layout-is-shared-daemon-state.md).
 - Chords that mutate the shared layout are still subject to the clamp-on-render rule: a viewport too narrow to render panes must not write layout changes, so split and resize chords do nothing there and say so.
 
