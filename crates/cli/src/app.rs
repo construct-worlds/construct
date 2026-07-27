@@ -1460,6 +1460,9 @@ pub struct App {
     /// suggestions) for lack of a smith credential this run — the gate for
     /// showing the modeline degradation notice at all.
     pub features_degradation_observed: bool,
+    /// Plugin-contributed palette/slash actions (spec 0151 phase 2),
+    /// fetched once at startup/reconnect; empty when no plugins loaded.
+    pub plugin_actions: Vec<construct_protocol::PluginActionInfo>,
     /// Program templates offered as clickable buttons in the empty-program
     /// placeholder. Fetched at startup and on reconnect, and refreshed in the
     /// background every time the program pane opens so edits to template files
@@ -4454,6 +4457,7 @@ async fn run_with_socket_initial_selection(
     let groups = client.list_projects().await.unwrap_or_default();
     let harnesses = client.harnesses().await.unwrap_or_default();
     let features_status = client.features_status().await.ok();
+    let plugin_actions = client.plugin_actions().await.unwrap_or_default();
     let program_templates = client
         .program_templates()
         .await
@@ -4623,6 +4627,7 @@ async fn run_with_socket_initial_selection(
         features_degradation_observed: features_status
             .as_ref()
             .is_some_and(|s| s.degradation_observed),
+        plugin_actions,
         program_templates,
         program_templates_tx,
         program_verbs,
@@ -5866,6 +5871,7 @@ impl App {
         let sessions = client.list().await.unwrap_or_default();
         let groups = client.list_projects().await.unwrap_or_default();
         let harnesses = client.harnesses().await.unwrap_or_default();
+        let plugin_actions = client.plugin_actions().await.unwrap_or_default();
         let program_templates = client
             .program_templates()
             .await
@@ -5885,6 +5891,7 @@ impl App {
         self.groups = groups;
         self.harnesses = harnesses;
         self.refresh_features().await;
+        self.plugin_actions = plugin_actions;
         if !program_templates.is_empty() {
             self.program_templates = program_templates;
         }
@@ -12507,7 +12514,52 @@ impl App {
                     )),
                 }
             }
-            other => self.set_status(format!("unknown command: {other}")),
+            "plugins" | "plugin-actions" => {
+                self.plugin_actions = self.client.plugin_actions().await.unwrap_or_default();
+                if self.plugin_actions.is_empty() {
+                    self.set_status(
+                        "no plugin actions (install plugins with `construct plugin install`)"
+                            .to_string(),
+                    );
+                } else {
+                    let tokens: Vec<String> = self
+                        .plugin_actions
+                        .iter()
+                        .map(|a| format!("/{}", a.token))
+                        .collect();
+                    self.set_status(format!("plugin actions: {}", tokens.join(", ")));
+                }
+            }
+            // Plugin actions (spec 0151 phase 2): any token the static
+            // table doesn't know is tried against the daemon-reported
+            // action list before being rejected, so plugins extend the
+            // palette/slash surface without a client release.
+            other => {
+                if let Some(action) = self
+                    .plugin_actions
+                    .iter()
+                    .find(|a| a.token == other)
+                    .cloned()
+                {
+                    let session_id = if action.context == "session" {
+                        self.selected_id()
+                    } else {
+                        None
+                    };
+                    match self
+                        .client
+                        .plugin_run_action(&action.plugin_id, &action.id, session_id.as_deref())
+                        .await
+                    {
+                        Ok(()) => self.set_status(format!("plugin action {} started", action.token)),
+                        Err(e) => {
+                            self.set_status(format!("plugin action {} failed: {e}", action.token))
+                        }
+                    }
+                } else {
+                    self.set_status(format!("unknown command: {other}"));
+                }
+            }
         }
     }
 
@@ -14798,6 +14850,7 @@ mod tests {
             harnesses: Vec::new(),
             features: Vec::new(),
             features_degradation_observed: false,
+            plugin_actions: Vec::new(),
             program_templates: Vec::new(),
             program_templates_tx: mpsc::unbounded_channel().0,
             program_verbs: Vec::new(),

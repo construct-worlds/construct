@@ -208,6 +208,34 @@ impl Client {
         self.request(ipc_method::PING, &serde_json::Value::Null)
             .await
     }
+    /// Plugin-contributed palette/slash actions (spec 0151 phase 2).
+    pub async fn plugin_actions(&self) -> Result<Vec<construct_protocol::PluginActionInfo>> {
+        let r: construct_protocol::PluginListActionsResult = self
+            .request(ipc_method::PLUGIN_LIST_ACTIONS, &serde_json::Value::Null)
+            .await?;
+        Ok(r.actions)
+    }
+
+    /// Run one plugin action, fire-and-forget on the daemon side.
+    pub async fn plugin_run_action(
+        &self,
+        plugin_id: &str,
+        action_id: &str,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::PLUGIN_RUN_ACTION,
+                &construct_protocol::PluginRunActionParams {
+                    plugin_id: plugin_id.to_string(),
+                    action_id: action_id.to_string(),
+                    session_id: session_id.map(String::from),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn harnesses(&self) -> Result<Vec<HarnessInfo>> {
         let mut list: Vec<HarnessInfo> = self.request(ipc_method::HARNESS_LIST, &serde_json::Value::Null)
             .await?;

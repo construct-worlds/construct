@@ -121,21 +121,48 @@ dir = "templates"
 [[mcp_servers]]                     # injected into every harness session
 name = "review"                     # registered as mcpServers.diff-review-review
 command = ["target/release/review-mcp", "serve"]
+
+[[actions]]                         # user-invocable: /diff-review:open in the
+id = "open"                         # palette or any slash prompt
+label = "Open diff review"
+command = ["bin/open-review"]
+context = "session"                 # session (default) | fleet
+
+[[events]]                          # daemon spawns this on matching events
+on = ["done", "status:awaiting_input", "tool_approval_request"]
+command = ["bin/notify"]
+debounce_ms = 2000                  # optional; min ms between spawns
 ```
 
 An adapter (or MCP server) named exactly like the plugin id is exposed
 without the namespace suffix — a plugin `aider` with adapter `aider` is
 simply harness `aider`.
 
+### Actions and event hooks
+
+Actions appear in the TUI palette/slash surface as `/<token>` (the token is
+`<plugin-id>:<action-id>`, or the bare plugin id when they match); `/plugins`
+lists everything installed. Running one spawns its command with the plugin
+root as cwd, `CONSTRUCT_PLUGIN_ACTION_ID`, and — for `context = "session"`
+actions — the invoking session's `CONSTRUCT_SESSION_ID`. Event hooks match a
+session event's type tag (`done`, `error`, `tool_approval_request`, `pty`,
+…) or `status:<state>` (`status:awaiting_input`), and their command gets
+`CONSTRUCT_PLUGIN_EVENT` (the matched type) plus `CONSTRUCT_PLUGIN_EVENT_JSON`
+(`{"session_id": …, "event": …}`). Both are fire-and-forget: exit status is
+logged in the daemon log, and long-running work should talk back over IPC
+rather than holding the process open. Subscribe to chatty events (`pty`)
+only with a `debounce_ms`.
+
 ### Runtime contract
 
 Plugin-owned processes receive `CONSTRUCT_PLUGIN_ID`,
 `CONSTRUCT_PLUGIN_ROOT`, `CONSTRUCT_PLUGIN_CONFIG_DIR`
-(`<config>/plugins/<id>/`), and `CONSTRUCT_PLUGIN_STATE_DIR`
-(`<state>/plugins/<id>/`). Durable plugin state belongs in those two
-directories. For everything else, a plugin process is an ordinary IPC
-client: anything you can do as `construct …` or over the daemon socket, a
-plugin can do too.
+(`<config>/plugins/<id>/`), `CONSTRUCT_PLUGIN_STATE_DIR`
+(`<state>/plugins/<id>/`), plus `CONSTRUCT_SOCKET` and
+`CONSTRUCT_BIN_PATH` for daemon access. Durable plugin state belongs in
+the config/state directories. For everything else, a plugin process is an
+ordinary IPC client: anything you can do as `construct …` or over the
+daemon socket, a plugin can do too.
 
 ### Trust
 

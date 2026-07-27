@@ -1280,6 +1280,9 @@ use widgets::WidgetSnapshot;
 pub struct SessionManager {
     storage: Arc<Storage>,
     config: Arc<Config>,
+    /// Plugin action/event-hook runtime (spec 0151 phase 2). Set once from
+    /// daemon startup after construction; empty when no plugins are loaded.
+    plugins: std::sync::OnceLock<Arc<crate::plugins::PluginRuntime>>,
     adapter_runtime_dir: PathBuf,
     sessions: RwLock<HashMap<String, Arc<SessionEntry>>>,
     /// The sessions the operator currently has visible/focused (via `mark_seen` or `set_focused_sessions`).
@@ -1774,6 +1777,7 @@ impl SessionManager {
             Self {
                 storage,
                 config,
+                plugins: std::sync::OnceLock::new(),
                 adapter_runtime_dir,
                 sessions: RwLock::new(sessions),
                 focused_sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1815,6 +1819,40 @@ impl SessionManager {
     /// right after wrapping the manager in its `Arc`.
     pub fn bind_self_ref(self: &Arc<Self>) {
         let _ = self.self_ref.set(Arc::downgrade(self));
+    }
+
+    /// Install the plugin runtime (spec 0151 phase 2). Called once from
+    /// daemon startup, right after construction; later calls are ignored.
+    pub fn set_plugin_runtime(&self, runtime: Arc<crate::plugins::PluginRuntime>) {
+        let _ = self.plugins.set(runtime);
+    }
+
+    pub(crate) fn plugin_runtime(&self) -> Option<&Arc<crate::plugins::PluginRuntime>> {
+        self.plugins.get()
+    }
+
+    /// Every plugin-contributed action, for `plugin.list_actions`.
+    pub fn plugin_actions(&self) -> Vec<construct_protocol::PluginActionInfo> {
+        self.plugins
+            .get()
+            .map(|rt| rt.actions())
+            .unwrap_or_default()
+    }
+
+    /// Run one plugin action (`plugin.run_action`), fire-and-forget.
+    pub fn plugin_run_action(
+        &self,
+        params: &construct_protocol::PluginRunActionParams,
+    ) -> Result<()> {
+        let runtime = self
+            .plugins
+            .get()
+            .context("no plugins are loaded")?;
+        runtime.run_action(
+            &params.plugin_id,
+            &params.action_id,
+            params.session_id.as_deref(),
+        )
     }
 
     /// Allocate a monotonic id for a new client connection. The connection

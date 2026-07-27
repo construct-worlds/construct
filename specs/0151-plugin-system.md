@@ -27,6 +27,20 @@ data-file extensions:
   reserved and cannot be displaced. The existing MCP kill switch disables
   plugin servers too. Plugin tools flow through the same approval pipeline
   as every other tool.
+- **Actions** — user-invocable commands surfaced through a daemon IPC
+  listing (`plugin.list_actions`). Clients populate their palette/slash
+  surfaces from that list at runtime and invoke via `plugin.run_action`;
+  plugin actions are data, never compiled-in commands. Invocation tokens
+  follow the adapter naming rule (`<plugin-id>:<action>`, bare plugin id
+  when equal). Running an action spawns its command with plugin identity
+  env plus the invoking session's id for `context = "session"` actions,
+  fire-and-forget; the process talks back over ordinary IPC.
+- **Event hooks** — the daemon spawns a hook's command when a handled
+  session event matches one of its declared matchers (an event type tag,
+  or `status:<state>`). Hooks are observational and fire-and-forget, may
+  declare a per-hook debounce, receive the event as JSON in the
+  environment, and must never block or fail the event funnel — a daemon
+  with a broken hook still processes every event.
 
 Installed plugins are recorded in a registry file under the data
 directory's `plugins/` root; GitHub installs keep a managed checkout there,
@@ -88,6 +102,11 @@ registration.
   live-reload path instead.
 - The daemon must keep starting when any plugin is broken; plugin loading
   is diagnostics-only, never fatal.
+
+- Plugin actions carry no default keybindings, so the cross-client chord
+  parity obligation is not affected. Binding keys (and MIDI mappings) to
+  plugin actions, and surfacing actions in the web client, are follow-ups
+  that must consume the same runtime listing rather than a compiled table.
 
 ## Non-Goals
 

@@ -161,6 +161,11 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             .context("init session manager")?;
     let manager = Arc::new(manager);
     manager.bind_self_ref();
+    manager.set_plugin_runtime(Arc::new(plugins::PluginRuntime::new(
+        plugin_set,
+        paths.clone(),
+        socket_path.clone(),
+    )));
     // Spawn the remote supervisor first so any subsequent
     // `start_remote` call (boot-time env-var path or in-flight
     // `remote.start` IPC) has a live receiver to send to.

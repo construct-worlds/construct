@@ -1131,6 +1131,21 @@ async fn dispatch(
     dispatch_entry!(ipc_method::HARNESS_LIST, {
         ok!(req, &manager.harnesses().await)
     });
+    dispatch_entry!(ipc_method::PLUGIN_LIST_ACTIONS, {
+        ok!(
+            req,
+            &construct_protocol::PluginListActionsResult {
+                actions: manager.plugin_actions(),
+            }
+        )
+    });
+    dispatch_entry!(ipc_method::PLUGIN_RUN_ACTION, {
+        let p = params!(req, construct_protocol::PluginRunActionParams);
+        match manager.plugin_run_action(&p) {
+            Ok(()) => ok!(req, &serde_json::json!({ "ok": true })),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
     dispatch_entry!(ipc_method::SMITH_AUTH_STATUS, {
         ok!(req, &manager.smith_auth_status().await)
     });
