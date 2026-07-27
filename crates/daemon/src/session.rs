@@ -74,18 +74,23 @@ const RESPAWN_REDRAW_MAX_WAIT: Duration = Duration::from_secs(6);
 /// settle lets its render/state update land so the trailing `\r` is read as
 /// a clean submit keypress rather than being coalesced into the paste.
 const PROGRAM_EXTERNAL_PTY_SUBMIT_DELAY: Duration = Duration::from_millis(120);
-/// How long a freshly created program-execution fork's PTY must stay quiet
-/// before its harness's startup draw is considered settled enough to accept
-/// the run/verb prompt, plus the hard cap on waiting for that to happen. A
-/// fork cold-starts its harness (often through a native fork-resume), and a
-/// harness still busy with its own startup work does not drain stdin — a
-/// prompt pasted during that window either vanishes into the pre-draw screen
-/// or lands with its submit Enter coalesced into the same input read as the
-/// paste and never runs (the identical race spec 0086 documents for usage
-/// probes). On timeout the prompt is delivered anyway: a slow-booting
-/// harness eventually drains stdin, and delivering late can never be worse
-/// than the old deliver-immediately behavior.
-const PROGRAM_FORK_STARTUP_SETTLE: Duration = Duration::from_millis(500);
+/// Poll interval while waiting for a freshly created program-execution fork
+/// to become ready for its run/verb prompt.
+const PROGRAM_FORK_READY_POLL: Duration = Duration::from_millis(100);
+/// Fallback readiness signal for a program-execution fork: how long its PTY
+/// must stay quiet before the daemon treats the harness as ready even though
+/// it never reported `AwaitingInput`. Deliberately at least `PTY_QUIESCENCE`,
+/// the daemon's own definition of "this TUI is idle" — a shorter window
+/// mistakes a *pause inside* the startup draw for the end of it. Claude's
+/// cold-start draw, for one, reliably pauses ~750ms partway through, so a
+/// 500ms window fired mid-boot and the prompt was pasted into a harness that
+/// had not attached its input handler yet; the bytes were flushed with the
+/// rest of the pre-mount input and the Run silently never happened.
+const PROGRAM_FORK_READY_SETTLE: Duration = PTY_QUIESCENCE;
+/// Hard cap on waiting for a fork to become ready. On timeout the prompt is
+/// delivered anyway: a slow-booting harness eventually drains stdin, and
+/// delivering late can never be worse than the old deliver-immediately
+/// behavior.
 const PROGRAM_FORK_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const PROGRAM_CURSOR_TTL_MS: i64 = 60 * 1000;
 const PROGRAM_AGENT_CURSOR_TTL_MS: i64 = 2 * 1000;
@@ -571,6 +576,45 @@ fn program_execution_delivery(
     } else {
         ProgramExecutionDelivery::PtySubmit
     }
+}
+
+/// Pure decision step behind [`SessionManager::wait_for_fork_ready`]:
+/// `Some(true)` the fork can take its prompt, `Some(false)` give up (dead
+/// session or `max_wait` exhausted), `None` keep polling.
+///
+/// The ready signal is the harness's own `AwaitingInput`, not the shape of
+/// its output. `settle` is only a fallback for harnesses that never report
+/// it, and it is deliberately long enough that a pause *inside* a startup
+/// draw cannot be mistaken for the end of one.
+///
+/// `since_ms` matters: a summary can still hold pre-spawn state when this
+/// first runs, so nothing counts as ready until the fork has drawn something
+/// at or after the moment it was created.
+fn fork_ready_outcome(
+    state: construct_protocol::SessionState,
+    last_pty_at_ms: Option<i64>,
+    since_ms: i64,
+    now_ms: i64,
+    elapsed: Duration,
+    settle: Duration,
+    max_wait: Duration,
+) -> Option<bool> {
+    use construct_protocol::SessionState;
+    if matches!(state, SessionState::Errored | SessionState::Done) {
+        return Some(false);
+    }
+    if let Some(drawn_at) = last_pty_at_ms.filter(|t| *t >= since_ms) {
+        if state == SessionState::AwaitingInput {
+            return Some(true);
+        }
+        if now_ms.saturating_sub(drawn_at) >= settle.as_millis() as i64 {
+            return Some(true);
+        }
+    }
+    if elapsed >= max_wait {
+        return Some(false);
+    }
+    None
 }
 
 /// Frame a program prompt as a bracketed paste for delivery to an external
@@ -2845,17 +2889,65 @@ impl SessionManager {
         .await
     }
 
+    /// Wait until a just-created execution fork's harness is actually ready
+    /// to receive a prompt, or `max_wait` elapses (`false`: gave up).
+    ///
+    /// Readiness is the harness's *own* signal — the session reaching
+    /// `AwaitingInput` — not a guess derived from how its output looks. A
+    /// cold-started TUI does not attach its input handler until well after
+    /// its startup draw stops producing bytes, and anything written into the
+    /// PTY before that point is flushed away when the harness puts the
+    /// terminal into raw mode. Output-shape heuristics cannot see that
+    /// boundary; the state machine that already drives the rest of the daemon
+    /// can.
+    ///
+    /// [`PROGRAM_FORK_READY_SETTLE`] of PTY quiet is kept as a fallback for
+    /// harnesses that never report `AwaitingInput` (one that boots straight
+    /// into a turn, say), so those don't pay the full `max_wait` before their
+    /// prompt is delivered. `since_ms` guards both signals: the fork must have
+    /// drawn *something* since it was created, so a summary that still holds a
+    /// pre-spawn state cannot read as ready.
+    ///
+    /// A fork that reaches `Errored`/`Done` is never going to accept input;
+    /// report not-ready immediately rather than burning `max_wait` on it.
+    ///
+    /// See [`fork_ready_outcome`] for the pure decision step.
+    async fn wait_for_fork_ready(&self, id: &str, since_ms: i64, max_wait: Duration) -> bool {
+        let started = tokio::time::Instant::now();
+        loop {
+            let (state, last_pty_at_ms) = match self.get_entry(id).await {
+                Some(entry) => {
+                    let summary = entry.summary.read().await;
+                    (summary.state, summary.last_pty_at_ms)
+                }
+                None => return false,
+            };
+            match fork_ready_outcome(
+                state,
+                last_pty_at_ms,
+                since_ms,
+                Utc::now().timestamp_millis(),
+                started.elapsed(),
+                PROGRAM_FORK_READY_SETTLE,
+                max_wait,
+            ) {
+                Some(ready) => return ready,
+                None => tokio::time::sleep(PROGRAM_FORK_READY_POLL).await,
+            }
+        }
+    }
+
     /// Deliver a run/verb prompt to a just-created execution fork. Unlike
     /// [`Self::deliver_text_to_session`], which assumes an already-running
     /// harness that is draining stdin, this first waits for the fork's
-    /// cold-started harness to finish its startup draw, then — for external
-    /// agent TUIs — gates the submit Enter on the paste observably reaching
-    /// the harness (see `program_submit_typed_prompt_cold_start`). Without
-    /// both, the prompt raced the harness's boot and either vanished or sat
-    /// in the input box unsubmitted, leaving the fork idle. Blocking,
-    /// potentially for seconds: call via
-    /// [`Self::spawn_program_fork_prompt_delivery`] so the IPC dispatch
-    /// loop is never stalled behind a booting fork.
+    /// cold-started harness to report itself ready (see
+    /// [`Self::wait_for_fork_ready`]), then — for external agent TUIs — gates
+    /// the submit Enter on the paste observably reaching the harness (see
+    /// `program_submit_typed_prompt_cold_start`). Without both, the prompt
+    /// raced the harness's boot and either vanished or sat in the input box
+    /// unsubmitted, leaving the fork idle. Blocking, potentially for seconds:
+    /// call via [`Self::spawn_program_fork_prompt_delivery`] so the IPC
+    /// dispatch loop is never stalled behind a booting fork.
     async fn deliver_program_prompt_to_fork(
         self: &Arc<Self>,
         fork_id: &str,
@@ -2872,17 +2964,12 @@ impl SessionManager {
         };
         if has_pty
             && !self
-                .wait_for_pty_settle(
-                    fork_id,
-                    created_at_ms,
-                    PROGRAM_FORK_STARTUP_SETTLE,
-                    PROGRAM_FORK_STARTUP_TIMEOUT,
-                )
+                .wait_for_fork_ready(fork_id, created_at_ms, PROGRAM_FORK_STARTUP_TIMEOUT)
                 .await
         {
             tracing::warn!(
                 session = %fork_id,
-                "program fork prompt: harness startup never settled; delivering anyway",
+                "program fork prompt: harness never reported ready; delivering anyway",
             );
         }
         match delivery {
@@ -12033,6 +12120,135 @@ done
         };
         assert!(pos(&b64(b"one")) < pos(&b64(b"two")));
         assert!(pos(&b64(b"two")) < pos(&b64(b"three")));
+    }
+
+    /// The live regression behind spec 0149. A cold-starting agent TUI does
+    /// not draw continuously: claude's fork boot reliably emits, pauses ~750ms
+    /// mid-draw, emits again, and only attaches its input handler seconds
+    /// later. Treating that pause as "startup finished" pasted the Run prompt
+    /// into a harness that then flushed it on entering raw mode — the fork sat
+    /// idle forever and nothing was logged, because the paste write itself
+    /// succeeded. Only the harness's own `AwaitingInput` may unblock delivery
+    /// while the session is still drawing.
+    #[test]
+    fn fork_ready_outcome_rejects_a_pause_inside_the_startup_draw() {
+        use construct_protocol::SessionState;
+        let since = 1_000_000i64;
+        let settle = PROGRAM_FORK_READY_SETTLE;
+        let max_wait = settle + Duration::from_secs(10);
+        // Drew 750ms ago and still Running: that is a gap in the boot draw,
+        // not the end of it. Keep waiting.
+        let paused_ms = 750;
+        assert!(
+            paused_ms < settle.as_millis() as i64,
+            "the fallback settle must outlast a mid-draw pause, else this \
+             regression returns"
+        );
+        assert_eq!(
+            fork_ready_outcome(
+                SessionState::Running,
+                Some(since + 340),
+                since,
+                since + 340 + paused_ms,
+                Duration::from_millis(paused_ms as u64),
+                settle,
+                max_wait,
+            ),
+            None
+        );
+        // Same pause, but the harness now says it wants input -> ready.
+        assert_eq!(
+            fork_ready_outcome(
+                SessionState::AwaitingInput,
+                Some(since + 340),
+                since,
+                since + 340 + paused_ms,
+                Duration::from_millis(paused_ms as u64),
+                settle,
+                max_wait,
+            ),
+            Some(true)
+        );
+    }
+
+    /// The fallback exists for harnesses that never report `AwaitingInput`
+    /// (one that boots straight into a turn), so they don't pay the full
+    /// timeout — but it must require a genuinely idle PTY, and it must not
+    /// fire off a stale pre-spawn timestamp.
+    #[test]
+    fn fork_ready_outcome_fallback_and_liveness_guards() {
+        use construct_protocol::SessionState;
+        let since = 1_000_000i64;
+        let settle = PROGRAM_FORK_READY_SETTLE;
+        let max_wait = settle + Duration::from_secs(10);
+        let quiet = settle.as_millis() as i64;
+        // Quiet for the full settle while still Running -> fallback fires.
+        assert_eq!(
+            fork_ready_outcome(
+                SessionState::Running,
+                Some(since + 10),
+                since,
+                since + 10 + quiet,
+                Duration::from_secs(1),
+                settle,
+                max_wait,
+            ),
+            Some(true)
+        );
+        // Nothing drawn yet -> not ready, regardless of state.
+        assert_eq!(
+            fork_ready_outcome(
+                SessionState::AwaitingInput,
+                None,
+                since,
+                since + 5_000,
+                Duration::from_secs(1),
+                settle,
+                max_wait,
+            ),
+            None
+        );
+        // The only PTY timestamp predates the fork -> stale, not evidence
+        // this fork drew anything.
+        assert_eq!(
+            fork_ready_outcome(
+                SessionState::AwaitingInput,
+                Some(since - 10_000),
+                since,
+                since + 5_000,
+                Duration::from_secs(1),
+                settle,
+                max_wait,
+            ),
+            None
+        );
+        // A dead fork is never going to accept input: give up now rather
+        // than burning the whole timeout on it.
+        assert_eq!(
+            fork_ready_outcome(
+                SessionState::Errored,
+                Some(since + 10),
+                since,
+                since + 20,
+                Duration::from_millis(0),
+                settle,
+                max_wait,
+            ),
+            Some(false)
+        );
+        // Timeout with the harness still booting -> deliver anyway.
+        assert_eq!(
+            fork_ready_outcome(
+                SessionState::Running,
+                Some(since + 10),
+                since,
+                since + 20,
+                max_wait,
+                settle,
+                max_wait,
+            ),
+            Some(false)
+        );
     }
 
     // Spec 0042: starting a selection run while another run is still in flight

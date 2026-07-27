@@ -451,8 +451,6 @@ impl SessionManager {
     /// 6), and only an update at-or-after `since_ms` counts as evidence
     /// that the thing this particular wait cares about actually happened.
     /// See [`usage_probe_wait_outcome`] for the pure decision step.
-    /// `pub(super)`: program fork prompt delivery reuses this same wait to
-    /// let a cold-started fork finish its startup draw before pasting.
     pub(super) async fn wait_for_pty_settle(
         &self,
         id: &str,

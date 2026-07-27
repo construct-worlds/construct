@@ -371,6 +371,14 @@ impl SessionManager {
     /// timeout the Enter is sent anyway — a missing echo most likely means
     /// the harness is drawing nothing yet, and the Enter can't make that
     /// outcome worse than the old fixed-delay behavior.
+    ///
+    /// This gate only distinguishes "the harness consumed the paste" from
+    /// "the harness is still busy"; it is not a readiness check and cannot
+    /// substitute for one. Any output growth satisfies it, including output
+    /// that has nothing to do with the paste, so a caller that pastes into a
+    /// harness which has not attached its input handler yet gets a silent
+    /// pass here. Readiness is established *before* this is called — see
+    /// `wait_for_fork_ready`.
     pub(super) async fn program_submit_typed_prompt_cold_start(
         &self,
         id: &str,

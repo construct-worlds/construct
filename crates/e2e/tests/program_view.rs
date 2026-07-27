@@ -1592,6 +1592,150 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
     );
 }
 
+/// Spec 0149. Delivery must wait for the forked harness to report itself
+/// ready, not for its startup *output* to pause. Real agent TUIs don't draw
+/// continuously while booting — claude's fork boot emits, pauses ~750ms
+/// mid-draw, emits again, and only attaches its input handler seconds later.
+/// The old gate ("PTY quiet for 500ms") fired in that pause and pasted the
+/// Run prompt into a harness that had not started reading stdin; the bytes
+/// were flushed when it entered raw mode, the fork idled forever, and nothing
+/// was logged because the write itself succeeded.
+///
+/// The stand-in harness here reproduces that boot shape and reports any input
+/// that reached it before it was ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn program_fork_run_waits_for_harness_readiness_before_pasting() {
+    use base64::Engine as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = tempfile::Builder::new()
+        .prefix("ae-slowboot")
+        .tempdir_in("/tmp")
+        .expect("fixture dir");
+
+    // The boot phase runs as its own foreground job (the launcher enables
+    // job control), so it owns the PTY's foreground process group and the
+    // session reads as Running for its whole duration — exactly like a real
+    // agent TUI that has not finished starting. The pause is longer than the
+    // old 500ms output-quiet gate and shorter than the readiness fallback,
+    // so only a genuine readiness signal can unblock delivery. Any input
+    // already queued when the drain runs proves the daemon pasted too early.
+    // The leading silent sleep matters: the launcher briefly owns the
+    // terminal before it starts this job, and a stand-in built out of shell
+    // scripts cannot avoid that. Drawing nothing until the job is established
+    // keeps the fixture honest — the daemon requires output from the fork
+    // before any readiness signal counts, so the launcher's momentary idle
+    // can't be mistaken for a ready harness.
+    let boot = fixture.path().join("boot");
+    std::fs::write(
+        &boot,
+        "#!/bin/bash\n\
+         sleep 0.6\n\
+         printf 'boot-phase-1\\n'\n\
+         sleep 0.9\n\
+         printf 'boot-phase-2\\n'\n\
+         if IFS= read -r -t 0.4 early; then printf 'EARLY-INPUT<%s>\\n' \"$early\"; fi\n",
+    )
+    .expect("write boot script");
+    std::fs::set_permissions(&boot, std::fs::Permissions::from_mode(0o755)).expect("chmod boot");
+
+    let shell = fixture.path().join("slow-boot-shell");
+    std::fs::write(
+        &shell,
+        format!(
+            "#!/bin/bash\n\
+             set -m\n\
+             {}\n\
+             exec /bin/bash --norc --noprofile -i\n",
+            boot.display()
+        ),
+    )
+    .expect("write shell script");
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).expect("chmod shell");
+
+    let d = Daemon::spawn_with_env(&[("CONSTRUCT_SHELL_BIN", shell.to_str().expect("utf8 path"))])
+        .await
+        .expect("daemon");
+    let cwd = d.dir.path().to_string_lossy().to_string();
+
+    let owner = d
+        .client
+        .create(shell_session_params(&cwd, "owner"))
+        .await
+        .expect("create owner session");
+    wait_for_state(
+        &d,
+        &owner,
+        construct_protocol::SessionState::AwaitingInput,
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let updated = d
+        .client
+        .program_update(construct_protocol::ProgramUpdateParams {
+            session_id: owner.clone(),
+            markdown: "# Todo\n\n- say hello\n".to_string(),
+            base_version: None,
+            actor: construct_protocol::ProgramUpdateActor::Human,
+            template_id: None,
+            note: None,
+            shimmer: None,
+            shimmer_tooltips: None,
+        })
+        .await
+        .expect("program.update");
+
+    let result = d
+        .client
+        .program_execute(construct_protocol::ProgramExecuteParams {
+            session_id: owner.clone(),
+            selection: Some("- say hello".to_string()),
+            base_version: Some(updated.program.version),
+            shimmer: None,
+            selection_block_ids: None,
+            comment: None,
+            fork: true,
+        })
+        .await
+        .expect("program.execute");
+    let fork_id = result
+        .execution_session_id
+        .clone()
+        .expect("fork execution session id");
+
+    // The prompt still gets delivered — the fix is about *when*, not whether.
+    // Wait for the boot phase to finish too, so the early-input verdict below
+    // is actually decided rather than raced past.
+    let needle = "construct program autonomously";
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let text = loop {
+        let replay = d.client.pty_replay(&fork_id).await.expect("pty_replay");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&replay.data)
+            .expect("pty replay base64");
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        if text.contains(needle) && text.contains("boot-phase-2") {
+            break text;
+        }
+        if Instant::now() > deadline {
+            panic!(
+                "fork PTY never showed both the program prompt and a completed \
+                 boot phase; log so far:\n{text}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    // ...and it was not already sitting on the fork's stdin while the harness
+    // was still booting. This is the assertion that fails on the pre-fix
+    // daemon.
+    assert!(
+        !text.contains("EARLY-INPUT"),
+        "the Run prompt reached the fork before its harness was ready: {text}"
+    );
+}
+
 /// The owner-targeted counterpart (Shift+Run / non-fork callers): the work
 /// stays in the Program-owning session the user is already looking at, so
 /// no session clip is added to the selection.
@@ -1651,6 +1795,27 @@ async fn program_selection_owner_run_adds_no_session_clip() {
         !refetched.program.markdown.contains("@{session:"),
         "no clip annotation daemon-side either"
     );
+}
+
+/// Poll `session_id` until it reports `want`, or panic on timeout.
+async fn wait_for_state(
+    d: &Daemon,
+    session_id: &str,
+    want: construct_protocol::SessionState,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let sessions = d.client.list().await.expect("list");
+        let state = sessions.iter().find(|s| s.id == session_id).map(|s| s.state);
+        if state == Some(want) {
+            return;
+        }
+        if Instant::now() > deadline {
+            panic!("session {session_id} never reached {want:?} (last seen {state:?})");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn shell_session_params(cwd: &str, title: &str) -> construct_protocol::CreateSessionParams {
