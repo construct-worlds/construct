@@ -127,7 +127,17 @@ impl Daemon {
     /// orchestrator-spawn timeout on hosts where the adapter
     /// binaries can't be located.
     pub async fn spawn() -> Result<Self> {
-        Self::spawn_inner(false).await
+        Self::spawn_inner(false, &[]).await
+    }
+
+    /// Like `spawn`, but sets extra environment on the daemon process,
+    /// which the adapters it spawns then inherit. Applied *after* the
+    /// harness's own `CONSTRUCT_*` vars, so a fixture can override them.
+    /// Use this to swap in a stand-in harness binary — e.g. pointing
+    /// `CONSTRUCT_SHELL_BIN` at a script that reproduces a specific
+    /// startup behavior.
+    pub async fn spawn_with_env(extra_env: &[(&str, &str)]) -> Result<Self> {
+        Self::spawn_inner(false, extra_env).await
     }
 
     /// Like `spawn`, but copies the `construct` binary into the
@@ -140,10 +150,10 @@ impl Daemon {
     /// swap from disturbing other tests that share the workspace
     /// binary.
     pub async fn spawn_relocatable() -> Result<Self> {
-        Self::spawn_inner(true).await
+        Self::spawn_inner(true, &[]).await
     }
 
-    async fn spawn_inner(relocatable: bool) -> Result<Self> {
+    async fn spawn_inner(relocatable: bool, extra_env: &[(&str, &str)]) -> Result<Self> {
         // Root the tempdir under a SHORT base. macOS caps Unix
         // socket paths (`sun_path`) at 104 bytes, and the daemon's
         // per-adapter connect-back socket lives at
@@ -230,6 +240,7 @@ impl Daemon {
             // Skip cloudflared in every e2e test — its absence
             // from CI runners is not a test failure.
             .env("CONSTRUCT_REMOTE_NO_TUNNEL", "1")
+            .envs(extra_env.iter().copied())
             .args(["daemon", "run", "--socket"])
             .arg(&socket)
             // Silence the daemon's stderr / stdout in tests by
