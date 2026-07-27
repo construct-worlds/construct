@@ -58,7 +58,7 @@ pub(crate) const PROGRAM_AGENT_REVEAL_MS: i64 = 800;
 pub(crate) const PROGRAM_AGENT_RECENT_ACTIVITY_MS: i64 = 3000;
 pub(crate) const PROGRAM_SELECTION_RUN_MENU_W: u16 = 46;
 const PROGRAM_SELECTION_RUN_BUTTON: &str = "▸ Run";
-const PROGRAM_SELECTION_RUN_MAIN_BUTTON: &str = "▸ Run on main";
+const PROGRAM_SELECTION_RUN_FORK_BUTTON: &str = "▸ Run in fork";
 const PROGRAM_SELECTION_RUN_MENU_PAD_X: u16 = 1;
 
 /// Row-fraction range `[start, end)` of a preview image to paint this
@@ -14753,12 +14753,12 @@ fn render_program_selection_context_menu(
         .width
         .saturating_sub(2 + PROGRAM_SELECTION_RUN_MENU_PAD_X.saturating_mul(2))
         as usize;
-    let run_button = if app.program_selection_run_on_main {
-        PROGRAM_SELECTION_RUN_MAIN_BUTTON
+    let run_button = if app.program_selection_run_on_fork {
+        PROGRAM_SELECTION_RUN_FORK_BUTTON
     } else {
         PROGRAM_SELECTION_RUN_BUTTON
     };
-    let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_MAIN_BUTTON);
+    let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_FORK_BUTTON);
     let rendered_run_button_width = UnicodeWidthStr::width(run_button);
     let button_x = inner_x.saturating_add(inner_width.saturating_sub(run_button_width) as u16);
     let hit = (
@@ -14894,8 +14894,8 @@ fn render_program_selection_context_menu(
                 });
             let verb_key_selected = menu.focused
                 && menu.selected_action == crate::app::ProgramSelectionAction::Verb(idx);
-            let label = if app.program_selection_run_on_main {
-                format!("▸ {} (main)", verb.label)
+            let label = if app.program_selection_run_on_fork {
+                format!("▸ {} (fork)", verb.label)
             } else {
                 format!("▸ {}", verb.label)
             };
@@ -14934,7 +14934,7 @@ fn render_program_selection_context_menu(
                 program_selection_action_description(
                     menu.selected_action,
                     &verbs,
-                    app.program_selection_run_on_main,
+                    app.program_selection_run_on_fork,
                 )
                     .unwrap_or_default();
             let mut desc_lines = wrap_to_width(&description, inner_width);
@@ -14972,7 +14972,7 @@ fn program_selection_inner_width(menu_width: u16) -> usize {
 
 pub(crate) fn program_selection_comment_width(menu_width: u16) -> usize {
     let inner_width = program_selection_inner_width(menu_width);
-    let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_MAIN_BUTTON);
+    let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_FORK_BUTTON);
     let comment_gap = usize::from(inner_width > run_button_width);
     inner_width
         .saturating_sub(run_button_width)
@@ -14996,9 +14996,21 @@ fn program_selection_description_line_count(
         return 0;
     }
     let width = program_selection_inner_width(menu_width).max(1);
-    let text = program_selection_action_description(menu.selected_action, verbs, false)
-        .unwrap_or_default();
-    wrap_to_width(&text, width).len().max(1).min(max_rows.max(1))
+    // Reserve for the longer of the two destination variants, so pressing or
+    // releasing Shift only swaps the wording — it never resizes the menu under
+    // the pointer, and never truncates the longer sentence.
+    [false, true]
+        .into_iter()
+        .map(|run_on_fork| {
+            let text =
+                program_selection_action_description(menu.selected_action, verbs, run_on_fork)
+                    .unwrap_or_default();
+            wrap_to_width(&text, width).len()
+        })
+        .max()
+        .unwrap_or(0)
+        .max(1)
+        .min(max_rows.max(1))
 }
 
 fn program_selection_comment_line_count(
@@ -15031,12 +15043,12 @@ fn program_selection_comment_line_count(
 fn program_selection_action_description(
     action: crate::app::ProgramSelectionAction,
     verbs: &[construct_protocol::ProgramVerb],
-    run_on_main: bool,
+    run_on_fork: bool,
 ) -> Option<String> {
-    let destination = if run_on_main {
-        " Runs on the main session."
-    } else {
+    let destination = if run_on_fork {
         " Runs in an interactive fork."
+    } else {
+        " Runs on the main session."
     };
     match action {
         crate::app::ProgramSelectionAction::Comment => {

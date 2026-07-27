@@ -3396,7 +3396,11 @@ impl SessionManager {
             .map(str::trim)
             .filter(|c| !c.is_empty());
 
-        if params.direct_edit && params.run_on_owner {
+        // Owner delivery implies a direct edit: there is no fork whose
+        // structured result the daemon could merge back, so `direct_edit` is
+        // not consulted here. Honoring `run_on_owner` on its own also keeps a
+        // caller that asks for the owner from silently getting a fork.
+        if params.run_on_owner {
             self.start_program_run_with_dispatch_state(
                 &params.session_id,
                 &params.selection,

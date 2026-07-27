@@ -1145,7 +1145,7 @@ impl App {
             KeyCode::Tab => self.move_program_selection_action(1),
             KeyCode::BackTab => self.move_program_selection_action(-1),
             KeyCode::Enter => {
-                let run_on_main = key.modifiers.contains(KeyModifiers::SHIFT);
+                let run_on_fork = key.modifiers.contains(KeyModifiers::SHIFT);
                 let action = self
                     .program_popup
                     .as_ref()
@@ -1158,12 +1158,12 @@ impl App {
                         // reload) while this row was selected — fall back to
                         // Run rather than silently doing nothing.
                         if let Some(verb) = self.program_verbs.get(idx).cloned() {
-                            self.execute_program_selected_verb(verb.name, run_on_main).await;
+                            self.execute_program_selected_verb(verb.name, run_on_fork).await;
                         } else {
                             let comment = self.program_popup.as_ref().and_then(|popup| {
                                 Some(popup.selection_menu.as_ref()?.comment.clone())
                             });
-                            self.execute_program_selected_text(comment, run_on_main).await;
+                            self.execute_program_selected_text(comment, run_on_fork).await;
                         }
                     }
                     ProgramSelectionAction::Comment | ProgramSelectionAction::Run => {
@@ -1171,7 +1171,7 @@ impl App {
                             .program_popup
                             .as_ref()
                             .and_then(|popup| Some(popup.selection_menu.as_ref()?.comment.clone()));
-                        self.execute_program_selected_text(comment, run_on_main).await;
+                        self.execute_program_selected_text(comment, run_on_fork).await;
                     }
                 }
             }
@@ -1354,7 +1354,7 @@ impl App {
     pub(super) async fn execute_program_selected_text(
         &mut self,
         comment: Option<String>,
-        run_on_main: bool,
+        run_on_fork: bool,
     ) -> bool {
         let selected = self.program_popup.as_ref().and_then(|popup| {
             Some((
@@ -1364,7 +1364,7 @@ impl App {
         });
         let Some((selection, selected_block_ids)) = selected else {
             return self
-                .execute_program_popup_target(None, None, comment, !run_on_main)
+                .execute_program_popup_target(None, None, comment, run_on_fork)
                 .await;
         };
         if let Some(popup) = self.program_popup.as_mut() {
@@ -1377,7 +1377,7 @@ impl App {
             Some(selection),
             Some(selected_block_ids),
             comment,
-            !run_on_main,
+            run_on_fork,
         )
         .await
     }
@@ -1394,7 +1394,7 @@ impl App {
     pub(super) async fn execute_program_selected_verb(
         &mut self,
         verb: String,
-        run_on_main: bool,
+        run_on_fork: bool,
     ) -> bool {
         let Some(popup) = self.program_popup.as_ref() else {
             self.set_status("program verb failed: no active program".to_string());
@@ -1450,7 +1450,7 @@ impl App {
             base_version,
             comment,
             selection_block_ids,
-            run_on_owner: run_on_main,
+            run_on_owner: !run_on_fork,
             direct_edit: true,
         };
         match self.client.program_verb_execute(params).await {

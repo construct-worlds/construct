@@ -1797,6 +1797,79 @@ async fn program_selection_owner_run_adds_no_session_clip() {
     );
 }
 
+/// spec 0089/0137: a verb asked to run on the Program owner is delivered to
+/// that session, never silently forked — and owner delivery implies the direct
+/// anchored edit, so it holds even when the caller left `direct_edit` unset.
+#[tokio::test]
+async fn program_verb_run_on_owner_never_forks() {
+    let d = Daemon::spawn().await.expect("daemon");
+    let cwd = d.dir.path().to_string_lossy().to_string();
+
+    let owner = d
+        .client
+        .create(shell_session_params(&cwd, "owner"))
+        .await
+        .expect("create owner session");
+    let before: Vec<String> = d
+        .client
+        .list()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+
+    let md = "# Todo\n\n- say hello\n";
+    let updated = d
+        .client
+        .program_update(construct_protocol::ProgramUpdateParams {
+            session_id: owner.clone(),
+            markdown: md.to_string(),
+            base_version: None,
+            actor: construct_protocol::ProgramUpdateActor::Human,
+            template_id: None,
+            note: None,
+            shimmer: None,
+            shimmer_tooltips: None,
+        })
+        .await
+        .expect("program.update");
+
+    let result = d
+        .client
+        .program_verb_execute(construct_protocol::ProgramVerbExecuteParams {
+            session_id: owner.clone(),
+            verb: "simplify".to_string(),
+            selection: "- say hello".to_string(),
+            base_version: Some(updated.program.version),
+            comment: None,
+            selection_block_ids: None,
+            run_on_owner: true,
+            direct_edit: false,
+        })
+        .await
+        .expect("program.verb_execute");
+
+    assert_eq!(
+        result.subagent_session_id, owner,
+        "an owner-targeted verb runs on the owning session"
+    );
+    assert!(
+        !result.program.markdown.contains("@{session:"),
+        "owner verb must not annotate the selection with a session clip: {}",
+        result.program.markdown
+    );
+    let after: Vec<String> = d
+        .client
+        .list()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(before, after, "owner-targeted verb must not spawn a fork");
+}
+
 /// Poll `session_id` until it reports `want`, or panic on timeout.
 async fn wait_for_state(
     d: &Daemon,

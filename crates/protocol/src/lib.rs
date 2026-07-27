@@ -1907,8 +1907,9 @@ pub struct ProgramExecuteParams {
     /// for older clients and callers (e.g. the MCP tool) that don't send it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_block_ids: Option<Vec<String>>,
-    /// Execute in a new interactive fork of the Program-owning session.
-    /// Older clients omit this and retain owner-session execution.
+    /// Execute in a new interactive fork of the Program-owning session
+    /// instead of the owner itself. This is the explicit Shift-modified
+    /// override in the clients (spec 0137); omitting it runs on the owner.
     #[serde(default)]
     pub fork: bool,
 }
@@ -1997,11 +1998,16 @@ pub struct ProgramVerbExecuteParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_block_ids: Option<Vec<String>>,
     /// Deliver the verb prompt to the Program owner instead of creating a
-    /// fork. This is the explicit Shift-modified escape hatch in the TUI.
+    /// fork. Owner delivery always implies a direct edit — there is no fork
+    /// to merge a structured result back from — so the daemon treats this as
+    /// `direct_edit` regardless of the flag below. Interactive clients set it
+    /// for the unmodified gesture and clear it for the Shift-modified one
+    /// (spec 0137); it stays default-off so API callers keep forking.
     #[serde(default)]
     pub run_on_owner: bool,
-    /// Let the executing session edit the owner's Program directly instead
-    /// of returning a structured result for daemon-side merge.
+    /// Let the executing fork edit the owner's Program directly instead
+    /// of returning a structured result for daemon-side merge. Ignored when
+    /// `run_on_owner` is set.
     #[serde(default)]
     pub direct_edit: bool,
 }

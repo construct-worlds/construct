@@ -1,7 +1,7 @@
 # 0089-program-selection-verbs
 
 Status: accepted
-Date: 2026-07-12
+Date: 2026-07-26
 Area: architecture
 Scope: Typed refinement actions ("verbs") on a Program selection, executed by interactive forks that edit the owning Program directly, with verb definitions loaded from markdown files.
 
@@ -11,7 +11,9 @@ The Program selection context menu offers, alongside Run, a set of **verbs**: ty
 
 ### Verb execution model
 
-A verb invocation follows one lifecycle:
+A verb invocation, like a selection Run, targets the Program-owning session by default and a fork under Shift (see 0137). Delivered to the owner, the verb is simply the next prompt in that session's conversation, and the owner applies the verb's effect to its own Program with the same anchored edit described below — no fork, no session clip, no auto-archive. The lifecycle below describes the Shift-modified case, where the verb runs in a fork.
+
+A forked verb invocation follows one lifecycle:
 
 1. **Spawn.** The daemon forks the Program-owning session into a new sibling session whose first message is the verb's purpose prompt. The forked session runs the same harness as the owning session; when that harness supports native fork-resume, the verb session inherits the owning session's actual conversation state (real model memory), not merely the Program document — see "Fork, not a fresh child" below. The fork receives the owning session id as its explicit Program write target.
 2. **Interact (optional).** Verbs declare an interaction policy. A `single-shot` verb runs to completion unattended. An `interactive` verb may hold a dialogue with the user inside its own session; the user reaches it through the session clip annotated into the Program (see below). Awaiting-input status flows to the orchestrator through the existing fleet-observation channel.
@@ -42,7 +44,7 @@ The direct edit settles the verb's affected refs. If the fork exits or errors be
 
 Both effects must preserve session/harness clips that appear inside the selection unless removing them is the explicit purpose of the verb invocation; a rewrite that silently destroys dispatch provenance is a defect.
 
-The free-text instruction field defined for selection Run composes with verbs: a verb plus a non-empty instruction appends the instruction to the verb's purpose prompt. It never replaces the verb. Verbs use the fork by default. Shift+Enter or Shift+click delivers the verb prompt to the Program-owning session instead; while Shift is held, the menu labels and focused-row description preview the main-session destination.
+The free-text instruction field defined for selection Run composes with verbs: a verb plus a non-empty instruction appends the instruction to the verb's purpose prompt. It never replaces the verb. Verbs run on the Program-owning session by default. Shift+Enter or Shift+click diverts the verb into a fork instead; while Shift is held, the menu labels and focused-row description preview the fork destination. A verb is dispatched with one destination, and owner delivery always implies the direct anchored edit — there is no fork whose structured result the daemon could merge back, so a caller that asks for the owner must never silently get a fork instead.
 
 ### Verb definitions are data
 
@@ -95,9 +97,11 @@ Verb definitions as markdown files keep the surface extensible without client re
 
 ## Examples
 
-A user selects a loose paragraph describing a deploy plan and picks **Crystallize**. The blocks shimmer immediately (client-optimistic, then daemon-confirmed); a new visible session — forked from the Program-owning session, with its native conversation if the harness supports it — appears with a session clip by the selection. It re-reads the owner's Program and writes a goal line, two constraints, and four acceptance criteria directly into that document without waiting for the owner.
+A user selects a loose paragraph describing a deploy plan and picks **Crystallize**. The blocks shimmer immediately and the Program-owning session — the one they are already talking to — takes the verb as its next prompt, rewriting the paragraph into a goal line, two constraints, and four acceptance criteria.
 
-A user picks **Interview** on a vague feature section, then keeps editing elsewhere. The interview session asks one question at a time and the user answers over ten minutes. Before annotating its decision digest, the fork re-reads the meanwhile-edited Program and applies the digest itself at a current anchor; no owner-session turn is queued.
+The same user Shift+picks **Crystallize** on another paragraph because the owner is mid-turn on something else. The blocks shimmer the same way; a new visible session — forked from the Program-owning session, with its native conversation if the harness supports it — appears with a session clip by the selection. It re-reads the owner's Program and writes the crystallized section directly into that document without waiting for the owner.
+
+A user Shift+picks **Interview** on a vague feature section, then keeps editing elsewhere. The interview session asks one question at a time and the user answers over ten minutes. Before annotating its decision digest, the fork re-reads the meanwhile-edited Program and applies the digest itself at a current anchor; no owner-session turn is queued.
 
 A user drops `verbs/threat-model.md` in the construct config directory with `effect: annotate`, `interaction: single-shot`, and a purpose prompt asking for abuse cases. On the next selection, every client's menu shows **Threat model** with no client or daemon code change.
 
