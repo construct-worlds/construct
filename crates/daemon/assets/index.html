@@ -681,6 +681,34 @@
     min-height: 0;
     background: var(--bg);
   }
+  /* Chord echo: the web peer of the TUI minibuffer's pending-chord label.
+     A half-typed `C-x` has no other feedback in a browser, so without this
+     the prefix is invisible and a mistyped second key looks like the whole
+     keymap is dead. Also carries the one-line "not available here" notice
+     for chords whose TUI action has no web surface. */
+  .chord-echo {
+    position: fixed;
+    left: 50%;
+    /* Just under the header, NOT at the bottom. The TUI puts this in the
+       minibuffer, but the web UI's bottom edge is the composer — anchoring
+       there covered the message box exactly while the user was mid-chord. */
+    top: 60px; /* header is 48px */
+    transform: translateX(-50%);
+    z-index: 120;
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-elev-2);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.3;
+    white-space: nowrap;
+    pointer-events: none;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  }
+  .chord-echo[hidden] { display: none; }
+  .chord-echo.is-notice { color: var(--fg-dim); }
   /* Drag-drop attach affordance: covers the session view while a file
      drag hovers over it. pointer-events stays off so the underlying
      drag events keep firing on .view itself. */
@@ -904,6 +932,14 @@
   }
   .pane-divider:hover, .pane-divider.is-dragging { background: var(--accent); }
   .pane-split.is-resizing { user-select: none; }
+  /* Zoom (`C-x z`): show only the focused pane. Purely visual — the shared
+     tree still holds every pane, so unzooming restores the exact layout and
+     other clients never see the change. The `!important` overrides the inline
+     flex ratios `renderPaneGrid` writes for the split it is hiding. */
+  .pane-grid.is-zoomed .pane:not(.is-focused),
+  .pane-grid.is-zoomed .pane-divider { display: none; }
+  .pane-grid.is-zoomed .pane,
+  .pane-grid.is-zoomed .pane-split { flex: 1 1 auto !important; }
   .transcript {
     flex: 1 1 0;
     min-height: 0;
@@ -3141,6 +3177,14 @@
   </main>
 
   <!--
+    Pending-chord echo (spec 0150). The TUI shows a half-typed `C-x` in the
+    minibuffer; a browser has nowhere to put it, so this strip is that
+    feedback. `aria-live` announces the prefix rather than leaving a screen
+    reader user with a keyboard that silently swallowed a keystroke.
+  -->
+  <div id="chordEcho" class="chord-echo" hidden aria-live="polite"></div>
+
+  <!--
     Tool-approval bottom sheet. Shown when the adapter emits
     `tool_approval_request`; the user picks approve / deny /
     auto-review / always-approve and the client posts back via
@@ -3626,6 +3670,9 @@ const state = {
   // `focusedPaneId` is deliberately NOT part of it — focus is per-client.
   layout: { tree: null, version: 0 },
   focusedPaneId: null,
+  // Per-client pane zoom (`C-x z`). Spec 0113 keeps zoom out of the shared
+  // layout, so this never round-trips to the daemon.
+  paneZoom: false,
   // Sessions currently mounted in an unfocused pane. Their cached terminal
   // hosts must stay visible and keep receiving live PTY bytes even though
   // they are not `currentId`.
@@ -9872,6 +9919,9 @@ function renderPaneGrid() {
   releaseMirrors();
   closeSessionMenu();
   paneGridEl.hidden = false;
+  // Zoom hides the other panes instead of rewriting the tree, so the layout
+  // every other client sees is untouched and un-zooming is exact.
+  paneGridEl.classList.toggle("is-zoomed", !!state.paneZoom);
   const focusedId = state.focusedPaneId;
 
   const buildNode = (node) => {
@@ -13412,6 +13462,462 @@ function initPullToRefresh() {
 
   header.addEventListener("touchcancel", reset, { passive: true });
 }
+
+// --- TUI keybindings (spec 0150) -----------------------------------------
+//
+// The TUI's emacs `C-x` chords, spelled identically in the browser. Only the
+// `C-x` family is bound: the TUI's bare-key bindings (`t`, `?`, `space`, `gg`)
+// assume a modal list that never has a text caret in it, and claiming bare
+// letters in a browser would break typing everywhere. `C-x` is unclaimed by
+// browsers and by every harness we run, so it is the one prefix that can be
+// taken globally without a fight.
+//
+// Chords are matched by the same rule the TUI uses: exact match fires, a
+// proper prefix arms and waits, anything else cancels and passes through.
+
+const CHORD_TIMEOUT_MS = 3000;
+const CHORD_ECHO_MS = 1600;
+const chordEchoEl = $("chordEcho");
+
+const chordState = { pending: [], timer: null, echoTimer: null };
+
+/**
+ * Normalize a KeyboardEvent to the TUI's chord vocabulary.
+ *
+ * Ctrl — not Meta — carries the `C-` prefix, matching the TUI and leaving
+ * macOS ⌘ shortcuts (⌘W, ⌘T, ⌘L) alone. A browser that swallowed those
+ * would feel broken in a way a terminal never does.
+ */
+function keyToken(ev) {
+  const named = {
+    ArrowUp: "Up",
+    ArrowDown: "Down",
+    ArrowLeft: "Left",
+    ArrowRight: "Right",
+    Tab: "Tab",
+    Enter: "Enter",
+    " ": "Space",
+    Escape: "Escape",
+  };
+  let base = named[ev.key] || ev.key;
+  if (!base || base.length > 1) {
+    if (!named[ev.key]) return null; // modifier press on its own, F-keys, etc.
+  }
+  if (ev.ctrlKey) {
+    // `ev.key` for Ctrl+letter is the bare letter in every current browser.
+    return "C-" + base.toLowerCase();
+  }
+  return base;
+}
+
+// Chord table. Mirrors the emacs profile's `C-x` bindings one-for-one; the
+// spelling is the contract, so this list should be diffed against the TUI's
+// keymap whenever either side changes.
+const WEB_KEYMAP = [
+  { keys: ["C-x", "C-c"], action: "quit" },
+  { keys: ["C-x", "o"], action: "switch-focus" },
+  { keys: ["C-x", "Tab"], action: "focus-list" },
+  { keys: ["C-x", "Up"], action: "focus-window-up" },
+  { keys: ["C-x", "Down"], action: "focus-window-down" },
+  { keys: ["C-x", "Left"], action: "focus-window-left" },
+  { keys: ["C-x", "Right"], action: "focus-window-right" },
+  { keys: ["C-x", "2"], action: "split-below" },
+  { keys: ["C-x", "3"], action: "split-right" },
+  { keys: ["C-x", "0"], action: "close-pane" },
+  { keys: ["C-x", "1"], action: "close-other-panes" },
+  { keys: ["C-x", "^"], action: "enlarge-window" },
+  { keys: ["C-x", "}"], action: "enlarge-window-horizontally" },
+  { keys: ["C-x", "{"], action: "shrink-window-horizontally" },
+  { keys: ["C-x", "t"], action: "toggle-view" },
+  { keys: ["C-x", "z"], action: "toggle-zoom" },
+  { keys: ["C-x", "C-f"], action: "new-session" },
+  { keys: ["C-x", "b"], action: "switch-session" },
+  { keys: ["C-x", "k"], action: "close-session" },
+  { keys: ["C-x", "Space"], action: "open-program" },
+  { keys: ["C-x", "C-s"], action: "save-program" },
+  { keys: ["C-x", "u"], action: "undo-program" },
+  { keys: ["C-x", "C-r"], action: "run-program" },
+  { keys: ["C-x", "C-o"], action: "toggle-program-terminal-focus" },
+  { keys: ["C-x", "d"], action: "open-diff" },
+  { keys: ["C-x", "i"], action: "send-input" },
+  { keys: ["C-x", "r"], action: "rename" },
+  { keys: ["C-x", "f"], action: "fork" },
+  { keys: ["C-x", "p"], action: "toggle-pin" },
+  { keys: ["C-x", "C-p"], action: "move-selected-up" },
+  { keys: ["C-x", "C-n"], action: "move-selected-down" },
+  { keys: ["C-x", "x"], action: "command-palette" },
+  { keys: ["C-x", "["], action: "scroll-page-up" },
+  { keys: ["C-x", "]"], action: "scroll-page-down" },
+  { keys: ["C-x", "A"], action: "toggle-automode" },
+  { keys: ["C-x", "c"], action: "toggle-mouse-capture" },
+  { keys: ["C-x", "v"], action: "paste-local-clipboard" },
+];
+
+/** Chords whose TUI action has no web surface, and why. Answering is better
+ *  than a dead key: the user learns the binding exists and stops retrying. */
+const UNSUPPORTED_ACTIONS = {
+  quit: "C-x C-c — nothing to quit; close the browser tab",
+  "toggle-program-terminal-focus": "C-x C-o — Program is a view here, not an overlay",
+  "open-diff": "C-x d — no diff view in the web UI yet",
+  "command-palette": "C-x x — no command palette in the web UI yet",
+  "toggle-automode": "C-x A — approval mode is not exposed here yet",
+  "toggle-mouse-capture": "C-x c — the browser owns the mouse",
+  "paste-local-clipboard": "C-x v — use the browser's own paste",
+};
+
+function chordLabel(keys) {
+  return keys.join(" ");
+}
+
+function showChordEcho(text, isNotice) {
+  if (!chordEchoEl) return;
+  chordEchoEl.textContent = text;
+  chordEchoEl.classList.toggle("is-notice", !!isNotice);
+  chordEchoEl.hidden = false;
+  clearTimeout(chordState.echoTimer);
+  if (isNotice) {
+    chordState.echoTimer = setTimeout(hideChordEcho, CHORD_ECHO_MS);
+  }
+}
+
+function hideChordEcho() {
+  if (chordEchoEl) chordEchoEl.hidden = true;
+}
+
+function resetChord() {
+  chordState.pending = [];
+  clearTimeout(chordState.timer);
+  hideChordEcho();
+}
+
+/**
+ * Feed one key to the chord machine.
+ *
+ * Returns true when the key was consumed — the caller must then stop the
+ * event so it reaches neither the browser nor a focused child PTY.
+ */
+function handleChordKey(ev) {
+  const token = keyToken(ev);
+  if (!token) return false;
+  // Escape always cancels a half-typed chord, as in emacs and the TUI.
+  if (token === "Escape" && chordState.pending.length) {
+    resetChord();
+    return true;
+  }
+  const probe = chordState.pending.concat([token]);
+  let exact = null;
+  let hasPrefix = false;
+  for (const binding of WEB_KEYMAP) {
+    if (binding.keys.length === probe.length && binding.keys.every((k, i) => k === probe[i])) {
+      exact = binding.action;
+    } else if (
+      binding.keys.length > probe.length &&
+      probe.every((k, i) => binding.keys[i] === k)
+    ) {
+      hasPrefix = true;
+    }
+  }
+  if (exact) {
+    resetChord();
+    runKeyAction(exact, probe);
+    return true;
+  }
+  if (hasPrefix) {
+    chordState.pending = probe;
+    showChordEcho(chordLabel(probe) + " -", false);
+    clearTimeout(chordState.timer);
+    chordState.timer = setTimeout(resetChord, CHORD_TIMEOUT_MS);
+    return true;
+  }
+  // A prefix followed by an unbound key is still consumed: the TUI swallows
+  // it rather than letting a stray `C-x q` reach the child.
+  const wasPending = chordState.pending.length > 0;
+  if (wasPending) {
+    resetChord();
+    showChordEcho(chordLabel(probe) + " is not bound", true);
+    return true;
+  }
+  return false;
+}
+
+/** The nearest ancestor split of a pane, plus which side the pane sits on. */
+function layoutParentSplit(node, paneId, direction = null) {
+  if (!node || node.kind === "leaf") return null;
+  const inFirst = layoutFindLeaf(node.first, paneId);
+  const inSecond = layoutFindLeaf(node.second, paneId);
+  if (!inFirst && !inSecond) return null;
+  const deeper = layoutParentSplit(inFirst ? node.first : node.second, paneId, direction);
+  if (deeper) return deeper;
+  if (direction && node.direction !== direction) return null;
+  return { node, side: inFirst ? "first" : "second" };
+}
+
+function adjustFocusedRatio(direction, delta) {
+  if (!splitLayoutActive() || !state.layout.tree) return false;
+  const tree = cloneLayout(state.layout.tree);
+  const found = layoutParentSplit(tree, state.focusedPaneId, direction);
+  if (!found) return false;
+  // `delta` is "grow the focused pane"; a pane on the second side grows by
+  // shrinking the ratio, which is measured from the first.
+  const signed = found.side === "first" ? delta : -delta;
+  const current = found.node.ratio_percent || 50;
+  found.node.ratio_percent = Math.min(90, Math.max(10, current + signed));
+  state.layout.tree = tree;
+  renderPaneGrid();
+  pushLayout(tree);
+  return true;
+}
+
+/** Directional pane focus, resolved geometrically from the rendered panes. */
+function focusPaneInDirection(dir) {
+  if (!splitLayoutActive()) return false;
+  const panes = Array.from(paneGridEl.querySelectorAll(".pane[data-pane-id]"));
+  const current = panes.find((p) => Number(p.dataset.paneId) === state.focusedPaneId);
+  if (!current || panes.length < 2) return false;
+  const from = current.getBoundingClientRect();
+  const fx = from.left + from.width / 2;
+  const fy = from.top + from.height / 2;
+  let best = null;
+  let bestDist = Infinity;
+  for (const pane of panes) {
+    if (pane === current) continue;
+    const r = pane.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const dx = cx - fx;
+    const dy = cy - fy;
+    const ok =
+      (dir === "up" && dy < 0 && Math.abs(dy) > Math.abs(dx)) ||
+      (dir === "down" && dy > 0 && Math.abs(dy) > Math.abs(dx)) ||
+      (dir === "left" && dx < 0 && Math.abs(dx) >= Math.abs(dy)) ||
+      (dir === "right" && dx > 0 && Math.abs(dx) >= Math.abs(dy));
+    if (!ok) continue;
+    const dist = Math.abs(dx) + Math.abs(dy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = pane;
+    }
+  }
+  if (!best) return false;
+  focusPane(Number(best.dataset.paneId));
+  return true;
+}
+
+/** Cycle focus through the panes in layout order (emacs `other-window`). */
+function cyclePaneFocus() {
+  const leaves = layoutLeaves(state.layout.tree);
+  if (leaves.length < 2) return false;
+  const idx = leaves.findIndex((l) => l.id === state.focusedPaneId);
+  const next = leaves[(idx + 1 + leaves.length) % leaves.length];
+  focusPane(next.id);
+  return true;
+}
+
+/** Move keyboard focus to the session list, or back to the view. */
+function toggleListFocus() {
+  const active = document.activeElement;
+  if (sessionListEl.contains(active)) {
+    focusActiveSurface();
+    return;
+  }
+  if (!isSessionListVisible()) setSessionListVisible(true);
+  const selected =
+    sessionListEl.querySelector(".item.selected") || sessionListEl.querySelector(".item[data-id]");
+  if (selected) {
+    selected.setAttribute("tabindex", "-1");
+    selected.focus();
+  } else {
+    sessionListEl.focus();
+  }
+}
+
+/** Put the caret back where typing should land for the current view. */
+function focusActiveSurface() {
+  if (state.mode === "program") {
+    programInputEl.focus();
+    return;
+  }
+  if (state.mode === "terminal") {
+    const handle = state.terminalById.get(state.currentId);
+    if (handle) handle.term.focus();
+    return;
+  }
+  inputEl.focus();
+}
+
+/** Scroll whichever surface the current view is showing. */
+function scrollActiveSurface(pages) {
+  if (state.mode === "terminal") {
+    const handle = state.terminalById.get(state.currentId);
+    if (handle) handle.term.scrollPages(pages);
+    return;
+  }
+  // `.program-editor` is the positioning context; `.program-input` inside it
+  // is the element that actually scrolls.
+  const pane =
+    state.mode === "program"
+      ? programInputEl
+      : state.transcriptPaneById.get(state.currentId);
+  if (pane) pane.scrollBy({ top: pane.clientHeight * 0.9 * pages, behavior: "auto" });
+}
+
+function runKeyAction(action, keys) {
+  const notice = UNSUPPORTED_ACTIONS[action];
+  if (notice) {
+    showChordEcho(notice, true);
+    return;
+  }
+  const id = state.currentId;
+  switch (action) {
+    case "switch-focus":
+      if (!cyclePaneFocus()) toggleListFocus();
+      return;
+    case "focus-list":
+      toggleListFocus();
+      return;
+    case "focus-window-up":
+    case "focus-window-down":
+    case "focus-window-left":
+    case "focus-window-right": {
+      const dir = action.replace("focus-window-", "");
+      if (!focusPaneInDirection(dir)) {
+        showChordEcho(chordLabel(keys) + " — no pane that way", true);
+      }
+      return;
+    }
+    case "split-below":
+    case "split-right": {
+      if (!splitLayoutAvailable()) {
+        showChordEcho(chordLabel(keys) + " — window too narrow to split", true);
+        return;
+      }
+      splitFocusedPane(action === "split-below" ? "below" : "right");
+      return;
+    }
+    case "close-pane":
+      if (layoutLeafCount(state.layout.tree) <= 1) {
+        showChordEcho("C-x 0 — only one pane", true);
+        return;
+      }
+      closePane(state.focusedPaneId);
+      return;
+    case "close-other-panes": {
+      const leaf = layoutFindLeaf(state.layout.tree, state.focusedPaneId);
+      if (!leaf || layoutLeafCount(state.layout.tree) <= 1) return;
+      const only = cloneLayout(leaf);
+      state.layout.tree = only;
+      state.focusedPaneId = only.id;
+      renderPaneGrid();
+      pushLayout(only);
+      return;
+    }
+    case "enlarge-window":
+      if (!adjustFocusedRatio("below", 5)) {
+        showChordEcho("C-x ^ — no split to resize", true);
+      }
+      return;
+    case "enlarge-window-horizontally":
+      if (!adjustFocusedRatio("right", 5)) {
+        showChordEcho("C-x } — no split to resize", true);
+      }
+      return;
+    case "shrink-window-horizontally":
+      if (!adjustFocusedRatio("right", -5)) {
+        showChordEcho("C-x { — no split to resize", true);
+      }
+      return;
+    case "toggle-view": {
+      // The TUI's ToggleView flips chat ↔ terminal; Program has its own
+      // chord (`C-x Space`), so it is not part of the cycle here either.
+      const s = currentSession();
+      if (!s) return;
+      switchCurrentViewMode(state.mode === "terminal" ? "chat" : "terminal");
+      return;
+    }
+    case "toggle-zoom":
+      if (!splitLayoutActive()) {
+        showChordEcho("C-x z — nothing to zoom", true);
+        return;
+      }
+      state.paneZoom = !state.paneZoom;
+      renderPaneGrid();
+      return;
+    case "new-session":
+      openNewSessionDialog();
+      return;
+    case "switch-session":
+      // The web has no switcher popup yet; the list is the nearest thing.
+      toggleListFocus();
+      return;
+    case "close-session":
+      if (id) openCloseSessionDialog(id);
+      return;
+    case "open-program":
+      if (id) switchCurrentViewMode("program");
+      return;
+    case "save-program":
+      if (state.mode === "program") programSave();
+      else showChordEcho("C-x C-s — open Program first", true);
+      return;
+    case "run-program":
+      if (state.mode === "program") programRun();
+      else showChordEcho("C-x C-r — open Program first", true);
+      return;
+    case "undo-program":
+      if (state.mode === "program") {
+        programInputEl.focus();
+        document.execCommand("undo");
+      } else {
+        showChordEcho("C-x u — open Program first", true);
+      }
+      return;
+    case "send-input":
+      inputEl.focus();
+      return;
+    case "rename":
+      if (id) openRenameDialog(id);
+      return;
+    case "fork":
+      if (id) forkSession(id);
+      return;
+    case "toggle-pin":
+      if (id) handleRowAction("pin", id);
+      return;
+    case "move-selected-up":
+      if (id) moveSessionSteps(id, -1);
+      return;
+    case "move-selected-down":
+      if (id) moveSessionSteps(id, 1);
+      return;
+    case "scroll-page-up":
+      scrollActiveSurface(-1);
+      return;
+    case "scroll-page-down":
+      scrollActiveSurface(1);
+      return;
+    default:
+      return;
+  }
+}
+
+// Capture phase on `document`, which is what makes this work everywhere:
+// the chord is claimed before the composer, the Program editor, a dialog, or
+// xterm's own textarea listener can see it. Stopping propagation here is also
+// how `C-x` chords escape a focused child PTY — the browser peer of the TUI's
+// rule (spec 0061) that these keys must leave a busy pane, since escaping is
+// their entire purpose. Every other Ctrl key (C-c, C-d, C-a …) is untouched
+// and still reaches the child.
+document.addEventListener(
+  "keydown",
+  (ev) => {
+    if (ev.isComposing) return;
+    if (handleChordKey(ev)) {
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
+  },
+  true
+);
 
 // --- Boot ---------------------------------------------------------------
 

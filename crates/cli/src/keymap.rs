@@ -1,6 +1,10 @@
 //! Keymap definitions. Default is emacs; an alternative vim profile is
 //! provided. The TUI dispatches based on a small chord state machine so
 //! emacs-style two-key bindings work.
+//!
+//! The web UI mirrors this table's `C-x` chords one-for-one (spec 0150):
+//! same spelling, same action. Changing a `C-x` binding here without
+//! changing it there is the divergence that spec exists to prevent.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
