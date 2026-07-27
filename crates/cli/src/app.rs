@@ -1467,8 +1467,10 @@ pub struct App {
     pub program_verbs: Vec<construct_protocol::ProgramVerb>,
     /// True while Shift is held under enhanced keyboard reporting, or while
     /// the latest mouse event carries Shift. The Program selection menu uses
-    /// this to preview its owner-session execution override.
-    pub program_selection_run_on_main: bool,
+    /// this to preview its forked-execution override (spec 0137: Run and
+    /// verbs go to the Program-owning session by default; Shift diverts them
+    /// into an interactive fork).
+    pub program_selection_run_on_fork: bool,
     /// Background channel for live-reloaded program verbs, the `program_verbs`
     /// counterpart to `program_templates_tx`.
     pub program_verbs_tx: mpsc::UnboundedSender<Vec<construct_protocol::ProgramVerb>>,
@@ -4607,7 +4609,7 @@ async fn run_with_socket_initial_selection(
         program_templates,
         program_templates_tx,
         program_verbs,
-        program_selection_run_on_main: false,
+        program_selection_run_on_fork: false,
         program_verbs_tx,
         program_markdown_cache: HashMap::new(),
         program_projection_pending: HashSet::new(),
@@ -9422,7 +9424,7 @@ impl App {
                     k.code,
                     KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift)
                 ) {
-                    self.program_selection_run_on_main =
+                    self.program_selection_run_on_fork =
                         !matches!(k.kind, KeyEventKind::Release);
                 }
                 if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
@@ -9443,7 +9445,7 @@ impl App {
         if !self.mouse_capture_enabled {
             return;
         }
-        self.program_selection_run_on_main = ev.modifiers.contains(KeyModifiers::SHIFT);
+        self.program_selection_run_on_fork = ev.modifiers.contains(KeyModifiers::SHIFT);
         use crossterm::event::MouseButton;
         const LIST_STEP: i32 = 3;
         let scrollback_step = self.mouse_scrollback_step();
@@ -14765,7 +14767,7 @@ mod tests {
             program_templates: Vec::new(),
             program_templates_tx: mpsc::unbounded_channel().0,
             program_verbs: Vec::new(),
-            program_selection_run_on_main: false,
+            program_selection_run_on_fork: false,
             program_verbs_tx: mpsc::unbounded_channel().0,
             program_markdown_cache: HashMap::new(),
             program_projection_pending: HashSet::new(),
@@ -20199,21 +20201,21 @@ mod tests {
             "Run's description shows while Run is highlighted: {text:?}"
         );
         assert!(
-            text.contains("interactive") && text.contains("fork."),
+            text.contains("Runs on the main") && text.contains("session."),
             "the default destination is explicit: {text:?}"
         );
 
-        app.program_selection_run_on_main = true;
+        app.program_selection_run_on_fork = true;
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("program should render with Shift held");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            text.contains("Run on main")
-                && text.contains("Runs on the main")
-                && text.contains("session."),
-            "holding Shift previews the owner-session override: {text:?}"
+            text.contains("Run in fork")
+                && text.contains("interactive")
+                && text.contains("fork."),
+            "holding Shift previews the forked-execution override: {text:?}"
         );
-        app.program_selection_run_on_main = false;
+        app.program_selection_run_on_fork = false;
 
         app.program_popup.as_mut().unwrap().selection_menu.as_mut().unwrap().selected_action =
             ProgramSelectionAction::Verb(0);
@@ -23379,8 +23381,8 @@ mod tests {
         );
         assert_eq!(
             params.get("fork").and_then(Value::as_bool),
-            Some(true),
-            "plain selection Run click should use an interactive fork"
+            Some(false),
+            "plain selection Run click should run on the Program-owning session"
         );
         server.abort();
     }
@@ -23484,6 +23486,113 @@ mod tests {
         server.abort();
     }
 
+    /// spec 0137/0089: a verb picked from the selection menu runs on the
+    /// Program-owning session, and Shift diverts it into a fork — the same
+    /// destination rule selection Run follows.
+    #[tokio::test]
+    async fn program_selection_verb_runs_on_owner_unless_shift_held() {
+        use construct_protocol::ipc_method;
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: Value = serde_json::from_str(&line).expect("json request");
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let params = req.get("params").cloned().unwrap_or(Value::Null);
+                let _ = seen_tx.send((method.clone(), params.clone()));
+                let program = serde_json::json!({
+                    "session_id": "s1",
+                    "markdown": "alpha beta",
+                    "version": 1,
+                    "updated_at_ms": 0,
+                    "template_id": null,
+                });
+                let result = match method.as_str() {
+                    ipc_method::PROGRAM_VERB_EXECUTE => serde_json::json!({
+                        "program": program,
+                        "subagent_session_id": "s1",
+                        "verb": "simplify",
+                        "blocks": [],
+                    }),
+                    _ => Value::Null,
+                };
+                let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                if writer
+                    .write_all((resp.to_string() + "\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut app = test_app(client, Vec::new());
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.program_verbs = vec![test_verb_with_description(
+            "simplify",
+            "Simplify",
+            construct_protocol::ProgramVerbEffect::Rewrite,
+            "reduce to the minimum that preserves intent.",
+        )];
+
+        for (shift, expect_owner) in [(false, true), (true, false)] {
+            app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+            app.begin_program_selection();
+            app.move_program_cursor(5);
+            app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+                focused: true,
+                selected_action: ProgramSelectionAction::Verb(0),
+                ..Default::default()
+            });
+            let modifiers = if shift {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            app.handle_program_key(KeyEvent::new(KeyCode::Enter, modifiers))
+                .await;
+
+            let (method, params) = seen_rx.recv().await.expect("program verb execute request");
+            assert_eq!(method, ipc_method::PROGRAM_VERB_EXECUTE);
+            assert_eq!(params.get("verb").and_then(Value::as_str), Some("simplify"));
+            assert_eq!(
+                params.get("run_on_owner").and_then(Value::as_bool),
+                Some(expect_owner),
+                "shift={shift} should target {}",
+                if expect_owner { "the owner" } else { "a fork" }
+            );
+        }
+        server.abort();
+    }
+
     #[tokio::test]
     async fn program_selection_run_menu_comment_runs_selection_with_comment() {
         use construct_protocol::ipc_method;
@@ -23579,8 +23688,8 @@ mod tests {
         );
         assert_eq!(
             params.get("fork").and_then(Value::as_bool),
-            Some(false),
-            "Shift+Enter should run the selection on the main session"
+            Some(true),
+            "Shift+Enter should divert the selection Run into a fork"
         );
         server.abort();
     }

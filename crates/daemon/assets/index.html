@@ -2995,7 +2995,8 @@
           <div class="program-cursor-layer" id="programCursorLayer"></div>
           <div class="program-empty" id="programEmpty" hidden></div>
           <div class="program-selection-menu" id="programSelectionMenu" hidden>
-            <button type="button" id="programSelectionRunBtn" title="Run selected program text">
+            <button type="button" id="programSelectionRunBtn"
+                    title="Run selected program text on this session (Shift: run in a fork)">
               <span aria-hidden="true">▶</span><span>Run</span>
             </button>
             <!-- Program selection verbs (spec 0089): typed refinement actions
@@ -7406,7 +7407,11 @@ function programHashRunBody(text) {
   return h >>> 0;
 }
 
-async function programRun() {
+// `fork` is the Shift-modified selection gesture (spec 0137): a selection Run
+// goes to the Program-owning session by default, and Shift diverts it into a
+// new interactive fork instead. Whole-document Run always targets the owner,
+// so the flag is only forwarded when there is a selection.
+async function programRun(fork = false) {
   const id = state.program.mountedId;
   if (!id) return;
   let doc = state.program.docById.get(id);
@@ -7429,7 +7434,10 @@ async function programRun() {
   // repeat is coalesced: a selection run while a full run is in flight, a
   // different selection, and a re-Run whose body changed all still dispatch.
   const preSaveBody = hasSel ? programNormalizeClipIds(selMarkdown) : programNormalizeClipIds(programSerialize());
-  const dispatchKey = `${id}::${hasSel ? 1 : 0}::${programHashRunBody(preSaveBody)}`;
+  // The destination is part of the identity: an owner Run and a forked Run of
+  // the same body are two different user intents, not a repeat to coalesce.
+  const runInFork = fork && hasSel;
+  const dispatchKey = `${id}::${hasSel ? 1 : 0}::${runInFork ? 1 : 0}::${programHashRunBody(preSaveBody)}`;
   const guardState = state.program.runDispatch.get(dispatchKey);
   const suppressed = guardState === "inflight"
     || (typeof guardState === "number" && performance.now() - guardState < PROGRAM_RUN_DEDUP_WINDOW_MS);
@@ -7470,6 +7478,7 @@ async function programRun() {
     if (selection != null) params.selection = selection;
     if (selectedBlockIds && selectedBlockIds.size) params.selection_block_ids = Array.from(selectedBlockIds);
     if (optimistic && optimistic.shimmer && optimistic.shimmer.length) params.shimmer = optimistic.shimmer;
+    if (runInFork) params.fork = true;
     const result = await rpc("program.execute", params);
     // Dispatch landed: start the debounce window rather than clearing the
     // guard outright, so an identical repeat arriving right behind it is
@@ -7483,7 +7492,9 @@ async function programRun() {
       if (state.program.mountedId === id) { programStopShimmer(); programApplyShimmer(); }
     }
     if (runP && runP.firstOutputSeen) programClearRunButton(id);
-    programSetMsg(`run sent (${hasSel ? "selection" : "program"}, v${result.program.version})`);
+    programSetMsg(
+      `run sent (${hasSel ? "selection" : "program"}${runInFork ? ", fork" : ""}, v${result.program.version})`,
+    );
   } catch (e) {
     // The request never landed — retract the guard so the user can retry
     // immediately.
@@ -7502,7 +7513,10 @@ async function programRun() {
 // it applies before this call returns), and the eventual merge arrives back
 // through the same program/state broadcast that already repaints the editor
 // for any other agent-driven edit.
-async function programRunVerb(verbName) {
+// `fork` mirrors programRun's Shift-modified gesture (spec 0137): the verb
+// prompt goes to the Program-owning session by default, and Shift runs it in
+// an interactive fork that edits the owner's document directly.
+async function programRunVerb(verbName, fork = false) {
   const id = state.program.mountedId;
   if (!id) return;
   let doc = state.program.docById.get(id);
@@ -7537,10 +7551,20 @@ async function programRunVerb(verbName) {
   programStartOptimisticRun(id, selection, true, selectedBlockIds, doc.saved);
   programSetMsg(`running verb "${verbName}"…`);
   try {
-    const params = { session_id: id, verb: verbName, selection, base_version: doc.version };
+    // `direct_edit` matches the TUI: whichever session runs the verb applies
+    // its own anchored edit to the owner's Program rather than handing a
+    // structured result back for a daemon-side merge (spec 0089).
+    const params = {
+      session_id: id,
+      verb: verbName,
+      selection,
+      base_version: doc.version,
+      run_on_owner: !fork,
+      direct_edit: true,
+    };
     if (selectedBlockIds && selectedBlockIds.size) params.selection_block_ids = Array.from(selectedBlockIds);
     await rpc("program.verb_execute", params);
-    programSetMsg(`verb "${verbName}" dispatched`);
+    programSetMsg(`verb "${verbName}" dispatched${fork ? " (fork)" : ""}`);
   } catch (e) {
     programSetMsg("verb failed: " + e.message, true);
   }
@@ -7582,7 +7606,7 @@ function programRenderSelectionVerbs() {
       btn.type = "button";
       btn.className = "program-selection-verb-btn";
       btn.dataset.verb = v.name;
-      btn.title = v.description || v.label;
+      btn.title = `${v.description || v.label} (Shift: run in a fork)`;
       btn.textContent = `▸ ${v.label}`;
       return btn;
     }),
@@ -8056,7 +8080,7 @@ function programOnKeyDown(e) {
     if (e.key === "Escape") { e.preventDefault(); programCloseClipMenu(); return; }
   }
   if (mod && (e.key === "s" || e.key === "S")) { e.preventDefault(); programSave(); return; }
-  if (mod && e.key === "Enter") { e.preventDefault(); programRun(); return; }
+  if (mod && e.key === "Enter") { e.preventDefault(); programRun(e.shiftKey); return; }
   // Emacs C-f: move the caret forward one character, matching the TUI's
   // Program binding. Must preventDefault or the browser opens its Find bar.
   if (mod && (e.key === "f" || e.key === "F")) {
@@ -8147,7 +8171,7 @@ function programWireEvents() {
   programSelectionRunBtn.addEventListener("mousedown", async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    await programRun();
+    await programRun(e.shiftKey);
     programClearSelection();
     try { programInputEl.focus(); } catch (_) {}
   });
@@ -8159,7 +8183,7 @@ function programWireEvents() {
     if (!btn) return;
     e.preventDefault();
     e.stopPropagation();
-    await programRunVerb(btn.dataset.verb);
+    await programRunVerb(btn.dataset.verb, e.shiftKey);
     programClearSelection();
     try { programInputEl.focus(); } catch (_) {}
   });
