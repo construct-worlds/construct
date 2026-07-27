@@ -200,6 +200,12 @@ pub struct Storage {
     /// are a personal customization, not project data. `None` (only in
     /// tests that don't call the setter) falls back to `data_dir/verbs`.
     program_verbs_dir_override: Option<PathBuf>,
+    /// Plugin verb directories as `(namespace, dir)` pairs (spec 0151).
+    /// Verbs from these load force-namespaced `<namespace>:<name>`.
+    plugin_verb_dirs: Vec<(String, PathBuf)>,
+    /// Plugin template directories as `(namespace, dir)` pairs (spec 0151).
+    /// Templates from these list with id `<namespace>:<stem>`.
+    plugin_template_dirs: Vec<(String, PathBuf)>,
 }
 
 impl Storage {
@@ -212,6 +218,8 @@ impl Storage {
             data_dir,
             program_templates_dir_override: None,
             program_verbs_dir_override: None,
+            plugin_verb_dirs: Vec::new(),
+            plugin_template_dirs: Vec::new(),
         })
     }
 
@@ -230,6 +238,20 @@ impl Storage {
         self
     }
 
+    /// Set the plugin verb directories (spec 0151), as `(namespace, dir)`
+    /// pairs from `plugins::PluginSet::verb_dirs`.
+    pub fn with_plugin_verb_dirs(mut self, dirs: Vec<(String, PathBuf)>) -> Self {
+        self.plugin_verb_dirs = dirs;
+        self
+    }
+
+    /// Set the plugin template directories (spec 0151), as `(namespace,
+    /// dir)` pairs from `plugins::PluginSet::template_dirs`.
+    pub fn with_plugin_template_dirs(mut self, dirs: Vec<(String, PathBuf)>) -> Self {
+        self.plugin_template_dirs = dirs;
+        self
+    }
+
     pub fn program_verbs_dir(&self) -> PathBuf {
         self.program_verbs_dir_override
             .clone()
@@ -237,7 +259,10 @@ impl Storage {
     }
 
     pub fn program_verbs(&self) -> Vec<construct_protocol::ProgramVerb> {
-        crate::program_verbs::load_verbs(&self.program_verbs_dir())
+        crate::program_verbs::load_verbs_with_plugins(
+            &self.program_verbs_dir(),
+            &self.plugin_verb_dirs,
+        )
     }
 
     pub fn global_memory_path(&self) -> PathBuf {
@@ -696,6 +721,40 @@ impl Storage {
                     id: stem.to_string(),
                     name: prettify_template_name(stem),
                     description: None,
+                    markdown: raw,
+                    built_in: false,
+                });
+            }
+        }
+        // Plugin templates (spec 0151): listed like user templates but with
+        // namespaced ids so a plugin can never shadow a user template file.
+        for (namespace, dir) in &self.plugin_template_dirs {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(dir = %dir.display(), error = ?e, "read plugin templates dir failed");
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let raw = match std::fs::read_to_string(&path) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = ?e, "skip unreadable plugin template");
+                        continue;
+                    }
+                };
+                templates.push(ProgramTemplate {
+                    id: format!("{namespace}:{stem}"),
+                    name: prettify_template_name(stem),
+                    description: Some(format!("from plugin {namespace}")),
                     markdown: raw,
                     built_in: false,
                 });
@@ -2358,6 +2417,28 @@ mod program_tests {
         assert_eq!(review.markdown, contents);
         assert_eq!(review.description, None);
         assert!(!review.built_in);
+        assert!(templates.iter().any(|t| t.id == "tasks" && t.built_in));
+    }
+
+    #[test]
+    fn plugin_templates_list_with_namespaced_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugin-templates");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("threat-model.md"), "# Threat model\n").unwrap();
+        let storage = Storage::new(tmp.path().join("data"))
+            .unwrap()
+            .with_plugin_template_dirs(vec![("secplug".to_string(), plugin_dir)]);
+
+        let templates = storage.program_templates().unwrap();
+        let t = templates
+            .iter()
+            .find(|t| t.id == "secplug:threat-model")
+            .expect("plugin template listed under namespaced id");
+        assert_eq!(t.name, "Threat Model");
+        assert_eq!(t.description.as_deref(), Some("from plugin secplug"));
+        assert!(!t.built_in);
+        // Built-ins are untouched.
         assert!(templates.iter().any(|t| t.id == "tasks" && t.built_in));
     }
 

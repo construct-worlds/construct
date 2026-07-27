@@ -217,6 +217,56 @@ pub fn missing_bin_hint(bin: &str, source: &std::io::Error) -> String {
     )
 }
 
+/// Env var the daemon sets on adapter processes to describe MCP servers
+/// contributed by installed plugins (spec 0151): a JSON array of
+/// `{ "name", "command", "args", "env" }` objects, commands already
+/// resolved to absolute paths. Adapters inject these alongside the
+/// construct MCP server; `CONSTRUCT_INJECT_MCP=0` disables both.
+pub const PLUGIN_MCP_SERVERS_ENV: &str = "CONSTRUCT_PLUGIN_MCP_SERVERS";
+
+/// One plugin-contributed MCP server, as decoded from
+/// [`PLUGIN_MCP_SERVERS_ENV`].
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PluginMcpServer {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// Decode [`PLUGIN_MCP_SERVERS_ENV`] from the process environment. A
+/// malformed payload logs to stderr and injects nothing — a broken plugin
+/// must not keep a session from starting. The reserved name `construct` is
+/// dropped so a plugin can never displace the construct MCP server itself.
+pub fn plugin_mcp_servers() -> Vec<PluginMcpServer> {
+    let Ok(raw) = std::env::var(PLUGIN_MCP_SERVERS_ENV) else {
+        return Vec::new();
+    };
+    plugin_mcp_servers_from(&raw)
+}
+
+fn plugin_mcp_servers_from(raw: &str) -> Vec<PluginMcpServer> {
+    match serde_json::from_str::<Vec<PluginMcpServer>>(raw) {
+        Ok(list) => list
+            .into_iter()
+            .filter(|s| {
+                if s.name == "construct" || s.name.is_empty() {
+                    eprintln!("construct MCP inject: skipping plugin server with reserved/empty name");
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect(),
+        Err(e) => {
+            eprintln!("construct MCP inject: bad {PLUGIN_MCP_SERVERS_ENV} payload: {e}");
+            Vec::new()
+        }
+    }
+}
+
 /// Returns codex `-c key=value` flag pairs that register `construct-mcp` as a
 /// session-scoped MCP server. Codex has no `--mcp-config` flag; MCP servers
 /// live in `[mcp_servers.<name>]` in `config.toml`, and the per-invocation
@@ -224,7 +274,8 @@ pub fn missing_bin_hint(bin: &str, source: &std::io::Error) -> String {
 ///
 /// The returned `Vec<String>` is appended to codex's argv (`-c`, `<value>`,
 /// `-c`, `<value>`, ...). Empty when `CONSTRUCT_INJECT_MCP=0` or the
-/// `construct-mcp` binary cannot be located.
+/// `construct-mcp` binary cannot be located. Plugin-contributed servers
+/// ([`PLUGIN_MCP_SERVERS_ENV`]) are appended after the construct server.
 pub fn maybe_inject_codex_mcp_args(session_id: &str) -> Vec<String> {
     if std::env::var("CONSTRUCT_INJECT_MCP").as_deref() == Ok("0") {
         return Vec::new();
@@ -235,7 +286,30 @@ pub fn maybe_inject_codex_mcp_args(session_id: &str) -> Vec<String> {
     let bin_lit = toml_quote(&bin.to_string_lossy());
     let env_lit = mcp_env_toml(session_id);
     let inline = format!("{{ command = {bin_lit}, args = [\"__mcp\"], env = {env_lit} }}");
-    vec!["-c".into(), format!("mcp_servers.construct={inline}")]
+    let mut out = vec!["-c".to_string(), format!("mcp_servers.construct={inline}")];
+    for server in plugin_mcp_servers() {
+        let cmd_lit = toml_quote(&server.command);
+        let args_lit = format!(
+            "[{}]",
+            server
+                .args
+                .iter()
+                .map(|a| toml_quote(a))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let env_pairs = server
+            .env
+            .iter()
+            .map(|(k, v)| format!("{k} = {}", toml_quote(v)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let inline =
+            format!("{{ command = {cmd_lit}, args = {args_lit}, env = {{ {env_pairs} }} }}");
+        out.push("-c".to_string());
+        out.push(format!("mcp_servers.{}={inline}", server.name));
+    }
+    out
 }
 
 fn toml_quote(s: &str) -> String {
@@ -299,15 +373,26 @@ pub fn maybe_inject_mcp_config(session_id: &str) -> Option<PathBuf> {
             env.insert(name.to_string(), serde_json::json!(value));
         }
     }
-    let config = serde_json::json!({
-        "mcpServers": {
-            "construct": {
-                "command": mcp_bin.to_string_lossy(),
-                "args": ["__mcp"],
-                "env": env,
-            }
-        }
-    });
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        "construct".to_string(),
+        serde_json::json!({
+            "command": mcp_bin.to_string_lossy(),
+            "args": ["__mcp"],
+            "env": env,
+        }),
+    );
+    for server in plugin_mcp_servers() {
+        servers.insert(
+            server.name.clone(),
+            serde_json::json!({
+                "command": server.command,
+                "args": server.args,
+                "env": server.env,
+            }),
+        );
+    }
+    let config = serde_json::json!({ "mcpServers": servers });
     let text = serde_json::to_string_pretty(&config).ok()?;
     if let Err(e) = std::fs::write(&cfg_path, text) {
         eprintln!(
@@ -1113,6 +1198,24 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn plugin_mcp_servers_decode_and_filter_reserved_names() {
+        let raw = r#"[
+            {"name": "review", "command": "/p/review-mcp", "args": ["serve"], "env": {"CONSTRUCT_PLUGIN_ID": "diff-review"}},
+            {"name": "construct", "command": "/evil", "args": [], "env": {}}
+        ]"#;
+        let servers = plugin_mcp_servers_from(raw);
+        assert_eq!(servers.len(), 1, "reserved `construct` name is dropped");
+        assert_eq!(servers[0].name, "review");
+        assert_eq!(servers[0].command, "/p/review-mcp");
+        assert_eq!(servers[0].args, vec!["serve"]);
+        assert_eq!(
+            servers[0].env.get("CONSTRUCT_PLUGIN_ID").map(String::as_str),
+            Some("diff-review")
+        );
+        assert!(plugin_mcp_servers_from("not json").is_empty());
     }
 
     #[test]

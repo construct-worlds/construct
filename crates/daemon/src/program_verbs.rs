@@ -193,6 +193,17 @@ fn parse_frontmatter_fields(frontmatter: &str) -> BTreeMap<String, String> {
 /// `tracing::warn!`, never a hard failure — one broken user file must not
 /// take down the whole list.
 pub fn load_verbs(dir: &Path) -> Vec<ProgramVerb> {
+    load_verbs_with_plugins(dir, &[])
+}
+
+/// [`load_verbs`], plus plugin verb directories as `(namespace, dir)` pairs
+/// (spec 0151). Plugin verbs are force-namespaced `<namespace>:<name>` so a
+/// plugin can never override a built-in or user verb by matching `name` —
+/// only the user's own `verbs/` directory has that power.
+pub fn load_verbs_with_plugins(
+    dir: &Path,
+    plugin_dirs: &[(String, std::path::PathBuf)],
+) -> Vec<ProgramVerb> {
     let mut by_name: BTreeMap<String, ProgramVerb> = BTreeMap::new();
     for (name, raw) in BUILT_INS {
         match parse_verb_definition(raw, true, name) {
@@ -202,43 +213,60 @@ pub fn load_verbs(dir: &Path) -> Vec<ProgramVerb> {
             None => tracing::warn!(verb = %name, "built-in program verb failed to parse"),
         }
     }
-    if dir.exists() {
-        match std::fs::read_dir(dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                        continue;
-                    }
-                    let Some(default_name) = path.file_stem().and_then(|s| s.to_str()) else {
-                        tracing::warn!(path = %path.display(), "skip program verb with non-UTF-8 filename");
-                        continue;
-                    };
-                    let raw = match std::fs::read_to_string(&path) {
-                        Ok(raw) => raw,
-                        Err(e) => {
-                            tracing::warn!(path = %path.display(), error = ?e, "skip unreadable program verb");
-                            continue;
-                        }
-                    };
-                    match parse_verb_definition(&raw, false, default_name) {
-                        Some(verb) => {
-                            by_name.insert(verb.name.clone(), verb);
-                        }
-                        None => {
-                            tracing::warn!(path = %path.display(), "skip malformed program verb (missing/unrecognized effect or interaction)")
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(dir = %dir.display(), error = ?e, "read program verbs dir failed")
-            }
-        }
+    load_verb_dir(dir, None, &mut by_name);
+    for (namespace, plugin_dir) in plugin_dirs {
+        load_verb_dir(plugin_dir, Some(namespace), &mut by_name);
     }
     let mut verbs: Vec<ProgramVerb> = by_name.into_values().collect();
     verbs.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.label.cmp(&b.label)));
     verbs
+}
+
+/// Load every `*.md` verb definition in `dir` into `by_name`. With a
+/// `namespace`, each verb's final name becomes `<namespace>:<name>`.
+fn load_verb_dir(
+    dir: &Path,
+    namespace: Option<&str>,
+    by_name: &mut BTreeMap<String, ProgramVerb>,
+) {
+    if !dir.exists() {
+        return;
+    }
+    match std::fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let Some(default_name) = path.file_stem().and_then(|s| s.to_str()) else {
+                    tracing::warn!(path = %path.display(), "skip program verb with non-UTF-8 filename");
+                    continue;
+                };
+                let raw = match std::fs::read_to_string(&path) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = ?e, "skip unreadable program verb");
+                        continue;
+                    }
+                };
+                match parse_verb_definition(&raw, false, default_name) {
+                    Some(mut verb) => {
+                        if let Some(ns) = namespace {
+                            verb.name = format!("{ns}:{}", verb.name);
+                        }
+                        by_name.insert(verb.name.clone(), verb);
+                    }
+                    None => {
+                        tracing::warn!(path = %path.display(), "skip malformed program verb (missing/unrecognized effect or interaction)")
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = ?e, "read program verbs dir failed")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -408,6 +436,36 @@ mod tests {
         assert_eq!(simplify.label, "My Simplify");
         assert!(!simplify.built_in);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plugin_verbs_are_force_namespaced_and_cannot_override_built_ins() {
+        let base =
+            std::env::temp_dir().join(format!("agentd-verb-test-plugin-{}", std::process::id()));
+        let user_dir = base.join("user");
+        let plugin_dir = base.join("plugin");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // A plugin file that *claims* the built-in name `simplify` must land
+        // as `myplug:simplify`, leaving the built-in untouched.
+        std::fs::write(
+            plugin_dir.join("simplify.md"),
+            "---\nname: simplify\nlabel: Plugin Simplify\neffect: rewrite\ninteraction: single-shot\n---\n\nPlugin body.\n",
+        )
+        .unwrap();
+        let verbs = load_verbs_with_plugins(
+            &user_dir,
+            &[("myplug".to_string(), plugin_dir.clone())],
+        );
+        let built_in = verbs.iter().find(|v| v.name == "simplify").unwrap();
+        assert!(built_in.built_in, "built-in simplify survives");
+        let plugin_verb = verbs
+            .iter()
+            .find(|v| v.name == "myplug:simplify")
+            .expect("plugin verb namespaced");
+        assert_eq!(plugin_verb.label, "Plugin Simplify");
+        assert!(!plugin_verb.built_in);
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

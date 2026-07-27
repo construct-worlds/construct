@@ -19,6 +19,7 @@ mod adapter;
 mod availability;
 mod config;
 mod loops;
+pub mod plugins;
 mod program_verbs;
 mod remote;
 mod remote_supervisor;
@@ -119,7 +120,24 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
         Err(e) => return Err(e.context("acquire daemon single-instance lock")),
     };
 
-    let config = config::Config::load_or_default(&paths)?;
+    let mut config = config::Config::load_or_default(&paths)?;
+    // Merge installed-plugin contributions (spec 0151) into the same
+    // adapter map user config and built-ins land in, so a plugin harness
+    // is indistinguishable from a community adapter downstream.
+    let plugin_set = plugins::PluginSet::load(&paths);
+    if !plugin_set.is_empty() {
+        tracing::info!(
+            plugins = plugin_set.plugins.len(),
+            ids = %plugin_set
+                .plugins
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            "loaded plugins"
+        );
+    }
+    plugin_set.apply_to_config(&mut config, &paths);
     tracing::info!(
         adapters = config.adapters.len(),
         config_dir = %paths.config_dir.display(),
@@ -133,7 +151,9 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     let storage = Arc::new(
         storage::Storage::new(paths.data_dir.clone())?
             .with_program_templates_dir(program_templates_dir)
-            .with_program_verbs_dir(paths.config_dir.join("verbs")),
+            .with_program_verbs_dir(paths.config_dir.join("verbs"))
+            .with_plugin_verb_dirs(plugin_set.verb_dirs())
+            .with_plugin_template_dirs(plugin_set.template_dirs()),
     );
     let (manager, remote_rx, mut restart_rx) =
         session::SessionManager::new(storage.clone(), Arc::new(config), paths.runtime_dir.clone())
