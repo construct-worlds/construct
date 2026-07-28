@@ -73,14 +73,77 @@ GitHub topic search now, and it is the namespace a future marketplace index
 will crawl. Repositories tagged today will be picked up automatically once
 that index exists.
 
-## Where this is headed
+## Packaged plugins (`construct plugin`)
 
-A packaged plugin system is planned on top of these seams — a
-`construct-plugin.toml` manifest describing what a repository contributes
-(adapters, verbs, templates, MCP tool servers; later user-invocable actions
-and event hooks), and a `construct plugin install <owner>/<repo>` /
-`construct plugin link <dir>` lifecycle that automates the manual steps
-above. The manual paths on this page remain supported; the manifest is a
-declarative wrapper over the same registration points, so an extension
-published today as "config block + verbs dir" translates directly into a
-manifest later.
+The manual paths above stay supported, but a repository can declare all of
+them at once with a `construct-plugin.toml` manifest at its root (spec
+0151) and become installable with one command:
+
+```console
+$ construct plugin install owner/repo          # or owner/repo/subdir
+$ construct plugin link ~/src/my-plugin        # local development, no clone
+$ construct plugin list
+$ construct plugin disable <id> / enable <id>
+$ construct plugin uninstall <id>
+```
+
+`install` clones the repo under the data directory's `plugins/` root, shows
+a capability summary, asks for consent (`--yes` in scripts, `--ref` to pin
+a tag/commit), runs the manifest's build steps, and registers the plugin.
+Registry changes apply on the next `construct daemon restart` — sessions
+are preserved, so applying is cheap.
+
+### Manifest
+
+```toml
+[plugin]
+id = "diff-review"                  # namespaces everything the plugin adds
+name = "Diff Review"
+version = "0.3.0"
+min_construct_version = "0.16.0"    # older constructs refuse to install
+description = "Rich diff review workflow"
+platforms = ["macos", "linux"]      # optional; omit for all
+
+[[build]]                           # run once at install, cwd = plugin root
+command = ["cargo", "build", "--release"]
+
+[[adapters]]                        # AHP harness; binary relative to root
+name = "reviewer"                   # exposed as harness diff-review:reviewer
+binary = "target/release/reviewer-adapter"
+description = "Headless review harness"
+
+[verbs]                             # program verbs, namespaced diff-review:<name>
+dir = "verbs"
+
+[templates]                         # program templates, id diff-review:<stem>
+dir = "templates"
+
+[[mcp_servers]]                     # injected into every harness session
+name = "review"                     # registered as mcpServers.diff-review-review
+command = ["target/release/review-mcp", "serve"]
+```
+
+An adapter (or MCP server) named exactly like the plugin id is exposed
+without the namespace suffix — a plugin `aider` with adapter `aider` is
+simply harness `aider`.
+
+### Runtime contract
+
+Plugin-owned processes receive `CONSTRUCT_PLUGIN_ID`,
+`CONSTRUCT_PLUGIN_ROOT`, `CONSTRUCT_PLUGIN_CONFIG_DIR`
+(`<config>/plugins/<id>/`), and `CONSTRUCT_PLUGIN_STATE_DIR`
+(`<state>/plugins/<id>/`). Durable plugin state belongs in those two
+directories. For everything else, a plugin process is an ordinary IPC
+client: anything you can do as `construct …` or over the daemon socket, a
+plugin can do too.
+
+### Trust
+
+There is no sandbox: install/link runs the plugin's build and runtime code
+as your user, with your environment, and with full daemon access — exactly
+like any binary you install. construct's guarantees are narrower and
+deliberate: nothing in a project tree can register a plugin (plugins are
+user-level only), the consent prompt lists everything the manifest
+declares before anything runs, and plugin-contributed tools go through the
+same approval flow as every other tool. Review the repository, prefer
+`--ref`-pinned installs, and treat `--yes` as the trusted-author path.

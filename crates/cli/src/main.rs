@@ -13,6 +13,7 @@ mod lineage;
 mod matrix_rain;
 mod midi;
 mod mouse_forward;
+mod plugin_cmd;
 mod pty_render;
 mod text_util;
 mod theme;
@@ -177,6 +178,13 @@ enum Command {
     Program {
         #[command(subcommand)]
         command: ProgramCommand,
+    },
+    /// Manage installed plugins (install, link, list, enable, disable,
+    /// uninstall). Plugins contribute adapters, program verbs, program
+    /// templates, and MCP tool servers via a construct-plugin.toml manifest.
+    Plugin {
+        #[command(subcommand)]
+        command: plugin_cmd::PluginCommand,
     },
     /// Internal: `PreToolUse` hook body for the AskUserQuestion chat-gate.
     /// Reads the hook payload on stdin; if a chat viewer is active for
@@ -618,6 +626,7 @@ async fn main() -> Result<()> {
             let c = connect(&socket).await?;
             run_program_command(&c, command).await
         }
+        Command::Plugin { command } => plugin_cmd::run(command),
         Command::AskGate => {
             // Drain stdin (the PreToolUse payload) so the hook's pipe closes
             // cleanly, then resolve the session id from the adapter-set env
@@ -800,6 +809,7 @@ fn command_allows_upgrade_prompt(command: &Command) -> bool {
             | Command::Ssh { .. }
             | Command::Acp { .. }
             | Command::Program { .. }
+            | Command::Plugin { .. }
             | Command::AskGate
             | Command::Mcp
             | Command::Adapter { .. }
