@@ -94,8 +94,8 @@ impl SessionManager {
         );
         let _ = self
             .broadcast
-            .send(BroadcastMsg::GroupState(GroupStateNotificationPayload {
-                group: summary,
+            .send(BroadcastMsg::GroupState(ProjectStateNotificationPayload {
+                project: summary,
             }));
         Ok(id)
     }
@@ -120,8 +120,8 @@ impl SessionManager {
         self.storage.save_group(&snapshot)?;
         let _ = self
             .broadcast
-            .send(BroadcastMsg::GroupState(GroupStateNotificationPayload {
-                group: snapshot,
+            .send(BroadcastMsg::GroupState(ProjectStateNotificationPayload {
+                project: snapshot,
             }));
         Ok(())
     }
@@ -142,8 +142,8 @@ impl SessionManager {
         self.storage.save_group(&snapshot)?;
         let _ = self
             .broadcast
-            .send(BroadcastMsg::GroupState(GroupStateNotificationPayload {
-                group: snapshot,
+            .send(BroadcastMsg::GroupState(ProjectStateNotificationPayload {
+                project: snapshot,
             }));
         Ok(())
     }
@@ -209,8 +209,8 @@ impl SessionManager {
         }
         let _ = self.storage.remove_group(id);
         let _ = self.broadcast.send(BroadcastMsg::GroupDeleted(
-            GroupDeletedNotificationPayload {
-                group_id: id.to_string(),
+            ProjectDeletedNotificationPayload {
+                project_id: id.to_string(),
             },
         ));
         Ok(())
@@ -270,13 +270,13 @@ impl SessionManager {
         self.storage.save_group(&snap_b)?;
         let _ = self
             .broadcast
-            .send(BroadcastMsg::GroupState(GroupStateNotificationPayload {
-                group: snap_a,
+            .send(BroadcastMsg::GroupState(ProjectStateNotificationPayload {
+                project: snap_a,
             }));
         let _ = self
             .broadcast
-            .send(BroadcastMsg::GroupState(GroupStateNotificationPayload {
-                group: snap_b,
+            .send(BroadcastMsg::GroupState(ProjectStateNotificationPayload {
+                project: snap_b,
             }));
         Ok(())
     }

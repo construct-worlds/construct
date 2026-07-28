@@ -3,15 +3,14 @@
 use construct_protocol::jsonrpc::{self, MessageKind};
 use construct_protocol::{
     ipc_method, transport, ChatViewerActiveResult, ClientView, CreateSessionParams, DiffResult,
-    ErrorObject, GroupCreateParams, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
-    GroupSetCollapsedParams, GroupSummary, HarnessInfo, LayoutDocument, LayoutNode,
-    LayoutSetParams, MoveDirection, Notification, PingResult,
-    ProgramCursorParams, ProgramCursorResult, ProgramEditParams, ProgramExecuteParams,
-    ProgramExecuteResult, ProgramGetParams, ProgramGetResult, ProgramListTemplatesResult,
-    ProgramListVerbsResult, ProgramUpdateActor, ProgramUpdateParams, ProgramUpdateResult,
-    ProgramVerbExecuteParams, ProgramVerbExecuteResult, FeaturesStatusResult, ProjectCreateParams,
-    ProjectCreateResult, ProjectDeleteParams, ProjectMoveParams, ProjectRenameParams,
-    ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, PtySize, Request, Response,
+    ErrorObject, HarnessInfo, LayoutDocument, LayoutNode, LayoutSetParams, MoveDirection,
+    Notification, PingResult, ProgramCursorParams, ProgramCursorResult, ProgramEditParams,
+    ProgramExecuteParams, ProgramExecuteResult, ProgramGetParams, ProgramGetResult,
+    ProgramListTemplatesResult, ProgramListVerbsResult, ProgramUpdateActor, ProgramUpdateParams,
+    ProgramUpdateResult, ProgramVerbExecuteParams, ProgramVerbExecuteResult, FeaturesStatusResult,
+    ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams, ProjectMoveParams,
+    ProjectRenameParams, ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, PtySize,
+    Request, Response,
     SearchParams, SearchResult, SessionAttachClipboardParams, SessionAttachClipboardResult,
     SessionDetail, SessionEmitEventParams, SessionIdParams, SessionInputParams, SessionMoveParams,
     SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
@@ -1127,28 +1126,9 @@ impl Client {
         .await
     }
 
-    pub async fn list_groups(&self) -> Result<Vec<GroupSummary>> {
-        self.request(ipc_method::GROUP_LIST, &serde_json::Value::Null)
-            .await
-    }
     pub async fn list_projects(&self) -> Result<Vec<ProjectSummary>> {
         self.request(ipc_method::PROJECT_LIST, &serde_json::Value::Null)
             .await
-    }
-    pub async fn create_group(&self, name: &str) -> Result<String> {
-        #[derive(serde::Deserialize)]
-        struct R {
-            group_id: String,
-        }
-        let r: R = self
-            .request(
-                ipc_method::GROUP_CREATE,
-                &GroupCreateParams {
-                    name: name.to_string(),
-                },
-            )
-            .await?;
-        Ok(r.group_id)
     }
     pub async fn create_project(&self, name: &str) -> Result<String> {
         let r: ProjectCreateResult = self
@@ -1160,18 +1140,6 @@ impl Client {
             )
             .await?;
         Ok(r.project_id)
-    }
-    pub async fn rename_group(&self, id: &str, name: &str) -> Result<()> {
-        let _: serde_json::Value = self
-            .request(
-                ipc_method::GROUP_RENAME,
-                &GroupRenameParams {
-                    group_id: id.to_string(),
-                    name: name.to_string(),
-                },
-            )
-            .await?;
-        Ok(())
     }
     pub async fn rename_project(&self, id: &str, name: &str) -> Result<()> {
         let _: serde_json::Value = self
@@ -1185,23 +1153,11 @@ impl Client {
             .await?;
         Ok(())
     }
-    /// Delete a group. When `delete_members` is true the daemon
+    /// Delete a project. When `delete_members` is true the daemon
     /// cascade-deletes every member session (kills its adapter, removes
     /// its on-disk dir, tears down any worktree) before removing the
-    /// group itself. When false (the previous behavior) members are
-    /// orphaned: their `group_id` clears but the sessions survive.
-    pub async fn delete_group(&self, id: &str, delete_members: bool) -> Result<()> {
-        let _: serde_json::Value = self
-            .request(
-                ipc_method::GROUP_DELETE,
-                &GroupDeleteParams {
-                    group_id: id.to_string(),
-                    delete_members,
-                },
-            )
-            .await?;
-        Ok(())
-    }
+    /// project itself. When false, members are orphaned: their
+    /// `group_id` clears but the sessions survive.
     pub async fn delete_project(&self, id: &str, delete_members: bool) -> Result<()> {
         let _: serde_json::Value = self
             .request(
@@ -1214,18 +1170,6 @@ impl Client {
             .await?;
         Ok(())
     }
-    pub async fn set_group_collapsed(&self, id: &str, collapsed: bool) -> Result<()> {
-        let _: serde_json::Value = self
-            .request(
-                ipc_method::GROUP_SET_COLLAPSED,
-                &GroupSetCollapsedParams {
-                    group_id: id.to_string(),
-                    collapsed,
-                },
-            )
-            .await?;
-        Ok(())
-    }
     pub async fn set_project_collapsed(&self, id: &str, collapsed: bool) -> Result<()> {
         let _: serde_json::Value = self
             .request(
@@ -1233,18 +1177,6 @@ impl Client {
                 &ProjectSetCollapsedParams {
                     project_id: id.to_string(),
                     collapsed,
-                },
-            )
-            .await?;
-        Ok(())
-    }
-    pub async fn move_group(&self, id: &str, direction: MoveDirection) -> Result<()> {
-        let _: serde_json::Value = self
-            .request(
-                ipc_method::GROUP_MOVE,
-                &GroupMoveParams {
-                    group_id: id.to_string(),
-                    direction,
                 },
             )
             .await?;

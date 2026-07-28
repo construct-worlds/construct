@@ -4904,7 +4904,7 @@ async function moveGroupSteps(groupId, steps) {
   const direction = steps > 0 ? "down" : "up";
   for (let i = 0; i < Math.abs(steps); i += 1) {
     try {
-      const res = await rpc("group.move", { group_id: groupId, direction });
+      const res = await rpc("project.move", { project_id: groupId, direction });
       if (res && res.moved === false) break;
     } catch (e) {
       appendError(`reorder failed: ${e.message}`);
@@ -11611,15 +11611,15 @@ function handleNotification(method, params) {
       refreshSessionActions();
       if (neighborId) selectSession(neighborId);
     }
-  } else if (method === "group/state" || method === "project/state") {
-    const group = params.group || params.project;
+  } else if (method === "project/state") {
+    const group = params.project;
     if (!group) return;
     const i = state.groups.findIndex((g) => g.id === group.id);
     if (i >= 0) state.groups[i] = group;
     else state.groups.push(group);
     scheduleRenderSessions();
-  } else if (method === "group/deleted" || method === "project/deleted") {
-    const deletedId = params.group_id || params.project_id;
+  } else if (method === "project/deleted") {
+    const deletedId = params.project_id;
     state.groups = state.groups.filter((g) => g.id !== deletedId);
     scheduleRenderSessions();
   }
