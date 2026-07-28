@@ -1059,6 +1059,12 @@ pub mod ipc_method {
     /// `config.toml`. Takes effect for sessions started after the write —
     /// see `SmithSetAuthMethodResult::note`.
     pub const SMITH_SET_AUTH_METHOD: &str = "smith.set_auth_method";
+    /// Live status of the daemon's ambient features (auto-naming,
+    /// suggestions, operator — spec 0151): whether each is working,
+    /// degraded, or off, with a human-readable reason. Lets clients
+    /// connect a silently-missing convenience back to its cause instead
+    /// of leaving the user guessing.
+    pub const FEATURES_STATUS: &str = "features.status";
     pub const PROGRAM_GET: &str = "program.get";
     pub const PROGRAM_UPDATE: &str = "program.update";
     pub const PROGRAM_EDIT: &str = "program.edit";
@@ -1249,6 +1255,11 @@ pub mod ipc_notif {
     /// "● remote attached" badge as a visible signal that another
     /// surface is also driving the daemon.
     pub const REMOTE_STATE: &str = "remote/state";
+    /// Ambient-feature status changed (spec 0151). Carries a full
+    /// `FeaturesStatusResult`; emitted the first time an ambient feature
+    /// actually skips work for lack of a smith credential, so clients can
+    /// surface the degradation without polling.
+    pub const FEATURES_STATE: &str = "features/state";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2099,6 +2110,70 @@ pub struct SmithSetAuthMethodResult {
     /// adapters keep their current model and only sessions started after a
     /// `construct daemon restart` pick up the new pin.
     pub note: String,
+}
+
+/// Health of one ambient daemon feature (spec 0151). Serialized lowercase
+/// so clients can string-match without importing the enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeatureStatus {
+    /// Fully working.
+    Ok,
+    /// Working for some sessions / via a fallback, but not at full fidelity.
+    Degraded,
+    /// Not working at all (unusable dependency or disabled in config).
+    Off,
+}
+
+/// One ambient feature's live status, as reported by `features.status`
+/// (spec 0151). Ambient features are the daemon-driven conveniences that
+/// depend on the built-in smith harness having a usable model credential —
+/// session auto-naming, next-prompt suggestions, the operator session — and
+/// whose failure would otherwise be invisible to the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureInfo {
+    /// Stable id: `"auto_title"`, `"suggestions"`, `"operator"`.
+    pub id: String,
+    /// Human label for display, e.g. "Session auto-naming".
+    pub label: String,
+    pub status: FeatureStatus,
+    /// Human-readable explanation of the status — what works, what doesn't,
+    /// and why (e.g. "no smith credential — shell sessions get no
+    /// suggestions").
+    pub detail: String,
+}
+
+/// Result of `features.status`, also the payload of the `features/state`
+/// notification (spec 0151).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeaturesStatusResult {
+    pub features: Vec<FeatureInfo>,
+    /// True once any ambient feature has actually skipped work this daemon
+    /// run because no smith credential was available — the signal clients
+    /// use to surface a visible degradation notice instead of nagging on
+    /// every credential-less machine that never hit the gap.
+    #[serde(default)]
+    pub degradation_observed: bool,
+}
+
+/// Clean a model-generated session title: first line only, quotes/markdown
+/// stripped, length capped so a misbehaving model can't blow out the
+/// modeline. Shared by smith's `--title-mode` one-shot and the daemon's
+/// same-harness title-probe fallback so both produce identically shaped
+/// titles.
+pub fn sanitize_auto_title(raw: &str) -> String {
+    let line = raw.lines().next().unwrap_or("");
+    let mut s = line
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '*' || c == '#');
+    // Strip a single pair of surrounding quotes after the trim-match above
+    // catches the easy cases.
+    while let (Some('"'), Some('"')) = (s.chars().next(), s.chars().last()) {
+        s = &s[1..s.len() - 1];
+        s = s.trim();
+    }
+    let truncated: String = s.chars().take(48).collect();
+    truncated.trim().to_string()
 }
 
 /// One cached harness usage-probe capture, as sent over the wire (spec
@@ -4058,5 +4133,38 @@ mod layout_tests {
         assert_eq!(doc.version, 0);
         assert_eq!(doc.tree.leaf_count(), 1);
         assert_eq!(doc.tree.session_ids(), Vec::<&str>::new());
+    }
+}
+
+#[cfg(test)]
+mod auto_title_tests {
+    use super::sanitize_auto_title;
+
+    #[test]
+    fn sanitize_strips_quotes_and_markdown() {
+        assert_eq!(
+            sanitize_auto_title("\"Refactor Adapter Spawning\""),
+            "Refactor Adapter Spawning"
+        );
+        assert_eq!(sanitize_auto_title("`Add Pty Logging`"), "Add Pty Logging");
+        assert_eq!(
+            sanitize_auto_title("**Plan The Refactor**"),
+            "Plan The Refactor"
+        );
+    }
+
+    #[test]
+    fn sanitize_first_line_only() {
+        assert_eq!(
+            sanitize_auto_title("Title Here\nextra explanation"),
+            "Title Here"
+        );
+    }
+
+    #[test]
+    fn sanitize_caps_length() {
+        let huge = "Word ".repeat(50);
+        let out = sanitize_auto_title(&huge);
+        assert!(out.len() <= 48);
     }
 }

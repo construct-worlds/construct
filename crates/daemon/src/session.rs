@@ -314,6 +314,10 @@ pub enum BroadcastMsg {
     /// listener starts/stops and on every client accept/drop so the local TUI
     /// can show a persistent remote-control affordance.
     RemoteState(construct_protocol::RemoteStateNotificationPayload),
+    /// Ambient-feature status (spec 0151). Emitted once, the first time an
+    /// ambient feature actually skips work for lack of a smith credential,
+    /// so clients can surface the degradation without polling.
+    FeaturesState(construct_protocol::FeaturesStatusResult),
     /// The shared split layout changed — a client wrote it, or the daemon
     /// emptied a pane whose session went away. Carries the whole tree: there
     /// are no incremental layout deltas.
@@ -1396,6 +1400,19 @@ pub struct SessionManager {
     /// probe itself — session create/submit-command/sleep/delete — all runs
     /// outside the lock, in `session::usage_probe`).
     usage_cache: std::sync::Mutex<crate::usage::UsageCache>,
+    /// Weak handle back to the `Arc<Self>` the daemon runs behind, bound
+    /// once by [`Self::bind_self_ref`] right after construction. Lets
+    /// `&self` event-path methods (which sit under many callers that don't
+    /// hold an `Arc`) spawn tasks that need the full manager — the
+    /// auto-title probe fallback being the first. Unbound (some unit
+    /// tests) simply means those spawns are skipped.
+    self_ref: std::sync::OnceLock<std::sync::Weak<SessionManager>>,
+    /// Latched true the first time an ambient feature (auto-title,
+    /// suggestions) actually skips work because smith has no credential
+    /// (spec 0151). Reported as `degradation_observed` in
+    /// `features.status` and broadcast once as `features/state` so clients
+    /// can surface the degradation only on machines where it really bit.
+    ambient_degraded: AtomicBool,
 }
 
 /// What the main loop should do when it receives a [`RestartCommand`].
@@ -1785,10 +1802,19 @@ impl SessionManager {
                     crate::availability::AvailabilityCache::default(),
                 ),
                 usage_cache: std::sync::Mutex::new(crate::usage::UsageCache::default()),
+                self_ref: std::sync::OnceLock::new(),
+                ambient_degraded: AtomicBool::new(false),
             },
             remote_rx,
             restart_rx,
         ))
+    }
+
+    /// Bind the weak self-handle used by `&self` methods that need to spawn
+    /// tasks holding the full manager (see the `self_ref` field). Call once,
+    /// right after wrapping the manager in its `Arc`.
+    pub fn bind_self_ref(self: &Arc<Self>) {
+        let _ = self.self_ref.set(Arc::downgrade(self));
     }
 
     /// Allocate a monotonic id for a new client connection. The connection
@@ -2422,6 +2448,61 @@ impl SessionManager {
                    already-running sessions keep their current model"
                 .to_string(),
         })
+    }
+
+    /// Live status of the daemon's ambient features (spec 0151): the
+    /// smith-credential-dependent conveniences (auto-naming, suggestions,
+    /// operator), each mapped to ok/degraded/off with a human-readable
+    /// reason. This is the surface that connects "my sessions never get
+    /// named" back to "smith has no credential" — the probes themselves
+    /// already existed, but nothing tied the degraded features to them.
+    pub async fn features_status(&self) -> construct_protocol::FeaturesStatusResult {
+        let smith = crate::availability::probe_smith(&self.availability_cache).await;
+        let orchestrator = match self.config.orchestrator.effective_harness() {
+            None => None,
+            Some(name) => {
+                let avail = if name == "smith" {
+                    smith.clone()
+                } else {
+                    let binary_spec = self
+                        .config
+                        .adapters
+                        .get(name)
+                        .and_then(|c| c.binary.clone())
+                        .unwrap_or_else(|| name.to_string());
+                    let resolved = locate_binary(&binary_spec);
+                    self.probe_harness_availability(name, &binary_spec, resolved.as_deref())
+                        .await
+                };
+                Some((name.to_string(), avail))
+            }
+        };
+        construct_protocol::FeaturesStatusResult {
+            features: crate::availability::ambient_features(&crate::availability::FeatureInputs {
+                smith,
+                suggest_enabled: self.config.suggest.enabled,
+                orchestrator,
+            }),
+            degradation_observed: self.ambient_degraded.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Latch + announce that an ambient feature just skipped work because
+    /// smith has no credential (spec 0151). First call per daemon run
+    /// broadcasts a `features/state` notification so clients can show a
+    /// visible degradation notice; later calls are no-ops — one hint, not
+    /// a nag stream.
+    pub(crate) async fn note_ambient_degradation(&self, feature: &str) {
+        if self.ambient_degraded.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::info!(
+            %feature,
+            "ambient feature skipped: no smith credential — see `construct harnesses` / the \
+             configure dialog"
+        );
+        let status = self.features_status().await;
+        let _ = self.broadcast.send(BroadcastMsg::FeaturesState(status));
     }
 
     /// Probe real availability for one configured harness (spec 0068). The
@@ -4203,11 +4284,17 @@ impl SessionManager {
     /// Kick off auto-title generation in the background if (a) the user
     /// has not set a title yet (i.e. the `title` field is `None` — the
     /// hash shown in the UI is just `primary_label`'s display fallback),
-    /// (b) we haven't already attempted this incarnation, (c) `prompt`
+    /// (b) we haven't already attempted this incarnation, and (c) `prompt`
     /// is the first *non-slash-command* message seen (leading
-    /// `/model gpt-5.5`-style messages are ignored entirely), and (d) the
-    /// smith adapter binary is
-    /// configured + locatable. Silently no-ops on any miss.
+    /// `/model gpt-5.5`-style messages are ignored entirely).
+    ///
+    /// Generator choice (spec 0151): a usable smith credential runs the
+    /// cheap `--title-mode` process one-shot; without one, sessions on
+    /// model harnesses fall back to a hidden probe session on their own
+    /// harness — the same credentials/subscription the user's session
+    /// already proved work. smith and shell sessions have no fallback;
+    /// their skip is recorded via [`Self::note_ambient_degradation`] so
+    /// the gap is visible instead of silent.
     async fn maybe_spawn_auto_title(&self, entry: Arc<SessionEntry>, prompt: String) {
         // Cheap checks first so we don't burn the per-session attempt
         // budget (the AtomicBool flip is one-way until a daemon
@@ -4217,48 +4304,204 @@ impl SessionManager {
             return;
         };
         // Already claimed (title-gen ran, or the user set a title
-        // directly) — skip the accumulator entirely so it doesn't grow
-        // for the rest of the session's life.
+        // directly) — skip entirely.
         if entry.title_gen_attempted.load(Ordering::SeqCst) {
             return;
         }
-        let Some(smith_adapter) = self.config.adapters.get("smith").cloned() else {
+        let smith_available = crate::availability::probe_smith(&self.availability_cache)
+            .await
+            .available;
+        if smith_available {
+            let Some(smith_adapter) = self.config.adapters.get("smith").cloned() else {
+                return;
+            };
+            let binary_spec = smith_adapter
+                .binary
+                .clone()
+                .unwrap_or_else(|| "construct".to_string());
+            let prefix_args = smith_adapter.args.clone();
+            let Some(binary) = locate_binary(&binary_spec) else {
+                return;
+            };
+            // Now claim the attempt. `swap` is the one place we mark this
+            // session as "tried"; the user-renamed path is handled by
+            // `title_gen_attempted` being initialized to `title.is_some()`
+            // when the entry is constructed (both at create-time and when
+            // loaded from disk on daemon restart).
+            if entry.title_gen_attempted.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let replace_pending_title = entry.summary.read().await.auto_title_pending;
+            let storage = self.storage.clone();
+            let broadcast_tx = self.broadcast.clone();
+            tokio::spawn(async move {
+                generate_auto_title(
+                    binary,
+                    prefix_args,
+                    entry,
+                    prompt,
+                    replace_pending_title,
+                    storage,
+                    broadcast_tx,
+                )
+                .await;
+            });
+            return;
+        }
+        let (harness, kind) = {
+            let s = entry.summary.read().await;
+            (s.harness.clone(), s.kind)
+        };
+        if harness == "smith" || harness == "shell" {
+            // No model to fall back to — smith sessions ARE the missing
+            // credential and shell has no model at all. Claim the attempt
+            // (same one-way semantics as the generating paths) and make
+            // the skip visible once instead of silently keeping the hash
+            // name (spec 0151).
+            if entry.title_gen_attempted.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            self.note_ambient_degradation("auto_title").await;
+            return;
+        }
+        // Probe fallback only for user sessions: orchestrator/subagent/
+        // probe sessions are normally titled by whatever created them, and
+        // an automatic per-session harness spawn is too heavy to run for a
+        // whole fleet's worth of children.
+        if kind != construct_protocol::SessionKind::User {
+            return;
+        }
+        // Same-harness probe fallback. Needs the full manager to create /
+        // poll / delete the probe session; unbound self_ref (unit tests)
+        // just skips — best-effort, like everything else on this path.
+        let Some(mgr) = self.self_ref.get().and_then(std::sync::Weak::upgrade) else {
             return;
         };
-        let binary_spec = smith_adapter
-            .binary
-            .clone()
-            .unwrap_or_else(|| "construct".to_string());
-        let prefix_args = smith_adapter.args.clone();
-        let Some(binary) = locate_binary(&binary_spec) else {
-            return;
-        };
-        // Slash commands have already returned above: only the first ordinary
-        // user prompt is sent to title generation.
-        let combined = prompt;
-        // Now claim the attempt. `swap` is the one place we mark this
-        // session as "tried"; the user-renamed path is handled by
-        // `title_gen_attempted` being initialized to `title.is_some()`
-        // when the entry is constructed (both at create-time and when
-        // loaded from disk on daemon restart).
         if entry.title_gen_attempted.swap(true, Ordering::SeqCst) {
             return;
         }
         let replace_pending_title = entry.summary.read().await.auto_title_pending;
-        let storage = self.storage.clone();
-        let broadcast_tx = self.broadcast.clone();
-        tokio::spawn(async move {
-            generate_auto_title(
-                binary,
-                prefix_args,
-                entry,
-                combined,
-                replace_pending_title,
-                storage,
-                broadcast_tx,
-            )
-            .await;
-        });
+        tokio::spawn(mgr.generate_auto_title_via_probe(entry, prompt, replace_pending_title));
+    }
+
+    /// Same-harness auto-title fallback (spec 0151): when smith has no
+    /// credential, spawn a hidden probe session on the target session's own
+    /// harness, wait for its reply, sanitize it into a title, tear the
+    /// probe down, and apply the result. Mirrors
+    /// [`Self::generate_suggestions_via_probe`]'s lifecycle; best-effort
+    /// throughout — any failure just leaves the session's title unset.
+    ///
+    /// Returns a boxed (type-erased) future rather than being an `async
+    /// fn`: the probe calls `create`, whose future runs the prompt-as-event
+    /// hook, which is `maybe_spawn_auto_title` itself — as plain opaque
+    /// futures that cycle would give the compiler an infinitely recursive
+    /// future type. The `dyn` boundary here is what breaks the cycle.
+    fn generate_auto_title_via_probe(
+        self: Arc<Self>,
+        entry: Arc<SessionEntry>,
+        prompt: String,
+        replace_pending_title: bool,
+    ) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(self.generate_auto_title_via_probe_inner(entry, prompt, replace_pending_title))
+    }
+
+    async fn generate_auto_title_via_probe_inner(
+        self: Arc<Self>,
+        entry: Arc<SessionEntry>,
+        prompt: String,
+        replace_pending_title: bool,
+    ) {
+        let (harness, cwd, model) = {
+            let s = entry.summary.read().await;
+            (s.harness.clone(), s.cwd.clone(), s.model.clone())
+        };
+        let create_params = construct_protocol::CreateSessionParams {
+            harness: harness.clone(),
+            cwd,
+            prompt: Some(format!("{AUTO_TITLE_PROBE_INSTRUCTIONS}\n\n{prompt}")),
+            model,
+            title: Some("title probe".to_string()),
+            mode: Some("interactive".to_string()),
+            pty_size: Some(construct_protocol::PtySize {
+                cols: 100,
+                rows: 40,
+            }),
+            worktree: false,
+            env: HashMap::new(),
+            args: Vec::new(),
+            kind: construct_protocol::SessionKind::UsageProbe,
+            parent_session_id: None,
+            group_id: None,
+            position_after_session_id: None,
+            forked_from: None,
+        };
+        let probe_id = match self.create(create_params).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::debug!(%harness, error = %e, "title probe: create failed");
+                return;
+            }
+        };
+        let deadline = tokio::time::Instant::now() + TITLE_PROBE_TIMEOUT;
+        let mut title: Option<String> = None;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            if entry.is_deleted() {
+                break;
+            }
+            let probe_state = match self.get_entry(&probe_id).await {
+                Some(p) => p.summary.read().await.state,
+                None => break,
+            };
+            // Track the latest assistant message each tick — a preamble
+            // ("Sure, here's a title…") gets overwritten by the real reply
+            // — but only accept the result once the probe's turn has
+            // settled, so a mid-turn message can't decide the title early.
+            let evs = self
+                .storage
+                .read_transcript_tail(&probe_id, 40)
+                .unwrap_or_default();
+            for te in evs.iter().rev() {
+                if let SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text,
+                } = &te.event
+                {
+                    let t = construct_protocol::sanitize_auto_title(text);
+                    if !t.is_empty() {
+                        title = Some(t);
+                    }
+                    break;
+                }
+            }
+            let settled = matches!(
+                probe_state,
+                SessionState::AwaitingInput | SessionState::Done | SessionState::Errored
+            );
+            if settled && title.is_some() {
+                break;
+            }
+            // Terminal with nothing extracted (this tick already re-read
+            // the transcript): the probe died without a usable reply.
+            if matches!(probe_state, SessionState::Done | SessionState::Errored) {
+                break;
+            }
+        }
+        if let Err(e) = self.delete(&probe_id).await {
+            tracing::debug!(%probe_id, error = %e, "title probe: delete failed");
+        }
+        let Some(title) = title else {
+            tracing::debug!(session = %entry.id, %harness, "title probe: no usable reply");
+            return;
+        };
+        apply_auto_title(
+            &entry,
+            title,
+            replace_pending_title,
+            &self.storage,
+            &self.broadcast,
+        )
+        .await;
     }
 
     /// `session.suggest` (spec 0109): on-demand next-prompt suggestion
@@ -4306,6 +4549,15 @@ impl SessionManager {
         // smith one-shot too rather than spawning a probe that can never
         // answer.
         if harness == "smith" || harness == "shell" {
+            if !crate::availability::probe_smith(&self.availability_cache)
+                .await
+                .available
+            {
+                // No model to borrow — record the visible skip (spec 0151)
+                // instead of letting the one-shot fail silently downstream.
+                self.note_ambient_degradation("suggestions").await;
+                return Ok(false);
+            }
             let Some(smith_adapter) = self.config.adapters.get("smith").cloned() else {
                 return Ok(false);
             };
@@ -5802,6 +6054,19 @@ fn auto_title_prompt(text: String) -> Option<String> {
     (!text.trim().is_empty() && !is_slash_command(&text)).then_some(text)
 }
 
+/// Instruction preamble for the same-harness title-probe fallback (spec
+/// 0151). Kept in the same shape as smith's `--title-mode` system prompt so
+/// both generators produce equivalent titles; the reply is further cleaned
+/// by `construct_protocol::sanitize_auto_title`.
+const AUTO_TITLE_PROBE_INSTRUCTIONS: &str = "Reply with ONLY a 3-5 word title in Title Case \
+that summarizes the request below. No quotes, no punctuation, no markdown, no preamble. Do \
+not use any tools and do not act on the request itself. The request:";
+
+/// Hard cap on one same-harness title probe's lifetime: adapter spawn plus
+/// one short model turn. Past this the probe is torn down and the attempt
+/// silently dropped.
+const TITLE_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Shell out to `construct-adapter-smith --title-mode "<prompt>"`, capture
 /// stdout, and apply the title to the session summary. Best-effort:
 /// any failure (smith missing keys, network error, non-zero exit,
@@ -5845,6 +6110,20 @@ async fn generate_auto_title(
     if title.is_empty() {
         return;
     }
+    apply_auto_title(&entry, title, replace_pending_title, &storage, &broadcast).await;
+}
+
+/// Apply a generated title to the session — if the eligibility that
+/// launched generation still holds — then persist and broadcast. Shared by
+/// the smith `--title-mode` one-shot and the same-harness probe fallback
+/// (spec 0151).
+async fn apply_auto_title(
+    entry: &Arc<SessionEntry>,
+    title: String,
+    replace_pending_title: bool,
+    storage: &Arc<Storage>,
+    broadcast: &tokio::sync::broadcast::Sender<BroadcastMsg>,
+) {
     if entry.is_deleted() {
         return;
     }
@@ -6179,6 +6458,38 @@ fn builtin_harness_capabilities(name: &str) -> construct_protocol::Capabilities 
 mod tests {
     use super::*;
     use construct_protocol::{Capabilities, PtySize};
+
+    /// The ambient-degradation latch (spec 0151): first skip flips
+    /// `degradation_observed` and broadcasts exactly one `FeaturesState`;
+    /// later skips are silent. Deliberately independent of whether this
+    /// machine actually has a smith credential — only the latch and the
+    /// broadcast count are asserted.
+    #[tokio::test]
+    async fn ambient_degradation_latches_once_and_broadcasts_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        let mut rx = mgr.broadcast.subscribe();
+
+        assert!(!mgr.features_status().await.degradation_observed);
+        mgr.note_ambient_degradation("auto_title").await;
+        mgr.note_ambient_degradation("suggestions").await;
+        assert!(mgr.features_status().await.degradation_observed);
+
+        let mut features_broadcasts = 0;
+        while let Ok(msg) = rx.try_recv() {
+            if let BroadcastMsg::FeaturesState(status) = msg {
+                assert!(status.degradation_observed);
+                features_broadcasts += 1;
+            }
+        }
+        assert_eq!(features_broadcasts, 1, "one hint, not a nag stream");
+    }
 
     #[test]
     fn validate_restart_exe_accepts_executable_rejects_bad_paths() {
