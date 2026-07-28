@@ -8816,22 +8816,17 @@ function createTerminalHandle(id) {
     // those through onData, the same channel as user keystrokes, so replay
     // must never be allowed to inject a fresh response into the live child.
     replayingPty: false,
+    // xterm reports child-requested mouse motion through `onData`, just like
+    // keyboard input. Capture plain hover separately so forwarding it does
+    // not make this browser the session's PTY geometry owner.
+    forwardingPointerHover: false,
     ptyAltScreenFilterCarry: new Uint8Array(0),
     lastReportedSize: { cols: 0, rows: 0 },
   };
   state.terminalById.set(id, handle);
 
-  // Forward user keystrokes (and pasted text) as base64-encoded
-  // PTY input. xterm's onData yields a JS string of UTF-8
-  // codepoints; we re-encode through TextEncoder so multi-byte
-  // input round-trips cleanly.
-  term.onData((s) => {
-    if (handle.replayingPty || state.mode !== "terminal" || state.currentId !== id || currentInlineWidget(id)) return;
-    claimTerminalGeometryNow();
-    const data = encodeBase64Utf8(s);
-    rpc("session.pty_input", { session_id: id, data })
-      .catch((e) => console.error("pty_input failed:", e));
-  });
+  installTerminalPointerOwnershipTracking(host, handle);
+  term.onData((s) => forwardTerminalData(handle, id, s));
 
   // Refit when the terminal host changes size. Only the active xterm
   // claims daemon PTY geometry; hidden cached terminals just keep their
@@ -8868,6 +8863,31 @@ function createTerminalHandle(id) {
   });
 
   return handle;
+}
+
+function installTerminalPointerOwnershipTracking(host, handle) {
+  host.addEventListener("mousemove", (event) => {
+    // A move with a held button is a drag and therefore explicit engagement.
+    // Plain motion is hover, even when xterm forwards it to a child that
+    // enabled DECSET any-event mouse tracking.
+    handle.forwardingPointerHover = event.buttons === 0;
+    queueMicrotask(() => {
+      handle.forwardingPointerHover = false;
+    });
+  }, { capture: true, passive: true });
+}
+
+// Forward xterm input as base64-encoded PTY bytes. xterm's onData yields a JS
+// string of UTF-8 codepoints; we re-encode through TextEncoder so multi-byte
+// input round-trips cleanly. Child-requested hover reports use this same path,
+// but are deliberately passive PTY-geometry activity.
+function forwardTerminalData(handle, id, value) {
+  if (handle.replayingPty || state.mode !== "terminal" || state.currentId !== id || currentInlineWidget(id)) return;
+  const claim = !handle.forwardingPointerHover;
+  if (claim) claimTerminalGeometryNow();
+  const data = encodeBase64Utf8(value);
+  rpc("session.pty_input", { session_id: id, data, claim })
+    .catch((e) => console.error("pty_input failed:", e));
 }
 
 function activateTerminalHandle(handle) {
@@ -9085,6 +9105,14 @@ function refitTerminal(options = {}) {
   // `sendTerminalPtyResize` for why a same-size resize isn't enough.
   const forceRedraw = !!options.forceRedraw;
   if (claim) noteWebPtyEngagement();
+  if (claim && immediate && state.ptyResizeTimer) {
+    // A deliberate click/keystroke supersedes any older debounced viewport
+    // report from this browser. Letting that stale timer land afterward could
+    // resize the PTY away from the dimensions the engagement just claimed.
+    clearTimeout(state.ptyResizeTimer);
+    state.ptyResizeTimer = null;
+    state.pendingPtyResize = null;
+  }
   if (!claim && !webPtyRecentlyEngaged()) {
     // Passive browser layout churn (background tab, phone keyboard, viewport
     // settle) must not steal the single OS PTY geometry from an active TUI.
@@ -9106,7 +9134,10 @@ function refitTerminal(options = {}) {
   if (!wasAtBottom) state.resizeFollowBottomUntil = 0;
   const colsChanged = cols !== state.lastReportedSize.cols;
   const rowsChanged = rows !== state.lastReportedSize.rows;
-  if (!colsChanged && !rowsChanged && !forceRedraw) {
+  // A deliberate click/input is meaningful even at unchanged dimensions:
+  // ownership may currently belong to another connection whose viewport is
+  // different. The daemon deduplicates the eventual same-size OS resize.
+  if (!colsChanged && !rowsChanged && !forceRedraw && !claim) {
     return;
   }
   if (!claim && !colsChanged && rowsChanged && shouldSuppressComposerRowResize()) {
@@ -9128,9 +9159,9 @@ function refitTerminal(options = {}) {
   const host = state.term.element && state.term.element.closest(".terminal-host");
   if (host) host.classList.remove("pty-wide");
   if (immediate) {
-    sendTerminalPtyResize(cols, rows, wasAtBottom, state.currentId, forceRedraw);
+    sendTerminalPtyResize(cols, rows, wasAtBottom, state.currentId, forceRedraw, claim);
   } else {
-    scheduleTerminalPtyResize(cols, rows, wasAtBottom, { forceRedraw });
+    scheduleTerminalPtyResize(cols, rows, wasAtBottom, { forceRedraw, claim });
   }
 }
 
@@ -9176,8 +9207,16 @@ function applyPassiveTerminalGeometry() {
 
 function scheduleTerminalPtyResize(cols, rows, wasAtBottom, options = {}) {
   const forceRedraw = !!options.forceRedraw;
+  const claim = !!options.claim;
   const delayMs = options.delayMs || WEB_PTY_RESIZE_DEBOUNCE_MS;
-  state.pendingPtyResize = { sessionId: state.currentId, cols, rows, wasAtBottom, forceRedraw };
+  state.pendingPtyResize = {
+    sessionId: state.currentId,
+    cols,
+    rows,
+    wasAtBottom,
+    forceRedraw,
+    claim,
+  };
   state.lastReportedSize = { cols, rows };
   if (state.ptyResizeTimer) clearTimeout(state.ptyResizeTimer);
   state.ptyResizeTimer = setTimeout(() => {
@@ -9191,6 +9230,7 @@ function scheduleTerminalPtyResize(cols, rows, wasAtBottom, options = {}) {
       pending.wasAtBottom,
       pending.sessionId,
       pending.forceRedraw,
+      pending.claim,
     );
   }, delayMs);
 }
@@ -9201,12 +9241,13 @@ function sendTerminalPtyResize(
   wasAtBottom,
   sessionId = state.currentId,
   forceRedraw = false,
+  claim = false,
 ) {
   state.lastReportedSize = { cols, rows };
   if (!sessionId || sessionId !== state.currentId) return;
   if (wasAtBottom) state.resizeFollowBottomUntil = performance.now() + 1500;
   const send = (c, r) =>
-    rpc("session.pty_resize", { session_id: sessionId, cols: c, rows: r })
+    rpc("session.pty_resize", { session_id: sessionId, cols: c, rows: r, claim })
       .catch((e) => console.warn("pty_resize failed:", e));
   // PTY history is a delta stream, not a geometry-independent snapshot, so a
   // replayed grid can differ from the child's real screen — and the fit that
@@ -9996,17 +10037,42 @@ function closePane(paneId) {
   pushLayout(next);
 }
 
-function focusPane(paneId, { selectSessionToo = true } = {}) {
-  if (state.focusedPaneId === paneId) return;
+function claimPaneGeometry(paneId) {
+  const leaf = layoutFindLeaf(state.layout.tree, paneId);
+  if (!leaf || !leaf.session_id || leaf.session_id !== state.currentId) return;
+  const session = state.sessions.find((s) => s.id === leaf.session_id);
+  if (!isTerminalSession(session) || state.mode !== "terminal") return;
+  const handle = terminalHandleForSession(leaf.session_id);
+  if (!handle || !handle.loaded) {
+    state.pendingTerminalFocusId = leaf.session_id;
+    return;
+  }
+  // Pane focus can re-parent xterm. Wait for the new box to settle, then make
+  // this deliberate click a claim even when the pane was already focused.
+  requestAnimationFrame(() => {
+    if (state.focusedPaneId !== paneId || state.currentId !== leaf.session_id) return;
+    claimTerminalGeometryNow();
+  });
+}
+
+function focusPane(
+  paneId,
+  { selectSessionToo = true, claimGeometry = false } = {},
+) {
   const leaf = layoutFindLeaf(state.layout.tree, paneId);
   if (!leaf) return;
-  state.focusedPaneId = paneId;
-  renderPaneGrid();
+  const changed = state.focusedPaneId !== paneId;
+  if (changed) {
+    state.focusedPaneId = paneId;
+    renderPaneGrid();
+  }
   if (selectSessionToo && leaf.session_id && leaf.session_id !== state.currentId) {
     // Moving focus to a pane means looking at its session, so the singleton
     // stack follows. `fromPane` stops selectSession from writing the session
     // straight back into the layout it just came from.
     selectSession(leaf.session_id, { fromPane: true });
+  } else if (claimGeometry) {
+    claimPaneGeometry(paneId);
   }
 }
 
@@ -10117,7 +10183,17 @@ function renderPaneGrid() {
       body.appendChild(buildMirror(leaf));
     }
 
-    pane.addEventListener("mousedown", () => focusPane(leaf.id));
+    pane.addEventListener("mousedown", (event) => {
+      // The focused xterm host has its own click handler that claims and
+      // focuses its hidden textarea. Avoid sending the same claim again on
+      // the next frame. A terminal in an unfocused mirror still comes through
+      // here because moving pane focus/selection is this handler's job.
+      const terminalHost = event.target instanceof Element
+        ? event.target.closest(".terminal-host")
+        : null;
+      if (leaf.id === state.focusedPaneId && terminalHost) return;
+      focusPane(leaf.id, { claimGeometry: true });
+    });
     return pane;
   };
 

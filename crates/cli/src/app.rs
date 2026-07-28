@@ -472,8 +472,8 @@ impl ResizeDebounce {
         }
         // Send only what needs sending: panes whose size differs from the
         // one last sent, plus the newly focused session on a switch even at
-        // an unchanged size (claude/codex repaint on SIGWINCH, and the
-        // active-client-wins policy keys on the resize call itself).
+        // an unchanged size (claude/codex repaint on SIGWINCH, and a native
+        // resize call is also an explicit PTY-ownership claim).
         // Re-sending every visible pane on every trigger looks harmless —
         // the daemon dedups unchanged sizes — but with two clients attached
         // at different pane sizes that dedup never engages, so each
@@ -2119,6 +2119,9 @@ struct PtyInputJob {
     session_id: String,
     bytes: Vec<u8>,
     label: &'static str,
+    /// Whether this input transfers the session's PTY geometry to this TUI.
+    /// Mouse hover reports are delivered to tracking children without doing so.
+    claim_geometry: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2422,9 +2425,15 @@ fn spawn_pty_input_pump(
                     None => break,
                 },
             };
-            let (session_id, bytes, label, next) = coalesce_pty_input(first, &mut rx);
+            let (session_id, bytes, label, claim_geometry, next) =
+                coalesce_pty_input(first, &mut rx);
             carried = next;
-            if let Err(e) = client.pty_input(&session_id, bytes).await {
+            let result = if claim_geometry {
+                client.pty_input(&session_id, bytes).await
+            } else {
+                client.pty_input_passive(&session_id, bytes).await
+            };
+            if let Err(e) = result {
                 let _ = err_tx.send(format!("{label} failed: {e}"));
             }
         }
@@ -2442,14 +2451,16 @@ fn spawn_pty_input_pump(
 fn coalesce_pty_input(
     first: PtyInputJob,
     rx: &mut mpsc::UnboundedReceiver<PtyInputJob>,
-) -> (String, Vec<u8>, &'static str, Option<PtyInputJob>) {
+) -> (String, Vec<u8>, &'static str, bool, Option<PtyInputJob>) {
     let session_id = first.session_id;
     let label = first.label;
     let mut bytes = first.bytes;
+    let mut claim_geometry = first.claim_geometry;
     let mut carried = None;
     loop {
         match rx.try_recv() {
             Ok(next) if next.session_id == session_id => {
+                claim_geometry |= next.claim_geometry;
                 bytes.extend_from_slice(&next.bytes);
             }
             Ok(next) => {
@@ -2459,7 +2470,7 @@ fn coalesce_pty_input(
             Err(_) => break,
         }
     }
-    (session_id, bytes, label, carried)
+    (session_id, bytes, label, claim_geometry, carried)
 }
 
 /// State for the `/tasks` modal popup. v1 is read-only at the UI
@@ -6006,12 +6017,32 @@ impl App {
     }
 
     fn queue_pty_input(&mut self, session_id: String, bytes: Vec<u8>, label: &'static str) {
+        self.queue_pty_input_with_claim(session_id, bytes, label, true);
+    }
+
+    fn queue_passive_pty_input(
+        &mut self,
+        session_id: String,
+        bytes: Vec<u8>,
+        label: &'static str,
+    ) {
+        self.queue_pty_input_with_claim(session_id, bytes, label, false);
+    }
+
+    fn queue_pty_input_with_claim(
+        &mut self,
+        session_id: String,
+        bytes: Vec<u8>,
+        label: &'static str,
+        claim_geometry: bool,
+    ) {
         if self
             .pty_input_tx
             .send(PtyInputJob {
                 session_id,
                 bytes,
                 label,
+                claim_geometry,
             })
             .is_err()
         {
@@ -8041,6 +8072,40 @@ impl App {
             self.sync_program_popup_with_selection();
             self.report_focused_sessions();
         }
+    }
+
+    /// Make a deliberate click in a terminal split claim that session's PTY
+    /// geometry, even when the pane was already focused and its dimensions
+    /// have not changed. Ordinary focus bookkeeping would otherwise leave the
+    /// resize debounce quiescent, so another browser/TUI could remain owner
+    /// despite this user's explicit engagement.
+    fn main_window_pty_claim(&self, id: u64) -> Option<(String, (u16, u16))> {
+        if self.view_for_window(Some(id)) != ViewMode::Terminal {
+            return None;
+        }
+        let session_id = self
+            .selection_for_window(id)
+            .and_then(|selection| selection.session_id().map(str::to_owned))?;
+        if !self.sessions.iter().any(|session| {
+            session.id == session_id && session.has_pty && !session.state.is_terminal()
+        }) {
+            return None;
+        }
+        let (cols, rows) = self.window_pane_sizes.get(&id).copied()?;
+        if cols == 0 || rows == 0 {
+            return None;
+        }
+        Some((session_id, (cols, rows)))
+    }
+
+    fn claim_main_window_pty_size(&self, id: u64) {
+        let Some((session_id, (cols, rows))) = self.main_window_pty_claim(id) else {
+            return;
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let _ = client.pty_resize(&session_id, cols, rows).await;
+        });
     }
 
     fn split_active_window(&mut self, direction: WindowSplitDirection) {
@@ -10317,6 +10382,7 @@ impl App {
             .copied()
         {
             let view = hit.area;
+            self.claim_main_window_pty_size(hit.id);
             self.focus_main_window(hit.id);
             if contains(view, col, row) {
                 self.dynamic_ui_focused = None;
@@ -28879,6 +28945,37 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn already_focused_terminal_window_still_has_an_explicit_pty_claim() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.active_window_id = 1;
+        app.focus = PaneFocus::View;
+        app.view = ViewMode::Terminal;
+        app.window_pane_sizes.insert(1, (78, 22));
+
+        assert_eq!(
+            app.main_window_pty_claim(1),
+            Some(("s1".to_string(), (78, 22))),
+            "a click claim must not depend on focus changing"
+        );
+
+        // Re-focusing the same window is intentionally a bookkeeping no-op,
+        // but the click path still derives and sends this claim afterward.
+        app.focus_main_window(1);
+        assert_eq!(
+            app.main_window_pty_claim(1),
+            Some(("s1".to_string(), (78, 22)))
+        );
+
+        app.view = ViewMode::Chat;
+        assert_eq!(
+            app.main_window_pty_claim(1),
+            None,
+            "a transcript surface must not claim an unseen PTY grid"
+        );
+        server.abort();
+    }
+
     /// Regression: `C-x t` (ToggleView) must flip only the focused split's
     /// transcript/terminal mode, not every split. View mode is per-window
     /// (`window_views`), and each pane is remembered across focus changes.
@@ -31772,12 +31869,14 @@ mod tests {
                 session_id: "s1".into(),
                 bytes: vec![i],
                 label: "pty_input",
+                claim_geometry: true,
             })
             .unwrap();
         }
         let first = rx.try_recv().unwrap();
-        let (sid, bytes, _label, carried) = coalesce_pty_input(first, &mut rx);
+        let (sid, bytes, _label, claim_geometry, carried) = coalesce_pty_input(first, &mut rx);
         assert_eq!(sid, "s1");
+        assert!(claim_geometry);
         assert_eq!(
             bytes.len(),
             40,
@@ -31796,16 +31895,39 @@ mod tests {
                 session_id: s.into(),
                 bytes: vec![b],
                 label: "pty_input",
+                claim_geometry: true,
             })
             .unwrap();
         }
         let first = rx.try_recv().unwrap();
-        let (sid, bytes, _label, carried) = coalesce_pty_input(first, &mut rx);
+        let (sid, bytes, _label, claim_geometry, carried) = coalesce_pty_input(first, &mut rx);
         assert_eq!(sid, "s1");
         assert_eq!(bytes, b"ab");
+        assert!(claim_geometry);
         let carried = carried.expect("different-session job must carry over");
         assert_eq!(carried.session_id, "s2");
         assert_eq!(carried.bytes, b"c");
+    }
+
+    #[test]
+    fn coalesced_input_claims_geometry_if_any_event_is_explicit() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        for (bytes, claim_geometry) in [(b"hover".as_slice(), false), (b"click", true)] {
+            tx.send(PtyInputJob {
+                session_id: "s1".into(),
+                bytes: bytes.to_vec(),
+                label: "mouse",
+                claim_geometry,
+            })
+            .unwrap();
+        }
+
+        let first = rx.try_recv().unwrap();
+        let (sid, bytes, _label, claim_geometry, carried) = coalesce_pty_input(first, &mut rx);
+        assert_eq!(sid, "s1");
+        assert_eq!(bytes, b"hoverclick");
+        assert!(claim_geometry);
+        assert!(carried.is_none());
     }
 
     /// Build an App that's in PTY-capture mode (view focus, terminal
@@ -34288,6 +34410,70 @@ mod tests {
              still forward as a normal PTY mouse report",
         );
         assert_eq!(job.session_id, "s1");
+        assert!(
+            job.claim_geometry,
+            "a click forwarded to the child must claim PTY geometry"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mouse_hover_forwards_to_child_without_claiming_pty_geometry() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.view = ViewMode::Terminal;
+
+        // Any-event tracking reports plain pointer motion as well as clicks.
+        let mut history = crate::pty_render::ItemHistory::new();
+        history.feed_pty(b"\x1b[?1003h");
+        let _ = history.replay(120, 36, 0);
+        app.histories.insert("s1".into(), history);
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let inner = app
+            .layout
+            .main_window_areas
+            .first()
+            .expect("rendered session pane")
+            .inner_area;
+        let column = inner.x + inner.width / 2;
+        let row = inner.y + inner.height / 2;
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        let hover = rx
+            .try_recv()
+            .expect("mouse-tracking child should receive hover motion");
+        assert_eq!(hover.session_id, "s1");
+        assert!(
+            !hover.claim_geometry,
+            "hover motion must not claim the session's PTY geometry"
+        );
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })
+        .await;
+        let click = rx
+            .try_recv()
+            .expect("mouse-tracking child should receive the click");
+        assert!(
+            click.claim_geometry,
+            "click input must still claim the session's PTY geometry"
+        );
         server.abort();
     }
 

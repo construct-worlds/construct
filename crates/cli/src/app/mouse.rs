@@ -441,12 +441,17 @@ impl App {
         // click inside a mouse-grabbing child (e.g. Claude Code in fullscreen)
         // reaches the child but never focuses the pane, and keystrokes keep
         // going elsewhere. Focus is construct-side only and leaves the report
-        // sent down the PTY untouched, so the pass-through stays faithful. Wheel
-        // and motion events forward without stealing focus.
+        // sent down the PTY untouched, so the pass-through stays faithful.
+        // Wheel and motion events forward without stealing local focus; plain
+        // motion is additionally marked passive for PTY geometry ownership.
         if matches!(ev.kind, MouseEventKind::Down(_)) {
             self.focus_main_window(hit.id);
         }
-        self.queue_pty_input(session_id, bytes, "mouse");
+        if matches!(ev.kind, MouseEventKind::Moved) {
+            self.queue_passive_pty_input(session_id, bytes, "mouse");
+        } else {
+            self.queue_pty_input(session_id, bytes, "mouse");
+        }
         true
     }
 

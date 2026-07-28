@@ -1,7 +1,7 @@
 # 0121-client-grid-matches-pty-geometry
 
 Status: accepted
-Date: 2026-07-26
+Date: 2026-07-27
 Area: webui
 Scope: Agreement between a client's local terminal grid and the geometry the child process believes it has.
 
@@ -15,6 +15,8 @@ not be allowed to drift apart and stay apart.
 Concretely, a client has three legitimate options when its viewport changes:
 
 1. **Own the geometry** — resize the local grid and send the resize onward.
+   Ownership transfers only on explicit engagement under spec `0153`; a
+   passive measurement cannot take it.
 2. **Defer** — resize the local grid and send the resize after a settling
    delay, coalescing rapid changes into one notification.
 3. **Follow** — decline to own the geometry and render at the size the owning
@@ -65,5 +67,5 @@ keystroke — without ever leaving the two grids out of sync.
 
 - This does not require every client to have identical geometry. Only that a
   client's rendered grid and the geometry it has told the child about agree.
-- This does not govern which client wins when several attach at once; that
-  remains the daemon's active-client policy.
+- Which client connection wins is governed by explicit engagement under spec
+  `0153`.

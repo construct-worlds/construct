@@ -55,12 +55,10 @@ enum SubCmd {
     Unsubscribe,
 }
 
-/// Which transport a request arrived on. Drives the activity-
-/// driven PTY-resize policy: whichever kind most recently sent a
-/// `pty_input` or `pty_resize` to a given session "owns" that
-/// session's PTY size, and the daemon resizes the OS PTY to that
-/// kind's last-known viewport. Switching attention between TUI
-/// and phone flips the size on the next interaction.
+/// Which transport a request arrived on. Retained with each
+/// connection's PTY viewport for diagnostics; geometry ownership is
+/// connection-specific, because multiple TUIs and browsers can watch
+/// the same session at different sizes.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ClientKind {
     /// Unix-socket caller — the desktop TUI, MCP, or CLI scripts.
@@ -146,6 +144,7 @@ async fn run_session<I: Inbound>(
     }
 
     sub_task.abort();
+    manager.clear_pty_client(conn_id).await;
     manager.clear_conn(conn_id);
 }
 
@@ -1288,7 +1287,16 @@ async fn dispatch(
                 return Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string()));
             }
         };
-        manager.note_pty_activity(&p.session_id, kind, None).await;
+        if let Err(e) = manager
+            .note_pty_activity(&p.session_id, conn_id, kind, None, p.claim)
+            .await
+        {
+            tracing::debug!(
+                session = %p.session_id,
+                error = %e,
+                "input-driven PTY ownership resize failed"
+            );
+        }
         match manager.pty_input(&p.session_id, bytes).await {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
@@ -1296,10 +1304,16 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::SESSION_PTY_RESIZE, {
         let p = params!(req, SessionPtyResizeParams);
-        manager
-            .note_pty_activity(&p.session_id, kind, Some((p.cols, p.rows)))
-            .await;
-        match manager.pty_resize(&p.session_id, p.cols, p.rows).await {
+        match manager
+            .note_pty_activity(
+                &p.session_id,
+                conn_id,
+                kind,
+                Some((p.cols, p.rows)),
+                p.claim,
+            )
+            .await
+        {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
