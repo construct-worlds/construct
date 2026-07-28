@@ -24,7 +24,9 @@ What is deliberately **not** shared, and must stay per-client:
   keystrokes go. Sharing it would let one client redirect another's typing into
   a different session mid-sentence. Focus is per connection, and a client whose
   focused pane disappears falls back to the first pane in layout order — never
-  to whatever the writer had focused.
+  to whatever the writer had focused. A browser page reload may restore its own
+  focused pane from the locally selected session encoded in its URL; this is
+  local continuity, not shared focus.
 - **Zoom**, scrollback position, selection, and per-pane view mode. View mode
   in particular is resolved locally by each client (see
   [0062-webui-view-mode-is-per-session](0062-webui-view-mode-is-per-session.md)
@@ -118,6 +120,9 @@ feature not worth having.
 
 - A user splits a terminal pane in the TUI; the browser on the second monitor
   shows the same two panes, at the same ratio, without a reload.
+- A browser user focuses the second pane and refreshes the page. The session in
+  the URL restores focus to that pane and its content is hydrated there; no
+  focus state is written to or read from the daemon.
 - A pane in the TUI is focused while the same layout is open in a browser. The
   browser user moves focus to the other pane; the TUI's focus does not move,
   and neither user's typing is redirected.
