@@ -10,7 +10,11 @@ Scope: The web UI binds the TUI's emacs `C-x` chords with the same spelling and 
 The web UI implements the TUI's `C-x` prefix keymap verbatim. A chord that does something in the TUI does the same thing in the browser, spelled the same way. Rules that must hold:
 
 - **Same spelling, same action.** `C-x 3` splits right in both clients; `C-x r` renames in both. The keymap is a shared contract, not a per-client convenience. When either client's binding table changes, the other must change with it or the divergence is a bug.
-- **Only the chord-prefixed bindings are shared.** The TUI's bare-key bindings depend on a modal list that never holds a text caret. A browser has focusable text everywhere, so claiming bare letters globally would break typing. The prefix family is the portable subset; bare keys are deliberately not adopted.
+- **Only the chord-prefixed bindings are shared *globally*.** The TUI's bare-key bindings depend on a modal list that never holds a text caret. A browser has focusable text everywhere, so claiming bare letters across the page would break typing. The prefix family is the portable subset at global scope.
+- **The bare keys live in the session list, scoped to it.** A focused list row is exactly as modal as the TUI's list — no caret, nothing to type into — so the TUI's bare bindings carry their meanings there and only there: next/previous selection, drill into the view, toggle pin, expand and collapse a group, reorder. Scoping is the whole mechanism: the same keystroke typed into a composer must never move the list.
+- **Every keyboard-reachable surface is keyboard-escapable.** A chord that opens a dialog must have a keystroke that closes it. Cancel unwinds one layer at a time, innermost first, rather than dismissing the whole stack. Pending tool approvals are excluded: they are a decision an agent is blocked on, and a keystroke that discarded one would leave the session waiting with nothing recorded.
+- **Focus cycling reaches every focusable region, including the session list.** The TUI's cycle is list plus every visible window, in positional order. A cycle that visits only panes makes the list unreachable by keyboard the moment a split exists.
+- **A chord that toggles in the TUI toggles here.** Bindings whose TUI action opens *and* closes a surface must do both, or the keymap can enter a view it cannot leave.
 - **`Ctrl` carries the prefix, never the platform meta key.** The browser's own accelerators (⌘W, ⌘T, ⌘L and their Ctrl equivalents on other platforms) stay with the browser. A client that swallowed them would feel broken in a way a terminal never does.
 - **Chords escape a focused child PTY.** A pending chord and its prefix key are claimed before terminal emulation sees them, for the same reason the TUI forwards them: the purpose of these keys is to leave a busy pane, so a child that captured them would trap the user. Every other control key still reaches the child untouched.
 - **A half-typed chord is visible.** The prefix is echoed on screen until it completes, times out, or is cancelled. A terminal has a minibuffer to show this; a browser has nowhere, and an invisible prefix makes a mistyped second key look like the whole keymap is dead.
@@ -35,7 +39,7 @@ Sharing the spelling rather than inventing browser-native equivalents is the del
 ## Non-Goals
 
 - Adopting the TUI's vim profile, or offering a keymap-profile switch in the web UI.
-- Binding the TUI's bare-key or `M-x` bindings.
+- Binding the TUI's bare keys at *global* scope, or adopting `M-x`. Bare keys are adopted only inside the session list, where nothing can be typed into.
 - Making the chord set user-configurable. If that is wanted later, it should be one setting shared by both clients rather than a web-only preference.
 
 ## Examples
@@ -44,3 +48,7 @@ Sharing the spelling rather than inventing browser-native equivalents is the del
 - `C-x C-s` while the Program surface is open saves it; the same chord elsewhere reports that Program must be open first.
 - `C-x` followed by a key with no binding shows that the chord is unbound and sends nothing to the focused session.
 - On a viewport too narrow for panes, `C-x 3` reports that the window is too narrow instead of silently writing a split that other clients would then have to render.
+- A chord opens the new-session dialog; cancel closes it. The same cancel key, pressed with a half-typed chord instead, abandons the chord — one key, whichever layer is on top.
+- The chord that opens Program, pressed again, returns to the surface it was invoked from.
+- With two panes open, repeatedly cycling focus visits both panes and the session list, then returns to the first pane.
+- With a list row focused, the next/previous keys move the selection; the same keys typed into the composer insert text and leave the selection alone.

@@ -93,16 +93,47 @@ async fn web_ui_answers_the_tui_chord_keymap() {
         shared.tree
     );
 
-    // --- C-x o cycles focus without disturbing the panes ------------------
+    // --- C-x o cycles focus across panes AND the list ---------------------
+    // The TUI's other-window cycle is list → pane 1 → … → pane N → list, so a
+    // full lap must visit both kinds of region. Asserting only "focus moved to
+    // the other pane" is what let the list fall out of the cycle unnoticed.
     let focused_before: f64 = eval_number(&page, "state.focusedPaneId").await;
-    chord(&page, "o").await;
-    let focused_after = wait_for_changed_number(&page, "state.focusedPaneId", focused_before).await;
+    let mut saw_other_pane = false;
+    let mut saw_list = false;
+    for _ in 0..4 {
+        chord(&page, "o").await;
+        if eval_bool(
+            &page,
+            "document.getElementById('sessionList').contains(document.activeElement)",
+        )
+        .await
+        {
+            saw_list = true;
+        } else if eval_number(&page, "state.focusedPaneId").await != focused_before {
+            saw_other_pane = true;
+        }
+        let panes: f64 =
+            eval_number(&page, "document.querySelectorAll('#paneGrid .pane').length").await;
+        assert_eq!(panes, 2.0, "moving focus must not add or remove panes");
+    }
+    assert!(saw_other_pane, "C-x o should reach the other pane");
     assert!(
-        focused_after.is_some(),
-        "C-x o should move focus to the other pane"
+        saw_list,
+        "C-x o should also reach the session list — the TUI cycles list plus \
+         every visible window, and a list left out of the cycle is unreachable"
     );
-    let still_two: f64 = eval_number(&page, "document.querySelectorAll('#paneGrid .pane').length").await;
-    assert_eq!(still_two, 2.0, "moving focus must not add or remove panes");
+    // Land back on a pane so the zoom assertions below have one focused.
+    for _ in 0..4 {
+        if !eval_bool(
+            &page,
+            "document.getElementById('sessionList').contains(document.activeElement)",
+        )
+        .await
+        {
+            break;
+        }
+        chord(&page, "o").await;
+    }
     save_screenshot(&page, "web_keymap_split_via_chord.png").await;
 
     // --- C-x z zooms this client only -------------------------------------
@@ -174,6 +205,165 @@ async fn web_ui_answers_the_tui_chord_keymap() {
     )
     .await;
     assert!(told, "the refusal should be explained, not silent");
+}
+
+/// The four ways the first keymap could be entered but not left, or reached a
+/// surface the TUI reaches and the browser did not. Each of these was a real
+/// report, and each is the kind of failure a table-shaped test misses: the
+/// binding fires, so a "is it bound?" assertion passes — what's wrong is where
+/// it leaves the user.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_keymap_escapes_dialogs_toggles_program_and_drives_the_list() {
+    let d = Daemon::spawn().await.expect("daemon");
+    let r = d
+        .client
+        .remote_start(construct_protocol::TunnelProvider::None, None)
+        .await
+        .expect("remote.start");
+
+    let cwd = std::env::temp_dir().to_string_lossy().to_string();
+    for title in ["alpha", "beta", "gamma"] {
+        d.client
+            .create(shell_session_params(&cwd, title))
+            .await
+            .expect("create session");
+    }
+
+    let Some((browser, mut handler)) = launch_browser().await else {
+        eprintln!("skipping web_keymap dialogs test: could not launch Chromium");
+        return;
+    };
+    let _handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    let page = browser.new_page("about:blank").await.expect("new page");
+    set_viewport(&page, WIDE).await;
+    let url = inject_userinfo(&r.local_url, "remote", &r.password);
+    page.goto(&url).await.expect("goto");
+    wait_conn_open(&page).await;
+    assert!(wait_for_bool(&page, "!!state.currentId").await, "a session should be selected");
+
+    // --- a dialog opened by a chord can be closed by the keyboard ---------
+    // `C-x C-f` opens the new-session sheet. Before this, nothing dismissed
+    // it: the keymap could open a modal it had no way out of.
+    press(&page, "x", true).await;
+    press(&page, "f", true).await;
+    assert!(
+        wait_for_bool(&page, "!document.getElementById('newSessionSheet').hidden").await,
+        "C-x C-f should open the new-session sheet"
+    );
+    press(&page, "Escape", false).await;
+    assert!(
+        wait_for_bool(&page, "document.getElementById('newSessionSheet').hidden").await,
+        "Escape must close the new-session sheet — a chord that opens a modal \
+         must have a keyboard way out"
+    );
+
+    // The same must hold for every other dismissible sheet.
+    let _ = page.evaluate("openSettingsSheet(); true").await;
+    assert!(
+        wait_for_bool(&page, "!document.getElementById('settingsSheet').hidden").await,
+        "settings sheet should open"
+    );
+    press(&page, "Escape", false).await;
+    assert!(
+        wait_for_bool(&page, "document.getElementById('settingsSheet').hidden").await,
+        "Escape must close the settings sheet too"
+    );
+
+    // --- C-x Space toggles Program, rather than only entering it ----------
+    let before: String = page
+        .evaluate("state.mode")
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    chord(&page, " ").await;
+    assert!(
+        wait_for_bool(&page, "state.mode === 'program'").await,
+        "C-x Space should open Program"
+    );
+    chord(&page, " ").await;
+    let js = format!("state.mode === {before:?}");
+    assert!(
+        wait_for_bool(&page, js.as_str()).await,
+        "C-x Space again must return to {before:?} — the TUI's OpenProgram toggles"
+    );
+
+    // --- C-x o reaches the session list, not just the other pane ----------
+    chord(&page, "3").await;
+    assert!(
+        wait_for_number(&page, "document.querySelectorAll('#paneGrid .pane').length", 2.0)
+            .await
+            .is_some(),
+        "C-x 3 should split"
+    );
+    // Cycle until focus lands in the list; with 2 panes that is at most three
+    // presses. Before the fix the list was simply never in the cycle.
+    let mut reached_list = false;
+    for _ in 0..3 {
+        chord(&page, "o").await;
+        if eval_bool(
+            &page,
+            "document.getElementById('sessionList').contains(document.activeElement)",
+        )
+        .await
+        {
+            reached_list = true;
+            break;
+        }
+    }
+    assert!(
+        reached_list,
+        "C-x o must include the session list in the focus cycle, as the TUI's \
+         other-window does — otherwise the list is unreachable on a split"
+    );
+
+    // --- with the list focused, the TUI's bare keys drive it --------------
+    let selected_before: String = page
+        .evaluate("state.currentId")
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    press(&page, "n", true).await;
+    let moved = {
+        let js = format!("state.currentId !== {selected_before:?}");
+        wait_for_bool(&page, js.as_str()).await
+    };
+    assert!(
+        moved,
+        "C-n must move the list selection when the list has focus — the TUI \
+         binds it bare and a focused row is just as modal"
+    );
+    // And back, so the pair is verified rather than just one direction.
+    press(&page, "p", true).await;
+    let js = format!("state.currentId === {selected_before:?}");
+    assert!(
+        wait_for_bool(&page, js.as_str()).await,
+        "C-p must move the selection back the other way"
+    );
+
+    // Bare keys must stay scoped: typing in the composer is not list navigation.
+    let _ = page
+        .evaluate("document.getElementById('input').focus(); true")
+        .await;
+    let before_typing: String = page
+        .evaluate("state.currentId")
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    press(&page, "n", false).await;
+    let unchanged: String = page
+        .evaluate("state.currentId")
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    assert_eq!(
+        before_typing, unchanged,
+        "a bare letter typed into the composer must never move the list selection"
+    );
 }
 
 /// Send `C-x` then `key` — one complete chord.
