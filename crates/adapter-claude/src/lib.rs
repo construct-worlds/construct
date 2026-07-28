@@ -213,9 +213,12 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     let sid_file = std::env::var("CONSTRUCT_SESSION_DATA_DIR")
         .ok()
         .map(|d| std::path::PathBuf::from(d).join("claude_session_id.txt"));
-    let fork_from = std::env::var("CONSTRUCT_CLAUDE_FORK_FROM")
-        .ok()
-        .filter(|s| !s.is_empty());
+    let fork_from = claude_fork_parent_for_launch(
+        resuming,
+        std::env::var("CONSTRUCT_CLAUDE_FORK_FROM")
+            .ok()
+            .filter(|s| !s.is_empty()),
+    );
     let claude_session_id = match (resuming, sid_file.as_ref()) {
         (true, Some(p)) if p.exists() => std::fs::read_to_string(p)
             .ok()
@@ -327,6 +330,18 @@ fn truncate_initial_prompt_arg(prompt: &str) -> String {
         end -= 1;
     }
     format!("{}{}", &prompt[..end], suffix)
+}
+
+/// A native fork hint is consumed only by the new construct session's first
+/// launch. The daemon persists that original environment in `start.json`, so
+/// the hint remains present on restart; honoring it again would create another
+/// fork from the parent instead of resuming this session's captured native id.
+fn claude_fork_parent_for_launch(resuming: bool, configured: Option<String>) -> Option<String> {
+    if resuming {
+        None
+    } else {
+        configured
+    }
 }
 
 fn spawn_interactive_transcript_watcher(
@@ -1270,6 +1285,20 @@ mod tests {
         assert_eq!(
             claude_project_slug(Path::new("/Users/moon/agentd/.claude/worktrees/test")),
             "-Users-moon-agentd--claude-worktrees-test"
+        );
+    }
+
+    #[test]
+    fn native_fork_hint_is_ignored_when_resuming() {
+        assert_eq!(
+            claude_fork_parent_for_launch(false, Some("parent-id".into())).as_deref(),
+            Some("parent-id"),
+            "the first launch must fork the requested parent"
+        );
+        assert_eq!(
+            claude_fork_parent_for_launch(true, Some("parent-id".into())),
+            None,
+            "daemon restart must resume the captured child id instead of reforking the parent"
         );
     }
 
