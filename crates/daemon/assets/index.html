@@ -773,7 +773,10 @@
   /* Focus is per-client, never shared: it decides where THIS user's
      keystrokes go. Brightness-only, matching the TUI's pane focus
      treatment (spec 0084). */
-  .pane.is-focused { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+  .pane.is-focused {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-radius: 0;
+  }
   .pane-head {
     position: relative;
     z-index: 41;

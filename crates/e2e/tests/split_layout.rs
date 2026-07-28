@@ -487,6 +487,18 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
 
     let focused: f64 = eval_number(&page, "document.querySelectorAll('#paneGrid .pane.is-focused').length").await;
     assert_eq!(focused, 1.0, "exactly one pane holds focus");
+    let focused_border_radius: String = page
+        .evaluate(
+            "getComputedStyle(document.querySelector('#paneGrid .pane.is-focused')).borderRadius",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    assert_eq!(
+        focused_border_radius, "0px",
+        "the focused split highlight must have square corners"
+    );
     let stack_in_focused: bool = eval_bool(
         &page,
         "!!document.querySelector('#paneGrid .pane.is-focused #viewStack')",
