@@ -1,7 +1,7 @@
 # 0153-pty-size-ownership-follows-explicit-engagement
 
 Status: accepted
-Date: 2026-07-27
+Date: 2026-07-28
 Area: protocol
 Scope: Decide which of several clients viewing one session controls its single PTY geometry.
 
@@ -15,6 +15,11 @@ reported viewport.
 A viewport change without explicit engagement is passive. It updates that
 connection's remembered size and reaches the PTY only if the connection already
 owns the geometry. It must not transfer ownership.
+
+Following a session change received through shared split-layout
+synchronization is passive. The receiving client may update which session it
+renders and report that pane's viewport, but the layout event is not local
+focus or input and must not transfer geometry ownership.
 
 Clicking a visible terminal pane is an explicit claim even when that pane was
 already locally focused and its measured dimensions did not change.
@@ -94,3 +99,7 @@ clients.
 - If a browser receives a TUI resize while its post-click grace timer is still
   live, it immediately mirrors the TUI grid; a subsequent mouse-tracking hover
   remains passive and is encoded against that owning grid.
+- A TUI changes the session shown in a split and claims that session at the
+  split's dimensions. A browser displaying the same shared split follows the
+  new session without reclaiming it; only a later browser click or keystroke
+  transfers geometry to the browser.
