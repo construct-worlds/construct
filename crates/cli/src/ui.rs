@@ -11519,7 +11519,7 @@ pub fn short_event_label(ev: &SessionEvent) -> String {
         SessionEvent::NativeSubagent { id, state, .. } => {
             format!("native-subagent {id} {state:?}")
         }
-        SessionEvent::PtyResize { cols, rows } => format!("pty_resize {cols}x{rows}"),
+        SessionEvent::PtyResize { cols, rows, .. } => format!("pty_resize {cols}x{rows}"),
         SessionEvent::ToolApprovalResolved { call_id } => {
             format!("approval-resolved {call_id}")
         }
@@ -21556,7 +21556,11 @@ mod tests {
         let pty = SessionEvent::Pty {
             data: "AQID".into(),
         };
-        let resize = SessionEvent::PtyResize { cols: 80, rows: 24 };
+        let resize = SessionEvent::PtyResize {
+            cols: 80,
+            rows: 24,
+            owner: false,
+        };
         assert_eq!(chat_event_kind(&pty), ChatEventKind::Hidden);
         assert_eq!(chat_event_kind(&resize), ChatEventKind::Hidden);
     }

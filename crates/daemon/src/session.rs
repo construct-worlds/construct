@@ -291,6 +291,13 @@ fn position_after_visible_session(
 #[derive(Clone, Debug)]
 pub enum BroadcastMsg {
     Event(EventNotificationPayload),
+    /// A PTY resize is personalized while forwarding so the connection that
+    /// owns the geometry can distinguish its own echo from a resize claimed
+    /// by another TUI/web client.
+    PtyResize {
+        payload: EventNotificationPayload,
+        owner_conn_id: u64,
+    },
     State(StateNotificationPayload),
     Deleted(DeletedNotificationPayload),
     GroupState(GroupStateNotificationPayload),

@@ -27,6 +27,12 @@ Terminal-emulator protocol replies generated on behalf of the child are
 passive. They must not be treated as keyboard input merely because the
 terminal library exposes replies and user bytes through the same data stream.
 
+PTY resize notifications identify, for each receiving connection, whether
+that connection owns the resize. A client must immediately stop treating
+itself as recently engaged and render the new owning grid when the resize
+belongs to another connection. A local grace timer must not mask a newer
+explicit claim from a TUI or another browser.
+
 ## Reason
 
 A POSIX PTY has one row/column size even when several TUIs and browsers render
@@ -69,3 +75,6 @@ clients.
   when the TUI forwards that motion to a child using terminal mouse tracking.
 - A browser answering a child's device-status or capability query does not
   transfer ownership; a browser keystroke still does.
+- If a browser receives a TUI resize while its post-click grace timer is still
+  live, it immediately mirrors the TUI grid; a subsequent mouse-tracking hover
+  remains passive and is encoded against that owning grid.

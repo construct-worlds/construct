@@ -569,6 +569,12 @@ pub enum SessionEvent {
     PtyResize {
         cols: u16,
         rows: u16,
+        /// True only for the client connection whose explicit engagement
+        /// currently owns this resize. The daemon personalizes this transient
+        /// event per subscriber; older servers omit it and deserialize as
+        /// false.
+        #[serde(default)]
+        owner: bool,
     },
     /// Adapter is asking the user to approve (or deny) a pending tool call.
     /// The adapter parks the agent loop until a [`SessionToolDecisionParams`]
