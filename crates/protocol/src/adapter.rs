@@ -218,7 +218,7 @@ pub fn missing_bin_hint(bin: &str, source: &std::io::Error) -> String {
 }
 
 /// Env var the daemon sets on adapter processes to describe MCP servers
-/// contributed by installed plugins (spec 0151): a JSON array of
+/// contributed by installed plugins (spec 0152): a JSON array of
 /// `{ "name", "command", "args", "env" }` objects, commands already
 /// resolved to absolute paths. Adapters inject these alongside the
 /// construct MCP server; `CONSTRUCT_INJECT_MCP=0` disables both.

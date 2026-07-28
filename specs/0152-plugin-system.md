@@ -1,4 +1,4 @@
-# 0151-plugin-system
+# 0152-plugin-system
 
 Status: accepted
 Date: 2026-07-27

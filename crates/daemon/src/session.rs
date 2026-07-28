@@ -1280,7 +1280,7 @@ use widgets::WidgetSnapshot;
 pub struct SessionManager {
     storage: Arc<Storage>,
     config: Arc<Config>,
-    /// Plugin action/event-hook runtime (spec 0151 phase 2). Set once from
+    /// Plugin action/event-hook runtime (spec 0152 phase 2). Set once from
     /// daemon startup after construction; empty when no plugins are loaded.
     plugins: std::sync::OnceLock<Arc<crate::plugins::PluginRuntime>>,
     adapter_runtime_dir: PathBuf,
@@ -1821,7 +1821,7 @@ impl SessionManager {
         let _ = self.self_ref.set(Arc::downgrade(self));
     }
 
-    /// Install the plugin runtime (spec 0151 phase 2). Called once from
+    /// Install the plugin runtime (spec 0152 phase 2). Called once from
     /// daemon startup, right after construction; later calls are ignored.
     pub fn set_plugin_runtime(&self, runtime: Arc<crate::plugins::PluginRuntime>) {
         let _ = self.plugins.set(runtime);

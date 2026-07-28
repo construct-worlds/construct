@@ -121,7 +121,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     };
 
     let mut config = config::Config::load_or_default(&paths)?;
-    // Merge installed-plugin contributions (spec 0151) into the same
+    // Merge installed-plugin contributions (spec 0152) into the same
     // adapter map user config and built-ins land in, so a plugin harness
     // is indistinguishable from a community adapter downstream.
     let plugin_set = plugins::PluginSet::load(&paths);

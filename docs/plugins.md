@@ -77,7 +77,7 @@ that index exists.
 
 The manual paths above stay supported, but a repository can declare all of
 them at once with a `construct-plugin.toml` manifest at its root (spec
-0151) and become installable with one command:
+0152) and become installable with one command:
 
 ```console
 $ construct plugin install owner/repo          # or owner/repo/subdir

@@ -1,4 +1,4 @@
-//! Plugin system (spec 0151): manifest parsing, the installed-plugin
+//! Plugin system (spec 0152): manifest parsing, the installed-plugin
 //! registry, and the merge of plugin contributions into the daemon's
 //! existing extension seams (adapters, program verbs, program templates,
 //! injected MCP servers).
@@ -54,12 +54,12 @@ pub struct PluginManifest {
     /// construct MCP server.
     #[serde(default)]
     pub mcp_servers: Vec<PluginMcpServerDecl>,
-    /// User-invocable actions (spec 0151 phase 2): surfaced in client
+    /// User-invocable actions (spec 0152 phase 2): surfaced in client
     /// palettes and as `/<plugin>:<action>` slash tokens; running one
     /// spawns `command` with plugin identity env.
     #[serde(default)]
     pub actions: Vec<PluginActionDecl>,
-    /// Event hooks (spec 0151 phase 2): the daemon spawns `command` when a
+    /// Event hooks (spec 0152 phase 2): the daemon spawns `command` when a
     /// session event matching `on` is handled.
     #[serde(default)]
     pub events: Vec<PluginEventHookDecl>,
@@ -649,7 +649,7 @@ impl PluginSet {
     }
 }
 
-// ── Runtime: actions and event hooks (spec 0151 phase 2) ────────────────────
+// ── Runtime: actions and event hooks (spec 0152 phase 2) ────────────────────
 
 /// Daemon-side runtime for plugin actions and event hooks. Held by the
 /// session manager; `on_event` is called from the event funnel and must

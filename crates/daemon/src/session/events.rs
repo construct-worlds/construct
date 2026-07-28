@@ -17,7 +17,7 @@ impl SessionManager {
         if self.is_shutting_down.load(Ordering::Acquire) {
             return;
         }
-        // Plugin event hooks (spec 0151 phase 2): observational, spawned
+        // Plugin event hooks (spec 0152 phase 2): observational, spawned
         // fire-and-forget, and gated on a cheap has-hooks check so the hot
         // path pays nothing when no plugin subscribes.
         if let Some(runtime) = self.plugin_runtime() {

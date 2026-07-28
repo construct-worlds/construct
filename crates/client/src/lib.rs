@@ -208,7 +208,7 @@ impl Client {
         self.request(ipc_method::PING, &serde_json::Value::Null)
             .await
     }
-    /// Plugin-contributed palette/slash actions (spec 0151 phase 2).
+    /// Plugin-contributed palette/slash actions (spec 0152 phase 2).
     pub async fn plugin_actions(&self) -> Result<Vec<construct_protocol::PluginActionInfo>> {
         let r: construct_protocol::PluginListActionsResult = self
             .request(ipc_method::PLUGIN_LIST_ACTIONS, &serde_json::Value::Null)

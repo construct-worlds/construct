@@ -1049,7 +1049,7 @@ impl SessionState {
 pub mod ipc_method {
     pub const PING: &str = "ping";
     pub const HARNESS_LIST: &str = "harness.list";
-    /// User-invocable actions contributed by installed plugins (spec 0151
+    /// User-invocable actions contributed by installed plugins (spec 0152
     /// phase 2). Clients populate their palette/slash surfaces from this at
     /// runtime — plugin actions are data, never compiled-in commands.
     pub const PLUGIN_LIST_ACTIONS: &str = "plugin.list_actions";
@@ -2052,7 +2052,7 @@ pub struct ProgramStateNotificationPayload {
     pub blocks: Vec<ProgramBlockView>,
 }
 
-/// One user-invocable action contributed by an installed plugin (spec 0151
+/// One user-invocable action contributed by an installed plugin (spec 0152
 /// phase 2), as returned by `plugin.list_actions`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginActionInfo {

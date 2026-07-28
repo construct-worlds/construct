@@ -200,10 +200,10 @@ pub struct Storage {
     /// are a personal customization, not project data. `None` (only in
     /// tests that don't call the setter) falls back to `data_dir/verbs`.
     program_verbs_dir_override: Option<PathBuf>,
-    /// Plugin verb directories as `(namespace, dir)` pairs (spec 0151).
+    /// Plugin verb directories as `(namespace, dir)` pairs (spec 0152).
     /// Verbs from these load force-namespaced `<namespace>:<name>`.
     plugin_verb_dirs: Vec<(String, PathBuf)>,
-    /// Plugin template directories as `(namespace, dir)` pairs (spec 0151).
+    /// Plugin template directories as `(namespace, dir)` pairs (spec 0152).
     /// Templates from these list with id `<namespace>:<stem>`.
     plugin_template_dirs: Vec<(String, PathBuf)>,
 }
@@ -238,14 +238,14 @@ impl Storage {
         self
     }
 
-    /// Set the plugin verb directories (spec 0151), as `(namespace, dir)`
+    /// Set the plugin verb directories (spec 0152), as `(namespace, dir)`
     /// pairs from `plugins::PluginSet::verb_dirs`.
     pub fn with_plugin_verb_dirs(mut self, dirs: Vec<(String, PathBuf)>) -> Self {
         self.plugin_verb_dirs = dirs;
         self
     }
 
-    /// Set the plugin template directories (spec 0151), as `(namespace,
+    /// Set the plugin template directories (spec 0152), as `(namespace,
     /// dir)` pairs from `plugins::PluginSet::template_dirs`.
     pub fn with_plugin_template_dirs(mut self, dirs: Vec<(String, PathBuf)>) -> Self {
         self.plugin_template_dirs = dirs;
@@ -726,7 +726,7 @@ impl Storage {
                 });
             }
         }
-        // Plugin templates (spec 0151): listed like user templates but with
+        // Plugin templates (spec 0152): listed like user templates but with
         // namespaced ids so a plugin can never shadow a user template file.
         for (namespace, dir) in &self.plugin_template_dirs {
             let entries = match std::fs::read_dir(dir) {

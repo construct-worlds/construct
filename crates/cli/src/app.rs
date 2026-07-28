@@ -1460,7 +1460,7 @@ pub struct App {
     /// suggestions) for lack of a smith credential this run — the gate for
     /// showing the modeline degradation notice at all.
     pub features_degradation_observed: bool,
-    /// Plugin-contributed palette/slash actions (spec 0151 phase 2),
+    /// Plugin-contributed palette/slash actions (spec 0152 phase 2),
     /// fetched once at startup/reconnect; empty when no plugins loaded.
     pub plugin_actions: Vec<construct_protocol::PluginActionInfo>,
     /// Program templates offered as clickable buttons in the empty-program
@@ -12530,7 +12530,7 @@ impl App {
                     self.set_status(format!("plugin actions: {}", tokens.join(", ")));
                 }
             }
-            // Plugin actions (spec 0151 phase 2): any token the static
+            // Plugin actions (spec 0152 phase 2): any token the static
             // table doesn't know is tried against the daemon-reported
             // action list before being rejected, so plugins extend the
             // palette/slash surface without a client release.

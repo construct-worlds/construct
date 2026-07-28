@@ -1,4 +1,4 @@
-//! `construct plugin` subcommands (spec 0151): install, link, list,
+//! `construct plugin` subcommands (spec 0152): install, link, list,
 //! enable/disable, uninstall. These mutate the on-disk plugin registry only;
 //! the daemon reads it at startup, so every mutation ends with a restart
 //! hint (`construct daemon restart` preserves sessions).
