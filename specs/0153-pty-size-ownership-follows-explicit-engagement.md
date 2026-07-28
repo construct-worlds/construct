@@ -23,6 +23,10 @@ Pointer hover and motion are passive, including motion reports forwarded to a
 mouse-tracking child application. Clicks, drags, wheel actions, and keyboard
 input are explicit engagement and claim the geometry.
 
+Terminal-emulator protocol replies generated on behalf of the child are
+passive. They must not be treated as keyboard input merely because the
+terminal library exposes replies and user bytes through the same data stream.
+
 ## Reason
 
 A POSIX PTY has one row/column size even when several TUIs and browsers render
@@ -63,3 +67,5 @@ clients.
   input in either window selects that exact connection's size.
 - Moving a pointer over a browser or TUI pane does not transfer ownership, even
   when the TUI forwards that motion to a child using terminal mouse tracking.
+- A browser answering a child's device-status or capability query does not
+  transfer ownership; a browser keystroke still does.

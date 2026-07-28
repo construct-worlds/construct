@@ -8820,12 +8820,18 @@ function createTerminalHandle(id) {
     // keyboard input. Capture plain hover separately so forwarding it does
     // not make this browser the session's PTY geometry owner.
     forwardingPointerHover: false,
+    // xterm's internal user-input signal fires for keyboard, paste, and mouse
+    // reports, but not for automatic terminal protocol replies (DSR/DA/focus
+    // responses). `onData` itself carries no source metadata, so remember that
+    // signal until the matching data callback runs.
+    xtermUserInputPending: false,
+    xtermUserInputSignalAvailable: false,
     ptyAltScreenFilterCarry: new Uint8Array(0),
     lastReportedSize: { cols: 0, rows: 0 },
   };
   state.terminalById.set(id, handle);
 
-  installTerminalPointerOwnershipTracking(host, handle);
+  installTerminalInputOwnershipTracking(host, handle, term);
   term.onData((s) => forwardTerminalData(handle, id, s));
 
   // Refit when the terminal host changes size. Only the active xterm
@@ -8865,7 +8871,19 @@ function createTerminalHandle(id) {
   return handle;
 }
 
-function installTerminalPointerOwnershipTracking(host, handle) {
+function installTerminalInputOwnershipTracking(host, handle, term) {
+  // xterm marks genuine user-originated data before emitting the corresponding
+  // onData callback. The public onData event merges that with terminal replies,
+  // so use the bundled version's core signal to preserve the distinction.
+  // Fall back to the historical behavior if a future xterm update moves the
+  // internal signal: explicit input must keep working even before adaptation.
+  const coreService = term && term._core && term._core.coreService;
+  if (coreService && typeof coreService.onUserInput === "function") {
+    handle.xtermUserInputSignalAvailable = true;
+    coreService.onUserInput(() => {
+      handle.xtermUserInputPending = true;
+    });
+  }
   host.addEventListener("mousemove", (event) => {
     // A move with a held button is a drag and therefore explicit engagement.
     // Plain motion is hover, even when xterm forwards it to a child that
@@ -8880,10 +8898,16 @@ function installTerminalPointerOwnershipTracking(host, handle) {
 // Forward xterm input as base64-encoded PTY bytes. xterm's onData yields a JS
 // string of UTF-8 codepoints; we re-encode through TextEncoder so multi-byte
 // input round-trips cleanly. Child-requested hover reports use this same path,
-// but are deliberately passive PTY-geometry activity.
+// but are deliberately passive PTY-geometry activity. Automatic replies to
+// terminal queries are passive too: they are application protocol traffic,
+// not evidence that the browser user engaged with this session.
 function forwardTerminalData(handle, id, value) {
+  const xtermUserInput = handle.xtermUserInputSignalAvailable
+    ? !!handle.xtermUserInputPending
+    : true;
+  handle.xtermUserInputPending = false;
   if (handle.replayingPty || state.mode !== "terminal" || state.currentId !== id || currentInlineWidget(id)) return;
-  const claim = !handle.forwardingPointerHover;
+  const claim = xtermUserInput && !handle.forwardingPointerHover;
   if (claim) claimTerminalGeometryNow();
   const data = encodeBase64Utf8(value);
   rpc("session.pty_input", { session_id: id, data, claim })
