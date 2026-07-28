@@ -689,6 +689,11 @@ impl Client {
                     session_id: id.to_string(),
                     cols,
                     rows,
+                    // Native callers historically used resize as both a
+                    // viewport update and an ownership claim. Preserve that
+                    // contract; browser callers can report `claim: false`
+                    // directly over JSON-RPC for passive layout churn.
+                    claim: true,
                 },
             )
             .await?;

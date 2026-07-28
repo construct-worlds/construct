@@ -195,60 +195,59 @@ impl SessionManager {
         lines
     }
 
-    /// Record that a given client kind just acted on a session's
-    /// PTY (typed input or sent a resize). Updates the kind's
-    /// last-known viewport (if `resize_to` was supplied), flips
-    /// `last_active` to that kind, and — if the kind switched
-    /// since last time — issues a `pty_resize` to match the kind's
-    /// stored viewport. No-op when only one kind is attached.
+    /// Record input or a viewport report from one client connection.
     ///
-    /// This is the daemon-side half of the "active client wins"
-    /// PTY-size policy. The complementary half lives in
-    /// `server::dispatch`'s `SESSION_PTY_INPUT` and
-    /// `SESSION_PTY_RESIZE` arms, which call this method before
-    /// forwarding the actual request to the PTY.
+    /// Input and claiming resize reports move ownership to that exact
+    /// connection. Passive resize reports update the connection's remembered
+    /// viewport, but only reach the OS PTY while that connection is already
+    /// the owner. This prevents delayed browser layout work from stealing
+    /// geometry after another TUI/browser receives user input.
+    ///
+    /// This is the daemon-side half of the explicit-engagement policy. The
+    /// complementary half lives in `server::dispatch`, which marks PTY input
+    /// as a claim and passes through the resize request's explicit claim bit.
     pub async fn note_pty_activity(
         self: &Arc<Self>,
         id: &str,
+        conn_id: u64,
         kind: crate::server::ClientKind,
         resize_to: Option<(u16, u16)>,
-    ) {
-        let Some(entry) = self.get_entry(id).await else {
-            return;
-        };
+        claim: bool,
+    ) -> Result<()> {
+        let entry = self
+            .get_entry(id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", id))?;
         let to_apply = {
             let mut policy = entry
                 .pty_client_policy
                 .lock()
                 .expect("pty_client_policy mutex poisoned");
-            if let Some(sz) = resize_to {
-                match kind {
-                    crate::server::ClientKind::Tui => policy.tui_size = Some(sz),
-                    crate::server::ClientKind::Remote => policy.remote_size = Some(sz),
-                }
-            }
-            let switched = policy.last_active != Some(kind);
-            policy.last_active = Some(kind);
-            // Only re-resize on a *switch*, or when this call was
-            // itself a pty_resize. Plain pty_input from the same
-            // kind that's already active is a no-op for the size
-            // policy (the per-call pty_resize handler still runs
-            // separately).
-            if switched || resize_to.is_some() {
-                match kind {
-                    crate::server::ClientKind::Tui => policy.tui_size,
-                    crate::server::ClientKind::Remote => policy.remote_size,
-                }
-            } else {
-                None
-            }
+            policy.note(conn_id, kind, resize_to, claim)
         };
         if let Some((cols, rows)) = to_apply {
-            // Best-effort. The pty_resize dedup inside
-            // `SessionManager::pty_resize` handles the case where
-            // the OS PTY is already at this size.
-            if let Err(e) = self.pty_resize(id, cols, rows).await {
-                tracing::debug!(session = %id, error = %e, "policy-driven pty_resize failed");
+            // The pty_resize dedup handles the case where the OS PTY is
+            // already at this size.
+            self.pty_resize(id, cols, rows).await?;
+        }
+        Ok(())
+    }
+
+    /// Forget one disconnected client's remembered viewports. If it owned a
+    /// session, leave that session temporarily ownerless; the next explicit
+    /// input/click establishes a new owner without guessing which passive
+    /// viewer should win.
+    pub async fn clear_pty_client(&self, conn_id: u64) {
+        let entries: Vec<Arc<SessionEntry>> =
+            self.sessions.read().await.values().cloned().collect();
+        for entry in entries {
+            let mut policy = entry
+                .pty_client_policy
+                .lock()
+                .expect("pty_client_policy mutex poisoned");
+            policy.clients.remove(&conn_id);
+            if policy.owner == Some(conn_id) {
+                policy.owner = None;
             }
         }
     }
@@ -290,6 +289,8 @@ impl SessionManager {
             session_id: id.to_string(),
             cols,
             rows,
+            // Adapter-facing resize has no client-ownership semantics.
+            claim: false,
         })?;
         adapter
             .request(ahp_method::SESSION_PTY_RESIZE, params)

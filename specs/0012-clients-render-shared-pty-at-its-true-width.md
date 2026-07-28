@@ -1,13 +1,19 @@
 # 0012-clients-render-shared-pty-at-its-true-width
 
 Status: accepted
-Date: 2026-05-30
+Date: 2026-07-27
 Area: cross-client
 Scope: How a client renders a PTY-backed session whose width is currently owned by a different client.
 
 ## Decision
 
-A PTY-backed session has a single geometry (columns × rows) at any moment, owned by whichever client most recently took input ("active wins"). A client whose own viewport is narrower than the owning geometry renders the terminal at the session's true column count and lets the user scroll to reach the overflow — it does not reflow or wrap the output to its own width. When a client takes over input it claims geometry at its own size, as before.
+A PTY-backed session has a single geometry (columns × rows) at any moment,
+owned by the exact client connection that most recently engaged through input
+or an explicit focus claim. A client whose own viewport is narrower than the
+owning geometry renders the terminal at the session's true column count and
+lets the user scroll to reach the overflow — it does not reflow or wrap the
+output to its own width. When a client takes over input or explicitly clicks a
+terminal pane, it claims geometry at its own size.
 
 Clients learn the live geometry from the daemon whenever it changes — a resize is announced to attached clients — not only at attach time.
 
@@ -18,7 +24,7 @@ A single PTY emits content laid out for its current width. If a passive viewer r
 ## Consequences
 
 - The daemon must announce PTY geometry changes to attached clients, not just report size at attach. This is carried by a transient, non-persisted resize signal in the session event stream.
-- A passive client tracks the session's current geometry and renders at the true width; it only resizes the shared PTY when it becomes the active input owner.
+- A passive client tracks the session's current geometry and renders at the true width. Its viewport reports are remembered but only resize the shared PTY if it already owns geometry.
 - Wide content is reached by scrolling, accepting a smaller effective viewport rather than reflowed text.
 - Consumers that exhaustively handle session events must tolerate the new transient resize signal (ignoring it where geometry is irrelevant).
 
@@ -26,7 +32,8 @@ A single PTY emits content laid out for its current width. If a passive viewer r
 
 - This does not mandate a particular fit strategy. A viewer may scroll or scale; the rule is "do not wrap to a narrower width," not "scale to fit."
 - It does not address the symmetric height case (a taller owning geometry). Rows may stay at the viewer's local fit; only wrapping (width) is in scope.
-- It does not change the "active wins" geometry-ownership policy.
+- Exact ownership transfer and passive viewport-report semantics are governed
+  by spec `0153`.
 
 ## Examples
 

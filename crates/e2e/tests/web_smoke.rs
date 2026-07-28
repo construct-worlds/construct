@@ -1279,6 +1279,65 @@ async fn web_client_loads_and_websocket_connects() {
         "visible keyboard switch should preserve terminal focus: {switch_focus:?}"
     );
 
+    // A deliberate click in a split is a geometry claim even if local focus
+    // was already on that pane. The old early return in focusPane made title
+    // bar/body clicks inert in exactly that case.
+    let same_pane_claims: f64 = page
+        .evaluate(
+            r#"
+            (async () => {
+              const saved = {
+                layout: state.layout,
+                focusedPaneId: state.focusedPaneId,
+                currentId: state.currentId,
+                sessions: state.sessions,
+                mode: state.mode,
+                terminalById: state.terminalById,
+                claimTerminalGeometryNow,
+              };
+              let claims = 0;
+              try {
+                state.layout = {
+                  tree: { kind: 'leaf', id: 77, session_id: 's-same-pane' },
+                  version: 1,
+                };
+                state.focusedPaneId = 77;
+                state.currentId = 's-same-pane';
+                state.sessions = [{
+                  id: 's-same-pane',
+                  has_pty: true,
+                  mode: 'interactive',
+                }];
+                state.mode = 'terminal';
+                state.terminalById = new Map([[
+                  's-same-pane',
+                  { loaded: true },
+                ]]);
+                claimTerminalGeometryNow = () => { claims += 1; };
+                focusPane(77, { claimGeometry: true });
+                await new Promise((resolve) => requestAnimationFrame(resolve));
+                return claims;
+              } finally {
+                state.layout = saved.layout;
+                state.focusedPaneId = saved.focusedPaneId;
+                state.currentId = saved.currentId;
+                state.sessions = saved.sessions;
+                state.mode = saved.mode;
+                state.terminalById = saved.terminalById;
+                claimTerminalGeometryNow = saved.claimTerminalGeometryNow;
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate already-focused split geometry claim")
+        .into_value::<f64>()
+        .expect("numeric claim count");
+    assert_eq!(
+        same_pane_claims, 1.0,
+        "clicking an already-focused terminal split must still claim PTY geometry"
+    );
+
     // Mobile regression: selecting a session auto-hides the narrow session
     // list without changing the stored preference. Keyboard/viewport resizes
     // must preserve that current hidden state instead of re-reading the older
@@ -2108,7 +2167,11 @@ async fn web_client_loads_and_websocket_connects() {
               // refit, so an unsent resize would leave the child painting into a
               // grid of a different height. It is deferred, not discarded.
               const composerDeferred = state.pendingPtyResize
-                ? { cols: state.pendingPtyResize.cols, rows: state.pendingPtyResize.rows }
+                ? {
+                    cols: state.pendingPtyResize.cols,
+                    rows: state.pendingPtyResize.rows,
+                    claim: state.pendingPtyResize.claim,
+                  }
                 : null;
 
               state.sessions = [{ id: 's-fit', has_pty: true, mode: 'interactive' }];
@@ -2171,7 +2234,7 @@ async fn web_client_loads_and_websocket_connects() {
     );
     assert_eq!(
         fit_scroll["composerDeferred"],
-        serde_json::json!({ "cols": 100, "rows": 25 }),
+        serde_json::json!({ "cols": 100, "rows": 25, "claim": false }),
         "a composer-suppressed row change must be deferred, not dropped, or xterm \
          and the child disagree about the row count forever: {fit_scroll:?}"
     );
@@ -2181,8 +2244,9 @@ async fn web_client_loads_and_websocket_connects() {
                 && v["params"]["session_id"].as_str() == Some("s-fit")
                 && v["params"]["cols"].as_i64() == Some(100)
                 && v["params"]["rows"].as_i64() == Some(25)
+                && v["params"]["claim"].as_bool() == Some(true)
         }),
-        "engaged row-only terminal fits should claim matching PTY size: {fit_scroll:?}"
+        "explicitly engaged row-only terminal fits should claim matching PTY size: {fit_scroll:?}"
     );
     assert_eq!(
         fit_scroll["bottom"]["viewportY"],

@@ -375,14 +375,11 @@ pub struct SessionEntry {
     /// Surfaced by `session.list_tasks` for the TUI `/tasks` popup
     /// and the MCP `agentd_get_tasks` tool.
     pub tasks: tokio::sync::Mutex<TaskRegistry>,
-    /// "Active client wins" PTY-size policy. A POSIX PTY can only
-    /// have one size, so when both the TUI and the remote web
-    /// client are attached to the same session we resize the OS
-    /// PTY to whichever kind most recently sent a `pty_input` or
-    /// `pty_resize`. Switching attention (typing on TUI →
-    /// `last_active = Tui`; typing on phone → `Remote`) flips the
-    /// size. The other client's view temporarily looks wrong until
-    /// they re-engage. See `SessionManager::note_pty_activity`.
+    /// Per-connection PTY-size ownership policy. A POSIX PTY can only have one
+    /// size, so explicit engagement (input or a claiming resize) chooses one
+    /// connection's remembered viewport. Passive resize reports from other
+    /// clients update their remembered viewport without stealing ownership.
+    /// See `SessionManager::note_pty_activity`.
     pub pty_client_policy: std::sync::Mutex<PtyClientPolicy>,
     /// In-memory "the session did something while you weren't looking" flag.
     /// Set when genuine activity (PTY output, messages, tool calls, terminal
@@ -416,20 +413,61 @@ pub struct SessionEntry {
     osc11_tail: std::sync::Mutex<Vec<u8>>,
 }
 
-/// Tracking state for the per-session "active client wins" PTY
-/// resize policy. Kept on `SessionEntry`. `std::sync::Mutex` (not
-/// tokio) is deliberate — every critical section is tiny and we
-/// never want to hold this across an .await.
+/// Tracking state for the per-session "explicitly engaged client wins" PTY
+/// resize policy. Kept on `SessionEntry`. `std::sync::Mutex` (not tokio) is
+/// deliberate — every critical section is tiny and never crosses an `.await`.
 #[derive(Debug, Default)]
 pub struct PtyClientPolicy {
-    /// Last viewport the TUI client claimed for this session.
-    pub tui_size: Option<(u16, u16)>,
-    /// Last viewport a remote (WS) client claimed for this session.
-    pub remote_size: Option<(u16, u16)>,
-    /// The kind whose viewport currently owns the OS PTY size. On
-    /// any further activity from a *different* kind, the daemon
-    /// resizes to that kind's stored viewport.
-    pub last_active: Option<crate::server::ClientKind>,
+    /// Last viewport reported by each live daemon connection.
+    pub clients: HashMap<u64, PtyClientViewport>,
+    /// Connection whose viewport currently owns the OS PTY geometry.
+    pub owner: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PtyClientViewport {
+    pub kind: crate::server::ClientKind,
+    pub size: Option<(u16, u16)>,
+}
+
+impl PtyClientPolicy {
+    /// Record input or a viewport report and return the size that should be
+    /// applied to the real PTY, if any.
+    fn note(
+        &mut self,
+        conn_id: u64,
+        kind: crate::server::ClientKind,
+        resize_to: Option<(u16, u16)>,
+        claim: bool,
+    ) -> Option<(u16, u16)> {
+        let viewport = self.clients.entry(conn_id).or_insert(PtyClientViewport {
+            kind,
+            size: None,
+        });
+        viewport.kind = kind;
+        if let Some(size) = resize_to {
+            viewport.size = Some(size);
+        }
+
+        if claim {
+            let switched = self.owner != Some(conn_id);
+            self.owner = Some(conn_id);
+            // A claiming resize always applies its supplied dimensions.
+            // Input only needs a resize when ownership actually switches.
+            return if resize_to.is_some() || switched {
+                viewport.size
+            } else {
+                None
+            };
+        }
+
+        // Passive reports only resize when they come from the current owner.
+        // Reports from every other connection are remembered for its next
+        // click/keystroke, but cannot steal geometry in the background.
+        (self.owner == Some(conn_id))
+            .then_some(resize_to)
+            .flatten()
+    }
 }
 
 /// Bounded log of recent + in-flight task entries. Held inside
@@ -6496,6 +6534,76 @@ fn builtin_harness_capabilities(name: &str) -> construct_protocol::Capabilities 
 mod tests {
     use super::*;
     use construct_protocol::{Capabilities, PtySize};
+
+    #[test]
+    fn pty_geometry_ownership_is_explicit_and_connection_scoped() {
+        use crate::server::ClientKind;
+
+        let mut policy = PtyClientPolicy::default();
+
+        // First TUI deliberately focuses the session.
+        assert_eq!(
+            policy.note(1, ClientKind::Tui, Some((100, 40)), true),
+            Some((100, 40))
+        );
+        assert_eq!(policy.owner, Some(1));
+
+        // A browser can keep its viewport current without stealing the PTY.
+        assert_eq!(
+            policy.note(2, ClientKind::Remote, Some((80, 25)), false),
+            None
+        );
+        assert_eq!(policy.owner, Some(1));
+
+        // Browser input claims its remembered viewport; later TUI input
+        // restores the first TUI's own remembered viewport.
+        assert_eq!(
+            policy.note(2, ClientKind::Remote, None, true),
+            Some((80, 25))
+        );
+        assert_eq!(policy.note(1, ClientKind::Tui, None, true), Some((100, 40)));
+
+        // Delayed browser layout churn after TUI input stays passive.
+        assert_eq!(
+            policy.note(2, ClientKind::Remote, Some((90, 30)), false),
+            None
+        );
+        assert_eq!(policy.owner, Some(1));
+
+        // Ownership is per connection, not per transport kind: a second TUI
+        // has an independent viewport and must explicitly engage to win.
+        assert_eq!(
+            policy.note(3, ClientKind::Tui, Some((120, 50)), false),
+            None
+        );
+        assert_eq!(
+            policy.note(3, ClientKind::Tui, None, true),
+            Some((120, 50))
+        );
+        assert_eq!(policy.owner, Some(3));
+    }
+
+    #[test]
+    fn passive_resize_applies_only_for_current_pty_owner() {
+        use crate::server::ClientKind;
+
+        let mut policy = PtyClientPolicy::default();
+        assert_eq!(
+            policy.note(7, ClientKind::Remote, None, true),
+            None,
+            "input may claim before the first measured viewport"
+        );
+        assert_eq!(
+            policy.note(7, ClientKind::Remote, Some((72, 20)), false),
+            Some((72, 20)),
+            "the owner's later viewport report reaches the OS PTY"
+        );
+        assert_eq!(
+            policy.note(8, ClientKind::Remote, Some((90, 35)), false),
+            None,
+            "another browser connection cannot steal through ResizeObserver"
+        );
+    }
 
     /// The ambient-degradation latch (spec 0151): first skip flips
     /// `degradation_observed` and broadcasts exactly one `FeaturesState`;

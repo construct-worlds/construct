@@ -140,6 +140,40 @@ pub struct SessionPtyResizeParams {
     pub session_id: String,
     pub cols: u16,
     pub rows: u16,
+    /// Whether this resize is an explicit user-engagement claim for the
+    /// session's single PTY geometry. Passive viewport reports set this to
+    /// false so they update the connection's remembered size without stealing
+    /// ownership from another client.
+    #[serde(default = "default_pty_resize_claim")]
+    pub claim: bool,
+}
+
+fn default_pty_resize_claim() -> bool {
+    // Compatibility with clients predating explicit resize ownership: their
+    // resize calls historically claimed the PTY, so an omitted field keeps
+    // that behavior. New passive reporters must send `claim: false`.
+    true
+}
+
+#[cfg(test)]
+#[test]
+fn pty_resize_claim_is_legacy_true_but_can_be_explicitly_passive() {
+    let legacy: SessionPtyResizeParams = serde_json::from_value(serde_json::json!({
+        "session_id": "s1",
+        "cols": 80,
+        "rows": 24
+    }))
+    .expect("legacy resize params");
+    assert!(legacy.claim);
+
+    let passive: SessionPtyResizeParams = serde_json::from_value(serde_json::json!({
+        "session_id": "s1",
+        "cols": 80,
+        "rows": 24,
+        "claim": false
+    }))
+    .expect("passive resize params");
+    assert!(!passive.claim);
 }
 
 impl SessionPtyInputParams {

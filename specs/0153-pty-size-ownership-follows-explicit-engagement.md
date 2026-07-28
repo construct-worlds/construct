@@ -1,0 +1,58 @@
+# 0153-pty-size-ownership-follows-explicit-engagement
+
+Status: accepted
+Date: 2026-07-27
+Area: protocol
+Scope: Decide which of several clients viewing one session controls its single PTY geometry.
+
+## Decision
+
+PTY size ownership belongs to one client connection at a time, not to a client
+transport category. User input and an explicit click/focus claim transfer
+ownership to that connection and apply its most recently reported viewport.
+
+A viewport change without explicit engagement is passive. It updates that
+connection's remembered size and reaches the PTY only if the connection already
+owns the geometry. It must not transfer ownership.
+
+Clicking a visible terminal pane is an explicit claim even when that pane was
+already locally focused and its measured dimensions did not change.
+
+## Reason
+
+A POSIX PTY has one row/column size even when several TUIs and browsers render
+the session. Browser layout observers, delayed debounce timers, background-tab
+settling, and other incidental measurements are not evidence that the user
+changed attention. Treating every resize report as attention lets an idle
+browser repeatedly undo a later TUI input claim. Grouping all TUIs or all web
+clients together also loses the distinct viewport of each connection.
+
+## Consequences
+
+Each live connection keeps an independent remembered viewport per session.
+Typing can restore the correct size immediately without first requiring another
+window resize. Passive viewers follow the owner's reported PTY geometry and may
+continue measuring their own viewport for a future claim.
+
+Clients must distinguish explicit engagement from passive layout reports.
+Compatibility clients that omit the distinction retain the historical
+claiming-resize behavior.
+
+When an owning connection disconnects, the session remains ownerless until the
+next explicit engagement; the daemon does not guess among passive viewers.
+
+## Non-Goals
+
+This decision does not provide multiple simultaneous PTY grids, reflow a
+full-screen terminal independently per viewer, or share keyboard focus between
+clients.
+
+## Examples
+
+- A desktop browser is open at 90×30. A TUI receives a keystroke at 120×40.
+  The PTY becomes 120×40; a later browser `ResizeObserver` report remains
+  passive.
+- Clicking an already-focused 90×30 browser split transfers ownership back to
+  that browser and resizes the PTY to 90×30.
+- Two TUI windows at different sizes retain separate remembered viewports;
+  input in either window selects that exact connection's size.

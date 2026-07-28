@@ -472,8 +472,8 @@ impl ResizeDebounce {
         }
         // Send only what needs sending: panes whose size differs from the
         // one last sent, plus the newly focused session on a switch even at
-        // an unchanged size (claude/codex repaint on SIGWINCH, and the
-        // active-client-wins policy keys on the resize call itself).
+        // an unchanged size (claude/codex repaint on SIGWINCH, and a native
+        // resize call is also an explicit PTY-ownership claim).
         // Re-sending every visible pane on every trigger looks harmless —
         // the daemon dedups unchanged sizes — but with two clients attached
         // at different pane sizes that dedup never engages, so each
@@ -8043,6 +8043,40 @@ impl App {
         }
     }
 
+    /// Make a deliberate click in a terminal split claim that session's PTY
+    /// geometry, even when the pane was already focused and its dimensions
+    /// have not changed. Ordinary focus bookkeeping would otherwise leave the
+    /// resize debounce quiescent, so another browser/TUI could remain owner
+    /// despite this user's explicit engagement.
+    fn main_window_pty_claim(&self, id: u64) -> Option<(String, (u16, u16))> {
+        if self.view_for_window(Some(id)) != ViewMode::Terminal {
+            return None;
+        }
+        let session_id = self
+            .selection_for_window(id)
+            .and_then(|selection| selection.session_id().map(str::to_owned))?;
+        if !self.sessions.iter().any(|session| {
+            session.id == session_id && session.has_pty && !session.state.is_terminal()
+        }) {
+            return None;
+        }
+        let (cols, rows) = self.window_pane_sizes.get(&id).copied()?;
+        if cols == 0 || rows == 0 {
+            return None;
+        }
+        Some((session_id, (cols, rows)))
+    }
+
+    fn claim_main_window_pty_size(&self, id: u64) {
+        let Some((session_id, (cols, rows))) = self.main_window_pty_claim(id) else {
+            return;
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let _ = client.pty_resize(&session_id, cols, rows).await;
+        });
+    }
+
     fn split_active_window(&mut self, direction: WindowSplitDirection) {
         fn split(
             node: &mut MainWindowTree,
@@ -10317,6 +10351,7 @@ impl App {
             .copied()
         {
             let view = hit.area;
+            self.claim_main_window_pty_size(hit.id);
             self.focus_main_window(hit.id);
             if contains(view, col, row) {
                 self.dynamic_ui_focused = None;
@@ -28876,6 +28911,37 @@ mod tests {
         // A session not in any visible pane has no pane size (callers fall back
         // to the active pane).
         assert_eq!(app.session_pane_size("nope"), None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn already_focused_terminal_window_still_has_an_explicit_pty_claim() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.active_window_id = 1;
+        app.focus = PaneFocus::View;
+        app.view = ViewMode::Terminal;
+        app.window_pane_sizes.insert(1, (78, 22));
+
+        assert_eq!(
+            app.main_window_pty_claim(1),
+            Some(("s1".to_string(), (78, 22))),
+            "a click claim must not depend on focus changing"
+        );
+
+        // Re-focusing the same window is intentionally a bookkeeping no-op,
+        // but the click path still derives and sends this claim afterward.
+        app.focus_main_window(1);
+        assert_eq!(
+            app.main_window_pty_claim(1),
+            Some(("s1".to_string(), (78, 22)))
+        );
+
+        app.view = ViewMode::Chat;
+        assert_eq!(
+            app.main_window_pty_claim(1),
+            None,
+            "a transcript surface must not claim an unseen PTY grid"
+        );
         server.abort();
     }
 
