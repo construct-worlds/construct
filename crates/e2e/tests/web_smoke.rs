@@ -1719,6 +1719,14 @@ async fn web_client_loads_and_websocket_connects() {
                     rows: c.params.rows,
                     claim: c.params.claim,
                   }));
+                // The grid must not lead the child: it stays at the child's
+                // geometry until the daemon's echo confirms the resize.
+                const gridBeforeEcho = { cols: term.cols, rows: term.rows };
+                handleNotification("session/event", {
+                  session_id: "s-owner-passive",
+                  at: 0,
+                  event: { type: "pty_resize", cols: 100, rows: 33, owner: true },
+                });
                 const ownerGrid = { cols: term.cols, rows: term.rows };
 
                 // Another client then claims a different grid: we lose
@@ -1745,6 +1753,7 @@ async fn web_client_loads_and_websocket_connects() {
                 return {
                   ownedAfterEcho,
                   ownerReport,
+                  gridBeforeEcho,
                   ownerGrid,
                   followGrid,
                   ownedAfterForeign,
@@ -1782,9 +1791,15 @@ async fn web_client_loads_and_websocket_connects() {
          resized instead of silently drifting: {owner_passive_resync:?}"
     );
     assert_eq!(
+        owner_passive_resync["gridBeforeEcho"],
+        serde_json::json!({ "cols": 100, "rows": 40 }),
+        "the grid must stay at the child's geometry until the resize echo \
+         confirms the child was told (spec 0121)"
+    );
+    assert_eq!(
         owner_passive_resync["ownerGrid"],
         serde_json::json!({ "cols": 100, "rows": 33 }),
-        "the owner renders at its own fit after a passive layout change"
+        "the owner adopts its own fit when the daemon's echo lands"
     );
     assert_eq!(
         owner_passive_resync["followGrid"],
@@ -1929,6 +1944,12 @@ async fn web_client_loads_and_websocket_connects() {
                 host.hidden = false;
                 // The host ResizeObserver fires this refit in production.
                 refitTerminal();
+                const gridBeforeEcho = { cols: term.cols, rows: term.rows };
+                handleNotification("session/event", {
+                  session_id: "s-parked-claim",
+                  at: 0,
+                  event: { type: "pty_resize", cols: 96, rows: 41, owner: true },
+                });
                 const afterLayout = {
                   resizes: calls
                     .filter((c) => c.method === "session.pty_resize")
@@ -1938,6 +1959,7 @@ async fn web_client_loads_and_websocket_connects() {
                       claim: c.params.claim,
                     })),
                   parked: !!state.pendingGeometryClaim,
+                  gridBeforeEcho,
                   grid: { cols: term.cols, rows: term.rows },
                 };
                 return { whileHidden, afterLayout };
@@ -1973,9 +1995,11 @@ async fn web_client_loads_and_websocket_connects() {
         serde_json::json!({
             "resizes": [{ "cols": 96, "rows": 41, "claim": true }],
             "parked": false,
+            "gridBeforeEcho": { "cols": 80, "rows": 24 },
             "grid": { "cols": 96, "rows": 41 },
         }),
-        "the parked claim resumes with real dimensions once the host lays out"
+        "the parked claim resumes with real dimensions once the host lays \
+         out, and the grid adopts them on the daemon's echo"
     );
 
     // Mobile regression: selecting a session auto-hides the narrow session
@@ -2671,6 +2695,7 @@ async fn web_client_loads_and_websocket_connects() {
                 },
               };
               state.fitAddon = {
+                proposeDimensions: () => ({ cols: 100, rows: 40 }),
                 fit: () => {
                   calls.push('fit-bottom');
                   bottom.baseY = 80;
@@ -2697,6 +2722,7 @@ async fn web_client_loads_and_websocket_connects() {
                 },
               };
               state.fitAddon = {
+                proposeDimensions: () => ({ cols: 100, rows: 40 }),
                 fit: () => {
                   calls.push('fit-scrolled-up');
                   scrolledUp.baseY = 90;
@@ -2724,6 +2750,7 @@ async fn web_client_loads_and_websocket_connects() {
                 },
               };
               state.fitAddon = {
+                proposeDimensions: () => ({ cols: 100, rows: 25 }),
                 fit: () => {
                   calls.push('fit-row-only');
                 },
@@ -2749,6 +2776,7 @@ async fn web_client_loads_and_websocket_connects() {
                 },
               };
               state.fitAddon = {
+                proposeDimensions: () => ({ cols: 100, rows: 25 }),
                 fit: () => {
                   calls.push('fit-active-row-only');
                 },
@@ -2797,6 +2825,7 @@ async fn web_client_loads_and_websocket_connects() {
                 },
               };
               state.fitAddon = {
+                proposeDimensions: () => ({ cols: 100, rows: 25 }),
                 fit: () => {
                   calls.push('fit-composer-suppressed');
                 },
@@ -2920,10 +2949,11 @@ async fn web_client_loads_and_websocket_connects() {
         "composer resize should preserve manual terminal scroll position: {fit_scroll:?}"
     );
     assert!(
-        calls
+        !calls
             .iter()
             .any(|v| v.as_str() == Some("fit-composer-suppressed")),
-        "composer-triggered terminal refit should still run locally: {fit_scroll:?}"
+        "a composer-suppressed refit must not reshape the local grid before \
+         the child has been told (spec 0121): {fit_scroll:?}"
     );
     assert_eq!(
         fit_scroll["composerSuppressed"]["viewportY"],

@@ -27,7 +27,18 @@ option. When following is impossible because the child's screen is larger than
 the client can display, the client clamps and accepts a visible mismatch rather
 than clipping the newest output.
 
-Two rules qualify these options:
+Three rules qualify these options:
+
+- **Adoption follows confirmation.** When a client wants the child at its own
+  fit, it reports the measurement and reshapes its local grid only once the
+  child has actually been resized (observed via the resize notification), not
+  at send time. A grid that leads the child — even briefly — collects frames
+  the child painted for the old geometry; a diff-based renderer in the child
+  never repaints cells it believes unchanged, and if the layout settles back
+  to the original size the deduplicated resize never triggers a repaint, so
+  one frame of damage freezes on screen indefinitely. The only geometry a
+  client may apply without a round-trip is one the child is already known to
+  have.
 
 - **A follower still reports.** Choosing to follow does not exempt a client
   from telling the daemon its measured viewport as a passive, non-claiming

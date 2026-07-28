@@ -3757,6 +3757,10 @@ const state = {
   // until a refit sees real dimensions and resumes the claim. Claiming with a
   // garbage fit would resize the real PTY under every other client.
   pendingGeometryClaim: null,
+  // The in-flight post-replay redraw bump: `cols+1` is sent purely to force a
+  // SIGWINCH repaint before the real size lands. Its personalized echo must
+  // not be adopted as geometry — the follow-up echo at the real size is.
+  pendingHydrationBump: null,
   ptyResizeTimer: null,
   pendingPtyResize: null,
   // Some PTY apps repaint after SIGWINCH by emitting a large redraw
@@ -9195,12 +9199,28 @@ function refitTerminal(options = {}) {
     reportPassiveViewport();
     return;
   }
-  const wasAtBottom = terminalIsAtBottom();
-  if (!fitTerminalPreservingScroll(wasAtBottom)) return;
-  const cols = state.term.cols;
-  const rows = state.term.rows;
+  // Active/claim/owner path. The grid must never lead the child (spec 0121):
+  // measure the fit WITHOUT applying it, tell the daemon, and adopt the new
+  // grid only when the personalized resize echo confirms the child was
+  // resized. Fitting first opens a window where the child keeps painting for
+  // its old geometry into a reshaped grid; a diff-based renderer (claude's
+  // spinner/prompt block) never repaints the cells it believes unchanged, so
+  // one frame of damage freezes on screen — and when layout settles back to
+  // the original size the daemon dedups the resize, no SIGWINCH fires, and
+  // nothing ever heals it.
+  let proposed = null;
+  try { proposed = state.fitAddon.proposeDimensions(); } catch (_) { return; }
+  const cols = proposed && proposed.cols;
+  const rows = proposed && proposed.rows;
   if (!cols || !rows) return;
+  const wasAtBottom = terminalIsAtBottom();
   if (!wasAtBottom) state.resizeFollowBottomUntil = 0;
+  const sz = state.currentId ? state.ptySizeById.get(state.currentId) : null;
+  if (sz && sz.cols === cols && sz.rows === rows) {
+    // The child already has exactly this geometry, so adopting it locally is
+    // safe without a round-trip (first refit after attach, follow → engage).
+    applyPassiveTerminalGeometry();
+  }
   const colsChanged = cols !== state.lastReportedSize.cols;
   const rowsChanged = rows !== state.lastReportedSize.rows;
   // A deliberate click/input is meaningful even at unchanged dimensions:
@@ -9211,22 +9231,16 @@ function refitTerminal(options = {}) {
   }
   if (!claim && !colsChanged && rowsChanged && shouldSuppressComposerRowResize()) {
     state.resizeFollowBottomUntil = 0;
-    // Composer auto-grow just changed our row count. `fitAddon.fit()`
-    // above ALREADY resized the local grid, so dropping this on the
-    // floor would leave xterm and the child permanently disagreeing
-    // about how many rows exist — and a child that repaints its footer
-    // with relative cursor moves (claude's spinner, the mode line) then
-    // overwrites the wrong rows. Defer rather than suppress: one
-    // coalesced SIGWINCH once the composer settles, not one per
-    // keystroke, which is what the suppression window was really for.
+    // Composer auto-grow just changed our measured row count. Do not turn
+    // that into one SIGWINCH per keystroke — defer a single coalesced resize
+    // for when the composer settles. Dropping it instead would leave the
+    // daemon's idea of our viewport stale. The local grid stays at the
+    // child's geometry until the deferred resize is applied and echoed.
     scheduleTerminalPtyResize(cols, rows, wasAtBottom, {
       delayMs: COMPOSER_RESIZE_SUPPRESS_PTY_RESIZE_MS,
     });
     return;
   }
-  // Active/claim path: we own geometry now, so render at our own fit.
-  const host = state.term.element && state.term.element.closest(".terminal-host");
-  if (host) host.classList.remove("pty-wide");
   if (immediate) {
     sendTerminalPtyResize(cols, rows, wasAtBottom, state.currentId, forceRedraw, claim);
   } else {
@@ -9370,7 +9384,14 @@ function sendTerminalPtyResize(
   // uses for a freshly hydrated SSH TUI. Sequenced, not fired in parallel:
   // the daemon must observe the bump as a distinct size.
   if (forceRedraw && cols > 1) {
-    send(cols + 1, rows).then(() => send(cols, rows));
+    // Both sends echo back personalized; the transient `cols+1` echo must not
+    // be adopted as real geometry. The bump marker clears once the final send
+    // has been answered — its response arrives after both echo broadcasts on
+    // this same ordered socket.
+    state.pendingHydrationBump = { sessionId, cols: cols + 1, rows };
+    send(cols + 1, rows)
+      .then(() => send(cols, rows))
+      .finally(() => { state.pendingHydrationBump = null; });
     return;
   }
   send(cols, rows);
@@ -9399,16 +9420,6 @@ function restoreTerminalBottomFor(term) {
   requestAnimationFrame(() => {
     if (state.term === term) term.scrollToBottom();
   });
-}
-
-function fitTerminalPreservingScroll(wasAtBottom = terminalIsAtBottom()) {
-  try {
-    state.fitAddon.fit();
-  } catch (_) {
-    return false;
-  }
-  restoreTerminalBottom(wasAtBottom);
-  return true;
 }
 
 function shouldFollowResizeBottom() {
@@ -11020,19 +11031,24 @@ function handleNotification(method, params) {
       // browser was clicked a moment ago and its engagement grace period is
       // still live. End that grace period immediately and adopt the owner's
       // grid before xterm can encode a child-requested hover report against
-      // stale web dimensions. Own echoes (including the hydration bump) stay
-      // local while engaged and do not cause a redundant reflow; outside the
-      // engagement window an own echo is adopted too — it is how a passive
-      // viewport report the daemon applied (because this connection still
-      // owns the geometry) reaches the local grid.
+      // stale web dimensions. Own echoes are adopted too — the local grid is
+      // deliberately not resized when a fit is sent (spec 0121: the grid must
+      // never lead the child), so this echo is what applies our own fit. The
+      // one exception is the transient hydration-bump echo (`cols+1`), which
+      // exists only to force a repaint and is superseded a beat later.
       const ownGeometry = event.owner === true;
       if (ownGeometry) state.ptyOwnedSessionIds.add(session_id);
       else state.ptyOwnedSessionIds.delete(session_id);
       if (!ownGeometry) state.webPtyEngagedUntil = 0;
+      const bump = state.pendingHydrationBump;
+      const bumpEcho =
+        ownGeometry &&
+        !!bump &&
+        bump.sessionId === session_id &&
+        event.cols === bump.cols &&
+        event.rows === bump.rows;
       if (session_id === state.currentId) {
-        if (!ownGeometry || !webPtyRecentlyEngaged()) {
-          applyPassiveTerminalGeometry();
-        }
+        if (!bumpEcho) applyPassiveTerminalGeometry();
       } else if (state.mirroredSessionIds.has(session_id)) {
         followMirrorPtyGeometry(session_id);
       }
@@ -13358,7 +13374,15 @@ function closeNewSessionDialog() {
 
 function currentTerminalSize() {
   if (state.term && state.fitAddon) {
-    fitTerminalPreservingScroll();
+    // Measure only. Resizing the visible grid here would reshape a session
+    // the child still paints at its told geometry (spec 0121) — the previous
+    // fit-as-a-side-effect corrupted the watched session whenever this
+    // dialog opened over a followed or busy terminal.
+    let proposed = null;
+    try { proposed = state.fitAddon.proposeDimensions(); } catch (_) {}
+    if (proposed && proposed.cols && proposed.rows) {
+      return { cols: proposed.cols, rows: proposed.rows };
+    }
     if (state.term.cols && state.term.rows) {
       return { cols: state.term.cols, rows: state.term.rows };
     }
