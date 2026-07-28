@@ -11,6 +11,12 @@ When a TUI split pane selects a session that is already visible in another split
 
 If stale state has the requested session visible in multiple other panes, the swap target is deterministic: the first matching other pane in layout order. Explicit split creation may initially duplicate the current pane because no alternate session was requested yet.
 
+Every split client must render each such leaf independently while that
+duplicate assignment exists. One pane must not become empty merely because
+another pane is showing the same session; only the focused pane is interactive,
+while any additional renderings may be passive replicas of the same live
+session surface.
+
 ## Reason
 
 Split session view is most useful when panes preserve distinct context. Accidentally showing the same session in multiple panes makes focus and list selection harder to reason about, especially when the user expected to move a visible session from one pane to another.
