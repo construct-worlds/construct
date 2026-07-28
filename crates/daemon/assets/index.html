@@ -11294,18 +11294,28 @@ function renderEvent(event, at) {
     // the xterm view would show nothing for tool calls. Synthesize an
     // inline rendering here, in event order with the surrounding PTY
     // prose. (issue #134)
-    if (event.type === "tool_use") {
-      writeToolUseToTerm(event.tool, event.args);
-    }
-    if (event.type === "tool_result") {
-      writeToolResultToTerm(event.ok, event.output);
-    }
-    if (event.type === "tool_approval_request") {
-      const risk = event.risk ? ` [${sanitizeForTerm(event.risk)}]` : "";
-      writeToTerm(
-        `\r\n\x1b[1;33m? approve${risk}\x1b[0m ${sanitizeForTerm(event.tool || "")}` +
-          `\x1b[2m(${sanitizeForTerm(event.args_summary || "")})\x1b[0m\r\n`
-      );
+    //
+    // ONLY for structured-tool sessions. Harnesses that paint their own
+    // tool blocks into the PTY (claude, codex) also emit these events —
+    // synthesizing a second copy doesn't just duplicate content, it MOVES
+    // THE XTERM CURSOR mid-frame under the child's diff-based renderer, so
+    // its next relative repaint lands on the wrong rows and the damage
+    // freezes on screen (duplicated spinner lines, tool blocks stuck below
+    // the prompt, ghost text written over stale tool output).
+    if (isStructuredToolSession(currentSession())) {
+      if (event.type === "tool_use") {
+        writeToolUseToTerm(event.tool, event.args);
+      }
+      if (event.type === "tool_result") {
+        writeToolResultToTerm(event.ok, event.output);
+      }
+      if (event.type === "tool_approval_request") {
+        const risk = event.risk ? ` [${sanitizeForTerm(event.risk)}]` : "";
+        writeToTerm(
+          `\r\n\x1b[1;33m? approve${risk}\x1b[0m ${sanitizeForTerm(event.tool || "")}` +
+            `\x1b[2m(${sanitizeForTerm(event.args_summary || "")})\x1b[0m\r\n`
+        );
+      }
     }
     return;
   }

@@ -2002,6 +2002,83 @@ async fn web_client_loads_and_websocket_connects() {
          out, and the grid adopts them on the daemon's echo"
     );
 
+    // Tool-call synthesis is for structured-tool sessions (smith) only.
+    // Harnesses that paint their own tool blocks into the PTY (claude,
+    // codex) also emit tool_use/tool_result transcript events; synthesizing
+    // a second copy into xterm moves the cursor mid-frame under the child's
+    // diff renderer — its next relative repaint lands on the wrong rows and
+    // the damage freezes (duplicated spinners, tool blocks under the prompt).
+    let tool_injection: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const saved = {
+                currentId: state.currentId,
+                mode: state.mode,
+                term: state.term,
+                sessions: state.sessions,
+                ptyBuffering: state.ptyBuffering,
+                resizeFollowBottomUntil: state.resizeFollowBottomUntil,
+              };
+              const writes = [];
+              try {
+                state.currentId = "s-pty-tool-events";
+                state.mode = "terminal";
+                state.ptyBuffering = false;
+                state.resizeFollowBottomUntil = 0;
+                state.term = {
+                  write: (chunk, cb) => {
+                    writes.push(String(chunk));
+                    if (cb) cb();
+                  },
+                  buffer: { active: { viewportY: 0, baseY: 0 } },
+                };
+                resetTermToolGroup();
+
+                state.sessions = [{ id: "s-pty-tool-events", harness: "claude" }];
+                renderEvent({ type: "tool_use", tool: "WebSearch", args: { query: "tokyo" } });
+                renderEvent({ type: "tool_result", ok: true, output: "results\nmore" });
+                renderEvent({ type: "tool_approval_request", tool: "Bash", args_summary: "ls" });
+                const claudeWrites = writes.length;
+
+                state.sessions = [{ id: "s-pty-tool-events", harness: "smith" }];
+                renderEvent({ type: "tool_use", tool: "WebSearch", args: { query: "tokyo" } });
+                renderEvent({ type: "tool_result", ok: true, output: "results\nmore" });
+                const smithWrites = writes.length - claudeWrites;
+                return { claudeWrites, smithWrites, sample: writes.join("") };
+              } finally {
+                resetTermToolGroup();
+                state.currentId = saved.currentId;
+                state.mode = saved.mode;
+                state.term = saved.term;
+                state.sessions = saved.sessions;
+                state.ptyBuffering = saved.ptyBuffering;
+                state.resizeFollowBottomUntil = saved.resizeFollowBottomUntil;
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate tool injection gating")
+        .into_value::<serde_json::Value>()
+        .expect("tool injection result");
+    assert_eq!(
+        tool_injection["claudeWrites"], 0,
+        "a PTY-painting harness must not get synthesized tool blocks written \
+         into its live terminal: {tool_injection:?}"
+    );
+    assert!(
+        tool_injection["smithWrites"].as_i64().unwrap_or(0) >= 2,
+        "smith still gets its synthesized tool blocks: {tool_injection:?}"
+    );
+    assert!(
+        tool_injection["sample"]
+            .as_str()
+            .unwrap_or("")
+            .contains("→ WebSearch"),
+        "smith synthesis renders the tool header: {tool_injection:?}"
+    );
+
     // Mobile regression: selecting a session auto-hides the narrow session
     // list without changing the stored preference. Keyboard/viewport resizes
     // must preserve that current hidden state instead of re-reading the older
@@ -3343,6 +3420,9 @@ async fn web_client_loads_and_websocket_connects() {
               state.mode = 'terminal';
               state.ptyBuffering = false;
               state.currentId = 'sX';
+              // Synthesis is gated to structured-tool sessions: only smith
+              // omits tool blocks from its PTY stream.
+              state.sessions = [{ id: 'sX', harness: 'smith' }];
               renderEvent({ type: 'tool_use', tool: 'shell', args: { command: 'ls -la /tmp' } });
               renderEvent({ type: 'tool_result', tool: 'c1', ok: true, output: 'a.txt\nb.txt\nc.txt' });
               renderEvent({ type: 'tool_result', tool: 'c2', ok: false, output: '' });
@@ -3350,6 +3430,7 @@ async fn web_client_loads_and_websocket_connects() {
               renderEvent({ type: 'tool_use', tool: 'evil\x1b[31m', args: {} });
               const raw = calls.join('');
               const stripped = raw.replace(/\x1b\[[0-9;]*m/g, '');
+              state.sessions = [];
               return { text: stripped, hasRawEsc: /\x1b/.test(stripped) };
             })()
             "#,
