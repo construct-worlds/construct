@@ -3696,6 +3696,14 @@ const state = {
   // hosts must stay visible and keep receiving live PTY bytes even though
   // they are not `currentId`.
   mirroredSessionIds: new Set(),
+  // A session normally owns one cached DOM surface, which unfocused panes
+  // can re-parent cheaply. Explicit split creation may temporarily assign
+  // the SAME session to multiple leaves, though, and one DOM node cannot
+  // inhabit all of them. Pane-scoped read-only replicas cover only those
+  // duplicate leaves; the canonical per-session surface remains interactive.
+  duplicateTerminalMirrorByPaneId: new Map(),
+  duplicateTranscriptMirrorByPaneId: new Map(),
+  duplicateTranscriptSyncQueued: new Set(),
   // At most one upward-history page request per transcript pane.
   transcriptHistoryLoadById: new Map(),
   // Scroll anchor captured before leaving chat view. Restored when the cached
@@ -10313,6 +10321,7 @@ function renderPaneGrid() {
     // Single-session mode — the pre-split layout, verbatim. Any mirrored
     // terminal hosts go home so the normal show/hide logic owns them again.
     releaseMirrors();
+    pruneDuplicateMirrors([]);
     // The pill was parented into a pane head; with no head to live in it
     // goes back to floating over the view.
     if (sessionMenuOverlayEl.parentElement !== sessionMenuHomeEl) {
@@ -10333,6 +10342,24 @@ function renderPaneGrid() {
   // every other client sees is untouched and un-zooming is exact.
   paneGridEl.classList.toggle("is-zoomed", !!state.paneZoom);
   const focusedId = state.focusedPaneId;
+  const leaves = layoutLeaves(state.layout.tree);
+  const sessionCounts = new Map();
+  for (const leaf of leaves) {
+    if (!leaf.session_id) continue;
+    sessionCounts.set(leaf.session_id, (sessionCounts.get(leaf.session_id) || 0) + 1);
+  }
+  // One pane per session may own the canonical cached surface. Prefer the
+  // focused pane so duplicate splits never steal the interactive surface.
+  const surfaceOwnerPaneBySessionId = new Map();
+  const focusedLeaf = layoutFindLeaf(state.layout.tree, focusedId);
+  if (focusedLeaf && focusedLeaf.session_id) {
+    surfaceOwnerPaneBySessionId.set(focusedLeaf.session_id, focusedLeaf.id);
+  }
+  for (const leaf of leaves) {
+    if (leaf.session_id && !surfaceOwnerPaneBySessionId.has(leaf.session_id)) {
+      surfaceOwnerPaneBySessionId.set(leaf.session_id, leaf.id);
+    }
+  }
 
   const buildNode = (node) => {
     if (node.kind === "leaf") return buildPane(node);
@@ -10392,7 +10419,10 @@ function renderPaneGrid() {
     if (leaf.id === focusedId) {
       body.appendChild(viewStackEl);
     } else {
-      body.appendChild(buildMirror(leaf));
+      const duplicate =
+        !!leaf.session_id &&
+        surfaceOwnerPaneBySessionId.get(leaf.session_id) !== leaf.id;
+      body.appendChild(buildMirror(leaf, { duplicate }));
     }
 
     pane.addEventListener("mousedown", (event) => {
@@ -10410,11 +10440,17 @@ function renderPaneGrid() {
   };
 
   paneGridEl.replaceChildren(buildNode(state.layout.tree));
+  pruneDuplicateMirrors(
+    leaves.filter(
+      (leaf) => leaf.session_id && (sessionCounts.get(leaf.session_id) || 0) > 1,
+    ),
+  );
   // Re-parenting moves xterm's canvas; it needs a refit to pick up the new
   // box before the next paint.
   requestAnimationFrame(() => {
     refitTerminal();
     refitMirrors();
+    refitDuplicateTerminalMirrors();
   });
 }
 
@@ -10425,7 +10461,7 @@ function renderPaneGrid() {
  * xterm instance and the rendered transcript DOM already exist per session,
  * so a mirror is a re-parent, not a second subscription.
  */
-function buildMirror(leaf) {
+function buildMirror(leaf, { duplicate = false } = {}) {
   const mirror = document.createElement("div");
   mirror.className = "pane-mirror";
   mirror.dataset.paneId = String(leaf.id);
@@ -10440,6 +10476,18 @@ function buildMirror(leaf) {
   const session = state.sessions.find((s) => s.id === id);
   const mode = session ? preferredViewModeForSession(session) : "chat";
   if (mode === "terminal" && session) {
+    if (duplicate) {
+      const handle = duplicateTerminalMirrorForPane(leaf.id, id);
+      if (handle) {
+        handle.host.hidden = false;
+        const wrap = document.createElement("div");
+        wrap.className = "terminal-wrap";
+        wrap.appendChild(handle.host);
+        mirror.appendChild(wrap);
+        if (!handle.loaded) hydrateDuplicateTerminalMirror(handle);
+        return mirror;
+      }
+    }
     const handle = initTerminalForSession(id);
     if (handle) {
       handle.host.hidden = false;
@@ -10455,6 +10503,13 @@ function buildMirror(leaf) {
       // until the user focuses it, which reads as a broken pane. Hydrate it
       // the same way the focused pane would.
       if (!handle.loaded) hydrateMirrorTerminal(id);
+      return mirror;
+    }
+  }
+  if (duplicate) {
+    const pane = duplicateTranscriptMirrorForPane(leaf.id, id);
+    if (pane) {
+      mirror.appendChild(pane);
       return mirror;
     }
   }
@@ -10475,6 +10530,197 @@ function buildMirror(leaf) {
       .catch(() => {});
   }
   return mirror;
+}
+
+function createDuplicateTerminalMirror(paneId, sessionId) {
+  if (!window.Terminal || !window.FitAddon) return null;
+  const host = document.createElement("div");
+  host.className = "terminal-host terminal-duplicate-mirror";
+  host.dataset.sessionId = sessionId;
+  host.dataset.paneId = String(paneId);
+  const term = new window.Terminal({
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    fontSize: 13,
+    convertEol: false,
+    cursorBlink: false,
+    disableStdin: true,
+    scrollback: 4000,
+    theme: xtermThemeFor(),
+  });
+  const fitAddon = new window.FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(host);
+  const handle = {
+    paneId,
+    sessionId,
+    host,
+    term,
+    fitAddon,
+    loaded: false,
+    hydrating: false,
+    replayingPty: false,
+  };
+  state.duplicateTerminalMirrorByPaneId.set(paneId, handle);
+  return handle;
+}
+
+function duplicateTerminalMirrorForPane(paneId, sessionId) {
+  const existing = state.duplicateTerminalMirrorByPaneId.get(paneId);
+  if (existing && existing.sessionId === sessionId) return existing;
+  if (existing) {
+    try { existing.term.dispose(); } catch (_) {}
+    state.duplicateTerminalMirrorByPaneId.delete(paneId);
+  }
+  const handle = createDuplicateTerminalMirror(paneId, sessionId);
+  if (!handle) {
+    waitForXterm(8000).then((ok) => {
+      if (ok && splitLayoutActive()) renderPaneGrid();
+    });
+  }
+  return handle;
+}
+
+async function hydrateDuplicateTerminalMirror(handle) {
+  if (!handle || handle.loaded || handle.hydrating) return;
+  handle.hydrating = true;
+  handle.replayingPty = true;
+  try {
+    const r = await rpc("session.pty_replay", { session_id: handle.sessionId });
+    if (r && r.size) handle.term.resize(r.size.cols, r.size.rows);
+    if (r && r.data) {
+      await writeTermBytes(handle.term, decodeBase64ToBytes(r.data));
+    }
+    handle.loaded = true;
+  } catch (_) {
+    /* best effort: a replica that cannot replay still receives live bytes */
+  } finally {
+    handle.replayingPty = false;
+    handle.hydrating = false;
+    if (handle.host.isConnected) followDuplicateTerminalGeometry(handle);
+  }
+}
+
+function duplicateTranscriptMirrorForPane(paneId, sessionId) {
+  const source = state.transcriptPaneById.get(sessionId);
+  let mirror = state.duplicateTranscriptMirrorByPaneId.get(paneId);
+  if (!mirror || mirror.dataset.sessionId !== sessionId) {
+    mirror = document.createElement("div");
+    mirror.className = "transcript-pane transcript-duplicate-mirror";
+    mirror.dataset.sessionId = sessionId;
+    mirror.dataset.paneId = String(paneId);
+    state.duplicateTranscriptMirrorByPaneId.set(paneId, mirror);
+  }
+  mirror.hidden = false;
+  if (source) {
+    syncDuplicateTranscriptMirror(mirror, source);
+    return mirror;
+  }
+  mirror.replaceChildren(transcriptSkeletonEl());
+  loadTranscript(sessionId, { background: true })
+    .then(() => renderPaneGrid())
+    .catch(() => {});
+  return mirror;
+}
+
+function syncDuplicateTranscriptMirror(mirror, source) {
+  if (!mirror || !source) return;
+  const fromBottom = Math.max(0, mirror.scrollHeight - mirror.scrollTop);
+  const atBottom =
+    mirror.scrollHeight - mirror.scrollTop - mirror.clientHeight < 80;
+  mirror.replaceChildren(...Array.from(source.childNodes, (node) => node.cloneNode(true)));
+  if (atBottom) mirror.scrollTop = mirror.scrollHeight;
+  else mirror.scrollTop = Math.max(0, mirror.scrollHeight - fromBottom);
+}
+
+function scheduleDuplicateTranscriptSync(sessionId) {
+  if (!sessionId || state.duplicateTranscriptSyncQueued.has(sessionId)) return;
+  state.duplicateTranscriptSyncQueued.add(sessionId);
+  requestAnimationFrame(() => {
+    state.duplicateTranscriptSyncQueued.delete(sessionId);
+    const source = state.transcriptPaneById.get(sessionId);
+    if (!source) return;
+    for (const mirror of state.duplicateTranscriptMirrorByPaneId.values()) {
+      if (mirror.dataset.sessionId === sessionId) {
+        syncDuplicateTranscriptMirror(mirror, source);
+      }
+    }
+  });
+}
+
+function pruneDuplicateMirrors(duplicateLeaves) {
+  const keep = new Map(
+    duplicateLeaves.map((leaf) => [leaf.id, leaf.session_id]),
+  );
+  for (const [paneId, handle] of state.duplicateTerminalMirrorByPaneId.entries()) {
+    if (keep.get(paneId) === handle.sessionId) continue;
+    try { handle.term.dispose(); } catch (_) {}
+    state.duplicateTerminalMirrorByPaneId.delete(paneId);
+  }
+  for (const [paneId, mirror] of state.duplicateTranscriptMirrorByPaneId.entries()) {
+    if (keep.get(paneId) === mirror.dataset.sessionId) continue;
+    mirror.remove();
+    state.duplicateTranscriptMirrorByPaneId.delete(paneId);
+  }
+}
+
+function followDuplicateTerminalGeometry(handle) {
+  if (!handle || !handle.host || !handle.host.isConnected) return;
+  try {
+    followPtyGeometry(
+      handle.sessionId,
+      handle.term,
+      handle.fitAddon,
+      handle.host,
+    );
+  } catch (_) {
+    /* a pane mid-layout can measure zero; the next refit catches it */
+  }
+}
+
+function refitDuplicateTerminalMirrors() {
+  for (const handle of state.duplicateTerminalMirrorByPaneId.values()) {
+    followDuplicateTerminalGeometry(handle);
+  }
+}
+
+function renderEventIntoDuplicateTerminals(sessionId, event) {
+  if (!event || !event.type || event.type === "pty") return;
+  const session = state.sessions.find((s) => s.id === sessionId);
+  for (const handle of state.duplicateTerminalMirrorByPaneId.values()) {
+    if (handle.sessionId !== sessionId || !handle.term) continue;
+    switch (event.type) {
+      case "reset":
+        handle.term.reset();
+        break;
+      case "error":
+        writeTermData(
+          handle.term,
+          `\r\n\x1b[31m[error] ${sanitizeForTerm(event.message || "")}\x1b[0m\r\n`,
+        );
+        break;
+      case "tool_use":
+        if (isStructuredToolSession(session)) {
+          writeTermData(handle.term, toolUseLine(event.tool, event.args));
+        }
+        break;
+      case "tool_result":
+        if (isStructuredToolSession(session)) {
+          writeTermData(handle.term, toolResultLines(event.ok, event.output));
+        }
+        break;
+      case "tool_approval_request":
+        if (isStructuredToolSession(session)) {
+          const risk = event.risk ? ` [${sanitizeForTerm(event.risk)}]` : "";
+          writeTermData(
+            handle.term,
+            `\r\n\x1b[1;33m? approve${risk}\x1b[0m ` +
+              `${sanitizeForTerm(event.tool || "")}` +
+              `\x1b[2m(${sanitizeForTerm(event.args_summary || "")})\x1b[0m\r\n`,
+          );
+        }
+        break;
+    }
+  }
 }
 
 /** Put mirrored elements back where their owners expect them. */
@@ -10665,6 +10911,7 @@ function clearTranscriptPane(id) {
   state.transcriptViewportById.delete(id);
   state.optimisticMessagesById.delete(id);
   state.chatWorkingById.delete(id);
+  scheduleDuplicateTranscriptSync(id);
 }
 
 function markTranscriptStale(id) {
@@ -10851,6 +11098,7 @@ async function loadTranscript(id, opts = {}) {
   pane.dataset.historyTotal = String(total);
   pane.dataset.historyBeforeSeq = String(minTailSeq);
   pane.dataset.historyComplete = total > tailEvents.length && minTailSeq > 0 ? "false" : "true";
+  scheduleDuplicateTranscriptSync(id);
 }
 
 async function loadOlderTranscriptPage(id, pane, options = {}) {
@@ -10899,6 +11147,7 @@ async function loadOlderTranscriptPage(id, pane, options = {}) {
       pane.dataset.historyLoaded = String(loaded);
       pane.dataset.historyBeforeSeq = String(older[0].seq);
       updateTranscriptProgressBanner(banner, loaded, total);
+      scheduleDuplicateTranscriptSync(id);
       if (older.length < TRANSCRIPT_OLDER_PAGE || older[0].seq <= 1 || loaded >= total) {
         pane.dataset.historyComplete = "true";
       }
@@ -11168,6 +11417,17 @@ function handleNotification(method, params) {
     if (event && event.type === "pty") {
       observeSessionPtyActivity(session_id, params.at);
       programWriteHoverPty(session_id, decodeBase64ToBytes(event.data || ""));
+      const bytes = decodeBase64ToBytes(event.data || "");
+      for (const mirror of state.duplicateTerminalMirrorByPaneId.values()) {
+        if (
+          mirror.sessionId === session_id &&
+          mirror.term &&
+          !mirror.replayingPty &&
+          !mirror.hydrating
+        ) {
+          writeTermBytes(mirror.term, bytes);
+        }
+      }
       // A session mirrored in an unfocused pane is on screen and has to stay
       // live. It isn't `currentId`, so the focused-session path below never
       // reaches it — write straight to its own cached terminal. Guarded on
@@ -11219,6 +11479,7 @@ function handleNotification(method, params) {
     if (programEventClearsRunButton(event)) {
       programClearRunButton(session_id);
     }
+    renderEventIntoDuplicateTerminals(session_id, event);
     if (session_id === state.currentId && state.mode === "terminal") {
       const handle = terminalHandleForSession(session_id);
       if (handle && handle.structuredTranscript && Number.isFinite(Number(params.seq))) {
@@ -11239,6 +11500,7 @@ function handleNotification(method, params) {
     if (state.mode === "program") return;
     if (state.mode === "chat") showTranscriptPane(session_id);
     renderEvent(event, params.at);
+    if (state.mode === "chat") scheduleDuplicateTranscriptSync(session_id);
     scrollToBottom();
   } else if (method === "session/state") {
     const { session } = params;
@@ -11615,12 +11877,14 @@ function startOptimisticWorkingIndicator(sessionId) {
   if (!sessionId) return;
   state.chatWorkingById.add(sessionId);
   syncThinkingBanner(sessionId);
+  scheduleDuplicateTranscriptSync(sessionId);
 }
 
 function clearOptimisticWorkingIndicator(sessionId) {
   if (!sessionId) return;
   state.chatWorkingById.delete(sessionId);
   removeThinkingBanner(sessionId);
+  scheduleDuplicateTranscriptSync(sessionId);
 }
 
 function ensureThinkingBanner(sessionId) {
@@ -11661,6 +11925,7 @@ function appendOptimisticUserMessage(sessionId, text) {
   list.push(entry);
   state.optimisticMessagesById.set(sessionId, list);
   scrollToBottom();
+  scheduleDuplicateTranscriptSync(sessionId);
   return entry;
 }
 

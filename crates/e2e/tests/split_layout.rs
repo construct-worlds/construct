@@ -46,6 +46,17 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         ))
         .await
         .expect("create beta");
+    let mut terminal_params = shell_session_params(&cwd, "duplicate terminal");
+    terminal_params.mode = Some("interactive".to_string());
+    terminal_params.pty_size = Some(construct_protocol::PtySize {
+        cols: 100,
+        rows: 30,
+    });
+    let duplicate_terminal = d
+        .client
+        .create(terminal_params)
+        .await
+        .expect("create duplicate terminal");
 
     // Stand in for the TUI: write a two-pane layout straight to the daemon,
     // exactly as the other client would.
@@ -507,6 +518,155 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
     assert!(
         stack_in_focused,
         "the interactive stack lives in the focused pane"
+    );
+
+    // Split creation deliberately starts the new leaf on the same session.
+    // A session's canonical surface DOM can only have one parent, so WebUI
+    // needs a pane-scoped passive replica for the other leaf rather than
+    // moving the one surface back and forth and blanking a pane. This shell
+    // currently has its semantic chat view selected; prove that surface is
+    // present in both panes before exercising the terminal representation.
+    let duplicate_chat_js =
+        "(() => {
+           const panes = Array.from(document.querySelectorAll('#paneGrid .pane'));
+           return panes.length === 2 && panes.every((pane) =>
+             Array.from(pane.querySelectorAll('.transcript-pane')).some(
+               (transcript) =>
+                 transcript.dataset.sessionId === state.currentId &&
+                 !transcript.hidden
+             )
+           );
+         })()";
+    let duplicate_chat_surfaces = wait_for_bool(&page, &duplicate_chat_js).await;
+    let duplicate_chat_state: String = page
+        .evaluate(
+            "JSON.stringify({
+               currentId: state.currentId,
+               focusedPaneId: state.focusedPaneId,
+               focusedSessionId: focusedPaneSessionId(),
+               mode: state.mode,
+               panes: Array.from(document.querySelectorAll('#paneGrid .pane')).map((pane) => ({
+                 paneId: pane.dataset.paneId,
+                 focused: pane.classList.contains('is-focused'),
+                 transcripts: Array.from(pane.querySelectorAll('.transcript-pane')).map((p) => ({
+                   sessionId: p.dataset.sessionId,
+                   hidden: p.hidden,
+                   duplicate: p.classList.contains('transcript-duplicate-mirror'),
+                   connected: p.isConnected,
+                 })),
+               })),
+             })",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    assert!(
+        duplicate_chat_surfaces,
+        "two panes assigned to one chat session must both render its transcript; \
+         got {duplicate_chat_state}"
+    );
+
+    let terminal_duplicate_tree = LayoutNode::Split {
+        direction: LayoutSplitDirection::Right,
+        ratio_percent: 50,
+        first: Box::new(LayoutNode::Leaf {
+            id: 1,
+            session_id: Some(duplicate_terminal.clone()),
+        }),
+        second: Box::new(LayoutNode::Leaf {
+            id: 2,
+            session_id: Some(duplicate_terminal.clone()),
+        }),
+    };
+    d.client
+        .set_layout(
+            terminal_duplicate_tree,
+            Some(d.client.layout().await.expect("layout before terminal duplicate").version),
+        )
+        .await
+        .expect("assign terminal session to both panes");
+    let duplicate_terminal_ready_js = format!(
+        "state.currentId === {duplicate_terminal:?} && state.mode === 'terminal'"
+    );
+    assert!(
+        wait_for_bool(&page, &duplicate_terminal_ready_js).await,
+        "the duplicated interactive shell should become the focused terminal"
+    );
+
+    let both_duplicate_surfaces = wait_for_bool(
+        &page,
+        "(() => {
+           const panes = Array.from(document.querySelectorAll('#paneGrid .pane'));
+           return panes.length === 2 && panes.every((pane) => {
+             const host = pane.querySelector('.terminal-host');
+             return !!host && !host.hidden && !!host.querySelector('.xterm-screen');
+           });
+         })()",
+    )
+    .await;
+    let duplicate_surface_state: String = page
+        .evaluate(
+            "JSON.stringify({
+               currentId: state.currentId,
+               focusedPaneId: state.focusedPaneId,
+               focusedSessionId: focusedPaneSessionId(),
+               mode: state.mode,
+               leaves: layoutLeaves(state.layout.tree),
+               mirrors: Array.from(state.duplicateTerminalMirrorByPaneId.entries())
+                 .map(([paneId, h]) => ({
+                   paneId,
+                   sessionId: h.sessionId,
+                   loaded: h.loaded,
+                   hydrating: h.hydrating,
+                   connected: h.host.isConnected,
+                   hidden: h.host.hidden,
+                   hasScreen: !!h.host.querySelector('.xterm-screen'),
+                 })),
+               panes: Array.from(document.querySelectorAll('#paneGrid .pane')).map((pane) => {
+                 const host = pane.querySelector('.terminal-host');
+                 return {
+                   paneId: pane.dataset.paneId,
+                   focused: pane.classList.contains('is-focused'),
+                   hostSessionId: host?.dataset.sessionId || null,
+                   hostHidden: host?.hidden ?? null,
+                   hasScreen: !!host?.querySelector('.xterm-screen'),
+                   body: pane.querySelector('.pane-body')?.innerHTML.slice(0, 200),
+                 };
+               }),
+             })",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    assert!(
+        both_duplicate_surfaces,
+        "two panes assigned to one terminal session must both render a terminal surface; \
+         got {duplicate_surface_state}"
+    );
+
+    d.client
+        .pty_input(
+            &duplicate_terminal,
+            b"printf '__duplicate_pane_live__\\n'\r".to_vec(),
+        )
+        .await
+        .expect("write duplicate-pane sentinel");
+    let both_duplicate_surfaces_live = wait_for_bool(
+        &page,
+        "(() => {
+           const panes = Array.from(document.querySelectorAll('#paneGrid .pane'));
+           return panes.length === 2 && panes.every(
+             (pane) => (pane.querySelector('.xterm-rows')?.textContent || '')
+               .includes('__duplicate_pane_live__')
+           );
+         })()",
+    )
+    .await;
+    assert!(
+        both_duplicate_surfaces_live,
+        "both same-session panes must continue receiving live PTY output"
     );
 
     // Leave a reviewable artifact of the split actually rendering, the way
