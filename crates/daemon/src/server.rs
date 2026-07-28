@@ -975,6 +975,7 @@ fn forward_broadcast(
             BroadcastMsg::GroupState(_)
             | BroadcastMsg::GroupDeleted(_)
             | BroadcastMsg::RemoteState(_)
+            | BroadcastMsg::FeaturesState(_)
             | BroadcastMsg::LayoutState(_) => true,
         };
         if !matches {
@@ -1054,6 +1055,13 @@ fn forward_broadcast(
             };
             Notification::new(ipc_notif::REMOTE_STATE, Some(p))
         }
+        BroadcastMsg::FeaturesState(fs) => {
+            let p = match serde_json::to_value(&fs) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            Notification::new(ipc_notif::FEATURES_STATE, Some(p))
+        }
         BroadcastMsg::LayoutState(l) => {
             let p = match serde_json::to_value(&l) {
                 Ok(v) => v,
@@ -1125,6 +1133,9 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::SMITH_AUTH_STATUS, {
         ok!(req, &manager.smith_auth_status().await)
+    });
+    dispatch_entry!(ipc_method::FEATURES_STATUS, {
+        ok!(req, &manager.features_status().await)
     });
     dispatch_entry!(ipc_method::SMITH_SET_AUTH_METHOD, {
         let p = params!(req, SmithSetAuthMethodParams);

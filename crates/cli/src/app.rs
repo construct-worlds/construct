@@ -42,8 +42,8 @@ mod session_title_menu;
 mod session_title_rename;
 mod tutorial;
 pub use configure::{
-    harness_guidance, no_agent_harness_available, smith_method_guidance, ConfigurePopup,
-    ConfigureTab, CONFIGURE_TABS,
+    feature_guidance, harness_guidance, no_agent_harness_available, smith_method_guidance,
+    ConfigurePopup, ConfigureTab, CONFIGURE_TABS,
 };
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
@@ -1451,6 +1451,15 @@ pub struct App {
     /// immediately instead of waiting out the timer.
     pub minibuffer_hint_context: Option<ZoomMode>,
     pub harnesses: Vec<HarnessInfo>,
+    /// Ambient-feature status rows from `features.status` (spec 0151),
+    /// refreshed alongside `harnesses` and updated live by the
+    /// `features/state` notification. Drives the configure dialog's
+    /// Features tab and the modeline degradation notice.
+    pub features: Vec<construct_protocol::FeatureInfo>,
+    /// Whether the daemon has actually skipped ambient work (auto-title,
+    /// suggestions) for lack of a smith credential this run — the gate for
+    /// showing the modeline degradation notice at all.
+    pub features_degradation_observed: bool,
     /// Program templates offered as clickable buttons in the empty-program
     /// placeholder. Fetched at startup and on reconnect, and refreshed in the
     /// background every time the program pane opens so edits to template files
@@ -4444,6 +4453,7 @@ async fn run_with_socket_initial_selection(
     let sessions = client.list().await.unwrap_or_default();
     let groups = client.list_projects().await.unwrap_or_default();
     let harnesses = client.harnesses().await.unwrap_or_default();
+    let features_status = client.features_status().await.ok();
     let program_templates = client
         .program_templates()
         .await
@@ -4606,6 +4616,13 @@ async fn run_with_socket_initial_selection(
         minibuffer_hint_rotated_at: None,
         minibuffer_hint_context: None,
         harnesses,
+        features: features_status
+            .as_ref()
+            .map(|s| s.features.clone())
+            .unwrap_or_default(),
+        features_degradation_observed: features_status
+            .as_ref()
+            .is_some_and(|s| s.degradation_observed),
         program_templates,
         program_templates_tx,
         program_verbs,
@@ -5867,6 +5884,7 @@ impl App {
         self.sessions = sessions;
         self.groups = groups;
         self.harnesses = harnesses;
+        self.refresh_features().await;
         if !program_templates.is_empty() {
             self.program_templates = program_templates;
         }
@@ -8907,6 +8925,17 @@ impl App {
                     }
                 }
             }
+            m if m == construct_protocol::ipc_notif::FEATURES_STATE => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        construct_protocol::FeaturesStatusResult,
+                    >(p)
+                    {
+                        self.features = payload.features;
+                        self.features_degradation_observed = payload.degradation_observed;
+                    }
+                }
+            }
             m if m == construct_protocol::ipc_notif::PROGRAM_STATE => {
                 if let Some(p) = n.params {
                     if let Ok(payload) = serde_json::from_value::<
@@ -11735,6 +11764,9 @@ impl App {
             }
             OpenRemoteControl => {
                 self.open_remote_control_popup(None).await;
+            }
+            OpenConfigure => {
+                self.open_configure_popup().await;
             }
             OpenRestartDaemonConfirm => {
                 self.minibuffer = Some(Minibuffer {
@@ -14764,6 +14796,8 @@ mod tests {
             minibuffer_hint_rotated_at: None,
             minibuffer_hint_context: None,
             harnesses: Vec::new(),
+            features: Vec::new(),
+            features_degradation_observed: false,
             program_templates: Vec::new(),
             program_templates_tx: mpsc::unbounded_channel().0,
             program_verbs: Vec::new(),
@@ -16714,6 +16748,7 @@ mod tests {
             tab: ConfigureTab::Harnesses,
             harness_selected: 0,
             smith_selected: 0,
+            feature_selected: 0,
             smith_methods: Vec::new(),
             smith_current: None,
             note: None,

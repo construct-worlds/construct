@@ -191,9 +191,10 @@ enabled = true
 # ── Next-prompt suggestions ──────────────────────────────────────────────────
 #
 # When a user session's turn ends, the daemon generates a hand of suggested
-# next prompts (spec 0109) with a one-shot smith model call over the
-# session's transcript tail. Best-effort: with no configured smith
-# credential, generation silently no-ops.
+# next prompts (spec 0109) with a one-shot model call over the session's
+# transcript tail (smith for smith/shell sessions, the session's own harness
+# otherwise). Best-effort: with no usable model the skip is reported via
+# features.status (spec 0151) instead of generating.
 
 # [suggest]
 # Set to false to disable suggestion generation entirely.
@@ -462,8 +463,9 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SuggestConfig {
     /// Kill switch for turn-end suggestion generation. Default: `true`
-    /// (generation is best-effort and silently no-ops without a smith
-    /// credential, so the default costs nothing when unconfigured).
+    /// (generation is best-effort; without a smith credential smith/shell
+    /// sessions skip it and report the gap via features.status — spec
+    /// 0151 — so the default costs nothing when unconfigured).
     #[serde(default = "default_suggest_enabled")]
     pub enabled: bool,
 }

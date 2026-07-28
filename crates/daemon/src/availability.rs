@@ -403,6 +403,106 @@ pub async fn smith_auth_methods(
     ]
 }
 
+/// Inputs for [`ambient_features`], pre-probed by the caller so the mapping
+/// itself stays pure and unit-testable.
+pub struct FeatureInputs {
+    /// smith's credential probe result ([`probe_smith`]).
+    pub smith: Availability,
+    /// `[suggest] enabled` from config.
+    pub suggest_enabled: bool,
+    /// The orchestrator's configured harness and that harness's
+    /// availability, or `None` when the operator is disabled in config.
+    pub orchestrator: Option<(String, Availability)>,
+}
+
+/// Map raw availability probes to per-feature status rows (spec 0151).
+/// This is the single place that records which ambient features depend on
+/// a smith credential and how each degrades without one — clients render
+/// these rows verbatim instead of re-deriving the dependency themselves.
+pub fn ambient_features(inputs: &FeatureInputs) -> Vec<construct_protocol::FeatureInfo> {
+    use construct_protocol::{FeatureInfo, FeatureStatus};
+    let smith_ok = inputs.smith.available;
+    let auto_title = if smith_ok {
+        FeatureInfo {
+            id: "auto_title".to_string(),
+            label: "Session auto-naming".to_string(),
+            status: FeatureStatus::Ok,
+            detail: format!("titles generated via smith ({})", inputs.smith.detail),
+        }
+    } else {
+        FeatureInfo {
+            id: "auto_title".to_string(),
+            label: "Session auto-naming".to_string(),
+            status: FeatureStatus::Degraded,
+            detail: "no smith credential — sessions on model harnesses fall back to a \
+                     one-shot on their own harness; smith and shell sessions keep their \
+                     default (hash) names"
+                .to_string(),
+        }
+    };
+    let suggestions = if !inputs.suggest_enabled {
+        FeatureInfo {
+            id: "suggestions".to_string(),
+            label: "Next-prompt suggestions".to_string(),
+            status: FeatureStatus::Off,
+            detail: "disabled in config ([suggest] enabled = false)".to_string(),
+        }
+    } else if smith_ok {
+        FeatureInfo {
+            id: "suggestions".to_string(),
+            label: "Next-prompt suggestions".to_string(),
+            status: FeatureStatus::Ok,
+            detail: format!(
+                "smith and shell sessions generate via smith ({}); other harnesses use \
+                 their own model",
+                inputs.smith.detail
+            ),
+        }
+    } else {
+        FeatureInfo {
+            id: "suggestions".to_string(),
+            label: "Next-prompt suggestions".to_string(),
+            status: FeatureStatus::Degraded,
+            detail: "no smith credential — smith and shell sessions get no suggestions; \
+                     other harnesses use their own model"
+                .to_string(),
+        }
+    };
+    let operator = match &inputs.orchestrator {
+        None => FeatureInfo {
+            id: "operator".to_string(),
+            label: "Operator session".to_string(),
+            status: FeatureStatus::Off,
+            detail: "disabled in config ([orchestrator])".to_string(),
+        },
+        Some((harness, avail)) if avail.available => FeatureInfo {
+            id: "operator".to_string(),
+            label: "Operator session".to_string(),
+            status: FeatureStatus::Ok,
+            detail: format!("runs on {harness} ({})", avail.detail),
+        },
+        // smith's degraded operator still starts and handles slash
+        // commands (spec 0071's orchestrator exception); a missing
+        // wrapper CLI for a non-smith orchestrator can't start at all.
+        Some((harness, avail)) if harness == "smith" => FeatureInfo {
+            id: "operator".to_string(),
+            label: "Operator session".to_string(),
+            status: FeatureStatus::Degraded,
+            detail: format!(
+                "slash commands only — smith has no model credential ({})",
+                avail.detail
+            ),
+        },
+        Some((harness, avail)) => FeatureInfo {
+            id: "operator".to_string(),
+            label: "Operator session".to_string(),
+            status: FeatureStatus::Off,
+            detail: format!("{harness} unavailable: {}", avail.detail),
+        },
+    };
+    vec![auto_title, suggestions, operator]
+}
+
 /// Which `smith_auth_methods` entry a pinned `CONSTRUCT_SMITH_MODEL` spec
 /// currently selects, by matching its `provider:` prefix. `None` pin
 /// (unset/empty) resolves to `"auto"`; a pin whose prefix doesn't match any
@@ -456,6 +556,61 @@ mod tests {
             Some("example.com:9999".to_string())
         );
         assert_eq!(host_port(""), None);
+    }
+
+    /// The feature mapping (spec 0151) must connect a missing smith
+    /// credential to every ambient feature it silently disables, and must
+    /// not report anything degraded when smith is usable.
+    #[test]
+    fn ambient_features_reflect_smith_availability() {
+        use construct_protocol::FeatureStatus;
+        let ok = ambient_features(&FeatureInputs {
+            smith: Availability::ready("ready (Anthropic API key)"),
+            suggest_enabled: true,
+            orchestrator: Some((
+                "smith".to_string(),
+                Availability::ready("ready (Anthropic API key)"),
+            )),
+        });
+        assert!(ok.iter().all(|f| f.status == FeatureStatus::Ok), "{ok:#?}");
+
+        let missing = ambient_features(&FeatureInputs {
+            smith: Availability::missing("no API key or OAuth credential found"),
+            suggest_enabled: true,
+            orchestrator: Some((
+                "smith".to_string(),
+                Availability::missing("no API key or OAuth credential found"),
+            )),
+        });
+        assert!(
+            missing.iter().all(|f| f.status == FeatureStatus::Degraded),
+            "{missing:#?}"
+        );
+        // Every degraded row names the cause so a user reading one row in
+        // isolation still learns what to fix.
+        assert!(missing
+            .iter()
+            .all(|f| f.detail.contains("smith") && f.detail.contains("credential")));
+
+        let off = ambient_features(&FeatureInputs {
+            smith: Availability::missing("no API key or OAuth credential found"),
+            suggest_enabled: false,
+            orchestrator: None,
+        });
+        assert_eq!(off[1].status, FeatureStatus::Off, "{off:#?}");
+        assert_eq!(off[2].status, FeatureStatus::Off, "{off:#?}");
+
+        // A non-smith orchestrator harness that's missing means the operator
+        // can't start at all — Off, not smith-style Degraded.
+        let wrapper = ambient_features(&FeatureInputs {
+            smith: Availability::missing("no API key or OAuth credential found"),
+            suggest_enabled: true,
+            orchestrator: Some((
+                "claude".to_string(),
+                Availability::missing("`claude` CLI not found on daemon PATH"),
+            )),
+        });
+        assert_eq!(wrapper[2].status, FeatureStatus::Off, "{wrapper:#?}");
     }
 
     #[test]

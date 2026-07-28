@@ -136,6 +136,11 @@ pub enum KeyAction {
     /// minibuffer status-bar affordance; `/remote-connect` remains the
     /// keyboard-facing command.
     OpenRemoteControl,
+    /// Open the configure dialog (spec 0069). Click-only, bound to the
+    /// status-bar ambient-feature degradation notice (spec 0151);
+    /// `configure` in the command palette remains the keyboard-facing
+    /// command.
+    OpenConfigure,
     /// Open the "restart daemon?" confirmation. Click-only, bound to the
     /// `<daemon build> (daemon)` segment of the status-bar version notice
     /// shown when the connected daemon's build differs from this client's.
