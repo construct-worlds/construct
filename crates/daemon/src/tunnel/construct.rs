@@ -19,6 +19,16 @@ use crate::remote::RemoteState;
 
 const DEFAULT_API_URL: &str = "https://tunnel.zarvis.ai/api/v1/tunnels";
 
+/// Cadence of the post-readiness `ready_url` health poll, and how many
+/// consecutive failures prove the gateway no longer routes this tunnel.
+/// The gateway holds routes in memory only, so a service deploy restarts
+/// it with an empty table while the in-process wstunnel client keeps
+/// retrying its transport forever — without this poll the daemon would
+/// advertise a dead tunnel until the ~24h capability refresh.
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(20);
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+const HEALTH_CHECK_FAILURES: u32 = 3;
+
 #[derive(Serialize)]
 struct RegisterRequest<'a> {
     construct_instance_id: &'a str,
@@ -138,14 +148,7 @@ pub async fn run_once(
     let readiness = async {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
-            let ready = http
-                .get(&ready_url)
-                .bearer_auth(&tunnel_token)
-                .send()
-                .await
-                .map(|response| response.status().is_success())
-                .unwrap_or(false);
-            if ready {
+            if tunnel_ready(&http, &ready_url, &tunnel_token).await {
                 remote.set_tunnel_url(Some(public_url)).await;
                 return Ok::<(), anyhow::Error>(());
             }
@@ -167,13 +170,58 @@ pub async fn run_once(
         }
     }
 
-    tokio::select! {
-        result = &mut tunnel => {
-            result.context("run in-process wstunnel client")?;
-            Err(anyhow!("wstunnel exited"))
+    // The gateway can lose this registration without the transport ever
+    // noticing (its route table is memory-only, so a deploy restart wipes
+    // it while wstunnel keeps retrying the relay). Keep verifying the
+    // ready endpoint; a sustained run of failures means the route is gone,
+    // so return cleanly and let the supervisor loop re-register with the
+    // cached owner token and republish the public URL.
+    let mut health = tokio::time::interval_at(
+        tokio::time::Instant::now() + HEALTH_CHECK_INTERVAL,
+        HEALTH_CHECK_INTERVAL,
+    );
+    health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let refresh = tokio::time::sleep(refresh_after);
+    tokio::pin!(refresh);
+    let mut consecutive_failures = 0u32;
+    loop {
+        tokio::select! {
+            result = &mut tunnel => {
+                result.context("run in-process wstunnel client")?;
+                return Err(anyhow!("wstunnel exited"));
+            }
+            _ = &mut refresh => return Ok(()),
+            _ = health.tick() => {
+                if tunnel_ready(&http, &ready_url, &tunnel_token).await {
+                    consecutive_failures = 0;
+                } else {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= HEALTH_CHECK_FAILURES {
+                        tracing::warn!(
+                            failures = consecutive_failures,
+                            "Construct tunnel gateway no longer routes this tunnel; re-registering"
+                        );
+                        remote.set_tunnel_url(None).await;
+                        return Ok(());
+                    }
+                }
+            }
         }
-        _ = tokio::time::sleep(refresh_after) => Ok(()),
     }
+}
+
+/// One authenticated probe of the gateway's ready endpoint: true only
+/// when the gateway still knows this tunnel and can reach its reverse
+/// port. Transport errors and non-success statuses both count as "not
+/// ready" — the caller only distinguishes healthy from not.
+async fn tunnel_ready(http: &reqwest::Client, ready_url: &str, tunnel_token: &str) -> bool {
+    http.get(ready_url)
+        .bearer_auth(tunnel_token)
+        .timeout(HEALTH_CHECK_TIMEOUT)
+        .send()
+        .await
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
 }
 
 async fn authorize(
