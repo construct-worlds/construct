@@ -8934,16 +8934,6 @@ impl App {
                     }
                 }
             }
-            m if m == construct_protocol::ipc_notif::GROUP_STATE => {
-                if let Some(p) = n.params {
-                    if let Ok(payload) = serde_json::from_value::<
-                        construct_protocol::GroupStateNotificationPayload,
-                    >(p)
-                    {
-                        self.on_group_state(payload.group).await;
-                    }
-                }
-            }
             m if m == construct_protocol::ipc_notif::PROJECT_STATE => {
                 if let Some(p) = n.params {
                     if let Ok(payload) = serde_json::from_value::<
@@ -8951,16 +8941,6 @@ impl App {
                     >(p)
                     {
                         self.on_group_state(payload.project).await;
-                    }
-                }
-            }
-            m if m == construct_protocol::ipc_notif::GROUP_DELETED => {
-                if let Some(p) = n.params {
-                    if let Ok(payload) = serde_json::from_value::<
-                        construct_protocol::GroupDeletedNotificationPayload,
-                    >(p)
-                    {
-                        self.on_group_deleted(&payload.group_id).await;
                     }
                 }
             }

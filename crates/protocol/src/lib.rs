@@ -1207,12 +1207,6 @@ pub mod ipc_method {
     pub const SESSION_MOVE: &str = "session.move";
     pub const SESSION_SET_GROUP: &str = "session.set_group";
     pub const SESSION_SET_PROJECT: &str = "session.set_project";
-    pub const GROUP_LIST: &str = "group.list";
-    pub const GROUP_CREATE: &str = "group.create";
-    pub const GROUP_RENAME: &str = "group.rename";
-    pub const GROUP_DELETE: &str = "group.delete";
-    pub const GROUP_SET_COLLAPSED: &str = "group.set_collapsed";
-    pub const GROUP_MOVE: &str = "group.move";
     pub const PROJECT_LIST: &str = "project.list";
     pub const PROJECT_CREATE: &str = "project.create";
     pub const PROJECT_RENAME: &str = "project.rename";
@@ -1313,8 +1307,6 @@ pub mod ipc_notif {
     pub const PROGRAM_STATE: &str = "program/state";
     pub const PROGRAM_CURSOR: &str = "program/cursor";
     pub const DELETED: &str = "session/deleted";
-    pub const GROUP_STATE: &str = "group/state";
-    pub const GROUP_DELETED: &str = "group/deleted";
     pub const PROJECT_STATE: &str = "project/state";
     pub const PROJECT_DELETED: &str = "project/deleted";
     /// The shared split layout changed — either because a client wrote it
@@ -3458,21 +3450,14 @@ pub struct GroupSummary {
     pub collapsed: bool,
 }
 
-/// Project is the product name for the same persisted organizer that
-/// older clients know as a group. Keep the wire payload identical
-/// while clients migrate method and notification names.
+/// Product name for the same persisted organizer still stored under the
+/// historical `GroupSummary` / `group_id` fields (storage rename is a
+/// separate migration). Wire IPC uses `project.*` only.
 pub type ProjectSummary = GroupSummary;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupCreateParams {
+pub struct ProjectCreateParams {
     pub name: String,
-}
-
-pub type ProjectCreateParams = GroupCreateParams;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupCreateResult {
-    pub group_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3481,28 +3466,9 @@ pub struct ProjectCreateResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupIdParams {
-    pub group_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectIdParams {
     #[serde(alias = "group_id")]
     pub project_id: String,
-}
-
-/// Parameters for `group.delete`. `delete_members` defaults to false
-/// so a client that sends the older `GroupIdParams` shape (just
-/// `{"group_id": "…"}`) still deserializes cleanly with the original
-/// "orphan members" semantics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupDeleteParams {
-    pub group_id: String,
-    /// When true, cascade-delete every member session before removing
-    /// the group. When false (default), members are orphaned —
-    /// `group_id` on their summary clears to `None` and they survive.
-    #[serde(default)]
-    pub delete_members: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3510,15 +3476,10 @@ pub struct ProjectDeleteParams {
     #[serde(alias = "group_id")]
     pub project_id: String,
     /// When true, cascade-delete every member session before removing
-    /// the project. When false (default), members are orphaned.
+    /// the project. When false (default), members are orphaned —
+    /// `group_id` on their summary clears to `None` and they survive.
     #[serde(default)]
     pub delete_members: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupRenameParams {
-    pub group_id: String,
-    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3529,22 +3490,10 @@ pub struct ProjectRenameParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupSetCollapsedParams {
-    pub group_id: String,
-    pub collapsed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectSetCollapsedParams {
     #[serde(alias = "group_id")]
     pub project_id: String,
     pub collapsed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupMoveParams {
-    pub group_id: String,
-    pub direction: MoveDirection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3789,18 +3738,8 @@ pub struct LayoutStateNotificationPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupStateNotificationPayload {
-    pub group: GroupSummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectStateNotificationPayload {
     pub project: ProjectSummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupDeletedNotificationPayload {
-    pub group_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

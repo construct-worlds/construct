@@ -6,20 +6,17 @@ use crate::session::{BroadcastMsg, SessionManager};
 use construct_protocol::jsonrpc::{self, MessageKind};
 use construct_protocol::{
     ipc_method, ipc_notif, transport, ChatViewerActiveResult, CreateSessionParams, ErrorObject,
-    GroupCreateParams, GroupCreateResult, GroupDeleteParams, GroupMoveParams, GroupRenameParams,
-    GroupSetCollapsedParams, LayoutSetParams, Notification, PingResult, ProgramCursorParams,
-    ProgramEditParams,
+    LayoutSetParams, Notification, PingResult, ProgramCursorParams, ProgramEditParams,
     ProgramExecuteParams, ProgramGetParams, ProgramUpdateActor, ProgramUpdateParams,
     ProgramVerbExecuteParams, ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams,
-    ProjectDeletedNotificationPayload, ProjectMoveParams, ProjectRenameParams,
-    ProjectSetCollapsedParams, ProjectStateNotificationPayload, PtyReplayParams, Request, Response,
-    RouterListRoutesParams,
-    SearchParams, SessionAttachClipboardParams, SessionIdParams, SessionInputParams,
-    SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
-    SessionSetFocusedParams, SessionSetGroupParams, SessionSetPinnedParams,
-    SessionSetProjectParams, SessionSetRouteParams, SessionSetTitleParams, SessionSetViewParams, SessionToolActionParams,
-    SessionToolDecisionParams, SetTerminalBackgroundParams, SmithSetAuthMethodParams,
-    SubscribeParams, TranscriptParams, UsageQueryParams, IPC_VERSION,
+    ProjectMoveParams, ProjectRenameParams, ProjectSetCollapsedParams, PtyReplayParams, Request,
+    Response, RouterListRoutesParams, SearchParams, SessionAttachClipboardParams, SessionIdParams,
+    SessionInputParams, SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams,
+    SessionSetApprovalModeParams, SessionSetFocusedParams, SessionSetGroupParams,
+    SessionSetPinnedParams, SessionSetProjectParams, SessionSetRouteParams, SessionSetTitleParams,
+    SessionSetViewParams, SessionToolActionParams, SessionToolDecisionParams,
+    SetTerminalBackgroundParams, SmithSetAuthMethodParams, SubscribeParams, TranscriptParams,
+    UsageQueryParams, IPC_VERSION,
 };
 use anyhow::{Context, Result};
 use futures::{SinkExt as _, StreamExt as _};
@@ -965,7 +962,7 @@ fn forward_broadcast(
             BroadcastMsg::Deleted(d) => d.session_id == *f,
             BroadcastMsg::ProgramState(c) => c.program.session_id == *f,
             BroadcastMsg::ProgramCursor { payload, .. } => payload.cursor.session_id == *f,
-            // Group, remote-state and layout notifications aren't session-
+            // Project, remote-state and layout notifications aren't session-
             // specific; always forward even when a session filter
             // is set so the local TUI's remote badge stays accurate
             // while a single-session view is active. Layout in particular
@@ -982,7 +979,6 @@ fn forward_broadcast(
             return;
         }
     }
-    let mut notifs = Vec::with_capacity(2);
     let notif = match msg {
         BroadcastMsg::Event(e) => {
             let p = match serde_json::to_value(&e) {
@@ -1039,29 +1035,14 @@ fn forward_broadcast(
                 Ok(v) => v,
                 Err(_) => return,
             };
-            let notif = Notification::new(ipc_notif::GROUP_STATE, Some(p));
-            if let Ok(project_p) = serde_json::to_value(ProjectStateNotificationPayload {
-                project: g.group.clone(),
-            }) {
-                notifs.push(Notification::new(ipc_notif::PROJECT_STATE, Some(project_p)));
-            }
-            notif
+            Notification::new(ipc_notif::PROJECT_STATE, Some(p))
         }
         BroadcastMsg::GroupDeleted(g) => {
             let p = match serde_json::to_value(&g) {
                 Ok(v) => v,
                 Err(_) => return,
             };
-            let notif = Notification::new(ipc_notif::GROUP_DELETED, Some(p));
-            if let Ok(project_p) = serde_json::to_value(ProjectDeletedNotificationPayload {
-                project_id: g.group_id.clone(),
-            }) {
-                notifs.push(Notification::new(
-                    ipc_notif::PROJECT_DELETED,
-                    Some(project_p),
-                ));
-            }
-            notif
+            Notification::new(ipc_notif::PROJECT_DELETED, Some(p))
         }
         BroadcastMsg::RemoteState(r) => {
             let p = match serde_json::to_value(&r) {
@@ -1085,14 +1066,11 @@ fn forward_broadcast(
             Notification::new(ipc_notif::LAYOUT_STATE, Some(p))
         }
     };
-    notifs.insert(0, notif);
-    for notif in notifs {
-        let v = match serde_json::to_value(&notif) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let _ = out_tx.send(v);
-    }
+    let v = match serde_json::to_value(&notif) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let _ = out_tx.send(v);
 }
 
 fn parse_params<T: serde::de::DeserializeOwned>(
@@ -1570,18 +1548,8 @@ async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::GROUP_LIST, {
-        ok!(req, &manager.list_groups().await)
-    });
     dispatch_entry!(ipc_method::PROJECT_LIST, {
         ok!(req, &manager.list_groups().await)
-    });
-    dispatch_entry!(ipc_method::GROUP_CREATE, {
-        let p = params!(req, GroupCreateParams);
-        match manager.create_group(p.name).await {
-            Ok(gid) => ok!(req, &GroupCreateResult { group_id: gid }),
-            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
-        }
     });
     dispatch_entry!(ipc_method::PROJECT_CREATE, {
         let p = params!(req, ProjectCreateParams);
@@ -1590,23 +1558,9 @@ async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::GROUP_RENAME, {
-        let p = params!(req, GroupRenameParams);
-        match manager.rename_group(&p.group_id, p.name).await {
-            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
-            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
-        }
-    });
     dispatch_entry!(ipc_method::PROJECT_RENAME, {
         let p = params!(req, ProjectRenameParams);
         match manager.rename_group(&p.project_id, p.name).await {
-            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
-            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
-        }
-    });
-    dispatch_entry!(ipc_method::GROUP_DELETE, {
-        let p = params!(req, GroupDeleteParams);
-        match manager.delete_group(&p.group_id, p.delete_members).await {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
@@ -1618,26 +1572,12 @@ async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::GROUP_SET_COLLAPSED, {
-        let p = params!(req, GroupSetCollapsedParams);
-        match manager.set_group_collapsed(&p.group_id, p.collapsed).await {
-            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
-            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
-        }
-    });
     dispatch_entry!(ipc_method::PROJECT_SET_COLLAPSED, {
         let p = params!(req, ProjectSetCollapsedParams);
         match manager
             .set_group_collapsed(&p.project_id, p.collapsed)
             .await
         {
-            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
-            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
-        }
-    });
-    dispatch_entry!(ipc_method::GROUP_MOVE, {
-        let p = params!(req, GroupMoveParams);
-        match manager.move_group(&p.group_id, p.direction).await {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }

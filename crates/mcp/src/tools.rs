@@ -706,7 +706,7 @@ pub async fn call(
                 .min(500) as usize;
             let detail_full = args.get("detail").and_then(Value::as_str) == Some("full");
             let sessions = client.list().await?;
-            let groups = client.list_groups().await.unwrap_or_default();
+            let groups = client.list_projects().await.unwrap_or_default();
             let group_name_by_id: HashMap<&str, &str> = groups
                 .iter()
                 .map(|g| (g.id.as_str(), g.name.as_str()))

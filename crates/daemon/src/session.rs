@@ -10,14 +10,14 @@ use chrono::Utc;
 use construct_protocol::dialect;
 use construct_protocol::{
     agent_context, ahp_method, ClientView, CreateSessionParams, DeletedNotificationPayload,
-    EventNotificationPayload, GroupDeletedNotificationPayload, GroupStateNotificationPayload,
-    GroupSummary, HarnessInfo, LayoutDocument, LayoutStateNotificationPayload, MessageRole,
-    MoveDirection, NativeSubagentRef, ProgramDocument,
+    EventNotificationPayload, GroupSummary, HarnessInfo, LayoutDocument,
+    LayoutStateNotificationPayload, MessageRole, MoveDirection, NativeSubagentRef, ProgramDocument,
     ProgramEditParams, ProgramExecuteParams, ProgramExecuteResult, ProgramGetResult,
     ProgramListTemplatesResult, ProgramListVerbsResult, ProgramRunProgress,
     ProgramStateNotificationPayload, ProgramUpdateParams, ProgramUpdateResult,
-    ProgramVerbExecuteParams, ProgramVerbExecuteResult, PtyReplayResult, PtySize, SearchParams,
-    SearchResult, SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
+    ProgramVerbExecuteParams, ProgramVerbExecuteResult, ProjectDeletedNotificationPayload,
+    ProjectStateNotificationPayload, PtyReplayResult, PtySize, SearchParams, SearchResult,
+    SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
     SessionEmitEventParams, SessionEvent, SessionStartParams, SessionState, SessionSummary,
     SmithAuthMethodInfo, SmithAuthStatusResult, SmithSetAuthMethodResult, StateNotificationPayload,
     TimestampedEvent, TranscriptResult,
@@ -300,8 +300,11 @@ pub enum BroadcastMsg {
     },
     State(StateNotificationPayload),
     Deleted(DeletedNotificationPayload),
-    GroupState(GroupStateNotificationPayload),
-    GroupDeleted(GroupDeletedNotificationPayload),
+    /// Project organizer state changed. Variant name still says Group
+    /// because the daemon's in-memory/storage model uses `group_*`; the
+    /// IPC surface only emits `project/*`.
+    GroupState(ProjectStateNotificationPayload),
+    GroupDeleted(ProjectDeletedNotificationPayload),
     ProgramState(ProgramStateNotificationPayload),
     ProgramCursor {
         payload: construct_protocol::ProgramCursorNotificationPayload,
