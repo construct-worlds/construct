@@ -4683,16 +4683,31 @@ function listFocusedRow() {
     : null;
 }
 
-function moveListFocus(step) {
+/** Re-find a session's row after a re-render and put the caret back on it. */
+function refocusListRowForSession(id) {
+  if (!id) return;
+  const row = sessionListEl.querySelector(`.item[data-id="${CSS.escape(id)}"]`);
+  if (row) focusListRow(row);
+}
+
+async function moveListFocus(step) {
   const rows = listFocusRows();
   if (!rows.length) return;
   const current = listFocusedRow();
   const idx = current ? rows.indexOf(current) : -1;
   const next = rows[Math.min(rows.length - 1, Math.max(0, idx + step))];
+  if (!next) return;
   focusListRow(next);
   // Moving the list cursor selects, mirroring the TUI where the list cursor
   // IS the selection — not a separate highlight the user must confirm.
-  if (next && next.dataset.id) selectSession(next.dataset.id);
+  const id = next.dataset.id;
+  if (!id) return;
+  await selectSession(id, { keepFocus: true });
+  // The switch is async and re-renders the list on the way through, so
+  // re-assert the caret once it has settled: anything the incoming view
+  // focused after our `focusListRow` would otherwise have the last word,
+  // and the next keypress would land somewhere other than the list.
+  refocusListRowForSession(id);
 }
 
 function handleSessionListKey(ev) {
@@ -5519,7 +5534,19 @@ async function switchCurrentViewMode(mode) {
   reportView();
 }
 
-async function selectSession(id, { replaceUrl = false, fromPane = false } = {}) {
+/**
+ * Point the UI at a session.
+ *
+ * `keepFocus` suppresses the caret grab a switch normally does. Selecting
+ * from the list's own keymap must leave the caret on the list row: the TUI's
+ * list keeps its cursor across a switch, which is what makes the next/previous
+ * keys *repeatable*. Pulling focus into the view after the first press ends
+ * the navigation after one step.
+ */
+async function selectSession(
+  id,
+  { replaceUrl = false, fromPane = false, keepFocus = false } = {}
+) {
   rpc("session.mark_seen", { session_id: id }).catch(() => {});
   // Picking a session from the list points the FOCUSED pane at it, which is
   // shared state. `fromPane` is the one exception: focusing a pane already
@@ -5534,7 +5561,7 @@ async function selectSession(id, { replaceUrl = false, fromPane = false } = {}) 
     return;
   }
   if (state.mode === "chat") rememberTranscriptViewport(state.currentId);
-  const focusTerminalAfterSwitch = shouldFocusTerminalAfterSessionSwitch();
+  const focusTerminalAfterSwitch = !keepFocus && shouldFocusTerminalAfterSessionSwitch();
   state.currentId = id;
   setLocationSessionId(id, { replace: replaceUrl });
   renderSessions();

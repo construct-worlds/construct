@@ -223,10 +223,13 @@ async fn web_keymap_escapes_dialogs_toggles_program_and_drives_the_list() {
 
     let cwd = std::env::temp_dir().to_string_lossy().to_string();
     for title in ["alpha", "beta", "gamma"] {
-        d.client
-            .create(shell_session_params(&cwd, title))
-            .await
-            .expect("create session");
+        // INTERACTIVE, not the default headless: only a non-headless PTY
+        // session renders in terminal view, and terminal view is the one that
+        // grabs the caret on a switch. A headless session opens in chat and
+        // never exercises the focus path this test exists to pin down.
+        let mut params = shell_session_params(&cwd, title);
+        params.mode = Some("interactive".to_string());
+        d.client.create(params).await.expect("create session");
     }
 
     let Some((browser, mut handler)) = launch_browser().await else {
@@ -319,6 +322,9 @@ async fn web_keymap_escapes_dialogs_toggles_program_and_drives_the_list() {
     );
 
     // --- with the list focused, the TUI's bare keys drive it --------------
+    // (Repeatability across a real view switch is covered on its own in
+    // `web_keymap_list_navigation_keeps_the_caret_on_the_list`, which needs an
+    // interactive session and no split to exercise the focus-stealing path.)
     let selected_before: String = page
         .evaluate("state.currentId")
         .await
@@ -364,6 +370,175 @@ async fn web_keymap_escapes_dialogs_toggles_program_and_drives_the_list() {
         before_typing, unchanged,
         "a bare letter typed into the composer must never move the list selection"
     );
+}
+
+/// Navigating the list must not hand the caret to the session view.
+///
+/// Selecting a session enters that session's view, and a terminal view claims
+/// the keyboard — so the first `C-n` worked and every one after it went to the
+/// terminal instead of the list. The selection moved once and then navigation
+/// was dead, which is invisible to any assertion that only checks "did the
+/// selection change".
+///
+/// Three conditions all have to hold for the steal to be reachable, which is
+/// why this is a separate test rather than more assertions on the shared one:
+///   * the sessions must be INTERACTIVE — a headless PTY session opens in chat,
+///     and chat never grabbed focus;
+///   * the client must believe it is a desktop — headless Chrome reports touch
+///     points, and the touch path deliberately skips the terminal auto-focus;
+///   * no split may be open — the shared test leaves one, and the pane the
+///     caret lands in changes which surface claims it.
+///
+/// Known limit, stated so nobody trusts this further than it goes: the steal
+/// only manifests when this test is not competing with the rest of the suite.
+/// Run alone (`--test web_keymap web_keymap_list_navigation`) it fails without
+/// the fix, which is how the fix was verified. Run alongside the other keymap
+/// tests, the switch finishes late enough that the caret is never observed to
+/// move, and it passes either way. So treat a green here as evidence only when
+/// it was run in isolation; the repeatability assertions below still hold in
+/// both modes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_keymap_list_navigation_keeps_the_caret_on_the_list() {
+    let d = Daemon::spawn().await.expect("daemon");
+    let r = d
+        .client
+        .remote_start(construct_protocol::TunnelProvider::None, None)
+        .await
+        .expect("remote.start");
+
+    let cwd = std::env::temp_dir().to_string_lossy().to_string();
+    for title in ["alpha", "beta", "gamma"] {
+        let mut params = shell_session_params(&cwd, title);
+        params.mode = Some("interactive".to_string());
+        d.client.create(params).await.expect("create session");
+    }
+
+    let Some((browser, mut handler)) = launch_browser().await else {
+        eprintln!("skipping web_keymap list-focus test: could not launch Chromium");
+        return;
+    };
+    let _handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    let page = browser.new_page("about:blank").await.expect("new page");
+    set_viewport(&page, WIDE).await;
+    let url = inject_userinfo(&r.local_url, "remote", &r.password);
+    page.goto(&url).await.expect("goto");
+    wait_conn_open(&page).await;
+    assert!(wait_for_bool(&page, "!!state.currentId").await, "a session should be selected");
+    let _ = page
+        .evaluate("window.isLikelyTouchDevice = () => false; true")
+        .await;
+
+    // Assert the preconditions rather than assume them: without all three the
+    // test would pass for the wrong reason, which is exactly how the first
+    // version of this coverage slipped through.
+    assert!(
+        wait_for_bool(&page, "state.mode === 'terminal'").await,
+        "sessions must open in terminal view for the caret-stealing path to exist"
+    );
+    assert!(
+        eval_bool(&page, "shouldFocusTerminalAfterSessionSwitch()").await,
+        "the switch must be trying to claim the caret, or this proves nothing"
+    );
+
+    let _ = page.evaluate("toggleListFocus(); true").await;
+    assert!(
+        wait_for_bool(
+            &page,
+            "document.getElementById('sessionList').contains(document.activeElement)",
+        )
+        .await,
+        "the list should take focus"
+    );
+
+    let first: String = page
+        .evaluate("state.currentId")
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+
+    press(&page, "n", true).await;
+    let js = format!("state.currentId !== {first:?}");
+    assert!(
+        wait_for_bool(&page, js.as_str()).await,
+        "C-n should move the selection"
+    );
+
+    // Wait for the switch to actually FINISH before judging focus. The caret is
+    // stolen at the very end of entering the terminal view, after hydration, so
+    // a fixed sleep is a false-green generator: under parallel test load the
+    // steal simply lands after the sleep and the assertion sails through. Tie
+    // the wait to the real completion signal instead.
+    assert!(
+        wait_for_bool(
+            &page,
+            "(() => { const h = state.terminalById.get(state.currentId);
+                      return !!h && h.loaded === true; })()",
+        )
+        .await,
+        "the incoming session's terminal should finish hydrating"
+    );
+    // Sample continuously rather than once. The steal lands at the tail of the
+    // switch, and under parallel test load that can be any time within a couple
+    // of seconds — a single sample at a fixed offset silently passes when the
+    // steal happens just after it. Failing if focus EVER leaves the list makes
+    // the check independent of when the switch happens to finish.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if !eval_bool(
+            &page,
+            "document.getElementById('sessionList').contains(document.activeElement)",
+        )
+        .await
+        {
+            let active = text_of_active(&page).await;
+            panic!(
+                "after a list-driven switch the caret must stay on the list row, \
+                 but it moved to `{active}` — the TUI's list keeps its cursor, and \
+                 that is what makes C-n/C-p repeatable"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The consequence, stated directly: navigation keeps going.
+    let second: String = page
+        .evaluate("state.currentId")
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    press(&page, "n", true).await;
+    let js = format!("state.currentId !== {second:?}");
+    assert!(
+        wait_for_bool(&page, js.as_str()).await,
+        "a second C-n must keep walking the list — the reported bug is that \
+         navigation stopped after one step"
+    );
+
+    // And back up, both steps, still without touching the mouse.
+    press(&page, "p", true).await;
+    let js = format!("state.currentId === {second:?}");
+    assert!(wait_for_bool(&page, js.as_str()).await, "C-p should walk back");
+    press(&page, "p", true).await;
+    let js = format!("state.currentId === {first:?}");
+    assert!(
+        wait_for_bool(&page, js.as_str()).await,
+        "repeated C-p should return to where navigation started"
+    );
+}
+
+/// A label for whatever currently holds focus, for failure messages.
+async fn text_of_active(page: &Page) -> String {
+    page.evaluate(
+        "(() => { const a = document.activeElement;
+                  return a ? (a.className || a.tagName) : 'none'; })()",
+    )
+    .await
+    .ok()
+    .and_then(|r| r.into_value::<String>().ok())
+    .unwrap_or_default()
 }
 
 /// Send `C-x` then `key` — one complete chord.
