@@ -3744,6 +3744,19 @@ const state = {
   // but recent web interaction should keep xterm and the real PTY in
   // sync, including row-only changes.
   webPtyEngagedUntil: 0,
+  // Session ids whose PTY geometry this connection currently owns, learned
+  // from personalized `pty_resize` events (`owner: true` means the resize was
+  // ours) and set optimistically when we send a claiming resize. While owner,
+  // even passive local layout changes must reach the child: rendering a grid
+  // the child was never told about corrupts every relative repaint it sends
+  // (spec 0121), and nobody else is going to resize the PTY for us. Cleared
+  // on (re)connect — a fresh connection owns nothing until it engages.
+  ptyOwnedSessionIds: new Set(),
+  // A geometry claim attempted while the local grid was unmeasurable (host
+  // hidden during hydration, pane mid-layout). Holds { sessionId, forceRedraw }
+  // until a refit sees real dimensions and resumes the claim. Claiming with a
+  // garbage fit would resize the real PTY under every other client.
+  pendingGeometryClaim: null,
   ptyResizeTimer: null,
   pendingPtyResize: null,
   // Some PTY apps repaint after SIGWINCH by emitting a large redraw
@@ -4184,6 +4197,11 @@ function connect() {
   ws.addEventListener("open", () => {
     setConnState("open", "connected");
     state.reconnectDelay = 1000;
+    // PTY geometry ownership is per daemon connection. This socket is a new
+    // connection, so any ownership the previous one held is gone until the
+    // user engages again.
+    state.ptyOwnedSessionIds.clear();
+    state.pendingGeometryClaim = null;
     // Unlike the native TUI's background-aware themes, every WebUI xterm
     // paints an explicit background. Report it before subscribing so the
     // daemon answers and strips live OSC background probes exactly once.
@@ -9123,11 +9141,20 @@ function webPtyRecentlyEngaged() {
 function refitTerminal(options = {}) {
   if (!state.term || !state.fitAddon) return;
   if (state.mode !== "terminal") return;
-  const claim = !!options.claim;
-  const immediate = !!options.immediate;
+  let claim = !!options.claim;
+  let immediate = !!options.immediate;
   // Set after a history replay rebuilt the grid from PTY deltas. See
   // `sendTerminalPtyResize` for why a same-size resize isn't enough.
-  const forceRedraw = !!options.forceRedraw;
+  let forceRedraw = !!options.forceRedraw;
+  // A claim parked on an unmeasurable grid resumes on the first refit that
+  // sees real dimensions — the host ResizeObserver fires once layout lands.
+  const parked = state.pendingGeometryClaim;
+  if (!claim && parked && parked.sessionId === state.currentId && terminalGridMeasurable()) {
+    state.pendingGeometryClaim = null;
+    claim = true;
+    immediate = true;
+    forceRedraw = forceRedraw || parked.forceRedraw;
+  }
   if (claim) noteWebPtyEngagement();
   if (claim && immediate && state.ptyResizeTimer) {
     // A deliberate click/keystroke supersedes any older debounced viewport
@@ -9137,17 +9164,35 @@ function refitTerminal(options = {}) {
     state.ptyResizeTimer = null;
     state.pendingPtyResize = null;
   }
-  if (!claim && !webPtyRecentlyEngaged()) {
+  if (claim && !terminalGridMeasurable()) {
+    // The host has no real dimensions yet (hidden while hydrating, pane
+    // mid-layout). Fitting now would measure a garbage grid, and claiming
+    // with it would SIGWINCH the real child to nonsense under every other
+    // client. Park the claim; the resize observer resumes it above once the
+    // host lays out.
+    state.pendingGeometryClaim = { sessionId: state.currentId, forceRedraw };
+    return;
+  }
+  if (
+    !claim &&
+    !webPtyRecentlyEngaged() &&
+    !state.ptyOwnedSessionIds.has(state.currentId)
+  ) {
     // Passive browser layout churn (background tab, phone keyboard, viewport
     // settle) must not steal the single OS PTY geometry from an active TUI.
     // Decide this BEFORE fitting: fitting first would reflow the buffer to our
     // viewport — a geometry the child does not have and will never paint for —
     // and we would then have to reflow a second time to undo it. Mirror the
-    // owning client's grid instead. Once the web terminal is clicked or typed
-    // into, recent engagement takes us down the claim path below, so row-only
-    // changes reach the child and full-screen apps like codex stay aligned.
+    // owning client's grid instead, but still report our measured viewport so
+    // the daemon can apply it the moment this client's next keystroke claims.
+    // Once the web terminal is clicked or typed into — or while this
+    // connection already owns the geometry — the fit path below runs instead,
+    // so row-only changes reach the child and full-screen apps stay aligned:
+    // an owner that silently followed its own stale size would corrupt every
+    // relative repaint, since no other client will ever resize the PTY for it.
     state.resizeFollowBottomUntil = 0;
     applyPassiveTerminalGeometry();
+    reportPassiveViewport();
     return;
   }
   const wasAtBottom = terminalIsAtBottom();
@@ -9189,12 +9234,46 @@ function refitTerminal(options = {}) {
   }
 }
 
-function resizeTermTo(cols, rows) {
-  if (!state.term || !cols || !rows) return;
-  if (state.term.cols === cols && state.term.rows === rows) return;
-  const wasAtBottom = terminalIsAtBottom();
-  state.term.resize(cols, rows);
-  restoreTerminalBottom(wasAtBottom);
+function resizeTermGridTo(term, cols, rows) {
+  if (!term || !cols || !rows) return;
+  if (term.cols === cols && term.rows === rows) return;
+  const active = term.buffer && term.buffer.active;
+  const wasAtBottom = !!active && active.viewportY >= active.baseY;
+  term.resize(cols, rows);
+  if (wasAtBottom) restoreTerminalBottomFor(term);
+}
+
+// A grid is only worth measuring, reporting, or claiming with when its host
+// actually has layout. During hydration the host is hidden and addon-fit
+// falls back to a tiny nonsense grid; claiming with that would resize the
+// real child under every other client.
+function terminalGridMeasurable() {
+  const el = state.term && state.term.element;
+  if (!el) return false;
+  const host = el.closest(".terminal-host");
+  if (host && host.hidden) return false;
+  return el.offsetWidth > 0 && el.offsetHeight > 0;
+}
+
+// A passive viewer still tells the daemon what it measured (claim: false).
+// The daemon remembers the viewport per connection without resizing anything
+// for non-owners, so this client's next keystroke can claim at the right size
+// immediately (spec 0153). If this connection still owns the geometry, the
+// daemon applies the report and echoes a personalized resize back — which is
+// exactly what keeps an owner's grid and the child agreeing across layout
+// changes instead of silently drifting apart (spec 0121).
+function reportPassiveViewport() {
+  if (!state.fitAddon || !state.currentId || !terminalGridMeasurable()) return;
+  let proposed = null;
+  try { proposed = state.fitAddon.proposeDimensions(); } catch (_) {}
+  if (!proposed || !proposed.cols || !proposed.rows) return;
+  if (
+    proposed.cols === state.lastReportedSize.cols &&
+    proposed.rows === state.lastReportedSize.rows
+  ) {
+    return;
+  }
+  scheduleTerminalPtyResize(proposed.cols, proposed.rows, false, { claim: false });
 }
 
 // Passive geometry handling: when this web terminal does NOT own the PTY, it
@@ -9207,26 +9286,30 @@ function resizeTermTo(cols, rows) {
 // show are the one case we clamp, because clipping the newest output at the
 // bottom is worse than the residual mismatch. Taking over is not handled here:
 // the claim path in `refitTerminal` snaps back to our own fit and propagates it.
-function applyPassiveTerminalGeometry() {
-  if (!state.term || !state.fitAddon || state.mode !== "terminal") return;
-  const host = state.term.element && state.term.element.closest(".terminal-host");
-  if (!host) return;
+function followPtyGeometry(sessionId, term, fitAddon, host) {
   let proposed = null;
-  try { proposed = state.fitAddon.proposeDimensions(); } catch (_) {}
-  const fitCols = (proposed && proposed.cols) || state.term.cols;
-  const fitRows = (proposed && proposed.rows) || state.term.rows;
-  const sz = state.currentId ? state.ptySizeById.get(state.currentId) : null;
+  try { proposed = fitAddon.proposeDimensions(); } catch (_) {}
+  const fitCols = (proposed && proposed.cols) || term.cols;
+  const fitRows = (proposed && proposed.rows) || term.rows;
+  const sz = sessionId ? state.ptySizeById.get(sessionId) : null;
   const ptyCols = sz && sz.cols;
   const ptyRows = sz && sz.rows;
   if (!ptyCols || !ptyRows) {
     // The child's grid is unknown, so our own fit is the only information we
     // have. Render at it rather than freezing at a stale size.
     host.classList.remove("pty-wide");
-    resizeTermTo(fitCols, fitRows);
+    resizeTermGridTo(term, fitCols, fitRows);
     return;
   }
   host.classList.toggle("pty-wide", ptyCols > fitCols);
-  resizeTermTo(ptyCols, Math.min(ptyRows, fitRows));
+  resizeTermGridTo(term, ptyCols, Math.min(ptyRows, fitRows));
+}
+
+function applyPassiveTerminalGeometry() {
+  if (!state.term || !state.fitAddon || state.mode !== "terminal") return;
+  const host = state.term.element && state.term.element.closest(".terminal-host");
+  if (!host) return;
+  followPtyGeometry(state.currentId, state.term, state.fitAddon, host);
 }
 
 function scheduleTerminalPtyResize(cols, rows, wasAtBottom, options = {}) {
@@ -9269,6 +9352,10 @@ function sendTerminalPtyResize(
 ) {
   state.lastReportedSize = { cols, rows };
   if (!sessionId || sessionId !== state.currentId) return;
+  // A claiming resize makes this connection the owner the moment the daemon
+  // processes it. Track that optimistically; the personalized `owner: true`
+  // echo confirms it, and any foreign resize event revokes it.
+  if (claim) state.ptyOwnedSessionIds.add(sessionId);
   if (wasAtBottom) state.resizeFollowBottomUntil = performance.now() + 1500;
   const send = (c, r) =>
     rpc("session.pty_resize", { session_id: sessionId, cols: c, rows: r, claim })
@@ -10305,13 +10392,22 @@ function releaseMirrors() {
 
 function refitMirrors() {
   for (const id of state.mirroredSessionIds) {
-    const handle = state.terminalById.get(id);
-    if (!handle || !handle.fitAddon) continue;
-    try {
-      handle.fitAddon.fit();
-    } catch (_) {
-      /* a pane mid-layout can measure zero; the next refit catches it */
-    }
+    followMirrorPtyGeometry(id);
+  }
+}
+
+// A mirrored pane is a passive viewer by definition — clicking it focuses it
+// before any engagement can claim — so it must render the owner's grid the
+// same way the focused passive viewer does. Fitting a mirror to its own pane
+// silently disagrees with the child about wrap and scroll lines, which
+// corrupts every cursor-relative repaint the mirror replays (spec 0121).
+function followMirrorPtyGeometry(id) {
+  const handle = state.terminalById.get(id);
+  if (!handle || !handle.term || !handle.fitAddon || !handle.host) return;
+  try {
+    followPtyGeometry(id, handle.term, handle.fitAddon, handle.host);
+  } catch (_) {
+    /* a pane mid-layout can measure zero; the next refit catches it */
   }
 }
 
@@ -10925,11 +11021,20 @@ function handleNotification(method, params) {
       // still live. End that grace period immediately and adopt the owner's
       // grid before xterm can encode a child-requested hover report against
       // stale web dimensions. Own echoes (including the hydration bump) stay
-      // local and do not cause a redundant reflow.
+      // local while engaged and do not cause a redundant reflow; outside the
+      // engagement window an own echo is adopted too — it is how a passive
+      // viewport report the daemon applied (because this connection still
+      // owns the geometry) reaches the local grid.
       const ownGeometry = event.owner === true;
+      if (ownGeometry) state.ptyOwnedSessionIds.add(session_id);
+      else state.ptyOwnedSessionIds.delete(session_id);
       if (!ownGeometry) state.webPtyEngagedUntil = 0;
-      if (session_id === state.currentId && !ownGeometry) {
-        applyPassiveTerminalGeometry();
+      if (session_id === state.currentId) {
+        if (!ownGeometry || !webPtyRecentlyEngaged()) {
+          applyPassiveTerminalGeometry();
+        }
+      } else if (state.mirroredSessionIds.has(session_id)) {
+        followMirrorPtyGeometry(session_id);
       }
       return;
     }

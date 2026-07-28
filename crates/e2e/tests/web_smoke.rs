@@ -1653,6 +1653,331 @@ async fn web_client_loads_and_websocket_connects() {
         "Claude-style mouse hover must be forwarded as passive input after the handoff"
     );
 
+    // Single-client regression: a browser that OWNS the PTY geometry (its
+    // click/typing claimed it minutes ago) has its layout change passively —
+    // composer growth, a widget panel, a window resize — after the engagement
+    // latch expired. It must not silently follow its own stale size: as owner
+    // it reports the new fit (claim: false), the daemon applies it, and the
+    // grid tracks the fit. A non-owner in the same situation follows the
+    // owner's grid but still reports its measured viewport so its next
+    // keystroke can claim at the right size immediately.
+    let owner_passive_resync: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const saved = {
+                currentId: state.currentId,
+                mode: state.mode,
+                term: state.term,
+                fitAddon: state.fitAddon,
+                webPtyEngagedUntil: state.webPtyEngagedUntil,
+                ptySizeById: state.ptySizeById,
+                lastReportedSize: state.lastReportedSize,
+                rpc,
+              };
+              const calls = [];
+              const host = document.createElement("div");
+              host.className = "terminal-host";
+              host.style.cssText = "position:fixed;left:0;top:0;width:960px;height:600px";
+              document.body.appendChild(host);
+              const term = new window.Terminal({ cols: 100, rows: 40 });
+              let fitDims = { cols: 100, rows: 40 };
+              try {
+                state.currentId = "s-owner-passive";
+                state.mode = "terminal";
+                state.term = term;
+                state.fitAddon = {
+                  proposeDimensions: () => ({ ...fitDims }),
+                  fit: () => term.resize(fitDims.cols, fitDims.rows),
+                };
+                state.ptySizeById = new Map();
+                state.lastReportedSize = { cols: 100, rows: 40 };
+                state.webPtyEngagedUntil = 0;
+                state.ptyOwnedSessionIds.delete("s-owner-passive");
+                rpc = (method, params) => {
+                  calls.push({ method, params });
+                  return Promise.resolve(null);
+                };
+                term.open(host);
+
+                // The daemon confirmed an earlier claim: we own this geometry.
+                handleNotification("session/event", {
+                  session_id: "s-owner-passive",
+                  at: 0,
+                  event: { type: "pty_resize", cols: 100, rows: 40, owner: true },
+                });
+                const ownedAfterEcho = state.ptyOwnedSessionIds.has("s-owner-passive");
+
+                // Composer/widget layout steals rows long after engagement.
+                fitDims = { cols: 100, rows: 33 };
+                refitTerminal();
+                await new Promise((resolve) => setTimeout(resolve, 300));
+                const ownerReport = calls
+                  .filter((c) => c.method === "session.pty_resize")
+                  .map((c) => ({
+                    cols: c.params.cols,
+                    rows: c.params.rows,
+                    claim: c.params.claim,
+                  }));
+                const ownerGrid = { cols: term.cols, rows: term.rows };
+
+                // Another client then claims a different grid: we lose
+                // ownership and follow, but keep reporting our viewport.
+                calls.length = 0;
+                handleNotification("session/event", {
+                  session_id: "s-owner-passive",
+                  at: 0,
+                  event: { type: "pty_resize", cols: 120, rows: 50, owner: false },
+                });
+                const followGrid = { cols: term.cols, rows: term.rows };
+                const ownedAfterForeign = state.ptyOwnedSessionIds.has("s-owner-passive");
+                fitDims = { cols: 90, rows: 28 };
+                refitTerminal();
+                await new Promise((resolve) => setTimeout(resolve, 300));
+                const viewerReport = calls
+                  .filter((c) => c.method === "session.pty_resize")
+                  .map((c) => ({
+                    cols: c.params.cols,
+                    rows: c.params.rows,
+                    claim: c.params.claim,
+                  }));
+                const viewerGrid = { cols: term.cols, rows: term.rows };
+                return {
+                  ownedAfterEcho,
+                  ownerReport,
+                  ownerGrid,
+                  followGrid,
+                  ownedAfterForeign,
+                  viewerReport,
+                  viewerGrid,
+                };
+              } finally {
+                term.dispose();
+                host.remove();
+                state.ptyOwnedSessionIds.delete("s-owner-passive");
+                state.currentId = saved.currentId;
+                state.mode = saved.mode;
+                state.term = saved.term;
+                state.fitAddon = saved.fitAddon;
+                state.webPtyEngagedUntil = saved.webPtyEngagedUntil;
+                state.ptySizeById = saved.ptySizeById;
+                state.lastReportedSize = saved.lastReportedSize;
+                rpc = saved.rpc;
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate owner passive resync")
+        .into_value::<serde_json::Value>()
+        .expect("owner passive resync result");
+    assert_eq!(
+        owner_passive_resync["ownedAfterEcho"], true,
+        "a personalized owner echo must mark this connection as geometry owner"
+    );
+    assert_eq!(
+        owner_passive_resync["ownerReport"],
+        serde_json::json!([{ "cols": 100, "rows": 33, "claim": false }]),
+        "an owner's passive layout change must be reported so the child is \
+         resized instead of silently drifting: {owner_passive_resync:?}"
+    );
+    assert_eq!(
+        owner_passive_resync["ownerGrid"],
+        serde_json::json!({ "cols": 100, "rows": 33 }),
+        "the owner renders at its own fit after a passive layout change"
+    );
+    assert_eq!(
+        owner_passive_resync["followGrid"],
+        serde_json::json!({ "cols": 120, "rows": 33 }),
+        "a foreign claim immediately replaces the local grid (rows clamped \
+         to the local fit)"
+    );
+    assert_eq!(
+        owner_passive_resync["ownedAfterForeign"], false,
+        "a foreign resize revokes local ownership"
+    );
+    assert_eq!(
+        owner_passive_resync["viewerReport"],
+        serde_json::json!([{ "cols": 90, "rows": 28, "claim": false }]),
+        "a passive viewer still reports its measured viewport for its next claim"
+    );
+    assert_eq!(
+        owner_passive_resync["viewerGrid"],
+        serde_json::json!({ "cols": 120, "rows": 28 }),
+        "a passive viewer renders the owner's columns and clamps rows to its fit"
+    );
+
+    // Mirrored panes are passive viewers too: they must render the owner's
+    // grid, not their own pane fit. A mirror fitted to its pane disagrees
+    // with the child about wrap and scroll lines, so every cursor-relative
+    // repaint it replays lands on the wrong rows.
+    let mirror_follow: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const saved = {
+                currentId: state.currentId,
+                webPtyEngagedUntil: state.webPtyEngagedUntil,
+              };
+              const host = document.createElement("div");
+              host.className = "terminal-host";
+              host.style.cssText = "position:fixed;left:0;top:0;width:640px;height:360px";
+              document.body.appendChild(host);
+              const term = new window.Terminal({ cols: 90, rows: 30 });
+              try {
+                state.currentId = "s-somewhere-else";
+                term.open(host);
+                const handle = {
+                  id: "s-mirror-follow",
+                  host,
+                  term,
+                  fitAddon: { proposeDimensions: () => ({ cols: 80, rows: 24 }) },
+                };
+                state.terminalById.set("s-mirror-follow", handle);
+                state.mirroredSessionIds.add("s-mirror-follow");
+
+                handleNotification("session/event", {
+                  session_id: "s-mirror-follow",
+                  at: 0,
+                  event: { type: "pty_resize", cols: 120, rows: 20, owner: false },
+                });
+                const afterEvent = {
+                  cols: term.cols,
+                  rows: term.rows,
+                  wide: host.classList.contains("pty-wide"),
+                };
+                // A later mirror refit must keep the followed grid rather
+                // than re-fitting the mirror to its own pane.
+                refitMirrors();
+                const afterRefit = { cols: term.cols, rows: term.rows };
+                return { afterEvent, afterRefit };
+              } finally {
+                state.mirroredSessionIds.delete("s-mirror-follow");
+                state.terminalById.delete("s-mirror-follow");
+                state.ptySizeById.delete("s-mirror-follow");
+                term.dispose();
+                host.remove();
+                state.currentId = saved.currentId;
+                state.webPtyEngagedUntil = saved.webPtyEngagedUntil;
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate mirror follow")
+        .into_value::<serde_json::Value>()
+        .expect("mirror follow result");
+    assert_eq!(
+        mirror_follow["afterEvent"],
+        serde_json::json!({ "cols": 120, "rows": 20, "wide": true }),
+        "a mirrored pane adopts the owner's grid from the resize event: \
+         {mirror_follow:?}"
+    );
+    assert_eq!(
+        mirror_follow["afterRefit"],
+        serde_json::json!({ "cols": 120, "rows": 20 }),
+        "refitting mirrors preserves the followed grid instead of pane-fitting"
+    );
+
+    // A claim attempted while the terminal host has no layout (hidden during
+    // hydration) must not measure a garbage fit and resize the real PTY with
+    // it. The claim parks and resumes on the first refit that sees real
+    // dimensions.
+    let parked_claim: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const saved = {
+                currentId: state.currentId,
+                mode: state.mode,
+                term: state.term,
+                fitAddon: state.fitAddon,
+                webPtyEngagedUntil: state.webPtyEngagedUntil,
+                lastReportedSize: state.lastReportedSize,
+                pendingGeometryClaim: state.pendingGeometryClaim,
+                rpc,
+              };
+              const calls = [];
+              const host = document.createElement("div");
+              host.className = "terminal-host";
+              host.style.cssText = "position:fixed;left:0;top:0;width:960px;height:600px";
+              host.hidden = true;
+              document.body.appendChild(host);
+              const term = new window.Terminal({ cols: 80, rows: 24 });
+              try {
+                state.currentId = "s-parked-claim";
+                state.mode = "terminal";
+                state.term = term;
+                state.fitAddon = {
+                  proposeDimensions: () => ({ cols: 96, rows: 41 }),
+                  fit: () => term.resize(96, 41),
+                };
+                state.lastReportedSize = { cols: 0, rows: 0 };
+                state.pendingGeometryClaim = null;
+                rpc = (method, params) => {
+                  calls.push({ method, params });
+                  return Promise.resolve(null);
+                };
+                term.open(host);
+
+                refitTerminal({ claim: true, immediate: true });
+                const whileHidden = {
+                  resizeCalls: calls.filter((c) => c.method === "session.pty_resize").length,
+                  parked: !!state.pendingGeometryClaim,
+                };
+
+                host.hidden = false;
+                // The host ResizeObserver fires this refit in production.
+                refitTerminal();
+                const afterLayout = {
+                  resizes: calls
+                    .filter((c) => c.method === "session.pty_resize")
+                    .map((c) => ({
+                      cols: c.params.cols,
+                      rows: c.params.rows,
+                      claim: c.params.claim,
+                    })),
+                  parked: !!state.pendingGeometryClaim,
+                  grid: { cols: term.cols, rows: term.rows },
+                };
+                return { whileHidden, afterLayout };
+              } finally {
+                term.dispose();
+                host.remove();
+                state.ptyOwnedSessionIds.delete("s-parked-claim");
+                state.ptySizeById.delete("s-parked-claim");
+                state.currentId = saved.currentId;
+                state.mode = saved.mode;
+                state.term = saved.term;
+                state.fitAddon = saved.fitAddon;
+                state.webPtyEngagedUntil = saved.webPtyEngagedUntil;
+                state.lastReportedSize = saved.lastReportedSize;
+                state.pendingGeometryClaim = saved.pendingGeometryClaim;
+                rpc = saved.rpc;
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate parked claim")
+        .into_value::<serde_json::Value>()
+        .expect("parked claim result");
+    assert_eq!(
+        parked_claim["whileHidden"],
+        serde_json::json!({ "resizeCalls": 0, "parked": true }),
+        "a hidden host must park the claim instead of resizing the PTY to a \
+         garbage fit: {parked_claim:?}"
+    );
+    assert_eq!(
+        parked_claim["afterLayout"],
+        serde_json::json!({
+            "resizes": [{ "cols": 96, "rows": 41, "claim": true }],
+            "parked": false,
+            "grid": { "cols": 96, "rows": 41 },
+        }),
+        "the parked claim resumes with real dimensions once the host lays out"
+    );
+
     // Mobile regression: selecting a session auto-hides the narrow session
     // list without changing the stored preference. Keyboard/viewport resizes
     // must preserve that current hidden state instead of re-reading the older
@@ -2332,6 +2657,9 @@ async fn web_client_loads_and_websocket_connects() {
                 cols: 100,
                 rows: 40,
                 buffer: { active: bottom },
+                // Claims verify the grid is measurable before resizing the
+                // real PTY; give the stub real-looking layout.
+                element: { offsetWidth: 800, offsetHeight: 480, closest: () => null },
                 scrollToBottom: () => {
                   calls.push('bottom');
                   bottom.viewportY = bottom.baseY;
@@ -2410,6 +2738,7 @@ async fn web_client_loads_and_websocket_connects() {
                 cols: 100,
                 rows: 25,
                 buffer: { active: activeRowOnly },
+                element: { offsetWidth: 800, offsetHeight: 480, closest: () => null },
                 scrollToBottom: () => {
                   calls.push('active-row-only-bottom');
                   activeRowOnly.viewportY = activeRowOnly.baseY;
@@ -2507,6 +2836,7 @@ async fn web_client_loads_and_websocket_connects() {
               if (state.ptyResizeTimer) clearTimeout(state.ptyResizeTimer);
               state.ptyResizeTimer = oldTimer;
               state.pendingPtyResize = oldPending;
+              state.ptyOwnedSessionIds.delete('s-fit');
               rpc = oldRpc;
               return { calls, bottom, scrolledUp, composerBottom, composerScrolledUp, composerSuppressed, composerDeferred };
             })()

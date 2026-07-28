@@ -56,6 +56,13 @@ claiming behavior for both resize and input messages.
 When an owning connection disconnects, the session remains ownerless until the
 next explicit engagement; the daemon does not guess among passive viewers.
 
+An ownership handoff is announced to every attached client even when the
+geometry does not change — for example when the new owner's remembered
+viewport matches the current size, or when it has none yet. Clients are
+entitled to track ownership from these announcements; a client that believes
+it owns the geometry renders and reports its own fit, so a handoff it never
+hears about would leave it authoritative over a grid it no longer controls.
+
 ## Non-Goals
 
 This decision does not provide multiple simultaneous PTY grids, reflow a

@@ -27,6 +27,26 @@ option. When following is impossible because the child's screen is larger than
 the client can display, the client clamps and accepts a visible mismatch rather
 than clipping the newest output.
 
+Two rules qualify these options:
+
+- **A follower still reports.** Choosing to follow does not exempt a client
+  from telling the daemon its measured viewport as a passive, non-claiming
+  report. The daemon remembers it per connection, so this client's next
+  explicit engagement applies the correct size immediately — and if the
+  connection in fact still owns the geometry (nobody else claimed since its
+  last engagement), the passive report reaches the child and the follower is
+  told, through the ordinary resize event, to render its own fit. An owner
+  has no one to follow; silently clamping to its own stale size corrupts
+  rendering with only one client attached.
+- **A claim needs a real measurement.** A client whose local grid cannot be
+  measured yet (a host still hidden while history hydrates, a pane
+  mid-layout) must not claim geometry with the garbage fit it would read.
+  It defers the claim until the grid has real dimensions, then resumes it.
+
+Every passive rendering surface of a session follows the same rule as the
+focused view. A mirrored or split pane showing a session it does not own
+renders the owner's grid, not its own pane fit.
+
 ## Reason
 
 Terminal applications position output relative to a grid they believe they
