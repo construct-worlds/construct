@@ -8906,15 +8906,20 @@ function installTerminalInputOwnershipTracking(host, handle, term) {
       handle.xtermUserInputPending = true;
     });
   }
-  host.addEventListener("mousemove", (event) => {
+  const markPointerMotion = (event) => {
     // A move with a held button is a drag and therefore explicit engagement.
     // Plain motion is hover, even when xterm forwards it to a child that
-    // enabled DECSET any-event mouse tracking.
+    // enabled DECSET any-event mouse tracking. Real browsers dispatch a
+    // PointerEvent before the compatibility MouseEvent; xterm consumes the
+    // pointermove directly, so marking only mousemove is too late and lets
+    // the earlier mouse report claim geometry.
     handle.forwardingPointerHover = event.buttons === 0;
     queueMicrotask(() => {
       handle.forwardingPointerHover = false;
     });
-  }, { capture: true, passive: true });
+  };
+  host.addEventListener("pointermove", markPointerMotion, { capture: true, passive: true });
+  host.addEventListener("mousemove", markPointerMotion, { capture: true, passive: true });
 }
 
 // Forward xterm input as base64-encoded PTY bytes. xterm's onData yields a JS
@@ -8929,11 +8934,27 @@ function forwardTerminalData(handle, id, value) {
     : true;
   handle.xtermUserInputPending = false;
   if (handle.replayingPty || state.mode !== "terminal" || state.currentId !== id || currentInlineWidget(id)) return;
-  const claim = xtermUserInput && !handle.forwardingPointerHover;
+  // xterm may emit a mouse report asynchronously after the DOM pointer event
+  // and its microtasks have finished, so the event-scoped hover marker alone
+  // cannot reliably classify real desktop pointer entry. SGR mouse reports
+  // carry the source semantics in-band: bit 32 means motion and low bits 3
+  // mean no button is held. That exact shape is plain hover. Motion with
+  // button 0/1/2 is a drag and still claims; clicks and wheel reports do too.
+  const pointerHover =
+    handle.forwardingPointerHover || isPlainSgrPointerHoverReport(value);
+  const claim = xtermUserInput && !pointerHover;
   if (claim) claimTerminalGeometryNow();
   const data = encodeBase64Utf8(value);
   rpc("session.pty_input", { session_id: id, data, claim })
     .catch((e) => console.error("pty_input failed:", e));
+}
+
+function isPlainSgrPointerHoverReport(value) {
+  if (typeof value !== "string") return false;
+  const match = /^\x1b\[<(\d+);\d+;\d+M$/.exec(value);
+  if (!match) return false;
+  const code = Number(match[1]);
+  return (code & 32) !== 0 && (code & 3) === 3;
 }
 
 function activateTerminalHandle(handle) {
