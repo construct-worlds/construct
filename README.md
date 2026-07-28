@@ -208,6 +208,9 @@ For an optimized build, use `cargo build --workspace --release` and replace
   decisions, preferences, and pitfalls.
 - [Configuration](docs/configuration.md) — XDG paths, `CONSTRUCT_*` overrides, and
   TUI theme customization.
+- [Extending construct (plugins)](docs/plugins.md) — community adapters, verb
+  and template packs, IPC clients, and the `construct-plugin` publishing
+  convention.
 - [Remote control](docs/remote-control.md) — phone/browser access, QR setup,
   credentials, and local debug mode.
 
