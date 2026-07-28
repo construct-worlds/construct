@@ -218,18 +218,44 @@ impl SessionManager {
             .get_entry(id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", id))?;
-        let to_apply = {
+        let (to_apply, switched) = {
             let mut policy = entry
                 .pty_client_policy
                 .lock()
                 .expect("pty_client_policy mutex poisoned");
             policy.note(conn_id, kind, resize_to, claim)
         };
+        let mut resized = false;
         if let Some((cols, rows)) = to_apply {
             // The pty_resize dedup handles the case where the OS PTY is
             // already at this size.
-            self.pty_resize_from_connection(id, cols, rows, Some(conn_id))
+            resized = self
+                .pty_resize_from_connection(id, cols, rows, Some(conn_id))
                 .await?;
+        }
+        if switched && !resized {
+            // Ownership moved without the geometry changing (same size, or
+            // the new owner has no remembered viewport yet). Peers tracking
+            // ownership through personalized resize events still need to see
+            // the handoff — a viewer that missed it would keep treating its
+            // own remembered grid as authoritative and stop following.
+            let size = entry.pty.lock().await.size;
+            if let Some(size) = size {
+                let payload = construct_protocol::EventNotificationPayload {
+                    session_id: id.to_string(),
+                    at: chrono::Utc::now(),
+                    event: SessionEvent::PtyResize {
+                        cols: size.cols,
+                        rows: size.rows,
+                        owner: false,
+                    },
+                    seq: 0,
+                };
+                let _ = self.broadcast.send(super::BroadcastMsg::PtyResize {
+                    payload,
+                    owner_conn_id: conn_id,
+                });
+            }
         }
         Ok(())
     }
@@ -254,16 +280,20 @@ impl SessionManager {
     }
 
     pub async fn pty_resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        self.pty_resize_from_connection(id, cols, rows, None).await
+        self.pty_resize_from_connection(id, cols, rows, None)
+            .await
+            .map(|_| ())
     }
 
+    /// Returns whether the PTY size actually changed (and was therefore
+    /// broadcast); a same-size call dedups and returns `Ok(false)`.
     async fn pty_resize_from_connection(
         &self,
         id: &str,
         cols: u16,
         rows: u16,
         owner_conn_id: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let entry = self
             .get_entry(id)
             .await
@@ -281,7 +311,7 @@ impl SessionManager {
         {
             let mut pty = entry.pty.lock().await;
             if pty.size == Some(size) {
-                return Ok(());
+                return Ok(false);
             }
             pty.size = Some(size);
         }
@@ -323,7 +353,7 @@ impl SessionManager {
         adapter
             .request(ahp_method::SESSION_PTY_RESIZE, params)
             .await?;
-        Ok(())
+        Ok(true)
     }
 
     pub async fn pty_replay(&self, id: &str) -> Result<PtyReplayResult> {
