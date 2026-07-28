@@ -23,6 +23,12 @@ Pointer hover and motion are passive, including motion reports forwarded to a
 mouse-tracking child application. Clicks, drags, wheel actions, and keyboard
 input are explicit engagement and claim the geometry.
 
+Clients must classify forwarded terminal mouse reports by their protocol
+semantics, not solely by the lifetime of the originating UI event. A terminal
+emulator may emit its input callback asynchronously after the pointer event has
+finished. In SGR mouse mode, motion with the no-button code is hover; motion
+with a held button remains an explicit drag.
+
 Terminal-emulator protocol replies generated on behalf of the child are
 passive. They must not be treated as keyboard input merely because the
 terminal library exposes replies and user bytes through the same data stream.
@@ -53,8 +59,18 @@ Clients must distinguish explicit engagement from passive layout reports.
 Compatibility clients that omit the distinction retain the historical
 claiming behavior for both resize and input messages.
 
+UI-event markers may supplement terminal-protocol classification, but cannot
+be the only evidence that forwarded mouse input was passive.
+
 When an owning connection disconnects, the session remains ownerless until the
 next explicit engagement; the daemon does not guess among passive viewers.
+
+An ownership handoff is announced to every attached client even when the
+geometry does not change — for example when the new owner's remembered
+viewport matches the current size, or when it has none yet. Clients are
+entitled to track ownership from these announcements; a client that believes
+it owns the geometry renders and reports its own fit, so a handoff it never
+hears about would leave it authoritative over a grid it no longer controls.
 
 ## Non-Goals
 

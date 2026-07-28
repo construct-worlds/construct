@@ -439,14 +439,17 @@ pub struct PtyClientViewport {
 
 impl PtyClientPolicy {
     /// Record input or a viewport report and return the size that should be
-    /// applied to the real PTY, if any.
+    /// applied to the real PTY, if any, plus whether ownership moved to a
+    /// different connection. A switch matters even when no resize follows:
+    /// clients track ownership through personalized resize events, so the
+    /// caller must still announce a size-preserving handoff.
     fn note(
         &mut self,
         conn_id: u64,
         kind: crate::server::ClientKind,
         resize_to: Option<(u16, u16)>,
         claim: bool,
-    ) -> Option<(u16, u16)> {
+    ) -> (Option<(u16, u16)>, bool) {
         let viewport = self.clients.entry(conn_id).or_insert(PtyClientViewport {
             kind,
             size: None,
@@ -461,19 +464,21 @@ impl PtyClientPolicy {
             self.owner = Some(conn_id);
             // A claiming resize always applies its supplied dimensions.
             // Input only needs a resize when ownership actually switches.
-            return if resize_to.is_some() || switched {
+            let resize = if resize_to.is_some() || switched {
                 viewport.size
             } else {
                 None
             };
+            return (resize, switched);
         }
 
         // Passive reports only resize when they come from the current owner.
         // Reports from every other connection are remembered for its next
         // click/keystroke, but cannot steal geometry in the background.
-        (self.owner == Some(conn_id))
+        let resize = (self.owner == Some(conn_id))
             .then_some(resize_to)
-            .flatten()
+            .flatten();
+        (resize, false)
     }
 }
 
@@ -6551,29 +6556,39 @@ mod tests {
         // First TUI deliberately focuses the session.
         assert_eq!(
             policy.note(1, ClientKind::Tui, Some((100, 40)), true),
-            Some((100, 40))
+            (Some((100, 40)), true)
         );
         assert_eq!(policy.owner, Some(1));
 
         // A browser can keep its viewport current without stealing the PTY.
         assert_eq!(
             policy.note(2, ClientKind::Remote, Some((80, 25)), false),
-            None
+            (None, false)
         );
         assert_eq!(policy.owner, Some(1));
 
         // Browser input claims its remembered viewport; later TUI input
-        // restores the first TUI's own remembered viewport.
+        // restores the first TUI's own remembered viewport. Both are
+        // ownership switches the caller must announce.
         assert_eq!(
             policy.note(2, ClientKind::Remote, None, true),
-            Some((80, 25))
+            (Some((80, 25)), true)
         );
-        assert_eq!(policy.note(1, ClientKind::Tui, None, true), Some((100, 40)));
+        assert_eq!(
+            policy.note(1, ClientKind::Tui, None, true),
+            (Some((100, 40)), true)
+        );
+
+        // Re-claiming while already owner is not a switch.
+        assert_eq!(
+            policy.note(1, ClientKind::Tui, None, true),
+            (None, false)
+        );
 
         // Delayed browser layout churn after TUI input stays passive.
         assert_eq!(
             policy.note(2, ClientKind::Remote, Some((90, 30)), false),
-            None
+            (None, false)
         );
         assert_eq!(policy.owner, Some(1));
 
@@ -6581,11 +6596,11 @@ mod tests {
         // has an independent viewport and must explicitly engage to win.
         assert_eq!(
             policy.note(3, ClientKind::Tui, Some((120, 50)), false),
-            None
+            (None, false)
         );
         assert_eq!(
             policy.note(3, ClientKind::Tui, None, true),
-            Some((120, 50))
+            (Some((120, 50)), true)
         );
         assert_eq!(policy.owner, Some(3));
     }
@@ -6597,17 +6612,18 @@ mod tests {
         let mut policy = PtyClientPolicy::default();
         assert_eq!(
             policy.note(7, ClientKind::Remote, None, true),
-            None,
-            "input may claim before the first measured viewport"
+            (None, true),
+            "input may claim before the first measured viewport; the \
+             size-preserving handoff must still be reported"
         );
         assert_eq!(
             policy.note(7, ClientKind::Remote, Some((72, 20)), false),
-            Some((72, 20)),
+            (Some((72, 20)), false),
             "the owner's later viewport report reaches the OS PTY"
         );
         assert_eq!(
             policy.note(8, ClientKind::Remote, Some((90, 35)), false),
-            None,
+            (None, false),
             "another browser connection cannot steal through ResizeObserver"
         );
     }

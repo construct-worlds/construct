@@ -773,7 +773,10 @@
   /* Focus is per-client, never shared: it decides where THIS user's
      keystrokes go. Brightness-only, matching the TUI's pane focus
      treatment (spec 0084). */
-  .pane.is-focused { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+  .pane.is-focused {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-radius: 0;
+  }
   .pane-head {
     position: relative;
     z-index: 41;
@@ -1252,8 +1255,20 @@
     right: calc(16px + env(safe-area-inset-right));
     bottom: calc(86px + env(safe-area-inset-bottom));
     z-index: 32;
+    visibility: hidden;
+    pointer-events: none;
   }
-  .suggest-deck[hidden] { display: none !important; }
+  /*
+   * Keep the deck mounted while its session changes state. Toggling
+   * `display:none` through the hidden attribute can make browsers discard
+   * the active terminal/composer caret even though it lives outside the
+   * deck. Visibility does not affect this absolutely-positioned overlay's
+   * layout, so showing/hiding it can stay focus-neutral.
+   */
+  .suggest-deck.is-available {
+    visibility: visible;
+    pointer-events: auto;
+  }
   /* Circular orb (FAB). The fan and stack anchor to its center. */
   .suggest-orb {
     display: flex;
@@ -3158,7 +3173,7 @@
         sends the text through `session.input`. Never modal: it hides
         while the session runs and closes on any outside tap.
       -->
-      <div id="suggestDeck" class="suggest-deck" hidden>
+      <div id="suggestDeck" class="suggest-deck" aria-hidden="true" inert>
         <div id="suggestFan" class="suggest-fan" hidden></div>
         <div id="suggestStack" class="suggest-stack" hidden>
           <div class="suggest-stack-head">
@@ -3744,6 +3759,23 @@ const state = {
   // but recent web interaction should keep xterm and the real PTY in
   // sync, including row-only changes.
   webPtyEngagedUntil: 0,
+  // Session ids whose PTY geometry this connection currently owns, learned
+  // from personalized `pty_resize` events (`owner: true` means the resize was
+  // ours) and set optimistically when we send a claiming resize. While owner,
+  // even passive local layout changes must reach the child: rendering a grid
+  // the child was never told about corrupts every relative repaint it sends
+  // (spec 0121), and nobody else is going to resize the PTY for us. Cleared
+  // on (re)connect — a fresh connection owns nothing until it engages.
+  ptyOwnedSessionIds: new Set(),
+  // A geometry claim attempted while the local grid was unmeasurable (host
+  // hidden during hydration, pane mid-layout). Holds { sessionId, forceRedraw }
+  // until a refit sees real dimensions and resumes the claim. Claiming with a
+  // garbage fit would resize the real PTY under every other client.
+  pendingGeometryClaim: null,
+  // The in-flight post-replay redraw bump: `cols+1` is sent purely to force a
+  // SIGWINCH repaint before the real size lands. Its personalized echo must
+  // not be adopted as geometry — the follow-up echo at the real size is.
+  pendingHydrationBump: null,
   ptyResizeTimer: null,
   pendingPtyResize: null,
   // Some PTY apps repaint after SIGWINCH by emitting a large redraw
@@ -4184,6 +4216,11 @@ function connect() {
   ws.addEventListener("open", () => {
     setConnState("open", "connected");
     state.reconnectDelay = 1000;
+    // PTY geometry ownership is per daemon connection. This socket is a new
+    // connection, so any ownership the previous one held is gone until the
+    // user engages again.
+    state.ptyOwnedSessionIds.clear();
+    state.pendingGeometryClaim = null;
     // Unlike the native TUI's background-aware themes, every WebUI xterm
     // paints an explicit background. Report it before subscribing so the
     // daemon answers and strips live OSC background probes exactly once.
@@ -4202,11 +4239,16 @@ function connect() {
     state.widgetProgramById.clear();
     // Fetch the shared layout on every (re)connect, not just the first: a
     // client that was disconnected missed the broadcasts, so its tree is
-    // stale by definition.
+    // stale by definition. Read it before the session-list selection, but do
+    // not apply/render it until the list has populated session metadata.
+    // Otherwise the layout can select a session before the client knows which
+    // surface that session uses, leaving the focused split blank after refresh.
     rpc("layout.get", null)
-      .then((doc) => applySharedLayout(doc))
-      .catch(() => {/* older daemon with no shared layout — stay single-pane */});
-    refreshSessions();
+      .catch(() => null) // older daemon with no shared layout — stay single-pane
+      .then(async (doc) => {
+        await refreshSessions(doc && doc.tree);
+        if (doc) applySharedLayout(doc);
+      });
     refreshCurrentSessionAfterReconnect();
   });
 
@@ -4298,7 +4340,7 @@ function rpc(method, params) {
 
 // --- Sessions list -------------------------------------------------------
 
-async function refreshSessions() {
+async function refreshSessions(startingLayoutTree = null) {
   try {
     // Fetch sessions + projects in parallel. Projects arrive as
     // `project.list -> Vec<ProjectSummary>`; sessions still reference
@@ -4328,9 +4370,27 @@ async function refreshSessions() {
       const requested = state.urlRequestedSessionId
         ? ordered.find((s) => s.id === state.urlRequestedSessionId)
         : null;
+      // On startup the staged layout supplies the local starting session, but
+      // selection waits until the metadata that decides terminal vs chat is
+      // available. Narrow clients use the first populated layout leaf as
+      // their read-only starting hint.
+      const layoutSessionId = state.layout.tree
+        ? focusedPaneSessionId() || layoutStartingSessionId()
+        : layoutStartingSessionId(startingLayoutTree);
+      const fromLayout = layoutSessionId
+        ? ordered.find((s) => s.id === layoutSessionId)
+        : null;
       const firstUser = ordered.find((s) => s.kind !== "orchestrator");
-      const pick = requested || firstUser || ordered[0];
+      const pick = requested || fromLayout || firstUser || ordered[0];
       if (pick) selectSession(pick.id, { replaceUrl: true });
+    } else {
+      // A layout notification can set currentId while session.list is still
+      // in flight. If that selection stopped before its real surface was
+      // initialized, finish it now that its metadata is present.
+      const current = state.sessions.find((s) => s.id === state.currentId);
+      if (current && !sessionSurfaceIsInitialized(current)) {
+        selectSession(current.id, { replaceUrl: true, fromPane: true });
+      }
     }
   } catch (e) {
     sessionListEl.innerHTML = `<div class="empty">${escape(e.message)}</div>`;
@@ -5534,6 +5594,15 @@ async function switchCurrentViewMode(mode) {
   reportView();
 }
 
+function sessionSurfaceIsInitialized(session) {
+  if (!session || state.currentId !== session.id) return false;
+  const preferred = preferredViewModeForSession(session);
+  if (state.mode !== preferred) return false;
+  if (preferred === "terminal") return state.terminalById.has(session.id);
+  if (preferred === "program") return state.program.mountedId === session.id;
+  return state.transcriptPaneById.has(session.id);
+}
+
 /**
  * Point the UI at a session.
  *
@@ -5558,7 +5627,11 @@ async function selectSession(
   if (!fromPane) setFocusedPaneSession(id);
   if (state.currentId === id) {
     setLocationSessionId(id, { replace: replaceUrl });
-    return;
+    const current = state.sessions.find((s) => s.id === id);
+    // An early layout selection may know the ID but not yet have the session
+    // metadata/surface. Once metadata arrives, fall through and complete the
+    // same selection rather than treating the half-selected ID as finished.
+    if (!current || sessionSurfaceIsInitialized(current)) return;
   }
   if (state.mode === "chat") rememberTranscriptViewport(state.currentId);
   const focusTerminalAfterSwitch = !keepFocus && shouldFocusTerminalAfterSessionSwitch();
@@ -8911,15 +8984,20 @@ function installTerminalInputOwnershipTracking(host, handle, term) {
       handle.xtermUserInputPending = true;
     });
   }
-  host.addEventListener("mousemove", (event) => {
+  const markPointerMotion = (event) => {
     // A move with a held button is a drag and therefore explicit engagement.
     // Plain motion is hover, even when xterm forwards it to a child that
-    // enabled DECSET any-event mouse tracking.
+    // enabled DECSET any-event mouse tracking. Real browsers dispatch a
+    // PointerEvent before the compatibility MouseEvent; xterm consumes the
+    // pointermove directly, so marking only mousemove is too late and lets
+    // the earlier mouse report claim geometry.
     handle.forwardingPointerHover = event.buttons === 0;
     queueMicrotask(() => {
       handle.forwardingPointerHover = false;
     });
-  }, { capture: true, passive: true });
+  };
+  host.addEventListener("pointermove", markPointerMotion, { capture: true, passive: true });
+  host.addEventListener("mousemove", markPointerMotion, { capture: true, passive: true });
 }
 
 // Forward xterm input as base64-encoded PTY bytes. xterm's onData yields a JS
@@ -8934,11 +9012,27 @@ function forwardTerminalData(handle, id, value) {
     : true;
   handle.xtermUserInputPending = false;
   if (handle.replayingPty || state.mode !== "terminal" || state.currentId !== id || currentInlineWidget(id)) return;
-  const claim = xtermUserInput && !handle.forwardingPointerHover;
+  // xterm may emit a mouse report asynchronously after the DOM pointer event
+  // and its microtasks have finished, so the event-scoped hover marker alone
+  // cannot reliably classify real desktop pointer entry. SGR mouse reports
+  // carry the source semantics in-band: bit 32 means motion and low bits 3
+  // mean no button is held. That exact shape is plain hover. Motion with
+  // button 0/1/2 is a drag and still claims; clicks and wheel reports do too.
+  const pointerHover =
+    handle.forwardingPointerHover || isPlainSgrPointerHoverReport(value);
+  const claim = xtermUserInput && !pointerHover;
   if (claim) claimTerminalGeometryNow();
   const data = encodeBase64Utf8(value);
   rpc("session.pty_input", { session_id: id, data, claim })
     .catch((e) => console.error("pty_input failed:", e));
+}
+
+function isPlainSgrPointerHoverReport(value) {
+  if (typeof value !== "string") return false;
+  const match = /^\x1b\[<(\d+);\d+;\d+M$/.exec(value);
+  if (!match) return false;
+  const code = Number(match[1]);
+  return (code & 32) !== 0 && (code & 3) === 3;
 }
 
 function activateTerminalHandle(handle) {
@@ -9150,11 +9244,20 @@ function webPtyRecentlyEngaged() {
 function refitTerminal(options = {}) {
   if (!state.term || !state.fitAddon) return;
   if (state.mode !== "terminal") return;
-  const claim = !!options.claim;
-  const immediate = !!options.immediate;
+  let claim = !!options.claim;
+  let immediate = !!options.immediate;
   // Set after a history replay rebuilt the grid from PTY deltas. See
   // `sendTerminalPtyResize` for why a same-size resize isn't enough.
-  const forceRedraw = !!options.forceRedraw;
+  let forceRedraw = !!options.forceRedraw;
+  // A claim parked on an unmeasurable grid resumes on the first refit that
+  // sees real dimensions — the host ResizeObserver fires once layout lands.
+  const parked = state.pendingGeometryClaim;
+  if (!claim && parked && parked.sessionId === state.currentId && terminalGridMeasurable()) {
+    state.pendingGeometryClaim = null;
+    claim = true;
+    immediate = true;
+    forceRedraw = forceRedraw || parked.forceRedraw;
+  }
   if (claim) noteWebPtyEngagement();
   if (claim && immediate && state.ptyResizeTimer) {
     // A deliberate click/keystroke supersedes any older debounced viewport
@@ -9164,25 +9267,59 @@ function refitTerminal(options = {}) {
     state.ptyResizeTimer = null;
     state.pendingPtyResize = null;
   }
-  if (!claim && !webPtyRecentlyEngaged()) {
+  if (claim && !terminalGridMeasurable()) {
+    // The host has no real dimensions yet (hidden while hydrating, pane
+    // mid-layout). Fitting now would measure a garbage grid, and claiming
+    // with it would SIGWINCH the real child to nonsense under every other
+    // client. Park the claim; the resize observer resumes it above once the
+    // host lays out.
+    state.pendingGeometryClaim = { sessionId: state.currentId, forceRedraw };
+    return;
+  }
+  if (
+    !claim &&
+    !webPtyRecentlyEngaged() &&
+    !state.ptyOwnedSessionIds.has(state.currentId)
+  ) {
     // Passive browser layout churn (background tab, phone keyboard, viewport
     // settle) must not steal the single OS PTY geometry from an active TUI.
     // Decide this BEFORE fitting: fitting first would reflow the buffer to our
     // viewport — a geometry the child does not have and will never paint for —
     // and we would then have to reflow a second time to undo it. Mirror the
-    // owning client's grid instead. Once the web terminal is clicked or typed
-    // into, recent engagement takes us down the claim path below, so row-only
-    // changes reach the child and full-screen apps like codex stay aligned.
+    // owning client's grid instead, but still report our measured viewport so
+    // the daemon can apply it the moment this client's next keystroke claims.
+    // Once the web terminal is clicked or typed into — or while this
+    // connection already owns the geometry — the fit path below runs instead,
+    // so row-only changes reach the child and full-screen apps stay aligned:
+    // an owner that silently followed its own stale size would corrupt every
+    // relative repaint, since no other client will ever resize the PTY for it.
     state.resizeFollowBottomUntil = 0;
     applyPassiveTerminalGeometry();
+    reportPassiveViewport();
     return;
   }
-  const wasAtBottom = terminalIsAtBottom();
-  if (!fitTerminalPreservingScroll(wasAtBottom)) return;
-  const cols = state.term.cols;
-  const rows = state.term.rows;
+  // Active/claim/owner path. The grid must never lead the child (spec 0121):
+  // measure the fit WITHOUT applying it, tell the daemon, and adopt the new
+  // grid only when the personalized resize echo confirms the child was
+  // resized. Fitting first opens a window where the child keeps painting for
+  // its old geometry into a reshaped grid; a diff-based renderer (claude's
+  // spinner/prompt block) never repaints the cells it believes unchanged, so
+  // one frame of damage freezes on screen — and when layout settles back to
+  // the original size the daemon dedups the resize, no SIGWINCH fires, and
+  // nothing ever heals it.
+  let proposed = null;
+  try { proposed = state.fitAddon.proposeDimensions(); } catch (_) { return; }
+  const cols = proposed && proposed.cols;
+  const rows = proposed && proposed.rows;
   if (!cols || !rows) return;
+  const wasAtBottom = terminalIsAtBottom();
   if (!wasAtBottom) state.resizeFollowBottomUntil = 0;
+  const sz = state.currentId ? state.ptySizeById.get(state.currentId) : null;
+  if (sz && sz.cols === cols && sz.rows === rows) {
+    // The child already has exactly this geometry, so adopting it locally is
+    // safe without a round-trip (first refit after attach, follow → engage).
+    applyPassiveTerminalGeometry();
+  }
   const colsChanged = cols !== state.lastReportedSize.cols;
   const rowsChanged = rows !== state.lastReportedSize.rows;
   // A deliberate click/input is meaningful even at unchanged dimensions:
@@ -9193,22 +9330,16 @@ function refitTerminal(options = {}) {
   }
   if (!claim && !colsChanged && rowsChanged && shouldSuppressComposerRowResize()) {
     state.resizeFollowBottomUntil = 0;
-    // Composer auto-grow just changed our row count. `fitAddon.fit()`
-    // above ALREADY resized the local grid, so dropping this on the
-    // floor would leave xterm and the child permanently disagreeing
-    // about how many rows exist — and a child that repaints its footer
-    // with relative cursor moves (claude's spinner, the mode line) then
-    // overwrites the wrong rows. Defer rather than suppress: one
-    // coalesced SIGWINCH once the composer settles, not one per
-    // keystroke, which is what the suppression window was really for.
+    // Composer auto-grow just changed our measured row count. Do not turn
+    // that into one SIGWINCH per keystroke — defer a single coalesced resize
+    // for when the composer settles. Dropping it instead would leave the
+    // daemon's idea of our viewport stale. The local grid stays at the
+    // child's geometry until the deferred resize is applied and echoed.
     scheduleTerminalPtyResize(cols, rows, wasAtBottom, {
       delayMs: COMPOSER_RESIZE_SUPPRESS_PTY_RESIZE_MS,
     });
     return;
   }
-  // Active/claim path: we own geometry now, so render at our own fit.
-  const host = state.term.element && state.term.element.closest(".terminal-host");
-  if (host) host.classList.remove("pty-wide");
   if (immediate) {
     sendTerminalPtyResize(cols, rows, wasAtBottom, state.currentId, forceRedraw, claim);
   } else {
@@ -9216,12 +9347,46 @@ function refitTerminal(options = {}) {
   }
 }
 
-function resizeTermTo(cols, rows) {
-  if (!state.term || !cols || !rows) return;
-  if (state.term.cols === cols && state.term.rows === rows) return;
-  const wasAtBottom = terminalIsAtBottom();
-  state.term.resize(cols, rows);
-  restoreTerminalBottom(wasAtBottom);
+function resizeTermGridTo(term, cols, rows) {
+  if (!term || !cols || !rows) return;
+  if (term.cols === cols && term.rows === rows) return;
+  const active = term.buffer && term.buffer.active;
+  const wasAtBottom = !!active && active.viewportY >= active.baseY;
+  term.resize(cols, rows);
+  if (wasAtBottom) restoreTerminalBottomFor(term);
+}
+
+// A grid is only worth measuring, reporting, or claiming with when its host
+// actually has layout. During hydration the host is hidden and addon-fit
+// falls back to a tiny nonsense grid; claiming with that would resize the
+// real child under every other client.
+function terminalGridMeasurable() {
+  const el = state.term && state.term.element;
+  if (!el) return false;
+  const host = el.closest(".terminal-host");
+  if (host && host.hidden) return false;
+  return el.offsetWidth > 0 && el.offsetHeight > 0;
+}
+
+// A passive viewer still tells the daemon what it measured (claim: false).
+// The daemon remembers the viewport per connection without resizing anything
+// for non-owners, so this client's next keystroke can claim at the right size
+// immediately (spec 0153). If this connection still owns the geometry, the
+// daemon applies the report and echoes a personalized resize back — which is
+// exactly what keeps an owner's grid and the child agreeing across layout
+// changes instead of silently drifting apart (spec 0121).
+function reportPassiveViewport() {
+  if (!state.fitAddon || !state.currentId || !terminalGridMeasurable()) return;
+  let proposed = null;
+  try { proposed = state.fitAddon.proposeDimensions(); } catch (_) {}
+  if (!proposed || !proposed.cols || !proposed.rows) return;
+  if (
+    proposed.cols === state.lastReportedSize.cols &&
+    proposed.rows === state.lastReportedSize.rows
+  ) {
+    return;
+  }
+  scheduleTerminalPtyResize(proposed.cols, proposed.rows, false, { claim: false });
 }
 
 // Passive geometry handling: when this web terminal does NOT own the PTY, it
@@ -9234,26 +9399,30 @@ function resizeTermTo(cols, rows) {
 // show are the one case we clamp, because clipping the newest output at the
 // bottom is worse than the residual mismatch. Taking over is not handled here:
 // the claim path in `refitTerminal` snaps back to our own fit and propagates it.
-function applyPassiveTerminalGeometry() {
-  if (!state.term || !state.fitAddon || state.mode !== "terminal") return;
-  const host = state.term.element && state.term.element.closest(".terminal-host");
-  if (!host) return;
+function followPtyGeometry(sessionId, term, fitAddon, host) {
   let proposed = null;
-  try { proposed = state.fitAddon.proposeDimensions(); } catch (_) {}
-  const fitCols = (proposed && proposed.cols) || state.term.cols;
-  const fitRows = (proposed && proposed.rows) || state.term.rows;
-  const sz = state.currentId ? state.ptySizeById.get(state.currentId) : null;
+  try { proposed = fitAddon.proposeDimensions(); } catch (_) {}
+  const fitCols = (proposed && proposed.cols) || term.cols;
+  const fitRows = (proposed && proposed.rows) || term.rows;
+  const sz = sessionId ? state.ptySizeById.get(sessionId) : null;
   const ptyCols = sz && sz.cols;
   const ptyRows = sz && sz.rows;
   if (!ptyCols || !ptyRows) {
     // The child's grid is unknown, so our own fit is the only information we
     // have. Render at it rather than freezing at a stale size.
     host.classList.remove("pty-wide");
-    resizeTermTo(fitCols, fitRows);
+    resizeTermGridTo(term, fitCols, fitRows);
     return;
   }
   host.classList.toggle("pty-wide", ptyCols > fitCols);
-  resizeTermTo(ptyCols, Math.min(ptyRows, fitRows));
+  resizeTermGridTo(term, ptyCols, Math.min(ptyRows, fitRows));
+}
+
+function applyPassiveTerminalGeometry() {
+  if (!state.term || !state.fitAddon || state.mode !== "terminal") return;
+  const host = state.term.element && state.term.element.closest(".terminal-host");
+  if (!host) return;
+  followPtyGeometry(state.currentId, state.term, state.fitAddon, host);
 }
 
 function scheduleTerminalPtyResize(cols, rows, wasAtBottom, options = {}) {
@@ -9296,6 +9465,10 @@ function sendTerminalPtyResize(
 ) {
   state.lastReportedSize = { cols, rows };
   if (!sessionId || sessionId !== state.currentId) return;
+  // A claiming resize makes this connection the owner the moment the daemon
+  // processes it. Track that optimistically; the personalized `owner: true`
+  // echo confirms it, and any foreign resize event revokes it.
+  if (claim) state.ptyOwnedSessionIds.add(sessionId);
   if (wasAtBottom) state.resizeFollowBottomUntil = performance.now() + 1500;
   const send = (c, r) =>
     rpc("session.pty_resize", { session_id: sessionId, cols: c, rows: r, claim })
@@ -9310,7 +9483,14 @@ function sendTerminalPtyResize(
   // uses for a freshly hydrated SSH TUI. Sequenced, not fired in parallel:
   // the daemon must observe the bump as a distinct size.
   if (forceRedraw && cols > 1) {
-    send(cols + 1, rows).then(() => send(cols, rows));
+    // Both sends echo back personalized; the transient `cols+1` echo must not
+    // be adopted as real geometry. The bump marker clears once the final send
+    // has been answered — its response arrives after both echo broadcasts on
+    // this same ordered socket.
+    state.pendingHydrationBump = { sessionId, cols: cols + 1, rows };
+    send(cols + 1, rows)
+      .then(() => send(cols, rows))
+      .finally(() => { state.pendingHydrationBump = null; });
     return;
   }
   send(cols, rows);
@@ -9339,16 +9519,6 @@ function restoreTerminalBottomFor(term) {
   requestAnimationFrame(() => {
     if (state.term === term) term.scrollToBottom();
   });
-}
-
-function fitTerminalPreservingScroll(wasAtBottom = terminalIsAtBottom()) {
-  try {
-    state.fitAddon.fit();
-  } catch (_) {
-    return false;
-  }
-  restoreTerminalBottom(wasAtBottom);
-  return true;
 }
 
 function shouldFollowResizeBottom() {
@@ -9960,20 +10130,38 @@ async function pushLayout(tree) {
 /** Adopt a layout from the daemon (initial fetch or another client's write). */
 function applySharedLayout(doc) {
   if (!doc || !doc.tree) return;
+  const adoptingFirstLayout = !state.layout.tree;
   state.layout = { tree: doc.tree, version: doc.version || 0 };
   // Focus never comes from the wire. Keep ours if the pane still exists;
-  // otherwise fall back to the first pane in layout order.
+  // otherwise fall back to the first pane in layout order. On the first
+  // layout snapshot after a page load, the URL/current session identifies
+  // which local pane held focus before refresh, so restore that pane first.
   const leaves = layoutLeaves(state.layout.tree);
   if (!leaves.some((l) => l.id === state.focusedPaneId)) {
-    state.focusedPaneId = leaves.length ? leaves[0].id : null;
+    const restoreSessionId = adoptingFirstLayout
+      ? state.urlRequestedSessionId || state.currentId
+      : null;
+    const restored = restoreSessionId
+      ? leaves.find((l) => l.session_id === restoreSessionId)
+      : null;
+    state.focusedPaneId = restored
+      ? restored.id
+      : leaves.length
+        ? leaves[0].id
+        : null;
   }
   renderPaneGrid();
+  refreshSessionActions();
   // With panes on screen, the focused pane's session is shared: another
   // client moving it moves what this pane shows. With a single pane the
   // selection is local and stays put.
   if (splitLayoutActive()) {
     const focused = focusedPaneSessionId();
-    if (focused && focused !== state.currentId) {
+    // Do not bind the interactive surface until session.list has told us
+    // whether this session is PTY-backed. Selecting against an empty metadata
+    // cache guesses "chat" and leaves terminal sessions blank after refresh.
+    const known = focused && state.sessions.some((s) => s.id === focused);
+    if (known && focused !== state.currentId) {
       selectSession(focused, { fromPane: true });
     }
   }
@@ -9984,8 +10172,8 @@ function applySharedLayout(doc) {
  * remembered selection: whatever the shared layout has focused. Read-only —
  * this is the one way a narrow client touches the layout.
  */
-function layoutStartingSessionId() {
-  const leaves = layoutLeaves(state.layout.tree);
+function layoutStartingSessionId(tree = state.layout.tree) {
+  const leaves = layoutLeaves(tree);
   for (const leaf of leaves) {
     if (leaf.session_id && state.sessions.some((s) => s.id === leaf.session_id)) {
       return leaf.session_id;
@@ -10308,7 +10496,11 @@ function buildMirror(leaf) {
   empty.className = "pane-empty";
   empty.textContent = session ? "loading…" : "session unavailable";
   mirror.appendChild(empty);
-  if (session) loadTranscript(id).then(() => renderPaneGrid()).catch(() => {});
+  if (session) {
+    loadTranscript(id, { background: true })
+      .then(() => renderPaneGrid())
+      .catch(() => {});
+  }
   return mirror;
 }
 
@@ -10332,13 +10524,22 @@ function releaseMirrors() {
 
 function refitMirrors() {
   for (const id of state.mirroredSessionIds) {
-    const handle = state.terminalById.get(id);
-    if (!handle || !handle.fitAddon) continue;
-    try {
-      handle.fitAddon.fit();
-    } catch (_) {
-      /* a pane mid-layout can measure zero; the next refit catches it */
-    }
+    followMirrorPtyGeometry(id);
+  }
+}
+
+// A mirrored pane is a passive viewer by definition — clicking it focuses it
+// before any engagement can claim — so it must render the owner's grid the
+// same way the focused passive viewer does. Fitting a mirror to its own pane
+// silently disagrees with the child about wrap and scroll lines, which
+// corrupts every cursor-relative repaint the mirror replays (spec 0121).
+function followMirrorPtyGeometry(id) {
+  const handle = state.terminalById.get(id);
+  if (!handle || !handle.term || !handle.fitAddon || !handle.host) return;
+  try {
+    followPtyGeometry(id, handle.term, handle.fitAddon, handle.host);
+  } catch (_) {
+    /* a pane mid-layout can measure zero; the next refit catches it */
   }
 }
 
@@ -10609,7 +10810,13 @@ function updateTranscriptProgressBanner(el, loaded, total) {
 }
 
 async function loadTranscript(id, opts = {}) {
-  const pane = showTranscriptPane(id);
+  // Mirrors hydrate offscreen. They must not call showTranscriptPane: that
+  // foreground helper hides every other cached transcript, including the
+  // focused split's content during refresh.
+  const background = opts.background === true;
+  const pane = background
+    ? transcriptPaneForSession(id)
+    : showTranscriptPane(id);
   if (opts.force) markTranscriptStale(id);
   if (pane.dataset.loaded === "true") {
     restoreTranscriptViewport(id);
@@ -10646,7 +10853,7 @@ async function loadTranscript(id, opts = {}) {
   clearTimeout(skeletonTimer);
   // A rapid re-selection may have moved on while we awaited the round-trip;
   // don't clobber whatever the user is now looking at.
-  if (state.currentId !== id) return;
+  if (!background && state.currentId !== id) return;
   const tailEvents = (result && result.events) || [];
   const total = (result && typeof result.total === "number") ? result.total : tailEvents.length;
   // Build the tail off-DOM, then swap it in and pin to the bottom in one
@@ -10761,6 +10968,17 @@ function suggestPendingActive(id) {
 function suggestDeckIsOpen() {
   return !suggestFanEl.hidden || !suggestStackEl.hidden;
 }
+function suggestDeckIsAvailable() {
+  return suggestDeckEl.classList.contains("is-available");
+}
+function setSuggestDeckAvailable(available) {
+  suggestDeckEl.classList.toggle("is-available", available);
+  suggestDeckEl.setAttribute("aria-hidden", available ? "false" : "true");
+  // Keep the hidden deck out of sequential focus and accessibility trees
+  // without detaching it from rendering. Its controls become interactive
+  // again atomically with the visibility class.
+  suggestDeckEl.inert = !available;
+}
 function closeSuggestDeck() {
   suggestFanEl.hidden = true;
   suggestStackEl.hidden = true;
@@ -10769,7 +10987,7 @@ function closeSuggestDeck() {
 function updateSuggestOrb() {
   const s = state.sessions.find((x) => x.id === state.currentId) || null;
   const awaiting = !!s && sessionStatusLabel(s) === "awaiting_input";
-  suggestDeckEl.hidden = !awaiting;
+  setSuggestDeckAvailable(awaiting);
   if (!awaiting) {
     closeSuggestDeck();
     return;
@@ -10898,7 +11116,7 @@ document.addEventListener("keydown", (e) => {
 // Refresh the pending spinner label so a timed-out generation falls
 // back to the idle orb without requiring another event.
 setInterval(() => {
-  if (!suggestDeckEl.hidden) updateSuggestOrb();
+  if (suggestDeckIsAvailable()) updateSuggestOrb();
 }, 3000);
 
 function handleNotification(method, params) {
@@ -10951,12 +11169,26 @@ function handleNotification(method, params) {
       // browser was clicked a moment ago and its engagement grace period is
       // still live. End that grace period immediately and adopt the owner's
       // grid before xterm can encode a child-requested hover report against
-      // stale web dimensions. Own echoes (including the hydration bump) stay
-      // local and do not cause a redundant reflow.
+      // stale web dimensions. Own echoes are adopted too — the local grid is
+      // deliberately not resized when a fit is sent (spec 0121: the grid must
+      // never lead the child), so this echo is what applies our own fit. The
+      // one exception is the transient hydration-bump echo (`cols+1`), which
+      // exists only to force a repaint and is superseded a beat later.
       const ownGeometry = event.owner === true;
+      if (ownGeometry) state.ptyOwnedSessionIds.add(session_id);
+      else state.ptyOwnedSessionIds.delete(session_id);
       if (!ownGeometry) state.webPtyEngagedUntil = 0;
-      if (session_id === state.currentId && !ownGeometry) {
-        applyPassiveTerminalGeometry();
+      const bump = state.pendingHydrationBump;
+      const bumpEcho =
+        ownGeometry &&
+        !!bump &&
+        bump.sessionId === session_id &&
+        event.cols === bump.cols &&
+        event.rows === bump.rows;
+      if (session_id === state.currentId) {
+        if (!bumpEcho) applyPassiveTerminalGeometry();
+      } else if (state.mirroredSessionIds.has(session_id)) {
+        followMirrorPtyGeometry(session_id);
       }
       return;
     }
@@ -11200,18 +11432,28 @@ function renderEvent(event, at) {
     // the xterm view would show nothing for tool calls. Synthesize an
     // inline rendering here, in event order with the surrounding PTY
     // prose. (issue #134)
-    if (event.type === "tool_use") {
-      writeToolUseToTerm(event.tool, event.args);
-    }
-    if (event.type === "tool_result") {
-      writeToolResultToTerm(event.ok, event.output);
-    }
-    if (event.type === "tool_approval_request") {
-      const risk = event.risk ? ` [${sanitizeForTerm(event.risk)}]` : "";
-      writeToTerm(
-        `\r\n\x1b[1;33m? approve${risk}\x1b[0m ${sanitizeForTerm(event.tool || "")}` +
-          `\x1b[2m(${sanitizeForTerm(event.args_summary || "")})\x1b[0m\r\n`
-      );
+    //
+    // ONLY for structured-tool sessions. Harnesses that paint their own
+    // tool blocks into the PTY (claude, codex) also emit these events —
+    // synthesizing a second copy doesn't just duplicate content, it MOVES
+    // THE XTERM CURSOR mid-frame under the child's diff-based renderer, so
+    // its next relative repaint lands on the wrong rows and the damage
+    // freezes on screen (duplicated spinner lines, tool blocks stuck below
+    // the prompt, ghost text written over stale tool output).
+    if (isStructuredToolSession(currentSession())) {
+      if (event.type === "tool_use") {
+        writeToolUseToTerm(event.tool, event.args);
+      }
+      if (event.type === "tool_result") {
+        writeToolResultToTerm(event.ok, event.output);
+      }
+      if (event.type === "tool_approval_request") {
+        const risk = event.risk ? ` [${sanitizeForTerm(event.risk)}]` : "";
+        writeToTerm(
+          `\r\n\x1b[1;33m? approve${risk}\x1b[0m ${sanitizeForTerm(event.tool || "")}` +
+            `\x1b[2m(${sanitizeForTerm(event.args_summary || "")})\x1b[0m\r\n`
+        );
+      }
     }
     return;
   }
@@ -13280,7 +13522,15 @@ function closeNewSessionDialog() {
 
 function currentTerminalSize() {
   if (state.term && state.fitAddon) {
-    fitTerminalPreservingScroll();
+    // Measure only. Resizing the visible grid here would reshape a session
+    // the child still paints at its told geometry (spec 0121) — the previous
+    // fit-as-a-side-effect corrupted the watched session whenever this
+    // dialog opened over a followed or busy terminal.
+    let proposed = null;
+    try { proposed = state.fitAddon.proposeDimensions(); } catch (_) {}
+    if (proposed && proposed.cols && proposed.rows) {
+      return { cols: proposed.cols, rows: proposed.rows };
+    }
     if (state.term.cols && state.term.rows) {
       return { cols: state.term.cols, rows: state.term.rows };
     }
