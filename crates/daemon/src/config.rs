@@ -142,7 +142,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # binary      = "construct-adapter-aider"
 # description = "Aider (community adapter)"
 #
-# Installed plugins (`construct plugin install owner/repo`, spec 0151)
+# Installed plugins (`construct plugin install owner/repo`, spec 0152)
 # register their adapters automatically — no [adapters.*] block needed. A
 # block naming a plugin harness (e.g. [adapters."my-plugin:tool"]) still
 # works to override individual fields; your values win field-by-field.

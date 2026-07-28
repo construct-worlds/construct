@@ -1,4 +1,4 @@
-//! Plugin system (spec 0151): manifest parsing, the installed-plugin
+//! Plugin system (spec 0152): manifest parsing, the installed-plugin
 //! registry, and the merge of plugin contributions into the daemon's
 //! existing extension seams (adapters, program verbs, program templates,
 //! injected MCP servers).
@@ -54,6 +54,15 @@ pub struct PluginManifest {
     /// construct MCP server.
     #[serde(default)]
     pub mcp_servers: Vec<PluginMcpServerDecl>,
+    /// User-invocable actions (spec 0152 phase 2): surfaced in client
+    /// palettes and as `/<plugin>:<action>` slash tokens; running one
+    /// spawns `command` with plugin identity env.
+    #[serde(default)]
+    pub actions: Vec<PluginActionDecl>,
+    /// Event hooks (spec 0152 phase 2): the daemon spawns `command` when a
+    /// session event matching `on` is handled.
+    #[serde(default)]
+    pub events: Vec<PluginEventHookDecl>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +106,40 @@ pub struct PluginAdapterDecl {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginDirSection {
     pub dir: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginActionDecl {
+    /// Action id within the plugin; token rules match adapter naming
+    /// (`<plugin-id>:<id>`, or the bare plugin id when equal).
+    pub id: String,
+    pub label: String,
+    /// Argv array; `command[0]` resolves against the plugin root when
+    /// relative. Runs with the plugin root as cwd.
+    pub command: Vec<String>,
+    /// `session` (default): receives `CONSTRUCT_SESSION_ID` of the session
+    /// it was invoked from. `fleet`: no session context.
+    #[serde(default = "default_action_context")]
+    pub context: String,
+}
+
+fn default_action_context() -> String {
+    "session".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginEventHookDecl {
+    /// Event matchers: a `SessionEvent` type tag (`done`, `error`,
+    /// `tool_approval_request`, …) or `status:<state>` for specific status
+    /// transitions (`status:awaiting_input`).
+    pub on: Vec<String>,
+    /// Argv array; `command[0]` resolves against the plugin root when
+    /// relative.
+    pub command: Vec<String>,
+    /// Minimum milliseconds between spawns of this hook (per plugin/hook,
+    /// across all sessions). 0 = fire on every match.
+    #[serde(default)]
+    pub debounce_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,6 +201,25 @@ impl PluginManifest {
                 bail!("build step with empty command");
             }
         }
+        for a in &self.actions {
+            if a.id.trim().is_empty() || a.id.contains(':') {
+                bail!("action id `{}` must be non-empty and contain no `:`", a.id);
+            }
+            if a.command.is_empty() {
+                bail!("action `{}` needs a command", a.id);
+            }
+            if !matches!(a.context.as_str(), "session" | "fleet") {
+                bail!("action `{}` context must be `session` or `fleet`", a.id);
+            }
+        }
+        for (i, h) in self.events.iter().enumerate() {
+            if h.on.is_empty() || h.on.iter().any(|m| m.trim().is_empty()) {
+                bail!("event hook #{i} needs at least one non-empty `on` matcher");
+            }
+            if h.command.is_empty() {
+                bail!("event hook #{i} needs a command");
+            }
+        }
         Ok(())
     }
 
@@ -194,6 +256,21 @@ impl PluginManifest {
                 "  mcp server: {} — `{}` injected into every harness session\n",
                 mcp_key(&meta.id, &s.name),
                 s.command.join(" ")
+            ));
+        }
+        for a in &self.actions {
+            out.push_str(&format!(
+                "  action: /{} ({}) — runs `{}` as your user\n",
+                action_token(&meta.id, &a.id),
+                a.label,
+                a.command.join(" ")
+            ));
+        }
+        for h in &self.events {
+            out.push_str(&format!(
+                "  event hook: on [{}] — runs `{}` as your user\n",
+                h.on.join(", "),
+                h.command.join(" ")
             ));
         }
         out
@@ -289,6 +366,15 @@ pub fn mcp_key(plugin_id: &str, server_name: &str) -> String {
         plugin_id.to_string()
     } else {
         format!("{plugin_id}-{server_name}")
+    }
+}
+
+/// Palette/slash token a plugin action is invoked by.
+pub fn action_token(plugin_id: &str, action_id: &str) -> String {
+    if plugin_id == action_id {
+        plugin_id.to_string()
+    } else {
+        format!("{plugin_id}:{action_id}")
     }
 }
 
@@ -563,6 +649,213 @@ impl PluginSet {
     }
 }
 
+// ── Runtime: actions and event hooks (spec 0152 phase 2) ────────────────────
+
+/// Daemon-side runtime for plugin actions and event hooks. Held by the
+/// session manager; `on_event` is called from the event funnel and must
+/// stay cheap when nothing matches.
+pub struct PluginRuntime {
+    set: PluginSet,
+    paths: Paths,
+    /// Actual socket the daemon serves — passed to plugin processes as
+    /// `CONSTRUCT_SOCKET` so they reach *this* daemon even under
+    /// `--socket` overrides.
+    socket_path: PathBuf,
+    /// Last-fire time per (plugin, hook index), for `debounce_ms`.
+    debounce: std::sync::Mutex<HashMap<(String, usize), std::time::Instant>>,
+    /// True when any enabled plugin declares at least one event hook —
+    /// checked before serializing events on the hot path.
+    has_hooks: bool,
+}
+
+impl PluginRuntime {
+    pub fn new(set: PluginSet, paths: Paths, socket_path: PathBuf) -> Self {
+        let has_hooks = set
+            .plugins
+            .iter()
+            .any(|p| !p.manifest.events.is_empty());
+        Self {
+            set,
+            paths,
+            socket_path,
+            debounce: std::sync::Mutex::new(HashMap::new()),
+            has_hooks,
+        }
+    }
+
+    /// Every action across enabled plugins, for `plugin.list_actions`.
+    pub fn actions(&self) -> Vec<construct_protocol::PluginActionInfo> {
+        self.set
+            .plugins
+            .iter()
+            .flat_map(|p| {
+                p.manifest.actions.iter().map(|a| construct_protocol::PluginActionInfo {
+                    plugin_id: p.id.clone(),
+                    id: a.id.clone(),
+                    label: a.label.clone(),
+                    context: a.context.clone(),
+                    token: action_token(&p.id, &a.id),
+                })
+            })
+            .collect()
+    }
+
+    /// Spawn one action's command, fire-and-forget. Errors only when the
+    /// action is unknown or the spawn itself fails; the process's own exit
+    /// status is logged, never surfaced synchronously.
+    pub fn run_action(
+        &self,
+        plugin_id: &str,
+        action_id: &str,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        let plugin = self
+            .set
+            .plugins
+            .iter()
+            .find(|p| p.id == plugin_id)
+            .with_context(|| format!("plugin `{plugin_id}` is not loaded"))?;
+        let action = plugin
+            .manifest
+            .actions
+            .iter()
+            .find(|a| a.id == action_id)
+            .with_context(|| format!("plugin `{plugin_id}` has no action `{action_id}`"))?;
+        let mut extra = HashMap::from([(
+            "CONSTRUCT_PLUGIN_ACTION_ID".to_string(),
+            action.id.clone(),
+        )]);
+        if let Some(sid) = session_id {
+            extra.insert("CONSTRUCT_SESSION_ID".to_string(), sid.to_string());
+        }
+        self.spawn(plugin, &action.command, extra, format!("action {}", action.id))
+    }
+
+    /// Fire matching event hooks for one handled session event. Called on
+    /// the daemon's event funnel: the type-tag serialization only happens
+    /// when at least one hook exists, and the full event JSON only when a
+    /// hook actually matches.
+    pub fn on_event(&self, session_id: &str, event: &construct_protocol::SessionEvent) {
+        if !self.has_hooks {
+            return;
+        }
+        let Some(tags) = event_match_tags(event) else {
+            return;
+        };
+        for plugin in &self.set.plugins {
+            for (idx, hook) in plugin.manifest.events.iter().enumerate() {
+                if !hook.on.iter().any(|m| tags.iter().any(|t| t == m)) {
+                    continue;
+                }
+                if hook.debounce_ms > 0 {
+                    let key = (plugin.id.clone(), idx);
+                    let mut debounce = self.debounce.lock().unwrap();
+                    let now = std::time::Instant::now();
+                    if let Some(last) = debounce.get(&key) {
+                        if now.duration_since(*last)
+                            < std::time::Duration::from_millis(hook.debounce_ms)
+                        {
+                            continue;
+                        }
+                    }
+                    debounce.insert(key, now);
+                }
+                let payload = serde_json::json!({
+                    "session_id": session_id,
+                    "event": event,
+                });
+                let extra = HashMap::from([
+                    (
+                        "CONSTRUCT_PLUGIN_EVENT".to_string(),
+                        tags[0].clone(),
+                    ),
+                    (
+                        "CONSTRUCT_PLUGIN_EVENT_JSON".to_string(),
+                        payload.to_string(),
+                    ),
+                    ("CONSTRUCT_SESSION_ID".to_string(), session_id.to_string()),
+                ]);
+                if let Err(e) =
+                    self.spawn(plugin, &hook.command, extra, format!("event hook #{idx}"))
+                {
+                    tracing::warn!(plugin = %plugin.id, error = %format!("{e:#}"), "event hook spawn failed");
+                }
+            }
+        }
+    }
+
+    /// Spawn a plugin-owned process: plugin root as cwd, identity env plus
+    /// `CONSTRUCT_SOCKET`/`CONSTRUCT_BIN_PATH`, exit status logged.
+    fn spawn(
+        &self,
+        plugin: &LoadedPlugin,
+        command: &[String],
+        extra_env: HashMap<String, String>,
+        label: String,
+    ) -> Result<()> {
+        let (program, args) = command.split_first().context("empty command")?;
+        let program = plugin.resolve(program);
+        let mut cmd = tokio::process::Command::new(&program);
+        cmd.args(args)
+            .current_dir(&plugin.root)
+            .envs(plugin.env(&self.paths))
+            .env(
+                "CONSTRUCT_SOCKET",
+                self.socket_path.to_string_lossy().to_string(),
+            )
+            .envs(extra_env)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(false);
+        if let Ok(exe) = std::env::current_exe() {
+            cmd.env("CONSTRUCT_BIN_PATH", exe);
+        }
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("spawn `{}`", program.display()))?;
+        let plugin_id = plugin.id.clone();
+        tokio::spawn(async move {
+            let stderr = child.stderr.take();
+            let mut tail = String::new();
+            if let Some(stderr) = stderr {
+                use tokio::io::AsyncReadExt;
+                let mut buf = String::new();
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let _ = reader.read_to_string(&mut buf).await;
+                tail = buf.chars().rev().take(2000).collect::<String>().chars().rev().collect();
+            }
+            match child.wait().await {
+                Ok(status) if status.success() => {
+                    tracing::debug!(plugin = %plugin_id, %label, "plugin process finished");
+                }
+                Ok(status) => {
+                    tracing::warn!(plugin = %plugin_id, %label, %status, stderr = %tail, "plugin process failed");
+                }
+                Err(e) => {
+                    tracing::warn!(plugin = %plugin_id, %label, error = %e, "plugin process wait failed");
+                }
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Matchers a session event satisfies: its serde type tag, plus
+/// `status:<state>` for status events. `None` for events that fail to
+/// serialize (none today).
+fn event_match_tags(event: &construct_protocol::SessionEvent) -> Option<Vec<String>> {
+    let v = serde_json::to_value(event).ok()?;
+    let tag = v.get("type")?.as_str()?.to_string();
+    let mut tags = vec![tag.clone()];
+    if tag == "status" {
+        if let Some(state) = v.get("state").and_then(|s| s.as_str()) {
+            tags.push(format!("status:{state}"));
+        }
+    }
+    Some(tags)
+}
+
 // ── Install / link operations (driven by the CLI) ───────────────────────────
 
 /// `owner/repo[/subdir…]` → (clone URL, owner/repo, optional subdir).
@@ -742,6 +1035,16 @@ mod tests {
         [[mcp_servers]]
         name = "review"
         command = ["target/release/review-mcp", "serve"]
+
+        [[actions]]
+        id = "open"
+        label = "Open review"
+        command = ["bin/open.sh"]
+
+        [[events]]
+        on = ["done", "status:awaiting_input"]
+        command = ["bin/notify.sh"]
+        debounce_ms = 50
     "#;
 
     fn write_plugin(root: &Path, manifest: &str) {
@@ -978,6 +1281,151 @@ mod tests {
         assert!(cmd.ends_with("target/release/review-mcp") && PathBuf::from(cmd).is_absolute());
         assert_eq!(parsed[0]["args"], serde_json::json!(["serve"]));
         assert_eq!(parsed[0]["env"][ENV_PLUGIN_ID], "diff-review");
+    }
+
+    #[test]
+    fn actions_and_event_hooks_parse_with_defaults() {
+        let m: PluginManifest = toml::from_str(FULL_MANIFEST).unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.actions.len(), 1);
+        assert_eq!(m.actions[0].context, "session", "context defaults to session");
+        assert_eq!(m.events.len(), 1);
+        assert_eq!(m.events[0].debounce_ms, 50);
+        assert_eq!(m.events[0].on, vec!["done", "status:awaiting_input"]);
+    }
+
+    #[test]
+    fn action_and_hook_validation_rejects_bad_declarations() {
+        let bad_context = r#"
+            [plugin]
+            id = "p"
+            name = "P"
+            version = "1.0.0"
+            min_construct_version = "0.1"
+            [[actions]]
+            id = "a"
+            label = "A"
+            command = ["x"]
+            context = "galaxy"
+        "#;
+        assert!(toml::from_str::<PluginManifest>(bad_context)
+            .unwrap()
+            .validate()
+            .is_err());
+        let empty_on = r#"
+            [plugin]
+            id = "p"
+            name = "P"
+            version = "1.0.0"
+            min_construct_version = "0.1"
+            [[events]]
+            on = []
+            command = ["x"]
+        "#;
+        assert!(toml::from_str::<PluginManifest>(empty_on)
+            .unwrap()
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn event_match_tags_cover_type_and_status_state() {
+        use construct_protocol::{SessionEvent, SessionState};
+        assert_eq!(
+            event_match_tags(&SessionEvent::Done { exit_code: 0 }).unwrap(),
+            vec!["done"]
+        );
+        assert_eq!(
+            event_match_tags(&SessionEvent::Status {
+                state: SessionState::AwaitingInput,
+                detail: None,
+            })
+            .unwrap(),
+            vec!["status", "status:awaiting_input"]
+        );
+    }
+
+    fn runtime_with_manifest(tmp: &Path, manifest: &str) -> (Paths, PluginRuntime, PathBuf) {
+        let paths = tmp_paths(tmp);
+        let root = tmp.join("plug");
+        write_plugin(&root, manifest);
+        let m = PluginManifest::load(&root).unwrap();
+        register(&paths, &m, &root, "link").unwrap();
+        let set = PluginSet::load_for_version(&paths, "0.16.1");
+        assert_eq!(set.plugins.len(), 1, "fixture plugin must load");
+        let runtime = PluginRuntime::new(set, paths.clone(), tmp.join("sock"));
+        (paths, runtime, root)
+    }
+
+    #[test]
+    fn runtime_lists_actions_with_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_paths, runtime, _root) = runtime_with_manifest(tmp.path(), FULL_MANIFEST);
+        let actions = runtime.actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].plugin_id, "diff-review");
+        assert_eq!(actions[0].token, "diff-review:open");
+        assert_eq!(actions[0].context, "session");
+    }
+
+    async fn wait_for_file(path: &Path) -> String {
+        for _ in 0..100 {
+            if let Ok(s) = std::fs::read_to_string(path) {
+                if !s.is_empty() {
+                    return s;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("file {} never appeared", path.display());
+    }
+
+    const RUNTIME_MANIFEST: &str = r#"
+        [plugin]
+        id = "rt"
+        name = "Runtime"
+        version = "1.0.0"
+        min_construct_version = "0.1"
+
+        [[actions]]
+        id = "touch"
+        label = "Touch"
+        command = ["/bin/sh", "-c", "echo action=$CONSTRUCT_PLUGIN_ACTION_ID session=$CONSTRUCT_SESSION_ID plug=$CONSTRUCT_PLUGIN_ID > acted.txt"]
+
+        [[events]]
+        on = ["done"]
+        command = ["/bin/sh", "-c", "echo $CONSTRUCT_PLUGIN_EVENT >> events.txt"]
+        debounce_ms = 60000
+    "#;
+
+    #[tokio::test]
+    async fn run_action_spawns_with_identity_and_session_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_paths, runtime, root) = runtime_with_manifest(tmp.path(), RUNTIME_MANIFEST);
+        runtime.run_action("rt", "touch", Some("s123")).unwrap();
+        let acted = wait_for_file(&root.join("acted.txt")).await;
+        assert_eq!(acted.trim(), "action=touch session=s123 plug=rt");
+        assert!(runtime.run_action("rt", "nope", None).is_err());
+        assert!(runtime.run_action("ghost", "touch", None).is_err());
+    }
+
+    #[tokio::test]
+    async fn on_event_fires_matching_hook_once_within_debounce() {
+        use construct_protocol::SessionEvent;
+        let tmp = tempfile::tempdir().unwrap();
+        let (_paths, runtime, root) = runtime_with_manifest(tmp.path(), RUNTIME_MANIFEST);
+        // Non-matching event: nothing fires.
+        runtime.on_event("s1", &SessionEvent::Reset);
+        // Two matching events inside the debounce window: exactly one spawn.
+        runtime.on_event("s1", &SessionEvent::Done { exit_code: 0 });
+        runtime.on_event("s1", &SessionEvent::Done { exit_code: 0 });
+        let events = wait_for_file(&root.join("events.txt")).await;
+        // Give a straggler spawn a moment to (incorrectly) append.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let events_after = std::fs::read_to_string(root.join("events.txt")).unwrap();
+        assert_eq!(events, events_after, "debounce must suppress the second spawn");
+        assert_eq!(events.trim(), "done");
+        assert_eq!(events.lines().count(), 1);
     }
 
     #[test]

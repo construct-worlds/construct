@@ -1049,6 +1049,13 @@ impl SessionState {
 pub mod ipc_method {
     pub const PING: &str = "ping";
     pub const HARNESS_LIST: &str = "harness.list";
+    /// User-invocable actions contributed by installed plugins (spec 0152
+    /// phase 2). Clients populate their palette/slash surfaces from this at
+    /// runtime — plugin actions are data, never compiled-in commands.
+    pub const PLUGIN_LIST_ACTIONS: &str = "plugin.list_actions";
+    /// Run one plugin action: the daemon spawns the action's command with
+    /// plugin identity env and the optional session context, fire-and-forget.
+    pub const PLUGIN_RUN_ACTION: &str = "plugin.run_action";
     /// Per-method smith auth detection, powering the `/configure` dialog's
     /// smith-auth tab (spec 0069): which auth methods smith supports, whether
     /// each is currently usable, and which (if any) `CONSTRUCT_SMITH_MODEL`
@@ -2043,6 +2050,35 @@ pub struct ProgramStateNotificationPayload {
     /// block refs to the rendered Markdown without re-deriving identity.
     #[serde(default)]
     pub blocks: Vec<ProgramBlockView>,
+}
+
+/// One user-invocable action contributed by an installed plugin (spec 0152
+/// phase 2), as returned by `plugin.list_actions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginActionInfo {
+    pub plugin_id: String,
+    pub id: String,
+    pub label: String,
+    /// `session` (runs with the selected session's context) or `fleet`.
+    #[serde(default)]
+    pub context: String,
+    /// The palette/slash token that invokes it — `<plugin-id>:<id>`, or the
+    /// bare plugin id when the action id equals it.
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginListActionsResult {
+    pub actions: Vec<PluginActionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginRunActionParams {
+    pub plugin_id: String,
+    pub action_id: String,
+    /// Session context for `context = "session"` actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

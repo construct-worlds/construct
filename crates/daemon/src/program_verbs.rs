@@ -197,7 +197,7 @@ pub fn load_verbs(dir: &Path) -> Vec<ProgramVerb> {
 }
 
 /// [`load_verbs`], plus plugin verb directories as `(namespace, dir)` pairs
-/// (spec 0151). Plugin verbs are force-namespaced `<namespace>:<name>` so a
+/// (spec 0152). Plugin verbs are force-namespaced `<namespace>:<name>` so a
 /// plugin can never override a built-in or user verb by matching `name` —
 /// only the user's own `verbs/` directory has that power.
 pub fn load_verbs_with_plugins(
