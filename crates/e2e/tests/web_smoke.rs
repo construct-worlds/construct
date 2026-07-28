@@ -1338,6 +1338,76 @@ async fn web_client_loads_and_websocket_connects() {
         "clicking an already-focused terminal split must still claim PTY geometry"
     );
 
+    // xterm emits child-requested mouse reports through the same onData path
+    // as keystrokes. Plain pointer motion must stay passive; a drag is
+    // deliberate engagement and must claim.
+    let pointer_input_claims: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const saved = {
+                currentId: state.currentId,
+                mode: state.mode,
+                rpc,
+                claimTerminalGeometryNow,
+              };
+              const calls = [];
+              let geometryClaims = 0;
+              const handle = {
+                replayingPty: false,
+                forwardingPointerHover: false,
+              };
+              const host = document.createElement("div");
+              try {
+                state.currentId = "s-pointer-ownership";
+                state.mode = "terminal";
+                rpc = (method, params) => {
+                  calls.push({ method, params });
+                  return Promise.resolve(null);
+                };
+                claimTerminalGeometryNow = () => { geometryClaims += 1; };
+                installTerminalPointerOwnershipTracking(host, handle);
+                host.addEventListener("mousemove", () => {
+                  forwardTerminalData(handle, "s-pointer-ownership", "mouse-report");
+                });
+
+                host.dispatchEvent(new MouseEvent("mousemove", {
+                  bubbles: true,
+                  buttons: 0,
+                }));
+                await Promise.resolve();
+                host.dispatchEvent(new MouseEvent("mousemove", {
+                  bubbles: true,
+                  buttons: 1,
+                }));
+                await Promise.resolve();
+                return {
+                  geometryClaims,
+                  inputClaims: calls.map((call) => call.params.claim),
+                };
+              } finally {
+                state.currentId = saved.currentId;
+                state.mode = saved.mode;
+                rpc = saved.rpc;
+                claimTerminalGeometryNow = saved.claimTerminalGeometryNow;
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate web pointer PTY ownership")
+        .into_value::<serde_json::Value>()
+        .expect("pointer ownership result");
+    assert_eq!(
+        pointer_input_claims["geometryClaims"], 1,
+        "only the drag, not hover motion, should claim web PTY geometry"
+    );
+    assert_eq!(
+        pointer_input_claims["inputClaims"],
+        serde_json::json!([false, true]),
+        "web hover input must be passive while drag input claims"
+    );
+
     // Mobile regression: selecting a session auto-hides the narrow session
     // list without changing the stored preference. Keyboard/viewport resizes
     // must preserve that current hidden state instead of re-reading the older

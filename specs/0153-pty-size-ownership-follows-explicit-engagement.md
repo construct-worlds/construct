@@ -8,8 +8,9 @@ Scope: Decide which of several clients viewing one session controls its single P
 ## Decision
 
 PTY size ownership belongs to one client connection at a time, not to a client
-transport category. User input and an explicit click/focus claim transfer
-ownership to that connection and apply its most recently reported viewport.
+transport category. Keyboard input, clicks, drags, wheel actions, and explicit
+focus claims transfer ownership to that connection and apply its most recently
+reported viewport.
 
 A viewport change without explicit engagement is passive. It updates that
 connection's remembered size and reaches the PTY only if the connection already
@@ -17,6 +18,10 @@ owns the geometry. It must not transfer ownership.
 
 Clicking a visible terminal pane is an explicit claim even when that pane was
 already locally focused and its measured dimensions did not change.
+
+Pointer hover and motion are passive, including motion reports forwarded to a
+mouse-tracking child application. Clicks, drags, wheel actions, and keyboard
+input are explicit engagement and claim the geometry.
 
 ## Reason
 
@@ -36,7 +41,7 @@ continue measuring their own viewport for a future claim.
 
 Clients must distinguish explicit engagement from passive layout reports.
 Compatibility clients that omit the distinction retain the historical
-claiming-resize behavior.
+claiming behavior for both resize and input messages.
 
 When an owning connection disconnects, the session remains ownerless until the
 next explicit engagement; the daemon does not guess among passive viewers.
@@ -56,3 +61,5 @@ clients.
   that browser and resizes the PTY to 90×30.
 - Two TUI windows at different sizes retain separate remembered viewports;
   input in either window selects that exact connection's size.
+- Moving a pointer over a browser or TUI pane does not transfer ownership, even
+  when the TUI forwards that motion to a child using terminal mouse tracking.

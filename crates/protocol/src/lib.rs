@@ -133,6 +133,11 @@ pub struct SessionPtyInputParams {
     pub session_id: String,
     /// Base64-encoded raw bytes to write to the child's PTY.
     pub data: String,
+    /// Whether this input is an explicit user-engagement claim for the
+    /// session's single PTY geometry. Pointer motion may be forwarded to a
+    /// mouse-tracking child with this set to false.
+    #[serde(default = "default_pty_activity_claim")]
+    pub claim: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,20 +149,20 @@ pub struct SessionPtyResizeParams {
     /// session's single PTY geometry. Passive viewport reports set this to
     /// false so they update the connection's remembered size without stealing
     /// ownership from another client.
-    #[serde(default = "default_pty_resize_claim")]
+    #[serde(default = "default_pty_activity_claim")]
     pub claim: bool,
 }
 
-fn default_pty_resize_claim() -> bool {
-    // Compatibility with clients predating explicit resize ownership: their
-    // resize calls historically claimed the PTY, so an omitted field keeps
+fn default_pty_activity_claim() -> bool {
+    // Compatibility with clients predating explicit ownership: their resize
+    // and input calls historically claimed the PTY, so an omitted field keeps
     // that behavior. New passive reporters must send `claim: false`.
     true
 }
 
 #[cfg(test)]
 #[test]
-fn pty_resize_claim_is_legacy_true_but_can_be_explicitly_passive() {
+fn pty_activity_claim_is_legacy_true_but_can_be_explicitly_passive() {
     let legacy: SessionPtyResizeParams = serde_json::from_value(serde_json::json!({
         "session_id": "s1",
         "cols": 80,
@@ -174,6 +179,21 @@ fn pty_resize_claim_is_legacy_true_but_can_be_explicitly_passive() {
     }))
     .expect("passive resize params");
     assert!(!passive.claim);
+
+    let legacy_input: SessionPtyInputParams = serde_json::from_value(serde_json::json!({
+        "session_id": "s1",
+        "data": "aGVsbG8="
+    }))
+    .expect("legacy input params");
+    assert!(legacy_input.claim);
+
+    let passive_input: SessionPtyInputParams = serde_json::from_value(serde_json::json!({
+        "session_id": "s1",
+        "data": "aGVsbG8=",
+        "claim": false
+    }))
+    .expect("passive input params");
+    assert!(!passive_input.claim);
 }
 
 impl SessionPtyInputParams {
@@ -183,10 +203,15 @@ impl SessionPtyInputParams {
     }
 
     pub fn from_bytes(session_id: impl Into<String>, bytes: &[u8]) -> Self {
+        Self::from_bytes_with_claim(session_id, bytes, true)
+    }
+
+    pub fn from_bytes_with_claim(session_id: impl Into<String>, bytes: &[u8], claim: bool) -> Self {
         use base64::Engine;
         Self {
             session_id: session_id.into(),
             data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            claim,
         }
     }
 }

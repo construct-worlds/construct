@@ -673,10 +673,16 @@ impl Client {
         .await
     }
     pub async fn pty_input(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
+        self.pty_input_with_claim(id, bytes, true).await
+    }
+    pub async fn pty_input_passive(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
+        self.pty_input_with_claim(id, bytes, false).await
+    }
+    async fn pty_input_with_claim(&self, id: &str, bytes: Vec<u8>, claim: bool) -> Result<()> {
         let _: serde_json::Value = self
             .request(
                 ipc_method::SESSION_PTY_INPUT,
-                &SessionPtyInputParams::from_bytes(id, &bytes),
+                &SessionPtyInputParams::from_bytes_with_claim(id, &bytes, claim),
             )
             .await?;
         Ok(())

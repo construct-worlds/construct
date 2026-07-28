@@ -1288,7 +1288,7 @@ async fn dispatch(
             }
         };
         if let Err(e) = manager
-            .note_pty_activity(&p.session_id, conn_id, kind, None, true)
+            .note_pty_activity(&p.session_id, conn_id, kind, None, p.claim)
             .await
         {
             tracing::debug!(

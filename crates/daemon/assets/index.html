@@ -8708,22 +8708,17 @@ function createTerminalHandle(id) {
     // those through onData, the same channel as user keystrokes, so replay
     // must never be allowed to inject a fresh response into the live child.
     replayingPty: false,
+    // xterm reports child-requested mouse motion through `onData`, just like
+    // keyboard input. Capture plain hover separately so forwarding it does
+    // not make this browser the session's PTY geometry owner.
+    forwardingPointerHover: false,
     ptyAltScreenFilterCarry: new Uint8Array(0),
     lastReportedSize: { cols: 0, rows: 0 },
   };
   state.terminalById.set(id, handle);
 
-  // Forward user keystrokes (and pasted text) as base64-encoded
-  // PTY input. xterm's onData yields a JS string of UTF-8
-  // codepoints; we re-encode through TextEncoder so multi-byte
-  // input round-trips cleanly.
-  term.onData((s) => {
-    if (handle.replayingPty || state.mode !== "terminal" || state.currentId !== id || currentInlineWidget(id)) return;
-    claimTerminalGeometryNow();
-    const data = encodeBase64Utf8(s);
-    rpc("session.pty_input", { session_id: id, data })
-      .catch((e) => console.error("pty_input failed:", e));
-  });
+  installTerminalPointerOwnershipTracking(host, handle);
+  term.onData((s) => forwardTerminalData(handle, id, s));
 
   // Refit when the terminal host changes size. Only the active xterm
   // claims daemon PTY geometry; hidden cached terminals just keep their
@@ -8760,6 +8755,31 @@ function createTerminalHandle(id) {
   });
 
   return handle;
+}
+
+function installTerminalPointerOwnershipTracking(host, handle) {
+  host.addEventListener("mousemove", (event) => {
+    // A move with a held button is a drag and therefore explicit engagement.
+    // Plain motion is hover, even when xterm forwards it to a child that
+    // enabled DECSET any-event mouse tracking.
+    handle.forwardingPointerHover = event.buttons === 0;
+    queueMicrotask(() => {
+      handle.forwardingPointerHover = false;
+    });
+  }, { capture: true, passive: true });
+}
+
+// Forward xterm input as base64-encoded PTY bytes. xterm's onData yields a JS
+// string of UTF-8 codepoints; we re-encode through TextEncoder so multi-byte
+// input round-trips cleanly. Child-requested hover reports use this same path,
+// but are deliberately passive PTY-geometry activity.
+function forwardTerminalData(handle, id, value) {
+  if (handle.replayingPty || state.mode !== "terminal" || state.currentId !== id || currentInlineWidget(id)) return;
+  const claim = !handle.forwardingPointerHover;
+  if (claim) claimTerminalGeometryNow();
+  const data = encodeBase64Utf8(value);
+  rpc("session.pty_input", { session_id: id, data, claim })
+    .catch((e) => console.error("pty_input failed:", e));
 }
 
 function activateTerminalHandle(handle) {
