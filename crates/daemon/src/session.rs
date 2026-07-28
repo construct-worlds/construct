@@ -4595,6 +4595,45 @@ impl SessionManager {
         .await;
     }
 
+    /// Record a user prompt into the global prompt history (spec 0155).
+    /// Called from `handle_event` for every User message, so it catches
+    /// the create() prompt-as-event, `session.input`, and adapters that
+    /// re-emit typed prompts alike. Only user-kind sessions count —
+    /// orchestrator observations, subagent briefs, and probe prompts are
+    /// machine-written, not the user's voice. Slash commands are skipped:
+    /// they are UI commands, not reusable prompts.
+    pub(crate) async fn record_prompt_history(&self, entry: &Arc<SessionEntry>, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.starts_with('/') {
+            return;
+        }
+        let harness = {
+            let s = entry.summary.read().await;
+            if s.kind != construct_protocol::SessionKind::User {
+                return;
+            }
+            s.harness.clone()
+        };
+        if let Err(e) = self
+            .storage
+            .record_prompt(construct_protocol::PromptHistoryEntry {
+                text: trimmed.to_string(),
+                at_ms: Utc::now().timestamp_millis(),
+                session_id: Some(entry.id.clone()),
+                harness: Some(harness),
+            })
+        {
+            tracing::debug!(session = %entry.id, error = %e, "prompt history record failed");
+        }
+    }
+
+    /// `prompt_history.list`: the retained global prompt history,
+    /// newest first (spec 0155).
+    pub fn prompt_history(&self, limit: Option<usize>) -> Vec<construct_protocol::PromptHistoryEntry> {
+        self.storage
+            .read_prompt_history(limit.unwrap_or(crate::storage::PROMPT_HISTORY_CAP))
+    }
+
     /// `session.suggest` (spec 0109): on-demand next-prompt suggestion
     /// generation, kicked off when the user opens the suggestion orb —
     /// never automatically. Returns whether generation started. The hand
@@ -4634,6 +4673,11 @@ impl SessionManager {
         if context.trim().is_empty() {
             return Ok(false);
         }
+        // Inject the user's recent prompts across all sessions (spec
+        // 0155) so the generator can mirror their real voice and
+        // recurring workflows, not just this session's tail.
+        let history_block =
+            render_suggest_history(&self.storage.read_prompt_history(SUGGEST_HISTORY_PROMPTS));
         let broadcast = self.broadcast.clone();
         // Smith generates through its own cheap process one-shot. Shell has
         // no model at all — "same harness" is impossible — so it borrows the
@@ -4660,6 +4704,11 @@ impl SessionManager {
             let Some(binary) = locate_binary(&binary_spec) else {
                 return Ok(false);
             };
+            let context = if history_block.is_empty() {
+                context
+            } else {
+                format!("{context}\n\n{history_block}")
+            };
             tokio::spawn(async move {
                 generate_suggestions(binary, prefix_args, entry, my_gen, context, broadcast)
                     .await;
@@ -4667,7 +4716,7 @@ impl SessionManager {
         } else {
             let mgr = self.clone();
             tokio::spawn(async move {
-                mgr.generate_suggestions_via_probe(entry, my_gen, context, broadcast)
+                mgr.generate_suggestions_via_probe(entry, my_gen, context, history_block, broadcast)
                     .await;
             });
         }
@@ -4693,6 +4742,7 @@ impl SessionManager {
         entry: Arc<SessionEntry>,
         my_gen: u64,
         context: String,
+        history_block: String,
         broadcast: tokio::sync::broadcast::Sender<BroadcastMsg>,
     ) {
         let now_ms = Utc::now().timestamp_millis();
@@ -4714,19 +4764,19 @@ impl SessionManager {
             });
             (s.harness.clone(), s.cwd.clone(), s.model.clone(), forked_from)
         };
-        let prompt = if forked_from.is_some() {
+        let mut prompt = String::from(construct_protocol::SuggestionHand::PROMPT_INSTRUCTIONS);
+        if forked_from.is_some() {
             // The forked native conversation already carries the history.
-            format!(
-                "{}\n\n(The transcript is this conversation itself.)\n\nJSON:",
-                construct_protocol::SuggestionHand::PROMPT_INSTRUCTIONS
-            )
+            prompt.push_str("\n\n(The transcript is this conversation itself.)");
         } else {
-            format!(
-                "{}\n\nTranscript tail:\n\n{}\n\nJSON:",
-                construct_protocol::SuggestionHand::PROMPT_INSTRUCTIONS,
-                context
-            )
-        };
+            prompt.push_str("\n\nTranscript tail:\n\n");
+            prompt.push_str(&context);
+        }
+        if !history_block.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&history_block);
+        }
+        prompt.push_str("\n\nJSON:");
         let create_params = construct_protocol::CreateSessionParams {
             harness: harness.clone(),
             cwd,
@@ -6251,6 +6301,33 @@ async fn apply_auto_title(
 /// prompts before it; the rendered text is further capped by the
 /// suggest-mode process itself.
 const SUGGEST_CONTEXT_EVENTS: usize = 80;
+
+/// How many global prompt-history entries feed suggestion generation
+/// (spec 0155): enough to show the user's voice and recurring
+/// workflows without drowning the transcript tail.
+const SUGGEST_HISTORY_PROMPTS: usize = 15;
+
+/// Render recent global prompt-history entries into the labeled block
+/// appended to suggestion-generation context (spec 0155). Newlines
+/// collapse so each prompt stays one list line; empty history renders
+/// to an empty string (the block is simply omitted).
+fn render_suggest_history(entries: &[construct_protocol::PromptHistoryEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut out =
+        String::from("Recent prompts from this user across sessions (most recent first):");
+    for e in entries {
+        let one_line = e.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let clipped: String = one_line.chars().take(200).collect();
+        out.push_str("\n- ");
+        out.push_str(&clipped);
+        if one_line.chars().count() > 200 {
+            out.push('…');
+        }
+    }
+    out
+}
 
 /// Hard cap on one same-harness suggestion probe's lifetime: adapter
 /// spawn plus a full model turn over a long prompt. Past this the probe

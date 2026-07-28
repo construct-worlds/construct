@@ -602,6 +602,11 @@ impl SessionManager {
             text,
         } = &event
         {
+            // Same hook feeds the global prompt history (spec 0155):
+            // shell-history dedupe inside record_prompt_history absorbs
+            // the double-record when both send_input and an adapter
+            // re-emit record the same prompt.
+            self.record_prompt_history(&entry, text).await;
             self.maybe_spawn_auto_title(entry.clone(), text.clone())
                 .await;
         }

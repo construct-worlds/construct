@@ -31,6 +31,11 @@ that is awaiting input: one top pick plus a few generated "verbs"
   verb labels, cards) is model-generated per turn; only the structure
   (one top, few verbs, few cards, clamped lengths) is fixed, enforced by
   a single shared parser so every generator obeys the same contract.
+  Generators additionally receive a bounded block of the user's recent
+  prompts from the global prompt history (spec 0155) as voice/workflow
+  context; clients may present that history alongside the hand as a
+  clearly-separate verbatim-recall selection, which is the one
+  non-generated surface the deck offers.
 - **Accepting a suggestion sends through the ordinary session-input
   path.** The deck has no send machinery of its own.
 - **Typing always wins.** The suggestion UI may only consume input
