@@ -462,6 +462,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_view_uncollapse_tooltip(f, app);
     render_lineage_segment_tooltip(f, app);
     render_harness_hover_tooltip(f, app);
+    // A session switch affects the pane's final composited surface, not just
+    // the terminal/chat layer underneath it. Paint transitions after Program
+    // documents and every pane-anchored overlay so whichever surface is
+    // actually visible participates in the same glitch.
+    render_main_transitions(f, app);
 
     // The block is complete: slide it, translate everything it recorded into
     // screen coordinates, and hand the pointer back. Everything below paints
@@ -4671,23 +4676,22 @@ fn render_glitch_overlay(f: &mut Frame, area: Rect, theme: &Theme, seed: u64, am
     }
 }
 
-fn render_main_transition(f: &mut Frame, area: Rect, app: &App, window_id: Option<u64>) {
-    let Some(window_id) = window_id else {
-        return;
-    };
-    let Some(t) = app.session_transitions.get(&window_id) else {
-        return;
-    };
-    let Some(amount) = transition_amount(t.started_at) else {
-        return;
-    };
-    let seed = match &app.selection {
-        Selection::Session(id) => hash_str(id),
-        Selection::Group(id) => hash_str(id) ^ 0x67726f7570,
-        Selection::ArchivedRow(_) => 0x617263,
-        Selection::None => 0x5e5510,
-    };
-    render_glitch_overlay(f, area, &app.theme, seed, amount);
+fn render_main_transitions(f: &mut Frame, app: &App) {
+    for pane in &app.layout.main_window_areas {
+        let Some(t) = app.session_transitions.get(&pane.id) else {
+            continue;
+        };
+        let Some(amount) = transition_amount(t.started_at) else {
+            continue;
+        };
+        let seed = match app.selection_for_window(pane.id) {
+            Some(Selection::Session(id)) => hash_str(&id),
+            Some(Selection::Group(id)) => hash_str(&id) ^ 0x67726f7570,
+            Some(Selection::ArchivedRow(_)) => 0x617263,
+            Some(Selection::None) | None => 0x5e5510,
+        };
+        render_glitch_overlay(f, pane.inner_area, &app.theme, seed, amount);
+    }
 }
 
 fn render_pin_transition(f: &mut Frame, area: Rect, app: &App, session_id: &str) {
@@ -5440,7 +5444,6 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
     }
     if let Some(g) = app.selected_group() {
         render_group_overview(f, inner, app, g);
-        render_main_transition(f, inner, app, window_id);
         return;
     }
     // Per-window view mode: `C-x t` toggles only the focused split, so each
@@ -5449,7 +5452,6 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         ViewMode::Terminal => render_terminal_for_window(f, inner, app, window_id),
         ViewMode::Chat => render_chat(f, inner, app),
     }
-    render_main_transition(f, inner, app, window_id);
 }
 
 fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {

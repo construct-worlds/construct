@@ -30552,6 +30552,64 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn session_transition_glitches_the_visible_program_surface() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut popup = program_popup_for_test(
+            "s1",
+            "# Program surface\n\nalpha beta gamma\n\ndelta epsilon zeta\n",
+            0,
+        );
+        popup.revealed_at = Instant::now() - Duration::from_secs(1);
+        popup.hide_after = Instant::now() + Duration::from_secs(60);
+        popup.cover_percent = 100;
+        app.program_popup = Some(popup);
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("baseline draw");
+        let program_area = app
+            .layout
+            .program_inner_area
+            .expect("program content is visible");
+        let before = terminal.backend().buffer().clone();
+
+        app.start_session_transition();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("transition draw");
+        let after = terminal.backend().buffer();
+        let glitch_colors = [
+            app.theme.matrix_flash_work,
+            app.theme.matrix_flash_good,
+            app.theme.accent,
+            app.theme.matrix_glow,
+        ];
+        let program_was_glitched = program_area.rows().any(|row| {
+            row.columns().any(|pos| {
+                let Some(before_cell) = before.cell(pos) else {
+                    return false;
+                };
+                let Some(after_cell) = after.cell(pos) else {
+                    return false;
+                };
+                before_cell.symbol() != after_cell.symbol()
+                    && after_cell
+                        .style()
+                        .fg
+                        .is_some_and(|color| glitch_colors.contains(&color))
+            })
+        });
+
+        assert!(
+            program_was_glitched,
+            "the pane-level transition must be composited after the Program document"
+        );
+        server.abort();
+    }
+
     #[test]
     fn switch_session_matches_title_id_harness_and_fuzzy() {
         // `switch_session_match_score` is the shared match notion that drives
