@@ -4224,11 +4224,16 @@ function connect() {
     state.widgetProgramById.clear();
     // Fetch the shared layout on every (re)connect, not just the first: a
     // client that was disconnected missed the broadcasts, so its tree is
-    // stale by definition.
+    // stale by definition. Read it before the session-list selection, but do
+    // not apply/render it until the list has populated session metadata.
+    // Otherwise the layout can select a session before the client knows which
+    // surface that session uses, leaving the focused split blank after refresh.
     rpc("layout.get", null)
-      .then((doc) => applySharedLayout(doc))
-      .catch(() => {/* older daemon with no shared layout — stay single-pane */});
-    refreshSessions();
+      .catch(() => null) // older daemon with no shared layout — stay single-pane
+      .then(async (doc) => {
+        await refreshSessions(doc && doc.tree);
+        if (doc) applySharedLayout(doc);
+      });
     refreshCurrentSessionAfterReconnect();
   });
 
@@ -4320,7 +4325,7 @@ function rpc(method, params) {
 
 // --- Sessions list -------------------------------------------------------
 
-async function refreshSessions() {
+async function refreshSessions(startingLayoutTree = null) {
   try {
     // Fetch sessions + projects in parallel. Projects arrive as
     // `project.list -> Vec<ProjectSummary>`; sessions still reference
@@ -4350,9 +4355,27 @@ async function refreshSessions() {
       const requested = state.urlRequestedSessionId
         ? ordered.find((s) => s.id === state.urlRequestedSessionId)
         : null;
+      // On startup the staged layout supplies the local starting session, but
+      // selection waits until the metadata that decides terminal vs chat is
+      // available. Narrow clients use the first populated layout leaf as
+      // their read-only starting hint.
+      const layoutSessionId = state.layout.tree
+        ? focusedPaneSessionId() || layoutStartingSessionId()
+        : layoutStartingSessionId(startingLayoutTree);
+      const fromLayout = layoutSessionId
+        ? ordered.find((s) => s.id === layoutSessionId)
+        : null;
       const firstUser = ordered.find((s) => s.kind !== "orchestrator");
-      const pick = requested || firstUser || ordered[0];
+      const pick = requested || fromLayout || firstUser || ordered[0];
       if (pick) selectSession(pick.id, { replaceUrl: true });
+    } else {
+      // A layout notification can set currentId while session.list is still
+      // in flight. If that selection stopped before its real surface was
+      // initialized, finish it now that its metadata is present.
+      const current = state.sessions.find((s) => s.id === state.currentId);
+      if (current && !sessionSurfaceIsInitialized(current)) {
+        selectSession(current.id, { replaceUrl: true, fromPane: true });
+      }
     }
   } catch (e) {
     sessionListEl.innerHTML = `<div class="empty">${escape(e.message)}</div>`;
@@ -5541,6 +5564,15 @@ async function switchCurrentViewMode(mode) {
   reportView();
 }
 
+function sessionSurfaceIsInitialized(session) {
+  if (!session || state.currentId !== session.id) return false;
+  const preferred = preferredViewModeForSession(session);
+  if (state.mode !== preferred) return false;
+  if (preferred === "terminal") return state.terminalById.has(session.id);
+  if (preferred === "program") return state.program.mountedId === session.id;
+  return state.transcriptPaneById.has(session.id);
+}
+
 async function selectSession(id, { replaceUrl = false, fromPane = false } = {}) {
   rpc("session.mark_seen", { session_id: id }).catch(() => {});
   // Picking a session from the list points the FOCUSED pane at it, which is
@@ -5553,7 +5585,11 @@ async function selectSession(id, { replaceUrl = false, fromPane = false } = {}) 
   if (!fromPane) setFocusedPaneSession(id);
   if (state.currentId === id) {
     setLocationSessionId(id, { replace: replaceUrl });
-    return;
+    const current = state.sessions.find((s) => s.id === id);
+    // An early layout selection may know the ID but not yet have the session
+    // metadata/surface. Once metadata arrives, fall through and complete the
+    // same selection rather than treating the half-selected ID as finished.
+    if (!current || sessionSurfaceIsInitialized(current)) return;
   }
   if (state.mode === "chat") rememberTranscriptViewport(state.currentId);
   const focusTerminalAfterSwitch = shouldFocusTerminalAfterSessionSwitch();
@@ -10052,20 +10088,38 @@ async function pushLayout(tree) {
 /** Adopt a layout from the daemon (initial fetch or another client's write). */
 function applySharedLayout(doc) {
   if (!doc || !doc.tree) return;
+  const adoptingFirstLayout = !state.layout.tree;
   state.layout = { tree: doc.tree, version: doc.version || 0 };
   // Focus never comes from the wire. Keep ours if the pane still exists;
-  // otherwise fall back to the first pane in layout order.
+  // otherwise fall back to the first pane in layout order. On the first
+  // layout snapshot after a page load, the URL/current session identifies
+  // which local pane held focus before refresh, so restore that pane first.
   const leaves = layoutLeaves(state.layout.tree);
   if (!leaves.some((l) => l.id === state.focusedPaneId)) {
-    state.focusedPaneId = leaves.length ? leaves[0].id : null;
+    const restoreSessionId = adoptingFirstLayout
+      ? state.urlRequestedSessionId || state.currentId
+      : null;
+    const restored = restoreSessionId
+      ? leaves.find((l) => l.session_id === restoreSessionId)
+      : null;
+    state.focusedPaneId = restored
+      ? restored.id
+      : leaves.length
+        ? leaves[0].id
+        : null;
   }
   renderPaneGrid();
+  refreshSessionActions();
   // With panes on screen, the focused pane's session is shared: another
   // client moving it moves what this pane shows. With a single pane the
   // selection is local and stays put.
   if (splitLayoutActive()) {
     const focused = focusedPaneSessionId();
-    if (focused && focused !== state.currentId) {
+    // Do not bind the interactive surface until session.list has told us
+    // whether this session is PTY-backed. Selecting against an empty metadata
+    // cache guesses "chat" and leaves terminal sessions blank after refresh.
+    const known = focused && state.sessions.some((s) => s.id === focused);
+    if (known && focused !== state.currentId) {
       selectSession(focused, { fromPane: true });
     }
   }
@@ -10076,8 +10130,8 @@ function applySharedLayout(doc) {
  * remembered selection: whatever the shared layout has focused. Read-only —
  * this is the one way a narrow client touches the layout.
  */
-function layoutStartingSessionId() {
-  const leaves = layoutLeaves(state.layout.tree);
+function layoutStartingSessionId(tree = state.layout.tree) {
+  const leaves = layoutLeaves(tree);
   for (const leaf of leaves) {
     if (leaf.session_id && state.sessions.some((s) => s.id === leaf.session_id)) {
       return leaf.session_id;
@@ -10400,7 +10454,11 @@ function buildMirror(leaf) {
   empty.className = "pane-empty";
   empty.textContent = session ? "loading…" : "session unavailable";
   mirror.appendChild(empty);
-  if (session) loadTranscript(id).then(() => renderPaneGrid()).catch(() => {});
+  if (session) {
+    loadTranscript(id, { background: true })
+      .then(() => renderPaneGrid())
+      .catch(() => {});
+  }
   return mirror;
 }
 
@@ -10710,7 +10768,13 @@ function updateTranscriptProgressBanner(el, loaded, total) {
 }
 
 async function loadTranscript(id, opts = {}) {
-  const pane = showTranscriptPane(id);
+  // Mirrors hydrate offscreen. They must not call showTranscriptPane: that
+  // foreground helper hides every other cached transcript, including the
+  // focused split's content during refresh.
+  const background = opts.background === true;
+  const pane = background
+    ? transcriptPaneForSession(id)
+    : showTranscriptPane(id);
   if (opts.force) markTranscriptStale(id);
   if (pane.dataset.loaded === "true") {
     restoreTranscriptViewport(id);
@@ -10747,7 +10811,7 @@ async function loadTranscript(id, opts = {}) {
   clearTimeout(skeletonTimer);
   // A rapid re-selection may have moved on while we awaited the round-trip;
   // don't clobber whatever the user is now looking at.
-  if (state.currentId !== id) return;
+  if (!background && state.currentId !== id) return;
   const tailEvents = (result && result.events) || [];
   const total = (result && typeof result.total === "number") ? result.total : tailEvents.length;
   // Build the tail off-DOM, then swap it in and pin to the bottom in one

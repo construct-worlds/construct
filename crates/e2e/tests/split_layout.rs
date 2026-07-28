@@ -280,6 +280,82 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         "changing pane focus must not move the panes or their title bars"
     );
 
+    // A browser refresh keeps the selected session in the URL. That session
+    // identifies the locally focused pane (focus itself is intentionally not
+    // daemon state), so startup must put the interactive stack back in that
+    // pane and hydrate its real surface. Startup must also hydrate the
+    // unfocused mirror without letting that background load hide the focused
+    // transcript until the user switches away and back.
+    let focused_before_refresh = focused_session(&page).await;
+    assert_eq!(
+        focused_before_refresh, b,
+        "the second pane should be focused before exercising refresh"
+    );
+    page.reload().await.expect("reload focused split");
+    wait_conn_open(&page).await;
+    assert!(
+        wait_for_number(
+            &page,
+            "document.querySelectorAll('#paneGrid .pane').length",
+            2.0,
+        )
+        .await
+        .is_some(),
+        "the split layout should return after refresh"
+    );
+    let restored_js = format!(
+        "(() => {{
+           const focused = document.querySelector('#paneGrid .pane.is-focused');
+           const transcriptPane = state.transcriptPaneById.get({b:?});
+           const surfaceVisible = state.mode === 'terminal'
+             ? !document.getElementById('terminalWrap').hidden
+             : state.mode === 'program'
+               ? !document.getElementById('programWrap').hidden
+               : !!transcriptPane && !transcriptPane.hidden && focused?.contains(transcriptPane);
+           return state.currentId === {b:?}
+             && focusedPaneSessionId() === {b:?}
+             && !!focused?.querySelector('#viewStack')
+             && surfaceVisible;
+         }})()"
+    );
+    let restored = wait_for_bool(&page, &restored_js).await;
+    let restored_state: String = page
+        .evaluate(
+            "JSON.stringify({
+               currentId: state.currentId,
+               focusedPaneId: state.focusedPaneId,
+               focusedPaneSessionId: focusedPaneSessionId(),
+               urlRequestedSessionId: state.urlRequestedSessionId,
+               mode: state.mode,
+               session: state.sessions.find((s) => s.id === state.currentId),
+               terminalHidden: document.getElementById('terminalWrap').hidden,
+               transcriptMounted: (() => {
+                 const pane = state.transcriptPaneById.get(state.currentId);
+                 const focused = document.querySelector('#paneGrid .pane.is-focused');
+                 return !!pane && !pane.hidden && focused?.contains(pane);
+               })(),
+               transcript: (() => {
+                 const pane = state.transcriptPaneById.get(state.currentId);
+                 return pane ? {
+                   hidden: pane.hidden,
+                   parentId: pane.parentElement?.id,
+                   parentClass: pane.parentElement?.className,
+                 } : null;
+               })(),
+               mirroredSessionIds: Array.from(state.mirroredSessionIds),
+               stackInFocused: !!document.querySelector('#paneGrid .pane.is-focused #viewStack'),
+             })",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    assert!(
+        restored,
+        "refresh must restore the focused pane's session and visible surface; got {restored_state}"
+    );
+    save_screenshot(&page, "split_layout_refresh_restored.png").await;
+
     // The header must not reflow when the session name changes length.
     // Focusing another pane switches the selected session, and sizing the
     // title to its text made every control after it slide — the visible
