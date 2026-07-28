@@ -1279,6 +1279,116 @@ async fn web_client_loads_and_websocket_connects() {
         "visible keyboard switch should preserve terminal focus: {switch_focus:?}"
     );
 
+    // Suggestion availability follows live session state while the user may
+    // already be typing. Keep the overlay mounted and change only its
+    // visibility: display-detaching the button via `hidden` has caused some
+    // browsers to discard an unrelated composer/xterm caret.
+    let suggestion_focus: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const saved = {
+                currentId: state.currentId,
+                sessions: state.sessions,
+                mode: state.mode,
+                composerHidden: composerEl.hidden,
+                inputValue: inputEl.value,
+                deckClass: suggestDeckEl.className,
+                deckAriaHidden: suggestDeckEl.getAttribute('aria-hidden'),
+                deckInert: suggestDeckEl.inert,
+                deckHiddenAttribute: suggestDeckEl.hasAttribute('hidden'),
+              };
+              let detachedThroughHidden = false;
+              try {
+                state.currentId = 's-suggestion-focus';
+                state.sessions = [{
+                  id: 's-suggestion-focus',
+                  state: 'awaiting_input',
+                  kind: 'user',
+                }];
+                state.mode = 'chat';
+                composerEl.hidden = false;
+                inputEl.value = 'typing must continue';
+                inputEl.focus();
+
+                // Model the browser failure mode this regression guards:
+                // detaching the overlay with `hidden` drops the active caret,
+                // even though the caret is not inside the overlay.
+                Object.defineProperty(suggestDeckEl, 'hidden', {
+                  configurable: true,
+                  get: () => detachedThroughHidden,
+                  set: (hidden) => {
+                    detachedThroughHidden = !!hidden;
+                    if (hidden && document.activeElement === inputEl) inputEl.blur();
+                  },
+                });
+
+                updateSuggestOrb();
+                const focusedWhileShown = document.activeElement === inputEl;
+                const shownVisibility = getComputedStyle(suggestDeckEl).visibility;
+
+                state.sessions[0].state = 'running';
+                updateSuggestOrb();
+                const focusedWhileHidden = document.activeElement === inputEl;
+                const hiddenStyle = getComputedStyle(suggestDeckEl);
+
+                return {
+                  focusedWhileShown,
+                  focusedWhileHidden,
+                  shownVisibility,
+                  hiddenVisibility: hiddenStyle.visibility,
+                  hiddenDisplay: hiddenStyle.display,
+                  detachedThroughHidden,
+                  ariaHidden: suggestDeckEl.getAttribute('aria-hidden'),
+                  inert: suggestDeckEl.inert,
+                };
+              } finally {
+                delete suggestDeckEl.hidden;
+                state.currentId = saved.currentId;
+                state.sessions = saved.sessions;
+                state.mode = saved.mode;
+                composerEl.hidden = saved.composerHidden;
+                inputEl.value = saved.inputValue;
+                suggestDeckEl.className = saved.deckClass;
+                if (saved.deckAriaHidden === null) suggestDeckEl.removeAttribute('aria-hidden');
+                else suggestDeckEl.setAttribute('aria-hidden', saved.deckAriaHidden);
+                suggestDeckEl.inert = saved.deckInert;
+                suggestDeckEl.toggleAttribute('hidden', saved.deckHiddenAttribute);
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate suggestion focus preservation")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        suggestion_focus["focusedWhileShown"], true,
+        "showing the suggestion button must preserve the typing caret: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["focusedWhileHidden"], true,
+        "hiding the suggestion button must preserve the typing caret: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["shownVisibility"], "visible",
+        "awaiting-input sessions should reveal the mounted suggestion deck: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["hiddenVisibility"], "hidden",
+        "running sessions should conceal the mounted suggestion deck: {suggestion_focus:?}"
+    );
+    assert_ne!(
+        suggestion_focus["hiddenDisplay"], "none",
+        "availability changes must not display-detach the deck: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["detachedThroughHidden"], false,
+        "availability changes must not mutate the deck's hidden property: {suggestion_focus:?}"
+    );
+    assert_eq!(suggestion_focus["ariaHidden"], "true");
+    assert_eq!(suggestion_focus["inert"], true);
+
     // A deliberate click in a split is a geometry claim even if local focus
     // was already on that pane. The old early return in focusPane made title
     // bar/body clicks inert in exactly that case.

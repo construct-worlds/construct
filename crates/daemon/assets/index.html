@@ -1255,8 +1255,20 @@
     right: calc(16px + env(safe-area-inset-right));
     bottom: calc(86px + env(safe-area-inset-bottom));
     z-index: 32;
+    visibility: hidden;
+    pointer-events: none;
   }
-  .suggest-deck[hidden] { display: none !important; }
+  /*
+   * Keep the deck mounted while its session changes state. Toggling
+   * `display:none` through the hidden attribute can make browsers discard
+   * the active terminal/composer caret even though it lives outside the
+   * deck. Visibility does not affect this absolutely-positioned overlay's
+   * layout, so showing/hiding it can stay focus-neutral.
+   */
+  .suggest-deck.is-available {
+    visibility: visible;
+    pointer-events: auto;
+  }
   /* Circular orb (FAB). The fan and stack anchor to its center. */
   .suggest-orb {
     display: flex;
@@ -3161,7 +3173,7 @@
         sends the text through `session.input`. Never modal: it hides
         while the session runs and closes on any outside tap.
       -->
-      <div id="suggestDeck" class="suggest-deck" hidden>
+      <div id="suggestDeck" class="suggest-deck" aria-hidden="true" inert>
         <div id="suggestFan" class="suggest-fan" hidden></div>
         <div id="suggestStack" class="suggest-stack" hidden>
           <div class="suggest-stack-head">
@@ -10929,6 +10941,17 @@ function suggestPendingActive(id) {
 function suggestDeckIsOpen() {
   return !suggestFanEl.hidden || !suggestStackEl.hidden;
 }
+function suggestDeckIsAvailable() {
+  return suggestDeckEl.classList.contains("is-available");
+}
+function setSuggestDeckAvailable(available) {
+  suggestDeckEl.classList.toggle("is-available", available);
+  suggestDeckEl.setAttribute("aria-hidden", available ? "false" : "true");
+  // Keep the hidden deck out of sequential focus and accessibility trees
+  // without detaching it from rendering. Its controls become interactive
+  // again atomically with the visibility class.
+  suggestDeckEl.inert = !available;
+}
 function closeSuggestDeck() {
   suggestFanEl.hidden = true;
   suggestStackEl.hidden = true;
@@ -10937,7 +10960,7 @@ function closeSuggestDeck() {
 function updateSuggestOrb() {
   const s = state.sessions.find((x) => x.id === state.currentId) || null;
   const awaiting = !!s && sessionStatusLabel(s) === "awaiting_input";
-  suggestDeckEl.hidden = !awaiting;
+  setSuggestDeckAvailable(awaiting);
   if (!awaiting) {
     closeSuggestDeck();
     return;
@@ -11066,7 +11089,7 @@ document.addEventListener("keydown", (e) => {
 // Refresh the pending spinner label so a timed-out generation falls
 // back to the idle orb without requiring another event.
 setInterval(() => {
-  if (!suggestDeckEl.hidden) updateSuggestOrb();
+  if (suggestDeckIsAvailable()) updateSuggestOrb();
 }, 3000);
 
 function handleNotification(method, params) {
