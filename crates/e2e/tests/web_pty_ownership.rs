@@ -15,7 +15,9 @@ use chromiumoxide::cdp::browser_protocol::input::{
 };
 use chromiumoxide::page::Page;
 use construct_e2e::Daemon;
-use construct_protocol::{CreateSessionParams, PtySize, TunnelProvider};
+use construct_protocol::{
+    CreateSessionParams, LayoutNode, LayoutSplitDirection, PtySize, TunnelProvider,
+};
 use futures::StreamExt;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -235,6 +237,184 @@ async fn claude_mouse_hover_does_not_reclaim_pty_after_tui_handoff() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_split_session_switch_does_not_reclaim_tui_geometry() {
+    let d = Daemon::spawn().await.expect("daemon");
+    let r = d
+        .client
+        .remote_start(TunnelProvider::None, None)
+        .await
+        .expect("remote.start");
+    let cwd = std::env::temp_dir().to_string_lossy().to_string();
+    let a = d
+        .client
+        .create(shell_session_params(&cwd, "split alpha"))
+        .await
+        .expect("create alpha");
+    let b = d
+        .client
+        .create(shell_session_params(&cwd, "split beta"))
+        .await
+        .expect("create beta");
+    // Switching a pane to a session already visible in the other pane swaps
+    // the two sessions. This also guarantees the browser has hydrated the
+    // incoming pane before the remote switch, matching the live split-view
+    // path where the takeover was observed.
+    let incoming = b.clone();
+
+    let initial = LayoutNode::Split {
+        direction: LayoutSplitDirection::Right,
+        ratio_percent: 50,
+        first: Box::new(LayoutNode::Leaf {
+            id: 1,
+            session_id: Some(a.clone()),
+        }),
+        second: Box::new(LayoutNode::Leaf {
+            id: 2,
+            session_id: Some(b.clone()),
+        }),
+    };
+    let initial_doc = d
+        .client
+        .set_layout(initial, Some(0))
+        .await
+        .expect("seed split layout");
+
+    let Some((browser, mut handler)) = launch_browser().await else {
+        eprintln!("skipping web_pty_ownership: could not launch Chromium");
+        return;
+    };
+    let _handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+    let page = browser.new_page("about:blank").await.expect("new page");
+    set_viewport(&page, 1600, 900).await;
+    page.goto(inject_userinfo(&r.local_url, "remote", &r.password))
+        .await
+        .expect("goto WebUI");
+    wait_conn_open(&page).await;
+    wait_for_bool(
+        &page,
+        &format!(
+            "state.currentId === {a:?} && \
+             document.querySelectorAll('#paneGrid .pane').length === 2"
+        ),
+    )
+    .await;
+
+    // Prime both cached terminals through ordinary local selection, then
+    // return to pane 1's session. The native resize below supersedes these
+    // setup claims before the behavior under test begins.
+    page.evaluate(format!(
+        "(async () => {{ await selectSession({incoming:?}, {{ fromPane: true }}); return true; }})()"
+    ))
+        .await
+        .expect("prime incoming terminal");
+    page.evaluate(format!(
+        "(async () => {{ await selectSession({a:?}, {{ fromPane: true }}); return true; }})()"
+    ))
+    .await
+    .expect("return to first pane session");
+    wait_for_bool(&page, &format!("state.currentId === {a:?}")).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for_bool(
+        &page,
+        "state.pendingHydrationBump === null && \
+         state.pendingGeometryClaim === null && \
+         state.ptyResizeTimer === null && \
+         state.pendingPtyResize === null",
+    )
+    .await;
+
+    // Trace the browser's RPC classification. The shared layout event may
+    // report the newly measured viewport, but it must never mark that report
+    // as engagement.
+    page.evaluate(
+        r#"
+        (() => {
+          window.__splitGeometryTrace = [];
+          const realRpc = rpc;
+          rpc = (method, params) => {
+            if (method === "session.pty_resize") {
+              window.__splitGeometryTrace.push({ method, params: { ...params } });
+            }
+            return realRpc(method, params);
+          };
+          return true;
+        })()
+        "#,
+    )
+    .await
+    .expect("install split geometry trace");
+
+    // This connection stands in for the TUI. It switches the focused split
+    // to `incoming` and, as the last engaged client, owns its unmistakable
+    // geometry before the shared layout broadcast reaches the browser.
+    let tui_size = PtySize { cols: 73, rows: 21 };
+    d.client
+        .pty_resize(&incoming, tui_size.cols, tui_size.rows)
+        .await
+        .expect("TUI claims incoming geometry");
+    wait_for_pty_size(&d, &incoming, tui_size).await;
+
+    let switched = LayoutNode::Split {
+        direction: LayoutSplitDirection::Right,
+        ratio_percent: 50,
+        first: Box::new(LayoutNode::Leaf {
+            id: 1,
+            session_id: Some(incoming.clone()),
+        }),
+        second: Box::new(LayoutNode::Leaf {
+            id: 2,
+            session_id: Some(a),
+        }),
+    };
+    d.client
+        .set_layout(switched, Some(initial_doc.version))
+        .await
+        .expect("TUI switches focused split session");
+
+    wait_for_bool(
+        &page,
+        &format!("state.layout.version > {}", initial_doc.version),
+    )
+    .await;
+    wait_for_bool(&page, &format!("state.currentId === {incoming:?}")).await;
+    wait_for_bool(
+        &page,
+        &format!(
+            "(() => {{ const h = terminalHandleForSession({incoming:?}); \
+             return state.mode === 'terminal' && !!h?.loaded; }})()"
+        ),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    let actual = current_pty_size(&d, &incoming).await;
+    let trace = page
+        .evaluate("JSON.stringify(window.__splitGeometryTrace || [])")
+        .await
+        .ok()
+        .and_then(|v| v.into_value::<String>().ok())
+        .unwrap_or_else(|| "[]".to_string());
+    assert_eq!(
+        actual, tui_size,
+        "following a TUI split switch changed the TUI-owned PTY geometry; trace={trace}"
+    );
+    assert!(
+        !trace.contains(r#""claim":true"#),
+        "shared split synchronization emitted a claiming browser resize; trace={trace}"
+    );
+    let browser_owns = page
+        .evaluate(format!("state.ptyOwnedSessionIds.has({incoming:?})"))
+        .await
+        .ok()
+        .and_then(|v| v.into_value::<bool>().ok())
+        .unwrap_or(true);
+    assert!(
+        !browser_owns,
+        "the passive browser must still recognize the TUI as geometry owner"
+    );
+}
+
 async fn current_pty_size(d: &Daemon, id: &str) -> PtySize {
     d.client
         .pty_replay(id)
@@ -413,7 +593,10 @@ fn shell_session_params(cwd: &str, title: &str) -> CreateSessionParams {
         model: None,
         title: Some(title.to_string()),
         mode: None,
-        pty_size: None,
+        pty_size: Some(PtySize {
+            cols: 100,
+            rows: 30,
+        }),
         worktree: false,
         env: std::collections::HashMap::new(),
         args: Vec::new(),
