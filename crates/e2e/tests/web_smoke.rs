@@ -1507,6 +1507,152 @@ async fn web_client_loads_and_websocket_connects() {
         "typed bytes claim, while automatic DSR replies and real xterm hover stay passive"
     );
 
+    // Exact cross-client handoff regression: the browser was clicked first,
+    // so its short post-click engagement latch is still live when a TUI
+    // claims a different grid. The personalized resize event must override
+    // that stale latch and resize local xterm before Claude-style any-event
+    // mouse tracking forwards the next plain hover.
+    let xterm_hover_after_tui_handoff: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const saved = {
+                currentId: state.currentId,
+                mode: state.mode,
+                term: state.term,
+                fitAddon: state.fitAddon,
+                webPtyEngagedUntil: state.webPtyEngagedUntil,
+                ptySizeById: state.ptySizeById,
+                rpc,
+                claimTerminalGeometryNow,
+              };
+              const calls = [];
+              let geometryClaims = 0;
+              const host = document.createElement("div");
+              host.className = "terminal-host";
+              host.style.cssText = "position:fixed;left:0;top:0;width:960px;height:600px";
+              document.body.appendChild(host);
+              const term = new window.Terminal({ cols: 100, rows: 40 });
+              const handle = {
+                replayingPty: false,
+                forwardingPointerHover: false,
+                xtermUserInputPending: false,
+                xtermUserInputSignalAvailable: false,
+              };
+              try {
+                state.currentId = "s-hover-handoff";
+                state.mode = "terminal";
+                state.term = term;
+                state.fitAddon = {
+                  proposeDimensions: () => ({ cols: 120, rows: 50 }),
+                };
+                state.ptySizeById = new Map();
+                rpc = (method, params) => {
+                  calls.push({ method, params });
+                  return Promise.resolve(null);
+                };
+                claimTerminalGeometryNow = () => { geometryClaims += 1; };
+
+                term.open(host);
+                installTerminalInputOwnershipTracking(host, handle, term);
+                term.onData((value) => {
+                  forwardTerminalData(handle, "s-hover-handoff", value);
+                });
+
+                // Browser click/claim and its own resize echo.
+                noteWebPtyEngagement();
+                handleNotification("session/event", {
+                  session_id: "s-hover-handoff",
+                  at: 0,
+                  event: {
+                    type: "pty_resize",
+                    cols: 100,
+                    rows: 40,
+                    owner: true,
+                  },
+                });
+                const ownLatchPreserved = webPtyRecentlyEngaged();
+
+                // A TUI then clicks/types at a distinct geometry. This event
+                // arrives well inside the browser's old three-second latch.
+                handleNotification("session/event", {
+                  session_id: "s-hover-handoff",
+                  at: 0,
+                  event: {
+                    type: "pty_resize",
+                    cols: 73,
+                    rows: 21,
+                    owner: false,
+                  },
+                });
+                const afterTui = {
+                  cols: term.cols,
+                  rows: term.rows,
+                  latchCleared: !webPtyRecentlyEngaged(),
+                };
+
+                // Claude enables any-event SGR mouse reporting; moving the
+                // pointer into its web terminal must remain passive.
+                await new Promise((resolve) => term.write(
+                  "\x1b[?1003h\x1b[?1006h",
+                  resolve,
+                ));
+                const screen = term.element.querySelector(".xterm-screen");
+                const rect = screen.getBoundingClientRect();
+                screen.dispatchEvent(new MouseEvent("mousemove", {
+                  bubbles: true,
+                  buttons: 0,
+                  clientX: rect.left + rect.width / 2,
+                  clientY: rect.top + rect.height / 2,
+                }));
+                await Promise.resolve();
+                return {
+                  ownLatchPreserved,
+                  afterTui,
+                  geometryClaims,
+                  inputClaims: calls
+                    .filter((call) => call.method === "session.pty_input")
+                    .map((call) => call.params.claim),
+                };
+              } finally {
+                term.dispose();
+                host.remove();
+                state.currentId = saved.currentId;
+                state.mode = saved.mode;
+                state.term = saved.term;
+                state.fitAddon = saved.fitAddon;
+                state.webPtyEngagedUntil = saved.webPtyEngagedUntil;
+                state.ptySizeById = saved.ptySizeById;
+                rpc = saved.rpc;
+                claimTerminalGeometryNow = saved.claimTerminalGeometryNow;
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate real xterm hover after TUI geometry handoff")
+        .into_value::<serde_json::Value>()
+        .expect("hover handoff result");
+    assert_eq!(
+        xterm_hover_after_tui_handoff["ownLatchPreserved"], true,
+        "the browser's own resize echo must not cancel its engagement latch"
+    );
+    assert_eq!(
+        xterm_hover_after_tui_handoff["afterTui"],
+        serde_json::json!({ "cols": 73, "rows": 21, "latchCleared": true }),
+        "a foreign TUI claim must immediately replace the stale web grid: \
+         {xterm_hover_after_tui_handoff:?}"
+    );
+    assert_eq!(
+        xterm_hover_after_tui_handoff["geometryClaims"], 0,
+        "hover after the handoff must not reclaim web geometry"
+    );
+    assert_eq!(
+        xterm_hover_after_tui_handoff["inputClaims"],
+        serde_json::json!([false]),
+        "Claude-style mouse hover must be forwarded as passive input after the handoff"
+    );
+
     // Mobile regression: selecting a session auto-hides the narrow session
     // list without changing the stored preference. Keyboard/viewport resizes
     // must preserve that current hidden state instead of re-reading the older

@@ -960,6 +960,7 @@ fn forward_broadcast(
     if let Some(f) = filter {
         let matches = match &msg {
             BroadcastMsg::Event(e) => e.session_id == *f,
+            BroadcastMsg::PtyResize { payload, .. } => payload.session_id == *f,
             BroadcastMsg::State(s) => s.session.id == *f,
             BroadcastMsg::Deleted(d) => d.session_id == *f,
             BroadcastMsg::ProgramState(c) => c.program.session_id == *f,
@@ -985,6 +986,21 @@ fn forward_broadcast(
     let notif = match msg {
         BroadcastMsg::Event(e) => {
             let p = match serde_json::to_value(&e) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            Notification::new(ipc_notif::EVENT, Some(p))
+        }
+        BroadcastMsg::PtyResize {
+            mut payload,
+            owner_conn_id,
+        } => {
+            if let construct_protocol::SessionEvent::PtyResize { owner, .. } =
+                &mut payload.event
+            {
+                *owner = owner_conn_id == conn_id;
+            }
+            let p = match serde_json::to_value(&payload) {
                 Ok(v) => v,
                 Err(_) => return,
             };
@@ -1825,6 +1841,46 @@ mod tests {
             out_rx.try_recv().is_ok(),
             "a rebase-driven update must reach the cursor's own owner"
         );
+    }
+
+    #[test]
+    fn forward_broadcast_personalizes_pty_resize_ownership() {
+        let payload = construct_protocol::EventNotificationPayload {
+            session_id: "s1".to_string(),
+            at: chrono::Utc::now(),
+            event: construct_protocol::SessionEvent::PtyResize {
+                cols: 73,
+                rows: 21,
+                owner: false,
+            },
+            seq: 0,
+        };
+
+        let (owner_tx, mut owner_rx) = mpsc::unbounded_channel();
+        forward_broadcast(
+            &owner_tx,
+            &None,
+            BroadcastMsg::PtyResize {
+                payload: payload.clone(),
+                owner_conn_id: 7,
+            },
+            7,
+        );
+        let owner = owner_rx.try_recv().expect("owner notification");
+        assert_eq!(owner["params"]["event"]["owner"], true);
+
+        let (viewer_tx, mut viewer_rx) = mpsc::unbounded_channel();
+        forward_broadcast(
+            &viewer_tx,
+            &None,
+            BroadcastMsg::PtyResize {
+                payload,
+                owner_conn_id: 7,
+            },
+            42,
+        );
+        let viewer = viewer_rx.try_recv().expect("viewer notification");
+        assert_eq!(viewer["params"]["event"]["owner"], false);
     }
 
     #[test]

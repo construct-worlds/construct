@@ -228,7 +228,8 @@ impl SessionManager {
         if let Some((cols, rows)) = to_apply {
             // The pty_resize dedup handles the case where the OS PTY is
             // already at this size.
-            self.pty_resize(id, cols, rows).await?;
+            self.pty_resize_from_connection(id, cols, rows, Some(conn_id))
+                .await?;
         }
         Ok(())
     }
@@ -253,6 +254,16 @@ impl SessionManager {
     }
 
     pub async fn pty_resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
+        self.pty_resize_from_connection(id, cols, rows, None).await
+    }
+
+    async fn pty_resize_from_connection(
+        &self,
+        id: &str,
+        cols: u16,
+        rows: u16,
+        owner_conn_id: Option<u64>,
+    ) -> Result<()> {
         let entry = self
             .get_entry(id)
             .await
@@ -283,7 +294,24 @@ impl SessionManager {
         // persisted) so a passive viewer (e.g. a narrower web terminal) can
         // render at the real width instead of wrapping. Only fires on an
         // actual change — the dedup above already returned for a no-op.
-        self.broadcast_widget_event(id, SessionEvent::PtyResize { cols, rows });
+        let payload = construct_protocol::EventNotificationPayload {
+            session_id: id.to_string(),
+            at: chrono::Utc::now(),
+            event: SessionEvent::PtyResize {
+                cols,
+                rows,
+                owner: false,
+            },
+            seq: 0,
+        };
+        let broadcast = match owner_conn_id {
+            Some(owner_conn_id) => super::BroadcastMsg::PtyResize {
+                payload,
+                owner_conn_id,
+            },
+            None => super::BroadcastMsg::Event(payload),
+        };
+        let _ = self.broadcast.send(broadcast);
         let adapter = self.live_adapter_or_mark_closed(&entry).await?;
         let params = serde_json::to_value(&construct_protocol::SessionPtyResizeParams {
             session_id: id.to_string(),

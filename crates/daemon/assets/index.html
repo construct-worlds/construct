@@ -10919,10 +10919,16 @@ function handleNotification(method, params) {
       // instead of its own fit — a viewer whose rows or columns disagree with
       // the child misplaces every cursor-addressed repaint it receives.
       state.ptySizeById.set(session_id, { cols: event.cols, rows: event.rows });
-      // Skip while we are the engaged owner: these broadcasts are echoes of
-      // our own resizes, including the transient one-column hydration bump,
-      // and adopting them would reflow the grid twice for nothing.
-      if (session_id === state.currentId && !webPtyRecentlyEngaged()) {
+      // The daemon personalizes this transient event per connection. A
+      // foreign resize means another TUI/browser took ownership, even if this
+      // browser was clicked a moment ago and its engagement grace period is
+      // still live. End that grace period immediately and adopt the owner's
+      // grid before xterm can encode a child-requested hover report against
+      // stale web dimensions. Own echoes (including the hydration bump) stay
+      // local and do not cause a redundant reflow.
+      const ownGeometry = event.owner === true;
+      if (!ownGeometry) state.webPtyEngagedUntil = 0;
+      if (session_id === state.currentId && !ownGeometry) {
         applyPassiveTerminalGeometry();
       }
       return;
