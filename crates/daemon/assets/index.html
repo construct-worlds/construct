@@ -3671,9 +3671,12 @@ const state = {
   // `focusedPaneId` is deliberately NOT part of it — focus is per-client.
   layout: { tree: null, version: 0 },
   focusedPaneId: null,
-  // Per-client pane zoom (`C-x z`). Spec 0113 keeps zoom out of the shared
+  // Per-client pane zoom (`C-x z`). Spec 0118 keeps zoom out of the shared
   // layout, so this never round-trips to the daemon.
   paneZoom: false,
+  // Surface `C-x Space` was invoked from, so toggling Program off returns
+  // there instead of guessing. Null until Program is opened by the chord.
+  viewModeBeforeProgram: null,
   // Sessions currently mounted in an unfocused pane. Their cached terminal
   // hosts must stay visible and keep receiving live PTY bytes even though
   // they are not `currentId`.
@@ -4646,6 +4649,111 @@ const listDrag = {
   suppressClick: false, // swallow the click that follows a drag
   renderQueued: false,  // a renderSessions() arrived mid-drag
 };
+
+/**
+ * The list's own keymap, live only while focus is inside the list.
+ *
+ * The TUI binds these bare — `C-n`/`C-p`, arrows, Enter, Space — because its
+ * list is modal and never holds a text caret. A browser can't claim bare keys
+ * globally without breaking typing everywhere, but it can claim them *here*:
+ * a focused list row is exactly as modal as the TUI's list, so the same
+ * spelling is safe and expected. This is why `C-x o` reaching the list
+ * matters — it is the door to this layer.
+ *
+ * Rows include group headers, matching the TUI, where a group is a selectable
+ * row whose Left/Right collapse and expand it.
+ */
+function listFocusRows() {
+  return Array.from(
+    sessionListEl.querySelectorAll(".item[data-id], .group-header[data-group-id]")
+  );
+}
+
+function focusListRow(row) {
+  if (!row) return;
+  row.setAttribute("tabindex", "-1");
+  row.focus();
+  row.scrollIntoView({ block: "nearest" });
+}
+
+function listFocusedRow() {
+  const active = document.activeElement;
+  return active && active.closest
+    ? active.closest(".item[data-id], .group-header[data-group-id]")
+    : null;
+}
+
+function moveListFocus(step) {
+  const rows = listFocusRows();
+  if (!rows.length) return;
+  const current = listFocusedRow();
+  const idx = current ? rows.indexOf(current) : -1;
+  const next = rows[Math.min(rows.length - 1, Math.max(0, idx + step))];
+  focusListRow(next);
+  // Moving the list cursor selects, mirroring the TUI where the list cursor
+  // IS the selection — not a separate highlight the user must confirm.
+  if (next && next.dataset.id) selectSession(next.dataset.id);
+}
+
+function handleSessionListKey(ev) {
+  if (ev.isComposing || ev.altKey || ev.metaKey) return;
+  const row = listFocusedRow();
+  const groupId = row && row.dataset ? row.dataset.groupId : null;
+  const sessionId = row && row.dataset ? row.dataset.id : null;
+  const key = ev.key;
+
+  // Reorder before plain navigation: Shift+Arrow is the TUI's move binding.
+  if (ev.shiftKey && (key === "ArrowUp" || key === "ArrowDown")) {
+    const steps = key === "ArrowDown" ? 1 : -1;
+    if (sessionId) moveSessionSteps(sessionId, steps);
+    else if (groupId) moveGroupSteps(groupId, steps);
+    else return;
+    ev.preventDefault();
+    return;
+  }
+
+  if ((ev.ctrlKey && (key === "n" || key === "p")) || key === "ArrowDown" || key === "ArrowUp") {
+    if (ev.ctrlKey && key !== "n" && key !== "p") return;
+    const down = key === "ArrowDown" || key === "n";
+    moveListFocus(down ? 1 : -1);
+    ev.preventDefault();
+    return;
+  }
+
+  if (ev.ctrlKey) return; // every other Ctrl combo belongs to the browser
+
+  switch (key) {
+    case "Enter":
+      // The TUI's FocusView: a one-way drill from the list into the view.
+      if (sessionId) selectSession(sessionId);
+      focusActiveSurface();
+      ev.preventDefault();
+      return;
+    case " ":
+      if (sessionId) handleRowAction("pin", sessionId);
+      else if (groupId) toggleGroupCollapsed(groupId);
+      ev.preventDefault();
+      return;
+    case "ArrowRight":
+      if (groupId) {
+        const g = state.groups.find((x) => x.id === groupId);
+        if (g && g.collapsed) toggleGroupCollapsed(groupId);
+        ev.preventDefault();
+      }
+      return;
+    case "ArrowLeft":
+      if (groupId) {
+        const g = state.groups.find((x) => x.id === groupId);
+        if (g && !g.collapsed) toggleGroupCollapsed(groupId);
+        ev.preventDefault();
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+sessionListEl.addEventListener("keydown", handleSessionListKey);
 
 function listDragSourceEl() {
   if (listDrag.sourceId) {
@@ -13489,12 +13597,16 @@ function initPullToRefresh() {
 
 // --- TUI keybindings (spec 0150) -----------------------------------------
 //
-// The TUI's emacs `C-x` chords, spelled identically in the browser. Only the
-// `C-x` family is bound: the TUI's bare-key bindings (`t`, `?`, `space`, `gg`)
-// assume a modal list that never has a text caret in it, and claiming bare
-// letters in a browser would break typing everywhere. `C-x` is unclaimed by
-// browsers and by every harness we run, so it is the one prefix that can be
-// taken globally without a fight.
+// The TUI's emacs `C-x` chords, spelled identically in the browser. Globally,
+// only the `C-x` family is bound: claiming bare letters across the whole page
+// would break typing everywhere, so the TUI's bare `t` / `?` / `gg` stay out.
+// `C-x` is unclaimed by browsers and by every harness we run, so it is the one
+// prefix that can be taken globally without a fight.
+//
+// The bare keys are not lost, though — they live in the session list's own
+// keymap (see `handleSessionListKey`), active only while a list row has focus.
+// A focused row is as modal as the TUI's list, so `C-n` / `C-p` / arrows /
+// Enter / Space carry their TUI meanings there and nowhere else.
 //
 // Chords are matched by the same rule the TUI uses: exact match fires, a
 // proper prefix arms and waits, anything else cancels and passes through.
@@ -13620,6 +13732,65 @@ function resetChord() {
 }
 
 /**
+ * Close the topmost dismissible overlay, innermost first.
+ *
+ * The TUI dismisses every popup with Escape, handled per-surface. The web UI
+ * grew its sheets one at a time and none of them listened for it, so a dialog
+ * opened by a chord could only be closed with the mouse — the keymap could
+ * open something it couldn't get out of.
+ *
+ * Order matters: it is z-order, so Escape peels one layer at a time rather
+ * than closing the whole stack at once.
+ *
+ * The approval sheet is deliberately absent. It is a pending decision an
+ * agent is blocked on, and a keystroke that silently discarded it would
+ * leave the session waiting with nothing recorded. Approvals are answered,
+ * not dismissed.
+ */
+function closeTopmostOverlay() {
+  if (state.program && state.program.clip) {
+    programCloseClipMenu();
+    return true;
+  }
+  if (state.program && state.program.find) {
+    programCloseFind();
+    if (state.mode === "program") programInputEl.focus();
+    return true;
+  }
+  if (typeof suggestDeckIsOpen === "function" && suggestDeckIsOpen()) {
+    closeSuggestDeck();
+    return true;
+  }
+  const menu = $("sessionMenu");
+  if (menu && !menu.hidden) {
+    closeSessionMenu();
+    return true;
+  }
+  const runtimePopover = $("sessionRuntimePopover");
+  if (runtimePopover && !runtimePopover.hidden) {
+    closeSessionRuntimePopover();
+    return true;
+  }
+  if (!renameSheetEl.hidden) {
+    closeRenameDialog();
+    return true;
+  }
+  if (!closeSessionSheetEl.hidden) {
+    closeCloseSessionDialog();
+    return true;
+  }
+  if (!newSessionSheetEl.hidden) {
+    closeNewSessionDialog();
+    return true;
+  }
+  if (!settingsSheetEl.hidden) {
+    closeSettingsSheet();
+    return true;
+  }
+  return false;
+}
+
+/**
  * Feed one key to the chord machine.
  *
  * Returns true when the key was consumed — the caller must then stop the
@@ -13632,6 +13803,10 @@ function handleChordKey(ev) {
   if (token === "Escape" && chordState.pending.length) {
     resetChord();
     return true;
+  }
+  // With no chord pending, Escape unwinds the overlay stack instead.
+  if (token === "Escape") {
+    return closeTopmostOverlay();
   }
   const probe = chordState.pending.concat([token]);
   let exact = null;
@@ -13742,6 +13917,63 @@ function cyclePaneFocus() {
   return true;
 }
 
+/** True when keyboard focus currently sits in the session list. */
+function listHasFocus() {
+  return sessionListEl.contains(document.activeElement);
+}
+
+/**
+ * `C-x o` — cycle focus across every pane AND the session list, matching the
+ * TUI's `other-window`, whose cycle has always included the list.
+ *
+ * The first implementation only fell back to the list when there was a single
+ * pane, so on a split the list was simply unreachable from the keyboard.
+ * Order is list → pane 1 → … → pane N → list, so repeated presses visit every
+ * focusable region exactly once per lap.
+ */
+function cycleFocusIncludingList() {
+  const leaves = layoutLeaves(state.layout.tree);
+  if (listHasFocus()) {
+    // Leaving the list, `C-x o` enters the FIRST pane — the TUI's cycle is
+    // positional. (`C-x Tab` is the one that returns to the pane you came
+    // from; keeping them distinct is why both bindings exist.)
+    if (leaves.length > 1) focusPane(leaves[0].id);
+    // `focusPane` moves the *pane* focus but not the DOM's, and it early-returns
+    // when the target pane is already the focused one. Either way the caret has
+    // to be walked out of the list explicitly, or the next press sees the list
+    // still focused and the cycle never leaves it.
+    focusActiveSurface();
+    return;
+  }
+  if (leaves.length < 2) {
+    toggleListFocus();
+    return;
+  }
+  const idx = leaves.findIndex((l) => l.id === state.focusedPaneId);
+  if (idx === leaves.length - 1) {
+    // Past the last pane, the list is the next stop in the lap.
+    toggleListFocus();
+    return;
+  }
+  focusPane(leaves[idx + 1].id);
+  focusActiveSurface();
+}
+
+/**
+ * The surface `C-x Space` should return to when it closes Program.
+ *
+ * Deliberately ignores the stored per-session view preference: that preference
+ * IS "program" while Program is open (spec 0062), so consulting it would toggle
+ * program → program and appear to do nothing.
+ */
+function surfaceBehindProgram() {
+  const s = currentSession();
+  if (!s) return "chat";
+  if (!isTerminalSession(s)) return "chat";
+  if (!hasSemanticChatView(s)) return "terminal";
+  return state.viewModeBeforeProgram === "chat" ? "chat" : "terminal";
+}
+
 /** Move keyboard focus to the session list, or back to the view. */
 function toggleListFocus() {
   const active = document.activeElement;
@@ -13799,7 +14031,7 @@ function runKeyAction(action, keys) {
   const id = state.currentId;
   switch (action) {
     case "switch-focus":
-      if (!cyclePaneFocus()) toggleListFocus();
+      cycleFocusIncludingList();
       return;
     case "focus-list":
       toggleListFocus();
@@ -13882,7 +14114,16 @@ function runKeyAction(action, keys) {
       if (id) openCloseSessionDialog(id);
       return;
     case "open-program":
-      if (id) switchCurrentViewMode("program");
+      // The TUI's OpenProgram toggles the program surface; pressing the chord
+      // twice returns you where you were. Leaving it one-way here meant
+      // `C-x Space` could get in but not out.
+      if (!id) return;
+      if (state.mode === "program") {
+        switchCurrentViewMode(surfaceBehindProgram());
+      } else {
+        state.viewModeBeforeProgram = state.mode;
+        switchCurrentViewMode("program");
+      }
       return;
     case "save-program":
       if (state.mode === "program") programSave();
@@ -13936,11 +14177,42 @@ function runKeyAction(action, keys) {
 // rule (spec 0061) that these keys must leave a busy pane, since escaping is
 // their entire purpose. Every other Ctrl key (C-c, C-d, C-a …) is untouched
 // and still reaches the child.
+/** True when the keystroke is destined for a text caret the user is typing in. */
+function isTextEntryFocused() {
+  const el = document.activeElement;
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
+/**
+ * Global bindings that are not `C-x` chords.
+ *
+ * Kept to keys no text caret wants, so they can be claimed without the
+ * bare-letter problem that keeps the TUI's `t` / `?` / `gg` out of the
+ * browser. PageUp/PageDown scroll the active surface, matching the TUI —
+ * the page itself never scrolls, so nothing is stolen.
+ */
+function handleGlobalKey(ev) {
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return false;
+  if (isTextEntryFocused()) return false;
+  if (ev.key === "PageUp") {
+    scrollActiveSurface(-1);
+    return true;
+  }
+  if (ev.key === "PageDown") {
+    scrollActiveSurface(1);
+    return true;
+  }
+  return false;
+}
+
 document.addEventListener(
   "keydown",
   (ev) => {
     if (ev.isComposing) return;
-    if (handleChordKey(ev)) {
+    if (handleChordKey(ev) || handleGlobalKey(ev)) {
       ev.preventDefault();
       ev.stopPropagation();
     }
