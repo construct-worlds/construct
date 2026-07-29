@@ -1329,6 +1329,17 @@ async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
+    dispatch_entry!(ipc_method::PROMPT_HISTORY_LIST, {
+        // Params are wholly optional; omitting them means "everything".
+        let p = parse_params::<construct_protocol::PromptHistoryListParams>(req.params.clone())
+            .unwrap_or_default();
+        ok!(
+            req,
+            &construct_protocol::PromptHistoryListResult {
+                entries: manager.prompt_history(p.limit),
+            }
+        )
+    });
     dispatch_entry!(ipc_method::SESSION_INTERRUPT, {
         let p = params!(req, SessionIdParams);
         match manager.interrupt(&p.session_id).await {

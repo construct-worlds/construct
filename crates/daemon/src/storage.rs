@@ -185,6 +185,14 @@ struct ProgramBlockIdentity {
     content_id: String,
 }
 
+/// FIFO cap on the global prompt history (spec 0155). Old entries fall
+/// off the tail as new prompts arrive.
+pub const PROMPT_HISTORY_CAP: usize = 200;
+
+/// Prompts longer than this are not recorded: pasted walls of text make
+/// poor history entries and would bloat the file.
+const PROMPT_HISTORY_MAX_CHARS: usize = 4000;
+
 pub struct Storage {
     data_dir: PathBuf,
     /// When set, program templates are read from this directory instead of the
@@ -206,6 +214,9 @@ pub struct Storage {
     /// Plugin template directories as `(namespace, dir)` pairs (spec 0152).
     /// Templates from these list with id `<namespace>:<stem>`.
     plugin_template_dirs: Vec<(String, PathBuf)>,
+    /// Serializes read-modify-write cycles on the global prompt-history
+    /// file (spec 0155) so concurrent session inputs can't drop entries.
+    prompt_history_lock: std::sync::Mutex<()>,
 }
 
 impl Storage {
@@ -220,6 +231,7 @@ impl Storage {
             program_verbs_dir_override: None,
             plugin_verb_dirs: Vec::new(),
             plugin_template_dirs: Vec::new(),
+            prompt_history_lock: std::sync::Mutex::new(()),
         })
     }
 
@@ -335,6 +347,71 @@ impl Storage {
         std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
         std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
         Ok(())
+    }
+
+    pub fn prompt_history_path(&self) -> PathBuf {
+        self.data_dir.join("global").join("prompt_history.json")
+    }
+
+    /// Append a prompt to the global prompt history (spec 0155): a
+    /// FIFO of the user's prompts across all user-kind sessions, newest
+    /// first, capped at [`PROMPT_HISTORY_CAP`] entries. A repeat of an
+    /// existing prompt moves it to the front (shell-history dedupe)
+    /// instead of storing a duplicate. Best-effort: an unreadable file
+    /// is reset rather than treated as an error.
+    pub fn record_prompt(&self, entry: construct_protocol::PromptHistoryEntry) -> Result<()> {
+        let text = entry.text.trim();
+        if text.is_empty() || text.chars().count() > PROMPT_HISTORY_MAX_CHARS {
+            return Ok(());
+        }
+        let entry = construct_protocol::PromptHistoryEntry {
+            text: text.to_string(),
+            ..entry
+        };
+        let _guard = self.prompt_history_lock.lock().unwrap();
+        let mut entries = self.read_prompt_history_locked();
+        entries.retain(|e| e.text != entry.text);
+        entries.insert(0, entry);
+        entries.truncate(PROMPT_HISTORY_CAP);
+        let path = self.prompt_history_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_string_pretty(&entries)?;
+        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Read the global prompt history, newest first, at most `limit`
+    /// entries. Missing or corrupt file degrades to empty — history is
+    /// a convenience, never a startup dependency.
+    pub fn read_prompt_history(
+        &self,
+        limit: usize,
+    ) -> Vec<construct_protocol::PromptHistoryEntry> {
+        let _guard = self.prompt_history_lock.lock().unwrap();
+        let mut entries = self.read_prompt_history_locked();
+        entries.truncate(limit);
+        entries
+    }
+
+    fn read_prompt_history_locked(&self) -> Vec<construct_protocol::PromptHistoryEntry> {
+        let path = self.prompt_history_path();
+        if !path.exists() {
+            return Vec::new();
+        }
+        match std::fs::read(&path).and_then(|b| {
+            serde_json::from_slice::<Vec<construct_protocol::PromptHistoryEntry>>(&b)
+                .map_err(Into::into)
+        }) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "unreadable prompt history; resetting");
+                Vec::new()
+            }
+        }
     }
 
     pub fn groups_root(&self) -> PathBuf {
@@ -1942,6 +2019,86 @@ fn safe_memory_segment(raw: &str) -> String {
         "unknown".to_string()
     } else {
         out
+    }
+}
+
+#[cfg(test)]
+mod prompt_history_tests {
+    use super::*;
+
+    fn entry(text: &str, at_ms: i64) -> construct_protocol::PromptHistoryEntry {
+        construct_protocol::PromptHistoryEntry {
+            text: text.to_string(),
+            at_ms,
+            session_id: Some("s1".to_string()),
+            harness: Some("smith".to_string()),
+        }
+    }
+
+    #[test]
+    fn records_newest_first_with_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        storage.record_prompt(entry("first", 1)).unwrap();
+        storage.record_prompt(entry("second", 2)).unwrap();
+        storage.record_prompt(entry("third", 3)).unwrap();
+
+        let all = storage.read_prompt_history(usize::MAX);
+        assert_eq!(
+            all.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+            vec!["third", "second", "first"]
+        );
+        assert_eq!(storage.read_prompt_history(2).len(), 2);
+    }
+
+    #[test]
+    fn repeat_moves_to_front_without_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        storage.record_prompt(entry("alpha", 1)).unwrap();
+        storage.record_prompt(entry("beta", 2)).unwrap();
+        storage.record_prompt(entry("alpha", 3)).unwrap();
+
+        let all = storage.read_prompt_history(usize::MAX);
+        assert_eq!(
+            all.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        assert_eq!(all[0].at_ms, 3);
+    }
+
+    #[test]
+    fn fifo_cap_drops_oldest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        for i in 0..(PROMPT_HISTORY_CAP + 5) {
+            storage.record_prompt(entry(&format!("p{i}"), i as i64)).unwrap();
+        }
+        let all = storage.read_prompt_history(usize::MAX);
+        assert_eq!(all.len(), PROMPT_HISTORY_CAP);
+        assert_eq!(all[0].text, format!("p{}", PROMPT_HISTORY_CAP + 4));
+        assert!(all.iter().all(|e| e.text != "p0"));
+    }
+
+    #[test]
+    fn skips_empty_and_oversized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        storage.record_prompt(entry("   ", 1)).unwrap();
+        storage.record_prompt(entry(&"x".repeat(5000), 2)).unwrap();
+        assert!(storage.read_prompt_history(usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn corrupt_file_degrades_to_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        storage.record_prompt(entry("keep", 1)).unwrap();
+        std::fs::write(storage.prompt_history_path(), "not json").unwrap();
+        assert!(storage.read_prompt_history(usize::MAX).is_empty());
+        // Recording after corruption resets the file.
+        storage.record_prompt(entry("fresh", 2)).unwrap();
+        assert_eq!(storage.read_prompt_history(usize::MAX).len(), 1);
     }
 }
 

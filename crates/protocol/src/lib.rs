@@ -803,6 +803,37 @@ pub struct SuggestResult {
     pub started: bool,
 }
 
+/// One remembered prompt in the global prompt history (spec 0155).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptHistoryEntry {
+    /// The prompt text, verbatim as sent.
+    pub text: String,
+    /// When the prompt was last sent (dedupe moves a repeat to the front
+    /// and refreshes this), unix millis.
+    pub at_ms: i64,
+    /// Session the prompt was last sent to, if still known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Harness of that session, for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+}
+
+/// Params for [`ipc_method::PROMPT_HISTORY_LIST`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PromptHistoryListParams {
+    /// Maximum entries to return, newest first. Omitted → the full
+    /// retained history (itself FIFO-capped by the daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Result of [`ipc_method::PROMPT_HISTORY_LIST`]: newest first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptHistoryListResult {
+    pub entries: Vec<PromptHistoryEntry>,
+}
+
 impl SuggestionHand {
     /// Loose-in, strict-out parse of a model's reply into a hand:
     /// accepts the JSON with or without code fences or prose around it,
@@ -899,6 +930,7 @@ Rules:
 - "verbs": exactly 3 or 4 distinct directions the user might take instead. Each label is 1-3 lowercase words generated from THIS conversation (e.g. "ship it", "dig deeper", "change course" — but derive from context, never a fixed menu). No two verbs may mean the same thing, and none may restate "top".
 - Each verb has 2-4 "cards": complete, self-contained prompts under 140 characters, concrete enough to send unedited. Reference actual files, tests, errors, and names from the transcript.
 - Mirror the user's phrasing habits and any workflow conventions visible in the transcript (tests before PR, worktrees, etc.).
+- A "Recent prompts from this user across sessions" section may follow the transcript. Use it only to mirror the user's voice, phrasing, and recurring workflows — suggestions must stay grounded in THIS session's transcript, and never copy an old prompt that doesn't fit the current state.
 - Never invent state: only reference things the transcript shows. Do not run tools; just reply with the JSON."#;
 }
 
@@ -1220,6 +1252,10 @@ pub mod ipc_method {
     /// started; the hand itself arrives later as a broadcast
     /// [`SessionEvent::Suggestions`](crate::SessionEvent::Suggestions).
     pub const SESSION_SUGGEST: &str = "session.suggest";
+    /// Read the global prompt history: the FIFO of prompts the user has
+    /// sent to any user-kind session, newest first (spec 0155). See
+    /// [`crate::PromptHistoryListParams`] / [`crate::PromptHistoryListResult`].
+    pub const PROMPT_HISTORY_LIST: &str = "prompt_history.list";
     /// Substring search across session name/metadata, stored program
     /// contents, and transcript history — see [`crate::SearchParams`] /
     /// [`crate::SearchResult`].

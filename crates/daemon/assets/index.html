@@ -1400,6 +1400,14 @@
   }
   .suggest-card:last-child { border-bottom: none; }
   .suggest-card:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  /* History cards recall verbatim past prompts, which can run long —
+     clamp the preview; the full text still sends on tap. */
+  .suggest-card.history-card {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
   @media (max-width: 720px) {
     .suggest-deck { bottom: calc(112px + env(safe-area-inset-bottom)); }
   }
@@ -3735,6 +3743,9 @@ const state = {
   // the in-flight `session.suggest` timestamp driving the orb spinner.
   suggestionsById: new Map(),
   suggestPendingById: new Map(),
+  // Global prompt history (spec 0155): the user's recent prompts across
+  // all sessions, newest first. Refreshed each time the orb is tapped.
+  promptHistory: [],
   // Session requested by the URL path. Kept separate from currentId so the
   // first session.list snapshot can honor a refresh/deep link before the
   // normal first-session fallback runs.
@@ -11274,12 +11285,26 @@ function updateSuggestOrb() {
   }
 }
 function renderSuggestFan() {
-  const hand = state.suggestionsById.get(state.currentId);
-  if (!hand || !hand.top) return;
+  // A fan can open before the hand arrives (generation in flight): it
+  // then holds just the prompt-history chip, so past prompts are
+  // reachable while the spinner runs (spec 0155).
+  const hand = state.suggestionsById.get(state.currentId) || null;
+  const items = [];
+  if (hand && hand.top) {
+    const verbs = hand.verbs || [];
+    items.push({ label: `▶ ${hand.top.text}`, cls: "suggest-chip top", act: () => sendSuggestion(hand.top.text) });
+    for (let i = 0; i < verbs.length; i++) {
+      const v = verbs[i];
+      items.push({ label: `${v.label} ›`, cls: "suggest-chip", act: () => openSuggestStack(i) });
+    }
+  }
+  if ((state.promptHistory || []).length) {
+    items.push({ label: "history ›", cls: "suggest-chip", act: () => openHistoryStack() });
+  }
+  if (!items.length) return;
   suggestStackEl.hidden = true;
   suggestFanEl.innerHTML = "";
-  const verbs = hand.verbs || [];
-  const total = verbs.length + 1;
+  const total = items.length;
   // Chips sweep a quarter arc around the orb center: the top pick sits
   // at the smallest angle (just above the orb), verbs fan out toward
   // horizontal-left. Right edges anchor to the arc; the pop-in stagger
@@ -11288,10 +11313,6 @@ function renderSuggestFan() {
   // Arc positions first, then a de-conflict pass: chips near the top of
   // the arc compress vertically, so walk outward from the orb keeping a
   // minimum vertical gap between neighbors.
-  const items = [
-    { label: `▶ ${hand.top.text}`, cls: "suggest-chip top", act: () => sendSuggestion(hand.top.text) },
-    ...verbs.map((v, i) => ({ label: `${v.label} ›`, cls: "suggest-chip", act: () => openSuggestStack(i) })),
-  ];
   const pos = items.map((_, k) => {
     const th = ((8 + (total === 1 ? 40 : k * (84 / (total - 1)))) * Math.PI) / 180;
     return {
@@ -11333,6 +11354,36 @@ function openSuggestStack(i) {
   }
   suggestStackEl.hidden = false;
 }
+// Global prompt history stack (spec 0155): verbatim past prompts,
+// newest first, selectable exactly like generated cards.
+function openHistoryStack() {
+  const history = state.promptHistory || [];
+  if (!history.length) return;
+  suggestFanEl.hidden = true;
+  suggestStackTitleEl.textContent = "history";
+  suggestCardsEl.innerHTML = "";
+  for (const e of history) {
+    const el = document.createElement("button");
+    el.type = "button";
+    el.className = "suggest-card history-card";
+    el.textContent = e.text;
+    el.title = e.text;
+    el.addEventListener("click", () => sendSuggestion(e.text));
+    suggestCardsEl.appendChild(el);
+  }
+  suggestStackEl.hidden = false;
+}
+// Refresh the cached global prompt history; if the fan is open (and
+// not covered by a card stack) re-deal it so the history chip appears
+// as soon as the entries arrive.
+function refreshPromptHistory() {
+  return rpc("prompt_history.list", { limit: 50 })
+    .then((r) => {
+      state.promptHistory = (r && r.entries) || [];
+      if (!suggestFanEl.hidden) renderSuggestFan();
+    })
+    .catch((e) => console.debug("prompt_history.list failed", e));
+}
 function sendSuggestion(text) {
   const sid = state.currentId;
   if (!sid || !text) return;
@@ -11352,14 +11403,26 @@ function sendSuggestion(text) {
 async function suggestOrbClick() {
   const sid = state.currentId;
   if (!sid) return;
+  const historyRefresh = refreshPromptHistory();
   if (state.suggestionsById.get(sid)) {
     if (suggestDeckIsOpen()) closeSuggestDeck();
     else renderSuggestFan();
     return;
   }
-  if (suggestPendingActive(sid)) return;
+  if (suggestPendingActive(sid)) {
+    // Generation already running: the orb still toggles the fan so the
+    // history chip stays reachable while the spinner turns.
+    if (suggestDeckIsOpen()) closeSuggestDeck();
+    else renderSuggestFan();
+    return;
+  }
   state.suggestPendingById.set(sid, Date.now());
   updateSuggestOrb();
+  // Deal the history-only fan as soon as the entries are in (a local
+  // round-trip) — the generated hand joins it when the broadcast
+  // arrives.
+  await historyRefresh;
+  renderSuggestFan();
   try {
     const r = await rpc("session.suggest", { session_id: sid });
     if (!r || !r.started) {
@@ -11502,8 +11565,10 @@ function handleNotification(method, params) {
       state.suggestPendingById.delete(session_id);
       if (session_id === state.currentId) {
         updateSuggestOrb();
-        // The user explicitly asked via the orb — open on arrival.
-        renderSuggestFan();
+        // The user explicitly asked via the orb — open on arrival,
+        // unless they're mid-read in a card stack (e.g. the prompt
+        // history): re-dealing the fan would stomp their view.
+        if (suggestStackEl.hidden) renderSuggestFan();
       }
       return;
     }
