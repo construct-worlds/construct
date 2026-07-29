@@ -590,6 +590,10 @@ impl Router {
         } else {
             None
         };
+        let catalog_enabled = catalog_path.is_some()
+            || (self.publish_models
+                && harness == "claude"
+                && !self.published_models("claude").is_empty());
 
         let ctx = Arc::new(SessionRouting {
             session_id: session_id.to_string(),
@@ -597,7 +601,7 @@ impl Router {
             harness: routing,
             ca,
             upstream_proxy: self.upstream_proxy.clone(),
-            catalog_enabled: AtomicBool::new(catalog_path.is_some()),
+            catalog_enabled: AtomicBool::new(catalog_enabled),
             route: RwLock::new(None),
             route_epoch: std::sync::atomic::AtomicU64::new(0),
             observed: AtomicBool::new(false),
@@ -609,14 +613,22 @@ impl Router {
             .insert(session_id.to_string(), ctx.clone());
         self.tokens.write().unwrap().insert(token.clone(), ctx);
 
-        Ok(self.session_env(&token, routing, catalog_path.as_deref()))
+        Ok(self.session_env(
+            &token,
+            harness,
+            routing,
+            catalog_path.as_deref(),
+            catalog_enabled,
+        ))
     }
 
     fn session_env(
         &self,
         token: &str,
+        harness: &str,
         routing: HarnessRouting,
         catalog_path: Option<&std::path::Path>,
+        catalog_enabled: bool,
     ) -> HashMap<String, String> {
         let mut env = HashMap::new();
         // The credential rides in the proxy URL's userinfo, which is how
@@ -637,6 +649,15 @@ impl Router {
             env.insert(
                 construct_protocol::adapter::ENV_CODEX_MODEL_CATALOG.to_string(),
                 path.to_string_lossy().to_string(),
+            );
+        }
+        if harness == "claude" && catalog_enabled {
+            env.insert(
+                construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG.to_string(),
+                format!(
+                    "http://127.0.0.1:{}/__construct/{token}",
+                    self.port()
+                ),
             );
         }
         if let Ok(ca) = self.ca() {
@@ -1079,6 +1100,46 @@ mod tests {
 
     #[tokio::test]
     async fn published_model_id_resolves_to_its_request_scoped_route() {
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_w = seen.clone();
+        tokio::spawn(async move {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            let mut request = vec![0u8; 16384];
+            let count = socket.read(&mut request).await.unwrap();
+            request.truncate(count);
+            *seen_w.lock().unwrap() = String::from_utf8_lossy(&request).to_string();
+            let body = serde_json::json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "model-one",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "routed"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
+            })
+            .to_string();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = cfg_with(true);
         cfg.publish_models = true;
@@ -1089,7 +1150,7 @@ mod tests {
                 "fast",
                 ModelProfile {
                     provider: "openai".to_string(),
-                    base_url: Some("https://example.test/v1".to_string()),
+                    base_url: Some(format!("http://127.0.0.1:{upstream_port}/v1")),
                     api_key_env: None,
                     api_key: Some("sk-test".to_string()),
                     model: Some("model-one".to_string()),
@@ -1102,6 +1163,7 @@ mod tests {
             .into_iter()
             .find(|model| model.route == "fast" && model.model == "model-one")
             .unwrap();
+        assert!(published.id.starts_with("claude-construct-"));
         let resolved = r
             .resolve_published_model("claude", &published.id)
             .unwrap()
@@ -1109,6 +1171,80 @@ mod tests {
         assert_eq!(resolved.name, "fast");
         assert_eq!(resolved.model, "model-one");
         assert_eq!(resolved.target_dialect, Dialect::OpenAiChat);
+        assert!(r.claude_models_response()["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == published.id));
+
+        let env = r.attach_session("s-claude", "claude", None).unwrap();
+        assert!(env[construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG]
+            .starts_with("http://127.0.0.1:"));
+        assert!(r.sessions.read().unwrap()["s-claude"].catalog_enabled());
+
+        let token = Router::token_from_env(&env).unwrap();
+        let mut gateway = tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
+            .await
+            .unwrap();
+        gateway
+            .write_all(
+                format!(
+                    "GET /__construct/{token}/v1/models?limit=1000 HTTP/1.1\r\n\
+                     Host: 127.0.0.1\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        gateway.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains(&published.id), "{response}");
+
+        let request_body = serde_json::json!({
+            "model": published.id,
+            "max_tokens": 16,
+            "stream": false,
+            "messages": [{"role": "user", "content": "ping"}]
+        })
+        .to_string();
+        let mut inference = tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
+            .await
+            .unwrap();
+        inference
+            .write_all(
+                format!(
+                    "POST /__construct/{token}/v1/messages HTTP/1.1\r\n\
+                     Host: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\
+                     Content-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{request_body}",
+                    request_body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut inference_response = String::new();
+        inference
+            .read_to_string(&mut inference_response)
+            .await
+            .unwrap();
+        assert!(
+            inference_response.starts_with("HTTP/1.1 200"),
+            "{inference_response}"
+        );
+        assert!(
+            inference_response.contains("routed"),
+            "{inference_response}"
+        );
+
+        let forwarded = seen.lock().unwrap().clone();
+        assert!(forwarded.contains("\"model\":\"model-one\""), "{forwarded}");
+        assert!(
+            forwarded.contains("authorization: Bearer sk-test"),
+            "{forwarded}"
+        );
+        assert!(!forwarded.contains(&published.id), "{forwarded}");
     }
 
     /// A live harness keeps presenting the credential it got at spawn, so

@@ -36,6 +36,10 @@ const MAX_HEAD: usize = 64 * 1024;
 /// know — is tunneled: traffic we cannot place is never routed.
 pub async fn serve(mut client: TcpStream, router: Arc<Router>) -> Result<()> {
     let head = read_head(&mut client).await?;
+    let request = parse_request(&head)?;
+    if !request.method.eq_ignore_ascii_case("CONNECT") {
+        return serve_claude_gateway(client, request, router).await;
+    }
     let target = parse_connect(&head)?;
     let ctx = proxy_credential(&head).and_then(|t| router.session_for_token(&t));
 
@@ -85,6 +89,58 @@ pub async fn serve(mut client: TcpStream, router: Arc<Router>) -> Result<()> {
         armed,
         ctx.expect("interception implies a session"),
         router,
+    )
+    .await
+}
+
+/// Serve Claude Code's session-local gateway URL on the same loopback
+/// listener as the HTTPS proxy.
+///
+/// The opaque session token in the path is the authority boundary. Native
+/// requests retain a user's API credential or exchange the session token for
+/// the detected Claude login; published ids take the same request-scoped
+/// routing path as intercepted HTTPS.
+async fn serve_claude_gateway(
+    mut client: TcpStream,
+    mut request: ParsedRequest,
+    router: Arc<Router>,
+) -> Result<()> {
+    const PREFIX: &str = "/__construct/";
+    let Some(rest) = request.path.strip_prefix(PREFIX) else {
+        return write_simple(&mut client, 404, r#"{"error":"not found"}"#).await;
+    };
+    let Some((token, upstream_path)) = rest.split_once('/') else {
+        return write_simple(&mut client, 404, r#"{"error":"not found"}"#).await;
+    };
+    let Some(ctx) = router.session_for_token(token) else {
+        return write_simple(&mut client, 403, r#"{"error":"unknown session"}"#).await;
+    };
+    if ctx.harness_name != "claude" || !ctx.catalog_enabled() {
+        return write_simple(&mut client, 403, r#"{"error":"catalog unavailable"}"#).await;
+    }
+    let construct_gateway_auth = request.header("authorization").is_some_and(|value| {
+        String::from_utf8_lossy(value)
+            .trim()
+            .strip_prefix("Bearer ")
+            .is_some_and(|credential| credential == token)
+    }) || request
+        .header("x-api-key")
+        .is_some_and(|value| String::from_utf8_lossy(value).trim() == token);
+    request.path = format!("/{upstream_path}");
+    let body = read_body(&mut client, &request).await?;
+    let pinned_route = ctx.armed_route();
+    handle_intercepted_request(
+        &mut client,
+        &Target {
+            host: "api.anthropic.com".to_string(),
+            port: 443,
+        },
+        pinned_route,
+        ctx,
+        router,
+        request,
+        body,
+        construct_gateway_auth,
     )
     .await
 }
@@ -365,6 +421,43 @@ async fn intercept_tls(
     let head = read_head_tls(&mut tls).await?;
     let request = parse_request(&head)?;
     let body = read_body(&mut tls, &request).await?;
+    handle_intercepted_request(
+        &mut tls,
+        target,
+        pinned_route,
+        ctx,
+        router,
+        request,
+        body,
+        false,
+    )
+    .await
+}
+
+async fn handle_intercepted_request<S>(
+    stream: &mut S,
+    target: &Target,
+    pinned_route: Option<ArmedRoute>,
+    ctx: Arc<SessionRouting>,
+    router: Arc<Router>,
+    request: ParsedRequest,
+    body: Vec<u8>,
+    construct_gateway_auth: bool,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // Claude Code's native gateway integration discovers picker entries
+    // from this endpoint. The session-local gateway answers the model-list
+    // request here; inference then follows the ordinary native-or-route
+    // decision below.
+    if ctx.catalog_enabled()
+        && ctx.harness_name == "claude"
+        && request.method.eq_ignore_ascii_case("GET")
+        && request.path.split('?').next() == Some("/v1/models")
+    {
+        return write_simple(stream, 200, &router.claude_models_response().to_string()).await;
+    }
 
     // A published picker id is an explicit request-scoped route and wins
     // over the session's manually pinned default. Native model ids retain
@@ -381,7 +474,35 @@ async fn intercept_tls(
         match requested_model.as_deref() {
             Some(model) => match router.resolve_published_model(&ctx.harness_name, model) {
                 Ok(Some(route)) => Some(route),
-                Ok(None) => pinned_route,
+                Ok(None) => {
+                    if pinned_route.is_some() || !construct_gateway_auth {
+                        pinned_route
+                    } else {
+                        // Claude's gateway discovery requires an API-shaped
+                        // credential. For subscription sessions the adapter
+                        // presents the session capability token; exchange it
+                        // here for the Claude login Construct already detected
+                        // so built-in native picker rows keep working alongside
+                        // the published routes.
+                        match router.resolve("claude-oauth", &ctx.harness_name, Some(model)) {
+                            Ok(route) => Some(route),
+                            Err(error) => {
+                                let payload = serde_json::json!({
+                                    "type": "error",
+                                    "error": {
+                                        "type": "api_error",
+                                        "message": format!(
+                                            "construct native Claude route: {error:#}"
+                                        ),
+                                    },
+                                })
+                                .to_string();
+                                write_simple(stream, 502, &payload).await.ok();
+                                return Err(error);
+                            }
+                        }
+                    }
+                }
                 Err(error) => {
                     let payload = serde_json::json!({
                         "type": "error",
@@ -391,7 +512,7 @@ async fn intercept_tls(
                         },
                     })
                     .to_string();
-                    write_simple(&mut tls, 502, &payload).await.ok();
+                    write_simple(stream, 502, &payload).await.ok();
                     return Err(error);
                 }
             },
@@ -406,7 +527,7 @@ async fn intercept_tls(
     // named by CONNECT with the client's credential intact.
     let Some(route) = route else {
         return match forward_native(&request, body, target).await {
-            Ok(response) => write_response(&mut tls, response).await,
+            Ok(response) => write_response(stream, response).await,
             Err(error) => {
                 let payload = serde_json::json!({
                     "type": "error",
@@ -416,7 +537,7 @@ async fn intercept_tls(
                     },
                 })
                 .to_string();
-                write_simple(&mut tls, 502, &payload).await.ok();
+                write_simple(stream, 502, &payload).await.ok();
                 Err(error)
             }
         };
@@ -443,7 +564,7 @@ async fn intercept_tls(
     // not always full requests.
     if request.path.contains("count_tokens") {
         ctx.mark_observed();
-        return write_simple(&mut tls, 200, &count_tokens_reply(&body)).await;
+        return write_simple(stream, 200, &count_tokens_reply(&body)).await;
     }
 
     // Detection decides whether this request needs translating at all.
@@ -464,7 +585,7 @@ async fn intercept_tls(
                 },
             })
             .to_string();
-            write_simple(&mut tls, 502, &payload).await.ok();
+            write_simple(stream, 502, &payload).await.ok();
             bail!("unrecognized request dialect on an armed route");
         }
     };
@@ -474,7 +595,7 @@ async fn intercept_tls(
         let streaming = wants_stream(&body);
         return match forward_translated(body, &route, client_dialect).await {
             Ok(response) => {
-                write_translated_response(&mut tls, response, &route, client_dialect, streaming)
+                write_translated_response(stream, response, &route, client_dialect, streaming)
                     .await
             }
             Err(e) => {
@@ -483,7 +604,7 @@ async fn intercept_tls(
                     "error": {"type": "api_error", "message": format!("construct router: {e:#}")},
                 })
                 .to_string();
-                write_simple(&mut tls, 502, &payload).await.ok();
+                write_simple(stream, 502, &payload).await.ok();
                 Err(e)
             }
         };
@@ -492,7 +613,7 @@ async fn intercept_tls(
     match forward(&request, body, &route).await {
         Ok(response) => {
             ctx.mark_observed();
-            write_response(&mut tls, response).await
+            write_response(stream, response).await
         }
         Err(e) => {
             // Answer in the dialect's own error shape so the harness
@@ -510,9 +631,9 @@ async fn intercept_tls(
                 "HTTP/1.1 502 Bad Gateway\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                 body.len()
             );
-            tls.write_all(head.as_bytes()).await.ok();
-            tls.write_all(body.as_bytes()).await.ok();
-            tls.shutdown().await.ok();
+            stream.write_all(head.as_bytes()).await.ok();
+            stream.write_all(body.as_bytes()).await.ok();
+            stream.shutdown().await.ok();
             Err(e)
         }
     }

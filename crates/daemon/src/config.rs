@@ -346,6 +346,12 @@ enabled = true
 # The generated catalog uses Codex's v1 multi-agent surface because v2 may
 # encrypt child task text for ChatGPT, which a routed provider cannot decrypt.
 #
+# For Claude Code, Construct exposes a session-local Anthropic-compatible
+# gateway and enables Claude's native gateway model discovery. `/model` and
+# native subagents see every usable route as a "From gateway" entry. The
+# gateway is loopback-only and capability-scoped to the session; Construct
+# leaves an existing ANTHROPIC_BASE_URL untouched.
+#
 # Route targets are the [smith.models.*] profiles below — declare an
 # endpoint once and it is reachable from both smith and a routed session.
 # When the target's dialect differs from the harness's, the router

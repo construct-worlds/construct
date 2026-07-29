@@ -29,12 +29,13 @@ subagents. The proxy resolves it per request:
 4. A malformed, unavailable, or stale id in Construct's namespace fails
    closed. It is never sent to the native provider.
 
-Construct integrates through a session-scoped catalog override and never
-edits the harness's persistent configuration or replaces its provider
-endpoint. Native catalog entries remain present alongside Construct
-entries. The first implementation supports Codex; other harnesses need
-their own verified catalog adapter but use the same publication and
-request-routing contract.
+Construct integrates through a session-scoped native mechanism and never
+edits the harness's persistent configuration. Codex receives a generated
+catalog override. Claude receives a loopback Anthropic gateway URL whose
+`/v1/models` response is consumed by Claude Code's native gateway discovery.
+The Claude adapter enables loopback discovery only for that child process
+and does not displace a user-configured `ANTHROPIC_BASE_URL`. Native catalog
+entries remain present alongside Construct entries.
 
 ## Reason
 
@@ -68,9 +69,21 @@ origin-safety rule in [0113](0113-model-routing-is-proxy-transported.md).
   The pin remains unchanged for native model ids and future requests.
 - Catalog-enabled sessions inspect only the harness's fixed model host.
   Other destinations remain blind tunnels.
-- After inspecting a native request with no pin, Construct reconstructs it
-  to the observed origin and preserves end-to-end credentials while
-  removing proxy and hop-by-hop headers.
+- After inspecting a native request with no pin, Construct normally
+  reconstructs it to the observed origin and preserves end-to-end credentials
+  while removing proxy and hop-by-hop headers. Claude subscription sessions
+  use the session-token exchange described below.
+- Claude's gateway discovery requires an API-shaped credential. When Claude
+  Code already has an API credential, Construct preserves it. For a
+  subscription session, the adapter presents the session capability token
+  to the loopback gateway and the router exchanges native Claude selections
+  for the detected Claude OAuth route. The capability is valid only for its
+  owning session.
+- Claude's loopback gateway is excluded from that child's proxy settings so
+  discovery reaches the listener directly instead of recursively proxying
+  through the same listener.
+- A user-configured Claude gateway remains authoritative; Construct does not
+  add its own rows to that gateway's picker.
 - Routed requests remove the harness's native credential and apply only the
   selected route's credential.
 - Generated catalogs use conservative capabilities unless the shared model
@@ -96,3 +109,9 @@ A Codex parent remains on its native model while a native subagent selects
 the readable Construct id `construct-kimi/kimi-k2.5`, so only that request
 is translated and routed to Kimi. The parent's concurrent native request
 still goes to the origin Codex selected.
+
+A Claude session opens `/model` and sees `gpt-5.6-sol · codex-oauth` as a
+gateway entry next to Claude's built-in rows. Selecting it carries
+`claude-construct-codex-oauth/gpt-5.6-sol` on the request, allowing the same
+Claude session or one of its native subagents to select the Codex route
+without changing the parent's model.

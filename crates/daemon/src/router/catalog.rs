@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use super::{oauth::OauthProvider, ArmedRoute, Router};
 
 pub const PUBLISHED_MODEL_PREFIX: &str = "construct-";
+pub const CLAUDE_PUBLISHED_MODEL_PREFIX: &str = "claude-construct-";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedModel {
@@ -59,16 +60,32 @@ fn decode_part(value: &str) -> Result<String> {
 /// model override surfaces. Typical ids remain readable
 /// (`construct-review/kimi-k2.5`); separators and other unsafe bytes are
 /// percent-encoded so the mapping remains reversible and collision-safe.
-pub fn published_model_id(route: &str, model: &str) -> String {
-    format!(
-        "{PUBLISHED_MODEL_PREFIX}{}/{}",
-        encode_part(route),
-        encode_part(model)
-    )
+#[cfg(test)]
+fn published_model_id(route: &str, model: &str) -> String {
+    published_model_id_with_prefix(PUBLISHED_MODEL_PREFIX, route, model)
+}
+
+fn published_model_id_with_prefix(prefix: &str, route: &str, model: &str) -> String {
+    format!("{prefix}{}/{}", encode_part(route), encode_part(model))
+}
+
+fn published_model_id_for_harness(harness: &str, route: &str, model: &str) -> String {
+    let prefix = if harness == "claude" {
+        // Claude Code filters gateway-discovered model ids to values that
+        // begin with `claude` or `anthropic`.
+        CLAUDE_PUBLISHED_MODEL_PREFIX
+    } else {
+        PUBLISHED_MODEL_PREFIX
+    };
+    published_model_id_with_prefix(prefix, route, model)
 }
 
 pub fn decode_published_model_id(id: &str) -> Result<Option<(String, String)>> {
-    let Some(encoded) = id.strip_prefix(PUBLISHED_MODEL_PREFIX) else {
+    let encoded = if let Some(encoded) = id.strip_prefix(CLAUDE_PUBLISHED_MODEL_PREFIX) {
+        encoded
+    } else if let Some(encoded) = id.strip_prefix(PUBLISHED_MODEL_PREFIX) {
+        encoded
+    } else {
         return Ok(None);
     };
     let (route, model) = encoded
@@ -97,7 +114,7 @@ impl Router {
             }
             for model in self.oauth_model_list(*provider) {
                 out.push(PublishedModel {
-                    id: published_model_id(provider.name(), &model),
+                    id: published_model_id_for_harness(harness, provider.name(), &model),
                     route: provider.name().to_string(),
                     model,
                 });
@@ -109,13 +126,41 @@ impl Router {
             }
             for model in self.profile_model_list(profile) {
                 out.push(PublishedModel {
-                    id: published_model_id(route, &model),
+                    id: published_model_id_for_harness(harness, route, &model),
                     route: route.clone(),
                     model,
                 });
             }
         }
         out
+    }
+
+    /// Anthropic Models API-shaped response consumed by Claude Code's
+    /// gateway model discovery. Native picker rows are built from these
+    /// fields; credentials and endpoint details never enter the response.
+    pub fn claude_models_response(&self) -> Value {
+        let data: Vec<Value> = self
+            .published_models("claude")
+            .into_iter()
+            .map(|model| {
+                json!({
+                    "id": model.id,
+                    "display_name": format!("{} · {}", model.model, model.route),
+                    "description": format!(
+                        "Routed by Construct through {} to {}.",
+                        model.route, model.model
+                    ),
+                    "type": "model",
+                    "created_at": "1970-01-01T00:00:00Z"
+                })
+            })
+            .collect();
+        json!({
+            "data": data,
+            "has_more": false,
+            "first_id": null,
+            "last_id": null
+        })
     }
 
     /// Resolve a model id carried by a harness request. An id outside the
@@ -380,6 +425,16 @@ mod tests {
             Some(("route/with space".into(), "vendor/model--1".into()))
         );
         assert_eq!(decode_published_model_id("gpt-native").unwrap(), None);
+    }
+
+    #[test]
+    fn claude_ids_pass_gateway_filter_and_round_trip() {
+        let id = published_model_id_for_harness("claude", "review", "vendor/model");
+        assert_eq!(id, "claude-construct-review/vendor%2Fmodel");
+        assert_eq!(
+            decode_published_model_id(&id).unwrap(),
+            Some(("review".into(), "vendor/model".into()))
+        );
     }
 
     #[test]

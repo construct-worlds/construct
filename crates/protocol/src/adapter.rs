@@ -62,6 +62,14 @@ use crate::paths;
 /// publish_models`, and the daemon owns the generated file.
 pub const ENV_CODEX_MODEL_CATALOG: &str = "CONSTRUCT_CODEX_MODEL_CATALOG";
 
+/// Tell the Claude adapter that this session has a native model catalog
+/// available through the Construct router.
+///
+/// The adapter converts this internal handoff into Claude Code's gateway
+/// model-discovery environment only when the session still uses the native
+/// Anthropic API origin. A user-configured gateway is never displaced.
+pub const ENV_CLAUDE_MODEL_CATALOG: &str = "CONSTRUCT_CLAUDE_MODEL_CATALOG";
+
 /// A command prefix supplied through an adapter's `CONSTRUCT_*_CMD` override.
 ///
 /// The first token is the executable to spawn; remaining tokens are prepended
