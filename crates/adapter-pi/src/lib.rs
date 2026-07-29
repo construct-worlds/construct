@@ -37,12 +37,15 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use construct_adapter_common::context_breakdown::{estimate_tokens_from_chars, BreakdownGate};
 use construct_adapter_common::{drive_turn, spawn_stderr_log, TurnOutcome};
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
-use construct_protocol::adapter::{run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter};
+use construct_protocol::adapter::{
+    run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
+};
 use construct_protocol::{
-    Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
-    SessionState,
+    Capabilities, ContextSegment, InitializeResult, MessageRole, PtySize, SessionEvent,
+    SessionStartParams, SessionState,
 };
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -132,13 +135,10 @@ fn write_conv_id(id: &str) {
 /// or `--fork`.
 fn is_pi_session_id(value: &str) -> bool {
     value.len() == 36
-        && value
-            .chars()
-            .zip(0..)
-            .all(|(c, i)| match i {
-                8 | 13 | 18 | 23 => c == '-',
-                _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
-            })
+        && value.chars().zip(0..).all(|(c, i)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
+        })
 }
 
 /// Newest session file in `dir` by filename. pi names files
@@ -228,7 +228,10 @@ struct MetaState {
 /// `provider/modelId` when both are present — the shape pi's own `--model`
 /// flag accepts, so the daemon can round-trip it into a respawn.
 fn model_label(provider: Option<&str>, model: Option<&str>) -> Option<String> {
-    match (provider.filter(|s| !s.is_empty()), model.filter(|s| !s.is_empty())) {
+    match (
+        provider.filter(|s| !s.is_empty()),
+        model.filter(|s| !s.is_empty()),
+    ) {
         (Some(p), Some(m)) => Some(format!("{p}/{m}")),
         (None, Some(m)) => Some(m.to_string()),
         _ => None,
@@ -270,6 +273,88 @@ fn usage_events(usage: &Value) -> Vec<SessionEvent> {
             window_tokens: None,
         },
     ]
+}
+
+/// Conversation-content chars of one pi `message` object: `thinking`/`text`/
+/// `toolCall` blocks, whatever the role (user and toolResult content is text
+/// blocks; assistant adds thinking and tool calls). Signature blobs
+/// (`thinkingSignature`, `textSignature`) are bookkeeping, not conversation
+/// content, and are excluded.
+fn message_content_chars(message: &Value) -> usize {
+    let mut chars = 0usize;
+    for block in message
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                chars += block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .map_or(0, str::len);
+            }
+            Some("text") => {
+                chars += block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map_or(0, str::len);
+            }
+            Some("toolCall") => {
+                chars += block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map_or(0, str::len);
+                if let Some(args) = block.get("arguments") {
+                    chars += args.to_string().len();
+                }
+            }
+            _ => {}
+        }
+    }
+    chars
+}
+
+/// Char sum over every `message` record in a session file. Deliberately a
+/// full scan at gauge cadence (not an incremental tally): the figure
+/// self-corrects across resume, rebinds, and anything pi rewrites behind us.
+fn conversation_chars(path: &Path) -> usize {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return 0;
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|v| v.get("type").and_then(Value::as_str) == Some("message"))
+        .filter_map(|v| v.get("message").map(message_content_chars))
+        .sum()
+}
+
+/// Context breakdown behind the gauge (spec 0156): the session file IS the
+/// conversation pi resends on the next call, so a char-heuristic sum over
+/// its content is a usable `messages` estimate. One segment only — the fixed
+/// prefix (system prompt, tools) never appears on pi's data surface, so it
+/// lands in the client's synthetic `unaccounted` row. `None` while the file
+/// has no conversation content yet.
+fn breakdown_segments(path: &Path) -> Option<Vec<ContextSegment>> {
+    let chars = conversation_chars(path);
+    (chars > 0).then(|| {
+        vec![ContextSegment::new(
+            "messages",
+            estimate_tokens_from_chars(chars),
+            true,
+        )]
+    })
+}
+
+/// Emit the breakdown at the same cadence as the context gauge, gated on
+/// change so identical rescans stay out of the transcript.
+fn emit_breakdown(path: &Path, gate: &mut BreakdownGate, emit: &EventEmitter) {
+    if let Some(segments) = breakdown_segments(path) {
+        if gate.changed(&segments) {
+            emit.emit(SessionEvent::ContextBreakdown { segments });
+        }
+    }
 }
 
 fn text_of_blocks(content: Option<&Value>) -> String {
@@ -347,10 +432,7 @@ fn message_events(message: &Value, meta: &mut MetaState) -> Vec<SessionEvent> {
                                 .unwrap_or("?")
                                 .to_string(),
                             args: block.get("arguments").cloned().unwrap_or(Value::Null),
-                            call_id: block
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
+                            call_id: block.get("id").and_then(Value::as_str).map(str::to_string),
                         });
                     }
                     _ => {}
@@ -424,7 +506,9 @@ fn record_events(v: &Value, meta: &mut MetaState) -> Vec<SessionEvent> {
 /// carriage return after a grace delay — forwarding every other inbox
 /// message unchanged. The delay lets pi's paste heuristics settle so the CR
 /// registers as a real Enter keypress.
-fn interpose_typed_input(mut real: mpsc::Receiver<AdapterInboxMsg>) -> mpsc::Receiver<AdapterInboxMsg> {
+fn interpose_typed_input(
+    mut real: mpsc::Receiver<AdapterInboxMsg>,
+) -> mpsc::Receiver<AdapterInboxMsg> {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
         while let Some(msg) = real.recv().await {
@@ -438,7 +522,11 @@ fn interpose_typed_input(mut real: mpsc::Receiver<AdapterInboxMsg>) -> mpsc::Rec
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    if tx.send(AdapterInboxMsg::PtyInput(vec![b'\r'])).await.is_err() {
+                    if tx
+                        .send(AdapterInboxMsg::PtyInput(vec![b'\r']))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -612,6 +700,7 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
             .as_ref()
             .map(|(path, _)| count_lines(path))
             .unwrap_or(0);
+        let mut breakdown_gate = BreakdownGate::default();
 
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -637,9 +726,10 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
                         cursor = 0;
                         current = Some((newest, id));
                     }
-                } else if current.as_ref().is_some_and(|(_, id)| {
-                    header_session_id(&newest).is_some_and(|h| &h != id)
-                }) {
+                } else if current
+                    .as_ref()
+                    .is_some_and(|(_, id)| header_session_id(&newest).is_some_and(|h| &h != id))
+                {
                     // Same path, rewritten header (observed once live: a
                     // `--continue` rewrote the file under a fresh uuid while
                     // keeping the history). Follow the id; history already
@@ -663,6 +753,7 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
             let Ok(text) = std::fs::read_to_string(path) else {
                 continue;
             };
+            let mut saw_context_usage = false;
             for (idx, line) in text.lines().enumerate() {
                 if idx < cursor || line.trim().is_empty() {
                     continue;
@@ -671,10 +762,14 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
                     continue;
                 };
                 for event in record_events(&v, &mut meta) {
+                    saw_context_usage |= matches!(event, SessionEvent::ContextUsage { .. });
                     emit.emit(event);
                 }
             }
             cursor = text.lines().count();
+            if saw_context_usage {
+                emit_breakdown(path, &mut breakdown_gate, &emit);
+            }
         }
     });
 }
@@ -717,6 +812,7 @@ async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext) {
         last_model: params.model.clone(),
         last_effort: None,
     }));
+    let mut breakdown_gate = BreakdownGate::default();
 
     let exit_code = loop {
         let user_text = match pending.pop_front() {
@@ -793,7 +889,12 @@ async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext) {
         let child_stdout = child.stdout.take().expect("piped");
         let child_stderr = child.stderr.take().expect("piped");
         let captured_sid = Arc::new(StdMutex::new(None::<String>));
-        let stdout_task = spawn_stdout(child_stdout, emit.clone(), meta.clone(), captured_sid.clone());
+        let stdout_task = spawn_stdout(
+            child_stdout,
+            emit.clone(),
+            meta.clone(),
+            captured_sid.clone(),
+        );
         let stderr_task = spawn_stderr_log(child_stderr, emit.clone());
 
         let outcome = drive_turn(&mut child, &mut ctx.inbox, &emit, &mut pending).await;
@@ -813,6 +914,13 @@ async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext) {
                     session_path = Some(path);
                 }
             }
+        }
+
+        // Per-turn is the gauge's headless cadence (usage arrives once per
+        // `message_end`), and by now the session file has landed, so the
+        // full rescan sees the whole conversation the turn produced.
+        if let Some(path) = session_path.as_ref() {
+            emit_breakdown(path, &mut breakdown_gate, &emit);
         }
 
         match outcome {
@@ -984,7 +1092,11 @@ mod tests {
         });
         let events = record_events(&v, &mut meta);
         match events.as_slice() {
-            [SessionEvent::ModelChanged { model }, SessionEvent::ToolUse { tool, args, call_id }, SessionEvent::Cost {
+            [SessionEvent::ModelChanged { model }, SessionEvent::ToolUse {
+                tool,
+                args,
+                call_id,
+            }, SessionEvent::Cost {
                 usd,
                 tokens_in,
                 tokens_out,
@@ -995,7 +1107,10 @@ mod tests {
             }] => {
                 assert_eq!(model, "openai/gpt-5.5");
                 assert_eq!(tool, "write");
-                assert_eq!(args.pointer("/path").and_then(Value::as_str), Some("hello.txt"));
+                assert_eq!(
+                    args.pointer("/path").and_then(Value::as_str),
+                    Some("hello.txt")
+                );
                 assert_eq!(
                     call_id.as_deref(),
                     Some("call_T27eYYfD60ur79KfMdy2SPnG|fc_0bee")
@@ -1104,13 +1219,113 @@ mod tests {
         }
     }
 
+    /// A representative session file mirroring the real pi 0.82.0 records
+    /// inspected on this machine (2026-07-28): header, bookkeeping records,
+    /// then a user text block, an assistant thinking+toolCall message with
+    /// signature blobs, a toolResult message, and a final assistant text
+    /// with its signature.
+    fn write_breakdown_fixture(path: &Path) -> usize {
+        let user_text = "run date";
+        let thinking = "The user wants the current date; run the bash tool.";
+        let tool_name = "bash";
+        let tool_args = r#"{"command":"date"}"#;
+        let tool_output = "Mon Jul 28 10:00:00 KST 2026";
+        let reply = "It is Mon Jul 28 10:00:00 KST 2026.";
+        let lines = [
+            r#"{"type":"session","version":3,"id":"019f9bc4-ca98-7527-9f5d-7ffa067500e2","timestamp":"2026-07-26T00:13:13.240Z","cwd":"/w"}"#.to_string(),
+            r#"{"type":"model_change","id":"85c02dea","parentId":null,"timestamp":"2026-07-26T00:13:13.252Z","provider":"openai-codex","modelId":"gpt-5.6-sol"}"#.to_string(),
+            format!(
+                r#"{{"type":"message","id":"a1","message":{{"role":"user","content":[{{"type":"text","text":"{user_text}"}}],"timestamp":1785000000000}}}}"#
+            ),
+            format!(
+                r#"{{"type":"message","id":"a2","message":{{"role":"assistant","content":[{{"type":"thinking","thinking":"{thinking}","thinkingSignature":"OPAQUE-SIGNATURE-BLOB-MUST-NOT-COUNT"}},{{"type":"toolCall","id":"call_1|fc_1","name":"{tool_name}","arguments":{tool_args}}}],"provider":"openai-codex","model":"gpt-5.6-sol","usage":{{"input":100,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":110,"cost":{{"total":0.001}}}},"stopReason":"toolUse"}}}}"#
+            ),
+            format!(
+                r#"{{"type":"message","id":"a3","message":{{"role":"toolResult","toolCallId":"call_1|fc_1","toolName":"bash","content":[{{"type":"text","text":"{tool_output}"}}],"isError":false}}}}"#
+            ),
+            format!(
+                r#"{{"type":"message","id":"a4","message":{{"role":"assistant","content":[{{"type":"text","text":"{reply}","textSignature":"OPAQUE-TEXT-SIGNATURE"}}],"provider":"openai-codex","model":"gpt-5.6-sol","usage":{{"input":160,"output":12,"cacheRead":0,"cacheWrite":0,"totalTokens":172,"cost":{{"total":0.002}}}},"stopReason":"stop"}}}}"#
+            ),
+        ];
+        std::fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+        user_text.len()
+            + thinking.len()
+            + tool_name.len()
+            + tool_args.len()
+            + tool_output.len()
+            + reply.len()
+    }
+
+    #[test]
+    fn conversation_chars_sums_content_and_skips_signatures() {
+        // Char sum covers thinking/text/toolCall blocks of every message
+        // record (user, assistant, toolResult) and nothing else — signature
+        // blobs, headers, and model_change bookkeeping stay out.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp
+            .path()
+            .join("2026-07-26T00-13-13-240Z_019f9bc4-ca98-7527-9f5d-7ffa067500e2.jsonl");
+        let expected = write_breakdown_fixture(&path);
+        assert_eq!(conversation_chars(&path), expected);
+        assert_eq!(conversation_chars(&tmp.path().join("missing.jsonl")), 0);
+    }
+
+    #[test]
+    fn breakdown_reports_single_estimated_segment_and_gates_repeats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("s.jsonl");
+        let chars = write_breakdown_fixture(&path);
+
+        let segments = breakdown_segments(&path).expect("content present");
+        match segments.as_slice() {
+            [ContextSegment {
+                label,
+                tokens,
+                estimated,
+            }] => {
+                assert_eq!(label, "messages");
+                assert_eq!(*tokens, estimate_tokens_from_chars(chars));
+                assert!(*estimated, "char heuristic must be marked estimated");
+            }
+            other => panic!("expected one messages segment: {other:?}"),
+        }
+
+        // Report-on-change: an identical rescan stays quiet; growth reports.
+        let mut gate = BreakdownGate::default();
+        assert!(gate.changed(&segments));
+        assert!(!gate.changed(&breakdown_segments(&path).unwrap()));
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(
+            r#"{"type":"message","id":"a5","message":{"role":"user","content":[{"type":"text","text":"more"}]}}"#,
+        );
+        text.push('\n');
+        std::fs::write(&path, text).unwrap();
+        assert!(gate.changed(&breakdown_segments(&path).unwrap()));
+
+        // A file with no conversation content yet reports nothing at all
+        // (spec 0156: only what the data surface makes derivable).
+        let empty = tmp.path().join("empty.jsonl");
+        std::fs::write(
+            &empty,
+            concat!(
+                r#"{"type":"session","version":3,"id":"019f94e7-a627-75fa-8509-c8d85654e609","timestamp":"2026-07-24T16:13:57.159Z","cwd":"/w"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(breakdown_segments(&empty), None);
+    }
+
     #[test]
     fn model_label_prefers_provider_qualified_form() {
         assert_eq!(
             model_label(Some("openai"), Some("gpt-5.5")).as_deref(),
             Some("openai/gpt-5.5")
         );
-        assert_eq!(model_label(None, Some("gpt-5.5")).as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            model_label(None, Some("gpt-5.5")).as_deref(),
+            Some("gpt-5.5")
+        );
         assert_eq!(model_label(Some("openai"), None), None);
         assert_eq!(model_label(Some(""), Some("")), None);
     }

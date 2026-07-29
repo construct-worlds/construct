@@ -543,6 +543,19 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window_tokens: Option<u64>,
     },
+    /// Labeled per-component breakdown of what occupies the context window
+    /// (spec 0156): system prompt, guides, tools, conversation, … Same gauge
+    /// semantics as [`ContextUsage`](Self::ContextUsage) — latest report
+    /// replaces the previous one, a context reset clears it — and adapters
+    /// emit it at the same cadence (on change, alongside the gauge). Segment
+    /// counts derived from char-length heuristics set
+    /// [`ContextSegment::estimated`]; clients mark those visually. Adapters
+    /// only report components their harness's own data surface makes
+    /// derivable — clients synthesize "free space" and "unaccounted" rows
+    /// themselves.
+    ContextBreakdown {
+        segments: Vec<ContextSegment>,
+    },
     Diff {
         patch: String,
     },
@@ -2305,6 +2318,35 @@ pub fn sanitize_auto_title(raw: &str) -> String {
     truncated.trim().to_string()
 }
 
+/// One labeled component of a session's occupied context window (spec
+/// 0156), as reported by [`SessionEvent::ContextBreakdown`]. Segments are
+/// additive parts of the *used* context, ordered fixed-prefix first;
+/// "free space" and any unaccounted remainder are derived by clients from
+/// the gauge (spec 0104) rather than reported here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextSegment {
+    /// Short lowercase display label chosen by the adapter, rendered
+    /// verbatim — e.g. `"system prompt"`, `"tools"`, `"messages"`.
+    pub label: String,
+    pub tokens: u64,
+    /// True when `tokens` comes from a char-length heuristic rather than a
+    /// harness-/provider-reported count. Clients must render estimated
+    /// segments visually distinct (a `~` prefix) — part of the spec 0156
+    /// contract, not styling.
+    #[serde(default)]
+    pub estimated: bool,
+}
+
+impl ContextSegment {
+    pub fn new(label: impl Into<String>, tokens: u64, estimated: bool) -> Self {
+        Self {
+            label: label.into(),
+            tokens,
+            estimated,
+        }
+    }
+}
+
 /// One cached harness usage-probe capture, as sent over the wire (spec
 /// 0085). `bytes` is the raw PTY output the harness's own usage/status
 /// slash command rendered — base64-encoded, deliberately unparsed (no token
@@ -2505,6 +2547,11 @@ pub struct SessionSummary {
     /// its usage reports. `None` = unknown; clients show bare usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// Latest per-component context breakdown report (spec 0156). Empty for
+    /// harnesses that report none; cleared on context reset; restored from
+    /// the transcript's last report at load, like the gauge above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_segments: Vec<ContextSegment>,
     /// How adapters that gate tools handle Risky tool calls.
     #[serde(default)]
     pub approval_mode: ApprovalMode,
@@ -3668,7 +3715,9 @@ impl LayoutNode {
     /// rather than collapsing the split out from under them.
     pub fn clear_session(&mut self, session_id: &str) -> bool {
         match self {
-            Self::Leaf { session_id: sid, .. } => {
+            Self::Leaf {
+                session_id: sid, ..
+            } => {
                 if sid.as_deref() == Some(session_id) {
                     *sid = None;
                     true
@@ -4072,7 +4121,9 @@ mod suggestion_tests {
         let long = "x".repeat(1000);
         let verbs: Vec<String> = (0..8)
             .map(|i| {
-                format!("{{\"label\":\"verb {i}\",\"cards\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\"]}}")
+                format!(
+                    "{{\"label\":\"verb {i}\",\"cards\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\"]}}"
+                )
             })
             .collect();
         let raw = format!("{{\"top\":\"{long}\",\"verbs\":[{}]}}", verbs.join(","));
@@ -4094,7 +4145,8 @@ mod suggestion_tests {
 
     #[test]
     fn parse_loose_ignores_prose_around_json() {
-        let raw = "Sure! Here's my prediction:\n{\"top\":\"merge it\",\"verbs\":[]}\nHope that helps.";
+        let raw =
+            "Sure! Here's my prediction:\n{\"top\":\"merge it\",\"verbs\":[]}\nHope that helps.";
         let hand = SuggestionHand::parse_loose(raw).unwrap();
         assert_eq!(hand.top.text, "merge it");
     }
@@ -4107,7 +4159,9 @@ mod suggestion_tests {
             },
             verbs: vec![SuggestionVerb {
                 label: "dig deeper".into(),
-                cards: vec![SuggestionCard { text: "why?".into() }],
+                cards: vec![SuggestionCard {
+                    text: "why?".into(),
+                }],
             }],
         });
         let json = serde_json::to_string(&ev).unwrap();
@@ -4166,7 +4220,11 @@ mod layout_tests {
 
     #[test]
     fn session_ids_skip_empty_panes() {
-        let tree = split(leaf(1, Some("a")), split(leaf(2, None), leaf(3, Some("b")), 50), 50);
+        let tree = split(
+            leaf(1, Some("a")),
+            split(leaf(2, None), leaf(3, Some("b")), 50),
+            50,
+        );
         assert_eq!(tree.session_ids(), vec!["a", "b"]);
     }
 

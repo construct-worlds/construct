@@ -158,6 +158,40 @@ only when the harness itself states the window (codex's
 per poll. Never guess the window from a model-name table outside the
 harness's own report.
 
+### 2.6b Context breakdown segments (spec 0156)
+
+Where the harness's own data surface makes it derivable, emit
+`SessionEvent::ContextBreakdown` alongside each context-gauge report: an
+ordered list of labeled segments (fixed prefix first — system prompt,
+guides, tools — then `messages`) describing what occupies the used
+context. This is the one sanctioned exception to the never-estimate rule:
+segment counts MAY come from a char-length heuristic
+(`adapter-common::context_breakdown::estimate_tokens_from_chars`, the same
+`chars / 3.5` rule smith budgets with), but every such segment sets
+`estimated: true` — clients render those with a `~` prefix, and the gauge's
+own used/window numbers stay harness-reported only.
+
+Patterns:
+
+- **Own the prompt** (smith): report each assembled section (system
+  prompt, project guide, skills, tool schemas) plus the live message list.
+- **Native transcript on disk** (claude, codex, kimi, pi): full-scan the
+  bound transcript at emit time and report a `messages` estimate from its
+  conversation content. Full scans at turn cadence are deliberate — they
+  self-correct across resume and native-id rebinds, where incremental
+  accumulators silently drift.
+- **Harness writes its prompt to disk** (grok): report a real
+  `system prompt` segment from that file, then `messages`.
+- **Usage buried in an internal db** (antigravity): the same poll that
+  scrapes the db for model/usage also triggers a `messages` estimate from
+  the brain transcript, restarting at truncation checkpoints.
+- **Nothing visible** (shell, and harnesses with no usable logs): report
+  nothing; clients keep the plain gauge tooltip.
+
+Report only derivable components — clients synthesize the `unaccounted`
+remainder and `free space` rows themselves. Gate re-emission on change
+(`adapter-common::context_breakdown::BreakdownGate`), like the gauge.
+
 ### 2.7 Dollar cost
 
 `Cost.usd` when the harness prices calls itself (smith; opencode stores
@@ -210,7 +244,7 @@ daemon once the events above are emitted.
 
 ## 3. Capability matrix
 
-Snapshot of where each harness stands (2026-07-24). Re-audit by checking the
+Snapshot of where each harness stands (2026-07-28). Re-audit by checking the
 listed data surface, not by trusting this table — upstream CLIs grow
 surfaces between releases (codex's token splits and grok's context figures
 both existed for months before we consumed them).
@@ -221,8 +255,9 @@ both existed for months before we consumed them).
 | Structured chat events | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
 | ModelChanged | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓¹ | ✓ | n/a |
 | EffortChanged | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
-| Token split (0103) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | gap² | none³ | n/a |
-| Context gauge (0104) | ✓ | ✓ | ✓ | ✓ | ✓ | gap | ✓⁶ | ✓ | none³ | n/a |
+| Token split (0103) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | gap² | ✓³ | n/a |
+| Context gauge (0104) | ✓ | ✓ | ✓ | ✓ | ✓ | gap | ✓⁶ | ✓ | ✓³ | n/a |
+| Context breakdown (0156) | ✓ | ✓ | ✓ | gap⁸ | ✓ | gap⁹ | ✓ | ✓ | ✓ | n/a |
 | USD cost | ✓ | headless only | — | gap⁴ | — | ✓ | ✓ | — | — | n/a |
 | Native resume | ✓ (own state) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | fresh shell |
 | Reset detection (0085) | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
@@ -239,8 +274,13 @@ adapter-codex's `codex_model_change` doc).
 gauge (spec 0104), but its only per-session consumption figure is a
 cumulative unsplit `totalTokens` — real data a token-split delta could
 consume, still unwired.
-³ antigravity exposes no token/cost data in print mode or its logs
-(checked; documented in the adapter).
+³ antigravity exposes no token/cost data in print mode or its logs, but
+its per-conversation sqlite db's `gen_metadata` blobs embed a full
+per-generation split (fresh input, cached prefix, output incl. thoughts)
+as schema-less protobuf varints — decoded best-effort like the model
+scrape, field mapping validated against 2,184 real generation rows across
+58 conversation dbs. Agy states no context window anywhere, so the gauge
+is used-only (same posture as pi⁶).
 ⁴ opencode stores exact per-message USD `cost` in the same event the plugin
 already reads — a one-line add.
 ⁵ smith subagents are real construct sessions (spec 0014), not mirrors.
@@ -249,6 +289,13 @@ bare usage without a denominator (its model catalog knows window sizes, but
 that is a model-name table, not a per-session report).
 ⁷ pi has a JS extension system that could host construct's unified tools
 (the opencode pattern); unwired today.
+⁸ opencode's injected plugin sees only usage numbers (`message.updated`
+carries no content; content-bearing part events aren't captured), so no
+breakdown component is derivable without an active harness-side query —
+which spec 0156's non-goals rule out.
+⁹ hermes's `state.db` stores full structured messages — a `messages`
+estimate is derivable, but hermes reports no context gauge at all yet
+(the row above); wire the gauge first, then the breakdown rides along.
 
 ## 4. Where each harness's data lives
 
@@ -263,7 +310,7 @@ short real session:
 | opencode | `~/.local/share/opencode/opencode.db` (sqlite `message`) — reachable live via the plugin's `message.updated` events | `tokens` (input/output/reasoning/cache r+w), exact `cost` USD, provider/model, per-message timestamps |
 | grok | `~/.grok/sessions/<cwd-enc>/<session>/` (`signals.json`, `updates.jsonl`, `chat_history.jsonl`) | `contextTokensUsed`/`contextWindowTokens`, `totalTokens` (unsplit), turn/tool counters, session summary |
 | hermes | `$HERMES_HOME/state.db` (`sessions`, `messages`) | source-tagged native id, model/reasoning config, full structured messages/tool calls, token split, estimated/actual USD cost |
-| antigravity | — | nothing usable found in print mode or logs |
+| antigravity | `~/.gemini/antigravity-cli/conversations/<id>.db` (`gen_metadata` blobs), `brain/<id>/.system_generated/logs/transcript.jsonl` | per-generation usage varints at blob path `1.4` (`2` fresh input, `3` output incl. thoughts, `5` cached prefix, `9` thoughts), model display label (ASCII scrape); transcript carries conversation content (`USER_INPUT`/`PLANNER_RESPONSE`/tool records, `CHECKPOINT` = truncation summary) but no usage |
 | pi | `<CONSTRUCT_SESSION_DATA_DIR>/pi-sessions/<ts>_<uuid>.jsonl` (private store the adapter selects via `--session-dir`; pi's global default is `~/.pi/agent/sessions/<cwd-slug>/`) | per-assistant-message `usage` (input/output/cacheRead/cacheWrite/reasoning + exact USD `cost.total`; `input` EXCLUDES cache reads), `model_change` / `thinking_level_change` records, `thinking`/`text`/`toolCall` content blocks, `toolResult` messages |
 
 ## 5. Verification checklist

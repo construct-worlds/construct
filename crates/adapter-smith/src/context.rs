@@ -56,6 +56,103 @@ pub fn context_window_tokens(provider: &str, model: &str) -> usize {
 pub const UTILIZATION: f64 = 0.7;
 const MIN_KEEP_TURNS: usize = 2;
 
+/// Char-heuristic token estimate for a raw string — the same `chars / 3.5`
+/// rule as [`estimate_tokens`], for prompt sections that aren't `Message`s.
+pub fn estimate_tokens_str(s: &str) -> u64 {
+    (s.len() as f64 / 3.5) as u64
+}
+
+/// The session's assembled system prompt with per-section char sizes
+/// retained, so the context breakdown (spec 0156) can report each section
+/// as its own segment instead of one opaque "system prompt" blob.
+pub struct PromptSections {
+    /// The full prompt string handed to the provider (base + guide + skills).
+    pub prompt: String,
+    base_chars: usize,
+    guide_chars: usize,
+    skills_chars: usize,
+}
+
+impl PromptSections {
+    /// Mirror of the historical inline assembly in `agent::run` /
+    /// `interactive::run`: base env prompt, then the project guide
+    /// (AGENTS.md) section, then the skills catalog section.
+    pub fn assemble(cwd: &std::path::Path) -> Self {
+        let base = crate::agent::system_prompt_for_env();
+        let mut prompt = base.to_string();
+        let mut guide_chars = 0;
+        if let Some(section) = crate::project_guide::format_section(cwd) {
+            guide_chars = section.len();
+            prompt.push_str("\n\n");
+            prompt.push_str(&section);
+        }
+        let mut skills_chars = 0;
+        if let Some(section) = crate::skills::format_section(cwd) {
+            skills_chars = section.len();
+            prompt.push_str("\n\n");
+            prompt.push_str(&section);
+        }
+        Self {
+            prompt,
+            base_chars: base.len(),
+            guide_chars,
+            skills_chars,
+        }
+    }
+
+    /// Build the spec 0156 segment list for the current turn: prompt
+    /// sections, tool schemas, then the conversation. Everything smith can
+    /// see is chars, so every segment is `estimated`. Zero-size sections
+    /// (no AGENTS.md, no skills) are omitted rather than reported as 0.
+    pub fn breakdown(
+        &self,
+        tool_specs: &[crate::provider::ToolSpec],
+        messages: &[Message],
+    ) -> Vec<construct_protocol::ContextSegment> {
+        use construct_protocol::ContextSegment;
+        let tool_chars: usize = tool_specs
+            .iter()
+            .map(|s| {
+                s.name.len()
+                    + s.description.len()
+                    + serde_json::to_string(&s.schema)
+                        .map(|j| j.len())
+                        .unwrap_or(0)
+            })
+            .sum();
+        let mut segments = vec![ContextSegment::new(
+            "system prompt",
+            estimate_tokens_str(&self.prompt[..self.base_chars]),
+            true,
+        )];
+        if self.guide_chars > 0 {
+            segments.push(ContextSegment::new(
+                "project guide",
+                (self.guide_chars as f64 / 3.5) as u64,
+                true,
+            ));
+        }
+        if self.skills_chars > 0 {
+            segments.push(ContextSegment::new(
+                "skills",
+                (self.skills_chars as f64 / 3.5) as u64,
+                true,
+            ));
+        }
+        segments.push(ContextSegment::new(
+            "tools",
+            (tool_chars as f64 / 3.5) as u64,
+            true,
+        ));
+        segments.push(ContextSegment::new(
+            "messages",
+            estimate_tokens(messages) as u64,
+            true,
+        ));
+        segments
+    }
+}
+
 /// Rough token estimate (chars / 3.5). Safe to overestimate.
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     let mut chars = 0usize;

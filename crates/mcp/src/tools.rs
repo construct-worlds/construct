@@ -1730,19 +1730,13 @@ mod tests {
         };
         let state = ContextServeState::default();
         let request = agent_context::ContextRequest::from_args(&json!({}));
-        let first = agent_context::compact_response(
-            make_context(),
-            &request,
-            &mut state.lock().unwrap(),
-        );
+        let first =
+            agent_context::compact_response(make_context(), &request, &mut state.lock().unwrap());
         assert_eq!(first["global_memory"]["content"], "remember this");
         assert!(first.get("memory_policy").is_none());
 
-        let second = agent_context::compact_response(
-            make_context(),
-            &request,
-            &mut state.lock().unwrap(),
-        );
+        let second =
+            agent_context::compact_response(make_context(), &request, &mut state.lock().unwrap());
         assert_eq!(second["global_memory"]["unchanged"], true);
         assert!(second["global_memory"].get("content").is_none());
     }
@@ -2238,6 +2232,7 @@ mod tests {
             tokens: construct_protocol::TokenTally::default(),
             context_used: None,
             context_window: None,
+            context_segments: Vec::new(),
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: SessionKind::Subagent,
             archived: false,

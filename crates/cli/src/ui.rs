@@ -2,14 +2,13 @@
 
 use crate::app::{
     feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
-    ConfigureTab,
-    HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
+    ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
     MinibufferChoiceAction, MinibufferChoiceHit, MinibufferIntent, PaneFocus, RemoteControlHit,
-    RemoteControlHitAction, ScreenPoint, Selection,
-    SessionTitleMenuAction, TextSelectionRange, ViewMode, WindowDividerHit, WindowPaneHit,
-    WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS,
-    PROGRAM_COLLAB_CURSOR_TTL_MS, PROGRAM_CONTENT_PADDING_X, PROGRAM_CONTENT_PADDING_Y,
-    PROGRAM_CLIP_HOVER_PREVIEW_COLS, PROGRAM_CLIP_HOVER_PREVIEW_ROWS, PROGRAM_REVEAL_MS,
+    RemoteControlHitAction, ScreenPoint, Selection, SessionTitleMenuAction, TextSelectionRange,
+    ViewMode, WindowDividerHit, WindowPaneHit, WindowSplitDirection, ZoomMode, CONFIGURE_TABS,
+    PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS, PROGRAM_CLIP_HOVER_PREVIEW_COLS,
+    PROGRAM_CLIP_HOVER_PREVIEW_ROWS, PROGRAM_COLLAB_CURSOR_TTL_MS, PROGRAM_CONTENT_PADDING_X,
+    PROGRAM_CONTENT_PADDING_Y, PROGRAM_REVEAL_MS,
 };
 use crate::keymap::{KeyAction, Profile};
 use crate::text_util::wrap_to_width;
@@ -551,10 +550,14 @@ fn capture_frame_text(f: &mut Frame, app: &mut App) {
 }
 
 fn is_program_doc_selection(app: &App, bounds: Option<Rect>) -> bool {
-    let Some(bounds) = bounds else { return false; };
+    let Some(bounds) = bounds else {
+        return false;
+    };
     for hit in &app.layout.main_window_areas {
         if bounds == hit.inner_area {
-            if let Some(crate::app::Selection::Session(session_id)) = app.selection_for_window(hit.id) {
+            if let Some(crate::app::Selection::Session(session_id)) =
+                app.selection_for_window(hit.id)
+            {
                 return app.program_popups.contains_key(&session_id);
             }
         }
@@ -585,7 +588,14 @@ fn render_text_selection(f: &mut Frame, app: &App) {
         if sel.dragged {
             let (start, end) = normalized_points(sel.anchor, sel.head);
             let use_reversed = is_program_doc_selection(app, sel.bounds);
-            render_selection_rect(f, sel.bounds.unwrap_or(area), start, end, style, use_reversed);
+            render_selection_rect(
+                f,
+                sel.bounds.unwrap_or(area),
+                start,
+                end,
+                style,
+                use_reversed,
+            );
         }
         return;
     }
@@ -1152,7 +1162,11 @@ pub fn dynamic_ui_trigger_range(
 /// the *left* of the harness label, reserving a separator for it), this is
 /// the harness label's own range, immediately left of the close button with
 /// no further reservation beyond that one separator.
-pub fn harness_title_range(view_area: Rect, close_width: u16, harness_width: u16) -> (u16, u16, u16) {
+pub fn harness_title_range(
+    view_area: Rect,
+    close_width: u16,
+    harness_width: u16,
+) -> (u16, u16, u16) {
     let titles_right = view_area
         .x
         .saturating_add(view_area.width)
@@ -1695,7 +1709,12 @@ fn harness_hover_tooltip_rect(anchor_x: u16, anchor_y: u16, w: u16, h: u16, tota
     } else {
         (anchor_y + 1).min((total.y + total.height).saturating_sub(h))
     };
-    Rect { x, y, width: w, height: h }
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
 
 const HARNESS_PICKER_MAX_ROWS: usize = 8;
@@ -1969,19 +1988,21 @@ fn minibuffer_choice_suffix(intent: &MinibufferIntent) -> Option<Vec<PromptPart>
             PromptPart::Text(" = cancel): "),
         ],
         // Typed-then-submit path, plain y/N.
-        ArchivedDeleteConfirm { .. } | MenuArchiveConfirm { .. } | MenuUnarchiveConfirm { .. } => vec![
-            PromptPart::Text("("),
-            PromptPart::Choice {
-                label: "y",
-                action: Submit("y".to_string()),
-            },
-            PromptPart::Text("/"),
-            PromptPart::Choice {
-                label: "N",
-                action: Submit("N".to_string()),
-            },
-            PromptPart::Text("): "),
-        ],
+        ArchivedDeleteConfirm { .. } | MenuArchiveConfirm { .. } | MenuUnarchiveConfirm { .. } => {
+            vec![
+                PromptPart::Text("("),
+                PromptPart::Choice {
+                    label: "y",
+                    action: Submit("y".to_string()),
+                },
+                PromptPart::Text("/"),
+                PromptPart::Choice {
+                    label: "N",
+                    action: Submit("N".to_string()),
+                },
+                PromptPart::Text("): "),
+            ]
+        }
         _ => return None,
     })
 }
@@ -2285,8 +2306,12 @@ fn session_detail_cells(s: &SessionSummary, now_ms: i64) -> DetailCells {
             )
         })
     };
-    let tokens = (!s.tokens.is_zero())
-        .then(|| format!("{} tok", crate::lineage::format_token_count(s.tokens.total())));
+    let tokens = (!s.tokens.is_zero()).then(|| {
+        format!(
+            "{} tok",
+            crate::lineage::format_token_count(s.tokens.total())
+        )
+    });
     DetailCells {
         model,
         ctx,
@@ -2395,9 +2420,14 @@ fn session_detail_line(
     match &cells.ctx {
         DetailCtx::Gauge(filled, pct) => {
             spans.push(Span::styled("▰".repeat(*filled), value_style));
-            spans.push(Span::styled("▱".repeat(4usize.saturating_sub(*filled)), faint_style));
+            spans.push(Span::styled(
+                "▱".repeat(4usize.saturating_sub(*filled)),
+                faint_style,
+            ));
             let pct_text = format!("{pct}%");
-            spans.push(Span::raw(" ".repeat(5 - UnicodeWidthStr::width(pct_text.as_str()))));
+            spans.push(Span::raw(
+                " ".repeat(5 - UnicodeWidthStr::width(pct_text.as_str())),
+            ));
             spans.push(Span::styled(pct_text, value_style));
             spans.push(Span::raw(" ".repeat(cols.ctx_w - DETAIL_GAUGE_W)));
         }
@@ -2585,8 +2615,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         ));
     }
     collapse_spans.push(Span::styled(" « ", minus_style));
-    let collapse_line =
-        Line::from(collapse_spans).alignment(ratatui::layout::Alignment::Right);
+    let collapse_line = Line::from(collapse_spans).alignment(ratatui::layout::Alignment::Right);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(pane_border_style(&app.theme, focused))
@@ -2642,13 +2671,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     let harness_w = harness.chars().count();
                     // Reserve room for the trailing unblock marker (" ●") so the
                     // right-aligned harness label doesn't shift when it shows.
-                    let show_attention =
-                        !s.archived && (s.needs_attention || *attention_rollup);
-                    let marker_w = if show_attention {
-                        2
-                    } else {
-                        0
-                    };
+                    let show_attention = !s.archived && (s.needs_attention || *attention_rollup);
+                    let marker_w = if show_attention { 2 } else { 0 };
                     // Always leave at least one cell of gap between the name
                     // and the right-aligned harness.
                     let name_avail = row_w.saturating_sub(prefix_w + 1 + harness_w + marker_w);
@@ -4961,7 +4985,11 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         let hovered = app
             .mouse_pos
             .is_some_and(|(mx, my)| my == first_row && mx >= inner_x && mx < inner_x + inner_w);
-        let style = row_style(true, menu.selected == 0 || hovered, targets_focused || hovered);
+        let style = row_style(
+            true,
+            menu.selected == 0 || hovered,
+            targets_focused || hovered,
+        );
         let marker = if menu.target_is_active(0) { "*" } else { " " };
         f.render_widget(
             Paragraph::new(Line::styled(
@@ -5040,9 +5068,20 @@ fn render_route_menu(f: &mut Frame, app: &App) {
             index == menu.selected || hovered,
             targets_focused || hovered,
         );
-        let marker = if menu.target_is_active(index) { "*" } else { " " };
-        let chevron = if menu.target_descends(index) { "›" } else { " " };
-        let label = truncate(&menu.target_label(index), target_w.saturating_sub(5) as usize);
+        let marker = if menu.target_is_active(index) {
+            "*"
+        } else {
+            " "
+        };
+        let chevron = if menu.target_descends(index) {
+            "›"
+        } else {
+            " "
+        };
+        let label = truncate(
+            &menu.target_label(index),
+            target_w.saturating_sub(5) as usize,
+        );
         let pad = (target_w as usize)
             .saturating_sub(UnicodeWidthStr::width(label.as_str()))
             .saturating_sub(5);
@@ -5065,10 +5104,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
             break;
         }
         f.render_widget(
-            Paragraph::new(Line::styled(
-                "│",
-                Style::default().fg(app.theme.border),
-            )),
+            Paragraph::new(Line::styled("│", Style::default().fg(app.theme.border))),
             Rect {
                 x: divider_x,
                 y: row,
@@ -5112,7 +5148,11 @@ fn render_route_menu(f: &mut Frame, app: &App) {
                 index == menu.model_selected || hovered,
                 !targets_focused || hovered,
             );
-            let marker = if menu.model_is_active(index) { "*" } else { " " };
+            let marker = if menu.model_is_active(index) {
+                "*"
+            } else {
+                " "
+            };
             let label = truncate(model, model_w.saturating_sub(4) as usize);
             let pad = (model_w as usize)
                 .saturating_sub(UnicodeWidthStr::width(label.as_str()))
@@ -5224,7 +5264,13 @@ fn render_session_title_menu(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(app.theme.text)
         };
-        let (label_text, binding) = session_title_menu_action_label(app, action, menu.session_id.as_str(), program_open, terminal_focus);
+        let (label_text, binding) = session_title_menu_action_label(
+            app,
+            action,
+            menu.session_id.as_str(),
+            program_open,
+            terminal_focus,
+        );
         render_session_title_menu_row(f, area, row, label_text, binding, style);
     }
 }
@@ -6062,7 +6108,7 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
         &app.theme,
         editor_area.is_none(),
         paint_row_offset,
-            0,
+        0,
     );
     app.block_hits.insert(
         id.clone(),
@@ -8812,10 +8858,7 @@ fn modeline_model_route_text(
 
 /// The modeline's detailed context indicator and the number of its text cells
 /// covered by the filled part of its background bar.
-fn modeline_context_usage_text(
-    used: Option<u64>,
-    window: Option<u64>,
-) -> Option<(String, usize)> {
+fn modeline_context_usage_text(used: Option<u64>, window: Option<u64>) -> Option<(String, usize)> {
     let used = used?;
     let Some(window) = window.filter(|window| *window > 0) else {
         return Some((
@@ -8855,7 +8898,8 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     };
     let approval_mode_label = s.and_then(approval_mode_modeline_label);
     let approval_mode_badge = approval_mode_label.map(|badge| format!("[{badge}]"));
-    let context_gauge = s.and_then(|s| modeline_context_usage_text(s.context_used, s.context_window));
+    let context_gauge =
+        s.and_then(|s| modeline_context_usage_text(s.context_used, s.context_window));
     let mut search_status = None;
     if let Some(search) = app
         .program_popup
@@ -8928,9 +8972,9 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     // picker there (spec 0114).
     if s.is_some() {
         let model_w = UnicodeWidthStr::width(model_text.as_str()) as u16;
-        let start_col = area.x.saturating_add(
-            UnicodeWidthStr::width(modeline_before_context_gauge.as_str()) as u16,
-        );
+        let start_col = area
+            .x
+            .saturating_add(UnicodeWidthStr::width(modeline_before_context_gauge.as_str()) as u16);
         let start_col = start_col.saturating_sub(model_w);
         let end_col = start_col
             .saturating_add(model_w)
@@ -9381,7 +9425,7 @@ fn render_modeline_context_gauge_tooltip(f: &mut Frame, app: &App) {
     let Some(used) = session.context_used else {
         return;
     };
-    let text = if let Some(window) = session.context_window.filter(|window| *window > 0) {
+    let header = if let Some(window) = session.context_window.filter(|window| *window > 0) {
         let percent = used.saturating_mul(100) / window;
         format!(
             " Context: {} / {} tokens ({}%) ",
@@ -9395,13 +9439,225 @@ fn render_modeline_context_gauge_tooltip(f: &mut Frame, app: &App) {
             crate::lineage::format_token_count(used),
         )
     };
-    render_button_tooltip(
-        f,
-        &app.theme,
-        &text,
-        hit.start_col,
-        hit.row.saturating_sub(2),
-    );
+    // Sessions whose harness reports no breakdown (spec 0156) keep the
+    // pre-existing one-line tooltip.
+    let Some(rows) = context_breakdown_rows(session) else {
+        render_button_tooltip(
+            f,
+            &app.theme,
+            &header,
+            hit.start_col,
+            hit.row.saturating_sub(2),
+        );
+        return;
+    };
+    let total = f.area();
+    // Colored 10x10 cell grid: each cell is 1% of the window (or of the
+    // used tokens when the harness reports no window), painted in the
+    // legend row's color, mirroring Claude Code's /context view.
+    let cell_colors: Vec<Color> = {
+        let weights: Vec<u64> = rows.iter().map(|r| r.tokens).collect();
+        let alloc = breakdown_grid_alloc(&weights, BREAKDOWN_GRID_CELLS);
+        rows.iter()
+            .zip(alloc)
+            .flat_map(|(row, cells)| std::iter::repeat_n(row.color, cells))
+            .collect()
+    };
+    let legend_w = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.text.as_str()) as u16)
+        .max()
+        .unwrap_or(0)
+        + 2; // "■ " marker
+    let grid_w = (BREAKDOWN_GRID_COLS * 2 - 1) as u16; // "■" cells, 1-col gaps
+    let body_rows = (BREAKDOWN_GRID_ROWS.max(rows.len())) as u16;
+    let inner_w =
+        (1 + grid_w + 2 + legend_w + 1).max(UnicodeWidthStr::width(header.as_str()) as u16);
+    let w = (inner_w + 2).min(total.width.max(1));
+    // header + blank separator + grid/legend rows + 2 border rows.
+    let h = (1 + 1 + body_rows + 2).min(total.height.max(1));
+    let rect = harness_hover_tooltip_rect(hit.start_col, hit.row, w, h, total);
+    f.render_widget(Clear, rect);
+    let block = app.theme.themed_block("");
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    if inner.height == 0 {
+        return;
+    }
+    let mut lines = vec![
+        Line::styled(header, harness_hover_tooltip_header_style(&app.theme)),
+        Line::raw(""),
+    ];
+    for line_idx in 0..body_rows as usize {
+        let mut spans: Vec<Span> = vec![Span::raw(" ")];
+        if line_idx < BREAKDOWN_GRID_ROWS {
+            for col in 0..BREAKDOWN_GRID_COLS {
+                let cell = line_idx * BREAKDOWN_GRID_COLS + col;
+                let color = cell_colors.get(cell).copied().unwrap_or(BREAKDOWN_FREE);
+                if col > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled("■", Style::default().fg(color)));
+            }
+        } else {
+            spans.push(Span::raw(" ".repeat(grid_w as usize)));
+        }
+        spans.push(Span::raw("  "));
+        if let Some(row) = rows.get(line_idx) {
+            spans.push(Span::styled("■ ", Style::default().fg(row.color)));
+            let style = if row.derived {
+                app.theme.dim_style()
+            } else {
+                app.theme.text_style()
+            };
+            spans.push(Span::styled(row.text.clone(), style));
+        }
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+const BREAKDOWN_GRID_COLS: usize = 10;
+const BREAKDOWN_GRID_ROWS: usize = 10;
+const BREAKDOWN_GRID_CELLS: usize = BREAKDOWN_GRID_COLS * BREAKDOWN_GRID_ROWS;
+
+/// Fixed midtone palette for reported segments, cycled by index. Fixed
+/// (not theme-derived) so segment identities read the same across themes;
+/// the web popover uses the same values.
+const BREAKDOWN_PALETTE: [Color; 6] = [
+    Color::Rgb(250, 179, 135), // orange
+    Color::Rgb(137, 180, 250), // blue
+    Color::Rgb(249, 226, 175), // yellow
+    Color::Rgb(203, 166, 247), // mauve
+    Color::Rgb(148, 226, 213), // teal
+    Color::Rgb(245, 194, 231), // pink
+];
+/// Derived-row colors: `unaccounted` (mid gray) and `free space` (near-bg
+/// gray, also the fill for any grid cells past the allocated ones).
+const BREAKDOWN_UNACCOUNTED: Color = Color::Rgb(127, 132, 156);
+const BREAKDOWN_FREE: Color = Color::Rgb(69, 71, 90);
+
+/// Largest-remainder allocation of `cells` grid cells across `weights`.
+/// Sums exactly to `cells` when the weights are non-zero; all-zero
+/// weights allocate nothing (callers backfill with the free color).
+fn breakdown_grid_alloc(weights: &[u64], cells: usize) -> Vec<usize> {
+    let total: u64 = weights.iter().sum();
+    if total == 0 {
+        return vec![0; weights.len()];
+    }
+    let mut alloc: Vec<usize> = Vec::with_capacity(weights.len());
+    let mut remainders: Vec<(usize, u64)> = Vec::with_capacity(weights.len());
+    let mut assigned = 0usize;
+    for (i, w) in weights.iter().enumerate() {
+        let exact = w * cells as u64;
+        alloc.push((exact / total) as usize);
+        remainders.push((i, exact % total));
+        assigned += alloc[i];
+    }
+    remainders.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    for (i, _) in remainders {
+        if assigned >= cells {
+            break;
+        }
+        alloc[i] += 1;
+        assigned += 1;
+    }
+    alloc
+}
+
+/// One rendered row of the context-breakdown tooltip. `derived` rows
+/// (`unaccounted`, `free space`) are computed client-side from the gauge
+/// per spec 0156 and render dimmed to separate them from adapter-reported
+/// segments.
+struct ContextBreakdownRow {
+    text: String,
+    derived: bool,
+    /// Raw token weight, for the grid-cell allocation.
+    tokens: u64,
+    /// Legend marker / grid cell color (palette by segment index; fixed
+    /// grays for the derived rows).
+    color: Color,
+}
+
+/// Format the spec 0156 breakdown detail for the context-gauge tooltip:
+/// one aligned row per reported segment (estimated counts carry the `~`
+/// prefix the spec mandates), then the derived `unaccounted` remainder
+/// (only when the segments don't cover the reported usage) and `free
+/// space` (only when the harness reported a window). `None` when the
+/// session carries no breakdown.
+fn context_breakdown_rows(s: &SessionSummary) -> Option<Vec<ContextBreakdownRow>> {
+    if s.context_segments.is_empty() {
+        return None;
+    }
+    let used = s.context_used?;
+    let window = s.context_window.filter(|w| *w > 0);
+    // label, formatted count, raw tokens, derived
+    let mut entries: Vec<(String, String, u64, bool)> = Vec::new();
+    let mut accounted: u64 = 0;
+    for seg in &s.context_segments {
+        accounted = accounted.saturating_add(seg.tokens);
+        let count = format!(
+            "{}{}",
+            if seg.estimated { "~" } else { "" },
+            crate::lineage::format_token_count(seg.tokens),
+        );
+        entries.push((seg.label.clone(), count, seg.tokens, false));
+    }
+    if accounted < used {
+        let rest = used - accounted;
+        entries.push((
+            "unaccounted".to_string(),
+            crate::lineage::format_token_count(rest),
+            rest,
+            true,
+        ));
+    }
+    if let Some(window) = window {
+        let free = window.saturating_sub(used);
+        entries.push((
+            "free space".to_string(),
+            crate::lineage::format_token_count(free),
+            free,
+            true,
+        ));
+    }
+    let label_w = entries
+        .iter()
+        .map(|e| UnicodeWidthStr::width(e.0.as_str()))
+        .max()
+        .unwrap_or(0);
+    let count_w = entries
+        .iter()
+        .map(|e| UnicodeWidthStr::width(e.1.as_str()))
+        .max()
+        .unwrap_or(0);
+    Some(
+        entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, (label, count, tokens, derived))| {
+                let pct = match window {
+                    Some(window) => {
+                        format!(" {:>3}%", tokens.saturating_mul(100) / window)
+                    }
+                    None => String::new(),
+                };
+                let color = if !derived {
+                    BREAKDOWN_PALETTE[index % BREAKDOWN_PALETTE.len()]
+                } else if label == "free space" {
+                    BREAKDOWN_FREE
+                } else {
+                    BREAKDOWN_UNACCOUNTED
+                };
+                ContextBreakdownRow {
+                    text: format!(" {label:<label_w$}  {count:>count_w$}{pct} "),
+                    derived,
+                    tokens,
+                    color,
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Hover tooltip for the two clickable status-bar version-notice segments
@@ -9435,10 +9691,7 @@ fn render_modeline_remote_tooltip(f: &mut Frame, app: &App) {
         return;
     };
     let Some(hit) = app.layout.shortcut_hints.iter().find(|h| {
-        h.action == KeyAction::OpenRemoteControl
-            && my == h.y
-            && mx >= h.x_start
-            && mx < h.x_end
+        h.action == KeyAction::OpenRemoteControl && my == h.y && mx >= h.x_start && mx < h.x_end
     }) else {
         return;
     };
@@ -9451,13 +9704,7 @@ fn render_modeline_remote_tooltip(f: &mut Frame, app: &App) {
     } else {
         " Remote control is off. Click to set up ".to_string()
     };
-    render_button_tooltip(
-        f,
-        &app.theme,
-        &label,
-        hit.x_start,
-        hit.y.saturating_sub(2),
-    );
+    render_button_tooltip(f, &app.theme, &label, hit.x_start, hit.y.saturating_sub(2));
 }
 
 fn render_modeline_theme_tooltip(f: &mut Frame, app: &App) {
@@ -10302,6 +10549,7 @@ fn chat_event_kind(ev: &SessionEvent) -> ChatEventKind {
         | SessionEvent::NativeSubagentRemoved { .. }
         | SessionEvent::NativeSubagent { .. }
         | SessionEvent::ContextUsage { .. }
+        | SessionEvent::ContextBreakdown { .. }
         | SessionEvent::AgentStatus(_) => ChatEventKind::Hidden,
         SessionEvent::Message { role, text } if should_render_chat_message(*role, text) => {
             if *role == MessageRole::Assistant {
@@ -10604,6 +10852,7 @@ fn format_chat_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>
         | SessionEvent::NativeSubagentRemoved { .. }
         | SessionEvent::NativeSubagent { .. }
         | SessionEvent::ContextUsage { .. }
+        | SessionEvent::ContextBreakdown { .. }
         | SessionEvent::AgentStatus(_) => Vec::new(),
         SessionEvent::Message { role, text } => {
             let role_label = match role {
@@ -11164,7 +11413,9 @@ fn non_blank_row_bounds(screen: &vt100::Screen) -> Option<(u16, u16)> {
         return None;
     }
     let first = (0..rows).find(|&r| row_has_visible_glyph(screen, r, cols))?;
-    let last = (0..rows).rev().find(|&r| row_has_visible_glyph(screen, r, cols))?;
+    let last = (0..rows)
+        .rev()
+        .find(|&r| row_has_visible_glyph(screen, r, cols))?;
     Some((first, last))
 }
 
@@ -11557,6 +11808,9 @@ pub fn short_event_label(ev: &SessionEvent) -> String {
             Some(w) => format!("context {used_tokens}/{w}"),
             None => format!("context {used_tokens}"),
         },
+        SessionEvent::ContextBreakdown { segments } => {
+            format!("context-breakdown ({} segments)", segments.len())
+        }
         SessionEvent::Diff { .. } => "diff".to_string(),
         SessionEvent::Error { message } => format!("error: {}", shorten(message, 60)),
         SessionEvent::Reset => "reset".to_string(),
@@ -11746,7 +12000,7 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
         &app.theme,
         editor_area.is_none(),
         paint_row_offset,
-            0,
+        0,
     );
     app.block_hits.insert(
         id,
@@ -12199,9 +12453,7 @@ fn program_attachment_decoded(
 ) -> Option<std::sync::Arc<image::RgbaImage>> {
     const MAX_DECODE_BYTES: u64 = 64 * 1024 * 1024;
     let meta = std::fs::metadata(path).ok()?;
-    let mtime = meta
-        .modified()
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
     if let Some((cached_mtime, img)) = app.attachment_images.get(path) {
         if *cached_mtime == mtime {
             return img.clone();
@@ -12263,8 +12515,7 @@ fn render_program_attachment_images(
             };
             // The block's first braille char sits one past the unit's
             // leading break space; its wrap row is the block's first row.
-            let (row_in_line, _) =
-                program_wrap_locate(&starts, clip.visual_start + 1, width);
+            let (row_in_line, _) = program_wrap_locate(&starts, clip.visual_start + 1, width);
             blocks.push((*key, path.clone(), row_base + row_in_line, *rows));
         }
         row_base = row_base.saturating_add(starts.len().max(1));
@@ -14954,7 +15205,9 @@ fn render_program_selection_context_menu(
         }
         let mut verb_hits = Vec::with_capacity(verb_rows);
         for (idx, verb) in verbs.iter().take(verb_rows).enumerate() {
-            let y = inner_y.saturating_add(comment_lines.len() as u16).saturating_add(idx as u16);
+            let y = inner_y
+                .saturating_add(comment_lines.len() as u16)
+                .saturating_add(idx as u16);
             let verb_hovered = hover_armed
                 && app.mouse_pos.is_some_and(|(mx, my)| {
                     my == y && mx >= inner_x && mx < inner_x.saturating_add(inner_width as u16)
@@ -14997,13 +15250,12 @@ fn render_program_selection_context_menu(
         // text, so the space Tab reserved doesn't jitter depending on
         // which row Up/Down lands on.
         if description_rows > 0 {
-            let description =
-                program_selection_action_description(
-                    menu.selected_action,
-                    &verbs,
-                    app.program_selection_run_on_fork,
-                )
-                    .unwrap_or_default();
+            let description = program_selection_action_description(
+                menu.selected_action,
+                &verbs,
+                app.program_selection_run_on_fork,
+            )
+            .unwrap_or_default();
             let mut desc_lines = wrap_to_width(&description, inner_width);
             desc_lines.truncate(description_rows);
             for (idx, line) in desc_lines.iter().enumerate() {
@@ -15014,7 +15266,9 @@ fn render_program_selection_context_menu(
                 f.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         line.as_str(),
-                        Style::default().fg(app.theme.dim).add_modifier(Modifier::ITALIC),
+                        Style::default()
+                            .fg(app.theme.dim)
+                            .add_modifier(Modifier::ITALIC),
                     ))),
                     Rect {
                         x: inner_x,
@@ -15121,9 +15375,9 @@ fn program_selection_action_description(
         crate::app::ProgramSelectionAction::Comment => {
             Some("Free-text guidance appended to Run or the selected verb.".to_string())
         }
-        crate::app::ProgramSelectionAction::Run => {
-            Some(format!("Execute the selection now, as orchestration.{destination}"))
-        }
+        crate::app::ProgramSelectionAction::Run => Some(format!(
+            "Execute the selection now, as orchestration.{destination}"
+        )),
         crate::app::ProgramSelectionAction::Verb(idx) => {
             let verb = verbs.get(idx)?;
             let effect_label = match verb.effect {
@@ -15791,8 +16045,10 @@ pub(crate) fn program_cursor_visual_pos(
     let cur_raw = markdown.lines().nth(line).unwrap_or("");
     let cur_li = program_line_instance(&mut dups, cur_raw);
     let visual_col = program_visual_col_for_line(app, cur_raw, col, width, cur_li);
-    let starts =
-        program_wrap_row_starts(&program_rendered_line_text(app, cur_raw, width, cur_li), width);
+    let starts = program_wrap_row_starts(
+        &program_rendered_line_text(app, cur_raw, width, cur_li),
+        width,
+    );
     let (row_in_line, col_in_row) = program_wrap_locate(&starts, visual_col, width);
     let visual_row = visual_row.saturating_add(row_in_line);
     (visual_row, col_in_row)
@@ -15978,8 +16234,7 @@ fn program_paint_graphemes(text: &str) -> impl Iterator<Item = (usize, bool)> + 
     text.graphemes(true)
         .filter(|g| !g.contains(char::is_control))
         .map(|g| {
-            let is_ws =
-                g == "\u{200b}" || (g.chars().all(char::is_whitespace) && g != "\u{a0}");
+            let is_ws = g == "\u{200b}" || (g.chars().all(char::is_whitespace) && g != "\u{a0}");
             (UnicodeWidthStr::width(g), is_ws)
         })
 }
@@ -16437,8 +16692,7 @@ pub(crate) fn program_skip_attachment_rows(
                 else {
                     continue;
                 };
-                let (row_in_line, _) =
-                    program_wrap_locate(&starts, clip.visual_start + 1, width);
+                let (row_in_line, _) = program_wrap_locate(&starts, clip.visual_start + 1, width);
                 let img_first = row_base + row_in_line;
                 let img_last = img_first + (*img_rows as usize).saturating_sub(1);
                 if target_row >= img_first && target_row <= img_last {
@@ -16494,7 +16748,10 @@ fn program_attachment_block(width: usize, rows: u16) -> String {
 /// and painting passes tokenizing identically.
 enum ProgramInlineToken<'a> {
     /// `@{…}`: the clip body and the full source length in bytes.
-    Clip { raw: &'a str, src_len: usize },
+    Clip {
+        raw: &'a str,
+        src_len: usize,
+    },
     Link(ProgramMdLink<'a>),
 }
 
@@ -17007,15 +17264,22 @@ fn program_visual_col_for_line(
         // clamp it into the painted width so the caret stays on the line (and
         // end-of-line clicks resolve to the line's last offset).
         let rendered = program_rendered_line_text(app, raw, 0, line_instance);
-        program_prefix_display_width(raw, raw_col)
-            .min(UnicodeWidthStr::width(rendered.as_str()))
+        program_prefix_display_width(raw, raw_col).min(UnicodeWidthStr::width(rendered.as_str()))
     } else if let Some((_, rest)) = program_list_item_content(raw) {
         // Mirror the proportional indent rendered for nested bullets: the bullet
         // glyph and text sit `leading` columns further right than a top-level
         // item, so the cursor column must account for the same offset. The `- `/
         // `* ` marker is always two chars; the rendered `  • ` prefix is 4 wide.
         // `rest` keeps any trailing space so the column advances past it.
-        leading + 4 + program_inline_visual_width(app, rest, col.saturating_sub(2), Some(line_instance), width)
+        leading
+            + 4
+            + program_inline_visual_width(
+                app,
+                rest,
+                col.saturating_sub(2),
+                Some(line_instance),
+                width,
+            )
     } else if raw_col <= leading {
         raw_col
     } else {
@@ -17024,7 +17288,8 @@ fn program_visual_col_for_line(
             .nth(leading)
             .map(|(idx, _)| &raw[idx..])
             .unwrap_or("");
-        leading + program_inline_visual_width(app, body, raw_col - leading, Some(line_instance), width)
+        leading
+            + program_inline_visual_width(app, body, raw_col - leading, Some(line_instance), width)
     }
 }
 
@@ -17053,19 +17318,18 @@ fn program_inline_visual_width(
         raw += before_len;
 
         let (chip_width, src_len) = match &token {
-            ProgramInlineToken::Clip { raw: raw_clip, src_len } => {
-                (program_smart_clip_visual_width(app, raw_clip), *src_len)
-            }
+            ProgramInlineToken::Clip {
+                raw: raw_clip,
+                src_len,
+            } => (program_smart_clip_visual_width(app, raw_clip), *src_len),
             ProgramInlineToken::Link(link) => {
                 // An expanded image's chip width is its inline block width,
                 // so following text maps onto the rows below it.
                 let w = match program_md_chip_render(app, link, line_key, link_idx) {
-                    ProgramChipRender::Label(label) => {
-                        UnicodeWidthStr::width(label.as_str()) + 2
+                    ProgramChipRender::Label(label) => UnicodeWidthStr::width(label.as_str()) + 2,
+                    ProgramChipRender::Block(rows) => {
+                        UnicodeWidthStr::width(program_attachment_block(wrap_width, rows).as_str())
                     }
-                    ProgramChipRender::Block(rows) => UnicodeWidthStr::width(
-                        program_attachment_block(wrap_width, rows).as_str(),
-                    ),
                 };
                 link_idx += 1;
                 (w, link.end - link.start)
@@ -17762,9 +18026,7 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
             render_remote_choose(app, c, total.width, total.height)
         }
         crate::app::RemoteControlPopup::Name(n) => render_remote_name(app, n, total.width),
-        crate::app::RemoteControlPopup::Starting(p) => {
-            render_remote_starting(app, p, total.width)
-        }
+        crate::app::RemoteControlPopup::Starting(p) => render_remote_starting(app, p, total.width),
         crate::app::RemoteControlPopup::Ok { ok, focus } => {
             render_remote_ok(app, ok, *focus, total.width)
         }
@@ -18235,35 +18497,59 @@ fn render_remote_choose<'a>(
     let hint_line = info.len();
     let segs: Vec<RemoteHintSeg> = if c.options.len() > 1 {
         vec![
-            RemoteHintSeg { text: "←/→ select · ", action: None },
+            RemoteHintSeg {
+                text: "←/→ select · ",
+                action: None,
+            },
             RemoteHintSeg {
                 text: "Enter",
-                action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Enter)),
+                action: Some(RemoteControlHitAction::Key(
+                    crossterm::event::KeyCode::Enter,
+                )),
             },
-            RemoteHintSeg { text: " start · ", action: None },
+            RemoteHintSeg {
+                text: " start · ",
+                action: None,
+            },
             RemoteHintSeg {
                 text: "Esc",
                 action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Esc)),
             },
-            RemoteHintSeg { text: " close", action: None },
+            RemoteHintSeg {
+                text: " close",
+                action: None,
+            },
         ]
     } else {
         vec![
             RemoteHintSeg {
                 text: "Enter",
-                action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Enter)),
+                action: Some(RemoteControlHitAction::Key(
+                    crossterm::event::KeyCode::Enter,
+                )),
             },
-            RemoteHintSeg { text: " start · ", action: None },
+            RemoteHintSeg {
+                text: " start · ",
+                action: None,
+            },
             RemoteHintSeg {
                 text: "Esc",
                 action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Esc)),
             },
-            RemoteHintSeg { text: " close", action: None },
+            RemoteHintSeg {
+                text: " close",
+                action: None,
+            },
         ]
     };
     let (line, hint_zones) = remote_hint_line(app, &segs);
     for (x_start, x_end, action) in hint_zones {
-        zones.push(RemoteInfoZone { line: hint_line, x_start, x_end, action });
+        zones.push(RemoteInfoZone {
+            line: hint_line,
+            x_start,
+            x_end,
+            action,
+        });
     }
     info.push(line);
 
@@ -18322,19 +18608,32 @@ fn render_remote_name<'a>(
         &[
             RemoteHintSeg {
                 text: "Enter",
-                action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Enter)),
+                action: Some(RemoteControlHitAction::Key(
+                    crossterm::event::KeyCode::Enter,
+                )),
             },
-            RemoteHintSeg { text: " continue · ", action: None },
+            RemoteHintSeg {
+                text: " continue · ",
+                action: None,
+            },
             RemoteHintSeg {
                 text: "Esc",
                 action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Esc)),
             },
-            RemoteHintSeg { text: " back", action: None },
+            RemoteHintSeg {
+                text: " back",
+                action: None,
+            },
         ],
     );
     let zones: Vec<RemoteInfoZone> = hint_zones
         .into_iter()
-        .map(|(x_start, x_end, action)| RemoteInfoZone { line: hint_line, x_start, x_end, action })
+        .map(|(x_start, x_end, action)| RemoteInfoZone {
+            line: hint_line,
+            x_start,
+            x_end,
+            action,
+        })
         .collect();
     info.push(line);
 
@@ -18371,25 +18670,41 @@ fn render_remote_starting<'a>(
             "Finish signing in in your browser:",
             Style::default().fg(app.theme.text),
         )));
-        info.extend(wrapped_lines(auth_url, Style::default().fg(app.theme.accent)));
+        info.extend(wrapped_lines(
+            auth_url,
+            Style::default().fg(app.theme.accent),
+        ));
         let hint_line = info.len();
         let (line, hint_zones) = remote_hint_line(
             app,
             &[
                 RemoteHintSeg {
                     text: "o",
-                    action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Char('o'))),
+                    action: Some(RemoteControlHitAction::Key(
+                        crossterm::event::KeyCode::Char('o'),
+                    )),
                 },
-                RemoteHintSeg { text: " open login again · ", action: None },
+                RemoteHintSeg {
+                    text: " open login again · ",
+                    action: None,
+                },
                 RemoteHintSeg {
                     text: "Esc",
                     action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Esc)),
                 },
-                RemoteHintSeg { text: " close", action: None },
+                RemoteHintSeg {
+                    text: " close",
+                    action: None,
+                },
             ],
         );
         for (x_start, x_end, action) in hint_zones {
-            zones.push(RemoteInfoZone { line: hint_line, x_start, x_end, action });
+            zones.push(RemoteInfoZone {
+                line: hint_line,
+                x_start,
+                x_end,
+                action,
+            });
         }
         info.push(line);
     } else {
@@ -18400,14 +18715,24 @@ fn render_remote_starting<'a>(
         let hint_line = info.len();
         let (line, hint_zones) = remote_hint_line(
             app,
-            &[RemoteHintSeg {
-                text: "Esc",
-                action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Esc)),
-            },
-            RemoteHintSeg { text: " close", action: None }],
+            &[
+                RemoteHintSeg {
+                    text: "Esc",
+                    action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Esc)),
+                },
+                RemoteHintSeg {
+                    text: " close",
+                    action: None,
+                },
+            ],
         );
         for (x_start, x_end, action) in hint_zones {
-            zones.push(RemoteInfoZone { line: hint_line, x_start, x_end, action });
+            zones.push(RemoteInfoZone {
+                line: hint_line,
+                x_start,
+                x_end,
+                action,
+            });
         }
         info.push(line);
     }
@@ -18492,21 +18817,37 @@ fn render_remote_ok<'a>(
     let (line, hint_zones) = remote_hint_line(
         app,
         &[
-            RemoteHintSeg { text: "←/→ select · ", action: None },
+            RemoteHintSeg {
+                text: "←/→ select · ",
+                action: None,
+            },
             RemoteHintSeg {
                 text: "Enter",
-                action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Enter)),
+                action: Some(RemoteControlHitAction::Key(
+                    crossterm::event::KeyCode::Enter,
+                )),
             },
-            RemoteHintSeg { text: " · ", action: None },
+            RemoteHintSeg {
+                text: " · ",
+                action: None,
+            },
             RemoteHintSeg {
                 text: "Esc",
                 action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Esc)),
             },
-            RemoteHintSeg { text: " close", action: None },
+            RemoteHintSeg {
+                text: " close",
+                action: None,
+            },
         ],
     );
     for (x_start, x_end, action) in hint_zones {
-        zones.push(RemoteInfoZone { line: hint_line, x_start, x_end, action });
+        zones.push(RemoteInfoZone {
+            line: hint_line,
+            x_start,
+            x_end,
+            action,
+        });
     }
     info.push(line);
 
@@ -18517,9 +18858,7 @@ fn render_remote_ok<'a>(
     (title, app.theme.success, lines, width, height, body_zones)
 }
 
-fn ready_screen_shows_basic_credentials(
-    provider: construct_protocol::TunnelProvider,
-) -> bool {
+fn ready_screen_shows_basic_credentials(provider: construct_protocol::TunnelProvider) -> bool {
     provider != construct_protocol::TunnelProvider::Construct
 }
 
@@ -18545,12 +18884,18 @@ fn render_remote_err<'a>(
                 text: "← back to options",
                 action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Left)),
             },
-            RemoteHintSeg { text: " · ", action: None },
+            RemoteHintSeg {
+                text: " · ",
+                action: None,
+            },
             RemoteHintSeg {
                 text: "Esc",
                 action: Some(RemoteControlHitAction::Key(crossterm::event::KeyCode::Esc)),
             },
-            RemoteHintSeg { text: " close", action: None },
+            RemoteHintSeg {
+                text: " close",
+                action: None,
+            },
         ],
     );
 
@@ -18582,7 +18927,12 @@ fn render_remote_err<'a>(
     let keys_row = height.saturating_sub(1);
     let body_zones = keys_zones
         .into_iter()
-        .map(|(x_start, x_end, action)| RemoteBodyZone { row: keys_row, x_start, x_end, action })
+        .map(|(x_start, x_end, action)| RemoteBodyZone {
+            row: keys_row,
+            x_start,
+            x_end,
+            action,
+        })
         .collect();
     (
         format!(" /remote-connect — {label} failed — Esc to close "),
@@ -18752,12 +19102,13 @@ mod tests {
         assert_eq!(link.name, "shot");
         assert_eq!(link.path, "/a/b/shot.png");
         assert!(link.is_image);
-        assert_eq!(&"see ![shot](/a/b/shot.png) here"[link.start..link.end],
-            "![shot](/a/b/shot.png)");
+        assert_eq!(
+            &"see ![shot](/a/b/shot.png) here"[link.start..link.end],
+            "![shot](/a/b/shot.png)"
+        );
 
         // Angle-bracket targets (paths with spaces) resolve to the bare path.
-        let link =
-            find_program_md_link("![s](</Users/x/App Support/s.png>)").expect("bracketed");
+        let link = find_program_md_link("![s](</Users/x/App Support/s.png>)").expect("bracketed");
         assert_eq!(link.path, "/Users/x/App Support/s.png");
     }
 
@@ -18826,10 +19177,12 @@ mod tests {
     #[test]
     fn program_visual_col_maps_attachment_chip_atomically() {
         let raw = "before ![shot](/tmp/s.png) after";
-        let chip_w =
-            UnicodeWidthStr::width(program_md_link_label("shot", true).as_str()) + 2;
+        let chip_w = UnicodeWidthStr::width(program_md_link_label("shot", true).as_str()) + 2;
         let link_chars = "![shot](/tmp/s.png)".chars().count();
-        assert_eq!(program_visual_col_for_line(None, raw, 7, 80, program_line_key(raw)), 7);
+        assert_eq!(
+            program_visual_col_for_line(None, raw, 7, 80, program_line_key(raw)),
+            7
+        );
         for inside in 8..=(7 + link_chars) {
             assert_eq!(
                 program_visual_col_for_line(None, raw, inside, 80, program_line_key(raw)),
@@ -19096,7 +19449,8 @@ mod tests {
         let theme = Theme::default();
         let line_a = session_detail_line(&theme, &a, &cols, now, 0, 60);
         let line_b = session_detail_line(&theme, &b, &cols, now, 0, 60);
-        let text = |line: &Line| -> String { line.spans.iter().map(|sp| sp.content.as_ref()).collect() };
+        let text =
+            |line: &Line| -> String { line.spans.iter().map(|sp| sp.content.as_ref()).collect() };
         let (ta, tb) = (text(&line_a), text(&line_b));
         // The gauge leads both rows at the same column, and the shared
         // activity/tokens columns align (char positions — `find` would
@@ -19659,7 +20013,11 @@ mod tests {
     fn harness_hover_tooltip_rect_sits_fully_above_the_anchor_row() {
         let total = Rect::new(0, 0, 80, 40);
         let rect = harness_hover_tooltip_rect(20, 10, 16, 3, total);
-        assert_eq!(rect.y + rect.height, 10, "bottom edge must stop at the anchor row");
+        assert_eq!(
+            rect.y + rect.height,
+            10,
+            "bottom edge must stop at the anchor row"
+        );
         assert!(
             rect.y + rect.height <= 10,
             "tooltip must never cover the anchor row: {rect:?}"
@@ -19767,7 +20125,10 @@ mod tests {
 
     #[test]
     fn harness_usage_tooltip_case_no_entry_yet_is_none() {
-        assert_eq!(harness_usage_tooltip_case(None), HarnessUsageTooltipCase::None);
+        assert_eq!(
+            harness_usage_tooltip_case(None),
+            HarnessUsageTooltipCase::None
+        );
     }
 
     #[test]
@@ -19776,7 +20137,10 @@ mod tests {
         // snapshot for this harness — never show a "probing…" flicker for
         // it, even if some stale `refreshing` bit were somehow still set.
         let r = usage_result(false, true, false);
-        assert_eq!(harness_usage_tooltip_case(Some(&r)), HarnessUsageTooltipCase::None);
+        assert_eq!(
+            harness_usage_tooltip_case(Some(&r)),
+            HarnessUsageTooltipCase::None
+        );
     }
 
     #[test]
@@ -19815,7 +20179,10 @@ mod tests {
         // window before the first hover-triggered fetch reports back.
         // Render nothing extra until the next poll shows `refreshing`.
         let r = usage_result(true, false, false);
-        assert_eq!(harness_usage_tooltip_case(Some(&r)), HarnessUsageTooltipCase::None);
+        assert_eq!(
+            harness_usage_tooltip_case(Some(&r)),
+            HarnessUsageTooltipCase::None
+        );
     }
 
     // -- `non_blank_row_bounds` (spec 0086): regression coverage for the
@@ -20036,16 +20403,82 @@ mod tests {
 
         let mut quantizer = Quantizer::new(ColorDepth::Ansi256);
         quantizer.keep_apart(&theme.contrast_pairs());
-        let painted: Vec<Color> = backgrounds
-            .iter()
-            .map(|c| quantizer.map(*c))
-            .collect();
+        let painted: Vec<Color> = backgrounds.iter().map(|c| quantizer.map(*c)).collect();
 
         let bar = painted[0];
         let filled = painted[1];
         let track = *painted.last().expect("a trailing cell");
-        assert_ne!(track, bar, "the gauge's remaining stretch merged into the bar");
+        assert_ne!(
+            track, bar,
+            "the gauge's remaining stretch merged into the bar"
+        );
         assert_ne!(filled, track, "filled and remaining became one color");
+    }
+
+    #[test]
+    fn context_breakdown_rows_marks_estimates_and_derives_remainders() {
+        let mut s = clip_test_session("s", None, "smith", SessionState::Running);
+        s.context_used = Some(100_000);
+        s.context_window = Some(200_000);
+        s.context_segments = vec![
+            construct_protocol::ContextSegment::new("system prompt", 10_000, true),
+            construct_protocol::ContextSegment::new("messages", 60_000, true),
+        ];
+        let rows = context_breakdown_rows(&s).expect("segments present");
+        // 2 reported segments + unaccounted (100k − 70k) + free space.
+        assert_eq!(rows.len(), 4);
+        assert!(rows[0].text.contains("system prompt") && rows[0].text.contains("~10k"));
+        assert!(!rows[0].derived);
+        assert!(rows[1].text.contains("messages") && rows[1].text.contains("~60k"));
+        assert!(rows[2].text.contains("unaccounted") && rows[2].text.contains("30k"));
+        assert!(
+            !rows[2].text.contains('~'),
+            "derived rows are not estimates"
+        );
+        assert!(rows[2].derived);
+        assert!(rows[3].text.contains("free space") && rows[3].text.contains("100k"));
+        assert!(rows[3].derived);
+        // Percent column present when the window is known.
+        assert!(rows[3].text.trim_end().ends_with("50%"));
+        // Grid weights and colors: reported rows take palette colors,
+        // derived rows the fixed grays.
+        assert_eq!(rows[0].tokens, 10_000);
+        assert_eq!(rows[0].color, BREAKDOWN_PALETTE[0]);
+        assert_eq!(rows[2].color, BREAKDOWN_UNACCOUNTED);
+        assert_eq!(rows[3].color, BREAKDOWN_FREE);
+    }
+
+    #[test]
+    fn breakdown_grid_alloc_sums_to_cell_count() {
+        // 10k/60k/30k/100k over 100 cells → exact 5/30/15/50.
+        assert_eq!(
+            breakdown_grid_alloc(&[10_000, 60_000, 30_000, 100_000], 100),
+            vec![5, 30, 15, 50]
+        );
+        // Rounding: largest remainders soak up the leftover cells and the
+        // total always lands exactly on the requested cell count.
+        let alloc = breakdown_grid_alloc(&[1, 1, 1], 100);
+        assert_eq!(alloc.iter().sum::<usize>(), 100);
+        assert!(alloc.iter().all(|c| *c >= 33));
+        assert_eq!(breakdown_grid_alloc(&[0, 0], 100), vec![0, 0]);
+    }
+
+    #[test]
+    fn context_breakdown_rows_without_window_or_segments() {
+        let mut s = clip_test_session("s", None, "kimi", SessionState::Running);
+        s.context_used = Some(50_000);
+        assert!(
+            context_breakdown_rows(&s).is_none(),
+            "no segments → fall back to the one-line tooltip"
+        );
+        // Used-only harness (no window): no free-space row, no percent column.
+        s.context_segments = vec![construct_protocol::ContextSegment::new(
+            "messages", 40_000, true,
+        )];
+        let rows = context_breakdown_rows(&s).expect("segments present");
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].text.contains("unaccounted"));
+        assert!(!rows[0].text.contains('%'));
     }
 
     #[test]
@@ -20222,6 +20655,7 @@ mod tests {
             tokens: Default::default(),
             context_used: None,
             context_window: None,
+            context_segments: Vec::new(),
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: construct_protocol::SessionKind::User,
             archived: false,
@@ -21887,7 +22321,10 @@ mod tests {
 
         let reset: Vec<TimestampedEvent> = Vec::new();
         let cached = chat_lines_cached(&mut cache, &theme, Some("s1"), &reset);
-        assert!(cached.is_empty(), "reset transcript must clear the cache too");
+        assert!(
+            cached.is_empty(),
+            "reset transcript must clear the cache too"
+        );
     }
 
     #[test]

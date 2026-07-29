@@ -4,6 +4,7 @@ use construct_protocol::adapter::{AdapterInboxMsg, EventEmitter};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::sync::mpsc;
 
+pub mod context_breakdown;
 mod transcript_paths;
 pub use transcript_paths::{
     antigravity_conversation_dir, antigravity_transcript_path, claude_project_slug,

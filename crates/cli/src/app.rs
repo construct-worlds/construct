@@ -36,8 +36,8 @@ mod matrix_clicks;
 mod minibuffer;
 mod mouse;
 mod program_popup;
-mod session_picker;
 pub mod route_menu;
+mod session_picker;
 mod session_title_menu;
 mod session_title_rename;
 mod tutorial;
@@ -748,10 +748,7 @@ impl MainWindowTree {
                         _ => Selection::None,
                     },
                 };
-                Self::Leaf {
-                    id: *id,
-                    selection,
-                }
+                Self::Leaf { id: *id, selection }
             }
             construct_protocol::LayoutNode::Split {
                 direction,
@@ -931,6 +928,7 @@ fn chat_scroll_kind(ev: &SessionEvent) -> ChatScrollKind {
         | SessionEvent::NativeSubagentRemoved { .. }
         | SessionEvent::NativeSubagent { .. }
         | SessionEvent::ContextUsage { .. }
+        | SessionEvent::ContextBreakdown { .. }
         | SessionEvent::AgentStatus(_) => ChatScrollKind::Hidden,
         SessionEvent::Message { role, text }
             if should_render_chat_message_for_scroll(*role, text) =>
@@ -1946,8 +1944,13 @@ pub struct App {
     /// Decoded program-attachment images (spec 0099), keyed by path with the
     /// file's mtime so an overwritten attachment re-decodes. `None` records a
     /// failed decode, so a broken file isn't re-read every frame.
-    pub attachment_images:
-        HashMap<String, (std::time::SystemTime, Option<std::sync::Arc<image::RgbaImage>>)>,
+    pub attachment_images: HashMap<
+        String,
+        (
+            std::time::SystemTime,
+            Option<std::sync::Arc<image::RgbaImage>>,
+        ),
+    >,
     /// Live drag state for resizing an expanded inline attachment image:
     /// (instance key, on-screen row of the image block's top).
     pub resizing_program_attachment: Option<((u64, usize), u16)>,
@@ -4234,14 +4237,12 @@ pub fn harness_picker_entries(
             detail: None,
         });
     }
-    entries.extend(harnesses
-        .iter()
-        .map(|h| HarnessPickerEntry {
-            name: h.name.clone(),
-            description: h.description.clone().unwrap_or_default(),
-            available: h.available,
-            detail: h.detail.clone(),
-        }));
+    entries.extend(harnesses.iter().map(|h| HarnessPickerEntry {
+        name: h.name.clone(),
+        description: h.description.clone().unwrap_or_default(),
+        available: h.available,
+        detail: h.detail.clone(),
+    }));
 
     if filter_active && !query.trim().is_empty() {
         let needle = query.trim().to_ascii_lowercase();
@@ -5050,10 +5051,8 @@ async fn run_loop(
     // `usage.query` call fired below (while a harness-name hover is
     // active) is spawned entirely within this loop, so like tier-2
     // content search this channel stays local instead of living on `App`.
-    let (harness_usage_tx, mut harness_usage_rx) = mpsc::unbounded_channel::<(
-        String,
-        anyhow::Result<construct_protocol::UsageQueryResult>,
-    )>();
+    let (harness_usage_tx, mut harness_usage_rx) =
+        mpsc::unbounded_channel::<(String, anyhow::Result<construct_protocol::UsageQueryResult>)>();
     let mut reconnect: Option<ReconnectState> = None;
     // Tick at the spinner frame boundary so each frame gets one redraw.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
@@ -5339,10 +5338,8 @@ async fn run_loop(
                     // known disabled (`usage_probe = ""` for it), the
                     // snapshot will never populate — stop polling instead
                     // of re-querying it every throttle window forever.
-                    let known_disabled = app
-                        .harness_usage
-                        .get(&harness)
-                        .is_some_and(|r| !r.enabled);
+                    let known_disabled =
+                        app.harness_usage.get(&harness).is_some_and(|r| !r.enabled);
                     let due = app
                         .harness_usage_last_query
                         .get(&harness)
@@ -5758,7 +5755,10 @@ fn op_xy_slot_from_title(title: &str) -> Option<usize> {
 }
 
 fn op_xy_session_activity(session: &SessionSummary) -> &chrono::DateTime<chrono::Utc> {
-    session.last_event_at.as_ref().unwrap_or(&session.created_at)
+    session
+        .last_event_at
+        .as_ref()
+        .unwrap_or(&session.created_at)
 }
 
 fn named_op_xy_session_slots(sessions: &[SessionSummary]) -> Vec<Option<String>> {
@@ -5767,11 +5767,7 @@ fn named_op_xy_session_slots(sessions: &[SessionSummary]) -> Vec<Option<String>>
         if session.archived || !is_user_list_session(session) {
             continue;
         }
-        let Some(slot) = session
-            .title
-            .as_deref()
-            .and_then(op_xy_slot_from_title)
-        else {
+        let Some(slot) = session.title.as_deref().and_then(op_xy_slot_from_title) else {
             continue;
         };
         if matches[slot].is_none_or(|current| {
@@ -5837,14 +5833,13 @@ fn op_xy_all_feedback_state(
     }
 }
 
-fn op_xy_slot_state_masks(
-    sessions: &[SessionSummary],
-    slots: &[Option<String>],
-) -> (u8, u8) {
+fn op_xy_slot_state_masks(sessions: &[SessionSummary], slots: &[Option<String>]) -> (u8, u8) {
     use construct_protocol::SessionState;
-    slots.iter().take(8).enumerate().fold(
-        (0u8, 0u8),
-        |(active, attention), (slot, session_id)| {
+    slots
+        .iter()
+        .take(8)
+        .enumerate()
+        .fold((0u8, 0u8), |(active, attention), (slot, session_id)| {
             let Some(session) = session_id
                 .as_ref()
                 .and_then(|session_id| sessions.iter().find(|session| session.id == *session_id))
@@ -5864,8 +5859,7 @@ fn op_xy_slot_state_masks(
                     attention
                 },
             )
-        },
-    )
+        })
 }
 
 impl App {
@@ -6020,12 +6014,7 @@ impl App {
         self.queue_pty_input_with_claim(session_id, bytes, label, true);
     }
 
-    fn queue_passive_pty_input(
-        &mut self,
-        session_id: String,
-        bytes: Vec<u8>,
-        label: &'static str,
-    ) {
+    fn queue_passive_pty_input(&mut self, session_id: String, bytes: Vec<u8>, label: &'static str) {
         self.queue_pty_input_with_claim(session_id, bytes, label, false);
     }
 
@@ -6148,11 +6137,11 @@ impl App {
         // so the paste falls through untouched.
         if crate::clipboard_bridge::socket_from_env().is_some() {
             if let Some(path) = crate::clipboard_bridge::droppable_local_path(&text) {
-                if let Some(session_id) =
-                    self.large_text_paste_target().or_else(|| {
-                        (self.focus == PaneFocus::View).then(|| self.selected_id()).flatten()
-                    })
-                {
+                if let Some(session_id) = self.large_text_paste_target().or_else(|| {
+                    (self.focus == PaneFocus::View)
+                        .then(|| self.selected_id())
+                        .flatten()
+                }) {
                     let name = std::path::Path::new(&path)
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -7193,11 +7182,7 @@ impl App {
             let has_children = has_subagents || has_forks;
             let children_expanded = has_children && !collapsed.contains(&s.id);
             let attention_rollup = !children_expanded
-                && descendants_need_attention(
-                    &s.id,
-                    subagents_by_parent,
-                    forks_by_parent,
-                );
+                && descendants_need_attention(&s.id, subagents_by_parent, forks_by_parent);
             out.push(ListItem::Session {
                 summary: s.clone(),
                 indented,
@@ -8979,9 +8964,8 @@ impl App {
             }
             m if m == construct_protocol::ipc_notif::FEATURES_STATE => {
                 if let Some(p) = n.params {
-                    if let Ok(payload) = serde_json::from_value::<
-                        construct_protocol::FeaturesStatusResult,
-                    >(p)
+                    if let Ok(payload) =
+                        serde_json::from_value::<construct_protocol::FeaturesStatusResult>(p)
                     {
                         self.features = payload.features;
                         self.features_degradation_observed = payload.degradation_observed;
@@ -9505,8 +9489,7 @@ impl App {
                     k.code,
                     KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift)
                 ) {
-                    self.program_selection_run_on_fork =
-                        !matches!(k.kind, KeyEventKind::Release);
+                    self.program_selection_run_on_fork = !matches!(k.kind, KeyEventKind::Release);
                 }
                 if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                     self.on_key(k).await;
@@ -12147,10 +12130,7 @@ impl App {
         }
     }
 
-    pub(crate) async fn handle_op_xy_focused_control(
-        &mut self,
-        control: crate::midi::OpXyControl,
-    ) {
+    pub(crate) async fn handle_op_xy_focused_control(&mut self, control: crate::midi::OpXyControl) {
         let Some(session_id) = self
             .selection_for_window(self.active_window_id)
             .and_then(|selection| selection.session_id().map(str::to_owned))
@@ -12169,10 +12149,7 @@ impl App {
             .await;
     }
 
-    pub(crate) async fn handle_op_xy_aux_control(
-        &mut self,
-        control: crate::midi::OpXyAuxControl,
-    ) {
+    pub(crate) async fn handle_op_xy_aux_control(&mut self, control: crate::midi::OpXyAuxControl) {
         use crate::midi::OpXyAuxControl;
         match control {
             OpXyAuxControl::Up => {
@@ -12286,13 +12263,9 @@ impl App {
             row: 0,
             modifiers: KeyModifiers::NONE,
         };
-        let Some(bytes) = crate::mouse_forward::encode(
-            &ev,
-            (cols / 2).max(1),
-            (rows / 2).max(1),
-            mode,
-            encoding,
-        ) else {
+        let Some(bytes) =
+            crate::mouse_forward::encode(&ev, (cols / 2).max(1), (rows / 2).max(1), mode, encoding)
+        else {
             return false;
         };
         self.queue_pty_input(session_id, bytes, "OP-XY scroll");
@@ -12343,7 +12316,12 @@ impl App {
             .sessions
             .iter()
             .filter(|session| {
-                is_matrix_rain_session_active(session, &self.agent_statuses, &self.pty_activity, now)
+                is_matrix_rain_session_active(
+                    session,
+                    &self.agent_statuses,
+                    &self.pty_activity,
+                    now,
+                )
             })
             .count()
             .min(u16::MAX as usize) as u16;
@@ -12448,9 +12426,7 @@ impl App {
             "mouse" | "select" | "selection" => {
                 self.run_action(KeyAction::ToggleMouseCapture).await
             }
-            "paste" | "paste-clipboard" => {
-                self.run_action(KeyAction::PasteLocalClipboard).await
-            }
+            "paste" | "paste-clipboard" => self.run_action(KeyAction::PasteLocalClipboard).await,
             "help" | "?" => {
                 self.help_visible = true;
                 self.help_scroll_offset = 0;
@@ -12489,7 +12465,8 @@ impl App {
                             TunnelProvider::Cloudflare,
                             rest_pw,
                             None,
-                        ).await
+                        )
+                        .await
                     }
                     "construct" | "zarvis" => {
                         if rest.is_empty() {
@@ -12499,7 +12476,8 @@ impl App {
                                 TunnelProvider::Construct,
                                 None,
                                 Some(rest.to_string()),
-                            ).await;
+                            )
+                            .await;
                         }
                     }
                     _ => {
@@ -12597,7 +12575,9 @@ impl App {
                         .plugin_run_action(&action.plugin_id, &action.id, session_id.as_deref())
                         .await
                     {
-                        Ok(()) => self.set_status(format!("plugin action {} started", action.token)),
+                        Ok(()) => {
+                            self.set_status(format!("plugin action {} started", action.token))
+                        }
                         Err(e) => {
                             self.set_status(format!("plugin action {} failed: {e}", action.token))
                         }
@@ -12706,12 +12686,7 @@ impl App {
         }
         match self
             .client
-            .remote_start_named_with_wait(
-                provider,
-                password.clone(),
-                subdomain.clone(),
-                false,
-            )
+            .remote_start_named_with_wait(provider, password.clone(), subdomain.clone(), false)
             .await
         {
             Ok(r) => {
@@ -12752,9 +12727,7 @@ impl App {
                 .remote_start(construct_protocol::TunnelProvider::None, None)
                 .await
             {
-                if let Some(RemoteControlPopup::Starting(ok)) =
-                    self.remote_control_popup.as_mut()
-                {
+                if let Some(RemoteControlPopup::Starting(ok)) = self.remote_control_popup.as_mut() {
                     ok.auth_url = snapshot.auth_url;
                 }
             }
@@ -12812,9 +12785,7 @@ impl App {
         match popup {
             RemoteControlPopup::Choose(choose) => match key.code {
                 KeyCode::Esc => self.close_remote_control_popup(),
-                KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h') => {
-                    choose.move_selection(-1)
-                }
+                KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h') => choose.move_selection(-1),
                 KeyCode::Right | KeyCode::Tab | KeyCode::Char('l') => choose.move_selection(1),
                 KeyCode::Enter => {
                     let Some(opt) = choose.selected_option().cloned() else {
@@ -12825,22 +12796,23 @@ impl App {
                         // Pressing a dead button should explain itself,
                         // not fail silently.
                         self.set_status(
-                            opt.detail
-                                .unwrap_or_else(|| format!("{} is unavailable", opt.provider.label())),
+                            opt.detail.unwrap_or_else(|| {
+                                format!("{} is unavailable", opt.provider.label())
+                            }),
                         );
                         return true;
                     }
                     if opt.provider == construct_protocol::TunnelProvider::Construct {
-                        self.remote_control_popup = Some(RemoteControlPopup::Name(
-                            RemoteControlName {
+                        self.remote_control_popup =
+                            Some(RemoteControlPopup::Name(RemoteControlName {
                                 choose: choose.clone(),
                                 name: remembered_tunnel_name()
                                     .unwrap_or_else(generated_tunnel_name),
                                 pristine: true,
-                            },
-                        ));
+                            }));
                     } else {
-                        self.start_remote_control_provider(opt.provider, None, None).await;
+                        self.start_remote_control_provider(opt.provider, None, None)
+                            .await;
                     }
                 }
                 _ => {}
@@ -12874,9 +12846,7 @@ impl App {
                         name.name.pop();
                     }
                 }
-                KeyCode::Char(c)
-                    if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' =>
-                {
+                KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' => {
                     if name.pristine {
                         name.name.clear();
                         name.pristine = false;
@@ -12937,8 +12907,7 @@ impl App {
             // Selecting a provider mirrors an arrow key: move the highlight,
             // nothing more. The `Enter` hint (also clickable) starts it.
             RemoteControlHitAction::SelectProvider(i) => {
-                if let Some(RemoteControlPopup::Choose(choose)) =
-                    self.remote_control_popup.as_mut()
+                if let Some(RemoteControlPopup::Choose(choose)) = self.remote_control_popup.as_mut()
                 {
                     if i < choose.options.len() {
                         choose.selected = i;
@@ -13082,10 +13051,7 @@ fn persist_remembered_tunnel_name(value: &str) -> std::io::Result<()> {
     persist_remembered_tunnel_name_at(&remembered_tunnel_name_path(), value)
 }
 
-fn persist_remembered_tunnel_name_at(
-    path: &std::path::Path,
-    value: &str,
-) -> std::io::Result<()> {
+fn persist_remembered_tunnel_name_at(path: &std::path::Path, value: &str) -> std::io::Result<()> {
     if !valid_tunnel_name(value) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -14970,8 +14936,8 @@ mod tests {
             route_menu: None,
             session_title_rename: None,
             mouse_pos: None,
-                mouse_moved_at: None,
-                saw_mouse_motion: false,
+            mouse_moved_at: None,
+            saw_mouse_motion: false,
             mouse_capture_enabled: true,
             last_program_clip_click: None,
             orchestrator_id: None,
@@ -15217,6 +15183,7 @@ mod tests {
             tokens: Default::default(),
             context_used: None,
             context_window: None,
+            context_segments: Vec::new(),
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind,
             archived: false,
@@ -16175,11 +16142,7 @@ mod tests {
         (client, dir, server)
     }
 
-    fn route_json_models(
-        name: &str,
-        models: &[&str],
-        reason: Option<&str>,
-    ) -> serde_json::Value {
+    fn route_json_models(name: &str, models: &[&str], reason: Option<&str>) -> serde_json::Value {
         serde_json::json!({
             "name": name,
             "dialect": "anthropic",
@@ -16390,7 +16353,6 @@ mod tests {
         );
     }
 
-
     /// The model indicator opens the route picker, so hovering it must look
     /// different from the inert text around it — a control that renders
     /// identically to plain text is one nobody discovers.
@@ -16436,7 +16398,6 @@ mod tests {
             "hovering beside the indicator must not highlight it"
         );
     }
-
 
     /// REGRESSION: clicking the picker did nothing in the real TUI while
     /// every picker test passed.
@@ -16524,10 +16485,18 @@ mod tests {
             (menu.area, menu.header_rows())
         };
         let row = area.y + 1 + header;
-        app.on_mouse(click(area.x + 2, row, MouseEventKind::Down(MouseButton::Left)))
-            .await;
-        app.on_mouse(click(area.x + 2, row, MouseEventKind::Up(MouseButton::Left)))
-            .await;
+        app.on_mouse(click(
+            area.x + 2,
+            row,
+            MouseEventKind::Down(MouseButton::Left),
+        ))
+        .await;
+        app.on_mouse(click(
+            area.x + 2,
+            row,
+            MouseEventKind::Up(MouseButton::Left),
+        ))
+        .await;
         let menu = app.route_menu.as_ref().expect("picker still open");
         assert_eq!(
             menu.models(),
@@ -16542,24 +16511,24 @@ mod tests {
         };
         let model_col = area.x + 1 + target_w + 2;
         let row = area.y + 1 + header;
-        app.on_mouse(click(model_col, row, MouseEventKind::Down(MouseButton::Left)))
-            .await;
+        app.on_mouse(click(
+            model_col,
+            row,
+            MouseEventKind::Down(MouseButton::Left),
+        ))
+        .await;
         app.on_mouse(click(model_col, row, MouseEventKind::Up(MouseButton::Left)))
             .await;
         assert!(app.route_menu.is_none(), "arming closes the picker");
     }
-
 
     /// The picker's explanatory text must be readable. `border` is the
     /// dimmest colour in the palette and belongs to rules and frames; prose
     /// rendered in it disappears against the background.
     #[tokio::test]
     async fn the_picker_description_is_not_rendered_in_the_border_colour() {
-        let (client, _dir, _server) = route_mock_daemon(
-            vec![route_json("kimi", "kimi-k2.5", None)],
-            None,
-        )
-        .await;
+        let (client, _dir, _server) =
+            route_mock_daemon(vec![route_json("kimi", "kimi-k2.5", None)], None).await;
         let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
         summary.harness = "claude".into();
         summary.route_capable = true;
@@ -17647,7 +17616,11 @@ mod tests {
             None,
             "a slow second click unpins rather than navigating"
         );
-        assert_eq!(app.selection.session_id(), Some("s1"), "still no navigation");
+        assert_eq!(
+            app.selection.session_id(),
+            Some("s1"),
+            "still no navigation"
+        );
     }
 
     /// Spec 0099: expanding an inline attachment pads its line to chip row +
@@ -17969,12 +17942,8 @@ mod tests {
         app.program_popup = Some(popup);
 
         let width = 90usize;
-        let (row, _col) = crate::ui::program_cursor_visual_pos(
-            Some(&app),
-            &md,
-            line.chars().count(),
-            width,
-        );
+        let (row, _col) =
+            crate::ui::program_cursor_visual_pos(Some(&app), &md, line.chars().count(), width);
         assert_eq!(
             row, 4,
             "caret at the line end sits on the block's last row (rows 0..=4)"
@@ -17992,15 +17961,14 @@ mod tests {
             ("/tmp/shot.png".to_string(), 5),
         );
         app.program_popup = Some(popup);
-        let (row, _) = crate::ui::program_cursor_visual_pos(
-            Some(&app),
-            &md,
-            line.chars().count(),
-            width,
-        );
+        let (row, _) =
+            crate::ui::program_cursor_visual_pos(Some(&app), &md, line.chars().count(), width);
         assert_eq!(row, 5, "line-end caret sits on the last image row");
         let (row, _) = crate::ui::program_cursor_visual_pos(Some(&app), &md, 2, width);
-        assert_eq!(row, 0, "caret inside the leading text stays on the text row");
+        assert_eq!(
+            row, 0,
+            "caret inside the leading text stays on the text row"
+        );
     }
 
     /// Typing after an inlined image keeps it expanded: the edit changes
@@ -18138,12 +18106,10 @@ mod tests {
         let md = "alphaword\n![shot](/tmp/shot.png)\nomegaword";
         let mut popup = program_popup_for_test("s1", md, 0);
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
-        popup
-            .expanded_attachments
-            .insert(
-                (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0),
-                ("/tmp/shot.png".to_string(), 5),
-            );
+        popup.expanded_attachments.insert(
+            (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0),
+            ("/tmp/shot.png".to_string(), 5),
+        );
         app.program_popup = Some(popup);
 
         // Render once so `program_inner_area` (which vertical motion needs)
@@ -18373,7 +18339,11 @@ mod tests {
             popup.pinned_scroll_rows, PROGRAM_WHEEL_SCROLL_ROWS as u16,
             "wheel-up pans one step back from the tail"
         );
-        assert_eq!(popup.pinned_clip.as_deref(), Some("worker1"), "pin survives");
+        assert_eq!(
+            popup.pinned_clip.as_deref(),
+            Some("worker1"),
+            "pin survives"
+        );
 
         app.handle_program_mouse(&wheel(
             MouseEventKind::ScrollDown,
@@ -18466,7 +18436,10 @@ mod tests {
             popup.pinned_scroll_cols, PROGRAM_PINNED_PAN_COLS_STEP as u16,
             "Alt+wheel pans horizontally"
         );
-        assert_eq!(popup.pinned_scroll_rows, 0, "Alt+wheel must not pan vertically");
+        assert_eq!(
+            popup.pinned_scroll_rows, 0,
+            "Alt+wheel must not pan vertically"
+        );
     }
 
     /// Shift+arrows pan the pinned card's crop without forwarding anything
@@ -18528,7 +18501,8 @@ mod tests {
         app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
 
-        app.set_program_pinned_clip(Some("worker1".to_string())).await;
+        app.set_program_pinned_clip(Some("worker1".to_string()))
+            .await;
 
         let popup = app.program_popup.as_ref().unwrap();
         assert_eq!(popup.pinned_clip.as_deref(), Some("worker1"));
@@ -18556,7 +18530,10 @@ mod tests {
         let (mut app, _dir, _server) = empty_app().await;
         let mut worker = summary_with_kind(construct_protocol::SessionKind::User);
         worker.id = "worker1".into();
-        app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User), worker];
+        app.sessions = vec![
+            summary_with_kind(construct_protocol::SessionKind::User),
+            worker,
+        ];
         app.main_windows = MainWindowTree::Leaf {
             id: 1,
             selection: Selection::Session("worker1".into()),
@@ -18564,7 +18541,8 @@ mod tests {
         app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
 
-        app.set_program_pinned_clip(Some("worker1".to_string())).await;
+        app.set_program_pinned_clip(Some("worker1".to_string()))
+            .await;
 
         let popup = app.program_popup.as_ref().unwrap();
         assert_eq!(popup.pinned_clip.as_deref(), Some("worker1"));
@@ -18755,8 +18733,13 @@ mod tests {
             .await;
 
         assert!(handled);
-        let job = rx.try_recv().expect("keystroke should reach the pinned session's PTY");
-        assert_eq!(job.session_id, "worker1", "forwards to the pinned clip, not the selected session");
+        let job = rx
+            .try_recv()
+            .expect("keystroke should reach the pinned session's PTY");
+        assert_eq!(
+            job.session_id, "worker1",
+            "forwards to the pinned clip, not the selected session"
+        );
         assert_eq!(job.bytes, b"y");
         assert_eq!(
             app.program_popup.as_ref().unwrap().buffer,
@@ -18783,7 +18766,10 @@ mod tests {
 
         let handled = app.handle_pinned_clip_key(ctrl_x).await;
         assert!(!handled, "C-x starts a chord: the keymap tier handles it");
-        assert!(rx.try_recv().is_err(), "the prefix must not reach the session");
+        assert!(
+            rx.try_recv().is_err(),
+            "the prefix must not reach the session"
+        );
 
         // Put a chord in flight, as on_key's keymap tier would after C-x.
         app.chord_state.handle(ctrl_x, &app.keymap);
@@ -18799,7 +18785,10 @@ mod tests {
         let job = rx.try_recv().expect("literal C-x forwards to the session");
         assert_eq!(job.session_id, "worker1");
         assert_eq!(job.bytes, vec![0x18]);
-        assert!(app.chord_state.is_empty(), "the escape hatch clears the chord");
+        assert!(
+            app.chord_state.is_empty(),
+            "the escape hatch clears the chord"
+        );
     }
 
     /// Esc is NOT an unpin key (spec 0090): sessions need it — interrupting
@@ -18828,7 +18817,10 @@ mod tests {
         );
         let job = rx.try_recv().expect("Esc forwards to the pinned session");
         assert_eq!(job.session_id, "worker1");
-        assert_eq!(job.bytes, b"\x1b", "Esc reaches the session as a raw escape byte");
+        assert_eq!(
+            job.bytes, b"\x1b",
+            "Esc reaches the session as a raw escape byte"
+        );
     }
 
     /// No clip pinned: the handler is a no-op that reports "not handled" so
@@ -20344,15 +20336,18 @@ mod tests {
             .expect("program should render with Shift held");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            text.contains("Run in fork")
-                && text.contains("interactive")
-                && text.contains("fork."),
+            text.contains("Run in fork") && text.contains("interactive") && text.contains("fork."),
             "holding Shift previews the forked-execution override: {text:?}"
         );
         app.program_selection_run_on_fork = false;
 
-        app.program_popup.as_mut().unwrap().selection_menu.as_mut().unwrap().selected_action =
-            ProgramSelectionAction::Verb(0);
+        app.program_popup
+            .as_mut()
+            .unwrap()
+            .selection_menu
+            .as_mut()
+            .unwrap()
+            .selected_action = ProgramSelectionAction::Verb(0);
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("program should render after navigating to verb 0");
         let text = rendered_text(term.backend().buffer());
@@ -20365,8 +20360,13 @@ mod tests {
             "Run's description must not linger once highlight moved off Run: {text:?}"
         );
 
-        app.program_popup.as_mut().unwrap().selection_menu.as_mut().unwrap().selected_action =
-            ProgramSelectionAction::Verb(1);
+        app.program_popup
+            .as_mut()
+            .unwrap()
+            .selection_menu
+            .as_mut()
+            .unwrap()
+            .selected_action = ProgramSelectionAction::Verb(1);
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("program should render after navigating to verb 1");
         let text = rendered_text(term.backend().buffer());
@@ -20430,8 +20430,13 @@ mod tests {
             "an annotate-effect verb's description is prefixed 'Annotate: ': {text:?}"
         );
 
-        app.program_popup.as_mut().unwrap().selection_menu.as_mut().unwrap().selected_action =
-            ProgramSelectionAction::Verb(1);
+        app.program_popup
+            .as_mut()
+            .unwrap()
+            .selection_menu
+            .as_mut()
+            .unwrap()
+            .selected_action = ProgramSelectionAction::Verb(1);
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("program should render after navigating to verb 1");
         let text = rendered_text(term.backend().buffer());
@@ -20547,9 +20552,7 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("program should render with stale mouse position");
         let buf = term.backend().buffer();
-        let verb_cell = buf
-            .cell((verb_hit.0, verb_hit.2))
-            .expect("verb row cell");
+        let verb_cell = buf.cell((verb_hit.0, verb_hit.2)).expect("verb row cell");
         assert_ne!(
             verb_cell.style().bg,
             Some(app.theme.accent),
@@ -20607,7 +20610,7 @@ mod tests {
             comment: "focus".into(),
             cursor: 5,
             selected_action: ProgramSelectionAction::Comment,
-        
+
             ..Default::default()
         });
 
@@ -20734,7 +20737,7 @@ mod tests {
             // highlighted appearance, which now depends on Run specifically
             // being the keyboard-selected row (spec 0089).
             selected_action: ProgramSelectionAction::Run,
-        
+
             ..Default::default()
         });
 
@@ -20887,7 +20890,7 @@ mod tests {
             comment: "alpha beta gamma delta epsilon zeta eta theta".into(),
             cursor: 45,
             selected_action: ProgramSelectionAction::Comment,
-        
+
             ..Default::default()
         });
 
@@ -22679,7 +22682,8 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("render");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("BOTTOM_MARKER") && !text.contains("TOP_MARKER"),
@@ -22692,7 +22696,8 @@ mod tests {
 
         // Over-scrolled vertical pan clamps at the content's top.
         app.program_popup.as_mut().unwrap().pinned_scroll_rows = 200;
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("render");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("TOP_MARKER"),
@@ -22704,7 +22709,8 @@ mod tests {
         let popup = app.program_popup.as_mut().unwrap();
         popup.pinned_scroll_rows = 0;
         popup.pinned_scroll_cols = 500;
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("render");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("FAR_RIGHT"),
@@ -22753,7 +22759,8 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("render");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("OWNED_MODE_MARKER"),
@@ -23471,7 +23478,7 @@ mod tests {
             comment: "focus tests".to_string(),
             cursor: "focus tests".chars().count(),
             selected_action: ProgramSelectionAction::Comment,
-        
+
             ..Default::default()
         });
 
@@ -27378,8 +27385,7 @@ mod tests {
                 painted, "  • ",
                 "a lone {marker:?} should render as an empty bullet"
             );
-            let (row, col) =
-                crate::ui::program_cursor_visual_pos(Some(&app), marker, 2, 40);
+            let (row, col) = crate::ui::program_cursor_visual_pos(Some(&app), marker, 2, 40);
             assert_eq!(
                 (row, col),
                 (0, 4),
@@ -27478,7 +27484,10 @@ mod tests {
         }
         app.undo_program_edit();
         let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(popup.buffer, "- foo\n- ", "undo restores the dissolved item");
+        assert_eq!(
+            popup.buffer, "- foo\n- ",
+            "undo restores the dissolved item"
+        );
         assert_eq!(popup.cursor, 8);
         server.abort();
     }
@@ -29931,8 +29940,7 @@ mod tests {
             "the active pane must be synchronized before focus is reported"
         );
         assert!(
-            !app
-                .sessions
+            !app.sessions
                 .iter()
                 .find(|session| session.id == "s2")
                 .expect("selected session")
@@ -30937,10 +30945,7 @@ mod tests {
         app.pty_input_tx = tx;
         app.open_session_picker(SessionPickerPurpose::Switch);
         picker_type(&mut app, "ac");
-        app.handle_session_picker_key(KeyEvent::new(
-            KeyCode::Char('b'),
-            KeyModifiers::CONTROL,
-        ));
+        app.handle_session_picker_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
 
         app.on_paste("b🙂".to_string()).await;
 
@@ -31953,7 +31958,10 @@ mod tests {
         // list at rest with no scrollbar chrome.
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let rows = app.layout.list_items_area.expect("session rows");
-        assert!(app.sessions.len() > rows.height as usize, "premise: overflow");
+        assert!(
+            app.sessions.len() > rows.height as usize,
+            "premise: overflow"
+        );
         assert!(app.layout.list_scrollbar.is_none());
 
         // Hover anywhere in the list's header/rows region reveals it without
@@ -32022,7 +32030,10 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let rows = app.layout.list_items_area.expect("session rows");
-        assert!(app.sessions.len() > rows.height as usize, "premise: overflow");
+        assert!(
+            app.sessions.len() > rows.height as usize,
+            "premise: overflow"
+        );
         assert!(
             app.layout.list_scrollbar.is_some(),
             "no motion tracking → the bar must not hide behind hover"
@@ -33089,10 +33100,7 @@ mod tests {
         assert!(
             modeline
                 .trim_end()
-                .ends_with(&format!(
-                    "theme:matrix | ○ remote | {}",
-                    crate::BUILD_ID
-                )),
+                .ends_with(&format!("theme:matrix | ○ remote | {}", crate::BUILD_ID)),
             "theme label should be right-aligned in status bar:\n{modeline}"
         );
         assert!(
@@ -33187,7 +33195,10 @@ mod tests {
     fn remote_ok_fixture(tunnel_ready: bool) -> RemoteControlOk {
         RemoteControlOk {
             url: "http://192.168.1.2:9800".into(),
-            qr: (0..10).map(|_| "#".repeat(20)).collect::<Vec<_>>().join("\n"),
+            qr: (0..10)
+                .map(|_| "#".repeat(20))
+                .collect::<Vec<_>>()
+                .join("\n"),
             tunnel_ready,
             password: "secret".into(),
             hint: None,
@@ -33351,10 +33362,12 @@ mod tests {
         // QR-side offset on this line, so this pins the raw column math too.
         let stop = hits
             .iter()
-            .find(|h| matches!(
-                h.action,
-                RemoteControlHitAction::ReadyButton(ReadyButton::Stop)
-            ))
+            .find(|h| {
+                matches!(
+                    h.action,
+                    RemoteControlHitAction::ReadyButton(ReadyButton::Stop)
+                )
+            })
             .cloned()
             .expect("stop zone");
         assert_eq!(
@@ -33483,8 +33496,10 @@ mod tests {
             row: p1.y,
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
-        app.on_mouse(ev(MouseEventKind::Down(MouseButton::Left))).await;
-        app.on_mouse(ev(MouseEventKind::Up(MouseButton::Left))).await;
+        app.on_mouse(ev(MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(ev(MouseEventKind::Up(MouseButton::Left)))
+            .await;
 
         match &app.remote_control_popup {
             Some(RemoteControlPopup::Choose(c)) => assert_eq!(
@@ -33677,7 +33692,10 @@ mod tests {
             app.status.as_ref().map(|(status, _)| status.as_str()),
             Some("codex: `codex` CLI not found")
         );
-        assert!(app.minibuffer.is_some(), "unavailable click keeps picker open");
+        assert!(
+            app.minibuffer.is_some(),
+            "unavailable click keeps picker open"
+        );
 
         let mb = app.minibuffer.as_mut().expect("picker");
         mb.input = "openai".to_string();
@@ -33692,17 +33710,17 @@ mod tests {
         assert!(filtered.contains("`codex` CLI not found"));
         assert!(!filtered.contains("Generic shell command runner"));
         assert_eq!(
-            app.layout.minibuffer_area.expect("filtered picker area").height,
+            app.layout
+                .minibuffer_area
+                .expect("filtered picker area")
+                .height,
             unfiltered_picker_height,
             "filtering keeps the picker height stable"
         );
 
         app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
-        let error = app
-            .minibuffer
-            .as_ref()
-            .and_then(|mb| mb.error.as_deref());
+        let error = app.minibuffer.as_ref().and_then(|mb| mb.error.as_deref());
         assert_eq!(error, Some("`codex` CLI not found"));
         server.abort();
     }
@@ -33760,32 +33778,20 @@ mod tests {
         ];
         app.run_action(KeyAction::OpenNewSession).await;
 
-        app.handle_minibuffer_key(KeyEvent::new(
-            KeyCode::Char('n'),
-            KeyModifiers::CONTROL,
-        ))
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(app.harness_picker_selected, 1);
-        app.handle_minibuffer_key(KeyEvent::new(
-            KeyCode::Char('n'),
-            KeyModifiers::CONTROL,
-        ))
-        .await;
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
         assert_eq!(app.harness_picker_selected, 2);
-        app.handle_minibuffer_key(KeyEvent::new(
-            KeyCode::Char('p'),
-            KeyModifiers::CONTROL,
-        ))
-        .await;
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
         assert_eq!(app.harness_picker_selected, 1);
         app.handle_minibuffer_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
             .await;
         assert_eq!(app.harness_picker_selected, 0);
-        app.handle_minibuffer_key(KeyEvent::new(
-            KeyCode::Char('p'),
-            KeyModifiers::CONTROL,
-        ))
-        .await;
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
         assert_eq!(app.harness_picker_selected, 2);
         app.handle_minibuffer_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
@@ -33821,11 +33827,8 @@ mod tests {
         app.run_action(KeyAction::OpenNewSession).await;
 
         for c in ['c', 'o', 'd'] {
-            app.handle_minibuffer_key(KeyEvent::new(
-                KeyCode::Char(c),
-                KeyModifiers::NONE,
-            ))
-            .await;
+            app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
         assert!(app.harness_picker_filter_active);
         assert_eq!(app.harness_picker_selected, 0);
@@ -37056,14 +37059,8 @@ mod tests {
 
         app.mouse_pos = Some((area.x + 1, area.y + 1));
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let vbar = app
-            .layout
-            .lineage_vscrollbar
-            .expect("vertical scrollbar");
-        let hbar = app
-            .layout
-            .lineage_hscrollbar
-            .expect("horizontal scrollbar");
+        let vbar = app.layout.lineage_vscrollbar.expect("vertical scrollbar");
+        let hbar = app.layout.lineage_hscrollbar.expect("horizontal scrollbar");
         let buffer = term.backend().buffer();
         assert_eq!(
             buffer
@@ -38312,7 +38309,10 @@ mod tests {
 
         assert!(matches!(
             &app.list_items()[0],
-            ListItem::GroupHeader { attention_rollup: true, .. }
+            ListItem::GroupHeader {
+                attention_rollup: true,
+                ..
+            }
         ));
         term.draw(|frame| crate::ui::render(frame, &mut app))
             .expect("render collapsed project");
@@ -38323,7 +38323,10 @@ mod tests {
         let expanded = app.list_items();
         assert!(matches!(
             &expanded[0],
-            ListItem::GroupHeader { attention_rollup: false, .. }
+            ListItem::GroupHeader {
+                attention_rollup: false,
+                ..
+            }
         ));
         assert!(matches!(
             &expanded[1],
@@ -38427,7 +38430,11 @@ mod tests {
         app.focus = PaneFocus::List;
         app.run_action(KeyAction::CollapseGroup).await;
         let collapsed = app.list_items();
-        assert_eq!(collapsed.len(), 1, "collapsing hides subagent and fork alike");
+        assert_eq!(
+            collapsed.len(),
+            1,
+            "collapsing hides subagent and fork alike"
+        );
         assert!(matches!(
             &collapsed[0],
             ListItem::Session { summary, has_children: true, children_expanded: false, .. }

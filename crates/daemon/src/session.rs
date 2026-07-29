@@ -453,10 +453,10 @@ impl PtyClientPolicy {
         resize_to: Option<(u16, u16)>,
         claim: bool,
     ) -> (Option<(u16, u16)>, bool) {
-        let viewport = self.clients.entry(conn_id).or_insert(PtyClientViewport {
-            kind,
-            size: None,
-        });
+        let viewport = self
+            .clients
+            .entry(conn_id)
+            .or_insert(PtyClientViewport { kind, size: None });
         viewport.kind = kind;
         if let Some(size) = resize_to {
             viewport.size = Some(size);
@@ -478,9 +478,7 @@ impl PtyClientPolicy {
         // Passive reports only resize when they come from the current owner.
         // Reports from every other connection are remembered for its next
         // click/keystroke, but cannot steal geometry in the background.
-        let resize = (self.owner == Some(conn_id))
-            .then_some(resize_to)
-            .flatten();
+        let resize = (self.owner == Some(conn_id)).then_some(resize_to).flatten();
         (resize, false)
     }
 }
@@ -1677,65 +1675,75 @@ impl SessionManager {
             // context gauge (spec 0104) restores from the LAST report seen,
             // and a Reset along the way clears it — mirroring the live fold.
             let path = storage.transcript_path(&s.id);
-            let (count, message_count, last_message_at, tokens, context) = if path.exists() {
-                let f = std::fs::File::open(&path)?;
-                let reader = std::io::BufReader::new(f);
-                use std::io::BufRead;
-                let mut n = 0u64;
-                let mut msgs = 0u64;
-                let mut last_msg_at: Option<chrono::DateTime<chrono::Utc>> = None;
-                let mut tally = construct_protocol::TokenTally::default();
-                let mut context: (Option<u64>, Option<u64>) = (None, None);
-                for line in reader.lines() {
-                    let line = line?;
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    n += 1;
-                    if let Ok(ts) =
-                        serde_json::from_str::<construct_protocol::TimestampedEvent>(&line)
-                    {
-                        match ts.event {
-                            SessionEvent::Message { .. } => {
-                                msgs += 1;
-                                last_msg_at = Some(ts.at);
-                            }
-                            SessionEvent::Cost {
-                                tokens_in,
-                                tokens_out,
-                                tokens_cached,
-                                ..
-                            } => tally.add(tokens_in, tokens_out, tokens_cached),
-                            SessionEvent::ContextUsage {
-                                used_tokens,
-                                window_tokens,
-                            } => {
-                                context.0 = Some(used_tokens);
-                                if window_tokens.is_some() {
-                                    context.1 = window_tokens;
+            let (count, message_count, last_message_at, tokens, context, context_segments) =
+                if path.exists() {
+                    let f = std::fs::File::open(&path)?;
+                    let reader = std::io::BufReader::new(f);
+                    use std::io::BufRead;
+                    let mut n = 0u64;
+                    let mut msgs = 0u64;
+                    let mut last_msg_at: Option<chrono::DateTime<chrono::Utc>> = None;
+                    let mut tally = construct_protocol::TokenTally::default();
+                    let mut context: (Option<u64>, Option<u64>) = (None, None);
+                    let mut segments: Vec<construct_protocol::ContextSegment> = Vec::new();
+                    for line in reader.lines() {
+                        let line = line?;
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        n += 1;
+                        if let Ok(ts) =
+                            serde_json::from_str::<construct_protocol::TimestampedEvent>(&line)
+                        {
+                            match ts.event {
+                                SessionEvent::Message { .. } => {
+                                    msgs += 1;
+                                    last_msg_at = Some(ts.at);
                                 }
+                                SessionEvent::Cost {
+                                    tokens_in,
+                                    tokens_out,
+                                    tokens_cached,
+                                    ..
+                                } => tally.add(tokens_in, tokens_out, tokens_cached),
+                                SessionEvent::ContextUsage {
+                                    used_tokens,
+                                    window_tokens,
+                                } => {
+                                    context.0 = Some(used_tokens);
+                                    if window_tokens.is_some() {
+                                        context.1 = window_tokens;
+                                    }
+                                }
+                                SessionEvent::ContextBreakdown { segments: segs } => {
+                                    segments = segs;
+                                }
+                                SessionEvent::Reset => {
+                                    context = (None, None);
+                                    segments.clear();
+                                }
+                                _ => {}
                             }
-                            SessionEvent::Reset => context = (None, None),
-                            _ => {}
                         }
                     }
-                }
-                (n, msgs, last_msg_at, tally, context)
-            } else {
-                (
-                    0,
-                    0,
-                    None,
-                    construct_protocol::TokenTally::default(),
-                    (None, None),
-                )
-            };
+                    (n, msgs, last_msg_at, tally, context, segments)
+                } else {
+                    (
+                        0,
+                        0,
+                        None,
+                        construct_protocol::TokenTally::default(),
+                        (None, None),
+                        Vec::new(),
+                    )
+                };
             let mut s = s;
             s.message_count = message_count;
             s.last_message_at = last_message_at;
             s.tokens = tokens;
             s.context_used = context.0;
             s.context_window = context.1;
+            s.context_segments = context_segments;
             // Scrollback survives daemon restarts because `pty_replay`
             // serves it from the on-disk `pty.log` directly; no in-memory
             // rehydration needed.
@@ -1752,9 +1760,7 @@ impl SessionManager {
                 // loaded summary; flagging "attempted" here stops the
                 // restart from re-running title-gen for already-titled
                 // sessions and is harmless for the rest.
-                title_gen_attempted: AtomicBool::new(
-                    s.title.is_some() && !s.auto_title_pending,
-                ),
+                title_gen_attempted: AtomicBool::new(s.title.is_some() && !s.auto_title_pending),
                 pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
                 pty_input_queue: std::sync::Mutex::new(None),
                 tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
@@ -1897,10 +1903,7 @@ impl SessionManager {
         &self,
         params: &construct_protocol::PluginRunActionParams,
     ) -> Result<()> {
-        let runtime = self
-            .plugins
-            .get()
-            .context("no plugins are loaded")?;
+        let runtime = self.plugins.get().context("no plugins are loaded")?;
         runtime.run_action(
             &params.plugin_id,
             &params.action_id,
@@ -3040,7 +3043,10 @@ impl SessionManager {
             model: None,
             title: Some(title),
             mode: Some("interactive".to_string()),
-            pty_size: Some(PtySize { cols: 100, rows: 30 }),
+            pty_size: Some(PtySize {
+                cols: 100,
+                rows: 30,
+            }),
             worktree: false,
             env: HashMap::new(),
             args: Vec::new(),
@@ -3296,7 +3302,8 @@ impl SessionManager {
                 let summary = entry.summary.read().await;
                 summary.state == construct_protocol::SessionState::Running
             };
-            self.deliver_text_to_session(&params.session_id, &prompt).await?;
+            self.deliver_text_to_session(&params.session_id, &prompt)
+                .await?;
             (params.session_id.clone(), prompt, queued)
         };
         self.start_program_run_with_dispatch_state(
@@ -3320,8 +3327,7 @@ impl SessionManager {
         let annotated = if params.fork {
             match params.selection.as_deref().filter(|s| !s.trim().is_empty()) {
                 Some(raw_selection) => {
-                    let anchor =
-                        format!("{} @{{session:{}}}", raw_selection, execution_session_id);
+                    let anchor = format!("{} @{{session:{}}}", raw_selection, execution_session_id);
                     // The clip lands at the end of the selection, so the
                     // *last* block is the one whose content (and id) gained
                     // it and needs its shimmer re-declared.
@@ -3589,7 +3595,8 @@ impl SessionManager {
                 comment,
                 Some((&params.session_id, &params.selection)),
             );
-            self.deliver_text_to_session(&params.session_id, &prompt).await?;
+            self.deliver_text_to_session(&params.session_id, &prompt)
+                .await?;
             self.broadcast_program_state(program.clone());
             let blocks = self.program_blocks_projection(&params.session_id, &program.markdown);
             return Ok(ProgramVerbExecuteResult {
@@ -3843,12 +3850,9 @@ impl SessionManager {
         };
         let mut decls = Self::verb_anchor_settle_decls(&dispatch.anchor);
         let clip = format!("@{{session:{fork_id}}}");
-        let blocks =
-            self.program_blocks_projection(&dispatch.owner_session_id, &program.markdown);
+        let blocks = self.program_blocks_projection(&dispatch.owner_session_id, &program.markdown);
         for block in &blocks {
-            if block.text.contains(&clip)
-                && !decls.iter().any(|decl| decl.id == block.content_id)
-            {
+            if block.text.contains(&clip) && !decls.iter().any(|decl| decl.id == block.content_id) {
                 decls.push(construct_protocol::ProgramShimmerDecl {
                     id: block.content_id.clone(),
                     shimmer: false,
@@ -4629,7 +4633,10 @@ impl SessionManager {
 
     /// `prompt_history.list`: the retained global prompt history,
     /// newest first (spec 0155).
-    pub fn prompt_history(&self, limit: Option<usize>) -> Vec<construct_protocol::PromptHistoryEntry> {
+    pub fn prompt_history(
+        &self,
+        limit: Option<usize>,
+    ) -> Vec<construct_protocol::PromptHistoryEntry> {
         self.storage
             .read_prompt_history(limit.unwrap_or(crate::storage::PROMPT_HISTORY_CAP))
     }
@@ -4665,7 +4672,10 @@ impl SessionManager {
         // Claim this generation slot; a new turn starting (which bumps
         // the counter in `handle_event`) makes this run's result stale.
         let my_gen = entry.suggest_gen.fetch_add(1, Ordering::SeqCst) + 1;
-        let events = match self.storage.read_transcript_tail(&entry.id, SUGGEST_CONTEXT_EVENTS) {
+        let events = match self
+            .storage
+            .read_transcript_tail(&entry.id, SUGGEST_CONTEXT_EVENTS)
+        {
             Ok(evs) if !evs.is_empty() => evs,
             _ => return Ok(false),
         };
@@ -4710,14 +4720,19 @@ impl SessionManager {
                 format!("{context}\n\n{history_block}")
             };
             tokio::spawn(async move {
-                generate_suggestions(binary, prefix_args, entry, my_gen, context, broadcast)
-                    .await;
+                generate_suggestions(binary, prefix_args, entry, my_gen, context, broadcast).await;
             });
         } else {
             let mgr = self.clone();
             tokio::spawn(async move {
-                mgr.generate_suggestions_via_probe(entry, my_gen, context, history_block, broadcast)
-                    .await;
+                mgr.generate_suggestions_via_probe(
+                    entry,
+                    my_gen,
+                    context,
+                    history_block,
+                    broadcast,
+                )
+                .await;
             });
         }
         Ok(true)
@@ -4762,7 +4777,12 @@ impl SessionManager {
                 parent_tokens: s.tokens,
                 is_reset_snapshot: false,
             });
-            (s.harness.clone(), s.cwd.clone(), s.model.clone(), forked_from)
+            (
+                s.harness.clone(),
+                s.cwd.clone(),
+                s.model.clone(),
+                forked_from,
+            )
         };
         let mut prompt = String::from(construct_protocol::SuggestionHand::PROMPT_INSTRUCTIONS);
         if forked_from.is_some() {
@@ -5747,15 +5767,13 @@ impl SessionManager {
                 s.route.clone(),
             )
         };
-        let armed = self
-            .router
-            .set_route(
-                session_id,
-                &harness,
-                route.as_deref(),
-                model.as_deref(),
-                origin_model,
-            )?;
+        let armed = self.router.set_route(
+            session_id,
+            &harness,
+            route.as_deref(),
+            model.as_deref(),
+            origin_model,
+        )?;
         if armed == existing {
             return Ok(());
         }
@@ -5929,6 +5947,7 @@ impl SessionManager {
             // recovered from the copied transcript at next load anyway.
             context_used: None,
             context_window: None,
+            context_segments: Vec::new(),
             approval_mode,
             kind: construct_protocol::SessionKind::User,
             archived: true,
@@ -6365,10 +6384,15 @@ fn render_suggest_context(events: &[construct_protocol::TimestampedEvent]) -> St
                 structured_signal += 1;
             }
             SessionEvent::ToolUse { tool, args, .. } => {
-                lines.push(format!("TOOL CALL {tool}: {}", trunc(&args.to_string(), 200)));
+                lines.push(format!(
+                    "TOOL CALL {tool}: {}",
+                    trunc(&args.to_string(), 200)
+                ));
                 structured_signal += 1;
             }
-            SessionEvent::ToolResult { tool, ok, output, .. } => {
+            SessionEvent::ToolResult {
+                tool, ok, output, ..
+            } => {
                 lines.push(format!(
                     "TOOL RESULT {tool} ({}): {}",
                     if *ok { "ok" } else { "failed" },
@@ -6399,7 +6423,10 @@ fn render_suggest_context(events: &[construct_protocol::TimestampedEvent]) -> St
             let start = chars.len().saturating_sub(4000);
             chars[start..].iter().collect()
         };
-        lines.push(format!("TERMINAL OUTPUT (most recent last):\n{}", tail.trim()));
+        lines.push(format!(
+            "TERMINAL OUTPUT (most recent last):\n{}",
+            tail.trim()
+        ));
     }
     lines.join("\n")
 }
@@ -6519,14 +6546,13 @@ async fn generate_suggestions(
         );
         return;
     }
-    let hand: construct_protocol::SuggestionHand =
-        match serde_json::from_slice(&out.stdout) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::debug!(session = %entry.id, error = ?e, "suggest-mode output parse failed");
-                return;
-            }
-        };
+    let hand: construct_protocol::SuggestionHand = match serde_json::from_slice(&out.stdout) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::debug!(session = %entry.id, error = ?e, "suggest-mode output parse failed");
+            return;
+        }
+    };
     if entry.is_deleted() {
         return;
     }
@@ -6612,12 +6638,10 @@ fn effective_mode(params: &CreateSessionParams) -> String {
 fn builtin_harness_capabilities(name: &str) -> construct_protocol::Capabilities {
     match name {
         "shell" | "claude" | "codex" | "opencode" | "antigravity" | "agy" | "grok" | "kimi"
-        | "hermes" | "pi" | "smith" => {
-            construct_protocol::Capabilities {
-                supports_pty: true,
-                ..Default::default()
-            }
-        }
+        | "hermes" | "pi" | "smith" => construct_protocol::Capabilities {
+            supports_pty: true,
+            ..Default::default()
+        },
         _ => Default::default(),
     }
 }
@@ -6660,10 +6684,7 @@ mod tests {
         );
 
         // Re-claiming while already owner is not a switch.
-        assert_eq!(
-            policy.note(1, ClientKind::Tui, None, true),
-            (None, false)
-        );
+        assert_eq!(policy.note(1, ClientKind::Tui, None, true), (None, false));
 
         // Delayed browser layout churn after TUI input stays passive.
         assert_eq!(
@@ -6788,14 +6809,8 @@ mod tests {
     fn program_verb_prompt_includes_full_document_as_context() {
         let verb = test_verb_for_prompt(construct_protocol::ProgramVerbEffect::Rewrite);
         let doc = "# Plan\n\nSection A.\n\nSection B: do the thing.\n\nSection C.\n";
-        let prompt = program_verb_prompt(
-            &verb,
-            "owner1",
-            doc,
-            "Section B: do the thing.",
-            None,
-            None,
-        );
+        let prompt =
+            program_verb_prompt(&verb, "owner1", doc, "Section B: do the thing.", None, None);
         assert!(
             prompt.contains("Section A.") && prompt.contains("Section C."),
             "full document, not just the selection, must appear in the prompt: {prompt}"
@@ -6864,14 +6879,7 @@ mod tests {
     fn program_verb_prompt_truncates_oversized_document_with_a_pointer() {
         let verb = test_verb_for_prompt(construct_protocol::ProgramVerbEffect::Annotate);
         let huge_doc = "x".repeat(PROGRAM_VERB_INLINE_DOC_MAX_CHARS + 5_000);
-        let prompt = program_verb_prompt(
-            &verb,
-            "owner42",
-            &huge_doc,
-            "selected bit",
-            None,
-            None,
-        );
+        let prompt = program_verb_prompt(&verb, "owner42", &huge_doc, "selected bit", None, None);
         assert!(
             prompt.contains("truncated"),
             "oversized document must be flagged as truncated: {prompt}"
@@ -7048,6 +7056,7 @@ mod tests {
             tokens: Default::default(),
             context_used: None,
             context_window: None,
+            context_segments: Vec::new(),
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind,
             archived: false,
@@ -7274,11 +7283,9 @@ mod tests {
             .instructions
             .iter()
             .any(|s| s.contains("Do not ask the user to run the program again")));
-        assert!(context
-            .instructions
-            .iter()
-            .any(|s| s.contains("status-only construct_program_edit")
-                && s.contains("settle_others")));
+        assert!(context.instructions.iter().any(|s| s
+            .contains("status-only construct_program_edit")
+            && s.contains("settle_others")));
         assert!(context
             .instructions
             .iter()
@@ -7582,6 +7589,7 @@ mod tests {
                 tokens: Default::default(),
                 context_used: None,
                 context_window: None,
+                context_segments: Vec::new(),
                 approval_mode: construct_protocol::ApprovalMode::Manual,
                 kind,
                 archived: false,
@@ -8119,7 +8127,11 @@ mod tests {
         let widgets_dir = storage.widgets_dir("vsub4");
         std::fs::create_dir_all(&widgets_dir).unwrap();
         let result_file = widgets_dir.join("verb-result.json");
-        std::fs::write(&result_file, r#"{"content":"> Assumption: the thing exists."}"#).unwrap();
+        std::fs::write(
+            &result_file,
+            r#"{"content":"> Assumption: the thing exists."}"#,
+        )
+        .unwrap();
         mgr.pending_verb_merges.lock().unwrap().insert(
             "vsub4".to_string(),
             PendingVerbMerge {
@@ -8220,7 +8232,11 @@ mod tests {
             "closing the fork settles its dispatched block: {after:?}"
         );
         assert!(
-            mgr.run_fork_dispatches.lock().unwrap().get("ffork").is_none(),
+            mgr.run_fork_dispatches
+                .lock()
+                .unwrap()
+                .get("ffork")
+                .is_none(),
             "the tracking entry is consumed so a later delete cannot double-settle"
         );
     }
@@ -9583,6 +9599,7 @@ mod tests {
             tokens: Default::default(),
             context_used: None,
             context_window: None,
+            context_segments: Vec::new(),
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: construct_protocol::SessionKind::User,
             forked_from: None,
@@ -9733,6 +9750,7 @@ mod tests {
             tokens: Default::default(),
             context_used: None,
             context_window: None,
+            context_segments: Vec::new(),
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: construct_protocol::SessionKind::User,
             archived: false,
@@ -11146,10 +11164,9 @@ mod tests {
     async fn layout_test_manager(dir: &std::path::Path) -> SessionManager {
         let storage = Arc::new(crate::storage::Storage::new(dir.join("data")).expect("storage"));
         let config = Arc::new(crate::config::Config::default());
-        let (mgr, _remote_rx, _restart_rx) =
-            SessionManager::new(storage, config, dir.join("run"))
-                .await
-                .expect("session manager");
+        let (mgr, _remote_rx, _restart_rx) = SessionManager::new(storage, config, dir.join("run"))
+            .await
+            .expect("session manager");
         mgr
     }
 
@@ -11183,7 +11200,10 @@ mod tests {
         assert_eq!(initial.tree.leaf_count(), 1);
 
         let doc = mgr
-            .set_layout(layout_split(layout_leaf(1, Some("a")), layout_leaf(2, Some("b"))), Some(0))
+            .set_layout(
+                layout_split(layout_leaf(1, Some("a")), layout_leaf(2, Some("b"))),
+                Some(0),
+            )
             .expect("first write");
         assert_eq!(doc.version, 1);
         assert_eq!(doc.tree.session_ids(), vec!["a", "b"]);
@@ -12634,10 +12654,13 @@ done
         let (record, release, _adapter_rx) =
             install_blocking_pty_mock_adapter(&mgr, &id, dir.path()).await;
 
-        tokio::time::timeout(Duration::from_secs(5), mgr.pty_input(&id, b"hello".to_vec()))
-            .await
-            .expect("pty_input must return on enqueue while the adapter ACK is withheld")
-            .expect("enqueue should succeed");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            mgr.pty_input(&id, b"hello".to_vec()),
+        )
+        .await
+        .expect("pty_input must return on enqueue while the adapter ACK is withheld")
+        .expect("enqueue should succeed");
 
         // Delivery still happens — asynchronously, once the adapter ACKs.
         std::fs::write(&release, b"go").expect("release");
@@ -12692,14 +12715,16 @@ done
         let (record, release, _adapter_rx) =
             install_blocking_pty_mock_adapter(&mgr, &id, dir.path()).await;
 
-        mgr.pty_input(&id, b"one".to_vec()).await.expect("queue one");
-        mgr.pty_input(&id, b"two".to_vec()).await.expect("queue two");
+        mgr.pty_input(&id, b"one".to_vec())
+            .await
+            .expect("queue one");
+        mgr.pty_input(&id, b"two".to_vec())
+            .await
+            .expect("queue two");
         let awaited = {
             let mgr = mgr.clone();
             let id = id.clone();
-            tokio::spawn(
-                async move { mgr.pty_input_without_capture(&id, b"three".to_vec()).await },
-            )
+            tokio::spawn(async move { mgr.pty_input_without_capture(&id, b"three".to_vec()).await })
         };
         // The writer is stuck on batch "one" (ACK withheld), so the
         // delivery-awaited call cannot have completed — deterministic, not

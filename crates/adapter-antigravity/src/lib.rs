@@ -48,14 +48,17 @@
 //! `CONSTRUCT_ANTIGRAVITY_BIN` (binary, default `agy`),
 //! `CONSTRUCT_ANTIGRAVITY_MODE` (`interactive`|`headless`).
 
-use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
-use construct_protocol::adapter::{run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter};
-use construct_protocol::{
-    Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
-    SessionState,
-};
+use construct_adapter_common::context_breakdown::{estimate_tokens_from_chars, BreakdownGate};
 use construct_adapter_common::{
     antigravity_transcript_path, drive_turn, next_native_seq, TurnOutcome,
+};
+use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
+use construct_protocol::adapter::{
+    run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
+};
+use construct_protocol::{
+    Capabilities, ContextSegment, InitializeResult, MessageRole, PtySize, SessionEvent,
+    SessionStartParams, SessionState,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
@@ -72,8 +75,10 @@ pub async fn run() -> anyhow::Result<()> {
         capabilities: Capabilities {
             supports_input: true,
             supports_interrupt: true,
-            // agy exposes no token/cost data in print mode or its logs.
-            supports_cost: false,
+            // Token usage comes from the per-conversation sqlite db's
+            // `gen_metadata` blobs (see `usage_from_gen_metadata_blob`) —
+            // print mode and the logs still expose none.
+            supports_cost: true,
             supports_pty: true,
             ..Default::default()
         },
@@ -194,8 +199,7 @@ const MODEL_DISPLAY_QUALIFIERS: [&str; 9] = [
     "High", "Low", "Medium", "Fast", "Standard", "Balanced", "Thinking", "Pro", "Preview",
 ];
 
-const MODEL_ID_PREFIXES: [&str; 7] =
-    ["gemini-", "claude-", "gpt-", "grok-", "o1-", "o3-", "o4-"];
+const MODEL_ID_PREFIXES: [&str; 7] = ["gemini-", "claude-", "gpt-", "grok-", "o1-", "o3-", "o4-"];
 
 /// A `Title Case Words (Qualifier)` display label, e.g.
 /// `"Gemini 3.5 Flash (High)"`.
@@ -299,14 +303,142 @@ fn model_and_effort_from_gen_metadata_blob(data: &[u8]) -> (Option<String>, Opti
     (None, None)
 }
 
+/// One decoded protobuf entry: `(field number, value)`. Fixed32/fixed64
+/// payloads are skipped (we only need varints and submessages here).
+enum ProtoValue<'a> {
+    Varint(u64),
+    Bytes(&'a [u8]),
+}
+
+/// Strict single-level protobuf scan. Returns `None` on any malformed
+/// framing rather than a partial read — callers treat that as "this blob
+/// doesn't have the shape we expect", the same degrade-to-nothing posture
+/// as the model scrape above.
+fn proto_entries(buf: &[u8]) -> Option<Vec<(u64, ProtoValue<'_>)>> {
+    fn varint(buf: &[u8], i: &mut usize) -> Option<u64> {
+        let mut v: u64 = 0;
+        let mut shift = 0u32;
+        loop {
+            let b = *buf.get(*i)?;
+            *i += 1;
+            v |= u64::from(b & 0x7f) << shift;
+            if b & 0x80 == 0 {
+                return Some(v);
+            }
+            shift += 7;
+            if shift >= 64 {
+                return None;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < buf.len() {
+        let key = varint(buf, &mut i)?;
+        let (field, wire) = (key >> 3, key & 7);
+        if field == 0 {
+            return None;
+        }
+        match wire {
+            0 => out.push((field, ProtoValue::Varint(varint(buf, &mut i)?))),
+            1 => i = i.checked_add(8).filter(|n| *n <= buf.len())?,
+            2 => {
+                let len = varint(buf, &mut i)? as usize;
+                let end = i.checked_add(len).filter(|n| *n <= buf.len())?;
+                out.push((field, ProtoValue::Bytes(&buf[i..end])));
+                i = end;
+            }
+            5 => i = i.checked_add(4).filter(|n| *n <= buf.len())?,
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Per-generation token usage embedded in a `gen_metadata` blob.
+///
+/// Agy's TUI renders the thoughts figure live ("Thought for 3s, 279
+/// tokens") but persists no usage to its logs or brain transcript; the
+/// only durable copy is this schema-less protobuf blob. Field mapping
+/// (submessage at path `1.4`, mirrored at `1.17.2`):
+///   `2` fresh (non-cached) prompt input, `3` output incl. thoughts,
+///   `5` cached prompt prefix, `9` thoughts.
+/// Validated against 2,184 real generation rows across the 58 conversation
+/// dbs on this machine: `thoughts <= output` held on every row, first
+/// generations carry no `5`, and `2 + 5` matched the no-cache first-row
+/// prompt total for same-cwd conversations. Like the model scrape, this is
+/// best-effort and degrades to `None` if agy's internal format changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GenUsage {
+    fresh_input: u64,
+    cached_input: u64,
+    output: u64,
+}
+
+impl GenUsage {
+    /// What actually filled the window on this call (spec 0104's
+    /// prompt-side definition): fresh input plus the cached prefix.
+    fn prompt_side(&self) -> u64 {
+        self.fresh_input + self.cached_input
+    }
+}
+
+fn usage_from_gen_metadata_blob(data: &[u8]) -> Option<GenUsage> {
+    let entries = proto_entries(data)?;
+    for (field, value) in &entries {
+        let (1, ProtoValue::Bytes(inner)) = (field, value) else {
+            continue;
+        };
+        let Some(inner_entries) = proto_entries(inner) else {
+            continue;
+        };
+        for (field, value) in &inner_entries {
+            let (4, ProtoValue::Bytes(usage)) = (field, value) else {
+                continue;
+            };
+            let Some(usage_entries) = proto_entries(usage) else {
+                continue;
+            };
+            let mut fresh = 0u64;
+            let mut cached = 0u64;
+            let mut output = 0u64;
+            let mut thoughts = 0u64;
+            for (field, value) in usage_entries {
+                if let ProtoValue::Varint(v) = value {
+                    match field {
+                        2 => fresh = v,
+                        3 => output = v,
+                        5 => cached = v,
+                        9 => thoughts = v,
+                        _ => {}
+                    }
+                }
+            }
+            // Sanity gate mirroring the invariants observed on real data —
+            // a mis-descended submessage that happens to parse must not
+            // become a fabricated report.
+            if fresh > 0 && output > 0 && thoughts <= output {
+                return Some(GenUsage {
+                    fresh_input: fresh,
+                    cached_input: cached,
+                    output,
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Poll `conversations/<id>.db`'s `gen_metadata` table for rows newer than
 /// `after_idx`. Returns the highest idx seen (so the caller can advance its
-/// high-water mark even when no row yields anything) and the most recent
-/// model/effort extracted from any new row.
-fn poll_gen_metadata_model_and_effort(
+/// high-water mark even when no row yields anything), the most recent
+/// model/effort extracted from any new row, and per-generation usage for
+/// each new row that carries it (in idx order — the cursor is the
+/// exactly-once guarantee).
+fn poll_gen_metadata(
     db_path: &Path,
     after_idx: i64,
-) -> Result<(i64, Option<String>, Option<String>), rusqlite::Error> {
+) -> Result<(i64, Option<String>, Option<String>, Vec<GenUsage>), rusqlite::Error> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.busy_timeout(Duration::from_millis(200))?;
     let mut stmt =
@@ -315,6 +447,7 @@ fn poll_gen_metadata_model_and_effort(
     let mut high = after_idx;
     let mut model = None;
     let mut effort = None;
+    let mut usage = Vec::new();
     while let Some(row) = rows.next()? {
         let idx: i64 = row.get(0)?;
         let data: Vec<u8> = row.get(1)?;
@@ -326,8 +459,49 @@ fn poll_gen_metadata_model_and_effort(
         if e.is_some() {
             effort = e;
         }
+        if let Some(u) = usage_from_gen_metadata_blob(&data) {
+            usage.push(u);
+        }
     }
-    Ok((high, model, effort))
+    Ok((high, model, effort, usage))
+}
+
+/// Char sum of the conversation content in a brain `transcript.jsonl`, for
+/// the spec 0156 `messages` estimate: `content` of user turns
+/// (`USER_EXPLICIT`) and model turns/tool records (`MODEL`). A
+/// `CHECKPOINT` record replaces the truncated earlier history with its
+/// summary, so the sum restarts there (counting the checkpoint itself) —
+/// without this the estimate would keep growing past every truncation.
+/// Ephemeral system reminders and bookkeeping rows are skipped; `thinking`
+/// is skipped (not replayed into later turns).
+fn transcript_conversation_chars(path: &Path) -> usize {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return 0;
+    };
+    let mut chars = 0usize;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let content_len = v
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::len)
+            .unwrap_or(0);
+        match (
+            v.get("type").and_then(Value::as_str).unwrap_or(""),
+            v.get("source").and_then(Value::as_str).unwrap_or(""),
+        ) {
+            ("CHECKPOINT", _) => chars = content_len,
+            (_, "USER_EXPLICIT") | (_, "MODEL") => chars += content_len,
+            _ => {}
+        }
+    }
+    chars
 }
 
 /// File where we stash the conversation id so a daemon restart can
@@ -458,6 +632,7 @@ fn spawn_interactive_transcript_watcher(
         let mut last_effort: Option<String> = None;
         let mut last_gen_idx: i64 = -1;
         let mut gen_metadata_error_logged = false;
+        let mut breakdown_gate = BreakdownGate::default();
         let mut tick_count: u64 = 0;
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -526,7 +701,8 @@ fn spawn_interactive_transcript_watcher(
                 let Some(child) = children.get_mut(&child_id) else {
                     continue;
                 };
-                let Some(child_path) = antigravity_transcript_path(&child_id, &HashMap::new()) else {
+                let Some(child_path) = antigravity_transcript_path(&child_id, &HashMap::new())
+                else {
                     continue;
                 };
                 let (next_step, values) = read_new_transcript_steps(&child_path, child.last_step);
@@ -556,12 +732,12 @@ fn spawn_interactive_transcript_watcher(
                 Some(&emit),
             );
 
-            // Best-effort model/effort capture, throttled to ~every 2s.
+            // Best-effort model/effort/usage capture, throttled to ~every 2s.
             if tick_count % 4 == 0 {
                 if let Some(db_path) = conversation_db_path(id) {
                     if db_path.exists() {
-                        match poll_gen_metadata_model_and_effort(&db_path, last_gen_idx) {
-                            Ok((high, model, effort)) => {
+                        match poll_gen_metadata(&db_path, last_gen_idx) {
+                            Ok((high, model, effort, usage)) => {
                                 last_gen_idx = high;
                                 if let Some(model) = model {
                                     if last_model.as_deref() != Some(model.as_str()) {
@@ -573,6 +749,37 @@ fn spawn_interactive_transcript_watcher(
                                     if last_effort.as_deref() != Some(effort.as_str()) {
                                         last_effort = Some(effort.clone());
                                         emit.emit(SessionEvent::EffortChanged { effort });
+                                    }
+                                }
+                                // One Cost per generation row (spec 0103;
+                                // the idx cursor is the exactly-once
+                                // guarantee), then the latest row refreshes
+                                // the gauge (spec 0104 — agy states no
+                                // window, so used-only) and the breakdown
+                                // (spec 0156).
+                                for u in &usage {
+                                    emit.emit(SessionEvent::Cost {
+                                        usd: 0.0,
+                                        tokens_in: u.prompt_side(),
+                                        tokens_out: u.output,
+                                        tokens_cached: u.cached_input,
+                                    });
+                                }
+                                if let Some(last) = usage.last() {
+                                    emit.emit(SessionEvent::ContextUsage {
+                                        used_tokens: last.prompt_side(),
+                                        window_tokens: None,
+                                    });
+                                    let chars = transcript_conversation_chars(&tp);
+                                    if chars > 0 {
+                                        let segments = vec![ContextSegment::new(
+                                            "messages",
+                                            estimate_tokens_from_chars(chars),
+                                            true,
+                                        )];
+                                        if breakdown_gate.changed(&segments) {
+                                            emit.emit(SessionEvent::ContextBreakdown { segments });
+                                        }
                                     }
                                 }
                             }
@@ -1058,6 +1265,111 @@ fn antigravity_events_from_step(v: &Value) -> Vec<SessionEvent> {
 mod tests {
     use super::*;
 
+    fn pb_varint(mut v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                return out;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    fn pb_varint_field(field: u64, v: u64) -> Vec<u8> {
+        let mut out = pb_varint(field << 3);
+        out.extend(pb_varint(v));
+        out
+    }
+    fn pb_submessage(field: u64, body: &[u8]) -> Vec<u8> {
+        let mut out = pb_varint((field << 3) | 2);
+        out.extend(pb_varint(body.len() as u64));
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// Fixture mirrors the real `gen_metadata` blob shape observed on this
+    /// machine (the field mapping was validated against 2,184 real
+    /// generation rows across 58 conversation dbs; the values here are the
+    /// literal row a fresh `hi` turn produced: fresh 12676, output 288
+    /// incl. 279 thoughts, cached 8118).
+    fn usage_blob(fresh: u64, output: u64, cached: u64, thoughts: u64) -> Vec<u8> {
+        let mut usage = pb_varint_field(2, fresh);
+        usage.extend(pb_varint_field(3, output));
+        if cached > 0 {
+            usage.extend(pb_varint_field(5, cached));
+        }
+        usage.extend(pb_varint_field(9, thoughts));
+        let mut inner = pb_varint_field(3, 1036); // unrelated sibling varint
+        inner.extend(pb_submessage(4, &usage));
+        let mut blob = pb_submessage(1, &inner);
+        // Unrelated top-level siblings the walker must skip: a string-ish
+        // submessage and a bare varint (real blobs carry hundreds).
+        blob.extend(pb_submessage(3, b"Gemini 3.1 Pro (Low)\x10\x08"));
+        blob.extend(pb_varint_field(6, 65535));
+        blob
+    }
+
+    #[test]
+    fn usage_from_gen_metadata_blob_decodes_the_real_row_shape() {
+        let blob = usage_blob(12676, 288, 8118, 279);
+        let u = usage_from_gen_metadata_blob(&blob).expect("usage present");
+        assert_eq!(u.fresh_input, 12676);
+        assert_eq!(u.cached_input, 8118);
+        assert_eq!(u.output, 288);
+        assert_eq!(u.prompt_side(), 20794);
+
+        // First generation of a conversation: no cached-prefix field.
+        let first = usage_from_gen_metadata_blob(&usage_blob(20794, 422, 0, 367)).unwrap();
+        assert_eq!(first.cached_input, 0);
+        assert_eq!(first.prompt_side(), 20794);
+    }
+
+    #[test]
+    fn usage_from_gen_metadata_blob_rejects_insane_or_malformed() {
+        // Sanity gate: thoughts exceeding output means we mis-descended —
+        // never fabricate a report from it.
+        assert!(usage_from_gen_metadata_blob(&usage_blob(100, 10, 0, 50)).is_none());
+        // Zero fresh input likewise.
+        assert!(usage_from_gen_metadata_blob(&usage_blob(0, 10, 0, 5)).is_none());
+        // Truncated / non-protobuf bytes degrade to None, not a panic.
+        assert!(usage_from_gen_metadata_blob(&[0x0a, 0xff, 0x01]).is_none());
+        assert!(usage_from_gen_metadata_blob(b"not a protobuf").is_none());
+    }
+
+    #[test]
+    fn transcript_conversation_chars_counts_turns_and_restarts_at_checkpoint() {
+        // Record shapes mirror a real brain transcript.jsonl on this
+        // machine (USER_INPUT / PLANNER_RESPONSE with thinking /
+        // EPHEMERAL_MESSAGE / CHECKPOINT).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let lines = [
+            r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"aaaa"}"#,
+            r#"{"step_index":1,"source":"SYSTEM","type":"CONVERSATION_HISTORY","status":"DONE"}"#,
+            r#"{"step_index":2,"source":"SYSTEM","type":"EPHEMERAL_MESSAGE","status":"DONE","content":"ignored reminder"}"#,
+            r#"{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"bbbbbb","thinking":"not replayed"}"#,
+            r#"{"step_index":4,"source":"MODEL","type":"RUN_COMMAND","status":"DONE","content":"cc"}"#,
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        // 4 + 6 + 2 = 12; ephemeral + thinking excluded.
+        assert_eq!(transcript_conversation_chars(&path), 12);
+
+        // A checkpoint replaces truncated history: the sum restarts at its
+        // summary content, then keeps accumulating.
+        let mut all: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+        all.push(
+            r#"{"step_index":5,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","content":"summary!"}"#.into(),
+        );
+        all.push(
+            r#"{"step_index":6,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"dd"}"#.into(),
+        );
+        std::fs::write(&path, all.join("\n")).unwrap();
+        // 8 ("summary!") + 2 = 10.
+        assert_eq!(transcript_conversation_chars(&path), 10);
+    }
+
     #[test]
     fn parses_conversation_id_from_log_line() {
         let log = "I0522 01:17:15.555 server.go:726] Conversation using project ID: fd861473-c03d-48d4-993b-7cf1e55cc70f\n\
@@ -1250,7 +1562,10 @@ mod tests {
         ]);
         assert_eq!(
             model_and_effort_from_gen_metadata_blob(&blob),
-            (Some("Gemini 3.5 Flash".to_string()), Some("High".to_string()))
+            (
+                Some("Gemini 3.5 Flash".to_string()),
+                Some("High".to_string())
+            )
         );
     }
 
@@ -1269,7 +1584,10 @@ mod tests {
         blob.extend_from_slice(&[0x00, 0x02]);
         assert_eq!(
             model_and_effort_from_gen_metadata_blob(&blob),
-            (Some("Gemini 3.5 Flash".to_string()), Some("High".to_string()))
+            (
+                Some("Gemini 3.5 Flash".to_string()),
+                Some("High".to_string())
+            )
         );
     }
 
@@ -1278,7 +1596,10 @@ mod tests {
         let blob = synthetic_blob(&["model_enum", "Gemini 3.5 Flash (High)"]);
         assert_eq!(
             model_and_effort_from_gen_metadata_blob(&blob),
-            (Some("Gemini 3.5 Flash".to_string()), Some("High".to_string()))
+            (
+                Some("Gemini 3.5 Flash".to_string()),
+                Some("High".to_string())
+            )
         );
     }
 

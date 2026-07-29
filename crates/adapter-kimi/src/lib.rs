@@ -20,10 +20,13 @@
 //! session data follows `CONSTRUCT_KIMI_HOME`, then Kimi's own
 //! `KIMI_CODE_HOME`, then `~/.kimi-code`.
 
+use construct_adapter_common::context_breakdown::{estimate_tokens_from_chars, BreakdownGate};
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
-use construct_protocol::adapter::{run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter};
+use construct_protocol::adapter::{
+    run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
+};
 use construct_protocol::{
-    Capabilities, InitializeResult, PtySize, SessionEvent, SessionStartParams,
+    Capabilities, ContextSegment, InitializeResult, PtySize, SessionEvent, SessionStartParams,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -260,6 +263,124 @@ fn wire_usage_events(v: &Value) -> Vec<SessionEvent> {
     ]
 }
 
+/// Conversation chars across a full `wire.jsonl` scan, feeding the
+/// `messages` breakdown segment (spec 0156). Everything kimi appends to
+/// the model context is journaled as a `context.append_*` wire line;
+/// shapes verified against real sessions on this machine (2026-07-28):
+///
+/// - `context.append_message`: `message.content` is a list of
+///   `{type:"text",text}` items (user turns; `toolCalls` observed empty).
+/// - `context.append_loop_event` `content.part`: one `part.text` or
+///   `part.think` string (assistant text / thinking).
+/// - `context.append_loop_event` `tool.call`: `name` plus structured
+///   `args`, counted as serialized JSON.
+/// - `context.append_loop_event` `tool.result`: `result.output` string.
+///
+/// `turn.prompt` mirrors the user text `context.append_message` already
+/// carries (counting both would double-count), and `step.begin`/`step.end`
+/// /`config.update`/`llm.request` etc. are bookkeeping — no conversation
+/// chars. The full re-scan at turn cadence is deliberate: resume and
+/// native-id rebinds self-correct without incremental bookkeeping.
+fn wire_conversation_chars(text: &str) -> usize {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|v| wire_line_chars(&v))
+        .sum()
+}
+
+fn wire_line_chars(v: &Value) -> usize {
+    match v.get("type").and_then(Value::as_str).unwrap_or("") {
+        "context.append_message" => v
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(Value::as_str))
+                    .map(|t| t.chars().count())
+                    .sum()
+            })
+            .unwrap_or(0),
+        "context.append_loop_event" => {
+            let Some(event) = v.get("event") else {
+                return 0;
+            };
+            match event.get("type").and_then(Value::as_str).unwrap_or("") {
+                "content.part" => event
+                    .get("part")
+                    .and_then(|p| p.get("text").or_else(|| p.get("think")))
+                    .and_then(Value::as_str)
+                    .map(|t| t.chars().count())
+                    .unwrap_or(0),
+                "tool.call" => {
+                    let name = event
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(|n| n.chars().count())
+                        .unwrap_or(0);
+                    let args = event
+                        .get("args")
+                        .filter(|a| !a.is_null())
+                        .map(|a| a.to_string().chars().count())
+                        .unwrap_or(0);
+                    name + args
+                }
+                "tool.result" => event
+                    .pointer("/result/output")
+                    .and_then(Value::as_str)
+                    .map(|t| t.chars().count())
+                    .unwrap_or(0),
+                _ => 0,
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Chars of the tool schemas the session currently sends with every LLM
+/// call: kimi journals them verbatim as `llm.tools_snapshot` wire lines
+/// (`{"type":"llm.tools_snapshot","hash":…,"tools":[…]}`, shape verified
+/// against real sessions on this machine, 2026-07-28), re-stamping a new
+/// snapshot whenever the active toolset changes — so the *last* snapshot
+/// in the log describes the live prefix and earlier ones are history.
+/// Counted as the serialized `tools` array.
+fn wire_tools_snapshot_chars(text: &str) -> usize {
+    text.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|v| v.get("type").and_then(Value::as_str) == Some("llm.tools_snapshot"))
+        .and_then(|v| v.get("tools").map(|t| t.to_string().chars().count()))
+        .unwrap_or(0)
+}
+
+/// The breakdown segments implied by a full wire-log scan, fixed-prefix
+/// first: an estimated `tools` segment from the latest `llm.tools_snapshot`
+/// (skipped when the log has none), then the estimated `messages`
+/// conversation segment. Kimi's system prompt never lands on disk
+/// (`llm.request` records only a `systemPromptHash`), so no `system
+/// prompt` segment is derivable and the client's "unaccounted" row absorbs
+/// it.
+fn wire_breakdown_segments(text: &str) -> Vec<ContextSegment> {
+    let mut segments = Vec::new();
+    let tools_chars = wire_tools_snapshot_chars(text);
+    if tools_chars > 0 {
+        segments.push(ContextSegment::new(
+            "tools",
+            estimate_tokens_from_chars(tools_chars),
+            true,
+        ));
+    }
+    let message_chars = wire_conversation_chars(text);
+    if message_chars > 0 {
+        segments.push(ContextSegment::new(
+            "messages",
+            estimate_tokens_from_chars(message_chars),
+            true,
+        ));
+    }
+    segments
+}
+
 fn append_launch_args(args: &mut Vec<String>, model: Option<&str>, native_id: Option<&str>) {
     if let Some(model) = model {
         args.extend(["--model".into(), model.into()]);
@@ -342,6 +463,9 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
         // every 10 ticks (5s) rather than re-scanning every pass.
         let mut sibling_ids = sibling_native_ids(&cwd);
         let mut ticks_since_sibling_refresh = 0u32;
+        // Breakdown (spec 0156): recomputed by full wire-log scan at
+        // `step.end` cadence, reported only when it changes.
+        let mut breakdown_gate = BreakdownGate::default();
         loop {
             tick.tick().await;
             ticks_since_sibling_refresh += 1;
@@ -404,6 +528,7 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
             let Ok(text) = std::fs::read_to_string(&wire_path) else {
                 continue;
             };
+            let mut saw_step_usage = false;
             for (idx, line) in text.lines().enumerate() {
                 if idx < wire_cursor || line.trim().is_empty() {
                     continue;
@@ -419,11 +544,22 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
                     last_effort = Some(effort.clone());
                     emit.emit(SessionEvent::EffortChanged { effort });
                 }
-                for event in wire_usage_events(&v) {
+                let usage_events = wire_usage_events(&v);
+                saw_step_usage |= !usage_events.is_empty();
+                for event in usage_events {
                     emit.emit(event);
                 }
             }
             wire_cursor = text.lines().count();
+            if saw_step_usage {
+                // Same cadence as the gauge: a `step.end` with usage just
+                // landed, so re-derive the messages estimate from the whole
+                // log (`text` is already the full file).
+                let segments = wire_breakdown_segments(&text);
+                if !segments.is_empty() && breakdown_gate.changed(&segments) {
+                    emit.emit(SessionEvent::ContextBreakdown { segments });
+                }
+            }
         }
     });
 }
@@ -666,6 +802,106 @@ mod tests {
         ));
         assert!(!is_kimi_session_id("session_"));
         assert!(!is_kimi_session_id("ses_abc123"));
+    }
+
+    /// Line shapes verified against real `wire.jsonl` files on this
+    /// machine (2026-07-28): user turns land as `context.append_message`
+    /// with a `{type:"text",text}` item list (and again as `turn.prompt`,
+    /// which must NOT be double-counted), assistant output as
+    /// `content.part` think/text loop events, tool traffic as `tool.call`
+    /// (structured `args`) and `tool.result` (`result.output` string),
+    /// and the full active tool schemas as `llm.tools_snapshot` lines —
+    /// re-stamped on toolset change, so only the latest one is live.
+    fn wire_breakdown_fixture() -> String {
+        concat!(
+            r#"{"type":"metadata","protocol_version":"1.4"}"#,
+            "\n",
+            r#"{"type":"llm.tools_snapshot","hash":"aaa","tools":[{"name":"Old"}]}"#,
+            "\n",
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"fix the icon"}],"origin":{"kind":"user"}}"#,
+            "\n",
+            r#"{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"fix the icon"}],"toolCalls":[],"origin":{"kind":"user"}}}"#,
+            "\n",
+            r#"{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"u1","turnId":"0","step":1}}"#,
+            "\n",
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"think","think":"Find the button."}}}"#,
+            "\n",
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"t1","name":"Grep","args":{"pattern":"expand"}}}"#,
+            "\n",
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"t1","result":{"output":"no matches","isError":false}}}"#,
+            "\n",
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"Done."}}}"#,
+            "\n",
+            r#"{"type":"context.append_loop_event","event":{"type":"step.end","usage":{"inputOther":10,"output":5,"inputCacheRead":0,"inputCacheCreation":0}}}"#,
+            "\n",
+            r#"{"type":"llm.tools_snapshot","hash":"bbb","tools":[{"name":"Grep","description":"Search files."}]}"#,
+            "\n",
+            r#"{"type":"config.update","modelAlias":"kimi-code/k3","thinkingEffort":"low"}"#,
+            "\n",
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn wire_scan_counts_context_appends_once() {
+        // context.append_message 12 ("fix the icon") + think 16
+        // ("Find the button.") + tool.call 4 ("Grep") + 20 (serialized
+        // {"pattern":"expand"}) + tool.result 10 ("no matches") + text 5
+        // ("Done.") = 67. turn.prompt mirrors the user text and counts 0;
+        // metadata/llm.tools_snapshot/step.begin/step.end/config.update
+        // count 0 here (the snapshot feeds the `tools` segment instead).
+        assert_eq!(wire_conversation_chars(&wire_breakdown_fixture()), 67);
+    }
+
+    #[test]
+    fn tools_snapshot_chars_use_only_the_latest_snapshot() {
+        // Two snapshots in the fixture; only the later ("bbb") one is the
+        // live toolset. Its serialized `tools` array,
+        // `[{"name":"Grep","description":"Search files."}]`, is 47 chars
+        // (key order cannot change the length).
+        assert_eq!(wire_tools_snapshot_chars(&wire_breakdown_fixture()), 47);
+        assert_eq!(wire_tools_snapshot_chars(""), 0);
+    }
+
+    #[test]
+    fn breakdown_orders_tools_before_messages_and_gates_repeats() {
+        let text = wire_breakdown_fixture();
+        let segments = wire_breakdown_segments(&text);
+        // Fixed-prefix first: tools 47 chars / 3.5 -> ~13 tokens, then
+        // messages 67 chars / 3.5 -> ~19, both estimated by contract
+        // (spec 0156).
+        assert_eq!(
+            segments,
+            vec![
+                ContextSegment::new("tools", 13, true),
+                ContextSegment::new("messages", 19, true),
+            ]
+        );
+
+        // A log with no tools snapshot skips the segment, not zeroes it.
+        let no_snapshot = r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"Done."}}}"#;
+        assert_eq!(
+            wire_breakdown_segments(no_snapshot),
+            vec![ContextSegment::new("messages", 1, true)]
+        );
+
+        // Report-on-change: recomputing over an unchanged log stays quiet;
+        // a grown log fires again.
+        let mut gate = BreakdownGate::default();
+        assert!(gate.changed(&segments));
+        assert!(!gate.changed(&wire_breakdown_segments(&text)));
+        let mut grown = text.clone();
+        grown.push_str(concat!(
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"And pushed the fix."}}}"#,
+            "\n",
+        ));
+        assert!(gate.changed(&wire_breakdown_segments(&grown)));
+
+        // An empty or content-free log yields no segments at all.
+        assert!(wire_breakdown_segments("").is_empty());
+        assert!(
+            wire_breakdown_segments(r#"{"type":"metadata","protocol_version":"1.4"}"#).is_empty()
+        );
     }
 
     #[test]

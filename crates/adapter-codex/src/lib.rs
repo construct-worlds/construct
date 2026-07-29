@@ -15,14 +15,18 @@
 //! `CONSTRUCT_CODEX_MODE=interactive|headless`. Honors `CONSTRUCT_CODEX_CMD` for a
 //! full command prefix, falling back to `CONSTRUCT_CODEX_BIN` for a binary path.
 
+use construct_adapter_common::context_breakdown::{estimate_tokens_from_chars, BreakdownGate};
+use construct_adapter_common::{
+    codex_sessions_root, drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
+};
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
-use construct_protocol::adapter::{run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter};
+use construct_protocol::adapter::{
+    run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
+};
+use construct_protocol::ContextSegment;
 use construct_protocol::{
     Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
     SessionState,
-};
-use construct_adapter_common::{
-    codex_sessions_root, drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -251,6 +255,8 @@ fn spawn_interactive_transcript_watcher(
         let mut last_model = initial_model;
         let mut last_effort: Option<String> = None;
         let mut reported_usage = UsageTotals::default();
+        // Report-on-change gate for the context breakdown (spec 0156).
+        let mut breakdown_gate = BreakdownGate::default();
         let mut known: HashMap<String, (PathBuf, SessionMeta)> = HashMap::new();
         let mut child_lines: HashMap<String, usize> = HashMap::new();
         let mut child_seq: HashMap<String, u64> = HashMap::new();
@@ -342,7 +348,7 @@ fn spawn_interactive_transcript_watcher(
             let Some((_, path)) = selected.as_ref() else {
                 continue;
             };
-            emit_new_codex_rollout_lines(
+            let usage_refreshed = emit_new_codex_rollout_lines(
                 path,
                 &mut next_line,
                 &emit,
@@ -350,6 +356,14 @@ fn spawn_interactive_transcript_watcher(
                 &mut last_effort,
                 &mut reported_usage,
             );
+            // A fresh ContextUsage gauge means the window's contents moved;
+            // refresh the breakdown behind it at the same cadence (spec
+            // 0156). Always a full scan of the currently bound rollout —
+            // turn cadence keeps that cheap, and it self-corrects across
+            // resume and /clear rebinds.
+            if usage_refreshed {
+                emit_codex_context_breakdown(path, &mut breakdown_gate, &emit);
+            }
 
             let Some(root_id) = selected
                 .as_ref()
@@ -514,6 +528,8 @@ fn count_jsonl_lines(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
+/// Returns true when any of the new lines refreshed the context gauge — the
+/// caller refreshes the context breakdown (spec 0156) at that same cadence.
 fn emit_new_codex_rollout_lines(
     path: &Path,
     next_line: &mut usize,
@@ -521,11 +537,12 @@ fn emit_new_codex_rollout_lines(
     last_model: &mut Option<String>,
     last_effort: &mut Option<String>,
     reported_usage: &mut UsageTotals,
-) {
+) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return;
+        return false;
     };
     let mut seen = 0usize;
+    let mut usage_refreshed = false;
     for (idx, line) in text.lines().enumerate() {
         seen = idx + 1;
         if idx < *next_line {
@@ -535,7 +552,10 @@ fn emit_new_codex_rollout_lines(
             continue;
         }
         match serde_json::from_str::<Value>(line) {
-            Ok(v) => emit_codex_rollout_event(emit, &v, last_model, last_effort, reported_usage),
+            Ok(v) => {
+                usage_refreshed |=
+                    emit_codex_rollout_event(emit, &v, last_model, last_effort, reported_usage);
+            }
             Err(e) => emit.log(format!(
                 "codex transcript: failed to parse {} line {}: {e}",
                 path.display(),
@@ -544,15 +564,17 @@ fn emit_new_codex_rollout_lines(
         }
     }
     *next_line = seen;
+    usage_refreshed
 }
 
+/// Returns true when the record emitted a fresh `ContextUsage` gauge.
 fn emit_codex_rollout_event(
     emit: &EventEmitter,
     v: &Value,
     last_model: &mut Option<String>,
     last_effort: &mut Option<String>,
     reported_usage: &mut UsageTotals,
-) {
+) -> bool {
     if let Some(model) = codex_model_change(v, last_model) {
         *last_model = Some(model.clone());
         emit.emit(SessionEvent::ModelChanged { model });
@@ -561,12 +583,17 @@ fn emit_codex_rollout_event(
         *last_effort = Some(effort.clone());
         emit.emit(SessionEvent::EffortChanged { effort });
     }
-    for event in codex_usage_events(v, reported_usage) {
+    let usage_events = codex_usage_events(v, reported_usage);
+    let usage_refreshed = usage_events
+        .iter()
+        .any(|event| matches!(event, SessionEvent::ContextUsage { .. }));
+    for event in usage_events {
         emit.emit(event);
     }
     for event in codex_rollout_events(v) {
         emit.emit(event);
     }
+    usage_refreshed
 }
 
 /// Cumulative token totals already reported for the bound rollout, so each
@@ -683,6 +710,117 @@ fn last_rollout_usage_totals(path: &Path) -> UsageTotals {
         }
     }
     latest
+}
+
+/// Context breakdown behind the gauge (spec 0156): a full scan of the
+/// currently-bound rollout, estimating what occupies the window. Codex's
+/// rollout exposes the base instructions (`session_meta`) and the whole
+/// conversation (`response_item` records), so up to two estimated segments
+/// are derivable — `system prompt` then `messages`, fixed-prefix first.
+/// Gated so identical reports aren't re-emitted (report on change, spec
+/// 0104's rule applied to the breakdown).
+fn emit_codex_context_breakdown(path: &Path, gate: &mut BreakdownGate, emit: &EventEmitter) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let segments = codex_breakdown_segments(&text);
+    if gate.changed(&segments) {
+        emit.emit(SessionEvent::ContextBreakdown { segments });
+    }
+}
+
+/// Record shapes verified against real rollouts under `~/.codex/sessions/`
+/// on this machine: `session_meta.payload.base_instructions` is
+/// `{"text": "..."}`; conversation content lives in `response_item`
+/// payloads; a `compacted` record's `payload.replacement_history` is the
+/// list of response-item payloads that REPLACES the prior history, so the
+/// conversation sum restarts from those items (base instructions are
+/// re-sent every turn and survive compaction).
+fn codex_breakdown_segments(text: &str) -> Vec<ContextSegment> {
+    let mut system_chars: Option<usize> = None;
+    let mut convo_chars = 0usize;
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match v.get("type").and_then(Value::as_str) {
+            Some("session_meta") => {
+                let base = v.pointer("/payload/base_instructions");
+                system_chars = match base {
+                    Some(Value::String(s)) => Some(s.len()),
+                    Some(obj) => obj.get("text").and_then(Value::as_str).map(str::len),
+                    None => None,
+                }
+                .or(system_chars);
+            }
+            Some("compacted") => {
+                convo_chars = v
+                    .pointer("/payload/replacement_history")
+                    .and_then(Value::as_array)
+                    .map(|items| items.iter().map(codex_item_content_chars).sum())
+                    .unwrap_or(0);
+            }
+            Some("response_item") => {
+                if let Some(payload) = v.get("payload") {
+                    convo_chars += codex_item_content_chars(payload);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut segments = Vec::new();
+    if let Some(chars) = system_chars {
+        segments.push(ContextSegment::new(
+            "system prompt",
+            estimate_tokens_from_chars(chars),
+            true,
+        ));
+    }
+    segments.push(ContextSegment::new(
+        "messages",
+        estimate_tokens_from_chars(convo_chars),
+        true,
+    ));
+    segments
+}
+
+/// Content chars one response-item payload contributes to the window:
+/// message text (user/assistant/developer alike — developer messages ride
+/// in the same request), reasoning summaries, tool-call inputs, and
+/// tool-call outputs. `reasoning.encrypted_content` is an opaque blob whose
+/// char length says nothing about tokens, so it's skipped.
+fn codex_item_content_chars(payload: &Value) -> usize {
+    match payload.get("type").and_then(Value::as_str) {
+        Some("message") => codex_blocks_text_chars(payload.get("content")),
+        Some("reasoning") => codex_blocks_text_chars(payload.get("summary")),
+        Some("function_call") => payload
+            .get("arguments")
+            .and_then(Value::as_str)
+            .map_or(0, str::len),
+        Some("custom_tool_call") => payload
+            .get("input")
+            .and_then(Value::as_str)
+            .map_or(0, str::len),
+        Some("function_call_output" | "custom_tool_call_output") => match payload.get("output") {
+            Some(Value::String(s)) => s.len(),
+            output @ Some(Value::Array(_)) => codex_blocks_text_chars(output),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Summed `.text` of a block array (`input_text`/`output_text`/summary
+/// blocks all carry their content under `text`).
+fn codex_blocks_text_chars(blocks: Option<&Value>) -> usize {
+    blocks
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|b| b.get("text").and_then(Value::as_str).map_or(0, str::len))
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 /// The root session's active model, if `v` is a `turn_context` rollout
@@ -1368,7 +1506,9 @@ mod tests {
             "transcript events must still project: {events:?}"
         );
         assert!(
-            !events.iter().any(|e| matches!(e, SessionEvent::Cost { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Cost { .. })),
             "a non-usage record must not fabricate a Cost: {events:?}"
         );
     }
@@ -1733,10 +1873,7 @@ mod tests {
     #[test]
     fn effort_change_silent_when_unchanged() {
         let v = serde_json::json!({"type": "turn_context", "payload": {"effort": "medium"}});
-        assert_eq!(
-            codex_effort_change(&v, &Some("medium".to_string())),
-            None
-        );
+        assert_eq!(codex_effort_change(&v, &Some("medium".to_string())), None);
     }
 
     #[test]
@@ -1746,5 +1883,101 @@ mod tests {
             codex_effort_change(&v, &Some("medium".to_string())).as_deref(),
             Some("high")
         );
+    }
+
+    // Record shapes below mirror real rollouts inspected under
+    // `~/.codex/sessions/` on this machine: `session_meta` carries
+    // `base_instructions: {"text": ...}`; `response_item` payloads are
+    // `message` (content blocks of `input_text`/`output_text`),
+    // `reasoning` (summary blocks + opaque `encrypted_content`),
+    // `function_call`/`custom_tool_call` (string `arguments`/`input`), and
+    // their `*_output` twins (`output` either a string or a block list).
+    #[test]
+    fn context_breakdown_sums_system_prompt_and_conversation_chars() {
+        let rollout = concat!(
+            r#"{"type":"session_meta","payload":{"id":"019f-1","originator":"agentd:s1","base_instructions":{"text":"You are Codex."}}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.2-codex","effort":"medium"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi there"}]}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"plan"}],"encrypted_content":"gAAAAABqVtwq"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls\"}","call_id":"call_1"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"done"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"text(1);","call_id":"call_2"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":[{"type":"input_text","text":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":5,"cached_input_tokens":0}}}}"#,
+            "\n",
+        );
+        // system: "You are Codex." (14). conversation: "hi there" (8) +
+        // "plan" (4) + arguments (12) + "done" (4) + input (8) + "ok" (2)
+        // = 38; encrypted_content contributes nothing.
+        assert_eq!(
+            codex_breakdown_segments(rollout),
+            vec![
+                ContextSegment::new("system prompt", estimate_tokens_from_chars(14), true),
+                ContextSegment::new("messages", estimate_tokens_from_chars(38), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn context_breakdown_omits_system_prompt_when_meta_lacks_instructions() {
+        let rollout = concat!(
+            r#"{"type":"session_meta","payload":{"id":"019f-1","originator":"agentd:s1"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}"#,
+            "\n",
+        );
+        // Never guess a segment the data surface doesn't carry (spec 0156).
+        assert_eq!(
+            codex_breakdown_segments(rollout),
+            vec![ContextSegment::new(
+                "messages",
+                estimate_tokens_from_chars(5),
+                true
+            )]
+        );
+    }
+
+    #[test]
+    fn context_breakdown_restarts_conversation_at_compacted_record() {
+        // Real `compacted` records carry `replacement_history`: the
+        // response-item payloads that REPLACE everything before them.
+        let rollout = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"0123456789"}]}}"#,
+            "\n",
+            r#"{"type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"sum"}]}]}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ab"}]}}"#,
+            "\n",
+        );
+        assert_eq!(
+            codex_breakdown_segments(rollout),
+            vec![ContextSegment::new(
+                "messages",
+                estimate_tokens_from_chars(5),
+                true
+            )]
+        );
+    }
+
+    #[test]
+    fn context_breakdown_gate_suppresses_identical_reports() {
+        let rollout = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}"#;
+        let mut gate = BreakdownGate::default();
+        assert!(gate.changed(&codex_breakdown_segments(rollout)));
+        // Re-scanning an unchanged rollout must not re-emit.
+        assert!(!gate.changed(&codex_breakdown_segments(rollout)));
+        let grown = format!(
+            "{rollout}\n{}",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"a much longer reply that moves the estimate"}]}}"#
+        );
+        assert!(gate.changed(&codex_breakdown_segments(&grown)));
     }
 }

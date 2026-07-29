@@ -2153,8 +2153,8 @@ pub fn format_token_count(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use construct_protocol::{ForkMerge, ForkedFrom};
     use chrono::{TimeZone, Utc};
+    use construct_protocol::{ForkMerge, ForkedFrom};
 
     fn base(id: &str) -> SessionSummary {
         SessionSummary {
@@ -2190,6 +2190,7 @@ mod tests {
             tokens: Default::default(),
             context_used: None,
             context_window: None,
+            context_segments: Vec::new(),
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: SessionKind::User,
             archived: false,

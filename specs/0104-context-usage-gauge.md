@@ -20,7 +20,9 @@ The TUI modeline renders the gauge immediately after the model name as
 `used/window %` — for example `12.4k/258k 5%` — with that label drawn over a
 proportional background bar. Used capacity uses the normal modeline color and
 remaining capacity is dimmed, while the label remains readable on top.
-Hovering the label reveals the exact `used / window` token counts. The window
+Hovering the label reveals the exact `used / window` token counts — and, when
+the adapter reports a context breakdown (spec 0156), a per-component detail
+under those counts. The window
 is never guessed from model names or hardcoded tables outside the harness's
 own report. When a harness reports usage without a window, the modeline shows
 the `used` label over an all-dim (zero-percent) bar; its tooltip reports the
@@ -51,7 +53,9 @@ the different question "how full is this conversation right now?".
 ## Non-Goals
 
 - Estimating context usage for harnesses that report nothing (e.g. a
-  bare shell). No report → no gauge.
+  bare shell). No report → no gauge. (Spec 0156 carves out one narrow
+  exception: clearly-marked *estimated* segments in the breakdown detail —
+  never the gauge's own used/window numbers.)
 - Quota/rate-limit display — that is subscription state (spec 0086),
   not conversation state.
 
