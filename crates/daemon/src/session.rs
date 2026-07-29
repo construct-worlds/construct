@@ -1360,7 +1360,7 @@ pub struct SessionManager {
     /// every live session terminal and skip them on restart.
     is_shutting_down: AtomicBool,
     /// Model-route transport (specs 0113/0114/0115). Present always,
-    /// inert unless `[router] enabled = true`.
+    /// inert when `[router] enabled = false`.
     pub(crate) router: Arc<crate::router::Router>,
     /// Remote-WS transport: `None` until `start_remote` is called
     /// (either by env-var-at-boot in `main.rs` or by the

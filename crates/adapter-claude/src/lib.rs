@@ -88,6 +88,86 @@ fn resolve_mode(params: &SessionStartParams) -> Mode {
     }
 }
 
+const GATEWAY_DISCOVERY_ENV: &str = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
+const GATEWAY_ALLOW_LOOPBACK_ENV: &str = "CLAUDE_GATEWAY_ALLOW_LOOPBACK";
+
+/// Activate Claude Code's native multi-model gateway picker without
+/// displacing a user-configured gateway.
+///
+/// The router-provided URL is loopback and session-scoped. It answers
+/// `/v1/models`, routes Construct ids, and reconstructs native selections
+/// onto Claude's default API origin. A user-provided base URL is left
+/// entirely alone.
+fn activate_model_catalog(env: &mut HashMap<String, String>) {
+    activate_model_catalog_with(env, |key| std::env::var(key).ok());
+}
+
+fn activate_model_catalog_with(
+    env: &mut HashMap<String, String>,
+    inherited: impl Fn(&str) -> Option<String>,
+) {
+    let Some(catalog_url) = env
+        .get(construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG)
+        .filter(|url| url.starts_with("http://127.0.0.1:"))
+        .cloned()
+    else {
+        return;
+    };
+    if env.contains_key("ANTHROPIC_BASE_URL") || inherited("ANTHROPIC_BASE_URL").is_some() {
+        return;
+    }
+    let session_token = catalog_url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+    env.insert("ANTHROPIC_BASE_URL".to_string(), catalog_url);
+    env.entry(GATEWAY_DISCOVERY_ENV.to_string())
+        .or_insert_with(|| "1".to_string());
+    // Claude Code blocks gateway discovery on loopback unless the operator
+    // explicitly opts in. Construct's gateway is intentionally loopback-only
+    // and its path carries a per-session capability token.
+    env.entry(GATEWAY_ALLOW_LOOPBACK_ENV.to_string())
+        .or_insert_with(|| "1".to_string());
+
+    // Gateway discovery requires an API credential even though Construct's
+    // `/v1/models` response contains no secrets. Reuse a user's API credential
+    // when one exists; subscription sessions use the path capability as a
+    // gateway credential, which the daemon exchanges for the existing Claude
+    // OAuth route on native model requests.
+    let has_api_credential = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]
+        .into_iter()
+        .any(|key| env.contains_key(key) || inherited(key).is_some());
+    if !has_api_credential {
+        if let Some(token) = session_token {
+            env.insert("ANTHROPIC_AUTH_TOKEN".to_string(), token);
+        }
+    }
+
+    // The local gateway and the HTTPS interception proxy share a listener.
+    // Bypass the proxy for loopback so Claude does not send its gateway
+    // request through a second proxy hop before reaching that listener.
+    for key in ["NO_PROXY", "no_proxy"] {
+        let existing = env
+            .get(key)
+            .cloned()
+            .or_else(|| inherited(key))
+            .unwrap_or_default();
+        let mut entries: Vec<&str> = existing
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        for host in ["127.0.0.1", "localhost"] {
+            if !entries.contains(&host) {
+                entries.push(host);
+            }
+        }
+        env.insert(key.to_string(), entries.join(","));
+    }
+}
+
 /// Generate a minimal Claude `--settings` file for adapter bookkeeping hooks
 /// and return its path. Always includes a `SessionStart` hook that rewrites
 /// `claude_session_id.txt` whenever Claude mints a new native id (startup,
@@ -267,8 +347,9 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     }
     // Surface the session id to the child's env so agents that aren't using
     // MCP (or the user, via `echo $CONSTRUCT_SESSION_ID`) can still tell.
-    let mut env: Vec<(String, String)> = params
-        .env
+    let mut child_env = params.env.clone();
+    activate_model_catalog(&mut child_env);
+    let mut env: Vec<(String, String)> = child_env
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
@@ -862,7 +943,8 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
     let cwd = PathBuf::from(&params.cwd);
     let model = params.model.clone();
     let extra_args = params.args.clone();
-    let env = params.env.clone();
+    let mut env = params.env.clone();
+    activate_model_catalog(&mut env);
 
     let mut session_id: Option<String> = None;
     let mut pending: VecDeque<String> = initial_pending(&params.prompt);
@@ -1435,6 +1517,78 @@ fn tool_results_from_message(msg: Option<&Value>) -> Vec<SessionEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn construct_catalog_activates_the_session_local_native_gateway() {
+        let mut env = HashMap::from([(
+            construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG.to_string(),
+            "http://127.0.0.1:8917/__construct/session-token".to_string(),
+        )]);
+        activate_model_catalog_with(&mut env, |_| None);
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("http://127.0.0.1:8917/__construct/session-token")
+        );
+        assert_eq!(
+            env.get(GATEWAY_DISCOVERY_ENV).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            env.get(GATEWAY_ALLOW_LOOPBACK_ENV).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
+            Some("session-token")
+        );
+        assert_eq!(
+            env.get("NO_PROXY").map(String::as_str),
+            Some("127.0.0.1,localhost")
+        );
+        assert_eq!(
+            env.get("no_proxy").map(String::as_str),
+            Some("127.0.0.1,localhost")
+        );
+    }
+
+    #[test]
+    fn construct_catalog_never_displaces_a_user_gateway() {
+        let mut env = HashMap::from([
+            (
+                construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG.to_string(),
+                "http://127.0.0.1:8917/__construct/session-token".to_string(),
+            ),
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://gateway.example.test".to_string(),
+            ),
+        ]);
+        activate_model_catalog_with(&mut env, |_| None);
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://gateway.example.test")
+        );
+        assert!(!env.contains_key(GATEWAY_DISCOVERY_ENV));
+    }
+
+    #[test]
+    fn construct_catalog_preserves_api_credentials_and_no_proxy_entries() {
+        let mut env = HashMap::from([
+            (
+                construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG.to_string(),
+                "http://127.0.0.1:8917/__construct/session-token".to_string(),
+            ),
+            ("NO_PROXY".to_string(), "example.test,localhost".to_string()),
+        ]);
+        activate_model_catalog_with(&mut env, |key| {
+            (key == "ANTHROPIC_API_KEY").then(|| "user-key".to_string())
+        });
+        assert!(!env.contains_key("ANTHROPIC_AUTH_TOKEN"));
+        assert_eq!(
+            env.get("NO_PROXY").map(String::as_str),
+            Some("example.test,localhost,127.0.0.1")
+        );
+    }
 
     #[test]
     fn native_subagent_updates_parse_launch_and_completion() {

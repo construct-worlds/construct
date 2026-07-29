@@ -12,10 +12,11 @@ Construct-owned local proxy. The interposition mechanism is the harness
 process's **proxy environment** (`HTTPS_PROXY`), never the harness's
 base-URL/model configuration.
 
-Two behaviors follow from one listener:
+Three behaviors follow from one listener:
 
 - **Pass-through (the default, and the state of every routed-capable
-  session until a route is armed).** The proxy accepts the client's
+  session until a route is armed or native catalog publication is
+  enabled).** The proxy accepts the client's
   `CONNECT`, dials the destination the client named, and splices the two
   sockets. It never terminates TLS, never parses a request or response
   body, and never inspects or substitutes a credential.
@@ -23,6 +24,12 @@ Two behaviors follow from one listener:
   destination host being routed, the proxy terminates TLS with a leaf
   certificate minted by a Construct-local CA, rewrites the request to the
   target endpoint, and streams the response back.
+- **Native catalog selection (automatic for supported harnesses).** For the
+  harness's fixed model host only, the proxy terminates TLS to read the
+  request's model id. A Construct-published id selects its encoded route for
+  that request. A native id with no armed route is reconstructed to the
+  exact origin named by `CONNECT`, retaining the harness's native provider
+  credential.
 
 The origin — where the request would have gone without Construct — is
 **always taken from the client's `CONNECT` line**, never derived from the
@@ -51,9 +58,10 @@ the shape, not of test coverage.
 
 ## Consequences
 
-- Pass-through must never parse. Anything that inspects traffic —
-  token accounting, model detection — is available only on the routed
-  path, where TLS is already terminated for a reason the user asked for.
+- Pass-through must never parse. Inspection is available only for an armed
+  route or a session whose native catalog was enabled. Catalog
+  inspection is limited to the fixed model host and the model selector
+  needed to choose between a published route and the native origin.
 - Routing to a different endpoint — whether a same-dialect redirect or a
   translation — requires TLS interception, and therefore
   requires that the harness trust the Construct CA through a
@@ -71,10 +79,10 @@ the shape, not of test coverage.
   Which kind a given variable is differs per harness and is established by
   probe, not by its name.
 - Interception is per-destination, not per-connection. Every destination
-  other than the routed one stays a blind tunnel, including the harness's
-  own auth-refresh and telemetry endpoints, and everything the harness
-  spawns (MCP servers, subprocess network calls) that inherits the proxy
-  environment.
+  other than the routed model host stays a blind tunnel, including the
+  harness's own auth-refresh and telemetry endpoints, and everything the
+  harness spawns (MCP servers, subprocess network calls) that inherits the
+  proxy environment.
 - A pre-existing `HTTPS_PROXY` in the environment is a single standardized
   value: it is captured and chained to, so a user behind a corporate proxy
   keeps reaching it.
@@ -85,12 +93,12 @@ the shape, not of test coverage.
   TUN devices, DNS overrides, system trust-store changes) is rejected: its
   failure escapes the session and can outlive the process that created it.
   Every accepted mechanism confines its worst case to a session the user
-  opted into.
+  deliberately launched through Construct.
 
 ## Non-Goals
 
 - Routing traffic for processes Construct did not spawn.
-- Intercepting anything on the pass-through path, for any purpose,
+- Intercepting anything on the blind pass-through path, for any purpose,
   including observability.
 - The translation itself. What a route *is* — including when a target
   speaks a different dialect than the harness — is

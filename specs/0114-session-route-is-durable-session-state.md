@@ -25,6 +25,12 @@ same class as its approval mode and its active model
 Clients read the live route from the session record. It is never a
 transcript row: a route change is configuration, not conversation.
 
+This durable route is the session's manually pinned default. A model id
+published into a harness's native picker may select a different route for
+one request as defined by
+[0157](0157-native-model-catalog-routing.md); that request-scoped choice
+does not replace or mutate the durable pin.
+
 ## Reason
 
 The value of runtime routing is that a session in flight can be moved to a
@@ -80,8 +86,9 @@ routing is indistinguishable from a harness that changed its own model.
 
 ## Non-Goals
 
-- Per-turn or per-request routing, and any notion of route history. Only
-  the current route is retained.
+- Retaining per-turn or per-request route history. Request-scoped native
+  catalog selection is supported, but only the current manual pin is
+  durable.
 - Automatic or policy-driven route selection (cost, availability,
   failover). A route changes because a user changed it.
 - Preserving a route across a fork into a new session, unless the fork

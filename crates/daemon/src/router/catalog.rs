@@ -1,0 +1,487 @@
+//! Native harness model-catalog publication.
+//!
+//! A published model id is routing data, not a provider model name. Codex
+//! carries the id on every request (including native subagent requests), so
+//! the proxy can select a route per request instead of pinning the whole
+//! session to one target.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::{anyhow, bail, Context, Result};
+use serde_json::{json, Value};
+
+use super::{oauth::OauthProvider, ArmedRoute, Router};
+
+pub const PUBLISHED_MODEL_PREFIX: &str = "construct-";
+pub const CLAUDE_PUBLISHED_MODEL_PREFIX: &str = "claude-construct-";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedModel {
+    pub id: String,
+    pub route: String,
+    pub model: String,
+}
+
+fn encode_part(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn decode_part(value: &str) -> Result<String> {
+    let input = value.as_bytes();
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] != b'%' {
+            bytes.push(input[index]);
+            index += 1;
+            continue;
+        }
+        let hex = input
+            .get(index + 1..index + 3)
+            .ok_or_else(|| anyhow!("truncated percent escape"))?;
+        let hex = std::str::from_utf8(hex).context("percent escape")?;
+        bytes.push(u8::from_str_radix(hex, 16).context("percent escape")?);
+        index += 3;
+    }
+    String::from_utf8(bytes).context("utf-8")
+}
+
+/// Stable, human-readable, one-slash id accepted by Codex's catalog and
+/// model override surfaces. Typical ids remain readable
+/// (`construct-review/kimi-k2.5`); separators and other unsafe bytes are
+/// percent-encoded so the mapping remains reversible and collision-safe.
+#[cfg(test)]
+fn published_model_id(route: &str, model: &str) -> String {
+    published_model_id_with_prefix(PUBLISHED_MODEL_PREFIX, route, model)
+}
+
+fn published_model_id_with_prefix(prefix: &str, route: &str, model: &str) -> String {
+    format!("{prefix}{}/{}", encode_part(route), encode_part(model))
+}
+
+fn published_model_id_for_harness(harness: &str, route: &str, model: &str) -> String {
+    let prefix = if harness == "claude" {
+        // Claude Code filters gateway-discovered model ids to values that
+        // begin with `claude` or `anthropic`.
+        CLAUDE_PUBLISHED_MODEL_PREFIX
+    } else {
+        PUBLISHED_MODEL_PREFIX
+    };
+    published_model_id_with_prefix(prefix, route, model)
+}
+
+pub fn decode_published_model_id(id: &str) -> Result<Option<(String, String)>> {
+    let encoded = if let Some(encoded) = id.strip_prefix(CLAUDE_PUBLISHED_MODEL_PREFIX) {
+        encoded
+    } else if let Some(encoded) = id.strip_prefix(PUBLISHED_MODEL_PREFIX) {
+        encoded
+    } else {
+        return Ok(None);
+    };
+    let (route, model) = encoded
+        .split_once('/')
+        .ok_or_else(|| anyhow!("published model id has no route/model separator"))?;
+    if route.is_empty() || model.is_empty() || model.contains('/') {
+        bail!("published model id has an empty route or model");
+    }
+    Ok(Some((decode_part(route)?, decode_part(model)?)))
+}
+
+impl Router {
+    /// Available route/model pairs for a harness, without credentials.
+    ///
+    /// Availability is checked before publication, so the native picker
+    /// never advertises a target the same session could not select from the
+    /// Construct route menu.
+    pub fn published_models(&self, harness: &str) -> Vec<PublishedModel> {
+        if !self.publish_models {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for provider in OauthProvider::ALL {
+            if self.oauth_blocker(*provider, harness).is_some() {
+                continue;
+            }
+            for model in self.oauth_model_list(*provider) {
+                out.push(PublishedModel {
+                    id: published_model_id_for_harness(harness, provider.name(), &model),
+                    route: provider.name().to_string(),
+                    model,
+                });
+            }
+        }
+        for (route, profile) in &self.profiles {
+            if self.profile_blocker(profile, harness).is_some() {
+                continue;
+            }
+            for model in self.profile_model_list(profile) {
+                out.push(PublishedModel {
+                    id: published_model_id_for_harness(harness, route, &model),
+                    route: route.clone(),
+                    model,
+                });
+            }
+        }
+        out
+    }
+
+    /// Anthropic Models API-shaped response consumed by Claude Code's
+    /// gateway model discovery. Native picker rows are built from these
+    /// fields; credentials and endpoint details never enter the response.
+    pub fn claude_models_response(&self) -> Value {
+        let data: Vec<Value> = self
+            .published_models("claude")
+            .into_iter()
+            .map(|model| {
+                json!({
+                    "id": model.id,
+                    "display_name": format!("{} · {}", model.model, model.route),
+                    "description": format!(
+                        "Routed by Construct through {} to {}.",
+                        model.route, model.model
+                    ),
+                    "type": "model",
+                    "created_at": "1970-01-01T00:00:00Z"
+                })
+            })
+            .collect();
+        json!({
+            "data": data,
+            "has_more": false,
+            "first_id": null,
+            "last_id": null
+        })
+    }
+
+    /// Resolve a model id carried by a harness request. An id outside the
+    /// Construct namespace is not ours. A malformed or no-longer-published
+    /// Construct id fails closed rather than leaking to the harness's native
+    /// provider as an accidental paid request.
+    pub fn resolve_published_model(&self, harness: &str, id: &str) -> Result<Option<ArmedRoute>> {
+        let Some((route, model)) = decode_published_model_id(id)
+            .with_context(|| format!("invalid Construct model id {id:?}"))?
+        else {
+            return Ok(None);
+        };
+        let allowed = self
+            .published_models(harness)
+            .into_iter()
+            .any(|candidate| candidate.route == route && candidate.model == model);
+        if !allowed {
+            bail!("Construct model {id:?} is not available for the {harness} harness");
+        }
+        self.resolve(&route, harness, Some(&model)).map(Some)
+    }
+
+    pub fn write_codex_catalog(&self, session_id: &str) -> Result<PathBuf> {
+        let source = active_codex_catalog_source()?;
+        let raw = std::fs::read(&source)
+            .with_context(|| format!("read Codex model catalog {}", source.display()))?;
+        let baseline: Value = serde_json::from_slice(&raw)
+            .with_context(|| format!("parse Codex model catalog {}", source.display()))?;
+        let published = self.published_models("codex");
+        if published.is_empty() {
+            bail!("no available routes can be published to Codex");
+        }
+        let catalog = build_codex_catalog(baseline, &published, &self.featured_models)?;
+
+        let dir = self.state_dir.join("router").join("catalogs");
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let safe_id: String = session_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = dir.join(format!("{safe_id}.json"));
+        let temp = dir.join(format!(".{safe_id}.{}.tmp", uuid::Uuid::new_v4().simple()));
+        let bytes = serde_json::to_vec_pretty(&catalog).context("encode Codex model catalog")?;
+        std::fs::write(&temp, bytes).with_context(|| format!("write {}", temp.display()))?;
+        std::fs::rename(&temp, &path).with_context(|| format!("install {}", path.display()))?;
+        Ok(path)
+    }
+}
+
+fn codex_home() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("CODEX_HOME") {
+        if !path.trim().is_empty() {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?;
+    Ok(PathBuf::from(home).join(".codex"))
+}
+
+/// Honor a user-selected catalog as the native baseline; otherwise use the
+/// cache Codex itself maintains. The generated session catalog never
+/// modifies either source.
+fn active_codex_catalog_source() -> Result<PathBuf> {
+    let home = codex_home()?;
+    let config_path = home.join("config.toml");
+    if let Ok(raw) = std::fs::read_to_string(&config_path) {
+        if let Ok(config) = raw.parse::<toml::Value>() {
+            if let Some(value) = config
+                .get("model_catalog_json")
+                .and_then(toml::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                let path = Path::new(value);
+                return Ok(if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    home.join(path)
+                });
+            }
+        }
+    }
+    Ok(home.join("models_cache.json"))
+}
+
+fn selector(route: &str, model: &str) -> String {
+    format!("{route}/{model}")
+}
+
+fn feature_ranks(models: &[PublishedModel], configured: &[String]) -> BTreeMap<String, usize> {
+    let available: std::collections::HashSet<String> = models
+        .iter()
+        .map(|model| selector(&model.route, &model.model))
+        .collect();
+    let mut ranks = BTreeMap::new();
+    for value in configured {
+        if ranks.len() == 5 {
+            break;
+        }
+        if available.contains(value) && !ranks.contains_key(value) {
+            ranks.insert(value.clone(), ranks.len());
+        }
+    }
+    ranks
+}
+
+fn replace_identity(entry: &mut Value, model: &PublishedModel) {
+    const NATIVE_IDENTITY: &str = "You are Codex, an agent based on GPT-5.";
+    let replacement = format!(
+        "You are Codex, a coding agent powered by {} through Construct.",
+        model.model
+    );
+    if let Some(text) = entry
+        .get("base_instructions")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        entry["base_instructions"] = Value::String(text.replacen(NATIVE_IDENTITY, &replacement, 1));
+    }
+    if let Some(text) = entry
+        .pointer("/model_messages/instructions_template")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        if let Some(slot) = entry.pointer_mut("/model_messages/instructions_template") {
+            *slot = Value::String(text.replacen(NATIVE_IDENTITY, &replacement, 1));
+        }
+    }
+}
+
+pub fn build_codex_catalog(
+    mut baseline: Value,
+    published: &[PublishedModel],
+    configured_featured: &[String],
+) -> Result<Value> {
+    let models = baseline
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("Codex catalog has no models array"))?;
+    models.retain(|entry| {
+        !entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| slug.starts_with(PUBLISHED_MODEL_PREFIX))
+    });
+    let template = models
+        .iter()
+        .find(|entry| {
+            entry
+                .get("slug")
+                .and_then(Value::as_str)
+                .is_some_and(|slug| !slug.contains('/'))
+                && entry.get("base_instructions").is_some()
+        })
+        .cloned()
+        .ok_or_else(|| anyhow!("Codex catalog has no native model template"))?;
+    let ranks = feature_ranks(published, configured_featured);
+    // Codex's v2 agent-message path may encrypt a child task for the
+    // ChatGPT backend. A routed provider cannot decrypt that payload. The
+    // v1 surface carries the task as ordinary Responses input, so
+    // published catalogs pin the whole session to v1 and keep native/routed
+    // delegation interoperable.
+    for entry in models.iter_mut() {
+        entry["multi_agent_version"] = Value::String("v1".to_string());
+    }
+    if !ranks.is_empty() {
+        // Codex sorts the native picker and the spawn_agent override enum by
+        // ascending priority. An explicit featured roster must therefore
+        // move every non-featured native below that bounded block.
+        for entry in models.iter_mut() {
+            let priority = entry.get("priority").and_then(Value::as_u64).unwrap_or(100);
+            entry["priority"] = json!(priority.max((ranks.len() + 100) as u64));
+        }
+    }
+
+    for (index, model) in published.iter().enumerate() {
+        let mut entry = template.clone();
+        entry["slug"] = Value::String(model.id.clone());
+        entry["display_name"] = Value::String(format!("{} · {}", model.model, model.route));
+        entry["description"] = Value::String(format!(
+            "Routed by Construct through {} to {}.",
+            model.route, model.model
+        ));
+        entry["visibility"] = Value::String("list".to_string());
+        entry["priority"] = json!(if ranks.is_empty() {
+            // Match Codex's native ordering convention: routed models are
+            // picker-visible and some enter the five-model subagent enum,
+            // while the priority-1 native default remains unchanged.
+            5
+        } else {
+            ranks
+                .get(&selector(&model.route, &model.model))
+                .copied()
+                .unwrap_or(100 + ranks.len() + index)
+        });
+        entry["default_reasoning_level"] = Value::String("medium".to_string());
+        entry["supported_reasoning_levels"] = json!([{
+            "effort": "medium",
+            "description": "Provider-default reasoning through Construct"
+        }]);
+        // Route profiles currently carry no capability metadata. Advertise a
+        // conservative text/tool surface until the shared registry grows
+        // explicit per-model capabilities.
+        entry["context_window"] = json!(64_000);
+        entry["max_context_window"] = json!(64_000);
+        entry["effective_context_window_percent"] = json!(90);
+        entry["input_modalities"] = json!(["text"]);
+        entry["supports_image_detail_original"] = Value::Bool(false);
+        entry["supports_search_tool"] = Value::Bool(false);
+        entry["multi_agent_version"] = Value::String("v1".to_string());
+        if let Some(object) = entry.as_object_mut() {
+            object.remove("web_search_tool_type");
+            object.remove("service_tiers");
+            object.remove("additional_speed_tiers");
+            object.remove("supports_websockets");
+            object.remove("prefer_websockets");
+            object.remove("availability_nux");
+            object.insert("upgrade".to_string(), Value::Null);
+        }
+        replace_identity(&mut entry, model);
+        models.push(entry);
+    }
+    Ok(baseline)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn baseline() -> Value {
+        json!({
+            "client_version": "test",
+            "models": [{
+                "slug": "gpt-native",
+                "display_name": "Native",
+                "description": "native",
+                "priority": 1,
+                "visibility": "list",
+                "base_instructions": "You are Codex, an agent based on GPT-5. Keep working.",
+                "model_messages": {
+                    "instructions_template": "You are Codex, an agent based on GPT-5. Use tools."
+                },
+                "supported_reasoning_levels": [{"effort":"high"}],
+                "context_window": 200000,
+                "service_tiers": [{"id":"priority"}],
+                "web_search_tool_type": "text_and_image"
+            }]
+        })
+    }
+
+    #[test]
+    fn published_ids_round_trip_arbitrary_parts() {
+        let id = published_model_id("route/with space", "vendor/model--1");
+        assert_eq!(id, "construct-route%2Fwith%20space/vendor%2Fmodel--1");
+        assert_eq!(
+            decode_published_model_id(&id).unwrap(),
+            Some(("route/with space".into(), "vendor/model--1".into()))
+        );
+        assert_eq!(decode_published_model_id("gpt-native").unwrap(), None);
+    }
+
+    #[test]
+    fn claude_ids_pass_gateway_filter_and_round_trip() {
+        let id = published_model_id_for_harness("claude", "review", "vendor/model");
+        assert_eq!(id, "claude-construct-review/vendor%2Fmodel");
+        assert_eq!(
+            decode_published_model_id(&id).unwrap(),
+            Some(("review".into(), "vendor/model".into()))
+        );
+    }
+
+    #[test]
+    fn generated_catalog_keeps_native_and_adds_routed_entries() {
+        let route = PublishedModel {
+            id: published_model_id("claude-oauth", "opus"),
+            route: "claude-oauth".into(),
+            model: "opus".into(),
+        };
+        let catalog = build_codex_catalog(baseline(), &[route.clone()], &[]).unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["slug"], "gpt-native");
+        assert_eq!(models[0]["multi_agent_version"], "v1");
+        assert_eq!(models[1]["slug"], route.id);
+        assert_eq!(models[1]["multi_agent_version"], "v1");
+        assert_eq!(models[1]["priority"], 5);
+        assert_eq!(models[1]["context_window"], 64_000);
+        assert!(!models[1]["base_instructions"]
+            .as_str()
+            .unwrap()
+            .contains("based on GPT-5"));
+        assert!(models[1].get("service_tiers").is_none());
+    }
+
+    #[test]
+    fn configured_feature_order_controls_priorities() {
+        let a = PublishedModel {
+            id: published_model_id("a", "one"),
+            route: "a".into(),
+            model: "one".into(),
+        };
+        let b = PublishedModel {
+            id: published_model_id("b", "two"),
+            route: "b".into(),
+            model: "two".into(),
+        };
+        let catalog =
+            build_codex_catalog(baseline(), &[a, b], &["b/two".into(), "a/one".into()]).unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(models[0]["priority"], 102);
+        assert_eq!(models[1]["priority"], 1);
+        assert_eq!(models[2]["priority"], 0);
+    }
+
+    #[test]
+    fn malformed_construct_ids_fail_closed() {
+        assert!(decode_published_model_id("construct-route/not%XXvalid").is_err());
+    }
+}

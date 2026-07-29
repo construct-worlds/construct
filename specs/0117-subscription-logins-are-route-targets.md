@@ -1,7 +1,7 @@
 # 0117-subscription-logins-are-route-targets
 
 Status: accepted
-Date: 2026-07-26
+Date: 2026-07-29
 Area: harness
 Scope: How an existing subscription (OAuth) login on the machine becomes a route target, and why the router reads those credentials without ever refreshing them.
 
@@ -14,6 +14,11 @@ required.
 - Logins are **discovered, not declared.** Nothing needs to be written in
   config for one to appear; it is offered as soon as its credential is
   readable and unexpired.
+- Discovery and route publication are enabled by default for
+  route-capable harnesses launched through Construct. Running
+  `construct new <harness>` establishes the session scope; users may opt
+  out of all routing or only native-catalog publication in Construct's
+  configuration.
 - **The router reads credentials and never writes them.** It never
   refreshes, re-mints, or otherwise updates a token in a store another
   application owns. When a token is expired or nearly so, the target is
@@ -90,9 +95,10 @@ failure than a corrupted credential store.
   required headers and required prompt text — the same evidentiary standard
   as adding a routable harness. None of it may be guessed.
 - Reading another application's stored credential and presenting it to that
-  application's backend is a decision with terms-of-service implications
-  that belong to the operator, not to Construct. The mechanism is provided;
-  the choice to enable routing is explicit and off by default.
+  application's backend has terms-of-service implications that belong to
+  the operator, not to Construct. Automatic discovery is scoped to
+  harnesses deliberately launched through Construct, is read-only until a
+  published route is selected, and has an explicit opt-out.
 
 ## Non-Goals
 

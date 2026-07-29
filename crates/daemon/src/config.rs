@@ -322,17 +322,35 @@ enabled = true
 # ---------------------------------------------------------------------------
 # Model routing (specs 0113/0114/0115/0116/0117)
 # ---------------------------------------------------------------------------
-# Off by default. When enabled, route-capable sessions are spawned with
-# HTTPS_PROXY pointing at a loopback proxy the daemon owns. The proxy does
-# NOT change where a harness sends its traffic: it blind-tunnels every
-# connection to the destination the harness itself resolved, so an enabled
-# router with no route armed is byte-for-byte identical to no router at all.
-# A harness's own endpoint configuration — env vars, config files, login
-# state — is never read and never displaced.
+# Automatic by default. Route-capable sessions are spawned with HTTPS_PROXY
+# pointing at a loopback proxy the daemon owns, and supported harnesses receive
+# a session-local native model catalog containing every usable route Construct
+# detects. Subscription logins owned by Claude, Codex, and Grok are discovered
+# read-only; no duplicate model configuration is required.
+#
+# The proxy does NOT replace where a harness sends native traffic. With model
+# publication disabled it blind-tunnels every unarmed connection to the
+# destination the harness resolved. A harness's endpoint configuration is
+# never displaced.
 #
 # Arming a route (from the TUI: click the model in the modeline) redirects
 # just that session's model traffic to the chosen endpoint, on the running
 # session, with no restart. The choice persists across daemon restarts.
+#
+# For Codex, Construct merges available routes into a generated, session-local
+# copy of Codex's model catalog and passes it as a command-line override. This
+# makes routes available to the native model picker and native subagents
+# without editing Codex's persistent config. Construct then inspects only Codex
+# model requests: a published id selects its route per request; a native id
+# keeps using Codex's own endpoint (or the manually armed session route).
+# The generated catalog uses Codex's v1 multi-agent surface because v2 may
+# encrypt child task text for ChatGPT, which a routed provider cannot decrypt.
+#
+# For Claude Code, Construct exposes a session-local Anthropic-compatible
+# gateway and enables Claude's native gateway model discovery. `/model` and
+# native subagents see every usable route as a "From gateway" entry. The
+# gateway is loopback-only and capability-scoped to the session; Construct
+# leaves an existing ANTHROPIC_BASE_URL untouched.
 #
 # Route targets are the [smith.models.*] profiles below — declare an
 # endpoint once and it is reachable from both smith and a routed session.
@@ -356,9 +374,19 @@ enabled = true
 # protocol the router has no translator for.
 #
 # [router]
-# enabled = true
-# port    = 8917    # fixed on purpose: harness processes outlive the daemon
-#                   # and keep dialing the port they were given at spawn
+# enabled        = false # opt out of all model routing and publication
+# publish_models = false # keep manual routing, but do not augment native pickers
+# port           = 8917 # fixed on purpose: harness processes outlive the daemon
+#                       # and keep dialing the port they were given at spawn
+#
+# # Optional picker/subagent ordering. Each selector is `<route>/<model>`.
+# # Codex exposes only its five lowest-priority catalog entries to spawn_agent;
+# # use this list to choose that roster. Without it, native defaults retain
+# # their order and routed entries use Codex's standard routed priority.
+# featured_models = [
+#   "claude-oauth/opus",
+#   "codex-oauth/gpt-5.6-sol",
+# ]
 #
 # [router.oauth]
 # # Models each subscription login offers in the route picker. Optional:
@@ -482,18 +510,37 @@ impl Default for SuggestConfig {
     }
 }
 
-/// `[router]` — model-route transport (specs 0113/0114/0115). Off by
-/// default: with `enabled = false` the daemon injects nothing into any
-/// session's environment and no listener is ever bound, so a session's
-/// traffic is byte-identical to a build without routing.
+/// `[router]` — model-route transport (specs 0113/0114/0115). Enabled by
+/// default so a harness launched through Construct automatically receives
+/// the usable routes Construct discovers. Set `enabled = false` to inject
+/// nothing and bind no listener. With model publication disabled, unarmed
+/// traffic remains a blind byte tunnel.
 ///
 /// Route *targets* are not declared here — they are the `[smith.models.*]`
 /// profiles (spec 0030), so an endpoint is declared once and reachable
 /// from both smith and a routed harness session.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RouterConfig {
-    #[serde(default)]
+    #[serde(default = "default_router_enabled")]
     pub enabled: bool,
+    /// Publish available routes into supported harnesses' native model
+    /// catalogs automatically. This may be disabled independently when a
+    /// user wants manual session routing but does not want native pickers
+    /// augmented. Publication requires reading the request's model field
+    /// on the harness's fixed model host; every other destination remains
+    /// byte-transparent.
+    #[serde(default = "default_publish_models")]
+    pub publish_models: bool,
+    /// Route/model selectors to prioritize in native delegation surfaces.
+    ///
+    /// A selector is the literal `<route>/<model>` pair shown in config and
+    /// model metadata; model ids may themselves contain slashes. Codex
+    /// exposes only its five lowest-priority catalog entries to
+    /// `spawn_agent`; this list chooses that roster. When empty, native
+    /// priorities are preserved and routes use the standard routed-model
+    /// priority.
+    #[serde(default)]
+    pub featured_models: Vec<String>,
     /// Loopback port the router listens on.
     ///
     /// Deliberately fixed and outside the OS ephemeral range rather than
@@ -517,7 +564,9 @@ pub struct RouterConfig {
 impl Default for RouterConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_router_enabled(),
+            publish_models: default_publish_models(),
+            featured_models: Vec::new(),
             port: default_router_port(),
             oauth: BTreeMap::new(),
         }
@@ -638,6 +687,14 @@ impl OauthModels {
             OauthModels::Many(m) => m.clone(),
         }
     }
+}
+
+fn default_router_enabled() -> bool {
+    true
+}
+
+fn default_publish_models() -> bool {
+    true
 }
 
 fn default_router_port() -> u16 {
@@ -913,6 +970,37 @@ mod tests {
             data_dir: tmp.to_path_buf(),
             runtime_dir: tmp.to_path_buf(),
         }
+    }
+
+    #[test]
+    fn router_defaults_to_automatic_model_publication() {
+        let cfg: Config = toml::from_str("").expect("parse");
+        assert!(cfg.router.enabled);
+        assert!(cfg.router.publish_models);
+    }
+
+    #[test]
+    fn partial_router_table_keeps_automatic_defaults() {
+        let cfg: Config = toml::from_str(
+            r#"
+                [router]
+                port = 18918
+            "#,
+        )
+        .expect("parse");
+        assert!(cfg.router.enabled);
+        assert!(cfg.router.publish_models);
+        assert_eq!(cfg.router.port, 18918);
+
+        let opted_out: Config = toml::from_str(
+            r#"
+                [router]
+                publish_models = false
+            "#,
+        )
+        .expect("parse");
+        assert!(opted_out.router.enabled);
+        assert!(!opted_out.router.publish_models);
     }
 
     /// The `/configure` dialog's smith-auth tab (spec 0069) writes through
