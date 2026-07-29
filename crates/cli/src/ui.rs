@@ -5153,18 +5153,20 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
             regenerate: true
         })
     );
-    // History (when highlighted) and the open keyword field each reserve a
-    // dedicated underlined input row so typing is visibly an input surface.
+    // History (when highlighted) and the open keyword field each show a
+    // dedicated underlined input row. Height always reserves that strip when
+    // History/Generate exist, so selecting them does not grow the popup.
     let show_text_input = history_selected || deck.regenerate_query.is_some();
-    let input_rows: u16 = if show_text_input { 1 } else { 0 };
-    let body_rows = categories
-        .len()
-        .max(cards.len().saturating_add(input_rows as usize))
-        .max(1) as u16;
-    // border + column headings + optional input + body + footer
+    use crate::app::suggest_deck::{suggest_reserves_input_row, SUGGEST_DECK_MAX_BODY};
+    let reserve_input: u16 = u16::from(suggest_reserves_input_row(&categories));
+    let max_right = app.suggest_max_right_rows(deck);
+    // Pin body to the taller of the left column and the tallest right column
+    // across every category, then cap so huge hands cannot cover the pane.
+    let body_rows = (categories.len().max(max_right).max(1) as u16).min(SUGGEST_DECK_MAX_BODY);
+    // border + column headings + reserved input strip + body + footer
     let wanted_h = body_rows
         .saturating_add(4)
-        .saturating_add(input_rows);
+        .saturating_add(reserve_input);
     let hint_y = pane
         .area
         .y
@@ -5200,9 +5202,14 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     let cards_x = divider_x.saturating_add(1);
     let header_y = area.y.saturating_add(1);
     let input_y = header_y.saturating_add(1);
-    let body_y = header_y
-        .saturating_add(1)
-        .saturating_add(input_rows);
+    // When the input strip is reserved but not shown (e.g. top pick), body
+    // starts immediately under the header and leftover rows sit empty above
+    // the footer — keeping height stable without a blank "ghost" field.
+    let body_y = if show_text_input {
+        header_y.saturating_add(1).saturating_add(1)
+    } else {
+        header_y.saturating_add(1)
+    };
     let footer_y = area.y.saturating_add(area.height).saturating_sub(2);
     let visible_rows = footer_y.saturating_sub(body_y) as usize;
     let mut hit_zones = Vec::new();

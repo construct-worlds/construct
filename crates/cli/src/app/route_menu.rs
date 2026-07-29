@@ -263,9 +263,30 @@ impl RouteMenu {
         2 + self.desc_lines
     }
 
-    /// Rows in the two-column body — one per target, beside the models.
+    /// Tallest model column across every target — used so the menu height
+    /// does not jump when the target highlight moves between short and
+    /// long model lists.
+    pub fn max_models_len(&self) -> usize {
+        self.routes
+            .iter()
+            .map(|route| {
+                if route.models.is_empty() {
+                    // Usable targets without a list still preview their
+                    // default model (see `models()`).
+                    usize::from(!route.model.is_empty())
+                } else {
+                    route.models.len()
+                }
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Rows in the two-column body — tall enough for every target and for
+    /// the largest model list any target offers, so switching the left
+    /// column does not resize the popup.
     pub fn body_rows(&self) -> usize {
-        self.routes.len().max(self.models().len())
+        self.routes.len().max(self.max_models_len())
     }
 
     pub fn rows(&self) -> usize {
@@ -401,9 +422,13 @@ impl RouteMenu {
 
         self.desc_lines = self.description(width.saturating_sub(2)).len() as u16;
         let reason_rows = if self.unavailable_reason.is_some() { 1 } else { 0 };
+        // Cap popup height independently of content so a huge model catalog
+        // cannot cover the whole frame; content still sizes up to this.
+        const ROUTE_MENU_MAX_HEIGHT: u16 = 18;
         let height = (self.rows() as u16)
             .saturating_add(2)
             .saturating_add(reason_rows)
+            .min(ROUTE_MENU_MAX_HEIGHT)
             .min(size.height.max(3));
         let (col, row) = self.anchor;
         let x = col.min(size.width.saturating_sub(width));
@@ -522,6 +547,40 @@ mod tests {
         m.selected = 1;
         assert_eq!(m.body_rows(), 4, "the model column is taller here");
         assert_eq!(m.rows(), m.header_rows() as usize + 4);
+    }
+
+    /// Body height is the max model list across every target, not only the
+    /// highlighted one — otherwise the popup jumps when the left column
+    /// moves between short and long lists.
+    #[test]
+    fn body_height_uses_the_tallest_model_list_across_targets() {
+        let mut m = menu(
+            vec![
+                option("short", &["a"], None),
+                option("long", &["w", "x", "y", "z"], None),
+            ],
+            None,
+        );
+        // Default highlighted: no models for the focus, but body still
+        // reserves room for the tallest target's list.
+        assert_eq!(m.selected, 0);
+        assert!(m.models().is_empty());
+        assert_eq!(m.body_rows(), 4);
+        let frame = ratatui::layout::Rect::new(0, 0, 120, 30);
+        let h_default = m.clone().anchored(frame).area.height;
+
+        m.selected = 1;
+        assert_eq!(m.models().len(), 1);
+        assert_eq!(m.body_rows(), 4);
+        let h_short = m.clone().anchored(frame).area.height;
+
+        m.selected = 2;
+        assert_eq!(m.models().len(), 4);
+        assert_eq!(m.body_rows(), 4);
+        let h_long = m.anchored(frame).area.height;
+
+        assert_eq!(h_default, h_short);
+        assert_eq!(h_short, h_long);
     }
 
     /// A target that cannot be used shows why, in place of models.

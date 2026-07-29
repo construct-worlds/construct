@@ -219,6 +219,19 @@ pub(crate) const SUGGEST_PENDING_STALE: Duration = Duration::from_millis(125_000
 /// How many history entries the history view shows at most.
 pub(crate) const SUGGEST_HISTORY_DISPLAY_CAP: usize = 10;
 
+/// Cap on the two-column body (categories / cards) so a huge hand or
+/// history cannot cover the whole session pane. Chrome (borders, header,
+/// optional input strip, footer) is counted separately.
+pub(crate) const SUGGEST_DECK_MAX_BODY: u16 = 12;
+
+/// Whether the deck reserves a permanent input-strip row in its height
+/// (History and Generate both surface one when selected).
+pub(crate) fn suggest_reserves_input_row(categories: &[DeckRow]) -> bool {
+    categories
+        .iter()
+        .any(|row| matches!(row, DeckRow::History { .. } | DeckRow::Generate { .. }))
+}
+
 impl App {
     pub(crate) fn suggest_pending_active(&self, id: &str) -> bool {
         self.suggest_pending
@@ -255,6 +268,32 @@ impl App {
             Some(DeckRow::Card(_)) | None => Vec::new(),
         }
     }
+
+    /// Tallest right-column content across every left-column category
+    /// (unfiltered history, full verb card counts). Used to pin the popup
+    /// height so switching categories does not resize it.
+    pub(crate) fn suggest_max_right_rows(&self, deck: &SuggestDeck) -> usize {
+        let categories = self.suggest_categories(deck);
+        let mut max = 1usize;
+        for row in &categories {
+            let n = match row {
+                DeckRow::Top(_) => 1,
+                DeckRow::Verb { count, .. } => (*count).max(1),
+                // Size for the unfiltered history cap so type-ahead filtering
+                // does not shrink the popup either.
+                DeckRow::History { count } => (*count)
+                    .min(SUGGEST_HISTORY_DISPLAY_CAP)
+                    .max(1),
+                // Help line under the keyword field.
+                DeckRow::Generate { .. } | DeckRow::Generating => 1,
+                DeckRow::Card(_) => 1,
+            };
+            max = max.max(n);
+        }
+        max
+    }
+
+
 
     /// `C-x .`: toggle the deck. Opening refreshes the global prompt
     /// history but does **not** start generation — the user picks History
@@ -762,6 +801,27 @@ mod tests {
         let rows = history_rows(&history(30), "", 10);
         assert_eq!(rows.len(), 10);
         assert_eq!(rows[0], DeckRow::Card("p0".into()));
+    }
+
+    #[test]
+    fn max_right_rows_uses_tallest_category() {
+        // Verb with 2 cards is taller than top (1) or history (when empty
+        // query would still count history entries).
+        let h = hand();
+        let rows = fan_rows(Some(&h), 3, false);
+        // Simulate App::suggest_max_right_rows logic without a full App:
+        let max = rows
+            .iter()
+            .map(|row| match row {
+                DeckRow::Top(_) => 1,
+                DeckRow::Verb { count, .. } => (*count).max(1),
+                DeckRow::History { count } => (*count).min(SUGGEST_HISTORY_DISPLAY_CAP).max(1),
+                DeckRow::Generate { .. } | DeckRow::Generating | DeckRow::Card(_) => 1,
+            })
+            .max()
+            .unwrap_or(1);
+        assert_eq!(max, 3, "history count 3 beats verb cards 2");
+        assert!(suggest_reserves_input_row(&rows));
     }
 
     #[test]
