@@ -109,7 +109,7 @@ construct new claude --model opus
 ```
 
 To open construct on a remote machine with working copy and paste of text and
-images between your laptop and the remote TUI:
+images, plus drag-and-drop file upload from your laptop into the remote TUI:
 
 ```sh
 construct ssh devbox
