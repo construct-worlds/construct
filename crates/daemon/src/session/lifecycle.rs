@@ -418,6 +418,34 @@ impl SessionManager {
     /// can't be re-spawned (missing start.json, missing adapter binary,
     /// spawn failure) are marked Errored.
     pub async fn resume_running_sessions(self: Arc<Self>) {
+        // Ephemeral probe sessions (usage probes, suggestion probes — spec
+        // 0085 / 0109) are torn down by their spawner the moment the probe
+        // finishes; one still persisted at startup means a daemon restart
+        // interrupted it mid-run. Its requester is gone, so resuming it
+        // could only leave an invisible session (and its harness's native
+        // transcript entry) lingering forever — reap instead of resuming.
+        let leftover_probes: Vec<String> = {
+            let guard = self.sessions.read().await;
+            let mut v = Vec::new();
+            for (id, entry) in guard.iter() {
+                if entry.summary.read().await.kind
+                    == construct_protocol::SessionKind::UsageProbe
+                {
+                    v.push(id.clone());
+                }
+            }
+            v
+        };
+        for id in leftover_probes {
+            match self.delete(&id).await {
+                Ok(()) => {
+                    tracing::info!(session = %id, "reaped leftover probe session at startup")
+                }
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %e, "leftover probe reap failed")
+                }
+            }
+        }
         let ids: Vec<String> = {
             let guard = self.sessions.read().await;
             let mut v = Vec::new();

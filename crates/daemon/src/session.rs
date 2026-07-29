@@ -6931,6 +6931,48 @@ mod tests {
         );
     }
 
+    /// A probe session persisted at startup is a leftover from a daemon
+    /// restart that interrupted generation mid-run; startup must reap it
+    /// instead of resuming, while other kinds stay untouched.
+    #[tokio::test]
+    async fn startup_reaps_leftover_usage_probe_sessions() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage.clone(), config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        let mgr = Arc::new(mgr);
+
+        let probe = synthetic_entry("probe1", construct_protocol::SessionKind::UsageProbe, 0);
+        // Done: not resumable, so the resume loop can't mask a missing reap
+        // by erroring the entry out, and the user session stays untouched.
+        probe.summary.write().await.state = SessionState::Done;
+        let user = synthetic_entry("user1", construct_protocol::SessionKind::User, 1);
+        user.summary.write().await.state = SessionState::Done;
+        {
+            let mut map = mgr.sessions.write().await;
+            map.insert("probe1".into(), probe);
+            map.insert("user1".into(), user);
+        }
+
+        mgr.clone().resume_running_sessions().await;
+
+        let map = mgr.sessions.read().await;
+        assert!(
+            !map.contains_key("probe1"),
+            "leftover probe must be reaped at startup"
+        );
+        assert!(
+            map.contains_key("user1"),
+            "user sessions must survive the probe reap"
+        );
+    }
+
     #[test]
     fn startup_resume_retries_errored_sessions() {
         assert!(should_resume_on_startup(SessionState::Pending));
