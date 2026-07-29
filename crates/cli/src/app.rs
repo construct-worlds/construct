@@ -32253,6 +32253,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn suggest_affordance_is_repainted_over_full_screen_harnesses() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].state = construct_protocol::SessionState::AwaitingInput;
+        app.zoom = ZoomMode::View;
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        // A full-screen harness owns the entire base view and may repaint it
+        // continuously. The shared overlay pass must restore Construct's
+        // affordance on every frame, including the zoom-only render path.
+        for _ in 0..2 {
+            terminal
+                .draw(|f| crate::ui::render(f, &mut app))
+                .expect("full-screen draw");
+            let hit = app
+                .layout
+                .suggest_affordance_hit
+                .expect("zoomed PTY advertises suggestions");
+            let pane = app.layout.view_area.expect("zoomed view area");
+            assert_eq!(
+                hit.y,
+                pane.bottom().saturating_sub(4),
+                "affordance stays three rows above the edge"
+            );
+            assert!(
+                rendered_text(terminal.backend().buffer()).contains("◇ C-x ."),
+                "full-screen PTY repaint must not cover suggestion chrome"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn suggest_deck_rows_hover_and_click_like_the_route_menu() {
         use crate::app::suggest_deck::{DeckFocus, SuggestDeckHit};
         use crossterm::event::MouseButton;

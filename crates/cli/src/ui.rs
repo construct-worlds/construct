@@ -487,9 +487,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     render_session_title_menu(f, app);
     render_route_menu(f, app);
-    let suggest_affordance = render_suggest_affordance(f, app);
-    render_suggest_deck(f, app);
-    render_suggest_affordance_tooltip(f, app, suggest_affordance);
     render_tutorial_card(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
@@ -502,6 +499,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
 }
 
 fn finish_frame(f: &mut Frame, app: &mut App) {
+    // Session terminals can own every cell in their pane (and zoomed views
+    // take a separate early-return render path), so suggestion chrome must be
+    // composited in the shared top-overlay pass after either base layout has
+    // finished. Session-picker/configure remain above it as true modals.
+    let suggest_affordance = render_suggest_affordance(f, app);
+    render_suggest_deck(f, app);
+    render_suggest_affordance_tooltip(f, app, suggest_affordance);
+
     // The session-picker dialog and the `/configure` dialog are the topmost
     // modals — drawn last so they sit over every base view (including
     // zoomed layouts, which return through here) and before
@@ -4940,6 +4945,21 @@ fn focused_session_pane(app: &App) -> Option<WindowPaneHit> {
         .iter()
         .find(|pane| pane.id == app.active_window_id)
         .copied()
+        .or_else(|| {
+            // Zoomed/full-screen views do not materialize the split-window
+            // tree, but their view area is still the focused session pane.
+            // Treat the screen edge as its border so the affordance keeps the
+            // same bottom-right, three-rows-up placement.
+            if app.zoom != ZoomMode::View {
+                return None;
+            }
+            let area = app.layout.view_area?;
+            Some(WindowPaneHit {
+                id: app.active_window_id,
+                area,
+                inner_area: area,
+            })
+        })
 }
 
 /// Persistent suggestion-deck affordance (specs 0109/0155). It belongs to

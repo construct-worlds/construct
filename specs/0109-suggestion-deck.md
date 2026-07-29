@@ -69,8 +69,10 @@ from burning tokens.
 - Clients render the hand however fits their surface but must preserve
   invalidation, staging, and typing-always-wins. The TUI advertises the
   chord inside the focused terminal pane with an animated pending
-  indicator; hovering the chord explains the action, and clicking it
-  performs the same toggle as the chord. The TUI keeps categories
+  indicator. This terminal-local chrome is composited above harness
+  output in both split and zoomed/full-screen layouts, so a harness
+  repaint cannot erase it; hovering the chord explains the action, and
+  clicking it performs the same toggle as the chord. The TUI keeps categories
   beside their concrete prompts in a two-column deck; its rows highlight
   on hover, category clicks select a preview, and prompt clicks stage
   that prompt. History supports fuzzy type-ahead after it is explicitly
