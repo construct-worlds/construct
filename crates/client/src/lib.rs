@@ -615,6 +615,18 @@ impl Client {
         .await
     }
 
+    /// Read the global prompt history (spec 0155), newest first.
+    pub async fn prompt_history_list(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<construct_protocol::PromptHistoryListResult> {
+        self.request(
+            ipc_method::PROMPT_HISTORY_LIST,
+            &construct_protocol::PromptHistoryListParams { limit },
+        )
+        .await
+    }
+
     pub async fn send_input(&self, id: &str, text: String) -> Result<()> {
         let _: serde_json::Value = self
             .request(

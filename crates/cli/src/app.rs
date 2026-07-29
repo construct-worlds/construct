@@ -39,6 +39,7 @@ mod program_popup;
 pub mod route_menu;
 mod session_picker;
 mod session_title_menu;
+pub mod suggest_deck;
 mod session_title_rename;
 mod tutorial;
 pub use configure::{
@@ -1717,6 +1718,19 @@ pub struct App {
     /// Open model-route picker, anchored to the modeline's model
     /// indicator (spec 0114).
     pub route_menu: Option<route_menu::RouteMenu>,
+    /// Open suggestion-deck popup (specs 0109/0155), anchored above the
+    /// modeline. `None` when closed.
+    pub suggest_deck: Option<suggest_deck::SuggestDeck>,
+    /// Latest dealt hand per session. Ephemeral UI state: a new turn,
+    /// user message, or terminal event for the session invalidates it.
+    pub suggestion_hands: HashMap<String, construct_protocol::SuggestionHand>,
+    /// In-flight `session.suggest` request timestamps, driving the
+    /// modeline spinner. Entries older than the daemon's probe cap are
+    /// treated as failed-silently and ignored.
+    pub suggest_pending: HashMap<String, Instant>,
+    /// Global prompt history (spec 0155), newest first. Refreshed each
+    /// time the deck opens.
+    pub prompt_history: Vec<construct_protocol::PromptHistoryEntry>,
     /// In-progress inline rename of a session's title, edited directly in a
     /// pane's title bar. `None` when no rename is active.
     pub session_title_rename: Option<SessionTitleRename>,
@@ -4733,6 +4747,10 @@ async fn run_with_socket_initial_selection(
         layout: LayoutSnapshot::default(),
         session_title_menu: None,
         route_menu: None,
+        suggest_deck: None,
+        suggestion_hands: HashMap::new(),
+        suggest_pending: HashMap::new(),
+        prompt_history: Vec::new(),
         session_title_rename: None,
         mouse_pos: None,
         mouse_moved_at: None,
@@ -8460,6 +8478,9 @@ impl App {
                             self.matrix_rain_intensity,
                             &payload.session_id,
                         );
+                        // Suggestion deck caches (specs 0109/0155): a dealt
+                        // hand lands, turn movement invalidates.
+                        self.observe_suggestion_event(&payload.session_id, &payload.event);
                         // Tool-approval prompt: if no minibuffer is in use,
                         // open the approval prompt for the matching session.
                         // Otherwise the user sees the request in the
@@ -10843,6 +10864,14 @@ impl App {
                 }
             }
         }
+        // Suggestion deck (specs 0109/0155): a small transient popup in
+        // the route-menu class — it owns navigation keys only, and ANY
+        // other key closes it and falls through so the same keystroke
+        // takes its normal route. Typing always wins; a popup must never
+        // own keys it doesn't use (the PR #700 lesson).
+        if self.suggest_deck.is_some() && self.handle_suggest_deck_key(key) {
+            return;
+        }
         // Help is the topmost keyboard surface. Check it before the program,
         // minibuffer, and focused child PTY routing. Up/Down/PageUp/PageDown
         // scroll the dialog's content (help text usually overflows a normal
@@ -11474,6 +11503,7 @@ impl App {
             ToggleProgramTerminalFocus => {
                 self.toggle_program_terminal_focus();
             }
+            OpenSuggestions => self.toggle_suggest_deck().await,
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
                     match self.client.diff(&id).await {
@@ -14934,6 +14964,10 @@ mod tests {
             layout: LayoutSnapshot::default(),
             session_title_menu: None,
             route_menu: None,
+            suggest_deck: None,
+            suggestion_hands: HashMap::new(),
+            suggest_pending: HashMap::new(),
+            prompt_history: Vec::new(),
             session_title_rename: None,
             mouse_pos: None,
             mouse_moved_at: None,
@@ -32082,6 +32116,118 @@ mod tests {
         (app, dir, server)
     }
 
+    fn deck_hand() -> construct_protocol::SuggestionHand {
+        construct_protocol::SuggestionHand {
+            top: construct_protocol::SuggestionCard {
+                text: "run the tests".into(),
+            },
+            verbs: vec![construct_protocol::SuggestionVerb {
+                label: "ship it".into(),
+                cards: vec![construct_protocol::SuggestionCard {
+                    text: "open a PR".into(),
+                }],
+            }],
+        }
+    }
+
+    fn deck_history_entry(text: &str) -> construct_protocol::PromptHistoryEntry {
+        construct_protocol::PromptHistoryEntry {
+            text: text.into(),
+            at_ms: 0,
+            session_id: None,
+            harness: None,
+        }
+    }
+
+    /// Specs 0109/0155: with the deck open, accepting the top pick on a
+    /// non-PTY session stages the text into the send-input minibuffer —
+    /// prefilled, not sent — and keeps the hand cached for a re-open.
+    #[tokio::test]
+    async fn suggest_deck_stages_into_minibuffer_for_non_pty() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.sessions[0].has_pty = false;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        assert!(app.suggest_deck.is_none(), "accept closes the deck");
+        let mb = app.minibuffer.as_ref().expect("minibuffer prefilled");
+        assert_eq!(mb.input, "run the tests");
+        assert!(matches!(
+            mb.intent,
+            MinibufferIntent::SendInput { ref session_id } if session_id == "s1"
+        ));
+        assert!(
+            app.suggestion_hands.contains_key("s1"),
+            "hand stays cached after staging"
+        );
+        server.abort();
+    }
+
+    /// Digit accelerators walk the deck: the history row opens the
+    /// history view, and a digit there stages that entry.
+    #[tokio::test]
+    async fn suggest_deck_digits_reach_history_entries() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.sessions[0].has_pty = false;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.prompt_history = vec![deck_history_entry("cargo build")];
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+
+        // Fan rows: 1=top, 2=verb, 3=history.
+        app.on_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE))
+            .await;
+        assert!(matches!(
+            app.suggest_deck.as_ref().map(|d| d.view),
+            Some(crate::app::suggest_deck::DeckView::History)
+        ));
+        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.minibuffer.as_ref().map(|m| m.input.as_str()),
+            Some("cargo build")
+        );
+        server.abort();
+    }
+
+    /// Spec 0109 "typing always wins": a key the deck doesn't use closes
+    /// it and takes its normal route — the popup is never modal.
+    #[tokio::test]
+    async fn suggest_deck_typing_wins() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .await;
+
+        assert!(app.suggest_deck.is_none(), "unused key closes the deck");
+        server.abort();
+    }
+
+    /// Spec 0109 invalidation: a dealt hand lands in the cache; the
+    /// session's next turn starting sweeps it and closes an open deck.
+    #[tokio::test]
+    async fn suggest_deck_hand_caches_and_invalidates() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.observe_suggestion_event("s1", &SessionEvent::Suggestions(deck_hand()));
+        assert!(app.suggestion_hands.contains_key("s1"));
+
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+        app.observe_suggestion_event(
+            "s1",
+            &SessionEvent::Status {
+                state: construct_protocol::SessionState::Running,
+                detail: None,
+            },
+        );
+        assert!(!app.suggestion_hands.contains_key("s1"));
+        assert!(app.suggest_deck.is_none(), "new turn closes the deck");
+        server.abort();
+    }
+
     /// Spec 0112: a hit target that slid off the top of the viewport is gone,
     /// not clamped to row 0 — otherwise the top visible row would fire
     /// whatever affordance used to sit above it.
@@ -35493,7 +35639,9 @@ mod tests {
         app.help_visible = true;
         app.profile = Profile::Vim;
         app.keymap = keymap::default_for(Profile::Vim);
-        let backend = ratatui::backend::TestBackend::new(120, 70);
+        // Tall enough for the full help text (it grows with the keymap;
+        // the modal scrolls on real terminals).
+        let backend = ratatui::backend::TestBackend::new(120, 72);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
 
         terminal

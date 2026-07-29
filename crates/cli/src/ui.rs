@@ -484,6 +484,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     render_session_title_menu(f, app);
     render_route_menu(f, app);
+    render_suggest_deck(f, app);
     render_tutorial_card(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
@@ -4928,6 +4929,136 @@ fn session_menu_icon_style(theme: &Theme, base: Color, hovered: bool, focused: b
 /// right. Both are visible at once so choosing a target shows what it can
 /// offer before committing to it — the two decisions stay separate without
 /// hiding one behind the other.
+/// Suggestion deck popup (specs 0109/0155): a compact row list anchored
+/// to the bottom-right of the session view, one level at a time (fan →
+/// verb cards / history). Rows come from `App::suggest_rows` so key
+/// handling and rendering always agree. Never modal — the key gate owns
+/// only navigation keys; anything else closes the deck and re-routes.
+fn render_suggest_deck(f: &mut Frame, app: &App) {
+    use crate::app::suggest_deck::{DeckRow, DeckView};
+    let Some(deck) = &app.suggest_deck else {
+        return;
+    };
+    let Some(view) = app.layout.view_area else {
+        return;
+    };
+    let rows = app.suggest_rows(deck);
+    if rows.is_empty() || view.width < 20 || view.height < 5 {
+        return;
+    }
+    let title = match deck.view {
+        DeckView::Fan => " suggestions ".to_string(),
+        DeckView::Cards { verb } => app
+            .suggestion_hands
+            .get(&deck.session_id)
+            .and_then(|h| h.verbs.get(verb))
+            .map(|v| format!(" {} ", v.label))
+            .unwrap_or_else(|| " suggestions ".to_string()),
+        DeckView::History => " history ".to_string(),
+    };
+    let label = |row: &DeckRow| -> String {
+        match row {
+            DeckRow::Top(text) => format!("▶ {text}"),
+            DeckRow::Verb { label, count, .. } => format!("{label} › ({count})"),
+            DeckRow::History { count } => format!("history › ({count})"),
+            DeckRow::Generating => "◈ generating…".to_string(),
+            DeckRow::Card(text) => text.clone(),
+        }
+    };
+    let hint = match deck.view {
+        DeckView::Fan => "Enter stage · Esc close · type to dismiss",
+        _ => "Enter stage · ← back · type to dismiss",
+    };
+    let longest = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(label(r).as_str()))
+        .max()
+        .unwrap_or(0)
+        .max(UnicodeWidthStr::width(hint))
+        .max(UnicodeWidthStr::width(title.as_str()));
+    // 2 border cols + "N " digit prefix + a trailing pad.
+    let inner_w = (longest + 3).clamp(24, view.width.saturating_sub(4) as usize);
+    let w = (inner_w as u16).saturating_add(2);
+    let h = (rows.len() as u16)
+        .saturating_add(3)
+        .min(view.height.saturating_sub(1));
+    let x = view
+        .x
+        .saturating_add(view.width.saturating_sub(w).saturating_sub(1));
+    let y = view
+        .y
+        .saturating_add(view.height.saturating_sub(h).saturating_sub(1));
+    let area = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+    let inner_x = area.x.saturating_add(1);
+    let visible_rows = h.saturating_sub(3) as usize;
+    for (i, row) in rows.iter().take(visible_rows).enumerate() {
+        let selected = i == deck.selected;
+        let style = if !row.is_activatable() {
+            Style::default()
+                .fg(app.theme.border)
+                .add_modifier(Modifier::DIM)
+        } else if selected {
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.inactive_highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        let prefix = if row.is_activatable() && i < 9 {
+            format!("{} ", i + 1)
+        } else {
+            "  ".to_string()
+        };
+        let text = truncate_to_width(
+            &format!("{prefix}{}", label(row)),
+            inner_w,
+        );
+        f.render_widget(
+            Paragraph::new(Line::styled(text, style)),
+            Rect {
+                x: inner_x,
+                y: area.y.saturating_add(1).saturating_add(i as u16),
+                width: inner_w as u16,
+                height: 1,
+            },
+        );
+    }
+    // Footer hint, dim, inside the bottom border row area.
+    f.render_widget(
+        Paragraph::new(Line::styled(
+            truncate_to_width(hint, inner_w),
+            Style::default()
+                .fg(app.theme.border)
+                .add_modifier(Modifier::DIM),
+        )),
+        Rect {
+            x: inner_x,
+            y: area
+                .y
+                .saturating_add(h.saturating_sub(2)),
+            width: inner_w as u16,
+            height: 1,
+        },
+    );
+}
+
 fn render_route_menu(f: &mut Frame, app: &App) {
     let Some(menu) = &app.route_menu else {
         return;
@@ -8896,6 +9027,21 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         String::new()
     };
+    // Suggestion-deck affordance (specs 0109/0155): only while the
+    // selected session awaits input — generation is on-demand and the
+    // chord is the entry point, so this is the feature's discoverability.
+    let suggest_hint = match s {
+        Some(sess) if sess.state == SessionState::AwaitingInput => {
+            if let Some(hand) = app.suggestion_hands.get(&sess.id) {
+                format!("✦{} C-x s  ", 1 + hand.verbs.len())
+            } else if app.suggest_pending_active(&sess.id) {
+                "◈ suggesting…  ".to_string()
+            } else {
+                "◇ C-x s  ".to_string()
+            }
+        }
+        _ => String::new(),
+    };
     let approval_mode_label = s.and_then(approval_mode_modeline_label);
     let approval_mode_badge = approval_mode_label.map(|badge| format!("[{badge}]"));
     let context_gauge =
@@ -9031,7 +9177,8 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
     let modeline_pre_hint = format!(
-        "{scrollback}{chord}",
+        "{suggest}{scrollback}{chord}",
+        suggest = suggest_hint,
         scrollback = scrollback_label,
         chord = if app.chord_label.is_empty() {
             String::new()
@@ -10427,6 +10574,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     drag text       select visible TUI text and copy to terminal clipboard
     C-x c           toggle mouse capture off/on for native selection fallback
     C-x v           paste local clipboard (image/file attaches; via construct ssh)
+    C-x s           suggestion deck (next-prompt picks + prompt history)
 
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
@@ -10501,6 +10649,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     drag text       select visible TUI text and copy to terminal clipboard
     C-x c           toggle mouse capture off/on for native selection fallback
     C-x v           paste local clipboard (image/file attaches; via construct ssh)
+    C-x s           suggestion deck (next-prompt picks + prompt history)
 
   global
     :               command palette
