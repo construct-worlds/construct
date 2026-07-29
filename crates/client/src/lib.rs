@@ -606,10 +606,21 @@ impl Client {
     /// 0106). Fire-and-forget: the hand arrives later as a broadcast
     /// `SessionEvent::Suggestions` on the event subscription.
     pub async fn suggest(&self, id: &str) -> Result<construct_protocol::SuggestResult> {
+        self.suggest_with_keywords(id, None).await
+    }
+
+    /// Regenerate next-prompt suggestions with optional user-provided
+    /// keywords steering the new hand (spec 0109).
+    pub async fn suggest_with_keywords(
+        &self,
+        id: &str,
+        keywords: Option<&str>,
+    ) -> Result<construct_protocol::SuggestResult> {
         self.request(
             ipc_method::SESSION_SUGGEST,
-            &construct_protocol::SessionIdParams {
+            &construct_protocol::SessionSuggestParams {
                 session_id: id.to_string(),
+                keywords: keywords.map(str::to_string),
             },
         )
         .await

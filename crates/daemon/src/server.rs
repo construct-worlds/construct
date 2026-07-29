@@ -14,7 +14,7 @@ use construct_protocol::{
     SessionInputParams, SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams,
     SessionSetApprovalModeParams, SessionSetFocusedParams, SessionSetGroupParams,
     SessionSetPinnedParams, SessionSetProjectParams, SessionSetRouteParams, SessionSetTitleParams,
-    SessionSetViewParams, SessionToolActionParams, SessionToolDecisionParams,
+    SessionSetViewParams, SessionSuggestParams, SessionToolActionParams, SessionToolDecisionParams,
     SetTerminalBackgroundParams, SmithSetAuthMethodParams, SubscribeParams, TranscriptParams,
     UsageQueryParams, IPC_VERSION,
 };
@@ -1323,8 +1323,8 @@ async fn dispatch(
         }
     });
     dispatch_entry!(ipc_method::SESSION_SUGGEST, {
-        let p = params!(req, SessionIdParams);
-        match manager.request_suggestions(&p.session_id).await {
+        let p = params!(req, SessionSuggestParams);
+        match manager.request_suggestions(&p.session_id, p.keywords).await {
             Ok(started) => ok!(req, &construct_protocol::SuggestResult { started }),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }

@@ -46,8 +46,12 @@ that is awaiting input: one top pick plus a few generated "verbs"
 - **Typing always wins.** The suggestion UI may only consume input
   while explicitly open, and any printable key must close it and take
   its normal route unless the user explicitly selected a text-search
-  surface such as prompt-history type-ahead. Suggestions are an offer,
-  never a gate.
+  surface such as prompt-history type-ahead or keyword-guided
+  regeneration. Suggestions are an offer, never a gate.
+- **Regeneration can be guided.** A client may request a replacement
+  hand with user-provided keywords. The generator treats those words as
+  intent guidance, not transcript evidence, and must not invent state
+  merely to satisfy them.
 
 ## Reason
 
@@ -64,9 +68,11 @@ from burning tokens.
 
 - Clients render the hand however fits their surface but must preserve
   invalidation, staging, and typing-always-wins. The TUI advertises the
-  chord inside the focused terminal pane and keeps directions beside
-  their concrete prompts in a two-column deck; History supports fuzzy
-  type-ahead after it is explicitly selected. Web may differ.
+  chord inside the focused terminal pane with an animated pending
+  indicator and keeps categories beside their concrete prompts in a
+  two-column deck. History supports fuzzy type-ahead after it is
+  explicitly selected; `r` opens keyword-guided regeneration; both
+  Escape and `C-g` close the deck. Web may differ.
 - Hidden generation sessions must be torn down after use and must never
   appear in user-facing session lists.
 - A generation result must be discarded if a newer turn started while

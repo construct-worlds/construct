@@ -10870,7 +10870,7 @@ impl App {
         // other key closes it and falls through so the same keystroke
         // takes its normal route. Typing always wins; a popup must never
         // own keys it doesn't use (the PR #700 lesson).
-        if self.suggest_deck.is_some() && self.handle_suggest_deck_key(key) {
+        if self.suggest_deck.is_some() && self.handle_suggest_deck_key(key).await {
             return;
         }
         // Help is the topmost keyboard surface. Check it before the program,
@@ -32236,6 +32236,37 @@ mod tests {
             app.suggest_deck.as_ref().map(|d| d.history_query.as_str()),
             Some("bgts")
         );
+        server.abort();
+    }
+
+    /// `r` deliberately opens the keyword-entry surface, and terminal
+    /// cancel (`C-g`) closes it exactly like Escape without leaking the
+    /// typed guidance into the selected PTY.
+    #[tokio::test]
+    async fn suggest_deck_regeneration_keywords_and_ctrl_g_cancel() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .await;
+        for c in "tests and docs".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
+        }
+        assert_eq!(
+            app.suggest_deck
+                .as_ref()
+                .and_then(|d| d.regenerate_query.as_deref()),
+            Some("tests and docs")
+        );
+
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        assert!(app.suggest_deck.is_none(), "C-g closes keyword input and deck");
         server.abort();
     }
 

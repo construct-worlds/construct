@@ -2,10 +2,10 @@
 //!
 //! `C-x .` on an awaiting-input session requests generation via
 //! `session.suggest` and opens a two-column popup inside the focused
-//! session pane. Directions stay visible on the left while the selected
-//! direction's concrete prompts appear on the right. Global prompt
+//! session pane. Categories stay visible on the left while the selected
+//! category's concrete prompts appear on the right. Global prompt
 //! history is one direction and gains fuzzy type-ahead search when
-//! selected.
+//! selected; `r` opens an explicit keyword field for guided regeneration.
 //!
 //! The popup is otherwise never modal: outside the explicitly selected
 //! history-search surface, printable input closes it and takes its normal
@@ -41,6 +41,9 @@ pub struct SuggestDeck {
     pub card_selected: usize,
     /// Fuzzy type-ahead query, active only while History is highlighted.
     pub history_query: String,
+    /// Explicit keyword-entry surface for a guided regeneration. `Some("")`
+    /// means the input is open but still empty.
+    pub regenerate_query: Option<String>,
 }
 
 impl SuggestDeck {
@@ -51,6 +54,7 @@ impl SuggestDeck {
             category_selected: 0,
             card_selected: 0,
             history_query: String::new(),
+            regenerate_query: None,
         }
     }
 }
@@ -258,7 +262,7 @@ impl App {
     /// unhandled key closes the deck and returns false so the caller
     /// re-routes the SAME keystroke normally — typing always wins
     /// (spec 0109), and a popup must never own keys it doesn't use.
-    pub(super) fn handle_suggest_deck_key(&mut self, key: KeyEvent) -> bool {
+    pub(super) async fn handle_suggest_deck_key(&mut self, key: KeyEvent) -> bool {
         let Some(deck) = self.suggest_deck.clone() else {
             return false;
         };
@@ -272,6 +276,43 @@ impl App {
         let cards = self.suggest_cards(&deck);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        // `C-g` is the terminal-wide cancel gesture; keep it exactly
+        // equivalent to Escape even while either text surface is active.
+        if matches!(key.code, KeyCode::Esc)
+            || (ctrl && matches!(key.code, KeyCode::Char('g')))
+        {
+            self.suggest_deck = None;
+            return true;
+        }
+
+        // Guided regeneration is the deck's second explicit text surface.
+        // Enter replaces the cached hand with a fresh request steered by the
+        // supplied keywords; all text remains local until that submit.
+        if let Some(query) = deck.regenerate_query.as_ref() {
+            match key.code {
+                KeyCode::Char(c) if !ctrl && !alt => {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        if let Some(q) = d.regenerate_query.as_mut() {
+                            q.push(c);
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        if let Some(q) = d.regenerate_query.as_mut() {
+                            q.pop();
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    let keywords = query.clone();
+                    self.regenerate_suggestions(keywords).await;
+                }
+                _ => {}
+            }
+            return true;
+        }
 
         let history_selected = matches!(
             categories.get(deck.category_selected),
@@ -299,6 +340,15 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        // Outside History (where `r` remains ordinary fuzzy-search text),
+        // open the explicit guided-regeneration input.
+        if !history_selected && !ctrl && !alt && matches!(key.code, KeyCode::Char('r')) {
+            if let Some(d) = self.suggest_deck.as_mut() {
+                d.regenerate_query = Some(String::new());
+            }
+            return true;
         }
 
         match key.code {
@@ -358,13 +408,51 @@ impl App {
                     }
                 }
             },
-            KeyCode::Esc => self.suggest_deck = None,
             _ => {
                 self.suggest_deck = None;
                 return false;
             }
         }
         true
+    }
+
+    async fn regenerate_suggestions(&mut self, keywords: String) {
+        let Some(deck) = self.suggest_deck.clone() else {
+            return;
+        };
+        let guidance = keywords.trim();
+        match self
+            .client
+            .suggest_with_keywords(
+                &deck.session_id,
+                (!guidance.is_empty()).then_some(guidance),
+            )
+            .await
+        {
+            Ok(result) if result.started => {
+                self.suggestion_hands.remove(&deck.session_id);
+                self.suggest_pending
+                    .insert(deck.session_id.clone(), Instant::now());
+                if let Some(d) = self.suggest_deck.as_mut() {
+                    d.regenerate_query = None;
+                    d.focus = DeckFocus::Categories;
+                    d.category_selected = 0;
+                    d.card_selected = 0;
+                }
+            }
+            Ok(_) => {
+                if let Some(d) = self.suggest_deck.as_mut() {
+                    d.regenerate_query = None;
+                }
+                self.set_status("suggestion regeneration unavailable".to_string());
+            }
+            Err(error) => {
+                if let Some(d) = self.suggest_deck.as_mut() {
+                    d.regenerate_query = None;
+                }
+                self.set_status(format!("suggestion regeneration failed: {error}"));
+            }
+        }
     }
 
     fn move_suggest_selection(&mut self, delta: isize) {
