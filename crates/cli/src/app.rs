@@ -32509,11 +32509,11 @@ mod tests {
         server.abort();
     }
 
-    /// Regenerate is a regular numbered category, and terminal cancel
-    /// (`C-g`) closes its keyword surface exactly like Escape without
-    /// leaking the typed guidance into the selected PTY.
+    /// Generate/Regenerate is a regular numbered category; Left returns
+    /// from its keyword surface to the category list; terminal cancel
+    /// (`C-g`) closes the whole deck without leaking typed guidance.
     #[tokio::test]
-    async fn suggest_deck_regeneration_keywords_and_ctrl_g_cancel() {
+    async fn suggest_deck_regeneration_keywords_left_back_and_ctrl_g_cancel() {
         let (mut app, _dir, server) = two_session_app().await;
         app.suggestion_hands.insert("s1".into(), deck_hand());
         app.prompt_history = vec![deck_history_entry("cargo build")];
@@ -32533,6 +32533,24 @@ mod tests {
             Some("tests and docs")
         );
 
+        // Left always returns to categories (Backspace only edits).
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .await;
+        let deck = app.suggest_deck.as_ref().expect("Left keeps deck open");
+        assert!(
+            deck.regenerate_query.is_none(),
+            "Left exits the keyword surface"
+        );
+        assert_eq!(
+            deck.focus,
+            crate::app::suggest_deck::DeckFocus::Categories
+        );
+
+        // Re-open and C-g cancel closes the deck entirely.
+        app.on_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await;
         app.on_key(KeyEvent::new(
             KeyCode::Char('g'),
             KeyModifiers::CONTROL,

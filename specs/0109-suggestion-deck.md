@@ -68,18 +68,21 @@ from burning tokens.
 
 - Clients render the hand however fits their surface but must preserve
   invalidation, staging, and typing-always-wins. The TUI advertises the
-  chord on the focused terminal pane's final interior row, one cell clear
-  of its right border, with an animated pending indicator. This
-  terminal-local chrome is composited above harness
+  chord on the focused terminal pane's final interior row, flush against
+  the right edge, with an animated pending indicator while a request is
+  in flight. This terminal-local chrome is composited above harness
   output in both split and zoomed/full-screen layouts, so a harness
   repaint cannot erase it; hovering the chord explains the action, and
-  clicking it performs the same toggle as the chord. The TUI keeps categories
-  beside their concrete prompts in a two-column deck; its rows highlight
-  on hover, category clicks select a preview, and prompt clicks stage
-  that prompt. History supports fuzzy type-ahead after it is explicitly
-  selected; Regenerate is a regular final category (`r` is its
-  shortcut) that opens keyword
-  guidance, and is hidden while a generation is already loading; both
+  clicking it performs the same toggle as the chord. Opening the deck
+  does **not** start generation — the left column always offers History
+  and Generate (labeled Regenerate once a hand is cached); the user must
+  activate Generate to request a hand. The TUI keeps categories beside
+  their concrete prompts in a two-column deck; its rows highlight on
+  hover, category clicks select a preview, and prompt clicks stage that
+  prompt. History and Generate each surface an underlined text field with
+  placeholder copy so typing is visibly an input surface (fuzzy
+  type-ahead for history; optional keywords for guided generation).
+  Left arrow leaves the keyword field back to the category list; both
   Escape and `C-g` close the deck. Web may differ.
 - Hidden generation sessions must be torn down after use and must never
   appear in user-facing session lists.

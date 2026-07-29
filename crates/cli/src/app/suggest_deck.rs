@@ -1,15 +1,17 @@
 //! Suggestion deck (specs 0109/0155) — the TUI surface.
 //!
-//! `C-x .` on an awaiting-input session requests generation via
-//! `session.suggest` and opens a two-column popup inside the focused
-//! session pane. Categories stay visible on the left while the selected
-//! category's concrete prompts appear on the right. Global prompt
-//! history is one category and gains fuzzy type-ahead search when
-//! selected; `r` opens an explicit keyword field for guided regeneration.
+//! `C-x .` on an awaiting-input session opens a two-column popup inside
+//! the focused session pane. Generation is **not** kicked off on open —
+//! the left column starts with History and Generate (or Regenerate once a
+//! hand is cached); the user must activate Generate to request a hand via
+//! `session.suggest`. Categories stay visible on the left while the
+//! selected category's concrete prompts appear on the right. History gains
+//! fuzzy type-ahead when selected; Generate/Regenerate opens an explicit
+//! keyword field for optional guided (re)generation.
 //!
 //! The popup is otherwise never modal: outside the explicitly selected
-//! history-search surface, printable input closes it and takes its normal
-//! route (typing always wins).
+//! history-search / keyword surfaces, printable input closes it and takes
+//! its normal route (typing always wins).
 //!
 //! Accepting a row never sends: for PTY sessions the text is typed
 //! into the harness's own prompt line (no Enter), for non-PTY sessions
@@ -95,8 +97,10 @@ pub enum DeckRow {
     },
     /// The global-history entry row — activating opens the history view.
     History { count: usize },
-    /// A regular final category that opens keyword-guided regeneration.
-    Regenerate,
+    /// Final category that opens optional keyword guidance, then requests
+    /// a hand. `regenerate` is true when a hand is already cached (label
+    /// "Regenerate"); false on first request (label "Generate").
+    Generate { regenerate: bool },
     /// Non-interactive placeholder while generation is in flight.
     Generating,
     /// A concrete prompt (verb card or history entry) — activating
@@ -110,10 +114,10 @@ impl DeckRow {
     }
 }
 
-/// Rows for the fan view. The hand may not have arrived yet (the deck
-/// opens immediately on request so history stays reachable while the
-/// spinner runs); an empty result means there is nothing to show and
-/// the deck should not open.
+/// Rows for the fan view. Opening the deck does **not** start generation;
+/// History and Generate are always available so the user can recall prior
+/// prompts or explicitly request a hand. While a request is in flight the
+/// Generate row is replaced by a non-activatable spinner.
 pub fn fan_rows(hand: Option<&SuggestionHand>, history_len: usize, pending: bool) -> Vec<DeckRow> {
     let mut rows = Vec::new();
     if let Some(h) = hand {
@@ -128,13 +132,15 @@ pub fn fan_rows(hand: Option<&SuggestionHand>, history_len: usize, pending: bool
     } else if pending {
         rows.push(DeckRow::Generating);
     }
-    if history_len > 0 {
-        rows.push(DeckRow::History { count: history_len });
-    }
-    // Regeneration is an idle action, not a loading-state affordance:
-    // hide it while any hand is already being generated.
+    // History is always listed so the recall surface is discoverable even
+    // before the user has typed anything this session.
+    rows.push(DeckRow::History { count: history_len });
+    // Generation is an idle action: hide it while a request is already
+    // in flight (the Generating row covers that state).
     if !pending {
-        rows.push(DeckRow::Regenerate);
+        rows.push(DeckRow::Generate {
+            regenerate: hand.is_some(),
+        });
     }
     rows
 }
@@ -244,17 +250,16 @@ impl App {
                 &deck.history_query,
                 SUGGEST_HISTORY_DISPLAY_CAP,
             ),
-            Some(DeckRow::Regenerate) => Vec::new(),
+            Some(DeckRow::Generate { .. }) => Vec::new(),
             Some(DeckRow::Generating) => vec![DeckRow::Generating],
             Some(DeckRow::Card(_)) | None => Vec::new(),
         }
     }
 
     /// `C-x .`: toggle the deck. Opening refreshes the global prompt
-    /// history and, when the session is at a turn boundary with no hand
-    /// cached and no request in flight, kicks off generation — the deck
-    /// opens immediately either way so history stays reachable while
-    /// the spinner runs (mirrors the web deck).
+    /// history but does **not** start generation — the user picks History
+    /// to recall prior prompts, or Generate/Regenerate to request a hand
+    /// (spec 0109: on demand only).
     pub(super) async fn toggle_suggest_deck(&mut self) {
         if self.suggest_deck.is_some() {
             self.suggest_deck = None;
@@ -267,18 +272,9 @@ impl App {
         if let Ok(r) = self.client.prompt_history_list(Some(50)).await {
             self.prompt_history = r.entries;
         }
-        let awaiting = self
-            .selected_session()
-            .is_some_and(|s| s.state == SessionState::AwaitingInput);
-        if awaiting && !self.suggestion_hands.contains_key(&id) && !self.suggest_pending_active(&id)
-        {
-            if let Ok(r) = self.client.suggest(&id).await {
-                if r.started {
-                    self.suggest_pending.insert(id.clone(), Instant::now());
-                }
-            }
-        }
         let deck = SuggestDeck::open(id);
+        // fan_rows always yields at least History + Generate (or a spinner
+        // while a prior request is still in flight).
         if self.suggest_categories(&deck).is_empty() {
             self.set_status("no suggestions yet — send a prompt first".to_string());
             return;
@@ -314,9 +310,10 @@ impl App {
             return true;
         }
 
-        // Guided regeneration is the deck's second explicit text surface.
-        // Enter replaces the cached hand with a fresh request steered by the
-        // supplied keywords; all text remains local until that submit.
+        // Guided (re)generation is the deck's second explicit text surface.
+        // Enter submits a request steered by the optional keywords; Left
+        // (or Backspace on an empty field) returns to the category list
+        // without closing the deck; Esc/C-g still close entirely above.
         if let Some(query) = deck.regenerate_query.as_ref() {
             match key.code {
                 KeyCode::Char(c) if !ctrl && !alt => {
@@ -326,17 +323,25 @@ impl App {
                         }
                     }
                 }
-                KeyCode::Backspace => {
+                KeyCode::Backspace if !query.is_empty() => {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         if let Some(q) = d.regenerate_query.as_mut() {
                             q.pop();
                         }
                     }
                 }
+                KeyCode::Left | KeyCode::Backspace => {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        d.regenerate_query = None;
+                        d.focus = DeckFocus::Categories;
+                    }
+                }
                 KeyCode::Enter => {
                     let keywords = query.clone();
                     self.regenerate_suggestions(keywords).await;
                 }
+                // Swallow other keys so they don't fall through to "typing
+                // always wins" and dismiss the deck while the field is open.
                 _ => {}
             }
             return true;
@@ -370,12 +375,23 @@ impl App {
             }
         }
 
-        // Outside History (where `r` remains ordinary fuzzy-search text),
-        // open the explicit guided-regeneration input.
-        if !history_selected && !ctrl && !alt && matches!(key.code, KeyCode::Char('r')) {
-            if let Some(d) = self.suggest_deck.as_mut() {
-                d.regenerate_query = Some(String::new());
-                d.focus = DeckFocus::Cards;
+        // Outside History (where `g`/`r` remain ordinary fuzzy-search text),
+        // open the explicit guided-generation keyword field. Prefer the
+        // Generate/Regenerate row when present so the highlight tracks.
+        if !history_selected
+            && !ctrl
+            && !alt
+            && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('r'))
+        {
+            if let Some(index) = categories
+                .iter()
+                .position(|row| matches!(row, DeckRow::Generate { .. }))
+            {
+                if let Some(d) = self.suggest_deck.as_mut() {
+                    d.category_selected = index;
+                    d.regenerate_query = Some(String::new());
+                    d.focus = DeckFocus::Cards;
+                }
             }
             return true;
         }
@@ -520,7 +536,7 @@ impl App {
                 let Some(row) = categories.get(deck.category_selected) else {
                     return;
                 };
-                if matches!(row, DeckRow::Regenerate) {
+                if matches!(row, DeckRow::Generate { .. }) {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.regenerate_query = Some(String::new());
                         d.focus = DeckFocus::Cards;
@@ -561,7 +577,7 @@ impl App {
                     d.card_selected = 0;
                     d.focus = DeckFocus::Categories;
                 }
-                if matches!(row, DeckRow::Regenerate) {
+                if matches!(row, DeckRow::Generate { .. }) {
                     self.activate_suggest_selection();
                 }
             }
@@ -714,18 +730,23 @@ mod tests {
         assert!(matches!(rows[1], DeckRow::Verb { index: 0, .. }));
         assert!(matches!(rows[2], DeckRow::Verb { index: 1, .. }));
         assert_eq!(rows[3], DeckRow::History { count: 3 });
-        assert_eq!(rows[4], DeckRow::Regenerate);
+        assert_eq!(rows[4], DeckRow::Generate { regenerate: true });
     }
 
     #[test]
-    fn fan_without_hand_shows_spinner_then_history() {
-        let rows = fan_rows(None, 2, true);
-        assert_eq!(rows[0], DeckRow::Generating);
-        assert_eq!(rows[1], DeckRow::History { count: 2 });
-        assert_eq!(rows.len(), 2, "Regenerate hides while loading");
-        assert!(!rows[0].is_activatable());
-        // Regeneration remains available even with no cached hand/history.
-        assert_eq!(fan_rows(None, 0, false), vec![DeckRow::Regenerate]);
+    fn fan_without_hand_shows_history_and_generate() {
+        assert_eq!(
+            fan_rows(None, 0, false),
+            vec![
+                DeckRow::History { count: 0 },
+                DeckRow::Generate { regenerate: false },
+            ]
+        );
+        let pending = fan_rows(None, 2, true);
+        assert_eq!(pending[0], DeckRow::Generating);
+        assert_eq!(pending[1], DeckRow::History { count: 2 });
+        assert_eq!(pending.len(), 2, "Generate hides while loading");
+        assert!(!pending[0].is_activatable());
     }
 
     #[test]
