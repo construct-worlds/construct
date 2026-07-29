@@ -45,7 +45,13 @@ that is awaiting input: one top pick plus a few generated "verbs"
   visible input field send immediately on accept.
 - **Typing always wins.** The suggestion UI may only consume input
   while explicitly open, and any printable key must close it and take
-  its normal route. Suggestions are an offer, never a gate.
+  its normal route unless the user explicitly selected a text-search
+  surface such as prompt-history type-ahead or keyword-guided
+  regeneration. Suggestions are an offer, never a gate.
+- **Regeneration can be guided.** A client may request a replacement
+  hand with user-provided keywords. The generator treats those words as
+  intent guidance, not transcript evidence, and must not invent state
+  merely to satisfy them.
 
 ## Reason
 
@@ -60,9 +66,21 @@ from burning tokens.
 
 ## Consequences
 
-- Clients render the hand however fits their surface (TUI corner orb →
-  fan → stack; web can differ) but must preserve the invalidation and
-  typing-always-wins rules.
+- Clients render the hand however fits their surface but must preserve
+  invalidation, staging, and typing-always-wins. The TUI advertises the
+  chord on the focused terminal pane's final interior row, one cell clear
+  of its right border, with an animated pending indicator. This
+  terminal-local chrome is composited above harness
+  output in both split and zoomed/full-screen layouts, so a harness
+  repaint cannot erase it; hovering the chord explains the action, and
+  clicking it performs the same toggle as the chord. The TUI keeps categories
+  beside their concrete prompts in a two-column deck; its rows highlight
+  on hover, category clicks select a preview, and prompt clicks stage
+  that prompt. History supports fuzzy type-ahead after it is explicitly
+  selected; Regenerate is a regular final category (`r` is its
+  shortcut) that opens keyword
+  guidance, and is hidden while a generation is already loading; both
+  Escape and `C-g` close the deck. Web may differ.
 - Hidden generation sessions must be torn down after use and must never
   appear in user-facing session lists.
 - A generation result must be discarded if a newer turn started while

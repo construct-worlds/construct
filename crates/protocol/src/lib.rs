@@ -816,6 +816,16 @@ pub struct SuggestResult {
     pub started: bool,
 }
 
+/// Params for [`ipc_method::SESSION_SUGGEST`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSuggestParams {
+    pub session_id: String,
+    /// Optional user guidance for a deliberate regeneration. Keywords
+    /// steer the next hand but do not become transcript evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keywords: Option<String>,
+}
+
 /// One remembered prompt in the global prompt history (spec 0155).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptHistoryEntry {
@@ -944,6 +954,7 @@ Rules:
 - Each verb has 2-4 "cards": complete, self-contained prompts under 140 characters, concrete enough to send unedited. Reference actual files, tests, errors, and names from the transcript.
 - Mirror the user's phrasing habits and any workflow conventions visible in the transcript (tests before PR, worktrees, etc.).
 - A "Recent prompts from this user across sessions" section may follow the transcript. Use it only to mirror the user's voice, phrasing, and recurring workflows — suggestions must stay grounded in THIS session's transcript, and never copy an old prompt that doesn't fit the current state.
+- A "User guidance for this regeneration" section may also follow. Bias the hand toward its keywords when they fit the transcript, but treat them as intent guidance rather than evidence and never invent state to satisfy them.
 - Never invent state: only reference things the transcript shows. Do not run tools; just reply with the JSON."#;
 }
 
@@ -4174,6 +4185,18 @@ mod suggestion_tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn suggest_params_keep_keyword_guidance_optional_for_existing_clients() {
+        let params: SessionSuggestParams =
+            serde_json::from_str(r#"{"session_id":"s1"}"#).unwrap();
+        assert_eq!(params.session_id, "s1");
+        assert!(params.keywords.is_none());
+
+        let guided: SessionSuggestParams =
+            serde_json::from_str(r#"{"session_id":"s1","keywords":"tests docs"}"#).unwrap();
+        assert_eq!(guided.keywords.as_deref(), Some("tests docs"));
     }
 }
 

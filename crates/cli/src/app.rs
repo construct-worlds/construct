@@ -39,6 +39,7 @@ mod program_popup;
 pub mod route_menu;
 mod session_picker;
 mod session_title_menu;
+pub mod suggest_deck;
 mod session_title_rename;
 mod tutorial;
 pub use configure::{
@@ -1717,6 +1718,19 @@ pub struct App {
     /// Open model-route picker, anchored to the modeline's model
     /// indicator (spec 0114).
     pub route_menu: Option<route_menu::RouteMenu>,
+    /// Open suggestion-deck popup (specs 0109/0155), anchored above the
+    /// modeline. `None` when closed.
+    pub suggest_deck: Option<suggest_deck::SuggestDeck>,
+    /// Latest dealt hand per session. Ephemeral UI state: a new turn,
+    /// user message, or terminal event for the session invalidates it.
+    pub suggestion_hands: HashMap<String, construct_protocol::SuggestionHand>,
+    /// In-flight `session.suggest` request timestamps, driving the
+    /// modeline spinner. Entries older than the daemon's probe cap are
+    /// treated as failed-silently and ignored.
+    pub suggest_pending: HashMap<String, Instant>,
+    /// Global prompt history (spec 0155), newest first. Refreshed each
+    /// time the deck opens.
+    pub prompt_history: Vec<construct_protocol::PromptHistoryEntry>,
     /// In-progress inline rename of a session's title, edited directly in a
     /// pane's title bar. `None` when no rename is active.
     pub session_title_rename: Option<SessionTitleRename>,
@@ -3510,6 +3524,11 @@ pub struct LayoutSnapshot {
     pub modeline_context_gauge_hit: Option<ModelineContextGaugeHit>,
     /// Clickable model indicator in the modeline for the selected session.
     pub modeline_model_hit: Option<ModelineModelHit>,
+    /// Hoverable and clickable in-terminal `C-x .` suggestion affordance.
+    pub suggest_affordance_hit: Option<ratatui::layout::Rect>,
+    /// Bounds and row hitboxes for the open two-column suggestion deck.
+    pub suggest_deck_area: Option<ratatui::layout::Rect>,
+    pub suggest_deck_hits: Vec<suggest_deck::SuggestDeckHitZone>,
     /// Whole-frame rect from the last render, so popups anchored to a
     /// modeline hit can be clamped on screen.
     pub frame_area: Option<ratatui::layout::Rect>,
@@ -3973,6 +3992,9 @@ impl LayoutSnapshot {
             modeline_context_gauge_hit: _,
             modeline_model_hit: _,
             modeline_theme_hit: _,
+            suggest_affordance_hit: _,
+            suggest_deck_area: _,
+            suggest_deck_hits: _,
             tutorial_card_area: _,
             minibuffer_harness_hits: _,
             minibuffer_choice_hits: _,
@@ -4733,6 +4755,10 @@ async fn run_with_socket_initial_selection(
         layout: LayoutSnapshot::default(),
         session_title_menu: None,
         route_menu: None,
+        suggest_deck: None,
+        suggestion_hands: HashMap::new(),
+        suggest_pending: HashMap::new(),
+        prompt_history: Vec::new(),
         session_title_rename: None,
         mouse_pos: None,
         mouse_moved_at: None,
@@ -8460,10 +8486,14 @@ impl App {
                             self.matrix_rain_intensity,
                             &payload.session_id,
                         );
+                        // Suggestion deck caches (specs 0109/0155): a dealt
+                        // hand lands, turn movement invalidates.
+                        self.observe_suggestion_event(&payload.session_id, &payload.event);
                         // Tool-approval prompt: if no minibuffer is in use,
                         // open the approval prompt for the matching session.
                         // Otherwise the user sees the request in the
-                        // transcript and can resume via `C-x .` (future).
+                        // transcript; approval resumption remains available
+                        // through the inline approval surface.
                         if let SessionEvent::ToolApprovalRequest {
                             call_id,
                             tool,
@@ -9680,6 +9710,18 @@ impl App {
                 return;
             }
         }
+        // The in-terminal suggestion chord is Construct chrome painted over
+        // the child PTY. It must keep hover/click ownership even when the
+        // child has enabled mouse tracking, just like the URL and popup
+        // overlays above.
+        let suggest_owns_event = self
+            .layout
+            .suggest_affordance_hit
+            .is_some_and(|hit| Self::rect_contains(hit, ev.column, ev.row));
+        let suggest_deck_owns_event = self
+            .layout
+            .suggest_deck_area
+            .is_some_and(|area| Self::rect_contains(area, ev.column, ev.row));
         if self.session_title_menu.is_none()
             // The route picker floats over the view pane, so without this a
             // click on it is forwarded to the child PTY and the popup never
@@ -9704,6 +9746,8 @@ impl App {
             // already routes in-modal clicks to the modal and out-of-modal
             // clicks to dismissal.
             && self.layout.modal_area.is_none()
+            && !suggest_owns_event
+            && !suggest_deck_owns_event
             && self.forward_mouse_to_child(&ev)
         {
             return;
@@ -9769,6 +9813,12 @@ impl App {
                 // divider/scrollbar drags, pane focus) — the card is opaque
                 // and its zones dispatch on mouse-up via handle_left_click.
                 if card_owns_event {
+                    return;
+                }
+                if suggest_owns_event {
+                    return;
+                }
+                if suggest_deck_owns_event {
                     return;
                 }
                 if let Some(hit) = self
@@ -10171,6 +10221,34 @@ impl App {
                 return;
             }
             self.route_menu = None;
+        }
+        if self
+            .layout
+            .suggest_affordance_hit
+            .is_some_and(|hit| contains(hit, col, row))
+        {
+            self.toggle_suggest_deck().await;
+            return;
+        }
+        if self.suggest_deck.is_some() {
+            if let Some(hit) = self
+                .layout
+                .suggest_deck_hits
+                .iter()
+                .find(|hit| hit.contains(col, row))
+                .map(|hit| hit.hit)
+            {
+                self.hit_suggest_deck(hit);
+                return;
+            }
+            if self
+                .layout
+                .suggest_deck_area
+                .is_some_and(|area| contains(area, col, row))
+            {
+                return;
+            }
+            self.suggest_deck = None;
         }
         if self.handle_dynamic_ui_overlay_click(col, row).await {
             return;
@@ -10843,6 +10921,14 @@ impl App {
                 }
             }
         }
+        // Suggestion deck (specs 0109/0155): a small transient popup in
+        // the route-menu class — it owns navigation keys only, and ANY
+        // other key closes it and falls through so the same keystroke
+        // takes its normal route. Typing always wins; a popup must never
+        // own keys it doesn't use (the PR #700 lesson).
+        if self.suggest_deck.is_some() && self.handle_suggest_deck_key(key).await {
+            return;
+        }
         // Help is the topmost keyboard surface. Check it before the program,
         // minibuffer, and focused child PTY routing. Up/Down/PageUp/PageDown
         // scroll the dialog's content (help text usually overflows a normal
@@ -11474,6 +11560,7 @@ impl App {
             ToggleProgramTerminalFocus => {
                 self.toggle_program_terminal_focus();
             }
+            OpenSuggestions => self.toggle_suggest_deck().await,
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
                     match self.client.diff(&id).await {
@@ -14682,6 +14769,9 @@ mod tests {
             last_chat_areas: std::collections::HashMap::new(),
             modeline_approval_mode_hit: None,
             modeline_model_hit: None,
+            suggest_affordance_hit: None,
+            suggest_deck_area: None,
+            suggest_deck_hits: Vec::new(),
             frame_area: None,
             modeline_context_gauge_hit: None,
             modeline_theme_hit: None,
@@ -14934,6 +15024,10 @@ mod tests {
             layout: LayoutSnapshot::default(),
             session_title_menu: None,
             route_menu: None,
+            suggest_deck: None,
+            suggestion_hands: HashMap::new(),
+            suggest_pending: HashMap::new(),
+            prompt_history: Vec::new(),
             session_title_rename: None,
             mouse_pos: None,
             mouse_moved_at: None,
@@ -32082,6 +32176,376 @@ mod tests {
         (app, dir, server)
     }
 
+    fn deck_hand() -> construct_protocol::SuggestionHand {
+        construct_protocol::SuggestionHand {
+            top: construct_protocol::SuggestionCard {
+                text: "run the tests".into(),
+            },
+            verbs: vec![construct_protocol::SuggestionVerb {
+                label: "ship it".into(),
+                cards: vec![construct_protocol::SuggestionCard {
+                    text: "open a PR".into(),
+                }],
+            }],
+        }
+    }
+
+    fn deck_history_entry(text: &str) -> construct_protocol::PromptHistoryEntry {
+        construct_protocol::PromptHistoryEntry {
+            text: text.into(),
+            at_ms: 0,
+            session_id: None,
+            harness: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn suggest_affordance_hover_explains_and_click_toggles_the_deck() {
+        use crossterm::event::MouseButton;
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].state = construct_protocol::SessionState::AwaitingInput;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let hit = app
+            .layout
+            .suggest_affordance_hit
+            .expect("awaiting PTY advertises suggestions");
+        app.mouse_pos = Some((hit.x, hit.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover draw");
+        assert!(
+            rendered_text(terminal.backend().buffer())
+                .contains("Open prompt suggestions · C-x ."),
+            "hovering the chord should explain its action"
+        );
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        assert!(
+            app.text_selection.is_none(),
+            "pressing Construct chrome must not start terminal selection"
+        );
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        assert!(
+            app.suggest_deck.is_none(),
+            "clicking the affordance runs the same toggle as C-x ."
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn suggest_affordance_is_repainted_over_full_screen_harnesses() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].state = construct_protocol::SessionState::AwaitingInput;
+        app.zoom = ZoomMode::View;
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        // A full-screen harness owns the entire base view and may repaint it
+        // continuously. The shared overlay pass must restore Construct's
+        // affordance on every frame, including the zoom-only render path.
+        for _ in 0..2 {
+            terminal
+                .draw(|f| crate::ui::render(f, &mut app))
+                .expect("full-screen draw");
+            let hit = app
+                .layout
+                .suggest_affordance_hit
+                .expect("zoomed PTY advertises suggestions");
+            let pane = app.layout.view_area.expect("zoomed view area");
+            assert_eq!(
+                hit.y,
+                pane.bottom().saturating_sub(2),
+                "affordance stays on the final interior row"
+            );
+            assert_eq!(
+                hit.right(),
+                pane.right().saturating_sub(2),
+                "affordance leaves one interior cell before the right edge"
+            );
+            assert!(
+                rendered_text(terminal.backend().buffer()).contains("◇ C-x ."),
+                "full-screen PTY repaint must not cover suggestion chrome"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn suggest_deck_rows_hover_and_click_like_the_route_menu() {
+        use crate::app::suggest_deck::{DeckFocus, SuggestDeckHit};
+        use crossterm::event::MouseButton;
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].state = construct_protocol::SessionState::AwaitingInput;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let category = app
+            .layout
+            .suggest_deck_hits
+            .iter()
+            .find(|zone| zone.hit == SuggestDeckHit::Category(1))
+            .copied()
+            .expect("second category hit");
+        app.mouse_pos = Some((category.area.x, category.area.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover draw");
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((category.area.x, category.area.y))
+                .expect("hovered category cell")
+                .style()
+                .bg,
+            Some(app.theme.inactive_highlight_bg),
+            "hover paints the same focused-row treatment as model routing"
+        );
+        assert_eq!(
+            app.suggest_deck.as_ref().map(|deck| deck.category_selected),
+            Some(0),
+            "hover previews interaction without moving the keyboard cursor"
+        );
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.on_mouse(MouseEvent {
+                kind,
+                column: category.area.x,
+                row: category.area.y,
+                modifiers: KeyModifiers::NONE,
+            })
+            .await;
+        }
+        let deck = app.suggest_deck.as_ref().expect("category click keeps deck open");
+        assert_eq!(deck.category_selected, 1);
+        assert_eq!(deck.focus, DeckFocus::Categories);
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("selected category draw");
+        let card = app
+            .layout
+            .suggest_deck_hits
+            .iter()
+            .find(|zone| zone.hit == SuggestDeckHit::Card(0))
+            .copied()
+            .expect("card hit");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.on_mouse(MouseEvent {
+                kind,
+                column: card.area.x,
+                row: card.area.y,
+                modifiers: KeyModifiers::NONE,
+            })
+            .await;
+        }
+        assert!(
+            app.suggest_deck.is_none(),
+            "clicking a concrete prompt stages it and closes the deck"
+        );
+        server.abort();
+    }
+
+    /// Specs 0109/0155: with the deck open, accepting the top pick on a
+    /// non-PTY session stages the text into the send-input minibuffer —
+    /// prefilled, not sent — and keeps the hand cached for a re-open.
+    #[tokio::test]
+    async fn suggest_deck_stages_into_minibuffer_for_non_pty() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.sessions[0].has_pty = false;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert!(app.suggest_deck.is_some(), "first Enter moves to prompts");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        assert!(app.suggest_deck.is_none(), "accept closes the deck");
+        let mb = app.minibuffer.as_ref().expect("minibuffer prefilled");
+        assert_eq!(mb.input, "run the tests");
+        assert!(matches!(
+            mb.intent,
+            MinibufferIntent::SendInput { ref session_id } if session_id == "s1"
+        ));
+        assert!(
+            app.suggestion_hands.contains_key("s1"),
+            "hand stays cached after staging"
+        );
+        server.abort();
+    }
+
+    /// Digit accelerators reach the History category; Enter in the right
+    /// column stages its highlighted entry.
+    #[tokio::test]
+    async fn suggest_deck_digits_reach_history_entries() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.sessions[0].has_pty = false;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.prompt_history = vec![deck_history_entry("cargo build")];
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+
+        // Fan rows: 1=top, 2=verb, 3=history.
+        app.on_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE))
+            .await;
+        let deck = app.suggest_deck.as_ref().expect("deck stays open");
+        assert_eq!(
+            deck.focus,
+            crate::app::suggest_deck::DeckFocus::Cards
+        );
+        assert!(matches!(
+            app.suggest_categories(deck).get(deck.category_selected),
+            Some(crate::app::suggest_deck::DeckRow::History { .. })
+        ));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.minibuffer.as_ref().map(|m| m.input.as_str()),
+            Some("cargo build")
+        );
+        server.abort();
+    }
+
+    /// Once History is selected, printable keys are fuzzy type-ahead rather
+    /// than pass-through input; Backspace refines the same query.
+    #[tokio::test]
+    async fn suggest_deck_history_has_fuzzy_typeahead() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.sessions[0].has_pty = false;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.prompt_history = vec![
+            deck_history_entry("cargo build --workspace"),
+            deck_history_entry("commit the branch"),
+            deck_history_entry("check background tasks"),
+        ];
+        let mut deck = crate::app::suggest_deck::SuggestDeck::open("s1".into());
+        deck.category_selected = 2;
+        app.suggest_deck = Some(deck);
+
+        for c in ['b', 'g', 't', 's', 'k'] {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
+        }
+        let deck = app.suggest_deck.as_ref().expect("search keeps popup open");
+        assert_eq!(deck.history_query, "bgtsk");
+        assert_eq!(
+            app.suggest_cards(deck),
+            vec![crate::app::suggest_deck::DeckRow::Card(
+                "check background tasks".into()
+            )]
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.suggest_deck.as_ref().map(|d| d.history_query.as_str()),
+            Some("bgts")
+        );
+        server.abort();
+    }
+
+    /// Regenerate is a regular numbered category, and terminal cancel
+    /// (`C-g`) closes its keyword surface exactly like Escape without
+    /// leaking the typed guidance into the selected PTY.
+    #[tokio::test]
+    async fn suggest_deck_regeneration_keywords_and_ctrl_g_cancel() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.prompt_history = vec![deck_history_entry("cargo build")];
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+
+        // Fixture categories: top, verb, history, Regenerate.
+        app.on_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE))
+            .await;
+        for c in "tests and docs".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
+        }
+        assert_eq!(
+            app.suggest_deck
+                .as_ref()
+                .and_then(|d| d.regenerate_query.as_deref()),
+            Some("tests and docs")
+        );
+
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        assert!(app.suggest_deck.is_none(), "C-g closes keyword input and deck");
+        server.abort();
+    }
+
+    /// Spec 0109 "typing always wins": a key the deck doesn't use closes
+    /// it and takes its normal route — the popup is never modal.
+    #[tokio::test]
+    async fn suggest_deck_typing_wins() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .await;
+
+        assert!(app.suggest_deck.is_none(), "unused key closes the deck");
+        server.abort();
+    }
+
+    /// Spec 0109 invalidation: a dealt hand lands in the cache; the
+    /// session's next turn starting sweeps it and closes an open deck.
+    #[tokio::test]
+    async fn suggest_deck_hand_caches_and_invalidates() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.observe_suggestion_event("s1", &SessionEvent::Suggestions(deck_hand()));
+        assert!(app.suggestion_hands.contains_key("s1"));
+
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+        app.observe_suggestion_event(
+            "s1",
+            &SessionEvent::Status {
+                state: construct_protocol::SessionState::Running,
+                detail: None,
+            },
+        );
+        assert!(!app.suggestion_hands.contains_key("s1"));
+        assert!(app.suggest_deck.is_none(), "new turn closes the deck");
+        server.abort();
+    }
+
     /// Spec 0112: a hit target that slid off the top of the viewport is gone,
     /// not clamped to row 0 — otherwise the top visible row would fire
     /// whatever affordance used to sit above it.
@@ -35493,7 +35957,9 @@ mod tests {
         app.help_visible = true;
         app.profile = Profile::Vim;
         app.keymap = keymap::default_for(Profile::Vim);
-        let backend = ratatui::backend::TestBackend::new(120, 70);
+        // Tall enough for the full help text (it grows with the keymap;
+        // the modal scrolls on real terminals).
+        let backend = ratatui::backend::TestBackend::new(120, 72);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
 
         terminal

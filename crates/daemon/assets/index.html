@@ -14571,6 +14571,7 @@ const WEB_KEYMAP = [
   { keys: ["C-x", "A"], action: "toggle-automode" },
   { keys: ["C-x", "c"], action: "toggle-mouse-capture" },
   { keys: ["C-x", "v"], action: "paste-local-clipboard" },
+  { keys: ["C-x", "."], action: "open-suggestions" },
 ];
 
 /** Chords whose TUI action has no web surface, and why. Answering is better
@@ -15022,6 +15023,12 @@ function runKeyAction(action, keys) {
       return;
     case "send-input":
       inputEl.focus();
+      return;
+    case "open-suggestions":
+      // Same entry as tapping the orb (specs 0109/0155); mirrors the
+      // TUI's C-x ..
+      if (suggestDeckIsAvailable()) suggestOrbClick();
+      else showChordEcho("C-x . — session must be awaiting input", true);
       return;
     case "rename":
       if (id) openRenameDialog(id);

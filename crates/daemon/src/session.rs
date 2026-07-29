@@ -4651,7 +4651,11 @@ impl SessionManager {
     /// run the cheap `--suggest-mode` process one-shot; every other
     /// harness gets a hidden probe session of the same harness (so it
     /// uses the same credentials/subscription the user's session does).
-    pub async fn request_suggestions(self: &Arc<Self>, id: &str) -> Result<bool> {
+    pub async fn request_suggestions(
+        self: &Arc<Self>,
+        id: &str,
+        keywords: Option<String>,
+    ) -> Result<bool> {
         if !self.config.suggest.enabled {
             return Ok(false);
         }
@@ -4688,6 +4692,7 @@ impl SessionManager {
         // recurring workflows, not just this session's tail.
         let history_block =
             render_suggest_history(&self.storage.read_prompt_history(SUGGEST_HISTORY_PROMPTS));
+        let keyword_block = render_suggest_keywords(keywords.as_deref());
         let broadcast = self.broadcast.clone();
         // Smith generates through its own cheap process one-shot. Shell has
         // no model at all — "same harness" is impossible — so it borrows the
@@ -4714,11 +4719,15 @@ impl SessionManager {
             let Some(binary) = locate_binary(&binary_spec) else {
                 return Ok(false);
             };
-            let context = if history_block.is_empty() {
-                context
-            } else {
-                format!("{context}\n\n{history_block}")
-            };
+            let mut context = context;
+            if !history_block.is_empty() {
+                context.push_str("\n\n");
+                context.push_str(&history_block);
+            }
+            if !keyword_block.is_empty() {
+                context.push_str("\n\n");
+                context.push_str(&keyword_block);
+            }
             tokio::spawn(async move {
                 generate_suggestions(binary, prefix_args, entry, my_gen, context, broadcast).await;
             });
@@ -4730,6 +4739,7 @@ impl SessionManager {
                     my_gen,
                     context,
                     history_block,
+                    keyword_block,
                     broadcast,
                 )
                 .await;
@@ -4758,6 +4768,7 @@ impl SessionManager {
         my_gen: u64,
         context: String,
         history_block: String,
+        keyword_block: String,
         broadcast: tokio::sync::broadcast::Sender<BroadcastMsg>,
     ) {
         let now_ms = Utc::now().timestamp_millis();
@@ -4795,6 +4806,10 @@ impl SessionManager {
         if !history_block.is_empty() {
             prompt.push_str("\n\n");
             prompt.push_str(&history_block);
+        }
+        if !keyword_block.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&keyword_block);
         }
         prompt.push_str("\n\nJSON:");
         let create_params = construct_protocol::CreateSessionParams {
@@ -6348,6 +6363,27 @@ fn render_suggest_history(entries: &[construct_protocol::PromptHistoryEntry]) ->
     out
 }
 
+/// Render optional regeneration guidance supplied by the user. This is
+/// deliberately labeled as preference rather than transcript evidence:
+/// it steers which valid next steps the generator emphasizes without
+/// authorizing invented state. Whitespace and length are bounded before
+/// the text reaches any harness.
+fn render_suggest_keywords(keywords: Option<&str>) -> String {
+    let Some(keywords) = keywords else {
+        return String::new();
+    };
+    let normalized = keywords.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clipped: String = normalized.chars().take(200).collect();
+    if clipped.is_empty() {
+        return String::new();
+    }
+    format!(
+        "User guidance for this regeneration:\n\
+         Prioritize relevant suggestions around these keywords: {clipped}\n\
+         Treat the keywords as intent guidance, not evidence; do not invent state."
+    )
+}
+
 /// Hard cap on one same-harness suggestion probe's lifetime: adapter
 /// spawn plus a full model turn over a long prompt. Past this the probe
 /// is torn down and the attempt silently dropped.
@@ -6648,6 +6684,29 @@ fn builtin_harness_capabilities(name: &str) -> construct_protocol::Capabilities 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn suggestion_regeneration_keywords_are_bounded_and_labeled_as_guidance() {
+        let rendered =
+            super::render_suggest_keywords(Some("  tests\n\n docs   mobile-layout  "));
+        assert!(rendered.contains("tests docs mobile-layout"));
+        assert!(rendered.contains("intent guidance, not evidence"));
+        assert_eq!(super::render_suggest_keywords(Some(" \n ")), "");
+
+        let long = "x".repeat(250);
+        let rendered = super::render_suggest_keywords(Some(&long));
+        assert_eq!(
+            rendered
+                .lines()
+                .find_map(|line| line.strip_prefix(
+                    "Prioritize relevant suggestions around these keywords: "
+                ))
+                .expect("keyword line")
+                .chars()
+                .count(),
+            200
+        );
+    }
+
     use super::*;
     use construct_protocol::{Capabilities, PtySize};
 
