@@ -58,10 +58,12 @@ const CREDENTIAL_FILLER: &str = "construct";
 pub enum Dialect {
     /// Anthropic Messages (`/v1/messages`).
     AnthropicMessages,
+    /// Google Gemini GenerateContent (`:generateContent` /
+    /// `:streamGenerateContent`).
+    GoogleGemini,
     /// OpenAI Chat Completions (`/chat/completions`).
     OpenAiChat,
-    /// OpenAI Responses (`/responses`). A *client* dialect only: four
-    /// harnesses speak it, no configurable route target does.
+    /// OpenAI Responses (`/responses`).
     OpenAiResponses,
 }
 
@@ -69,6 +71,7 @@ impl Dialect {
     pub fn label(self) -> &'static str {
         match self {
             Dialect::AnthropicMessages => "anthropic",
+            Dialect::GoogleGemini => "google-gemini",
             Dialect::OpenAiChat => "openai-chat",
             Dialect::OpenAiResponses => "openai-responses",
         }
@@ -78,15 +81,20 @@ impl Dialect {
 /// Map a `[smith.models.*]` provider onto a dialect the router can serve.
 ///
 /// Providers absent here are declared, usable by smith, and simply not
-/// routable: `gemini`, `meta` (Responses API) and `ollama` (`/api/chat`
-/// NDJSON) each speak a third shape, and claiming support without a
-/// translator would corrupt turns rather than fail cleanly.
+/// routable. Claiming support without a translator would corrupt turns
+/// rather than fail cleanly.
 pub fn provider_dialect(provider: &str) -> Option<Dialect> {
     match provider.to_ascii_lowercase().as_str() {
         "anthropic" => Some(Dialect::AnthropicMessages),
+        "gemini" | "google" => Some(Dialect::GoogleGemini),
         // Grok is served by smith's OpenAI client and speaks the same wire
         // format.
         "openai" | "grok" => Some(Dialect::OpenAiChat),
+        // Azure's current v1 API uses Responses on the wire; its adapter
+        // difference is the `api-key` header, not a separate JSON dialect.
+        "openai-responses" | "azure" | "azure-openai" => {
+            Some(Dialect::OpenAiResponses)
+        }
         _ => None,
     }
 }
@@ -308,6 +316,10 @@ pub struct ArmedRoute {
 pub enum TargetAuth {
     /// Anthropic API key header.
     ApiKeyHeader,
+    /// Google Generative Language API-key header.
+    GoogleApiKey,
+    /// Azure OpenAI API-key header.
+    AzureApiKey,
     /// `Authorization: Bearer …`.
     Bearer,
 }
@@ -752,8 +764,17 @@ impl Router {
                 profile.provider
             ));
         };
-        if profile.resolved_base_url().is_none() {
+        let Some(base_url) = profile.resolved_base_url() else {
             return Some(format!("provider \"{}\" has no base_url", profile.provider));
+        };
+        if matches!(
+            profile.provider.to_ascii_lowercase().as_str(),
+            "azure" | "azure-openai"
+        ) && (base_url.contains('{') || base_url.contains('}'))
+        {
+            return Some(
+                "azure-openai base_url contains an unresolved placeholder".to_string(),
+            );
         }
         if profile.model.as_deref().map(str::trim).unwrap_or("").is_empty() {
             return Some("profile sets no model".to_string());
@@ -876,17 +897,33 @@ impl Router {
         let base_url = profile
             .resolved_base_url()
             .ok_or_else(|| anyhow!("route \"{name}\": no base_url"))?;
+        if matches!(
+            profile.provider.to_ascii_lowercase().as_str(),
+            "azure" | "azure-openai"
+        ) && (base_url.contains('{') || base_url.contains('}'))
+        {
+            return Err(anyhow!(
+                "route \"{name}\": azure-openai base_url contains an unresolved placeholder"
+            ));
+        }
         Ok(ArmedRoute {
             name: name.to_string(),
-            endpoint: format!("{base_url}{}", translate::target_path(target_dialect)),
+            endpoint: translate::target_url(
+                &base_url,
+                target_dialect,
+                model.or(profile.model.as_deref()).unwrap_or_default(),
+                true,
+            ),
             base_url,
             model: model
                 .map(str::to_string)
                 .or_else(|| profile.model.clone())
                 .unwrap_or_default(),
             api_key: profile.resolve_api_key().map_err(|e| anyhow!(e))?,
-            auth: match target_dialect {
-                Dialect::AnthropicMessages => TargetAuth::ApiKeyHeader,
+            auth: match profile.provider.to_ascii_lowercase().as_str() {
+                "anthropic" => TargetAuth::ApiKeyHeader,
+                "gemini" | "google" => TargetAuth::GoogleApiKey,
+                "azure" | "azure-openai" => TargetAuth::AzureApiKey,
                 _ => TargetAuth::Bearer,
             },
             system_prefix: None,
@@ -1329,18 +1366,87 @@ mod tests {
         let r = started_with(
             &dir,
             cfg_with(true),
-            profiles(vec![("gemini-pro", profile("gemini", Some("X")))]),
+            profiles(vec![("meta-model", profile("meta", Some("X")))]),
         )
         .await;
         r.attach_session("s1", "claude", None).unwrap();
         let listed = r.list_routes("claude", true, None);
         assert!(listed.unavailable_reason.is_none());
-        let reason = route_named(&listed, "gemini-pro")
+        let reason = route_named(&listed, "meta-model")
             .unavailable_reason
             .as_deref()
             .unwrap();
         assert!(reason.contains("no translator"), "{reason}");
-        assert!(r.set_route("s1", "claude", Some("gemini-pro"), None, None).is_err());
+        assert!(r.set_route("s1", "claude", Some("meta-model"), None, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn gemini_profiles_are_selectable_with_native_url_and_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = started_with(
+            &dir,
+            cfg_with(true),
+            profiles(vec![(
+                "gemini-pro",
+                ModelProfile {
+                    provider: "gemini".to_string(),
+                    base_url: None,
+                    api_key_env: None,
+                    api_key: Some("google-key".to_string()),
+                    model: Some("gemini-2.5-pro".to_string()),
+                },
+            )]),
+        )
+        .await;
+        r.attach_session("s1", "claude", None).unwrap();
+
+        let listed = r.list_routes("claude", true, None);
+        let gemini = route_named(&listed, "gemini-pro");
+        assert_eq!(gemini.unavailable_reason, None);
+        assert_eq!(gemini.dialect, "google-gemini");
+        assert_eq!(
+            gemini.base_url,
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+
+        r.set_route("s1", "claude", Some("gemini-pro"), None, None)
+            .unwrap();
+        let armed = r.sessions.read().unwrap()["s1"].armed_route().unwrap();
+        assert_eq!(armed.auth, TargetAuth::GoogleApiKey);
+        assert_eq!(
+            armed.endpoint,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+        );
+    }
+
+    #[tokio::test]
+    async fn azure_profiles_use_responses_with_api_key_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = started_with(
+            &dir,
+            cfg_with(true),
+            profiles(vec![(
+                "azure",
+                ModelProfile {
+                    provider: "azure-openai".to_string(),
+                    base_url: Some("https://resource.openai.azure.com/openai".to_string()),
+                    api_key_env: None,
+                    api_key: Some("azure-key".to_string()),
+                    model: Some("deployment".to_string()),
+                },
+            )]),
+        )
+        .await;
+        r.attach_session("s1", "claude", None).unwrap();
+        r.set_route("s1", "claude", Some("azure"), None, None)
+            .unwrap();
+        let armed = r.sessions.read().unwrap()["s1"].armed_route().unwrap();
+        assert_eq!(armed.target_dialect, Dialect::OpenAiResponses);
+        assert_eq!(armed.auth, TargetAuth::AzureApiKey);
+        assert_eq!(
+            armed.endpoint,
+            "https://resource.openai.azure.com/openai/v1/responses"
+        );
     }
 
     /// An OpenAI-dialect profile IS selectable from an Anthropic-dialect
@@ -1849,6 +1955,138 @@ mod tests {
             "the route's model must be substituted: {forwarded}"
         );
     }
+
+    /// Gemini is a full target dialect, not an OpenAI-compatible alias:
+    /// its model/RPC live in the URL, its key uses x-goog-api-key, and its
+    /// contents/candidates stream is translated in both directions.
+    #[tokio::test]
+    async fn translates_an_anthropic_turn_onto_gemini() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_w = seen.clone();
+        tokio::spawn(async move {
+            let (mut s, _) = upstream.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = s.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            *seen_w.lock().unwrap() = String::from_utf8_lossy(&buf).to_string();
+            let sse = concat!(
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gem\"}]}}]}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ini\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":4,\"candidatesTokenCount\":2}}\n\n",
+            );
+            s.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{sse}",
+                    sse.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+            s.flush().await.unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let r = started_with(
+            &dir,
+            cfg_with(true),
+            profiles(vec![(
+                "gemini",
+                ModelProfile {
+                    provider: "gemini".to_string(),
+                    base_url: Some(format!("http://127.0.0.1:{upstream_port}/v1beta")),
+                    api_key_env: None,
+                    api_key: Some("google-route-key".to_string()),
+                    model: Some("gemini-2.5-pro".to_string()),
+                },
+            )]),
+        )
+        .await;
+        let env = r.attach_session("s1", "claude", None).unwrap();
+        let token = Router::token_from_env(&env).unwrap();
+        r.set_route(
+            "s1",
+            "claude",
+            Some("gemini"),
+            None,
+            Some("claude-opus-5".into()),
+        )
+        .unwrap();
+
+        let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
+            .await
+            .unwrap();
+        use base64::Engine;
+        let cred = base64::engine::general_purpose::STANDARD.encode(format!("{token}:construct"));
+        sock.write_all(
+            format!(
+                "CONNECT api.anthropic.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {cred}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut ack = [0u8; 39];
+        sock.read_exact(&mut ack).await.unwrap();
+
+        let ca_pem = std::fs::read_to_string(env.get("NODE_EXTRA_CA_CERTS").unwrap()).unwrap();
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        roots
+            .add(tokio_rustls::rustls::pki_types::CertificateDer::from(
+                pem_to_der(&ca_pem),
+            ))
+            .unwrap();
+        let provider = tokio_rustls::rustls::crypto::ring::default_provider();
+        let client_cfg = tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_cfg));
+        let domain =
+            tokio_rustls::rustls::pki_types::ServerName::try_from("api.anthropic.com").unwrap();
+        let mut tls = connector.connect(domain, sock).await.unwrap();
+
+        let body = br#"{"model":"claude-opus-5","max_tokens":32,"stream":true,"system":"be terse","messages":[{"role":"user","content":"hi"}]}"#;
+        tls.write_all(
+            format!(
+                "POST /v1/messages HTTP/1.1\r\nhost: api.anthropic.com\r\nx-api-key: users-own-key\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        tls.write_all(body).await.unwrap();
+        tls.flush().await.unwrap();
+
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.contains("\"text\":\"gem\""), "{response}");
+        assert!(response.contains("\"text\":\"ini\""), "{response}");
+        assert!(response.contains("event: message_stop"), "{response}");
+
+        let forwarded = seen.lock().unwrap().clone();
+        assert!(
+            forwarded.starts_with(
+                "POST /v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+            ),
+            "{forwarded}"
+        );
+        assert!(
+            forwarded.contains("x-goog-api-key: google-route-key"),
+            "{forwarded}"
+        );
+        assert!(!forwarded.contains("users-own-key"), "{forwarded}");
+        assert!(forwarded.contains("\"systemInstruction\""), "{forwarded}");
+        assert!(forwarded.contains("\"contents\""), "{forwarded}");
+        assert!(forwarded.contains("\"maxOutputTokens\":32"), "{forwarded}");
+    }
+
 
     /// End-to-end request-scoped selection from a native picker: a
     /// Responses-speaking session carries a published Construct model id,

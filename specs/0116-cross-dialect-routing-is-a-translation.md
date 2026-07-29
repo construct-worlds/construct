@@ -1,7 +1,7 @@
 # 0116-cross-dialect-routing-is-a-translation
 
 Status: accepted
-Date: 2026-07-25
+Date: 2026-07-29
 Area: protocol
 Scope: What a route does when the endpoint it targets speaks a different wire dialect than the harness being routed.
 
@@ -32,6 +32,11 @@ Support is per-dialect-pair and explicit:
 - A pair without one → the profile is **listed and not selectable**, with
   the missing translator named as its reason. It is never silently
   attempted.
+
+The maintained canonical adapters cover Anthropic Messages, Google Gemini
+GenerateContent, OpenAI Chat Completions, and OpenAI Responses. Azure OpenAI
+uses the Responses adapter with Azure's `api-key` authentication rather than
+being treated as a separate JSON dialect.
 
 Translation is lossy in one direction only, and only where the target has
 no equivalent concept. Losses must drop information, never invent it: a
@@ -65,6 +70,10 @@ component.
   tool-call encoding, and the stop/finish taxonomy all evolve
   independently. Adding a dialect means committing to that, not just
   adding a case.
+- Provider-specific wire constraints are enforced at the final emission
+  boundary. In particular, Gemini tool schemas and function names are
+  constrained to its documented subset, with request-scoped reversible name
+  mappings so the harness still receives the exact tool name it registered.
 - A dialect's event vocabulary must be established from a captured real
   exchange, not from memory or documentation. Streaming formats carry
   structure that is easy to get subtly wrong and whose failure mode is a
