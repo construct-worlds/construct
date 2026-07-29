@@ -8484,7 +8484,8 @@ impl App {
                         // Tool-approval prompt: if no minibuffer is in use,
                         // open the approval prompt for the matching session.
                         // Otherwise the user sees the request in the
-                        // transcript and can resume via `C-x .` (future).
+                        // transcript; approval resumption remains available
+                        // through the inline approval surface.
                         if let SessionEvent::ToolApprovalRequest {
                             call_id,
                             tool,
@@ -32151,6 +32152,9 @@ mod tests {
 
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
+        assert!(app.suggest_deck.is_some(), "first Enter moves to prompts");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
 
         assert!(app.suggest_deck.is_none(), "accept closes the deck");
         let mb = app.minibuffer.as_ref().expect("minibuffer prefilled");
@@ -32166,8 +32170,8 @@ mod tests {
         server.abort();
     }
 
-    /// Digit accelerators walk the deck: the history row opens the
-    /// history view, and a digit there stages that entry.
+    /// Digit accelerators reach the History category; Enter in the right
+    /// column stages its highlighted entry.
     #[tokio::test]
     async fn suggest_deck_digits_reach_history_entries() {
         let (mut app, _dir, server) = two_session_app().await;
@@ -32179,15 +32183,58 @@ mod tests {
         // Fan rows: 1=top, 2=verb, 3=history.
         app.on_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE))
             .await;
+        let deck = app.suggest_deck.as_ref().expect("deck stays open");
+        assert_eq!(
+            deck.focus,
+            crate::app::suggest_deck::DeckFocus::Cards
+        );
         assert!(matches!(
-            app.suggest_deck.as_ref().map(|d| d.view),
-            Some(crate::app::suggest_deck::DeckView::History)
+            app.suggest_categories(deck).get(deck.category_selected),
+            Some(crate::app::suggest_deck::DeckRow::History { .. })
         ));
-        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE))
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
             app.minibuffer.as_ref().map(|m| m.input.as_str()),
             Some("cargo build")
+        );
+        server.abort();
+    }
+
+    /// Once History is selected, printable keys are fuzzy type-ahead rather
+    /// than pass-through input; Backspace refines the same query.
+    #[tokio::test]
+    async fn suggest_deck_history_has_fuzzy_typeahead() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.sessions[0].has_pty = false;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.prompt_history = vec![
+            deck_history_entry("cargo build --workspace"),
+            deck_history_entry("commit the branch"),
+            deck_history_entry("check background tasks"),
+        ];
+        let mut deck = crate::app::suggest_deck::SuggestDeck::open("s1".into());
+        deck.category_selected = 2;
+        app.suggest_deck = Some(deck);
+
+        for c in ['b', 'g', 't', 's', 'k'] {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
+        }
+        let deck = app.suggest_deck.as_ref().expect("search keeps popup open");
+        assert_eq!(deck.history_query, "bgtsk");
+        assert_eq!(
+            app.suggest_cards(deck),
+            vec![crate::app::suggest_deck::DeckRow::Card(
+                "check background tasks".into()
+            )]
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.suggest_deck.as_ref().map(|d| d.history_query.as_str()),
+            Some("bgts")
         );
         server.abort();
     }

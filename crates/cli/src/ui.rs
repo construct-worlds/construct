@@ -484,6 +484,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     render_session_title_menu(f, app);
     render_route_menu(f, app);
+    render_suggest_affordance(f, app);
     render_suggest_deck(f, app);
     render_tutorial_card(f, app);
     render_harness_unavailable_tooltip(f, app);
@@ -4929,76 +4930,154 @@ fn session_menu_icon_style(theme: &Theme, base: Color, hovered: bool, focused: b
 /// right. Both are visible at once so choosing a target shows what it can
 /// offer before committing to it — the two decisions stay separate without
 /// hiding one behind the other.
-/// Suggestion deck popup (specs 0109/0155): a compact row list anchored
-/// to the bottom-right of the session view, one level at a time (fan →
-/// verb cards / history). Rows come from `App::suggest_rows` so key
-/// handling and rendering always agree. Never modal — the key gate owns
-/// only navigation keys; anything else closes the deck and re-routes.
+fn focused_session_pane(app: &App) -> Option<WindowPaneHit> {
+    app.layout
+        .main_window_areas
+        .iter()
+        .find(|pane| pane.id == app.active_window_id)
+        .copied()
+}
+
+/// Persistent suggestion-deck affordance (specs 0109/0155). It belongs to
+/// the focused session terminal rather than the global modeline: three rows
+/// above the pane's bottom border and right-aligned one cell inside it.
+fn render_suggest_affordance(f: &mut Frame, app: &App) {
+    let Some(session) = app.selected_session() else {
+        return;
+    };
+    if session.state != SessionState::AwaitingInput
+        || !session.has_pty
+        || session.mode.as_deref() == Some("headless")
+        || app.view_for_window(Some(app.active_window_id)) != ViewMode::Terminal
+    {
+        return;
+    }
+    let Some(pane) = focused_session_pane(app) else {
+        return;
+    };
+    if pane.area.width < 12 || pane.area.height < 5 {
+        return;
+    }
+    let label = if let Some(hand) = app.suggestion_hands.get(&session.id) {
+        format!("✦{} C-x .", 1 + hand.verbs.len())
+    } else if app.suggest_pending_active(&session.id) {
+        "◈ C-x . suggesting…".to_string()
+    } else {
+        "◇ C-x .".to_string()
+    };
+    let width = UnicodeWidthStr::width(label.as_str())
+        .min(pane.area.width.saturating_sub(2) as usize) as u16;
+    if width == 0 {
+        return;
+    }
+    let area = Rect {
+        x: pane
+            .area
+            .x
+            .saturating_add(pane.area.width)
+            .saturating_sub(width)
+            .saturating_sub(1),
+        // The bottom border is `bottom - 1`; this is exactly three rows up.
+        y: pane
+            .area
+            .y
+            .saturating_add(pane.area.height)
+            .saturating_sub(4),
+        width,
+        height: 1,
+    };
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(Line::styled(
+            truncate_to_width(&label, width as usize),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::DIM),
+        )),
+        area,
+    );
+}
+
+/// Suggestion deck popup (specs 0109/0155): directions remain visible in
+/// the left column while concrete prompts for the highlighted direction
+/// remain visible in the right, matching the model-routing popup's
+/// inspect-then-choose rhythm. History is the explicit fuzzy type-ahead
+/// surface; printable input elsewhere still dismisses and re-routes.
 fn render_suggest_deck(f: &mut Frame, app: &App) {
-    use crate::app::suggest_deck::{DeckRow, DeckView};
+    use crate::app::suggest_deck::{DeckFocus, DeckRow};
     let Some(deck) = &app.suggest_deck else {
         return;
     };
-    let Some(view) = app.layout.view_area else {
+    let Some(pane) = focused_session_pane(app) else {
         return;
     };
-    let rows = app.suggest_rows(deck);
-    if rows.is_empty() || view.width < 20 || view.height < 5 {
+    let categories = app.suggest_categories(deck);
+    let cards = app.suggest_cards(deck);
+    let bounds = pane.inner_area;
+    if categories.is_empty() || bounds.width < 32 || bounds.height < 8 {
         return;
     }
-    let title = match deck.view {
-        DeckView::Fan => " suggestions ".to_string(),
-        DeckView::Cards { verb } => app
-            .suggestion_hands
-            .get(&deck.session_id)
-            .and_then(|h| h.verbs.get(verb))
-            .map(|v| format!(" {} ", v.label))
-            .unwrap_or_else(|| " suggestions ".to_string()),
-        DeckView::History => " history ".to_string(),
-    };
-    let label = |row: &DeckRow| -> String {
+    let category_label = |row: &DeckRow| -> String {
         match row {
-            DeckRow::Top(text) => format!("▶ {text}"),
+            DeckRow::Top(_) => "top pick".to_string(),
             DeckRow::Verb { label, count, .. } => format!("{label} › ({count})"),
             DeckRow::History { count } => format!("history › ({count})"),
             DeckRow::Generating => "◈ generating…".to_string(),
             DeckRow::Card(text) => text.clone(),
         }
     };
-    let hint = match deck.view {
-        DeckView::Fan => "Enter stage · Esc close · type to dismiss",
-        _ => "Enter stage · ← back · type to dismiss",
+    let card_label = |row: &DeckRow| -> String {
+        match row {
+            DeckRow::Generating => "waiting for generated suggestions…".to_string(),
+            DeckRow::Card(text) | DeckRow::Top(text) => text.clone(),
+            DeckRow::Verb { label, .. } => label.clone(),
+            DeckRow::History { .. } => "history".to_string(),
+        }
     };
-    let longest = rows
+    let longest_category = categories
         .iter()
-        .map(|r| UnicodeWidthStr::width(label(r).as_str()))
+        .map(|row| UnicodeWidthStr::width(category_label(row).as_str()))
         .max()
         .unwrap_or(0)
-        .max(UnicodeWidthStr::width(hint))
-        .max(UnicodeWidthStr::width(title.as_str()));
-    // 2 border cols + "N " digit prefix + a trailing pad.
-    let inner_w = (longest + 3).clamp(24, view.width.saturating_sub(4) as usize);
-    let w = (inner_w as u16).saturating_add(2);
-    let h = (rows.len() as u16)
-        .saturating_add(3)
-        .min(view.height.saturating_sub(1));
-    let x = view
-        .x
-        .saturating_add(view.width.saturating_sub(w).saturating_sub(1));
-    let y = view
+        .saturating_add(4);
+    let max_w = bounds.width.saturating_sub(2);
+    let width = 78u16.min(max_w);
+    let inner_w = width.saturating_sub(2);
+    let category_w = (longest_category as u16)
+        .clamp(18, 28)
+        .min(inner_w.saturating_sub(12));
+    let card_w = inner_w.saturating_sub(category_w).saturating_sub(1);
+    if card_w < 10 {
+        return;
+    }
+
+    let body_rows = categories.len().max(cards.len()).max(1) as u16;
+    // border + column headings + body + footer
+    let wanted_h = body_rows.saturating_add(4);
+    let hint_y = pane
+        .area
         .y
-        .saturating_add(view.height.saturating_sub(h).saturating_sub(1));
+        .saturating_add(pane.area.height)
+        .saturating_sub(4);
+    let available_h = hint_y.saturating_sub(bounds.y).max(3);
+    let height = wanted_h.min(available_h);
+    if height < 6 {
+        return;
+    }
     let area = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
+        x: bounds
+            .x
+            .saturating_add(bounds.width)
+            .saturating_sub(width),
+        y: hint_y.saturating_sub(height),
+        width,
+        height,
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            title,
+            " suggestions ",
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -5006,54 +5085,189 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     f.render_widget(block, area);
     let inner_x = area.x.saturating_add(1);
-    let visible_rows = h.saturating_sub(3) as usize;
-    for (i, row) in rows.iter().take(visible_rows).enumerate() {
-        let selected = i == deck.selected;
-        let style = if !row.is_activatable() {
+    let divider_x = inner_x.saturating_add(category_w);
+    let cards_x = divider_x.saturating_add(1);
+    let header_y = area.y.saturating_add(1);
+    let body_y = header_y.saturating_add(1);
+    let footer_y = area.y.saturating_add(area.height).saturating_sub(2);
+    let visible_rows = footer_y.saturating_sub(body_y) as usize;
+
+    let history_selected = matches!(
+        categories.get(deck.category_selected),
+        Some(DeckRow::History { .. })
+    );
+    let right_header = if history_selected {
+        if deck.history_query.is_empty() {
+            "history · type to search".to_string()
+        } else {
+            format!("history / {}_", deck.history_query)
+        }
+    } else {
+        "prompts".to_string()
+    };
+    let fit_cell = |text: &str, width: usize| {
+        let mut text = truncate_to_width(text, width);
+        let padding = width.saturating_sub(UnicodeWidthStr::width(text.as_str()));
+        text.push_str(&" ".repeat(padding));
+        text
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                fit_cell("directions", category_w as usize),
+                Style::default()
+                    .fg(if deck.focus == DeckFocus::Categories {
+                        app.theme.accent
+                    } else {
+                        app.theme.muted
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("│", Style::default().fg(app.theme.border)),
+            Span::styled(
+                fit_cell(&right_header, card_w as usize),
+                Style::default()
+                    .fg(if deck.focus == DeckFocus::Cards {
+                        app.theme.accent
+                    } else {
+                        app.theme.muted
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        Rect {
+            x: inner_x,
+            y: header_y,
+            width: inner_w,
+            height: 1,
+        },
+    );
+
+    let row_style = |enabled: bool, highlighted: bool, focused: bool| {
+        if !enabled {
             Style::default()
                 .fg(app.theme.border)
                 .add_modifier(Modifier::DIM)
-        } else if selected {
+        } else if highlighted && focused {
             Style::default()
                 .fg(app.theme.text)
                 .bg(app.theme.inactive_highlight_bg)
                 .add_modifier(Modifier::BOLD)
+        } else if highlighted {
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(app.theme.text)
-        };
-        let prefix = if row.is_activatable() && i < 9 {
-            format!("{} ", i + 1)
-        } else {
-            "  ".to_string()
-        };
-        let text = truncate_to_width(
-            &format!("{prefix}{}", label(row)),
-            inner_w,
-        );
+        }
+    };
+
+    for row in 0..visible_rows {
+        let y = body_y.saturating_add(row as u16);
         f.render_widget(
-            Paragraph::new(Line::styled(text, style)),
+            Paragraph::new(Line::styled(
+                "│",
+                Style::default().fg(app.theme.border),
+            )),
             Rect {
-                x: inner_x,
-                y: area.y.saturating_add(1).saturating_add(i as u16),
-                width: inner_w as u16,
+                x: divider_x,
+                y,
+                width: 1,
                 height: 1,
             },
         );
     }
-    // Footer hint, dim, inside the bottom border row area.
+    for (index, row) in categories.iter().take(visible_rows).enumerate() {
+        let prefix = if index < 9 {
+            format!("{} ", index + 1)
+        } else {
+            "  ".to_string()
+        };
+        let text = truncate_to_width(
+            &format!("{prefix}{}", category_label(row)),
+            category_w as usize,
+        );
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                text,
+                row_style(
+                    row.is_activatable(),
+                    index == deck.category_selected,
+                    deck.focus == DeckFocus::Categories,
+                ),
+            )),
+            Rect {
+                x: inner_x,
+                y: body_y.saturating_add(index as u16),
+                width: category_w,
+                height: 1,
+            },
+        );
+    }
+
+    if cards.is_empty() && history_selected && !deck.history_query.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                "no matching prompts",
+                Style::default()
+                    .fg(app.theme.border)
+                    .add_modifier(Modifier::DIM),
+            )),
+            Rect {
+                x: cards_x,
+                y: body_y,
+                width: card_w,
+                height: 1,
+            },
+        );
+    } else {
+        for (index, row) in cards.iter().take(visible_rows).enumerate() {
+            let prefix = if history_selected {
+                if index == deck.card_selected { "› " } else { "  " }.to_string()
+            } else if index < 9 {
+                format!("{} ", index + 1)
+            } else {
+                "  ".to_string()
+            };
+            let text = truncate_to_width(
+                &format!("{prefix}{}", card_label(row)),
+                card_w as usize,
+            );
+            f.render_widget(
+                Paragraph::new(Line::styled(
+                    text,
+                    row_style(
+                        row.is_activatable(),
+                        index == deck.card_selected,
+                        deck.focus == DeckFocus::Cards,
+                    ),
+                )),
+                Rect {
+                    x: cards_x,
+                    y: body_y.saturating_add(index as u16),
+                    width: card_w,
+                    height: 1,
+                },
+            );
+        }
+    }
+
+    let hint = if history_selected {
+        "type fuzzy search · ←/→ columns · ↑/↓ move · Enter stage · Esc close"
+    } else {
+        "←/→ columns · ↑/↓ move · Enter stage · Esc close · typing dismisses"
+    };
     f.render_widget(
         Paragraph::new(Line::styled(
-            truncate_to_width(hint, inner_w),
+            truncate_to_width(hint, inner_w as usize),
             Style::default()
                 .fg(app.theme.border)
                 .add_modifier(Modifier::DIM),
         )),
         Rect {
             x: inner_x,
-            y: area
-                .y
-                .saturating_add(h.saturating_sub(2)),
-            width: inner_w as u16,
+            y: footer_y,
+            width: inner_w,
             height: 1,
         },
     );
@@ -9027,21 +9241,6 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         String::new()
     };
-    // Suggestion-deck affordance (specs 0109/0155): only while the
-    // selected session awaits input — generation is on-demand and the
-    // chord is the entry point, so this is the feature's discoverability.
-    let suggest_hint = match s {
-        Some(sess) if sess.state == SessionState::AwaitingInput => {
-            if let Some(hand) = app.suggestion_hands.get(&sess.id) {
-                format!("✦{} C-x s  ", 1 + hand.verbs.len())
-            } else if app.suggest_pending_active(&sess.id) {
-                "◈ suggesting…  ".to_string()
-            } else {
-                "◇ C-x s  ".to_string()
-            }
-        }
-        _ => String::new(),
-    };
     let approval_mode_label = s.and_then(approval_mode_modeline_label);
     let approval_mode_badge = approval_mode_label.map(|badge| format!("[{badge}]"));
     let context_gauge =
@@ -9177,8 +9376,7 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
     let modeline_pre_hint = format!(
-        "{suggest}{scrollback}{chord}",
-        suggest = suggest_hint,
+        "{scrollback}{chord}",
         scrollback = scrollback_label,
         chord = if app.chord_label.is_empty() {
             String::new()
@@ -10574,7 +10772,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     drag text       select visible TUI text and copy to terminal clipboard
     C-x c           toggle mouse capture off/on for native selection fallback
     C-x v           paste local clipboard (image/file attaches; via construct ssh)
-    C-x s           suggestion deck (next-prompt picks + prompt history)
+    C-x .           suggestion deck (next-prompt picks + prompt history)
 
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
@@ -10649,7 +10847,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     drag text       select visible TUI text and copy to terminal clipboard
     C-x c           toggle mouse capture off/on for native selection fallback
     C-x v           paste local clipboard (image/file attaches; via construct ssh)
-    C-x s           suggestion deck (next-prompt picks + prompt history)
+    C-x .           suggestion deck (next-prompt picks + prompt history)
 
   global
     :               command palette

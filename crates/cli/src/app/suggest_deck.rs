@@ -1,11 +1,15 @@
 //! Suggestion deck (specs 0109/0155) — the TUI surface.
 //!
-//! `C-x s` on an awaiting-input session requests generation via
-//! `session.suggest` and opens a compact popup anchored above the
-//! modeline: the dealt hand's top pick and verbs as rows, plus a
-//! `history` row backed by the global prompt history. The popup is
-//! never modal — it owns only its navigation keys, and any other key
-//! closes it and takes its normal route (typing always wins).
+//! `C-x .` on an awaiting-input session requests generation via
+//! `session.suggest` and opens a two-column popup inside the focused
+//! session pane. Directions stay visible on the left while the selected
+//! direction's concrete prompts appear on the right. Global prompt
+//! history is one direction and gains fuzzy type-ahead search when
+//! selected.
+//!
+//! The popup is otherwise never modal: outside the explicitly selected
+//! history-search surface, printable input closes it and takes its normal
+//! route (typing always wins).
 //!
 //! Accepting a row never sends: for PTY sessions the text is typed
 //! into the harness's own prompt line (no Enter), for non-PTY sessions
@@ -15,34 +19,38 @@
 
 use construct_protocol::{PromptHistoryEntry, SuggestionHand};
 
-/// Which level of the deck the popup is showing.
+/// Which column the keyboard is driving. Both columns stay visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeckView {
-    /// Top pick + verb rows + history row.
-    Fan,
-    /// The cards of one verb.
-    Cards { verb: usize },
-    /// The global prompt history, newest first.
-    History,
+pub enum DeckFocus {
+    /// Top pick + generated directions + history.
+    Categories,
+    /// Concrete prompts for the highlighted category.
+    Cards,
 }
 
-/// Open-popup state. The hand and history themselves live on `App`
-/// (cached per session / globally); this is only the view cursor.
+/// Open-popup state. The hand and history live on `App`; this is only
+/// the two cursors plus the history type-ahead query.
 #[derive(Debug, Clone)]
 pub struct SuggestDeck {
     /// Session the deck was opened for. A selection change closes it.
     pub session_id: String,
-    pub view: DeckView,
-    /// Highlighted row index within the current view's rows.
-    pub selected: usize,
+    pub focus: DeckFocus,
+    /// Highlighted row in the left category column.
+    pub category_selected: usize,
+    /// Highlighted row in the right concrete-prompt column.
+    pub card_selected: usize,
+    /// Fuzzy type-ahead query, active only while History is highlighted.
+    pub history_query: String,
 }
 
 impl SuggestDeck {
     pub fn open(session_id: String) -> Self {
         Self {
             session_id,
-            view: DeckView::Fan,
-            selected: 0,
+            focus: DeckFocus::Categories,
+            category_selected: 0,
+            card_selected: 0,
+            history_query: String::new(),
         }
     }
 }
@@ -54,7 +62,11 @@ pub enum DeckRow {
     /// The hand's top pick — activating stages this text.
     Top(String),
     /// A verb chip — activating opens its cards.
-    Verb { index: usize, label: String, count: usize },
+    Verb {
+        index: usize,
+        label: String,
+        count: usize,
+    },
     /// The global-history entry row — activating opens the history view.
     History { count: usize },
     /// Non-interactive placeholder while generation is in flight.
@@ -74,11 +86,7 @@ impl DeckRow {
 /// opens immediately on request so history stays reachable while the
 /// spinner runs); an empty result means there is nothing to show and
 /// the deck should not open.
-pub fn fan_rows(
-    hand: Option<&SuggestionHand>,
-    history_len: usize,
-    pending: bool,
-) -> Vec<DeckRow> {
+pub fn fan_rows(hand: Option<&SuggestionHand>, history_len: usize, pending: bool) -> Vec<DeckRow> {
     let mut rows = Vec::new();
     if let Some(h) = hand {
         rows.push(DeckRow::Top(h.top.text.clone()));
@@ -100,20 +108,65 @@ pub fn fan_rows(
     rows
 }
 
-/// Rows for a verb's card list. Empty when the verb index is stale
-/// (hand replaced while the view was open) — callers fall back to Fan.
+/// Rows for a verb's card list. Empty when the verb index is stale.
 pub fn card_rows(hand: Option<&SuggestionHand>, verb: usize) -> Vec<DeckRow> {
     hand.and_then(|h| h.verbs.get(verb))
-        .map(|v| v.cards.iter().map(|c| DeckRow::Card(c.text.clone())).collect())
+        .map(|v| {
+            v.cards
+                .iter()
+                .map(|c| DeckRow::Card(c.text.clone()))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-/// Rows for the history view, newest first, capped for display.
-pub fn history_rows(history: &[PromptHistoryEntry], cap: usize) -> Vec<DeckRow> {
-    history
+fn fuzzy_history_score(query: &str, text: &str) -> Option<i32> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Some(0);
+    }
+    let text = text.to_lowercase();
+    if text == query {
+        return Some(400);
+    }
+    if text.starts_with(&query) {
+        return Some(300);
+    }
+    if text.contains(&query) {
+        return Some(200);
+    }
+
+    // Loose subsequence fallback. Tighter matches win; equal scores keep
+    // the history's newest-first order.
+    let mut cursor = 0usize;
+    let mut first = None;
+    let mut last = 0usize;
+    for needle in query.chars().filter(|c| !c.is_whitespace()) {
+        let found = text[cursor..]
+            .char_indices()
+            .find_map(|(offset, hay)| (hay == needle).then_some(cursor + offset))?;
+        first.get_or_insert(found);
+        last = found;
+        cursor = found + text[found..].chars().next()?.len_utf8();
+    }
+    let span = last.saturating_sub(first.unwrap_or(last)) as i32;
+    Some(100 - span.min(80))
+}
+
+/// Fuzzy-filtered history, newest first for equal matches, capped for display.
+pub fn history_rows(history: &[PromptHistoryEntry], query: &str, cap: usize) -> Vec<DeckRow> {
+    let mut matches: Vec<(i32, usize, &PromptHistoryEntry)> = history
         .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            fuzzy_history_score(query, &entry.text).map(|score| (score, index, entry))
+        })
+        .collect();
+    matches.sort_by_key(|(score, index, _)| (std::cmp::Reverse(*score), *index));
+    matches
+        .into_iter()
         .take(cap)
-        .map(|e| DeckRow::Card(e.text.clone()))
+        .map(|(_, _, entry)| DeckRow::Card(entry.text.clone()))
         .collect()
 }
 
@@ -136,22 +189,36 @@ impl App {
             .is_some_and(|at| at.elapsed() < SUGGEST_PENDING_STALE)
     }
 
-    /// The deck rows for the popup's current view, derived fresh from
-    /// the caches so key handling and rendering always agree.
-    pub(crate) fn suggest_rows(&self, deck: &SuggestDeck) -> Vec<DeckRow> {
+    /// Left-column categories, derived fresh so a generated hand can land
+    /// while the popup remains open.
+    pub(crate) fn suggest_categories(&self, deck: &SuggestDeck) -> Vec<DeckRow> {
         let hand = self.suggestion_hands.get(&deck.session_id);
-        match deck.view {
-            DeckView::Fan => fan_rows(
-                hand,
-                self.prompt_history.len(),
-                self.suggest_pending_active(&deck.session_id),
+        fan_rows(
+            hand,
+            self.prompt_history.len(),
+            self.suggest_pending_active(&deck.session_id),
+        )
+    }
+
+    /// Right-column concrete prompts for the highlighted category.
+    pub(crate) fn suggest_cards(&self, deck: &SuggestDeck) -> Vec<DeckRow> {
+        let categories = self.suggest_categories(deck);
+        match categories.get(deck.category_selected) {
+            Some(DeckRow::Top(text)) => vec![DeckRow::Card(text.clone())],
+            Some(DeckRow::Verb { index, .. }) => {
+                card_rows(self.suggestion_hands.get(&deck.session_id), *index)
+            }
+            Some(DeckRow::History { .. }) => history_rows(
+                &self.prompt_history,
+                &deck.history_query,
+                SUGGEST_HISTORY_DISPLAY_CAP,
             ),
-            DeckView::Cards { verb } => card_rows(hand, verb),
-            DeckView::History => history_rows(&self.prompt_history, SUGGEST_HISTORY_DISPLAY_CAP),
+            Some(DeckRow::Generating) => vec![DeckRow::Generating],
+            Some(DeckRow::Card(_)) | None => Vec::new(),
         }
     }
 
-    /// `C-x s`: toggle the deck. Opening refreshes the global prompt
+    /// `C-x .`: toggle the deck. Opening refreshes the global prompt
     /// history and, when the session is at a turn boundary with no hand
     /// cached and no request in flight, kicks off generation — the deck
     /// opens immediately either way so history stays reachable while
@@ -171,9 +238,7 @@ impl App {
         let awaiting = self
             .selected_session()
             .is_some_and(|s| s.state == SessionState::AwaitingInput);
-        if awaiting
-            && !self.suggestion_hands.contains_key(&id)
-            && !self.suggest_pending_active(&id)
+        if awaiting && !self.suggestion_hands.contains_key(&id) && !self.suggest_pending_active(&id)
         {
             if let Ok(r) = self.client.suggest(&id).await {
                 if r.started {
@@ -182,7 +247,7 @@ impl App {
             }
         }
         let deck = SuggestDeck::open(id);
-        if self.suggest_rows(&deck).is_empty() {
+        if self.suggest_categories(&deck).is_empty() {
             self.set_status("no suggestions yet — send a prompt first".to_string());
             return;
         }
@@ -203,37 +268,93 @@ impl App {
             self.suggest_deck = None;
             return false;
         }
-        let rows = self.suggest_rows(&deck);
+        let categories = self.suggest_categories(&deck);
+        let cards = self.suggest_cards(&deck);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        let history_selected = matches!(
+            categories.get(deck.category_selected),
+            Some(DeckRow::History { .. })
+        );
+        // History is the deck's one explicit text-search surface. Once
+        // highlighted, printable input stays here instead of dismissing the
+        // popup; all other categories retain "typing always wins".
+        if history_selected && !ctrl && !alt {
+            match key.code {
+                KeyCode::Char(c) => {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        d.history_query.push(c);
+                        d.focus = DeckFocus::Cards;
+                        d.card_selected = 0;
+                    }
+                    return true;
+                }
+                KeyCode::Backspace if !deck.history_query.is_empty() => {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        d.history_query.pop();
+                        d.card_selected = 0;
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Down => self.move_suggest_selection(1),
             KeyCode::Char('n') if ctrl => self.move_suggest_selection(1),
             KeyCode::Up => self.move_suggest_selection(-1),
             KeyCode::Char('p') if ctrl => self.move_suggest_selection(-1),
-            KeyCode::Enter => self.activate_suggest_row(deck.selected),
+            KeyCode::Enter => self.activate_suggest_selection(),
+            KeyCode::Right => {
+                if deck.focus == DeckFocus::Categories {
+                    self.activate_suggest_selection();
+                }
+            }
             KeyCode::Char(c @ '1'..='9') if !ctrl => {
                 let idx = (c as usize) - ('1' as usize);
-                if idx < rows.len() {
-                    self.activate_suggest_row(idx);
-                }
-            }
-            KeyCode::Char('h')
-                if !ctrl
-                    && matches!(deck.view, DeckView::Fan)
-                    && !self.prompt_history.is_empty() =>
-            {
-                if let Some(d) = self.suggest_deck.as_mut() {
-                    d.view = DeckView::History;
-                    d.selected = 0;
-                }
-            }
-            // Left/Backspace step back one level; from the fan they close.
-            KeyCode::Left | KeyCode::Backspace => match deck.view {
-                DeckView::Fan => self.suggest_deck = None,
-                _ => {
+                let len = match deck.focus {
+                    DeckFocus::Categories => categories.len(),
+                    DeckFocus::Cards => cards.len(),
+                };
+                if idx < len {
                     if let Some(d) = self.suggest_deck.as_mut() {
-                        d.view = DeckView::Fan;
-                        d.selected = 0;
+                        match d.focus {
+                            DeckFocus::Categories => d.category_selected = idx,
+                            DeckFocus::Cards => d.card_selected = idx,
+                        }
+                    }
+                    self.activate_suggest_selection();
+                }
+            }
+            KeyCode::Char('h') if !ctrl && !self.prompt_history.is_empty() => {
+                if let Some(index) = categories
+                    .iter()
+                    .position(|row| matches!(row, DeckRow::History { .. }))
+                {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        d.category_selected = index;
+                        d.card_selected = 0;
+                        d.focus = DeckFocus::Cards;
+                    }
+                }
+            }
+            KeyCode::Tab => {
+                if let Some(d) = self.suggest_deck.as_mut() {
+                    d.focus = match d.focus {
+                        DeckFocus::Categories => DeckFocus::Cards,
+                        DeckFocus::Cards => DeckFocus::Categories,
+                    };
+                }
+            }
+            // Left/Backspace hand focus back to categories; from categories
+            // they close. History Backspace edits a non-empty query above.
+            KeyCode::Left | KeyCode::Backspace => match deck.focus {
+                DeckFocus::Categories => self.suggest_deck = None,
+                DeckFocus::Cards => {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        d.focus = DeckFocus::Categories;
                     }
                 }
             },
@@ -250,43 +371,53 @@ impl App {
         let Some(deck) = self.suggest_deck.clone() else {
             return;
         };
-        let len = self.suggest_rows(&deck).len();
+        let len = match deck.focus {
+            DeckFocus::Categories => self.suggest_categories(&deck).len(),
+            DeckFocus::Cards => self.suggest_cards(&deck).len(),
+        };
         if len == 0 {
             return;
         }
         if let Some(d) = self.suggest_deck.as_mut() {
-            let cur = d.selected as isize;
-            d.selected = (cur + delta).rem_euclid(len as isize) as usize;
+            match d.focus {
+                DeckFocus::Categories => {
+                    let cur = d.category_selected as isize;
+                    d.category_selected = (cur + delta).rem_euclid(len as isize) as usize;
+                    d.card_selected = 0;
+                }
+                DeckFocus::Cards => {
+                    let cur = d.card_selected as isize;
+                    d.card_selected = (cur + delta).rem_euclid(len as isize) as usize;
+                }
+            }
         }
     }
 
-    fn activate_suggest_row(&mut self, index: usize) {
+    fn activate_suggest_selection(&mut self) {
         let Some(deck) = self.suggest_deck.clone() else {
             return;
         };
-        let rows = self.suggest_rows(&deck);
-        let Some(row) = rows.get(index) else {
-            return;
-        };
-        match row {
-            DeckRow::Top(text) | DeckRow::Card(text) => {
+        match deck.focus {
+            DeckFocus::Categories => {
+                let categories = self.suggest_categories(&deck);
+                let Some(row) = categories.get(deck.category_selected) else {
+                    return;
+                };
+                if row.is_activatable() {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        d.focus = DeckFocus::Cards;
+                        d.card_selected = 0;
+                    }
+                }
+            }
+            DeckFocus::Cards => {
+                let cards = self.suggest_cards(&deck);
+                let Some(DeckRow::Card(text)) = cards.get(deck.card_selected) else {
+                    return;
+                };
                 let text = text.clone();
                 self.stage_suggestion(&deck.session_id, text);
             }
-            DeckRow::Verb { index, .. } => {
-                let verb = *index;
-                if let Some(d) = self.suggest_deck.as_mut() {
-                    d.view = DeckView::Cards { verb };
-                    d.selected = 0;
-                }
-            }
-            DeckRow::History { .. } => {
-                if let Some(d) = self.suggest_deck.as_mut() {
-                    d.view = DeckView::History;
-                    d.selected = 0;
-                }
-            }
-            DeckRow::Generating => {}
         }
     }
 
@@ -305,7 +436,6 @@ impl App {
         if pty {
             self.queue_pty_input(session_id.to_string(), text.into_bytes(), "suggestion");
             self.focus = PaneFocus::View;
-            self.set_status("suggestion staged — Enter in the session sends it".to_string());
         } else {
             let cursor = text.chars().count();
             self.minibuffer = Some(Minibuffer {
@@ -327,9 +457,26 @@ impl App {
     pub(crate) fn observe_suggestion_event(&mut self, session_id: &str, event: &SessionEvent) {
         match event {
             SessionEvent::Suggestions(hand) => {
+                let preserve_history = self.suggest_deck.as_ref().is_some_and(|deck| {
+                    deck.session_id == session_id
+                        && matches!(
+                            self.suggest_categories(deck).get(deck.category_selected),
+                            Some(DeckRow::History { .. })
+                        )
+                });
                 self.suggestion_hands
                     .insert(session_id.to_string(), hand.clone());
                 self.suggest_pending.remove(session_id);
+                if preserve_history {
+                    let history_index = self.suggest_deck.as_ref().and_then(|deck| {
+                        self.suggest_categories(deck)
+                            .iter()
+                            .position(|row| matches!(row, DeckRow::History { .. }))
+                    });
+                    if let (Some(index), Some(deck)) = (history_index, self.suggest_deck.as_mut()) {
+                        deck.category_selected = index;
+                    }
+                }
             }
             SessionEvent::Status {
                 state: SessionState::Running,
@@ -371,13 +518,19 @@ mod tests {
                 SuggestionVerb {
                     label: "ship it".into(),
                     cards: vec![
-                        SuggestionCard { text: "open a PR".into() },
-                        SuggestionCard { text: "merge it".into() },
+                        SuggestionCard {
+                            text: "open a PR".into(),
+                        },
+                        SuggestionCard {
+                            text: "merge it".into(),
+                        },
                     ],
                 },
                 SuggestionVerb {
                     label: "dig deeper".into(),
-                    cards: vec![SuggestionCard { text: "add a test".into() }],
+                    cards: vec![SuggestionCard {
+                        text: "add a test".into(),
+                    }],
                 },
             ],
         }
@@ -425,8 +578,44 @@ mod tests {
 
     #[test]
     fn history_rows_cap_display() {
-        let rows = history_rows(&history(30), 10);
+        let rows = history_rows(&history(30), "", 10);
         assert_eq!(rows.len(), 10);
         assert_eq!(rows[0], DeckRow::Card("p0".into()));
+    }
+
+    #[test]
+    fn history_rows_fuzzy_filter_and_rank() {
+        let entries = vec![
+            PromptHistoryEntry {
+                text: "cargo build --workspace".into(),
+                at_ms: 3,
+                session_id: None,
+                harness: None,
+            },
+            PromptHistoryEntry {
+                text: "commit the branch".into(),
+                at_ms: 2,
+                session_id: None,
+                harness: None,
+            },
+            PromptHistoryEntry {
+                text: "check background tasks".into(),
+                at_ms: 1,
+                session_id: None,
+                harness: None,
+            },
+        ];
+        assert_eq!(
+            history_rows(&entries, "c b", 10),
+            vec![
+                DeckRow::Card("cargo build --workspace".into()),
+                DeckRow::Card("check background tasks".into()),
+                DeckRow::Card("commit the branch".into()),
+            ]
+        );
+        assert_eq!(
+            history_rows(&entries, "bgtsk", 10),
+            vec![DeckRow::Card("check background tasks".into())]
+        );
     }
 }

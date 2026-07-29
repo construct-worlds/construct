@@ -149,9 +149,10 @@ pub enum KeyAction {
     /// the `<version> available` segment of the status-bar version notice.
     OpenUpgradeConfirm,
     /// Open the suggestion deck (specs 0109/0155) for the selected
-    /// session: requests next-prompt generation and pops the deck above
-    /// the modeline, with the global prompt history reachable while the
-    /// hand generates. Bound to `C-x s` in both profiles.
+    /// session: requests next-prompt generation and opens the two-column
+    /// deck inside the focused session pane, with global prompt history
+    /// reachable while the hand generates. Bound to `C-x .` in both
+    /// profiles.
     OpenSuggestions,
     /// Start the interactive tutorial (spec 0077). Bound to bare `t` in both
     /// profiles (verified unbound elsewhere in both tables). A no-op while a
@@ -342,7 +343,7 @@ fn emacs() -> Keymap {
         (Chord(vec![ctrl('x'), ch(' ')]), OpenProgram),
         (Chord(vec![ctrl('x'), ctrl('s')]), SaveProgram),
         // Suggestion deck (specs 0109/0155): request + open the popup.
-        (Chord(vec![ctrl('x'), ch('s')]), OpenSuggestions),
+        (Chord(vec![ctrl('x'), ch('.')]), OpenSuggestions),
         (Chord(vec![ctrl('x'), ch('u')]), UndoProgram),
         (Chord(vec![ctrl('x'), ctrl('r')]), RunProgram),
         (
@@ -422,7 +423,7 @@ fn vim() -> Keymap {
         (Chord(vec![ctrl('x'), ch(' ')]), OpenProgram),
         (Chord(vec![ctrl('x'), ctrl('s')]), SaveProgram),
         // Suggestion deck (specs 0109/0155): request + open the popup.
-        (Chord(vec![ctrl('x'), ch('s')]), OpenSuggestions),
+        (Chord(vec![ctrl('x'), ch('.')]), OpenSuggestions),
         (Chord(vec![ctrl('x'), ch('u')]), UndoProgram),
         (Chord(vec![ctrl('x'), ctrl('r')]), RunProgram),
         (
@@ -644,12 +645,10 @@ mod tests {
     /// disables the earlier binding. Keep every profile's table free of
     /// duplicates.
     #[test]
-    fn c_x_s_opens_suggestions_in_both_profiles() {
+    fn c_x_dot_opens_suggestions_in_both_profiles() {
         for profile in [Profile::Emacs, Profile::Vim] {
             let km = default_for(profile);
-            assert_action(&km, vec![ctrl('x'), ch('s')], KeyAction::OpenSuggestions);
-            // The save chord keeps its ctrl'd spelling, distinct from
-            // the deck's plain `s`.
+            assert_action(&km, vec![ctrl('x'), ch('.')], KeyAction::OpenSuggestions);
             assert_action(&km, vec![ctrl('x'), ctrl('s')], KeyAction::SaveProgram);
         }
     }
