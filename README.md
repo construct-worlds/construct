@@ -108,9 +108,13 @@ construct new codex
 construct new claude --model opus
 ```
 
-MIDI controllers can drive those same native TUI actions without keyboard
-emulation. See [MIDI control surfaces](docs/midi.md) for device discovery and
-the `construct midi learn` workflow, including OP–XY setup.
+To open construct on a remote machine with working copy and paste of text and
+images, plus drag-and-drop file upload from your laptop into the remote TUI:
+
+```sh
+construct ssh devbox
+construct ssh -J bastion -p 2222 devbox
+```
 
 To run the daemon explicitly instead (e.g. on a server, or under a process
 supervisor):
