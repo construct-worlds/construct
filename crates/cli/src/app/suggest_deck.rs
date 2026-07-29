@@ -1,15 +1,17 @@
 //! Suggestion deck (specs 0109/0155) — the TUI surface.
 //!
-//! `C-x .` on an awaiting-input session requests generation via
-//! `session.suggest` and opens a two-column popup inside the focused
-//! session pane. Categories stay visible on the left while the selected
-//! category's concrete prompts appear on the right. Global prompt
-//! history is one category and gains fuzzy type-ahead search when
-//! selected; `r` opens an explicit keyword field for guided regeneration.
+//! `C-x .` on an awaiting-input session opens a two-column popup inside
+//! the focused session pane. Generation is **not** kicked off on open —
+//! the left column starts with History and Generate (or Regenerate once a
+//! hand is cached); the user must activate Generate to request a hand via
+//! `session.suggest`. Categories stay visible on the left while the
+//! selected category's concrete prompts appear on the right. History gains
+//! fuzzy type-ahead when selected; Generate/Regenerate opens an explicit
+//! keyword field for optional guided (re)generation.
 //!
 //! The popup is otherwise never modal: outside the explicitly selected
-//! history-search surface, printable input closes it and takes its normal
-//! route (typing always wins).
+//! history-search / keyword surfaces, printable input closes it and takes
+//! its normal route (typing always wins).
 //!
 //! Accepting a row never sends: for PTY sessions the text is typed
 //! into the harness's own prompt line (no Enter), for non-PTY sessions
@@ -51,7 +53,8 @@ impl SuggestDeckHitZone {
 }
 
 /// Open-popup state. The hand and history live on `App`; this is only
-/// the two cursors plus the history type-ahead query.
+/// the two cursors plus the history type-ahead query and per-column
+/// scroll offsets (when the body is taller than the height cap).
 #[derive(Debug, Clone)]
 pub struct SuggestDeck {
     /// Session the deck was opened for. A selection change closes it.
@@ -61,6 +64,10 @@ pub struct SuggestDeck {
     pub category_selected: usize,
     /// Highlighted row in the right concrete-prompt column.
     pub card_selected: usize,
+    /// First visible row of the left column when content exceeds the body.
+    pub category_scroll: usize,
+    /// First visible row of the right column when content exceeds the body.
+    pub card_scroll: usize,
     /// Fuzzy type-ahead query, active only while History is highlighted.
     pub history_query: String,
     /// Explicit keyword-entry surface for a guided regeneration. `Some("")`
@@ -75,9 +82,30 @@ impl SuggestDeck {
             focus: DeckFocus::Categories,
             category_selected: 0,
             card_selected: 0,
+            category_scroll: 0,
+            card_scroll: 0,
             history_query: String::new(),
             regenerate_query: None,
         }
+    }
+
+    /// Keep `selected` inside the viewport of `scroll` given `visible` rows.
+    pub fn ensure_visible(scroll: &mut usize, selected: usize, len: usize, visible: usize) {
+        if visible == 0 || len == 0 {
+            *scroll = 0;
+            return;
+        }
+        let max_scroll = len.saturating_sub(visible);
+        if selected < *scroll {
+            *scroll = selected;
+        } else if selected >= *scroll + visible {
+            *scroll = selected + 1 - visible;
+        }
+        *scroll = (*scroll).min(max_scroll);
+    }
+
+    pub fn clamp_scroll(scroll: &mut usize, len: usize, visible: usize) {
+        *scroll = (*scroll).min(len.saturating_sub(visible));
     }
 }
 
@@ -95,8 +123,10 @@ pub enum DeckRow {
     },
     /// The global-history entry row — activating opens the history view.
     History { count: usize },
-    /// A regular final category that opens keyword-guided regeneration.
-    Regenerate,
+    /// Final category that opens optional keyword guidance, then requests
+    /// a hand. `regenerate` is true when a hand is already cached (label
+    /// "Regenerate"); false on first request (label "Generate").
+    Generate { regenerate: bool },
     /// Non-interactive placeholder while generation is in flight.
     Generating,
     /// A concrete prompt (verb card or history entry) — activating
@@ -110,10 +140,10 @@ impl DeckRow {
     }
 }
 
-/// Rows for the fan view. The hand may not have arrived yet (the deck
-/// opens immediately on request so history stays reachable while the
-/// spinner runs); an empty result means there is nothing to show and
-/// the deck should not open.
+/// Rows for the fan view. Opening the deck does **not** start generation;
+/// History and Generate are always available so the user can recall prior
+/// prompts or explicitly request a hand. While a request is in flight the
+/// Generate row is replaced by a non-activatable spinner.
 pub fn fan_rows(hand: Option<&SuggestionHand>, history_len: usize, pending: bool) -> Vec<DeckRow> {
     let mut rows = Vec::new();
     if let Some(h) = hand {
@@ -128,13 +158,15 @@ pub fn fan_rows(hand: Option<&SuggestionHand>, history_len: usize, pending: bool
     } else if pending {
         rows.push(DeckRow::Generating);
     }
-    if history_len > 0 {
-        rows.push(DeckRow::History { count: history_len });
-    }
-    // Regeneration is an idle action, not a loading-state affordance:
-    // hide it while any hand is already being generated.
+    // History is always listed so the recall surface is discoverable even
+    // before the user has typed anything this session.
+    rows.push(DeckRow::History { count: history_len });
+    // Generation is an idle action: hide it while a request is already
+    // in flight (the Generating row covers that state).
     if !pending {
-        rows.push(DeckRow::Regenerate);
+        rows.push(DeckRow::Generate {
+            regenerate: hand.is_some(),
+        });
     }
     rows
 }
@@ -213,6 +245,19 @@ pub(crate) const SUGGEST_PENDING_STALE: Duration = Duration::from_millis(125_000
 /// How many history entries the history view shows at most.
 pub(crate) const SUGGEST_HISTORY_DISPLAY_CAP: usize = 10;
 
+/// Cap on the two-column body (categories / cards) so a huge hand or
+/// history cannot cover the whole session pane. Chrome (borders, header,
+/// optional input strip, footer) is counted separately.
+pub(crate) const SUGGEST_DECK_MAX_BODY: u16 = 12;
+
+/// Whether the deck reserves a permanent input-strip row in its height
+/// (History and Generate both surface one when selected).
+pub(crate) fn suggest_reserves_input_row(categories: &[DeckRow]) -> bool {
+    categories
+        .iter()
+        .any(|row| matches!(row, DeckRow::History { .. } | DeckRow::Generate { .. }))
+}
+
 impl App {
     pub(crate) fn suggest_pending_active(&self, id: &str) -> bool {
         self.suggest_pending
@@ -244,17 +289,42 @@ impl App {
                 &deck.history_query,
                 SUGGEST_HISTORY_DISPLAY_CAP,
             ),
-            Some(DeckRow::Regenerate) => Vec::new(),
+            Some(DeckRow::Generate { .. }) => Vec::new(),
             Some(DeckRow::Generating) => vec![DeckRow::Generating],
             Some(DeckRow::Card(_)) | None => Vec::new(),
         }
     }
 
+    /// Tallest right-column content across every left-column category
+    /// (unfiltered history, full verb card counts). Used to pin the popup
+    /// height so switching categories does not resize it.
+    pub(crate) fn suggest_max_right_rows(&self, deck: &SuggestDeck) -> usize {
+        let categories = self.suggest_categories(deck);
+        let mut max = 1usize;
+        for row in &categories {
+            let n = match row {
+                DeckRow::Top(_) => 1,
+                DeckRow::Verb { count, .. } => (*count).max(1),
+                // Size for the unfiltered history cap so type-ahead filtering
+                // does not shrink the popup either.
+                DeckRow::History { count } => (*count)
+                    .min(SUGGEST_HISTORY_DISPLAY_CAP)
+                    .max(1),
+                // Help line under the keyword field.
+                DeckRow::Generate { .. } | DeckRow::Generating => 1,
+                DeckRow::Card(_) => 1,
+            };
+            max = max.max(n);
+        }
+        max
+    }
+
+
+
     /// `C-x .`: toggle the deck. Opening refreshes the global prompt
-    /// history and, when the session is at a turn boundary with no hand
-    /// cached and no request in flight, kicks off generation — the deck
-    /// opens immediately either way so history stays reachable while
-    /// the spinner runs (mirrors the web deck).
+    /// history but does **not** start generation — the user picks History
+    /// to recall prior prompts, or Generate/Regenerate to request a hand
+    /// (spec 0109: on demand only).
     pub(super) async fn toggle_suggest_deck(&mut self) {
         if self.suggest_deck.is_some() {
             self.suggest_deck = None;
@@ -267,18 +337,9 @@ impl App {
         if let Ok(r) = self.client.prompt_history_list(Some(50)).await {
             self.prompt_history = r.entries;
         }
-        let awaiting = self
-            .selected_session()
-            .is_some_and(|s| s.state == SessionState::AwaitingInput);
-        if awaiting && !self.suggestion_hands.contains_key(&id) && !self.suggest_pending_active(&id)
-        {
-            if let Ok(r) = self.client.suggest(&id).await {
-                if r.started {
-                    self.suggest_pending.insert(id.clone(), Instant::now());
-                }
-            }
-        }
         let deck = SuggestDeck::open(id);
+        // fan_rows always yields at least History + Generate (or a spinner
+        // while a prior request is still in flight).
         if self.suggest_categories(&deck).is_empty() {
             self.set_status("no suggestions yet — send a prompt first".to_string());
             return;
@@ -314,9 +375,10 @@ impl App {
             return true;
         }
 
-        // Guided regeneration is the deck's second explicit text surface.
-        // Enter replaces the cached hand with a fresh request steered by the
-        // supplied keywords; all text remains local until that submit.
+        // Guided (re)generation is the deck's second explicit text surface.
+        // Enter submits a request steered by the optional keywords; Left
+        // (or Backspace on an empty field) returns to the category list
+        // without closing the deck; Esc/C-g still close entirely above.
         if let Some(query) = deck.regenerate_query.as_ref() {
             match key.code {
                 KeyCode::Char(c) if !ctrl && !alt => {
@@ -326,17 +388,25 @@ impl App {
                         }
                     }
                 }
-                KeyCode::Backspace => {
+                KeyCode::Backspace if !query.is_empty() => {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         if let Some(q) = d.regenerate_query.as_mut() {
                             q.pop();
                         }
                     }
                 }
+                KeyCode::Left | KeyCode::Backspace => {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        d.regenerate_query = None;
+                        d.focus = DeckFocus::Categories;
+                    }
+                }
                 KeyCode::Enter => {
                     let keywords = query.clone();
                     self.regenerate_suggestions(keywords).await;
                 }
+                // Swallow other keys so they don't fall through to "typing
+                // always wins" and dismiss the deck while the field is open.
                 _ => {}
             }
             return true;
@@ -356,6 +426,7 @@ impl App {
                         d.history_query.push(c);
                         d.focus = DeckFocus::Cards;
                         d.card_selected = 0;
+                        d.card_scroll = 0;
                     }
                     return true;
                 }
@@ -363,6 +434,7 @@ impl App {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.history_query.pop();
                         d.card_selected = 0;
+                        d.card_scroll = 0;
                     }
                     return true;
                 }
@@ -370,12 +442,23 @@ impl App {
             }
         }
 
-        // Outside History (where `r` remains ordinary fuzzy-search text),
-        // open the explicit guided-regeneration input.
-        if !history_selected && !ctrl && !alt && matches!(key.code, KeyCode::Char('r')) {
-            if let Some(d) = self.suggest_deck.as_mut() {
-                d.regenerate_query = Some(String::new());
-                d.focus = DeckFocus::Cards;
+        // Outside History (where `g`/`r` remain ordinary fuzzy-search text),
+        // open the explicit guided-generation keyword field. Prefer the
+        // Generate/Regenerate row when present so the highlight tracks.
+        if !history_selected
+            && !ctrl
+            && !alt
+            && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('r'))
+        {
+            if let Some(index) = categories
+                .iter()
+                .position(|row| matches!(row, DeckRow::Generate { .. }))
+            {
+                if let Some(d) = self.suggest_deck.as_mut() {
+                    d.category_selected = index;
+                    d.regenerate_query = Some(String::new());
+                    d.focus = DeckFocus::Cards;
+                }
             }
             return true;
         }
@@ -400,10 +483,15 @@ impl App {
                 if idx < len {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         match d.focus {
-                            DeckFocus::Categories => d.category_selected = idx,
+                            DeckFocus::Categories => {
+                                d.category_selected = idx;
+                                d.card_selected = 0;
+                                d.card_scroll = 0;
+                            }
                             DeckFocus::Cards => d.card_selected = idx,
                         }
                     }
+                    self.ensure_suggest_selection_visible();
                     self.activate_suggest_selection();
                 }
             }
@@ -415,8 +503,10 @@ impl App {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.category_selected = index;
                         d.card_selected = 0;
+                        d.card_scroll = 0;
                         d.focus = DeckFocus::Cards;
                     }
+                    self.ensure_suggest_selection_visible();
                 }
             }
             KeyCode::Tab => {
@@ -488,25 +578,104 @@ impl App {
         let Some(deck) = self.suggest_deck.clone() else {
             return;
         };
+        let categories_len = self.suggest_categories(&deck).len();
+        let cards_len = self.suggest_cards(&deck).len();
         let len = match deck.focus {
-            DeckFocus::Categories => self.suggest_categories(&deck).len(),
-            DeckFocus::Cards => self.suggest_cards(&deck).len(),
+            DeckFocus::Categories => categories_len,
+            DeckFocus::Cards => cards_len,
         };
         if len == 0 {
             return;
         }
+        let visible = self.layout.suggest_deck_visible_rows.max(1);
         if let Some(d) = self.suggest_deck.as_mut() {
             match d.focus {
                 DeckFocus::Categories => {
                     let cur = d.category_selected as isize;
                     d.category_selected = (cur + delta).rem_euclid(len as isize) as usize;
                     d.card_selected = 0;
+                    d.card_scroll = 0;
+                    SuggestDeck::ensure_visible(
+                        &mut d.category_scroll,
+                        d.category_selected,
+                        categories_len,
+                        visible,
+                    );
                 }
                 DeckFocus::Cards => {
                     let cur = d.card_selected as isize;
                     d.card_selected = (cur + delta).rem_euclid(len as isize) as usize;
+                    SuggestDeck::ensure_visible(
+                        &mut d.card_scroll,
+                        d.card_selected,
+                        cards_len,
+                        visible,
+                    );
                 }
             }
+        }
+    }
+
+    /// Mouse wheel over the suggestion deck. Scrolls the column under the
+    /// pointer (divider decides left/right); falls back to the focused
+    /// column when the pointer is over chrome. Returns true when consumed.
+    pub(super) fn scroll_suggest_deck(&mut self, col: u16, row: u16, delta: isize) -> bool {
+        let Some(area) = self.layout.suggest_deck_area else {
+            return false;
+        };
+        if !Self::rect_contains(area, col, row) {
+            return false;
+        }
+        let Some(deck) = self.suggest_deck.clone() else {
+            return false;
+        };
+        let visible = self.layout.suggest_deck_visible_rows.max(1);
+        let categories_len = self.suggest_categories(&deck).len();
+        let cards_len = self.suggest_cards(&deck).len();
+        let left = self
+            .layout
+            .suggest_deck_divider_x
+            .is_some_and(|div| col <= div)
+            || (self.layout.suggest_deck_divider_x.is_none()
+                && deck.focus == DeckFocus::Categories);
+        if let Some(d) = self.suggest_deck.as_mut() {
+            if left {
+                let max = categories_len.saturating_sub(visible);
+                if max > 0 {
+                    let next = (d.category_scroll as isize + delta).clamp(0, max as isize) as usize;
+                    d.category_scroll = next;
+                }
+            } else {
+                let max = cards_len.saturating_sub(visible);
+                if max > 0 {
+                    let next = (d.card_scroll as isize + delta).clamp(0, max as isize) as usize;
+                    d.card_scroll = next;
+                }
+            }
+        }
+        true
+    }
+
+    fn ensure_suggest_selection_visible(&mut self) {
+        let Some(deck) = self.suggest_deck.clone() else {
+            return;
+        };
+        let visible = self.layout.suggest_deck_visible_rows.max(1);
+        let categories_len = self.suggest_categories(&deck).len();
+        let cards_len = self.suggest_cards(&deck).len();
+        if let Some(d) = self.suggest_deck.as_mut() {
+            SuggestDeck::ensure_visible(
+                &mut d.category_scroll,
+                d.category_selected,
+                categories_len,
+                visible,
+            );
+            SuggestDeck::ensure_visible(
+                &mut d.card_scroll,
+                d.card_selected,
+                cards_len,
+                visible,
+            );
         }
     }
 
@@ -520,16 +689,19 @@ impl App {
                 let Some(row) = categories.get(deck.category_selected) else {
                     return;
                 };
-                if matches!(row, DeckRow::Regenerate) {
+                if matches!(row, DeckRow::Generate { .. }) {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.regenerate_query = Some(String::new());
                         d.focus = DeckFocus::Cards;
+                        d.card_scroll = 0;
                     }
                 } else if row.is_activatable() {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.focus = DeckFocus::Cards;
                         d.card_selected = 0;
+                        d.card_scroll = 0;
                     }
+                    self.ensure_suggest_selection_visible();
                 }
             }
             DeckFocus::Cards => {
@@ -559,9 +731,11 @@ impl App {
                 if let Some(d) = self.suggest_deck.as_mut() {
                     d.category_selected = index;
                     d.card_selected = 0;
+                    d.card_scroll = 0;
                     d.focus = DeckFocus::Categories;
                 }
-                if matches!(row, DeckRow::Regenerate) {
+                self.ensure_suggest_selection_visible();
+                if matches!(row, DeckRow::Generate { .. }) {
                     self.activate_suggest_selection();
                 }
             }
@@ -574,6 +748,7 @@ impl App {
                     d.card_selected = index;
                     d.focus = DeckFocus::Cards;
                 }
+                self.ensure_suggest_selection_visible();
                 self.activate_suggest_selection();
             }
         }
@@ -714,18 +889,23 @@ mod tests {
         assert!(matches!(rows[1], DeckRow::Verb { index: 0, .. }));
         assert!(matches!(rows[2], DeckRow::Verb { index: 1, .. }));
         assert_eq!(rows[3], DeckRow::History { count: 3 });
-        assert_eq!(rows[4], DeckRow::Regenerate);
+        assert_eq!(rows[4], DeckRow::Generate { regenerate: true });
     }
 
     #[test]
-    fn fan_without_hand_shows_spinner_then_history() {
-        let rows = fan_rows(None, 2, true);
-        assert_eq!(rows[0], DeckRow::Generating);
-        assert_eq!(rows[1], DeckRow::History { count: 2 });
-        assert_eq!(rows.len(), 2, "Regenerate hides while loading");
-        assert!(!rows[0].is_activatable());
-        // Regeneration remains available even with no cached hand/history.
-        assert_eq!(fan_rows(None, 0, false), vec![DeckRow::Regenerate]);
+    fn fan_without_hand_shows_history_and_generate() {
+        assert_eq!(
+            fan_rows(None, 0, false),
+            vec![
+                DeckRow::History { count: 0 },
+                DeckRow::Generate { regenerate: false },
+            ]
+        );
+        let pending = fan_rows(None, 2, true);
+        assert_eq!(pending[0], DeckRow::Generating);
+        assert_eq!(pending[1], DeckRow::History { count: 2 });
+        assert_eq!(pending.len(), 2, "Generate hides while loading");
+        assert!(!pending[0].is_activatable());
     }
 
     #[test]
@@ -741,6 +921,40 @@ mod tests {
         let rows = history_rows(&history(30), "", 10);
         assert_eq!(rows.len(), 10);
         assert_eq!(rows[0], DeckRow::Card("p0".into()));
+    }
+
+    #[test]
+    fn ensure_visible_scrolls_selection_into_viewport() {
+        let mut scroll = 0usize;
+        SuggestDeck::ensure_visible(&mut scroll, 14, 20, 5);
+        assert_eq!(scroll, 10, "selection 14 needs scroll so 10..15 is shown");
+        SuggestDeck::ensure_visible(&mut scroll, 2, 20, 5);
+        assert_eq!(scroll, 2, "selection above the viewport pulls scroll up");
+        SuggestDeck::ensure_visible(&mut scroll, 4, 20, 5);
+        assert_eq!(scroll, 2, "already-visible selection leaves scroll alone");
+        SuggestDeck::clamp_scroll(&mut scroll, 3, 5);
+        assert_eq!(scroll, 0, "clamp when content fits the viewport");
+    }
+
+    #[test]
+    fn max_right_rows_uses_tallest_category() {
+        // Verb with 2 cards is taller than top (1) or history (when empty
+        // query would still count history entries).
+        let h = hand();
+        let rows = fan_rows(Some(&h), 3, false);
+        // Simulate App::suggest_max_right_rows logic without a full App:
+        let max = rows
+            .iter()
+            .map(|row| match row {
+                DeckRow::Top(_) => 1,
+                DeckRow::Verb { count, .. } => (*count).max(1),
+                DeckRow::History { count } => (*count).min(SUGGEST_HISTORY_DISPLAY_CAP).max(1),
+                DeckRow::Generate { .. } | DeckRow::Generating | DeckRow::Card(_) => 1,
+            })
+            .max()
+            .unwrap_or(1);
+        assert_eq!(max, 3, "history count 3 beats verb cards 2");
+        assert!(suggest_reserves_input_row(&rows));
     }
 
     #[test]

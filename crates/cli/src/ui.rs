@@ -301,6 +301,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.suggest_affordance_hit = None;
     app.layout.suggest_deck_area = None;
     app.layout.suggest_deck_hits.clear();
+    app.layout.suggest_deck_visible_rows = 0;
+    app.layout.suggest_deck_divider_x = None;
     app.layout.main_window_areas.clear();
     app.layout.main_window_dividers.clear();
     app.layout.session_title_name_hits.clear();
@@ -5079,45 +5081,51 @@ fn render_suggest_affordance_tooltip(
 /// the unlabeled left column while concrete prompts for the highlighted
 /// category remain visible in the right, matching the model-routing
 /// popup's inspect-then-choose rhythm. History search and guided
-/// regeneration are explicit text surfaces; printable input elsewhere
-/// still dismisses and re-routes.
+/// generation are explicit text surfaces with an underlined input field;
+/// printable input elsewhere still dismisses and re-routes.
 fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     use crate::app::suggest_deck::{
-        DeckFocus, DeckRow, SuggestDeckHit, SuggestDeckHitZone,
+        DeckFocus, DeckRow, SuggestDeck, SuggestDeckHit, SuggestDeckHitZone,
     };
-    let Some(deck) = &app.suggest_deck else {
+    // Clone so we can still mutably update scroll offsets after sizing.
+    let Some(deck) = app.suggest_deck.clone() else {
         return;
     };
     let Some(pane) = focused_session_pane(app) else {
         return;
     };
-    let categories = app.suggest_categories(deck);
+    let categories = app.suggest_categories(&deck);
     let cards = if deck.regenerate_query.is_some() {
         Vec::new()
     } else {
-        app.suggest_cards(deck)
+        app.suggest_cards(&deck)
     };
     let bounds = pane.inner_area;
     if categories.is_empty() || bounds.width < 32 || bounds.height < 8 {
         return;
     }
+    // Capture spinner up front so the label helpers do not borrow `app`
+    // across the mutable scroll-offset update below.
+    let spinner = app.spinner_frame().to_string();
     let category_label = |row: &DeckRow| -> String {
         match row {
             DeckRow::Top(_) => "top pick".to_string(),
             DeckRow::Verb { label, count, .. } => format!("{label} › ({count})"),
             DeckRow::History { count } => format!("history › ({count})"),
-            DeckRow::Regenerate => "Regenerate".to_string(),
-            DeckRow::Generating => format!("{} suggesting…", app.spinner_frame()),
+            DeckRow::Generate { regenerate: true } => "Regenerate".to_string(),
+            DeckRow::Generate { regenerate: false } => "Generate".to_string(),
+            DeckRow::Generating => format!("{spinner} suggesting…"),
             DeckRow::Card(text) => text.clone(),
         }
     };
     let card_label = |row: &DeckRow| -> String {
         match row {
-            DeckRow::Generating => format!("{} suggesting…", app.spinner_frame()),
+            DeckRow::Generating => format!("{spinner} suggesting…"),
             DeckRow::Card(text) | DeckRow::Top(text) => text.clone(),
             DeckRow::Verb { label, .. } => label.clone(),
             DeckRow::History { .. } => "history".to_string(),
-            DeckRow::Regenerate => "regenerate".to_string(),
+            DeckRow::Generate { regenerate: true } => "regenerate".to_string(),
+            DeckRow::Generate { regenerate: false } => "generate".to_string(),
         }
     };
     let longest_category = categories
@@ -5137,9 +5145,34 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    let body_rows = categories.len().max(cards.len()).max(1) as u16;
-    // border + column headings + body + footer
-    let wanted_h = body_rows.saturating_add(4);
+    let history_selected = matches!(
+        categories.get(deck.category_selected),
+        Some(DeckRow::History { .. })
+    );
+    let generate_selected = matches!(
+        categories.get(deck.category_selected),
+        Some(DeckRow::Generate { .. })
+    );
+    let generate_is_regen = matches!(
+        categories.get(deck.category_selected),
+        Some(DeckRow::Generate {
+            regenerate: true
+        })
+    );
+    // History (when highlighted) and the open keyword field each show a
+    // dedicated underlined input row. Height always reserves that strip when
+    // History/Generate exist, so selecting them does not grow the popup.
+    let show_text_input = history_selected || deck.regenerate_query.is_some();
+    use crate::app::suggest_deck::{suggest_reserves_input_row, SUGGEST_DECK_MAX_BODY};
+    let reserve_input: u16 = u16::from(suggest_reserves_input_row(&categories));
+    let max_right = app.suggest_max_right_rows(&deck);
+    // Pin body to the taller of the left column and the tallest right column
+    // across every category, then cap so huge hands cannot cover the pane.
+    let body_rows = (categories.len().max(max_right).max(1) as u16).min(SUGGEST_DECK_MAX_BODY);
+    // border + column headings + reserved input strip + body + footer
+    let wanted_h = body_rows
+        .saturating_add(4)
+        .saturating_add(reserve_input);
     let hint_y = pane
         .area
         .y
@@ -5174,33 +5207,35 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     let divider_x = inner_x.saturating_add(category_w);
     let cards_x = divider_x.saturating_add(1);
     let header_y = area.y.saturating_add(1);
-    let body_y = header_y.saturating_add(1);
+    let input_y = header_y.saturating_add(1);
+    // When the input strip is reserved but not shown (e.g. top pick), body
+    // starts immediately under the header and leftover rows sit empty above
+    // the footer — keeping height stable without a blank "ghost" field.
+    let body_y = if show_text_input {
+        header_y.saturating_add(1).saturating_add(1)
+    } else {
+        header_y.saturating_add(1)
+    };
     let footer_y = area.y.saturating_add(area.height).saturating_sub(2);
     let visible_rows = footer_y.saturating_sub(body_y) as usize;
     let mut hit_zones = Vec::new();
 
-    let history_selected = matches!(
-        categories.get(deck.category_selected),
-        Some(DeckRow::History { .. })
-    );
-    let regenerate_selected = matches!(
-        categories.get(deck.category_selected),
-        Some(DeckRow::Regenerate)
-    );
-    let right_header = if let Some(query) = deck.regenerate_query.as_ref() {
-        if query.is_empty() {
-            "regenerate · type keywords_".to_string()
+    let right_header = if deck.regenerate_query.is_some() {
+        if generate_is_regen {
+            "regenerate"
         } else {
-            format!("regenerate / {query}_")
+            "generate"
         }
+        .to_string()
     } else if history_selected {
-        if deck.history_query.is_empty() {
-            "history · type to search".to_string()
+        "history".to_string()
+    } else if generate_selected {
+        if generate_is_regen {
+            "regenerate"
         } else {
-            format!("history / {}_", deck.history_query)
+            "generate"
         }
-    } else if regenerate_selected {
-        "regenerate".to_string()
+        .to_string()
     } else {
         "prompts".to_string()
     };
@@ -5242,6 +5277,65 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         },
     );
 
+    // Underlined text field for History search / Generate keywords — the
+    // visual cue that typing stays in the deck instead of dismissing it.
+    if show_text_input {
+        let (value, placeholder, active) = if let Some(query) = deck.regenerate_query.as_ref() {
+            (
+                query.as_str(),
+                if generate_is_regen {
+                    "optional keywords to guide regeneration…"
+                } else {
+                    "optional keywords to guide generation…"
+                },
+                true,
+            )
+        } else {
+            (
+                deck.history_query.as_str(),
+                "type to search history…",
+                deck.focus == DeckFocus::Cards || !deck.history_query.is_empty(),
+            )
+        };
+        let field_style = Style::default()
+            .fg(if value.is_empty() {
+                app.theme.muted
+            } else {
+                app.theme.text
+            })
+            .add_modifier(if active {
+                Modifier::UNDERLINED
+            } else {
+                Modifier::UNDERLINED | Modifier::DIM
+            });
+        let display = if value.is_empty() {
+            format!(" {placeholder}")
+        } else {
+            format!(" {value}▌")
+        };
+        // Blank the right column cell fully so the underline reads as a
+        // continuous input bar, not a short label.
+        let mut field = truncate_to_width(&display, card_w as usize);
+        let pad = (card_w as usize).saturating_sub(UnicodeWidthStr::width(field.as_str()));
+        field.push_str(&" ".repeat(pad));
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    fit_cell("", category_w as usize),
+                    Style::default(),
+                ),
+                Span::styled("│", Style::default().fg(app.theme.border)),
+                Span::styled(field, field_style),
+            ])),
+            Rect {
+                x: inner_x,
+                y: input_y,
+                width: inner_w,
+                height: 1,
+            },
+        );
+    }
+
     let row_style = |enabled: bool, highlighted: bool, focused: bool| {
         if !enabled {
             Style::default()
@@ -5261,6 +5355,19 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         }
     };
 
+    // Clamp scroll against this frame's viewport before painting so a
+    // shrink (hand arrival, history filter) never leaves empty rows.
+    let mut cat_scroll = deck.category_scroll;
+    let mut card_scroll = deck.card_scroll;
+    SuggestDeck::clamp_scroll(&mut cat_scroll, categories.len(), visible_rows);
+    SuggestDeck::clamp_scroll(&mut card_scroll, cards.len(), visible_rows);
+    if let Some(d) = app.suggest_deck.as_mut() {
+        d.category_scroll = cat_scroll;
+        d.card_scroll = card_scroll;
+    }
+    // Stash visible row count for mouse-wheel / ensure-visible handlers.
+    app.layout.suggest_deck_visible_rows = visible_rows;
+
     for row in 0..visible_rows {
         let y = body_y.saturating_add(row as u16);
         f.render_widget(
@@ -5276,10 +5383,13 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
             },
         );
     }
-    for (index, row) in categories.iter().take(visible_rows).enumerate() {
+    for (paint_i, index) in (cat_scroll..).take(visible_rows).enumerate() {
+        let Some(row) = categories.get(index) else {
+            break;
+        };
         let row_area = Rect {
             x: inner_x,
-            y: body_y.saturating_add(index as u16),
+            y: body_y.saturating_add(paint_i as u16),
             width: category_w,
             height: 1,
         };
@@ -5288,6 +5398,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
             .is_some_and(|(mx, my)| mx >= row_area.x
                 && mx < row_area.x + row_area.width
                 && my == row_area.y);
+        // Digit accelerators still refer to absolute 1-based indices.
         let prefix = if index < 9 {
             format!("{} ", index + 1)
         } else {
@@ -5319,7 +5430,11 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     if deck.regenerate_query.is_some() {
         f.render_widget(
             Paragraph::new(Line::styled(
-                "Enter to regenerate with these keywords",
+                if generate_is_regen {
+                    "Enter to regenerate · ← back"
+                } else {
+                    "Enter to generate · ← back"
+                },
                 Style::default()
                     .fg(app.theme.muted)
                     .add_modifier(Modifier::DIM),
@@ -5331,10 +5446,10 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                 height: 1,
             },
         );
-    } else if regenerate_selected {
+    } else if generate_selected {
         f.render_widget(
             Paragraph::new(Line::styled(
-                "Enter to provide optional keywords",
+                "Enter for optional keywords, then generate",
                 Style::default()
                     .fg(app.theme.muted)
                     .add_modifier(Modifier::DIM),
@@ -5361,11 +5476,29 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                 height: 1,
             },
         );
+    } else if cards.is_empty() && history_selected {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                "no prompts in history yet",
+                Style::default()
+                    .fg(app.theme.border)
+                    .add_modifier(Modifier::DIM),
+            )),
+            Rect {
+                x: cards_x,
+                y: body_y,
+                width: card_w,
+                height: 1,
+            },
+        );
     } else {
-        for (index, row) in cards.iter().take(visible_rows).enumerate() {
+        for (paint_i, index) in (card_scroll..).take(visible_rows).enumerate() {
+            let Some(row) = cards.get(index) else {
+                break;
+            };
             let row_area = Rect {
                 x: cards_x,
-                y: body_y.saturating_add(index as u16),
+                y: body_y.saturating_add(paint_i as u16),
                 width: card_w,
                 height: 1,
             };
@@ -5375,7 +5508,12 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                     && mx < row_area.x + row_area.width
                     && my == row_area.y);
             let prefix = if history_selected {
-                if index == deck.card_selected { "› " } else { "  " }.to_string()
+                if index == deck.card_selected {
+                    "› "
+                } else {
+                    "  "
+                }
+                .to_string()
             } else if index < 9 {
                 format!("{} ", index + 1)
             } else {
@@ -5406,13 +5544,13 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     }
 
     let hint = if deck.regenerate_query.is_some() {
-        "type keywords · Enter regenerate · Esc/C-g close"
+        "type keywords · Enter generate · ← back · Esc/C-g close"
     } else if history_selected {
-        "type fuzzy search · ←/→ columns · ↑/↓ move · Enter stage · Esc/C-g close"
-    } else if regenerate_selected {
-        "Enter keywords · r shortcut · ↑/↓ move · Esc/C-g close"
+        "type to search · ←/→ columns · ↑/↓ move · Enter stage · Esc/C-g close"
+    } else if generate_selected {
+        "Enter keywords · g/r shortcut · ↑/↓ move · Esc/C-g close"
     } else {
-        "r regenerate · ←/→ columns · ↑/↓ move · Enter stage · Esc/C-g close"
+        "g/r generate · ←/→ columns · ↑/↓ move · Enter stage · Esc/C-g close"
     };
     f.render_widget(
         Paragraph::new(Line::styled(
@@ -5430,6 +5568,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     );
     app.layout.suggest_deck_area = Some(area);
     app.layout.suggest_deck_hits = hit_zones;
+    app.layout.suggest_deck_divider_x = Some(divider_x);
 }
 
 fn render_route_menu(f: &mut Frame, app: &App) {
@@ -5556,10 +5695,22 @@ fn render_route_menu(f: &mut Frame, app: &App) {
 
     let body_start = first_row.saturating_add(menu.header_rows());
 
-    // Target column.
-    for (offset, _) in menu.routes.iter().enumerate() {
+    let visible_body = menu.visible_body_rows.max(
+        last_row
+            .saturating_sub(body_start)
+            .min(menu.body_rows() as u16) as usize,
+    );
+
+    // Target column (scrolled).
+    for (paint_i, offset) in (menu.target_scroll..)
+        .take(visible_body)
+        .enumerate()
+    {
+        if offset >= menu.routes.len() {
+            break;
+        }
         let index = offset + 1;
-        let row = body_start.saturating_add(offset as u16);
+        let row = body_start.saturating_add(paint_i as u16);
         if row >= last_row {
             break;
         }
@@ -5602,8 +5753,8 @@ fn render_route_menu(f: &mut Frame, app: &App) {
     }
 
     // Column divider, spanning the two-column body only.
-    for index in 0..menu.body_rows() {
-        let row = body_start.saturating_add(index as u16);
+    for paint_i in 0..visible_body {
+        let row = body_start.saturating_add(paint_i as u16);
         if row >= last_row {
             break;
         }
@@ -5639,8 +5790,15 @@ fn render_route_menu(f: &mut Frame, app: &App) {
             },
         );
     } else {
-        for (index, model) in menu.models().iter().enumerate() {
-            let row = body_start.saturating_add(index as u16);
+        let models = menu.models();
+        for (paint_i, index) in (menu.model_scroll..)
+            .take(visible_body)
+            .enumerate()
+        {
+            let Some(model) = models.get(index) else {
+                break;
+            };
+            let row = body_start.saturating_add(paint_i as u16);
             if row >= last_row {
                 break;
             }
