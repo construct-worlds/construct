@@ -37,7 +37,12 @@ that is awaiting input: one top pick plus a few generated "verbs"
   clearly-separate verbatim-recall selection, which is the one
   non-generated surface the deck offers.
 - **Accepting a suggestion sends through the ordinary session-input
-  path.** The deck has no send machinery of its own.
+  path.** The deck has no send machinery of its own. When the client
+  is already showing an input field (a composer), accepting stages the
+  text there for review and editing instead of firing at the session —
+  the eventual send is still the ordinary input path, and staging must
+  never destroy a draft the user already typed. Only surfaces with no
+  visible input field send immediately on accept.
 - **Typing always wins.** The suggestion UI may only consume input
   while explicitly open, and any printable key must close it and take
   its normal route. Suggestions are an offer, never a gate.
