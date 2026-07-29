@@ -108,6 +108,22 @@ construct new codex
 construct new claude --model opus
 ```
 
+To open construct on a remote machine from your laptop, wrap SSH with
+`construct ssh` instead of plain `ssh`:
+
+```sh
+construct ssh devbox
+construct ssh -J bastion -p 2222 devbox
+```
+
+That reverse-forwards a private clipboard bridge so selection copy lands on
+*your* machine's clipboard (including in terminals without OSC 52, e.g. macOS
+Terminal.app), and remote paste can pull local text, images, or files. All
+arguments after `construct ssh` go to `ssh` verbatim; override the remote binary
+with `--remote-cmd` / `CONSTRUCT_SSH_REMOTE_CMD` when it isn't on the login
+PATH, or the transport with `--ssh-cmd` / `CONSTRUCT_SSH_CMD` for wrappers like
+`tsh ssh`.
+
 MIDI controllers can drive those same native TUI actions without keyboard
 emulation. See [MIDI control surfaces](docs/midi.md) for device discovery and
 the `construct midi learn` workflow, including OP–XY setup.
