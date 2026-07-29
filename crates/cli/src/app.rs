@@ -3524,6 +3524,11 @@ pub struct LayoutSnapshot {
     pub modeline_context_gauge_hit: Option<ModelineContextGaugeHit>,
     /// Clickable model indicator in the modeline for the selected session.
     pub modeline_model_hit: Option<ModelineModelHit>,
+    /// Hoverable and clickable in-terminal `C-x .` suggestion affordance.
+    pub suggest_affordance_hit: Option<ratatui::layout::Rect>,
+    /// Bounds and row hitboxes for the open two-column suggestion deck.
+    pub suggest_deck_area: Option<ratatui::layout::Rect>,
+    pub suggest_deck_hits: Vec<suggest_deck::SuggestDeckHitZone>,
     /// Whole-frame rect from the last render, so popups anchored to a
     /// modeline hit can be clamped on screen.
     pub frame_area: Option<ratatui::layout::Rect>,
@@ -3987,6 +3992,9 @@ impl LayoutSnapshot {
             modeline_context_gauge_hit: _,
             modeline_model_hit: _,
             modeline_theme_hit: _,
+            suggest_affordance_hit: _,
+            suggest_deck_area: _,
+            suggest_deck_hits: _,
             tutorial_card_area: _,
             minibuffer_harness_hits: _,
             minibuffer_choice_hits: _,
@@ -9702,6 +9710,18 @@ impl App {
                 return;
             }
         }
+        // The in-terminal suggestion chord is Construct chrome painted over
+        // the child PTY. It must keep hover/click ownership even when the
+        // child has enabled mouse tracking, just like the URL and popup
+        // overlays above.
+        let suggest_owns_event = self
+            .layout
+            .suggest_affordance_hit
+            .is_some_and(|hit| Self::rect_contains(hit, ev.column, ev.row));
+        let suggest_deck_owns_event = self
+            .layout
+            .suggest_deck_area
+            .is_some_and(|area| Self::rect_contains(area, ev.column, ev.row));
         if self.session_title_menu.is_none()
             // The route picker floats over the view pane, so without this a
             // click on it is forwarded to the child PTY and the popup never
@@ -9726,6 +9746,8 @@ impl App {
             // already routes in-modal clicks to the modal and out-of-modal
             // clicks to dismissal.
             && self.layout.modal_area.is_none()
+            && !suggest_owns_event
+            && !suggest_deck_owns_event
             && self.forward_mouse_to_child(&ev)
         {
             return;
@@ -9791,6 +9813,12 @@ impl App {
                 // divider/scrollbar drags, pane focus) — the card is opaque
                 // and its zones dispatch on mouse-up via handle_left_click.
                 if card_owns_event {
+                    return;
+                }
+                if suggest_owns_event {
+                    return;
+                }
+                if suggest_deck_owns_event {
                     return;
                 }
                 if let Some(hit) = self
@@ -10193,6 +10221,34 @@ impl App {
                 return;
             }
             self.route_menu = None;
+        }
+        if self
+            .layout
+            .suggest_affordance_hit
+            .is_some_and(|hit| contains(hit, col, row))
+        {
+            self.toggle_suggest_deck().await;
+            return;
+        }
+        if self.suggest_deck.is_some() {
+            if let Some(hit) = self
+                .layout
+                .suggest_deck_hits
+                .iter()
+                .find(|hit| hit.contains(col, row))
+                .map(|hit| hit.hit)
+            {
+                self.hit_suggest_deck(hit);
+                return;
+            }
+            if self
+                .layout
+                .suggest_deck_area
+                .is_some_and(|area| contains(area, col, row))
+            {
+                return;
+            }
+            self.suggest_deck = None;
         }
         if self.handle_dynamic_ui_overlay_click(col, row).await {
             return;
@@ -14713,6 +14769,9 @@ mod tests {
             last_chat_areas: std::collections::HashMap::new(),
             modeline_approval_mode_hit: None,
             modeline_model_hit: None,
+            suggest_affordance_hit: None,
+            suggest_deck_area: None,
+            suggest_deck_hits: Vec::new(),
             frame_area: None,
             modeline_context_gauge_hit: None,
             modeline_theme_hit: None,
@@ -32140,6 +32199,147 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn suggest_affordance_hover_explains_and_click_toggles_the_deck() {
+        use crossterm::event::MouseButton;
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].state = construct_protocol::SessionState::AwaitingInput;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let hit = app
+            .layout
+            .suggest_affordance_hit
+            .expect("awaiting PTY advertises suggestions");
+        app.mouse_pos = Some((hit.x, hit.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover draw");
+        assert!(
+            rendered_text(terminal.backend().buffer())
+                .contains("Open prompt suggestions · C-x ."),
+            "hovering the chord should explain its action"
+        );
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        assert!(
+            app.text_selection.is_none(),
+            "pressing Construct chrome must not start terminal selection"
+        );
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+        assert!(
+            app.suggest_deck.is_none(),
+            "clicking the affordance runs the same toggle as C-x ."
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn suggest_deck_rows_hover_and_click_like_the_route_menu() {
+        use crate::app::suggest_deck::{DeckFocus, SuggestDeckHit};
+        use crossterm::event::MouseButton;
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].state = construct_protocol::SessionState::AwaitingInput;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let category = app
+            .layout
+            .suggest_deck_hits
+            .iter()
+            .find(|zone| zone.hit == SuggestDeckHit::Category(1))
+            .copied()
+            .expect("second category hit");
+        app.mouse_pos = Some((category.area.x, category.area.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover draw");
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((category.area.x, category.area.y))
+                .expect("hovered category cell")
+                .style()
+                .bg,
+            Some(app.theme.inactive_highlight_bg),
+            "hover paints the same focused-row treatment as model routing"
+        );
+        assert_eq!(
+            app.suggest_deck.as_ref().map(|deck| deck.category_selected),
+            Some(0),
+            "hover previews interaction without moving the keyboard cursor"
+        );
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.on_mouse(MouseEvent {
+                kind,
+                column: category.area.x,
+                row: category.area.y,
+                modifiers: KeyModifiers::NONE,
+            })
+            .await;
+        }
+        let deck = app.suggest_deck.as_ref().expect("category click keeps deck open");
+        assert_eq!(deck.category_selected, 1);
+        assert_eq!(deck.focus, DeckFocus::Categories);
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("selected category draw");
+        let card = app
+            .layout
+            .suggest_deck_hits
+            .iter()
+            .find(|zone| zone.hit == SuggestDeckHit::Card(0))
+            .copied()
+            .expect("card hit");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.on_mouse(MouseEvent {
+                kind,
+                column: card.area.x,
+                row: card.area.y,
+                modifiers: KeyModifiers::NONE,
+            })
+            .await;
+        }
+        assert!(
+            app.suggest_deck.is_none(),
+            "clicking a concrete prompt stages it and closes the deck"
+        );
+        server.abort();
+    }
+
     /// Specs 0109/0155: with the deck open, accepting the top pick on a
     /// non-PTY session stages the text into the send-input minibuffer —
     /// prefilled, not sent — and keeps the hand cached for a re-open.
@@ -32239,16 +32439,18 @@ mod tests {
         server.abort();
     }
 
-    /// `r` deliberately opens the keyword-entry surface, and terminal
-    /// cancel (`C-g`) closes it exactly like Escape without leaking the
-    /// typed guidance into the selected PTY.
+    /// Regenerate is a regular numbered category, and terminal cancel
+    /// (`C-g`) closes its keyword surface exactly like Escape without
+    /// leaking the typed guidance into the selected PTY.
     #[tokio::test]
     async fn suggest_deck_regeneration_keywords_and_ctrl_g_cancel() {
         let (mut app, _dir, server) = two_session_app().await;
         app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.prompt_history = vec![deck_history_entry("cargo build")];
         app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
 
-        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+        // Fixture categories: top, verb, history, Regenerate.
+        app.on_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE))
             .await;
         for c in "tests and docs".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))

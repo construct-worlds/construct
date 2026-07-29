@@ -298,6 +298,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.modeline_model_hit = None;
     app.layout.modeline_context_gauge_hit = None;
     app.layout.modeline_theme_hit = None;
+    app.layout.suggest_affordance_hit = None;
+    app.layout.suggest_deck_area = None;
+    app.layout.suggest_deck_hits.clear();
     app.layout.main_window_areas.clear();
     app.layout.main_window_dividers.clear();
     app.layout.session_title_name_hits.clear();
@@ -484,8 +487,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     render_session_title_menu(f, app);
     render_route_menu(f, app);
-    render_suggest_affordance(f, app);
+    let suggest_affordance = render_suggest_affordance(f, app);
     render_suggest_deck(f, app);
+    render_suggest_affordance_tooltip(f, app, suggest_affordance);
     render_tutorial_card(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
@@ -4941,22 +4945,22 @@ fn focused_session_pane(app: &App) -> Option<WindowPaneHit> {
 /// Persistent suggestion-deck affordance (specs 0109/0155). It belongs to
 /// the focused session terminal rather than the global modeline: three rows
 /// above the pane's bottom border and right-aligned one cell inside it.
-fn render_suggest_affordance(f: &mut Frame, app: &App) {
+fn render_suggest_affordance(f: &mut Frame, app: &mut App) -> Option<Rect> {
     let Some(session) = app.selected_session() else {
-        return;
+        return None;
     };
     if session.state != SessionState::AwaitingInput
         || !session.has_pty
         || session.mode.as_deref() == Some("headless")
         || app.view_for_window(Some(app.active_window_id)) != ViewMode::Terminal
     {
-        return;
+        return None;
     }
     let Some(pane) = focused_session_pane(app) else {
-        return;
+        return None;
     };
     if pane.area.width < 12 || pane.area.height < 5 {
-        return;
+        return None;
     }
     let label = if let Some(hand) = app.suggestion_hands.get(&session.id) {
         format!("✦{} C-x .", 1 + hand.verbs.len())
@@ -4968,7 +4972,7 @@ fn render_suggest_affordance(f: &mut Frame, app: &App) {
     let width = UnicodeWidthStr::width(label.as_str())
         .min(pane.area.width.saturating_sub(2) as usize) as u16;
     if width == 0 {
-        return;
+        return None;
     }
     let area = Rect {
         x: pane
@@ -4996,6 +5000,30 @@ fn render_suggest_affordance(f: &mut Frame, app: &App) {
         )),
         area,
     );
+    app.layout.suggest_affordance_hit = Some(area);
+    Some(area)
+}
+
+fn render_suggest_affordance_tooltip(
+    f: &mut Frame,
+    app: &App,
+    affordance: Option<Rect>,
+) {
+    let (Some(area), Some((mx, my))) = (affordance, app.mouse_pos) else {
+        return;
+    };
+    if mx < area.x || mx >= area.x + area.width || my < area.y || my >= area.y + area.height {
+        return;
+    }
+    render_tooltip_at(
+        f,
+        &app.theme,
+        " Open prompt suggestions · C-x . ",
+        area.x,
+        area.y,
+        0,
+        -3,
+    );
 }
 
 /// Suggestion deck popup (specs 0109/0155): categories remain visible in
@@ -5004,8 +5032,10 @@ fn render_suggest_affordance(f: &mut Frame, app: &App) {
 /// popup's inspect-then-choose rhythm. History search and guided
 /// regeneration are explicit text surfaces; printable input elsewhere
 /// still dismisses and re-routes.
-fn render_suggest_deck(f: &mut Frame, app: &App) {
-    use crate::app::suggest_deck::{DeckFocus, DeckRow};
+fn render_suggest_deck(f: &mut Frame, app: &mut App) {
+    use crate::app::suggest_deck::{
+        DeckFocus, DeckRow, SuggestDeckHit, SuggestDeckHitZone,
+    };
     let Some(deck) = &app.suggest_deck else {
         return;
     };
@@ -5027,6 +5057,7 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
             DeckRow::Top(_) => "top pick".to_string(),
             DeckRow::Verb { label, count, .. } => format!("{label} › ({count})"),
             DeckRow::History { count } => format!("history › ({count})"),
+            DeckRow::Regenerate => "Regenerate".to_string(),
             DeckRow::Generating => format!("{} suggesting…", app.spinner_frame()),
             DeckRow::Card(text) => text.clone(),
         }
@@ -5037,6 +5068,7 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
             DeckRow::Card(text) | DeckRow::Top(text) => text.clone(),
             DeckRow::Verb { label, .. } => label.clone(),
             DeckRow::History { .. } => "history".to_string(),
+            DeckRow::Regenerate => "regenerate".to_string(),
         }
     };
     let longest_category = categories
@@ -5096,10 +5128,15 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
     let body_y = header_y.saturating_add(1);
     let footer_y = area.y.saturating_add(area.height).saturating_sub(2);
     let visible_rows = footer_y.saturating_sub(body_y) as usize;
+    let mut hit_zones = Vec::new();
 
     let history_selected = matches!(
         categories.get(deck.category_selected),
         Some(DeckRow::History { .. })
+    );
+    let regenerate_selected = matches!(
+        categories.get(deck.category_selected),
+        Some(DeckRow::Regenerate)
     );
     let right_header = if let Some(query) = deck.regenerate_query.as_ref() {
         if query.is_empty() {
@@ -5113,6 +5150,8 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
         } else {
             format!("history / {}_", deck.history_query)
         }
+    } else if regenerate_selected {
+        "regenerate".to_string()
     } else {
         "prompts".to_string()
     };
@@ -5189,6 +5228,17 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
         );
     }
     for (index, row) in categories.iter().take(visible_rows).enumerate() {
+        let row_area = Rect {
+            x: inner_x,
+            y: body_y.saturating_add(index as u16),
+            width: category_w,
+            height: 1,
+        };
+        let hovered = app
+            .mouse_pos
+            .is_some_and(|(mx, my)| mx >= row_area.x
+                && mx < row_area.x + row_area.width
+                && my == row_area.y);
         let prefix = if index < 9 {
             format!("{} ", index + 1)
         } else {
@@ -5203,23 +5253,39 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
                 text,
                 row_style(
                     row.is_activatable(),
-                    index == deck.category_selected,
-                    deck.focus == DeckFocus::Categories,
+                    index == deck.category_selected || hovered,
+                    deck.focus == DeckFocus::Categories || hovered,
                 ),
             )),
-            Rect {
-                x: inner_x,
-                y: body_y.saturating_add(index as u16),
-                width: category_w,
-                height: 1,
-            },
+            row_area,
         );
+        if row.is_activatable() {
+            hit_zones.push(SuggestDeckHitZone {
+                area: row_area,
+                hit: SuggestDeckHit::Category(index),
+            });
+        }
     }
 
     if deck.regenerate_query.is_some() {
         f.render_widget(
             Paragraph::new(Line::styled(
                 "Enter to regenerate with these keywords",
+                Style::default()
+                    .fg(app.theme.muted)
+                    .add_modifier(Modifier::DIM),
+            )),
+            Rect {
+                x: cards_x,
+                y: body_y,
+                width: card_w,
+                height: 1,
+            },
+        );
+    } else if regenerate_selected {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                "Enter to provide optional keywords",
                 Style::default()
                     .fg(app.theme.muted)
                     .add_modifier(Modifier::DIM),
@@ -5248,6 +5314,17 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
         );
     } else {
         for (index, row) in cards.iter().take(visible_rows).enumerate() {
+            let row_area = Rect {
+                x: cards_x,
+                y: body_y.saturating_add(index as u16),
+                width: card_w,
+                height: 1,
+            };
+            let hovered = app
+                .mouse_pos
+                .is_some_and(|(mx, my)| mx >= row_area.x
+                    && mx < row_area.x + row_area.width
+                    && my == row_area.y);
             let prefix = if history_selected {
                 if index == deck.card_selected { "› " } else { "  " }.to_string()
             } else if index < 9 {
@@ -5264,17 +5341,18 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
                     text,
                     row_style(
                         row.is_activatable(),
-                        index == deck.card_selected,
-                        deck.focus == DeckFocus::Cards,
+                        index == deck.card_selected || hovered,
+                        deck.focus == DeckFocus::Cards || hovered,
                     ),
                 )),
-                Rect {
-                    x: cards_x,
-                    y: body_y.saturating_add(index as u16),
-                    width: card_w,
-                    height: 1,
-                },
+                row_area,
             );
+            if row.is_activatable() {
+                hit_zones.push(SuggestDeckHitZone {
+                    area: row_area,
+                    hit: SuggestDeckHit::Card(index),
+                });
+            }
         }
     }
 
@@ -5282,6 +5360,8 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
         "type keywords · Enter regenerate · Esc/C-g close"
     } else if history_selected {
         "type fuzzy search · ←/→ columns · ↑/↓ move · Enter stage · Esc/C-g close"
+    } else if regenerate_selected {
+        "Enter keywords · r shortcut · ↑/↓ move · Esc/C-g close"
     } else {
         "r regenerate · ←/→ columns · ↑/↓ move · Enter stage · Esc/C-g close"
     };
@@ -5299,6 +5379,8 @@ fn render_suggest_deck(f: &mut Frame, app: &App) {
             height: 1,
         },
     );
+    app.layout.suggest_deck_area = Some(area);
+    app.layout.suggest_deck_hits = hit_zones;
 }
 
 fn render_route_menu(f: &mut Frame, app: &App) {

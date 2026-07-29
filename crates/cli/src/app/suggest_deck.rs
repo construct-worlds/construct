@@ -4,7 +4,7 @@
 //! `session.suggest` and opens a two-column popup inside the focused
 //! session pane. Categories stay visible on the left while the selected
 //! category's concrete prompts appear on the right. Global prompt
-//! history is one direction and gains fuzzy type-ahead search when
+//! history is one category and gains fuzzy type-ahead search when
 //! selected; `r` opens an explicit keyword field for guided regeneration.
 //!
 //! The popup is otherwise never modal: outside the explicitly selected
@@ -18,14 +18,36 @@
 //! composer behavior and spec 0109's staging rule.
 
 use construct_protocol::{PromptHistoryEntry, SuggestionHand};
+use ratatui::layout::Rect;
 
 /// Which column the keyboard is driving. Both columns stay visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeckFocus {
-    /// Top pick + generated directions + history.
+    /// Top pick + generated categories + history + regeneration.
     Categories,
     /// Concrete prompts for the highlighted category.
     Cards,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuggestDeckHit {
+    Category(usize),
+    Card(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SuggestDeckHitZone {
+    pub area: Rect,
+    pub hit: SuggestDeckHit,
+}
+
+impl SuggestDeckHitZone {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        col >= self.area.x
+            && col < self.area.x.saturating_add(self.area.width)
+            && row >= self.area.y
+            && row < self.area.y.saturating_add(self.area.height)
+    }
 }
 
 /// Open-popup state. The hand and history live on `App`; this is only
@@ -73,6 +95,8 @@ pub enum DeckRow {
     },
     /// The global-history entry row — activating opens the history view.
     History { count: usize },
+    /// A regular final category that opens keyword-guided regeneration.
+    Regenerate,
     /// Non-interactive placeholder while generation is in flight.
     Generating,
     /// A concrete prompt (verb card or history entry) — activating
@@ -107,8 +131,11 @@ pub fn fan_rows(hand: Option<&SuggestionHand>, history_len: usize, pending: bool
     if history_len > 0 {
         rows.push(DeckRow::History { count: history_len });
     }
-    // A lone Generating row carries no selectable content, but the
-    // popup still opens for it: it is the request's only feedback.
+    // Regeneration is an idle action, not a loading-state affordance:
+    // hide it while any hand is already being generated.
+    if !pending {
+        rows.push(DeckRow::Regenerate);
+    }
     rows
 }
 
@@ -217,6 +244,7 @@ impl App {
                 &deck.history_query,
                 SUGGEST_HISTORY_DISPLAY_CAP,
             ),
+            Some(DeckRow::Regenerate) => Vec::new(),
             Some(DeckRow::Generating) => vec![DeckRow::Generating],
             Some(DeckRow::Card(_)) | None => Vec::new(),
         }
@@ -347,6 +375,7 @@ impl App {
         if !history_selected && !ctrl && !alt && matches!(key.code, KeyCode::Char('r')) {
             if let Some(d) = self.suggest_deck.as_mut() {
                 d.regenerate_query = Some(String::new());
+                d.focus = DeckFocus::Cards;
             }
             return true;
         }
@@ -491,7 +520,12 @@ impl App {
                 let Some(row) = categories.get(deck.category_selected) else {
                     return;
                 };
-                if row.is_activatable() {
+                if matches!(row, DeckRow::Regenerate) {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        d.regenerate_query = Some(String::new());
+                        d.focus = DeckFocus::Cards;
+                    }
+                } else if row.is_activatable() {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.focus = DeckFocus::Cards;
                         d.card_selected = 0;
@@ -505,6 +539,42 @@ impl App {
                 };
                 let text = text.clone();
                 self.stage_suggestion(&deck.session_id, text);
+            }
+        }
+    }
+
+    pub(super) fn hit_suggest_deck(&mut self, hit: SuggestDeckHit) {
+        let Some(deck) = self.suggest_deck.clone() else {
+            return;
+        };
+        match hit {
+            SuggestDeckHit::Category(index) => {
+                let categories = self.suggest_categories(&deck);
+                let Some(row) = categories.get(index) else {
+                    return;
+                };
+                if !row.is_activatable() {
+                    return;
+                }
+                if let Some(d) = self.suggest_deck.as_mut() {
+                    d.category_selected = index;
+                    d.card_selected = 0;
+                    d.focus = DeckFocus::Categories;
+                }
+                if matches!(row, DeckRow::Regenerate) {
+                    self.activate_suggest_selection();
+                }
+            }
+            SuggestDeckHit::Card(index) => {
+                let cards = self.suggest_cards(&deck);
+                if !cards.get(index).is_some_and(DeckRow::is_activatable) {
+                    return;
+                }
+                if let Some(d) = self.suggest_deck.as_mut() {
+                    d.card_selected = index;
+                    d.focus = DeckFocus::Cards;
+                }
+                self.activate_suggest_selection();
             }
         }
     }
@@ -639,11 +709,12 @@ mod tests {
     fn fan_orders_top_verbs_history() {
         let h = hand();
         let rows = fan_rows(Some(&h), 3, false);
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 5);
         assert_eq!(rows[0], DeckRow::Top("run the tests".into()));
         assert!(matches!(rows[1], DeckRow::Verb { index: 0, .. }));
         assert!(matches!(rows[2], DeckRow::Verb { index: 1, .. }));
         assert_eq!(rows[3], DeckRow::History { count: 3 });
+        assert_eq!(rows[4], DeckRow::Regenerate);
     }
 
     #[test]
@@ -651,9 +722,10 @@ mod tests {
         let rows = fan_rows(None, 2, true);
         assert_eq!(rows[0], DeckRow::Generating);
         assert_eq!(rows[1], DeckRow::History { count: 2 });
+        assert_eq!(rows.len(), 2, "Regenerate hides while loading");
         assert!(!rows[0].is_activatable());
-        // Not pending and nothing cached: nothing to show.
-        assert!(fan_rows(None, 0, false).is_empty());
+        // Regeneration remains available even with no cached hand/history.
+        assert_eq!(fan_rows(None, 0, false), vec![DeckRow::Regenerate]);
     }
 
     #[test]

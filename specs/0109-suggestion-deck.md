@@ -69,9 +69,14 @@ from burning tokens.
 - Clients render the hand however fits their surface but must preserve
   invalidation, staging, and typing-always-wins. The TUI advertises the
   chord inside the focused terminal pane with an animated pending
-  indicator and keeps categories beside their concrete prompts in a
-  two-column deck. History supports fuzzy type-ahead after it is
-  explicitly selected; `r` opens keyword-guided regeneration; both
+  indicator; hovering the chord explains the action, and clicking it
+  performs the same toggle as the chord. The TUI keeps categories
+  beside their concrete prompts in a two-column deck; its rows highlight
+  on hover, category clicks select a preview, and prompt clicks stage
+  that prompt. History supports fuzzy type-ahead after it is explicitly
+  selected; Regenerate is a regular final category (`r` is its
+  shortcut) that opens keyword
+  guidance, and is hidden while a generation is already loading; both
   Escape and `C-g` close the deck. Web may differ.
 - Hidden generation sessions must be torn down after use and must never
   appear in user-facing session lists.
