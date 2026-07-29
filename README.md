@@ -108,20 +108,13 @@ construct new codex
 construct new claude --model opus
 ```
 
-To open construct on a remote machine from your laptop, prefer `construct ssh`
-over plain `ssh` + running construct yourself:
+To open construct on a remote machine with working copy and paste of text and
+images between your laptop and the remote TUI:
 
 ```sh
 construct ssh devbox
 construct ssh -J bastion -p 2222 devbox
 ```
-
-Plain SSH often breaks clipboard: selecting text in the remote TUI may not
-copy to your local machine (especially in macOS Terminal.app), and you can't
-paste a local screenshot or file into a remote session. `construct ssh` wires
-those up — copy from the remote TUI lands on *your* clipboard, and paste can
-bring over local text, images, or files. Same SSH flags and config as usual;
-use `--remote-cmd` if construct isn't on the remote login PATH.
 
 MIDI controllers can drive those same native TUI actions without keyboard
 emulation. See [MIDI control surfaces](docs/midi.md) for device discovery and
