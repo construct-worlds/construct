@@ -386,6 +386,7 @@ fn spawn_interactive_transcript_watcher(
         let mut child_seq: HashMap<String, u64> = HashMap::new();
         let mut child_states: HashMap<String, SessionState> = HashMap::new();
         let mut child_parents: HashMap<String, String> = HashMap::new();
+        let mut background_tasks = ClaudeBackgroundTaskTracker::default();
         // Usage dedupe state (`claude_cost_from_assistant`), root + per-child.
         let mut root_usage_msg_id: Option<String> = None;
         let mut child_usage_msg_ids: HashMap<String, Option<String>> = HashMap::new();
@@ -423,6 +424,7 @@ fn spawn_interactive_transcript_watcher(
                     child_seq.clear();
                     child_states.clear();
                     child_parents.clear();
+                    background_tasks = ClaudeBackgroundTaskTracker::default();
                     root_usage_msg_id = None;
                     child_usage_msg_ids.clear();
                 }
@@ -435,7 +437,12 @@ fn spawn_interactive_transcript_watcher(
                 &mut root_usage_msg_id,
             );
             for value in root_values {
-                if let Some((id, state, title)) = claude_native_subagent_update(&value) {
+                if let Some((id, state, title)) =
+                    claude_native_subagent_update_with_background_tasks(
+                        &value,
+                        &mut background_tasks,
+                    )
+                {
                     child_states.insert(id.clone(), state);
                     emit.emit(SessionEvent::NativeSubagent {
                         id: id.clone(),
@@ -682,6 +689,89 @@ fn claude_native_subagent_update(value: &Value) -> Option<(String, SessionState,
         _ => return None,
     };
     let title = xml_tag(&raw, "summary");
+    Some((id, state, title))
+}
+
+#[derive(Default)]
+struct ClaudeBackgroundTaskTracker {
+    descriptions_by_tool_use: HashMap<String, String>,
+    titles_by_task_id: HashMap<String, String>,
+}
+
+impl ClaudeBackgroundTaskTracker {
+    fn remember_launch_request(&mut self, value: &Value) {
+        let Some(blocks) = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use")
+                || block.get("name").and_then(Value::as_str) != Some("Bash")
+                || block
+                    .pointer("/input/run_in_background")
+                    .and_then(Value::as_bool)
+                    != Some(true)
+            {
+                continue;
+            }
+            let Some(tool_use_id) = block.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(description) = block
+                .pointer("/input/description")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|description| !description.is_empty())
+            else {
+                continue;
+            };
+            self.descriptions_by_tool_use
+                .insert(tool_use_id.to_string(), description.to_string());
+        }
+    }
+
+    fn launch_update(&mut self, value: &Value) -> Option<(String, SessionState, Option<String>)> {
+        let native_id = value
+            .pointer("/toolUseResult/backgroundTaskId")
+            .and_then(Value::as_str)
+            .map(normalize_claude_agent_id)?;
+        let tool_use_id = value
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .and_then(|blocks| {
+                blocks.iter().find_map(|block| {
+                    (block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                        .then(|| block.get("tool_use_id").and_then(Value::as_str))
+                        .flatten()
+                })
+            });
+        let title = tool_use_id
+            .and_then(|id| self.descriptions_by_tool_use.get(id))
+            .cloned()
+            .unwrap_or_else(|| format!("Background command {}", short_native_id(&native_id)));
+        self.titles_by_task_id
+            .insert(native_id.clone(), title.clone());
+        Some((native_id, SessionState::Running, Some(title)))
+    }
+
+    fn stable_title(&self, native_id: &str) -> Option<String> {
+        self.titles_by_task_id.get(native_id).cloned()
+    }
+}
+
+fn claude_native_subagent_update_with_background_tasks(
+    value: &Value,
+    background_tasks: &mut ClaudeBackgroundTaskTracker,
+) -> Option<(String, SessionState, Option<String>)> {
+    background_tasks.remember_launch_request(value);
+    if let Some(update) = background_tasks.launch_update(value) {
+        return Some(update);
+    }
+    let (id, state, title) = claude_native_subagent_update(value)?;
+    let title = background_tasks.stable_title(&id).or(title);
     Some((id, state, title))
 }
 
@@ -1277,6 +1367,92 @@ mod tests {
         assert_eq!(
             claude_native_subagent_update(&prefixed_complete).map(|(id, _, _)| id),
             Some("abc123".into())
+        );
+    }
+
+    #[test]
+    fn background_task_is_named_and_running_before_completion() {
+        let mut tasks = ClaudeBackgroundTaskTracker::default();
+        let request = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_wait",
+                    "name": "Bash",
+                    "input": {
+                        "command": "until ready; do sleep 30; done",
+                        "description": "Wait for PR 1003 CI",
+                        "run_in_background": true
+                    }
+                }]
+            }
+        });
+        assert_eq!(
+            claude_native_subagent_update_with_background_tasks(&request, &mut tasks),
+            None
+        );
+
+        let launched = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "tool_use_id": "toolu_wait",
+                    "type": "tool_result",
+                    "content": "Command running in background with ID: bzgt28rz0."
+                }]
+            },
+            "toolUseResult": {
+                "backgroundTaskId": "bzgt28rz0"
+            }
+        });
+        assert_eq!(
+            claude_native_subagent_update_with_background_tasks(&launched, &mut tasks),
+            Some((
+                "bzgt28rz0".into(),
+                SessionState::Running,
+                Some("Wait for PR 1003 CI".into())
+            ))
+        );
+
+        let completed = serde_json::json!({
+            "type": "queue-operation",
+            "content": concat!(
+                "<task-notification>",
+                "<task-id>bzgt28rz0</task-id>",
+                "<status>completed</status>",
+                "<summary>Background command \"Wait for PR 1003 CI\" ",
+                "completed (exit code 0)</summary>",
+                "</task-notification>"
+            )
+        });
+        assert_eq!(
+            claude_native_subagent_update_with_background_tasks(&completed, &mut tasks),
+            Some((
+                "bzgt28rz0".into(),
+                SessionState::Done,
+                Some("Wait for PR 1003 CI".into())
+            )),
+            "completion updates state without replacing the concise launch title"
+        );
+    }
+
+    #[test]
+    fn background_task_without_correlated_description_gets_fallback_title() {
+        let mut tasks = ClaudeBackgroundTaskTracker::default();
+        let launched = serde_json::json!({
+            "type": "user",
+            "toolUseResult": {
+                "backgroundTaskId": "task123"
+            }
+        });
+        assert_eq!(
+            claude_native_subagent_update_with_background_tasks(&launched, &mut tasks),
+            Some((
+                "task123".into(),
+                SessionState::Running,
+                Some("Background command task123".into())
+            ))
         );
     }
 
