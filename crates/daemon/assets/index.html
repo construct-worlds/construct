@@ -1253,7 +1253,11 @@
   .suggest-deck {
     position: absolute;
     right: calc(16px + env(safe-area-inset-right));
-    bottom: calc(86px + env(safe-area-inset-bottom));
+    /* The lift tracks the bottom chrome actually on screen (composer,
+       virtual keyboard) via a JS-maintained variable, so the orb sits
+       just above the input field when one is visible and drops toward
+       the screen edge on desktop terminal mode where there is none. */
+    bottom: calc(16px + var(--suggest-deck-lift, 70px) + env(safe-area-inset-bottom));
     z-index: 32;
     visibility: hidden;
     pointer-events: none;
@@ -1407,9 +1411,6 @@
     -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
-  }
-  @media (max-width: 720px) {
-    .suggest-deck { bottom: calc(112px + env(safe-area-inset-bottom)); }
   }
   @media (prefers-reduced-motion: reduce) {
     .suggest-chip, .suggest-stack { animation: none; }
@@ -3178,7 +3179,8 @@
         (the daemon generates with the session's own harness); the dealt
         hand arrives as a broadcast `suggestions` event and opens as a
         fan of verb chips, then a card list per verb. Picking anything
-        sends the text through `session.input`. Never modal: it hides
+        lands in the composer for review when one is on screen, else
+        sends directly through `session.input`. Never modal: it hides
         while the session runs and closes on any outside tap.
       -->
       <div id="suggestDeck" class="suggest-deck" aria-hidden="true" inert>
@@ -11226,7 +11228,8 @@ async function loadOlderTranscriptPage(id, pane, options = {}) {
 // session awaits input. Click → `session.suggest` (the daemon
 // generates with the session's own harness) → the broadcast
 // `suggestions` event deals a hand → verb-chip fan → card list.
-// Accepting sends through `session.input`. A new turn invalidates
+// Accepting fills the composer when one is visible (review before
+// send), else sends through `session.input`. A new turn invalidates
 // the hand; the deck is never modal.
 const suggestDeckEl = $("suggestDeck");
 const suggestFanEl = $("suggestFan");
@@ -11240,6 +11243,24 @@ const suggestOrbCountEl = $("suggestOrbCount");
 // Matches the daemon's probe cap: past this a silent generation is
 // treated as failed and the orb returns to idle.
 const SUGGEST_PENDING_STALE_MS = 125000;
+
+// Keep the orb clear of whatever bottom chrome is actually visible:
+// the composer (chat mode, or a phone's terminal helpers) and the
+// virtual keyboard. Hidden elements report offsetHeight 0, so the sum
+// is exactly the on-screen chrome; with none (desktop terminal mode)
+// the deck drops toward the screen edge. A ResizeObserver keeps this
+// current through mode switches, textarea autogrow, and the virtual
+// keyboard's minimize toggle.
+function updateSuggestDeckLift() {
+  const lift = composerEl.offsetHeight + (vkbdEl ? vkbdEl.offsetHeight : 0);
+  suggestDeckEl.style.setProperty("--suggest-deck-lift", `${lift}px`);
+}
+{
+  const liftObserver = new ResizeObserver(() => updateSuggestDeckLift());
+  liftObserver.observe(composerEl);
+  if (vkbdEl) liftObserver.observe(vkbdEl);
+  updateSuggestDeckLift();
+}
 
 function suggestPendingActive(id) {
   const at = state.suggestPendingById.get(id);
@@ -11387,9 +11408,21 @@ function refreshPromptHistory() {
 function sendSuggestion(text) {
   const sid = state.currentId;
   if (!sid || !text) return;
+  closeSuggestDeck();
+  // When an input field is on screen (chat mode, or a phone's terminal
+  // helpers) a pick lands in the composer for review and editing — the
+  // user sends it with the ordinary send gesture, and any existing
+  // draft is preserved by the caret-aware insert. The hand stays
+  // cached so they can reopen the deck and pick differently. Only
+  // desktop terminal mode, which has no composer, sends immediately.
+  if (!composerEl.hidden) {
+    insertComposerText(text);
+    try { inputEl.focus(); } catch (e) { /* focus is best-effort */ }
+    updateSuggestOrb();
+    return;
+  }
   state.suggestionsById.delete(sid);
   state.suggestPendingById.delete(sid);
-  closeSuggestDeck();
   updateSuggestOrb();
   // Optimistic echo, same as the composer's chat path.
   try {
