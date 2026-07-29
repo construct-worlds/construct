@@ -6622,7 +6622,8 @@ fn harness_uses_quiescence(s: &SessionSummary) -> bool {
     s.has_pty
         && matches!(
             s.harness.as_str(),
-            "claude" | "codex" | "antigravity" | "agy" | "grok" | "hermes"
+            "claude" | "codex" | "antigravity" | "agy" | "grok" | "hermes" | "kimi" | "opencode"
+            | "pi"
         )
 }
 
@@ -9742,7 +9743,17 @@ mod tests {
     fn quiescence_targets_tui_llm_harnesses() {
         let mut s = placement_summary("q", 0, None, construct_protocol::SessionKind::User);
         s.has_pty = true;
-        for h in ["claude", "codex", "antigravity", "agy", "grok"] {
+        for h in [
+            "claude",
+            "codex",
+            "antigravity",
+            "agy",
+            "grok",
+            "hermes",
+            "kimi",
+            "opencode",
+            "pi",
+        ] {
             s.harness = h.into();
             assert!(harness_uses_quiescence(&s), "{h} should use quiescence");
         }
