@@ -53,7 +53,8 @@ impl SuggestDeckHitZone {
 }
 
 /// Open-popup state. The hand and history live on `App`; this is only
-/// the two cursors plus the history type-ahead query.
+/// the two cursors plus the history type-ahead query and per-column
+/// scroll offsets (when the body is taller than the height cap).
 #[derive(Debug, Clone)]
 pub struct SuggestDeck {
     /// Session the deck was opened for. A selection change closes it.
@@ -63,6 +64,10 @@ pub struct SuggestDeck {
     pub category_selected: usize,
     /// Highlighted row in the right concrete-prompt column.
     pub card_selected: usize,
+    /// First visible row of the left column when content exceeds the body.
+    pub category_scroll: usize,
+    /// First visible row of the right column when content exceeds the body.
+    pub card_scroll: usize,
     /// Fuzzy type-ahead query, active only while History is highlighted.
     pub history_query: String,
     /// Explicit keyword-entry surface for a guided regeneration. `Some("")`
@@ -77,9 +82,30 @@ impl SuggestDeck {
             focus: DeckFocus::Categories,
             category_selected: 0,
             card_selected: 0,
+            category_scroll: 0,
+            card_scroll: 0,
             history_query: String::new(),
             regenerate_query: None,
         }
+    }
+
+    /// Keep `selected` inside the viewport of `scroll` given `visible` rows.
+    pub fn ensure_visible(scroll: &mut usize, selected: usize, len: usize, visible: usize) {
+        if visible == 0 || len == 0 {
+            *scroll = 0;
+            return;
+        }
+        let max_scroll = len.saturating_sub(visible);
+        if selected < *scroll {
+            *scroll = selected;
+        } else if selected >= *scroll + visible {
+            *scroll = selected + 1 - visible;
+        }
+        *scroll = (*scroll).min(max_scroll);
+    }
+
+    pub fn clamp_scroll(scroll: &mut usize, len: usize, visible: usize) {
+        *scroll = (*scroll).min(len.saturating_sub(visible));
     }
 }
 
@@ -400,6 +426,7 @@ impl App {
                         d.history_query.push(c);
                         d.focus = DeckFocus::Cards;
                         d.card_selected = 0;
+                        d.card_scroll = 0;
                     }
                     return true;
                 }
@@ -407,6 +434,7 @@ impl App {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.history_query.pop();
                         d.card_selected = 0;
+                        d.card_scroll = 0;
                     }
                     return true;
                 }
@@ -455,10 +483,15 @@ impl App {
                 if idx < len {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         match d.focus {
-                            DeckFocus::Categories => d.category_selected = idx,
+                            DeckFocus::Categories => {
+                                d.category_selected = idx;
+                                d.card_selected = 0;
+                                d.card_scroll = 0;
+                            }
                             DeckFocus::Cards => d.card_selected = idx,
                         }
                     }
+                    self.ensure_suggest_selection_visible();
                     self.activate_suggest_selection();
                 }
             }
@@ -470,8 +503,10 @@ impl App {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.category_selected = index;
                         d.card_selected = 0;
+                        d.card_scroll = 0;
                         d.focus = DeckFocus::Cards;
                     }
+                    self.ensure_suggest_selection_visible();
                 }
             }
             KeyCode::Tab => {
@@ -543,25 +578,104 @@ impl App {
         let Some(deck) = self.suggest_deck.clone() else {
             return;
         };
+        let categories_len = self.suggest_categories(&deck).len();
+        let cards_len = self.suggest_cards(&deck).len();
         let len = match deck.focus {
-            DeckFocus::Categories => self.suggest_categories(&deck).len(),
-            DeckFocus::Cards => self.suggest_cards(&deck).len(),
+            DeckFocus::Categories => categories_len,
+            DeckFocus::Cards => cards_len,
         };
         if len == 0 {
             return;
         }
+        let visible = self.layout.suggest_deck_visible_rows.max(1);
         if let Some(d) = self.suggest_deck.as_mut() {
             match d.focus {
                 DeckFocus::Categories => {
                     let cur = d.category_selected as isize;
                     d.category_selected = (cur + delta).rem_euclid(len as isize) as usize;
                     d.card_selected = 0;
+                    d.card_scroll = 0;
+                    SuggestDeck::ensure_visible(
+                        &mut d.category_scroll,
+                        d.category_selected,
+                        categories_len,
+                        visible,
+                    );
                 }
                 DeckFocus::Cards => {
                     let cur = d.card_selected as isize;
                     d.card_selected = (cur + delta).rem_euclid(len as isize) as usize;
+                    SuggestDeck::ensure_visible(
+                        &mut d.card_scroll,
+                        d.card_selected,
+                        cards_len,
+                        visible,
+                    );
                 }
             }
+        }
+    }
+
+    /// Mouse wheel over the suggestion deck. Scrolls the column under the
+    /// pointer (divider decides left/right); falls back to the focused
+    /// column when the pointer is over chrome. Returns true when consumed.
+    pub(super) fn scroll_suggest_deck(&mut self, col: u16, row: u16, delta: isize) -> bool {
+        let Some(area) = self.layout.suggest_deck_area else {
+            return false;
+        };
+        if !Self::rect_contains(area, col, row) {
+            return false;
+        }
+        let Some(deck) = self.suggest_deck.clone() else {
+            return false;
+        };
+        let visible = self.layout.suggest_deck_visible_rows.max(1);
+        let categories_len = self.suggest_categories(&deck).len();
+        let cards_len = self.suggest_cards(&deck).len();
+        let left = self
+            .layout
+            .suggest_deck_divider_x
+            .is_some_and(|div| col <= div)
+            || (self.layout.suggest_deck_divider_x.is_none()
+                && deck.focus == DeckFocus::Categories);
+        if let Some(d) = self.suggest_deck.as_mut() {
+            if left {
+                let max = categories_len.saturating_sub(visible);
+                if max > 0 {
+                    let next = (d.category_scroll as isize + delta).clamp(0, max as isize) as usize;
+                    d.category_scroll = next;
+                }
+            } else {
+                let max = cards_len.saturating_sub(visible);
+                if max > 0 {
+                    let next = (d.card_scroll as isize + delta).clamp(0, max as isize) as usize;
+                    d.card_scroll = next;
+                }
+            }
+        }
+        true
+    }
+
+    fn ensure_suggest_selection_visible(&mut self) {
+        let Some(deck) = self.suggest_deck.clone() else {
+            return;
+        };
+        let visible = self.layout.suggest_deck_visible_rows.max(1);
+        let categories_len = self.suggest_categories(&deck).len();
+        let cards_len = self.suggest_cards(&deck).len();
+        if let Some(d) = self.suggest_deck.as_mut() {
+            SuggestDeck::ensure_visible(
+                &mut d.category_scroll,
+                d.category_selected,
+                categories_len,
+                visible,
+            );
+            SuggestDeck::ensure_visible(
+                &mut d.card_scroll,
+                d.card_selected,
+                cards_len,
+                visible,
+            );
         }
     }
 
@@ -579,12 +693,15 @@ impl App {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.regenerate_query = Some(String::new());
                         d.focus = DeckFocus::Cards;
+                        d.card_scroll = 0;
                     }
                 } else if row.is_activatable() {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.focus = DeckFocus::Cards;
                         d.card_selected = 0;
+                        d.card_scroll = 0;
                     }
+                    self.ensure_suggest_selection_visible();
                 }
             }
             DeckFocus::Cards => {
@@ -614,8 +731,10 @@ impl App {
                 if let Some(d) = self.suggest_deck.as_mut() {
                     d.category_selected = index;
                     d.card_selected = 0;
+                    d.card_scroll = 0;
                     d.focus = DeckFocus::Categories;
                 }
+                self.ensure_suggest_selection_visible();
                 if matches!(row, DeckRow::Generate { .. }) {
                     self.activate_suggest_selection();
                 }
@@ -629,6 +748,7 @@ impl App {
                     d.card_selected = index;
                     d.focus = DeckFocus::Cards;
                 }
+                self.ensure_suggest_selection_visible();
                 self.activate_suggest_selection();
             }
         }
@@ -801,6 +921,19 @@ mod tests {
         let rows = history_rows(&history(30), "", 10);
         assert_eq!(rows.len(), 10);
         assert_eq!(rows[0], DeckRow::Card("p0".into()));
+    }
+
+    #[test]
+    fn ensure_visible_scrolls_selection_into_viewport() {
+        let mut scroll = 0usize;
+        SuggestDeck::ensure_visible(&mut scroll, 14, 20, 5);
+        assert_eq!(scroll, 10, "selection 14 needs scroll so 10..15 is shown");
+        SuggestDeck::ensure_visible(&mut scroll, 2, 20, 5);
+        assert_eq!(scroll, 2, "selection above the viewport pulls scroll up");
+        SuggestDeck::ensure_visible(&mut scroll, 4, 20, 5);
+        assert_eq!(scroll, 2, "already-visible selection leaves scroll alone");
+        SuggestDeck::clamp_scroll(&mut scroll, 3, 5);
+        assert_eq!(scroll, 0, "clamp when content fits the viewport");
     }
 
     #[test]

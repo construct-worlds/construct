@@ -3529,6 +3529,12 @@ pub struct LayoutSnapshot {
     /// Bounds and row hitboxes for the open two-column suggestion deck.
     pub suggest_deck_area: Option<ratatui::layout::Rect>,
     pub suggest_deck_hits: Vec<suggest_deck::SuggestDeckHitZone>,
+    /// Visible body rows of the suggestion deck this frame (after height
+    /// cap). Used by keyboard ensure-visible and mouse-wheel scroll.
+    pub suggest_deck_visible_rows: usize,
+    /// Vertical divider x of the open suggestion deck (left/right column
+    /// for mouse-wheel targeting).
+    pub suggest_deck_divider_x: Option<u16>,
     /// Whole-frame rect from the last render, so popups anchored to a
     /// modeline hit can be clamped on screen.
     pub frame_area: Option<ratatui::layout::Rect>,
@@ -3995,6 +4001,8 @@ impl LayoutSnapshot {
             suggest_affordance_hit: _,
             suggest_deck_area: _,
             suggest_deck_hits: _,
+            suggest_deck_visible_rows: _,
+            suggest_deck_divider_x: _,
             tutorial_card_area: _,
             minibuffer_harness_hits: _,
             minibuffer_choice_hits: _,
@@ -9754,6 +9762,13 @@ impl App {
         }
         match ev.kind {
             MouseEventKind::ScrollUp => {
+                // Popup menus own the wheel while the pointer is over them
+                // so the session scrollback underneath does not move.
+                if self.scroll_suggest_deck(ev.column, ev.row, -1)
+                    || self.scroll_route_menu(ev.column, ev.row, -1)
+                {
+                    return;
+                }
                 if self.is_over_lineage_section(ev.column, ev.row) {
                     // Shift+wheel scrolls sideways — the common convention
                     // in terminals without a horizontal wheel. A plain wheel
@@ -9779,6 +9794,11 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
+                if self.scroll_suggest_deck(ev.column, ev.row, 1)
+                    || self.scroll_route_menu(ev.column, ev.row, 1)
+                {
+                    return;
+                }
                 if self.is_over_lineage_section(ev.column, ev.row) {
                     // Clamped to the diagram's extents at render time.
                     if ev.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
@@ -14772,6 +14792,8 @@ mod tests {
             suggest_affordance_hit: None,
             suggest_deck_area: None,
             suggest_deck_hits: Vec::new(),
+            suggest_deck_visible_rows: 0,
+            suggest_deck_divider_x: None,
             frame_area: None,
             modeline_context_gauge_hit: None,
             modeline_theme_hit: None,

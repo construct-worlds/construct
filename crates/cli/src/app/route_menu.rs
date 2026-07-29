@@ -35,9 +35,12 @@ impl App {
             focus: RouteFocus::Targets,
             selected,
             model_selected: 0,
+            target_scroll: 0,
+            model_scroll: 0,
             anchor: (col, row),
             target_col_w: 0,
             desc_lines: 0,
+            visible_body_rows: 0,
         };
         menu.model_selected = menu.active_model_index();
         self.route_menu = Some(menu.anchored(self.frame_area()));
@@ -76,7 +79,9 @@ impl App {
         }
         menu.selected = index;
         menu.model_selected = menu.active_model_index();
+        menu.model_scroll = 0;
         menu.focus = RouteFocus::Targets;
+        menu.ensure_target_visible();
         self.replace_route_menu(menu);
     }
 
@@ -123,6 +128,7 @@ impl App {
         };
         if menu.target_descends(menu.selected) && !menu.models().is_empty() {
             menu.focus = RouteFocus::Models;
+            menu.ensure_model_visible();
         }
     }
 
@@ -153,6 +159,8 @@ impl App {
                 // highlight follows it rather than pointing at a row that
                 // now belongs to a different target.
                 menu.model_selected = menu.active_model_index();
+                menu.model_scroll = 0;
+                menu.ensure_target_visible();
             }
             RouteFocus::Models => {
                 let len = menu.models().len();
@@ -161,9 +169,23 @@ impl App {
                 }
                 menu.model_selected =
                     (menu.model_selected as isize + delta).rem_euclid(len as isize) as usize;
+                menu.ensure_model_visible();
             }
         }
         self.replace_route_menu(menu);
+    }
+
+    /// Mouse wheel over the route menu. Returns true when the event was
+    /// consumed so the terminal scrollback under the popup stays put.
+    pub(super) fn scroll_route_menu(&mut self, col: u16, row: u16, delta: isize) -> bool {
+        let Some(mut menu) = self.route_menu.clone() else {
+            return false;
+        };
+        if !menu.scroll_at(col, row, delta) {
+            return false;
+        }
+        self.replace_route_menu(menu);
+        true
     }
 
     async fn apply_route(
@@ -220,6 +242,11 @@ pub struct RouteMenu {
     pub selected: usize,
     /// Highlighted model row within the highlighted target.
     pub model_selected: usize,
+    /// First visible body row of the target list (Default is above the body
+    /// and never scrolls).
+    pub target_scroll: usize,
+    /// First visible body row of the model list for the focused target.
+    pub model_scroll: usize,
     anchor: (u16, u16),
     /// Width of the target column, including its padding. Set when the
     /// menu is placed so render and hit-testing agree on one number.
@@ -227,6 +254,9 @@ pub struct RouteMenu {
     /// Rows the description wraps to. Set when the menu is placed, for the
     /// same reason.
     pub desc_lines: u16,
+    /// Visible body rows after height-cap / frame clamping. Set by
+    /// `anchored` so render, hit-testing, and keyboard scroll agree.
+    pub visible_body_rows: usize,
 }
 
 impl RouteMenu {
@@ -441,7 +471,103 @@ impl RouteMenu {
             width,
             height,
         };
+        // Visible body = total height minus borders, header, optional reason.
+        let chrome = 2u16.saturating_add(self.header_rows()).saturating_add(reason_rows);
+        self.visible_body_rows = height.saturating_sub(chrome) as usize;
+        // Clamp scroll so a shrink (frame resize, re-anchor) does not leave
+        // the viewport past the end of either list.
+        let targets = self.routes.len();
+        let models = self.models().len();
+        let vis = self.visible_body_rows;
+        self.target_scroll = self.target_scroll.min(targets.saturating_sub(vis));
+        self.model_scroll = self.model_scroll.min(models.saturating_sub(vis));
         self
+    }
+
+    /// Keep a body-list selection inside the scrolled viewport.
+    pub fn ensure_target_visible(&mut self) {
+        // selected 0 is Default (above the body); body indices are selected-1.
+        if self.selected == 0 {
+            return;
+        }
+        let body_idx = self.selected - 1;
+        let len = self.routes.len();
+        let vis = self.visible_body_rows.max(1);
+        if body_idx < self.target_scroll {
+            self.target_scroll = body_idx;
+        } else if body_idx >= self.target_scroll + vis {
+            self.target_scroll = body_idx + 1 - vis;
+        }
+        self.target_scroll = self.target_scroll.min(len.saturating_sub(vis));
+    }
+
+    pub fn ensure_model_visible(&mut self) {
+        let len = self.models().len();
+        let vis = self.visible_body_rows.max(1);
+        if self.model_selected < self.model_scroll {
+            self.model_scroll = self.model_selected;
+        } else if self.model_selected >= self.model_scroll + vis {
+            self.model_scroll = self.model_selected + 1 - vis;
+        }
+        self.model_scroll = self.model_scroll.min(len.saturating_sub(vis));
+    }
+
+    /// Scroll the focused column by `delta` rows. Returns true when the
+    /// event was consumed (menu open and the wheel is for it).
+    pub fn scroll_focused(&mut self, delta: isize) -> bool {
+        let vis = self.visible_body_rows;
+        if vis == 0 {
+            return true;
+        }
+        match self.focus {
+            RouteFocus::Targets => {
+                let len = self.routes.len();
+                let max = len.saturating_sub(vis);
+                if max == 0 {
+                    return true;
+                }
+                let next = (self.target_scroll as isize + delta).clamp(0, max as isize) as usize;
+                self.target_scroll = next;
+            }
+            RouteFocus::Models => {
+                let len = self.models().len();
+                let max = len.saturating_sub(vis);
+                if max == 0 {
+                    return true;
+                }
+                let next = (self.model_scroll as isize + delta).clamp(0, max as isize) as usize;
+                self.model_scroll = next;
+            }
+        }
+        true
+    }
+
+    /// Scroll the column under `(col, row)`. Falls back to the focused
+    /// column when the pointer is over chrome (header / border).
+    pub fn scroll_at(&mut self, col: u16, row: u16, delta: isize) -> bool {
+        if !self.contains(col, row) {
+            return false;
+        }
+        let first = self.area.y.saturating_add(1);
+        let body_start = first.saturating_add(self.header_rows());
+        let last = self.area.y.saturating_add(self.area.height).saturating_sub(1);
+        if row >= body_start && row < last {
+            let divider = self.area.x.saturating_add(1).saturating_add(self.target_col_w);
+            if col <= divider {
+                // Temporarily treat as targets for this wheel.
+                let prev = self.focus;
+                self.focus = RouteFocus::Targets;
+                self.scroll_focused(delta);
+                self.focus = prev;
+                return true;
+            }
+            let prev = self.focus;
+            self.focus = RouteFocus::Models;
+            self.scroll_focused(delta);
+            self.focus = prev;
+            return true;
+        }
+        self.scroll_focused(delta)
     }
 
     pub fn contains(&self, col: u16, row: u16) -> bool {
@@ -464,11 +590,16 @@ impl RouteMenu {
             return Some(RouteHit::Target(0));
         }
         let body_start = first.saturating_add(self.header_rows());
-        let index = row.checked_sub(body_start)? as usize;
+        let visible = row.checked_sub(body_start)? as usize;
+        if self.visible_body_rows > 0 && visible >= self.visible_body_rows {
+            return None;
+        }
         let divider = self.area.x.saturating_add(1).saturating_add(self.target_col_w);
         if col <= divider {
+            let index = visible + self.target_scroll;
             (index < self.routes.len()).then_some(RouteHit::Target(index + 1))
         } else {
+            let index = visible + self.model_scroll;
             (index < self.models().len()).then_some(RouteHit::Model(index))
         }
     }
@@ -499,9 +630,12 @@ mod tests {
             focus: RouteFocus::Targets,
             selected: 0,
             model_selected: 0,
+            target_scroll: 0,
+            model_scroll: 0,
             anchor: (40, 23),
             target_col_w: 0,
             desc_lines: 0,
+            visible_body_rows: 0,
         };
         m = m.anchored(ratatui::layout::Rect::new(0, 0, 120, 30));
         m
@@ -681,6 +815,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn scrolled_hit_testing_maps_visible_rows_to_absolute_indices() {
+        // Long model list so the body is taller than the height cap.
+        let labels: Vec<String> = (0..30).map(|i| format!("m{i}")).collect();
+        let mut route = option("long", &["x"], None);
+        route.models = labels;
+        let mut m = menu(vec![route], None);
+        m.selected = 1;
+        // Short frame forces a small visible body so scrolling is possible.
+        m = m.anchored(ratatui::layout::Rect::new(0, 0, 120, 16));
+        assert!(m.visible_body_rows > 0);
+        assert!(
+            m.models().len() > m.visible_body_rows,
+            "need overflow to exercise scroll"
+        );
+        m.model_scroll = 3;
+        m.target_scroll = 0;
+        let first = m.area.y + 1;
+        let body = first + m.header_rows();
+        let divider = m.area.x + 1 + m.target_col_w;
+        // Top visible model row is absolute index 3.
+        assert_eq!(
+            m.hit_at(divider + 2, body),
+            Some(RouteHit::Model(3))
+        );
+        // Wheel over the model column advances model_scroll.
+        assert!(m.scroll_at(divider + 2, body, 1));
+        assert_eq!(m.model_scroll, 4);
     }
 
     /// The model column is sized for the widest model any target offers,
