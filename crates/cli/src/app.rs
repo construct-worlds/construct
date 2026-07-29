@@ -32282,27 +32282,40 @@ mod tests {
                 pane.right(),
                 "affordance is right-aligned flush against the pane edge"
             );
-            let label = "◇ C-x .";
+            // Chip text includes one filled space before the glyph and after
+            // the trailing '.'; exterior cells stay transparent.
+            let chip = " ◇ C-x . ";
             assert!(
-                rendered_text(terminal.backend().buffer()).contains(label),
+                rendered_text(terminal.backend().buffer()).contains("◇ C-x ."),
                 "full-screen PTY repaint must not cover suggestion chrome"
             );
-            // The label cells carry a filled background; the one-cell padding
-            // on each side is left transparent (untouched, bg Reset).
             let buffer = terminal.backend().buffer();
-            let label_start = hit.x + 1;
-            for x in label_start..label_start + label.chars().count() as u16 {
-                let cell = buffer.cell((x, hit.y)).expect("label cell");
+            let chip_start = hit.x + 1;
+            let chip_width = chip.chars().count() as u16;
+            assert_eq!(
+                hit.width,
+                chip_width + 2,
+                "hit spans exterior transparent cells + filled chip"
+            );
+            for x in chip_start..chip_start + chip_width {
+                let cell = buffer.cell((x, hit.y)).expect("chip cell");
                 assert!(
                     cell.style().bg.is_some_and(|bg| bg != ratatui::style::Color::Reset),
-                    "label cell {x} must have a filled background"
+                    "chip cell {x} (incl. interior spaces) must have a filled background"
                 );
             }
+            // Interior pad spaces: first and last cells of the chip.
+            let left_space = buffer.cell((chip_start, hit.y)).expect("left interior space");
+            let right_space = buffer
+                .cell((chip_start + chip_width - 1, hit.y))
+                .expect("right interior space");
+            assert_eq!(left_space.symbol(), " ", "space before glyph");
+            assert_eq!(right_space.symbol(), " ", "space after trailing '.'");
             for x in [hit.x, hit.right().saturating_sub(1)] {
-                let cell = buffer.cell((x, hit.y)).expect("padding cell");
+                let cell = buffer.cell((x, hit.y)).expect("exterior padding cell");
                 assert!(
                     cell.style().bg.is_none_or(|bg| bg == ratatui::style::Color::Reset),
-                    "padding cell {x} stays transparent"
+                    "exterior padding cell {x} stays transparent"
                 );
             }
         }

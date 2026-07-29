@@ -4964,11 +4964,17 @@ fn focused_session_pane(app: &App) -> Option<WindowPaneHit> {
 
 /// Persistent suggestion-deck affordance (specs 0109/0155). It belongs to
 /// the focused session terminal rather than the global modeline: right-aligned
-/// flush against the right edge, one row above the bottom border. The label
-/// carries a filled background tint; one transparent padding cell on each side
-/// is left untouched so the session content (and the scrollbar, which shares
-/// the rightmost column) shows through — the same see-through treatment the
-/// terminal scrollbar gets.
+/// flush against the right edge, one row above the bottom border.
+///
+/// Layout (one row, left → right):
+///   `[transparent][ bg " " ][ bg "◇ C-x ." ][ bg " " ][transparent]`
+///
+/// - **Interior spaces** (with filled bg) give the chip breathing room before
+///   the glyph and after the trailing `.` so the tint is visibly a pad, not
+///   tight to the ink.
+/// - **Exterior cells** stay transparent (untouched) so session content — and
+///   the scrollbar that shares the rightmost column — shows through, matching
+///   the terminal scrollbar's see-through treatment.
 fn render_suggest_affordance(f: &mut Frame, app: &mut App) -> Option<Rect> {
     let Some(session) = app.selected_session() else {
         return None;
@@ -4986,19 +4992,23 @@ fn render_suggest_affordance(f: &mut Frame, app: &mut App) -> Option<Rect> {
     if pane.area.width < 12 || pane.area.height < 5 {
         return None;
     }
-    let label = if let Some(hand) = app.suggestion_hands.get(&session.id) {
+    // Core label; wrapped in one filled space on each side for interior pad.
+    let core = if let Some(hand) = app.suggestion_hands.get(&session.id) {
         format!("✦{} C-x .", 1 + hand.verbs.len())
     } else if app.suggest_pending_active(&session.id) {
         format!("{} C-x . suggesting…", app.spinner_frame())
     } else {
         "◇ C-x .".to_string()
     };
+    let label = format!(" {core} ");
+    // +4 = 2 exterior transparent cells + room for the two interior spaces
+    // already counted in `label` width when not truncated.
     let width = UnicodeWidthStr::width(label.as_str())
-        .min(pane.area.width.saturating_sub(4) as usize) as u16;
+        .min(pane.area.width.saturating_sub(2) as usize) as u16;
     if width == 0 {
         return None;
     }
-    // Hit/paint rect spans the label plus one transparent padding cell per
+    // Hit/paint rect spans the chip plus one transparent padding cell per
     // side, flush against the pane's right edge.
     let area = Rect {
         x: pane
@@ -5021,8 +5031,8 @@ fn render_suggest_affordance(f: &mut Frame, app: &mut App) -> Option<Rect> {
         width,
         ..area
     };
-    // Filled-but-translucent background, tinting only the label cells; the
-    // padding cells keep whatever the session painted underneath.
+    // Filled-but-translucent background on the chip (including interior
+    // spaces); exterior padding cells keep whatever the session painted.
     let bg = blend_color(Color::Black, app.theme.text, 0.30);
     f.render_widget(Clear, label_area);
     let mut text = truncate_to_width(&label, width as usize);
