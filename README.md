@@ -116,10 +116,6 @@ construct ssh devbox
 construct ssh -J bastion -p 2222 devbox
 ```
 
-MIDI controllers can drive those same native TUI actions without keyboard
-emulation. See [MIDI control surfaces](docs/midi.md) for device discovery and
-the `construct midi learn` workflow, including OP–XY setup.
-
 To run the daemon explicitly instead (e.g. on a server, or under a process
 supervisor):
 
