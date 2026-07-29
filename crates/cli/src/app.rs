@@ -32275,17 +32275,36 @@ mod tests {
             assert_eq!(
                 hit.y,
                 pane.bottom().saturating_sub(2),
-                "affordance stays on the final interior row"
+                "affordance sits one row above the bottom border"
             );
             assert_eq!(
                 hit.right(),
-                pane.right().saturating_sub(2),
-                "affordance leaves one interior cell before the right edge"
+                pane.right(),
+                "affordance is right-aligned flush against the pane edge"
             );
+            let label = "◇ C-x .";
             assert!(
-                rendered_text(terminal.backend().buffer()).contains("◇ C-x ."),
+                rendered_text(terminal.backend().buffer()).contains(label),
                 "full-screen PTY repaint must not cover suggestion chrome"
             );
+            // The label cells carry a filled background; the one-cell padding
+            // on each side is left transparent (untouched, bg Reset).
+            let buffer = terminal.backend().buffer();
+            let label_start = hit.x + 1;
+            for x in label_start..label_start + label.chars().count() as u16 {
+                let cell = buffer.cell((x, hit.y)).expect("label cell");
+                assert!(
+                    cell.style().bg.is_some_and(|bg| bg != ratatui::style::Color::Reset),
+                    "label cell {x} must have a filled background"
+                );
+            }
+            for x in [hit.x, hit.right().saturating_sub(1)] {
+                let cell = buffer.cell((x, hit.y)).expect("padding cell");
+                assert!(
+                    cell.style().bg.is_none_or(|bg| bg == ratatui::style::Color::Reset),
+                    "padding cell {x} stays transparent"
+                );
+            }
         }
         server.abort();
     }
