@@ -371,12 +371,7 @@ impl RouteMenu {
             .chain(self.routes.iter().map(|r| r.model.chars().count()))
             .max()
             .unwrap_or(0)
-            .max(
-                self.focused_blocker()
-                    .map(|b| b.chars().count())
-                    .unwrap_or(0)
-                    .min(40),
-            )
+            .max(self.focused_blocker().map(|b| b.chars().count()).unwrap_or(0).min(40))
             .saturating_add(4) as u16;
 
         let max_w = size.width.saturating_sub(2).max(12);
@@ -405,11 +400,7 @@ impl RouteMenu {
         self.target_col_w = target_col_w;
 
         self.desc_lines = self.description(width.saturating_sub(2)).len() as u16;
-        let reason_rows = if self.unavailable_reason.is_some() {
-            1
-        } else {
-            0
-        };
+        let reason_rows = if self.unavailable_reason.is_some() { 1 } else { 0 };
         let height = (self.rows() as u16)
             .saturating_add(2)
             .saturating_add(reason_rows)
@@ -449,11 +440,7 @@ impl RouteMenu {
         }
         let body_start = first.saturating_add(self.header_rows());
         let index = row.checked_sub(body_start)? as usize;
-        let divider = self
-            .area
-            .x
-            .saturating_add(1)
-            .saturating_add(self.target_col_w);
+        let divider = self.area.x.saturating_add(1).saturating_add(self.target_col_w);
         if col <= divider {
             (index < self.routes.len()).then_some(RouteHit::Target(index + 1))
         } else {
@@ -466,11 +453,7 @@ impl RouteMenu {
 mod tests {
     use super::*;
 
-    fn option(
-        name: &str,
-        models: &[&str],
-        reason: Option<&str>,
-    ) -> construct_protocol::RouteOption {
+    fn option(name: &str, models: &[&str], reason: Option<&str>) -> construct_protocol::RouteOption {
         construct_protocol::RouteOption {
             name: name.to_string(),
             dialect: "anthropic".to_string(),
@@ -506,10 +489,7 @@ mod tests {
         assert!(m.target_enabled(0));
         assert!(!m.target_descends(0), "Default has no models to move into");
         assert!(!m.target_enabled(1), "an unusable target is not selectable");
-        assert!(
-            m.target_is_active(0),
-            "no route armed means Default is current"
-        );
+        assert!(m.target_is_active(0), "no route armed means Default is current");
     }
 
     /// The model column previews the highlighted target without committing
@@ -547,10 +527,7 @@ mod tests {
     /// A target that cannot be used shows why, in place of models.
     #[test]
     fn an_unusable_target_shows_its_reason_instead_of_models() {
-        let mut m = menu(
-            vec![option("glm", &["glm-5"], Some("GLM_API_KEY is not set"))],
-            None,
-        );
+        let mut m = menu(vec![option("glm", &["glm-5"], Some("GLM_API_KEY is not set"))], None);
         m.selected = 1;
         assert_eq!(m.focused_blocker(), Some("GLM_API_KEY is not set"));
     }

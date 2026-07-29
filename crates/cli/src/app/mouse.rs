@@ -225,7 +225,12 @@ impl App {
         true
     }
 
-    pub(super) fn drag_list_scrollbar_to_row(&mut self, row: u16, grab: u16, max_scroll: usize) {
+    pub(super) fn drag_list_scrollbar_to_row(
+        &mut self,
+        row: u16,
+        grab: u16,
+        max_scroll: usize,
+    ) {
         let Some(hit) = self.layout.list_scrollbar else {
             return;
         };

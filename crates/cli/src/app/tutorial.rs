@@ -501,7 +501,7 @@ fn step3_lines() -> Vec<TutorialLine> {
 fn step4_lines() -> Vec<TutorialLine> {
     vec![
         vec![t("Open the practice session's title-bar ☰")],
-        vec![t("menu and choose Fork conversation.")],
+        vec![t("menu and choose Fork conversation." )],
         vec![t("The fork keeps its context but works on an")],
         vec![t("independent path. Create one now.")],
         vec![],
@@ -1019,9 +1019,8 @@ impl App {
                 }
             }
         } else if n.method == construct_protocol::ipc_notif::PROGRAM_STATE {
-            if let Ok(payload) = serde_json::from_value::<
-                construct_protocol::ProgramStateNotificationPayload,
-            >(params)
+            if let Ok(payload) =
+                serde_json::from_value::<construct_protocol::ProgramStateNotificationPayload>(params)
             {
                 self.tutorial_on_program_state(&payload.program);
             }
@@ -1056,9 +1055,11 @@ impl App {
                 }
             }
             4 => {
-                if session.forked_from.as_ref().is_some_and(|fork| {
-                    Some(fork.session_id.as_str()) == t.practice_session_id.as_deref()
-                }) {
+                if session
+                    .forked_from
+                    .as_ref()
+                    .is_some_and(|fork| Some(fork.session_id.as_str()) == t.practice_session_id.as_deref())
+                {
                     t.fork_session_id = Some(session.id.clone());
                     t.advance(5);
                 }
