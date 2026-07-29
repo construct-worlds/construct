@@ -232,15 +232,27 @@
   .session-runtime-popover[hidden] { display: none; }
   .session-runtime-popover .runtime-detail-label { color: var(--fg-faint); }
   .session-runtime-popover .runtime-detail-bar { margin-top: 7px; width: 100%; }
-  /* Per-component context breakdown (spec 0156). Derived rows (unaccounted /
-     free space) are computed client-side from the gauge and render dimmed to
-     separate them from adapter-reported segments. */
-  .runtime-breakdown {
+  /* Per-component context breakdown (spec 0156): a colored cell grid (each
+     cell = 1% of the window) beside a color-keyed legend, mirroring the TUI
+     gauge tooltip. Derived rows (unaccounted / free space) are computed
+     client-side from the gauge and render dimmed / gray to separate them
+     from adapter-reported segments. */
+  .runtime-breakdown-wrap {
     margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--border);
-    display: grid; grid-template-columns: 1fr auto auto; column-gap: 10px;
+    display: flex; gap: 12px; align-items: flex-start;
+  }
+  .runtime-breakdown-grid {
+    flex: none; display: grid; gap: 2px;
+    grid-template-columns: repeat(10, 9px); grid-auto-rows: 9px;
+  }
+  .runtime-breakdown-grid > i { border-radius: 2px; }
+  .runtime-breakdown {
+    display: grid; grid-template-columns: auto 1fr auto auto;
+    column-gap: 8px; align-items: center;
     font-variant-numeric: tabular-nums;
   }
   .runtime-breakdown > span { white-space: nowrap; }
+  .runtime-breakdown .bd-dot { width: 8px; height: 8px; border-radius: 2px; }
   .runtime-breakdown .bd-count, .runtime-breakdown .bd-pct { text-align: right; }
   .runtime-breakdown .bd-derived { color: var(--fg-faint); }
   @media (max-width: 720px) {
@@ -13696,11 +13708,38 @@ function renderSessionRuntimeMeta(s) {
     contextBreakdownHtml(s);
 }
 
-/** Per-component context breakdown rows for the runtime popover (spec
- *  0156). Mirrors the TUI gauge tooltip: one row per adapter-reported
- *  segment (estimated counts carry the mandated `~` prefix), then the
- *  derived `unaccounted` remainder and `free space` rows. Empty string
- *  when the session reports no breakdown. */
+/** Fixed midtone palette for reported segments, cycled by index — the
+ *  same values the TUI gauge tooltip uses, so segment identities read
+ *  the same across clients. Derived rows use the fixed grays. */
+const BREAKDOWN_PALETTE = ["#fab387", "#89b4fa", "#f9e2af", "#cba6f7", "#94e2d5", "#f5c2e7"];
+const BREAKDOWN_UNACCOUNTED = "#7f849c";
+const BREAKDOWN_FREE = "#45475a";
+
+/** Largest-remainder allocation of `cells` grid cells across `weights`
+ *  (mirrors the TUI's breakdown_grid_alloc). */
+function breakdownGridAlloc(weights, cells) {
+  const total = weights.reduce((a, b) => a + b, 0);
+  if (!total) return weights.map(() => 0);
+  const alloc = weights.map((w) => Math.floor((w * cells) / total));
+  let assigned = alloc.reduce((a, b) => a + b, 0);
+  const order = weights
+    .map((w, i) => [i, (w * cells) % total])
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+  for (const [i] of order) {
+    if (assigned >= cells) break;
+    alloc[i] += 1;
+    assigned += 1;
+  }
+  return alloc;
+}
+
+/** Per-component context breakdown for the runtime popover (spec 0156).
+ *  Mirrors the TUI gauge tooltip: a colored 10x10 cell grid (each cell =
+ *  1% of the window, or of the used tokens when no window is reported)
+ *  beside a color-keyed legend — one row per adapter-reported segment
+ *  (estimated counts carry the mandated `~` prefix), then the derived
+ *  `unaccounted` remainder and `free space` rows. Empty string when the
+ *  session reports no breakdown. */
 function contextBreakdownHtml(s) {
   const segments = Array.isArray(s.context_segments) ? s.context_segments : [];
   const used = s.context_used;
@@ -13716,26 +13755,46 @@ function contextBreakdownHtml(s) {
       count: `${seg.estimated ? "~" : ""}${formatTokenCount(tokens)}`,
       tokens,
       derived: false,
+      color: BREAKDOWN_PALETTE[(rows.length) % BREAKDOWN_PALETTE.length],
     });
   }
   if (accounted < used) {
     const rest = used - accounted;
-    rows.push({ label: "unaccounted", count: formatTokenCount(rest), tokens: rest, derived: true });
+    rows.push({
+      label: "unaccounted", count: formatTokenCount(rest), tokens: rest,
+      derived: true, color: BREAKDOWN_UNACCOUNTED,
+    });
   }
   if (window > 0) {
     const free = Math.max(0, window - used);
-    rows.push({ label: "free space", count: formatTokenCount(free), tokens: free, derived: true });
+    rows.push({
+      label: "free space", count: formatTokenCount(free), tokens: free,
+      derived: true, color: BREAKDOWN_FREE,
+    });
   }
-  const cells = rows
+  const alloc = breakdownGridAlloc(rows.map((r) => r.tokens), 100);
+  let gridCells = "";
+  let filled = 0;
+  rows.forEach((r, i) => {
+    for (let c = 0; c < alloc[i]; c++) {
+      gridCells += `<i style="background:${r.color}"></i>`;
+      filled += 1;
+    }
+  });
+  for (; filled < 100; filled++) gridCells += `<i style="background:${BREAKDOWN_FREE}"></i>`;
+  const legend = rows
     .map((r) => {
       const cls = r.derived ? " bd-derived" : "";
       const pct = window > 0 ? `${Math.floor((r.tokens * 100) / window)}%` : "";
-      return `<span class="bd-label${cls}">${escape(r.label)}</span>` +
+      return `<span class="bd-dot" style="background:${r.color}"></span>` +
+        `<span class="bd-label${cls}">${escape(r.label)}</span>` +
         `<span class="bd-count${cls}">${escape(r.count)}</span>` +
         `<span class="bd-pct${cls}">${escape(pct)}</span>`;
     })
     .join("");
-  return `<div class="runtime-breakdown">${cells}</div>`;
+  return `<div class="runtime-breakdown-wrap">` +
+    `<div class="runtime-breakdown-grid" aria-hidden="true">${gridCells}</div>` +
+    `<div class="runtime-breakdown">${legend}</div></div>`;
 }
 
 function escape(s) {

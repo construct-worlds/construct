@@ -418,12 +418,10 @@ impl App {
             if let Some(hit) = image_chip {
                 if let Some(popup) = self.program_popup.as_mut() {
                     if popup.expanded_attachments.remove(&hit.key).is_none() {
-                        popup
-                            .expanded_attachments
-                            .insert(
-                                hit.key,
-                                (hit.path.clone(), crate::ui::PROGRAM_ATTACHMENT_DEFAULT_ROWS),
-                            );
+                        popup.expanded_attachments.insert(
+                            hit.key,
+                            (hit.path.clone(), crate::ui::PROGRAM_ATTACHMENT_DEFAULT_ROWS),
+                        );
                     }
                 }
                 self.persist_program_expanded();
@@ -584,13 +582,13 @@ impl App {
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if ev.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                    if let Some(hit) = crate::app::url_hit_in_frame(
-                        &self.frame_text,
-                        ev.column,
-                        ev.row,
-                        modal,
-                    ) {
+                if ev
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                {
+                    if let Some(hit) =
+                        crate::app::url_hit_in_frame(&self.frame_text, ev.column, ev.row, modal)
+                    {
                         match crate::app::open_url(&hit.url) {
                             Ok(()) => self.set_status(format!("opened {}", hit.url)),
                             Err(e) => self.set_status(format!("open URL failed: {e}")),
@@ -988,8 +986,8 @@ impl App {
     fn pan_pinned_clip_card(&mut self, ev: &MouseEvent) {
         let v_step = PROGRAM_WHEEL_SCROLL_ROWS as i32;
         let h_step = PROGRAM_PINNED_PAN_COLS_STEP as i32;
-        let horizontal = ev.modifiers.contains(KeyModifiers::SHIFT)
-            || ev.modifiers.contains(KeyModifiers::ALT);
+        let horizontal =
+            ev.modifiers.contains(KeyModifiers::SHIFT) || ev.modifiers.contains(KeyModifiers::ALT);
         match (ev.kind, horizontal) {
             (MouseEventKind::ScrollUp, true) => self.pan_pinned_card_by(h_step, 0),
             (MouseEventKind::ScrollDown, true) => self.pan_pinned_card_by(-h_step, 0),
@@ -1028,8 +1026,8 @@ impl App {
         // `C-x o`, `C-x z`, etc. keep working while a card is pinned. The
         // standard `C-x C-x` escape hatch forwards one literal C-x byte to
         // the pinned session instead.
-        let is_ctrl_x = matches!(key.code, KeyCode::Char('x'))
-            && key.modifiers.contains(KeyModifiers::CONTROL);
+        let is_ctrl_x =
+            matches!(key.code, KeyCode::Char('x')) && key.modifiers.contains(KeyModifiers::CONTROL);
         if !self.chord_state.is_empty() {
             if is_ctrl_x {
                 self.chord_state.reset();
@@ -1158,12 +1156,14 @@ impl App {
                         // reload) while this row was selected — fall back to
                         // Run rather than silently doing nothing.
                         if let Some(verb) = self.program_verbs.get(idx).cloned() {
-                            self.execute_program_selected_verb(verb.name, run_on_fork).await;
+                            self.execute_program_selected_verb(verb.name, run_on_fork)
+                                .await;
                         } else {
                             let comment = self.program_popup.as_ref().and_then(|popup| {
                                 Some(popup.selection_menu.as_ref()?.comment.clone())
                             });
-                            self.execute_program_selected_text(comment, run_on_fork).await;
+                            self.execute_program_selected_text(comment, run_on_fork)
+                                .await;
                         }
                     }
                     ProgramSelectionAction::Comment | ProgramSelectionAction::Run => {
@@ -1171,7 +1171,8 @@ impl App {
                             .program_popup
                             .as_ref()
                             .and_then(|popup| Some(popup.selection_menu.as_ref()?.comment.clone()));
-                        self.execute_program_selected_text(comment, run_on_fork).await;
+                        self.execute_program_selected_text(comment, run_on_fork)
+                            .await;
                     }
                 }
             }

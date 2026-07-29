@@ -290,7 +290,11 @@ impl OpXyAuxState {
             return None;
         }
         let (previous, increasing, decreasing) = if message.number == config.arrow_cc {
-            (&mut self.arrow_value, OpXyAuxControl::Down, OpXyAuxControl::Up)
+            (
+                &mut self.arrow_value,
+                OpXyAuxControl::Down,
+                OpXyAuxControl::Up,
+            )
         } else if message.number == config.scroll_cc {
             (
                 &mut self.scroll_value,
@@ -1006,7 +1010,9 @@ pub(crate) type OpXyLinkStatusReceiver = mpsc::UnboundedReceiver<OpXyLinkStatus>
 #[cfg(target_os = "macos")]
 pub(crate) fn start_feedback() -> Result<Option<(MidiFeedback, OpXyLinkStatusReceiver)>> {
     let config = MidiConfig::load(&Paths::discover().midi_file())?;
-    let Some(profile) = config.op_xy.filter(|profile| profile.enabled && profile.feedback.enabled)
+    let Some(profile) = config
+        .op_xy
+        .filter(|profile| profile.enabled && profile.feedback.enabled)
     else {
         return Ok(None);
     };
@@ -1052,8 +1058,7 @@ pub(crate) fn start_feedback() -> Result<Option<(MidiFeedback, OpXyLinkStatusRec
     Ok(None)
 }
 
-const FEEDBACK_MIN_FRAME_PERIOD: std::time::Duration =
-    std::time::Duration::from_millis(200);
+const FEEDBACK_MIN_FRAME_PERIOD: std::time::Duration = std::time::Duration::from_millis(200);
 const FEEDBACK_MAX_CC_MESSAGES_PER_SECOND: u32 = 16;
 /// First reassert after a global-state (scene/tempo/transport) change.
 /// Reasserts exist only to self-heal silently dropped Bluetooth packets, and
@@ -1275,8 +1280,7 @@ fn feedback_loop(
     let mut connection_ok = connection.is_some();
     if let Some(connection) = connection.as_mut() {
         connection_ok &= send_slot_volumes(connection, u8::MAX, 0);
-        connection_ok &=
-            send_pane_parameters(connection, 0b0000_1111, config.track_activity_cc, 0);
+        connection_ok &= send_pane_parameters(connection, 0b0000_1111, config.track_activity_cc, 0);
     }
     loop {
         if !connection_ok && connection.take().is_some() {
@@ -1470,7 +1474,12 @@ fn pane_parameter_packet(panes: u8, cc: u8, value: u8) -> Vec<u8> {
 }
 
 #[cfg(target_os = "macos")]
-fn send_pane_parameters(connection: &mut MidiOutputConnection, panes: u8, cc: u8, value: u8) -> bool {
+fn send_pane_parameters(
+    connection: &mut MidiOutputConnection,
+    panes: u8,
+    cc: u8,
+    value: u8,
+) -> bool {
     let packet = pane_parameter_packet(panes, cc, value);
     packet.is_empty() || connection.send(&packet).is_ok()
 }
@@ -1603,7 +1612,9 @@ fn op_xy_tempo_cc(active_sessions: u16, tempo_range: [u16; 2]) -> Option<u8> {
     }
     let min = f64::from(tempo_range[0].min(tempo_range[1]).clamp(40, 220));
     let max = f64::from(tempo_range[0].max(tempo_range[1]).clamp(40, 220));
-    let intensity = f64::from(crate::ui::rain_activity_for_active_sessions(active_sessions));
+    let intensity = f64::from(crate::ui::rain_activity_for_active_sessions(
+        active_sessions,
+    ));
     let bpm = min + (max - min) * intensity;
     Some(((bpm - 40.0) * 127.0 / 180.0).round().clamp(0.0, 127.0) as u8)
 }
@@ -1755,7 +1766,9 @@ fn find_output_port(output: &MidiOutput, selector: &str) -> Result<MidiOutputPor
         .into_iter()
         .filter_map(|port| {
             let name = output.port_name(&port).ok()?;
-            name.to_lowercase().contains(&needle).then_some((port, name))
+            name.to_lowercase()
+                .contains(&needle)
+                .then_some((port, name))
         })
         .collect();
     match matches.as_slice() {
@@ -2001,10 +2014,8 @@ mod tests {
 
     #[test]
     fn op_xy_aux_existing_config_defaults_external_midi_note_channel() {
-        let config: OpXyAuxConfig = toml::from_str(
-            "enabled = true\nchannel = 10\narrow_cc = 2\nscroll_cc = 3\n",
-        )
-        .unwrap();
+        let config: OpXyAuxConfig =
+            toml::from_str("enabled = true\nchannel = 10\narrow_cc = 2\nscroll_cc = 3\n").unwrap();
         assert_eq!(config.focused_note_channels, vec![10]);
     }
 
@@ -2221,7 +2232,11 @@ mod tests {
 
     #[test]
     fn tempo_cc_clamps_to_op_xy_scale_and_supports_disable() {
-        assert_eq!(op_xy_tempo_cc(4, [0, 0]), None, "[0,0] disables tempo control");
+        assert_eq!(
+            op_xy_tempo_cc(4, [0, 0]),
+            None,
+            "[0,0] disables tempo control"
+        );
         assert_eq!(
             op_xy_tempo_cc(0, [10, 500]),
             Some(0),
@@ -2291,7 +2306,10 @@ mod tests {
         for frame_index in 0..FEEDBACK_ANIMATION_FRAMES_BEFORE_HOLD {
             let frame = animation.next_frame();
             assert!(!frame.hold, "frame {frame_index} still animates");
-            assert_eq!(frame.active, ACTIVE_MOTION[frame_index % ACTIVE_MOTION.len()]);
+            assert_eq!(
+                frame.active,
+                ACTIVE_MOTION[frame_index % ACTIVE_MOTION.len()]
+            );
             assert_eq!(
                 frame.attention,
                 ATTENTION_BOUNCE[frame_index % ATTENTION_BOUNCE.len()]
@@ -2312,8 +2330,7 @@ mod tests {
             assert_eq!(frame.active, ACTIVE_HOLD);
             assert_eq!(frame.attention, ATTENTION_HOLD);
             assert_eq!(
-                frame.synth_active,
-                [synth_active[0]; SPLIT_ACTIVITY_PARAMETER_COUNT as usize],
+                frame.synth_active, [synth_active[0]; SPLIT_ACTIVITY_PARAMETER_COUNT as usize],
                 "held synth activity rests flat at the configured jump-cycle start"
             );
             assert_eq!(
@@ -2359,11 +2376,13 @@ mod tests {
             active_tracks: 0b0000_0001,
             ..idle
         };
-        assert_eq!(feedback_activity_message_count(one_session_and_synth_track), 5);
+        assert_eq!(
+            feedback_activity_message_count(one_session_and_synth_track),
+            5
+        );
         assert_eq!(
             feedback_frame_period(one_session_and_synth_track),
-            std::time::Duration::from_millis(312)
-                + std::time::Duration::from_micros(500)
+            std::time::Duration::from_millis(312) + std::time::Duration::from_micros(500)
         );
 
         let all_tracks = FeedbackSnapshot {
@@ -2394,15 +2413,15 @@ mod tests {
         assert_eq!(
             pane_parameter_packet(0b0000_1001, 12, 40),
             vec![
-                0xB0, 12, 40, 0xB0, 13, 40, 0xB0, 14, 40, 0xB0, 15, 40, 0xB3, 12, 40,
-                0xB3, 13, 40, 0xB3, 14, 40, 0xB3, 15, 40,
+                0xB0, 12, 40, 0xB0, 13, 40, 0xB0, 14, 40, 0xB0, 15, 40, 0xB3, 12, 40, 0xB3, 13, 40,
+                0xB3, 14, 40, 0xB3, 15, 40,
             ]
         );
         assert_eq!(
             activity_pane_packet(0b0000_1100, 0b0000_1000, 12, &[40; 4], &[70; 4]),
             vec![
-                0xB2, 12, 40, 0xB2, 13, 40, 0xB2, 14, 40, 0xB2, 15, 40, 0xB3, 12, 70,
-                0xB3, 13, 70, 0xB3, 14, 70, 0xB3, 15, 70,
+                0xB2, 12, 40, 0xB2, 13, 40, 0xB2, 14, 40, 0xB2, 15, 40, 0xB3, 12, 70, 0xB3, 13, 70,
+                0xB3, 14, 70, 0xB3, 15, 70,
             ]
         );
     }
@@ -2416,9 +2435,7 @@ mod tests {
         assert_eq!(values, [13, 64, 114, 64]);
         assert_eq!(
             activity_pane_packet(0b0000_0001, 0, 12, &values, &[0; 4]),
-            vec![
-                0xB0, 12, 13, 0xB0, 13, 64, 0xB0, 14, 114, 0xB0, 15, 64,
-            ]
+            vec![0xB0, 12, 13, 0xB0, 13, 64, 0xB0, 14, 114, 0xB0, 15, 64,]
         );
 
         // Phase wraps around the cycle end.
@@ -2439,9 +2456,7 @@ mod tests {
         let values = phase_offset_values(&attention, 0);
         assert_eq!(
             activity_pane_packet(0, 0b0000_0010, 12, &[0; 4], &values),
-            vec![
-                0xB1, 12, 13, 0xB1, 13, 114, 0xB1, 14, 13, 0xB1, 15, 13,
-            ]
+            vec![0xB1, 12, 13, 0xB1, 13, 114, 0xB1, 14, 13, 0xB1, 15, 13,]
         );
     }
 
@@ -2544,7 +2559,10 @@ mod tests {
             let pane = activity_pane_packet(0b0000_0001, 0, 12, &curve, &[0; 4]);
             assert!(volume.chunks(3).all(|m| m[1] == 7));
             assert!(pane.chunks(3).all(|m| m[1] != 7));
-            assert_eq!(volume, activity_volume_packet(0b0000_0011, 0b0000_0010, 32, 51));
+            assert_eq!(
+                volume,
+                activity_volume_packet(0b0000_0011, 0b0000_0010, 32, 51)
+            );
         }
     }
 

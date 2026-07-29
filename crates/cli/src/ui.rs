@@ -9452,17 +9452,30 @@ fn render_modeline_context_gauge_tooltip(f: &mut Frame, app: &App) {
         return;
     };
     let total = f.area();
-    let inner_w = rows
+    // Colored 10x10 cell grid: each cell is 1% of the window (or of the
+    // used tokens when the harness reports no window), painted in the
+    // legend row's color, mirroring Claude Code's /context view.
+    let cell_colors: Vec<Color> = {
+        let weights: Vec<u64> = rows.iter().map(|r| r.tokens).collect();
+        let alloc = breakdown_grid_alloc(&weights, BREAKDOWN_GRID_CELLS);
+        rows.iter()
+            .zip(alloc)
+            .flat_map(|(row, cells)| std::iter::repeat_n(row.color, cells))
+            .collect()
+    };
+    let legend_w = rows
         .iter()
         .map(|r| UnicodeWidthStr::width(r.text.as_str()) as u16)
-        .chain(std::iter::once(
-            UnicodeWidthStr::width(header.as_str()) as u16
-        ))
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        + 2; // "■ " marker
+    let grid_w = (BREAKDOWN_GRID_COLS * 2 - 1) as u16; // "■" cells, 1-col gaps
+    let body_rows = (BREAKDOWN_GRID_ROWS.max(rows.len())) as u16;
+    let inner_w =
+        (1 + grid_w + 2 + legend_w + 1).max(UnicodeWidthStr::width(header.as_str()) as u16);
     let w = (inner_w + 2).min(total.width.max(1));
-    // header + blank separator + segment rows + 2 border rows.
-    let h = (1 + 1 + rows.len() as u16 + 2).min(total.height.max(1));
+    // header + blank separator + grid/legend rows + 2 border rows.
+    let h = (1 + 1 + body_rows + 2).min(total.height.max(1));
     let rect = harness_hover_tooltip_rect(hit.start_col, hit.row, w, h, total);
     f.render_widget(Clear, rect);
     let block = app.theme.themed_block("");
@@ -9475,15 +9488,81 @@ fn render_modeline_context_gauge_tooltip(f: &mut Frame, app: &App) {
         Line::styled(header, harness_hover_tooltip_header_style(&app.theme)),
         Line::raw(""),
     ];
-    for row in rows {
-        let style = if row.derived {
-            app.theme.dim_style()
+    for line_idx in 0..body_rows as usize {
+        let mut spans: Vec<Span> = vec![Span::raw(" ")];
+        if line_idx < BREAKDOWN_GRID_ROWS {
+            for col in 0..BREAKDOWN_GRID_COLS {
+                let cell = line_idx * BREAKDOWN_GRID_COLS + col;
+                let color = cell_colors.get(cell).copied().unwrap_or(BREAKDOWN_FREE);
+                if col > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled("■", Style::default().fg(color)));
+            }
         } else {
-            app.theme.text_style()
-        };
-        lines.push(Line::styled(row.text, style));
+            spans.push(Span::raw(" ".repeat(grid_w as usize)));
+        }
+        spans.push(Span::raw("  "));
+        if let Some(row) = rows.get(line_idx) {
+            spans.push(Span::styled("■ ", Style::default().fg(row.color)));
+            let style = if row.derived {
+                app.theme.dim_style()
+            } else {
+                app.theme.text_style()
+            };
+            spans.push(Span::styled(row.text.clone(), style));
+        }
+        lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+const BREAKDOWN_GRID_COLS: usize = 10;
+const BREAKDOWN_GRID_ROWS: usize = 10;
+const BREAKDOWN_GRID_CELLS: usize = BREAKDOWN_GRID_COLS * BREAKDOWN_GRID_ROWS;
+
+/// Fixed midtone palette for reported segments, cycled by index. Fixed
+/// (not theme-derived) so segment identities read the same across themes;
+/// the web popover uses the same values.
+const BREAKDOWN_PALETTE: [Color; 6] = [
+    Color::Rgb(250, 179, 135), // orange
+    Color::Rgb(137, 180, 250), // blue
+    Color::Rgb(249, 226, 175), // yellow
+    Color::Rgb(203, 166, 247), // mauve
+    Color::Rgb(148, 226, 213), // teal
+    Color::Rgb(245, 194, 231), // pink
+];
+/// Derived-row colors: `unaccounted` (mid gray) and `free space` (near-bg
+/// gray, also the fill for any grid cells past the allocated ones).
+const BREAKDOWN_UNACCOUNTED: Color = Color::Rgb(127, 132, 156);
+const BREAKDOWN_FREE: Color = Color::Rgb(69, 71, 90);
+
+/// Largest-remainder allocation of `cells` grid cells across `weights`.
+/// Sums exactly to `cells` when the weights are non-zero; all-zero
+/// weights allocate nothing (callers backfill with the free color).
+fn breakdown_grid_alloc(weights: &[u64], cells: usize) -> Vec<usize> {
+    let total: u64 = weights.iter().sum();
+    if total == 0 {
+        return vec![0; weights.len()];
+    }
+    let mut alloc: Vec<usize> = Vec::with_capacity(weights.len());
+    let mut remainders: Vec<(usize, u64)> = Vec::with_capacity(weights.len());
+    let mut assigned = 0usize;
+    for (i, w) in weights.iter().enumerate() {
+        let exact = w * cells as u64;
+        alloc.push((exact / total) as usize);
+        remainders.push((i, exact % total));
+        assigned += alloc[i];
+    }
+    remainders.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    for (i, _) in remainders {
+        if assigned >= cells {
+            break;
+        }
+        alloc[i] += 1;
+        assigned += 1;
+    }
+    alloc
 }
 
 /// One rendered row of the context-breakdown tooltip. `derived` rows
@@ -9493,6 +9572,11 @@ fn render_modeline_context_gauge_tooltip(f: &mut Frame, app: &App) {
 struct ContextBreakdownRow {
     text: String,
     derived: bool,
+    /// Raw token weight, for the grid-cell allocation.
+    tokens: u64,
+    /// Legend marker / grid cell color (palette by segment index; fixed
+    /// grays for the derived rows).
+    color: Color,
 }
 
 /// Format the spec 0156 breakdown detail for the context-gauge tooltip:
@@ -9550,16 +9634,26 @@ fn context_breakdown_rows(s: &SessionSummary) -> Option<Vec<ContextBreakdownRow>
     Some(
         entries
             .into_iter()
-            .map(|(label, count, tokens, derived)| {
+            .enumerate()
+            .map(|(index, (label, count, tokens, derived))| {
                 let pct = match window {
                     Some(window) => {
                         format!(" {:>3}%", tokens.saturating_mul(100) / window)
                     }
                     None => String::new(),
                 };
+                let color = if !derived {
+                    BREAKDOWN_PALETTE[index % BREAKDOWN_PALETTE.len()]
+                } else if label == "free space" {
+                    BREAKDOWN_FREE
+                } else {
+                    BREAKDOWN_UNACCOUNTED
+                };
                 ContextBreakdownRow {
                     text: format!(" {label:<label_w$}  {count:>count_w$}{pct} "),
                     derived,
+                    tokens,
+                    color,
                 }
             })
             .collect(),
@@ -20346,6 +20440,27 @@ mod tests {
         assert!(rows[3].derived);
         // Percent column present when the window is known.
         assert!(rows[3].text.trim_end().ends_with("50%"));
+        // Grid weights and colors: reported rows take palette colors,
+        // derived rows the fixed grays.
+        assert_eq!(rows[0].tokens, 10_000);
+        assert_eq!(rows[0].color, BREAKDOWN_PALETTE[0]);
+        assert_eq!(rows[2].color, BREAKDOWN_UNACCOUNTED);
+        assert_eq!(rows[3].color, BREAKDOWN_FREE);
+    }
+
+    #[test]
+    fn breakdown_grid_alloc_sums_to_cell_count() {
+        // 10k/60k/30k/100k over 100 cells → exact 5/30/15/50.
+        assert_eq!(
+            breakdown_grid_alloc(&[10_000, 60_000, 30_000, 100_000], 100),
+            vec![5, 30, 15, 50]
+        );
+        // Rounding: largest remainders soak up the leftover cells and the
+        // total always lands exactly on the requested cell count.
+        let alloc = breakdown_grid_alloc(&[1, 1, 1], 100);
+        assert_eq!(alloc.iter().sum::<usize>(), 100);
+        assert!(alloc.iter().all(|c| *c >= 33));
+        assert_eq!(breakdown_grid_alloc(&[0, 0], 100), vec![0, 0]);
     }
 
     #[test]

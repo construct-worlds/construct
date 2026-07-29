@@ -233,15 +233,11 @@ impl App {
                         mb.cursor = mb.input.chars().count();
                         mb.error = None;
                         self.harness_picker_filter_active = false;
-                        self.harness_picker_selected = harness_picker_entries(
-                            &self.harnesses,
-                            is_fork_harness,
-                            "",
-                            false,
-                        )
-                        .iter()
-                        .position(|candidate| candidate.name == entry.name)
-                        .unwrap_or_default();
+                        self.harness_picker_selected =
+                            harness_picker_entries(&self.harnesses, is_fork_harness, "", false)
+                                .iter()
+                                .position(|candidate| candidate.name == entry.name)
+                                .unwrap_or_default();
                     } else {
                         mb.error = Some("no matching harnesses".to_string());
                     }
