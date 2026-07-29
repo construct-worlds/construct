@@ -16,6 +16,7 @@
 //! touched.
 
 pub mod ca;
+pub mod catalog;
 pub mod oauth;
 pub mod proxy;
 pub mod translate;
@@ -331,9 +332,15 @@ impl ArmedRoute {
 /// harness presents on `CONNECT`.
 pub struct SessionRouting {
     pub session_id: String,
+    harness_name: String,
     pub harness: HarnessRouting,
     pub ca: Arc<RouterCa>,
     pub upstream_proxy: Option<UpstreamProxy>,
+    /// This session was launched with a Construct-generated native model
+    /// catalog. Its model host must be inspected even without a manually
+    /// pinned route so a request-carried Construct alias can select its own
+    /// target.
+    catalog_enabled: AtomicBool,
     route: RwLock<Option<ArmedRoute>>,
     /// Bumped on every route change. Open pass-through tunnels compare it
     /// against the value they started with to notice they are stale: a
@@ -367,6 +374,10 @@ impl SessionRouting {
             .any(|h| h.eq_ignore_ascii_case(host))
     }
 
+    pub fn catalog_enabled(&self) -> bool {
+        self.catalog_enabled.load(Ordering::Relaxed)
+    }
+
     /// Record that interception actually served a request. Until this
     /// flips, an armed route is unproven: the harness may resolve its
     /// endpoint through a channel that ignores our injection (spec 0115).
@@ -383,6 +394,11 @@ impl SessionRouting {
 
 pub struct Router {
     enabled: bool,
+    /// Native picker publication is automatic but independently
+    /// configurable, so users may retain manual routing with an otherwise
+    /// blind unarmed path.
+    publish_models: bool,
+    featured_models: Vec<String>,
     port: u16,
     /// Route targets: the `[smith.models.*]` profiles, so an endpoint is
     /// declared once and reachable from both smith and a routed session.
@@ -419,6 +435,8 @@ impl Router {
         let (observed_tx, observed_rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(Self {
             enabled: cfg.enabled,
+            publish_models: cfg.publish_models,
+            featured_models: cfg.featured_models.clone(),
             port: cfg.port,
             profiles,
             oauth_models: cfg.oauth.clone(),
@@ -557,12 +575,29 @@ impl Router {
         }
         let ca = self.ca()?;
         let token = existing_token.unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+        let catalog_path = if self.publish_models && harness == "codex" {
+            match self.write_codex_catalog(session_id) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    tracing::warn!(
+                        session = %session_id,
+                        error = %format!("{error:#}"),
+                        "could not publish Construct routes to the Codex model picker"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let ctx = Arc::new(SessionRouting {
             session_id: session_id.to_string(),
+            harness_name: harness.to_string(),
             harness: routing,
             ca,
             upstream_proxy: self.upstream_proxy.clone(),
+            catalog_enabled: AtomicBool::new(catalog_path.is_some()),
             route: RwLock::new(None),
             route_epoch: std::sync::atomic::AtomicU64::new(0),
             observed: AtomicBool::new(false),
@@ -574,10 +609,15 @@ impl Router {
             .insert(session_id.to_string(), ctx.clone());
         self.tokens.write().unwrap().insert(token.clone(), ctx);
 
-        Ok(self.session_env(&token, routing))
+        Ok(self.session_env(&token, routing, catalog_path.as_deref()))
     }
 
-    fn session_env(&self, token: &str, routing: HarnessRouting) -> HashMap<String, String> {
+    fn session_env(
+        &self,
+        token: &str,
+        routing: HarnessRouting,
+        catalog_path: Option<&std::path::Path>,
+    ) -> HashMap<String, String> {
         let mut env = HashMap::new();
         // The credential rides in the proxy URL's userinfo, which is how
         // proxy clients carry `Proxy-Authorization`. One listener with
@@ -593,6 +633,12 @@ impl Router {
         let url = format!("http://{token}:{CREDENTIAL_FILLER}@127.0.0.1:{}", self.port());
         env.insert(PROXY_ENV.to_string(), url.clone());
         env.insert(PROXY_ENV_LOWER.to_string(), url);
+        if let Some(path) = catalog_path {
+            env.insert(
+                construct_protocol::adapter::ENV_CODEX_MODEL_CATALOG.to_string(),
+                path.to_string_lossy().to_string(),
+            );
+        }
         if let Ok(ca) = self.ca() {
             let path = ca.cert_path().to_string_lossy().to_string();
             // Trusting the router CA changes nothing until a route is
@@ -943,6 +989,8 @@ mod tests {
     fn cfg_with(enabled: bool) -> RouterConfig {
         RouterConfig {
             enabled,
+            publish_models: false,
+            featured_models: Vec::new(),
             port: 0,
             oauth: BTreeMap::new(),
         }
@@ -1027,6 +1075,40 @@ mod tests {
         // how a session stays attributable across a daemon restart.
         let token = Router::token_from_env(&env).unwrap();
         assert!(r.session_for_token(&token).is_some());
+    }
+
+    #[tokio::test]
+    async fn published_model_id_resolves_to_its_request_scoped_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = cfg_with(true);
+        cfg.publish_models = true;
+        let r = started_with(
+            &dir,
+            cfg,
+            profiles(vec![(
+                "fast",
+                ModelProfile {
+                    provider: "openai".to_string(),
+                    base_url: Some("https://example.test/v1".to_string()),
+                    api_key_env: None,
+                    api_key: Some("sk-test".to_string()),
+                    model: Some("model-one".to_string()),
+                },
+            )]),
+        )
+        .await;
+        let published = r
+            .published_models("claude")
+            .into_iter()
+            .find(|model| model.route == "fast" && model.model == "model-one")
+            .unwrap();
+        let resolved = r
+            .resolve_published_model("claude", &published.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.name, "fast");
+        assert_eq!(resolved.model, "model-one");
+        assert_eq!(resolved.target_dialect, Dialect::OpenAiChat);
     }
 
     /// A live harness keeps presenting the credential it got at spawn, so
@@ -1485,7 +1567,6 @@ mod tests {
         assert!(r.observed("s1"), "a served request marks the route observed");
     }
 
-
     /// End-to-end cross-dialect routing (spec 0116): an Anthropic-dialect
     /// client reaches an OpenAI-dialect endpoint. The request arrives
     /// translated and bearer-authenticated; the response comes back as a
@@ -1633,13 +1714,12 @@ mod tests {
         );
     }
 
-
-    /// End-to-end for a Responses-speaking harness (spec 0116): a `pi`
-    /// session sends an OpenAI Responses request, the router translates it
-    /// to Chat Completions for the target, and re-encodes the reply as a
-    /// Responses event stream the harness can render.
+    /// End-to-end request-scoped selection from a native picker: a
+    /// Responses-speaking session carries a published Construct model id,
+    /// the router resolves that id without a session pin, translates onto
+    /// the target, and re-encodes the reply as a Responses event stream.
     #[tokio::test]
-    async fn translates_a_responses_harness_onto_a_chat_target() {
+    async fn a_published_model_selects_its_route_per_request() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1671,9 +1751,11 @@ mod tests {
         });
 
         let dir = tempfile::tempdir().unwrap();
+        let mut cfg = cfg_with(true);
+        cfg.publish_models = true;
         let r = started_with(
             &dir,
-            cfg_with(true),
+            cfg,
             profiles(vec![(
                 "gpt",
                 ModelProfile {
@@ -1688,11 +1770,20 @@ mod tests {
         .await;
         let env = r.attach_session("s1", "pi", None).unwrap();
         let token = Router::token_from_env(&env).unwrap();
+        let ctx = r.sessions.read().unwrap()["s1"].clone();
+        ctx.catalog_enabled.store(true, Ordering::Relaxed);
         assert!(
             env.contains_key("NODE_EXTRA_CA_CERTS"),
             "pi takes its CA through the Node variable"
         );
-        r.set_route("s1", "pi", Some("gpt"), None, Some("gpt-5.6-sol".into()))
+        assert!(
+            ctx.armed_route().is_none(),
+            "the model id, not a session pin, must select the route"
+        );
+        let published = r
+            .published_models("pi")
+            .into_iter()
+            .find(|model| model.route == "gpt")
             .unwrap();
 
         let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
@@ -1727,7 +1818,23 @@ mod tests {
         let mut tls = connector.connect(domain, sock).await.unwrap();
 
         // A real Responses request, in the shape captured from pi.
-        let body = br#"{"model":"gpt-5.6-sol","stream":true,"store":false,"instructions":"be terse","input":[{"role":"user","content":[{"type":"input_text","text":"say pong"}]}],"tools":[{"type":"function","name":"read","description":"read a file","parameters":{"type":"object","properties":{}}}]}"#;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": published.id,
+            "stream": true,
+            "store": false,
+            "instructions": "be terse",
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_text", "text": "say pong"}]
+            }],
+            "tools": [{
+                "type": "function",
+                "name": "read",
+                "description": "read a file",
+                "parameters": {"type": "object", "properties": {}}
+            }]
+        }))
+        .unwrap();
         tls.write_all(
             format!(
                 "POST /backend-api/codex/responses HTTP/1.1\r\nhost: chatgpt.com\r\nauthorization: Bearer users-own-token\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
@@ -1737,7 +1844,7 @@ mod tests {
         )
         .await
         .unwrap();
-        tls.write_all(body).await.unwrap();
+        tls.write_all(&body).await.unwrap();
         tls.flush().await.unwrap();
 
         let mut response = Vec::new();
@@ -1786,7 +1893,6 @@ mod tests {
         );
     }
 
-
     /// A harness whose CA variable REPLACES the system roots must be handed
     /// the composed bundle, never the bare CA — the bare CA would leave the
     /// session trusting nothing but us.
@@ -1833,7 +1939,6 @@ mod tests {
             "codex is replacing: {codex_ca}"
         );
     }
-
 
     /// End-to-end for a subscription login as a target (spec 0117): a
     /// Responses-speaking harness routed onto the Claude subscription. The
@@ -1992,8 +2097,6 @@ mod tests {
         std::env::remove_var("CONSTRUCT_CLAUDE_CREDENTIALS_FILE");
     }
 
-
-
     /// REGRESSION: claude routed to codex-oauth failed with
     /// `400 Unsupported parameter: max_output_tokens`.
     ///
@@ -2052,7 +2155,6 @@ mod tests {
         // stripping must not be applied dialect-wide.
         std::env::remove_var("CODEX_HOME");
     }
-
 
     /// A profile pins one model but its endpoint serves the family, so the
     /// picker offers the provider's catalog behind the declared default.

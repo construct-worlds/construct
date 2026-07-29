@@ -6,13 +6,16 @@
 //!   named, splice the sockets. No TLS termination, no parsing, no header
 //!   or credential handling. It cannot alter a request because it never
 //!   sees one.
-//! - **Intercept** — only for the hosts a *currently armed* route covers.
-//!   Terminates TLS with a minted leaf, rewrites the request onto the
-//!   route's endpoint, streams the response back.
+//! - **Intercept** — only for the fixed model hosts of a session with a
+//!   currently armed route or an enabled native model catalog.
+//!   Terminates TLS with a minted leaf, resolves any request-carried
+//!   Construct model id, and streams the response back.
 //!
-//! Anything not explicitly being routed — the harness's auth refresh, its
-//! telemetry, package registries, whatever a spawned MCP server talks to —
-//! takes the pass-through path.
+//! Everything else — the harness's auth refresh, telemetry, package
+//! registries, and whatever a spawned MCP server talks to — takes the
+//! blind pass-through path. A native model request inspected for catalog
+//! selection is reconstructed to the same origin with its native
+//! credential intact.
 
 use std::sync::Arc;
 
@@ -40,6 +43,9 @@ pub async fn serve(mut client: TcpStream, router: Arc<Router>) -> Result<()> {
         .as_ref()
         .filter(|c| c.intercepts_host(&target.host))
         .and_then(|c| c.armed_route());
+    let catalog_intercept = ctx
+        .as_ref()
+        .is_some_and(|context| context.catalog_enabled() && context.intercepts_host(&target.host));
 
     // Every connection is logged with how it was classified. Without this
     // there is no way to answer "is this session actually going through
@@ -49,11 +55,11 @@ pub async fn serve(mut client: TcpStream, router: Arc<Router>) -> Result<()> {
         session = ctx.as_ref().map(|c| c.session_id.as_str()).unwrap_or("-"),
         host = %target.host,
         port = target.port,
-        disposition = if armed.is_some() { "intercept" } else { "tunnel" },
+        disposition = if armed.is_some() || catalog_intercept { "intercept" } else { "tunnel" },
         "router connection"
     );
 
-    let Some(route) = armed else {
+    if armed.is_none() && !catalog_intercept {
         let upstream = ctx
             .as_ref()
             .and_then(|c| c.upstream_proxy.clone())
@@ -67,13 +73,20 @@ pub async fn serve(mut client: TcpStream, router: Arc<Router>) -> Result<()> {
             .filter(|c| c.intercepts_host(&target.host))
             .cloned();
         return tunnel(client, &target, upstream.as_ref(), drain).await;
-    };
+    }
 
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await
         .context("ack CONNECT")?;
-    intercept_tls(client, &target, &route, ctx.expect("route implies a session")).await
+    intercept_tls(
+        client,
+        &target,
+        armed,
+        ctx.expect("interception implies a session"),
+        router,
+    )
+    .await
 }
 
 /// Extract the session credential from `Proxy-Authorization: Basic …`.
@@ -338,8 +351,9 @@ async fn connect_via_proxy(proxy: &UpstreamProxy, target: &Target) -> Result<Tcp
 async fn intercept_tls(
     client: TcpStream,
     target: &Target,
-    route: &ArmedRoute,
+    pinned_route: Option<ArmedRoute>,
     ctx: Arc<SessionRouting>,
+    router: Arc<Router>,
 ) -> Result<()> {
     let server_config = ctx.ca.server_config(&target.host)?;
     let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
@@ -351,6 +365,62 @@ async fn intercept_tls(
     let head = read_head_tls(&mut tls).await?;
     let request = parse_request(&head)?;
     let body = read_body(&mut tls, &request).await?;
+
+    // A published picker id is an explicit request-scoped route and wins
+    // over the session's manually pinned default. Native model ids retain
+    // the pin, or pass through to the original host when no pin exists.
+    let requested_model = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    let route = if ctx.catalog_enabled() {
+        match requested_model.as_deref() {
+            Some(model) => match router.resolve_published_model(&ctx.harness_name, model) {
+                Ok(Some(route)) => Some(route),
+                Ok(None) => pinned_route,
+                Err(error) => {
+                    let payload = serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": format!("construct router: {error:#}"),
+                        },
+                    })
+                    .to_string();
+                    write_simple(&mut tls, 502, &payload).await.ok();
+                    return Err(error);
+                }
+            },
+            None => pinned_route,
+        }
+    } else {
+        pinned_route
+    };
+
+    // Picker publication requires TLS inspection to read the model id. A
+    // native model with no manual pin is reconstructed onto the exact host
+    // named by CONNECT with the client's credential intact.
+    let Some(route) = route else {
+        return match forward_native(&request, body, target).await {
+            Ok(response) => write_response(&mut tls, response).await,
+            Err(error) => {
+                let payload = serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": format!("construct native passthrough: {error:#}"),
+                    },
+                })
+                .to_string();
+                write_simple(&mut tls, 502, &payload).await.ok();
+                Err(error)
+            }
+        };
+    };
 
     // Same dialect → redirect the bytes. Different dialect → rebuild the
     // request and re-encode the response stream (spec 0116).
@@ -569,24 +639,29 @@ where
     }
 }
 
-/// Headers we never copy onto the outbound request: hop-by-hop framing,
-/// and the client's credential (replaced with the route's).
-fn is_dropped_header(name: &str) -> bool {
+fn is_hop_header(name: &str) -> bool {
     const DROP: &[&str] = &[
         "host",
         "content-length",
         "transfer-encoding",
         "connection",
         "proxy-connection",
+        "proxy-authorization",
         "keep-alive",
         "upgrade",
         "te",
         "trailer",
         "accept-encoding",
-        "authorization",
-        "x-api-key",
     ];
     DROP.iter().any(|d| name.eq_ignore_ascii_case(d))
+}
+
+/// Headers we never copy onto a routed request: hop-by-hop framing and the
+/// client's credential, which belongs only to its native provider.
+fn is_dropped_header(name: &str) -> bool {
+    is_hop_header(name)
+        || name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("x-api-key")
 }
 
 /// Substitute the route's model into an Anthropic-dialect request body.
@@ -616,6 +691,36 @@ pub fn target_url(base_url: &str, path: &str) -> String {
     format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'))
 }
 
+/// Reconstruct a picker-enabled session's native request after inspecting
+/// its model id. This path is allowed only for the harness's hard-coded
+/// model host selected by CONNECT, and it deliberately preserves the
+/// client's native credential.
+async fn forward_native(
+    req: &ParsedRequest,
+    body: Vec<u8>,
+    target: &Target,
+) -> Result<reqwest::Response> {
+    let authority = if target.port == 443 {
+        target.host.clone()
+    } else {
+        format!("{}:{}", target.host, target.port)
+    };
+    let url = target_url(&format!("https://{authority}"), &req.path);
+    let method = reqwest::Method::from_bytes(req.method.as_bytes()).context("method")?;
+    let client = reqwest::Client::new();
+    let mut out = client.request(method, &url);
+    for (name, value) in &req.headers {
+        if is_hop_header(name) {
+            continue;
+        }
+        out = out.header(name, value.clone());
+    }
+    out.body(body)
+        .send()
+        .await
+        .with_context(|| format!("native passthrough to {url}"))
+}
+
 /// Same-dialect redirect: keep the request as-is, change where it goes.
 async fn forward(
     req: &ParsedRequest,
@@ -631,7 +736,12 @@ async fn forward(
         }
         out = out.header(name, value.clone());
     }
-    out = out.header("x-api-key", &route.api_key);
+    if !route.api_key.is_empty() {
+        out = match route.auth {
+            TargetAuth::ApiKeyHeader => out.header("x-api-key", &route.api_key),
+            TargetAuth::Bearer => out.header("authorization", format!("Bearer {}", route.api_key)),
+        };
+    }
     let body = rewrite_body(&body, &route.model);
     out = out.header("content-length", body.len().to_string()).body(body);
     out.send().await.with_context(|| format!("forward to {url}"))
@@ -962,6 +1072,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(SessionRouting {
             session_id: "s-drain".into(),
+            harness_name: "test".into(),
             harness: HarnessRouting {
                 dialect: Dialect::AnthropicMessages,
                 intercept_hosts: &["127.0.0.1"],
@@ -972,6 +1083,7 @@ mod tests {
             },
             ca: Arc::new(RouterCa::load_or_create(&dir.path().join("router")).unwrap()),
             upstream_proxy: None,
+            catalog_enabled: std::sync::atomic::AtomicBool::new(false),
             route: std::sync::RwLock::new(None),
             route_epoch: std::sync::atomic::AtomicU64::new(0),
             observed: std::sync::atomic::AtomicBool::new(false),
@@ -1138,8 +1250,21 @@ mod tests {
         assert!(is_dropped_header("Authorization"));
         assert!(is_dropped_header("Host"));
         assert!(is_dropped_header("content-length"));
+        assert!(is_dropped_header("proxy-authorization"));
         assert!(!is_dropped_header("anthropic-version"));
         assert!(!is_dropped_header("content-type"));
+    }
+
+    /// Picker inspection is not routing by itself. A native model request
+    /// goes back to its named origin with the harness's own provider
+    /// credential, while proxy credentials and framing remain local.
+    #[test]
+    fn native_passthrough_preserves_end_to_end_credentials_only() {
+        assert!(!is_hop_header("authorization"));
+        assert!(!is_hop_header("x-api-key"));
+        assert!(is_hop_header("proxy-authorization"));
+        assert!(is_hop_header("connection"));
+        assert!(is_hop_header("content-length"));
     }
 
     /// The drain rule in isolation: direction decides safety, not just
@@ -1177,5 +1302,4 @@ mod tests {
             "the client may be about to send the next request on this connection"
         );
     }
-
 }

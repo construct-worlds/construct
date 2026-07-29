@@ -79,6 +79,24 @@ fn resolve_mode(params: &SessionStartParams) -> Mode {
     }
 }
 
+fn inject_model_catalog_arg(
+    args: &mut Vec<String>,
+    env: &std::collections::HashMap<String, String>,
+) {
+    let Some(path) = env
+        .get(construct_protocol::adapter::ENV_CODEX_MODEL_CATALOG)
+        .filter(|path| !path.trim().is_empty())
+    else {
+        return;
+    };
+    // JSON string escaping is also valid TOML basic-string escaping, which
+    // keeps spaces, quotes, and platform path separators inside the value
+    // passed to Codex's `-c key=value` parser.
+    let quoted = serde_json::to_string(path).unwrap_or_else(|_| format!("{path:?}"));
+    args.push("-c".into());
+    args.push(format!("model_catalog_json={quoted}"));
+}
+
 async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     let command = construct_protocol::adapter::resolve_command_override(
         "CONSTRUCT_CODEX_CMD",
@@ -156,6 +174,7 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     for a in construct_protocol::adapter::maybe_inject_codex_mcp_args(&ctx.session_id) {
         args.push(a);
     }
+    inject_model_catalog_arg(&mut args, &params.env);
     // Skip the initial prompt only when we're actually resuming an
     // existing codex session; a respawn that fell through to a fresh
     // codex should still pass the original prompt.
@@ -1132,6 +1151,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         for a in &extra_args {
             child_args.push(a.clone());
         }
+        inject_model_catalog_arg(&mut child_args, &env);
         child_args.push(user_text.clone());
         let mut command = Command::new(&command_override.bin);
         for a in &child_args {
@@ -1979,5 +1999,23 @@ mod tests {
             r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"a much longer reply that moves the estimate"}]}}"#
         );
         assert!(gate.changed(&codex_breakdown_segments(&grown)));
+    }
+
+    #[test]
+    fn model_catalog_is_injected_as_a_codex_config_override() {
+        let mut args = vec!["exec".to_string()];
+        let env = std::collections::HashMap::from([(
+            construct_protocol::adapter::ENV_CODEX_MODEL_CATALOG.to_string(),
+            "/tmp/construct catalog.json".to_string(),
+        )]);
+        inject_model_catalog_arg(&mut args, &env);
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "-c",
+                "model_catalog_json=\"/tmp/construct catalog.json\""
+            ]
+        );
     }
 }
