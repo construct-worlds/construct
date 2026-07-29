@@ -19,17 +19,21 @@
 //! Honors `CONSTRUCT_CLAUDE_CMD` for a full command prefix, falling back to
 //! `CONSTRUCT_CLAUDE_BIN` for a binary path.
 
+#[cfg(test)]
+use construct_adapter_common::claude_project_slug;
+use construct_adapter_common::context_breakdown::{estimate_tokens_from_chars, BreakdownGate};
+use construct_adapter_common::{
+    claude_transcript_path, drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
+};
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
-use construct_protocol::adapter::{run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter};
+use construct_protocol::adapter::{
+    run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
+};
+use construct_protocol::ContextSegment;
 use construct_protocol::{
     Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
     SessionState,
 };
-use construct_adapter_common::{
-    claude_transcript_path, drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
-};
-#[cfg(test)]
-use construct_adapter_common::claude_project_slug;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -202,7 +206,8 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     // `--allowed-tools` patterns. Single policy in agentd; each adapter
     // applies it in its harness's native mechanism.
     args.extend(
-        construct_protocol::adapter::policy::AutoApprovePolicy::from_env().claude_allowed_tools_args(),
+        construct_protocol::adapter::policy::AutoApprovePolicy::from_env()
+            .claude_allowed_tools_args(),
     );
     // Resume support: stash our own UUID under
     // $CONSTRUCT_SESSION_DATA_DIR/claude_session_id.txt at first spawn (passed
@@ -389,6 +394,8 @@ fn spawn_interactive_transcript_watcher(
         // Usage dedupe state (`claude_cost_from_assistant`), root + per-child.
         let mut root_usage_msg_id: Option<String> = None;
         let mut child_usage_msg_ids: HashMap<String, Option<String>> = HashMap::new();
+        // Report-on-change gate for the context breakdown (spec 0156).
+        let mut breakdown_gate = BreakdownGate::default();
         let mut last_snapshot: Option<Vec<String>> = None;
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -427,6 +434,7 @@ fn spawn_interactive_transcript_watcher(
                     child_usage_msg_ids.clear();
                 }
             }
+            let prior_usage_msg_id = root_usage_msg_id.clone();
             let root_values = emit_new_claude_transcript_lines(
                 &path,
                 &mut next_line,
@@ -434,6 +442,14 @@ fn spawn_interactive_transcript_watcher(
                 &mut last_model,
                 &mut root_usage_msg_id,
             );
+            // A moved usage-dedupe id means this tick emitted a fresh
+            // ContextUsage gauge; refresh the breakdown behind it at the
+            // same cadence (spec 0156). Always a full scan of the currently
+            // bound transcript — turn cadence keeps that cheap, and it
+            // self-corrects across resume and native-id rebinds.
+            if root_usage_msg_id != prior_usage_msg_id {
+                emit_claude_context_breakdown(&path, &mut breakdown_gate, &emit);
+            }
             for value in root_values {
                 if let Some((id, state, title)) = claude_native_subagent_update(&value) {
                     child_states.insert(id.clone(), state);
@@ -760,6 +776,8 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
 
     let mut session_id: Option<String> = None;
     let mut pending: VecDeque<String> = initial_pending(&params.prompt);
+    // Report-on-change gate for the context breakdown (spec 0156).
+    let mut breakdown_gate = BreakdownGate::default();
 
     let exit_code = loop {
         // Pick next user message, or wait for one.
@@ -800,7 +818,8 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         child_args.push("--output-format".into());
         child_args.push("stream-json".into());
         child_args.push("--verbose".into());
-        if let Some(cfg) = construct_protocol::adapter::maybe_inject_mcp_config(&agentd_session_id) {
+        if let Some(cfg) = construct_protocol::adapter::maybe_inject_mcp_config(&agentd_session_id)
+        {
             child_args.push("--mcp-config".into());
             child_args.push(cfg.to_string_lossy().to_string());
         }
@@ -880,6 +899,15 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
                     let _ = std::fs::write(p, &sid);
                 }
                 session_id = Some(sid);
+            }
+        }
+
+        // `claude -p` writes the same native transcript interactive mode
+        // tails; refresh the context breakdown (spec 0156) from it at turn
+        // cadence, alongside the ContextUsage the turn's stream reported.
+        if let Some(sid) = &session_id {
+            if let Some(transcript) = claude_transcript_path(&cwd, sid, &env) {
+                emit_claude_context_breakdown(&transcript, &mut breakdown_gate, &emit);
             }
         }
 
@@ -1044,8 +1072,7 @@ fn claude_usage_from_assistant(
     let Some(msg) = v.get("message") else {
         return Vec::new();
     };
-    let (Some(usage), Some(id)) = (msg.get("usage"), msg.get("id").and_then(|i| i.as_str()))
-    else {
+    let (Some(usage), Some(id)) = (msg.get("usage"), msg.get("id").and_then(|i| i.as_str())) else {
         return Vec::new();
     };
     if last_usage_msg_id.as_deref() == Some(id) {
@@ -1122,17 +1149,108 @@ fn claude_context_window_for_model(model: &str, used_tokens: u64) -> Option<u64>
         "claude-haiku-4",
     ]
     .iter()
-    .any(|prefix| model.starts_with(prefix)) {
+    .any(|prefix| model.starts_with(prefix))
+    {
         CLAUDE_CONTEXT_WINDOW_STEP
     } else {
         return None;
     };
-    Some(
-        used_tokens
-            .max(base)
-            .div_ceil(CLAUDE_CONTEXT_WINDOW_STEP)
-            * CLAUDE_CONTEXT_WINDOW_STEP,
-    )
+    Some(used_tokens.max(base).div_ceil(CLAUDE_CONTEXT_WINDOW_STEP) * CLAUDE_CONTEXT_WINDOW_STEP)
+}
+
+/// Context breakdown behind the gauge (spec 0156): a full scan of the
+/// currently-bound native transcript, estimating how much of the window the
+/// conversation itself occupies. Claude's transcript exposes only the
+/// conversation (no system prompt or tool schemas), so a single estimated
+/// `messages` segment is all this data surface makes derivable — the client
+/// renders the rest as *unaccounted*. Gated so identical reports aren't
+/// re-emitted (report on change, spec 0104's rule applied to the breakdown).
+fn emit_claude_context_breakdown(path: &Path, gate: &mut BreakdownGate, emit: &EventEmitter) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let segments = claude_breakdown_segments(&text);
+    if gate.changed(&segments) {
+        emit.emit(SessionEvent::ContextBreakdown { segments });
+    }
+}
+
+fn claude_breakdown_segments(text: &str) -> Vec<ContextSegment> {
+    let chars = claude_transcript_content_chars(text);
+    vec![ContextSegment::new(
+        "messages",
+        estimate_tokens_from_chars(chars),
+        true,
+    )]
+}
+
+/// Content chars of the conversation records currently in the window.
+/// Record shapes verified against real transcripts under
+/// `~/.claude/projects/` on this machine: conversation rows are
+/// `type: "user" | "assistant"` with `message.content` either a plain
+/// string or an array of blocks (`text`, `thinking`, `tool_use`,
+/// `tool_result`, `image`); a `type: "system"` /
+/// `subtype: "compact_boundary"` row marks a compaction, after which only
+/// later records (plus the compact summary, itself a user record) are in
+/// the window; `isSidechain: true` rows belong to subagent conversations,
+/// not this window.
+fn claude_transcript_content_chars(text: &str) -> usize {
+    let mut chars = 0usize;
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) == Some("system")
+            && v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+        {
+            chars = 0;
+            continue;
+        }
+        if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        if matches!(
+            v.get("type").and_then(Value::as_str),
+            Some("user" | "assistant")
+        ) {
+            chars += claude_message_content_chars(v.get("message"));
+        }
+    }
+    chars
+}
+
+fn claude_message_content_chars(msg: Option<&Value>) -> usize {
+    match msg.and_then(|m| m.get("content")) {
+        Some(Value::String(s)) => s.len(),
+        Some(Value::Array(blocks)) => blocks.iter().map(claude_block_content_chars).sum(),
+        _ => 0,
+    }
+}
+
+fn claude_block_content_chars(block: &Value) -> usize {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map_or(0, str::len),
+        Some("tool_use") => block
+            .get("input")
+            .and_then(|input| serde_json::to_string(input).ok())
+            .map_or(0, |s| s.len()),
+        Some("tool_result") => match block.get("content") {
+            Some(Value::String(s)) => s.len(),
+            Some(Value::Array(parts)) => parts
+                .iter()
+                .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+                .map(|p| p.get("text").and_then(Value::as_str).map_or(0, str::len))
+                .sum(),
+            _ => 0,
+        },
+        // Prior-turn thinking blocks are stripped from the request context,
+        // and an image's base64 char length says nothing about its token
+        // cost — skip both rather than distort the estimate.
+        _ => 0,
+    }
 }
 
 fn extract_message_text(msg: Option<&Value>) -> String {
@@ -1607,9 +1725,7 @@ mod tests {
         third_record["message"]["id"] = serde_json::json!("msg_02");
         let third = claude_events_from_json(&third_record, &mut last_id);
         assert!(
-            third
-                .iter()
-                .any(|e| matches!(e, SessionEvent::Cost { .. })),
+            third.iter().any(|e| matches!(e, SessionEvent::Cost { .. })),
             "a new message id must report its usage: {third:?}"
         );
     }
@@ -1692,5 +1808,72 @@ mod tests {
             Some(600_000)
         );
         assert_eq!(claude_context_window_for_model("claude-future-9", 1), None);
+    }
+
+    // Record shapes below mirror real native transcripts inspected under
+    // `~/.claude/projects/` on this machine: string vs block-array
+    // `message.content`, `text`/`thinking`/`tool_use`/`tool_result`/`image`
+    // blocks, `isSidechain` on every conversation row, and non-conversation
+    // rows (`mode`, `file-history-snapshot`, ...) interleaved throughout.
+    #[test]
+    fn context_breakdown_sums_conversation_content_chars() {
+        let transcript = concat!(
+            r#"{"type":"mode","mode":"normal","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":"hi there"}}"#,
+            "\n",
+            r#"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"secret plan","signature":"sig"},{"type":"text","text":"okay"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            "\n",
+            r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"out"}]}}"#,
+            "\n",
+            r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":"abcde"},{"type":"image","source":{"type":"base64","data":"AAAA"}}]}]}}"#,
+            "\n",
+            r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"subagent text never in the root window"}]}}"#,
+            "\n",
+        );
+        // "hi there" (8) + "okay" (4) + {"command":"ls"} serialized (16)
+        // + "out" (3) + "abcde" (5); thinking, image, and sidechain rows
+        // contribute nothing.
+        assert_eq!(claude_transcript_content_chars(transcript), 36);
+        assert_eq!(
+            claude_breakdown_segments(transcript),
+            vec![ContextSegment::new(
+                "messages",
+                estimate_tokens_from_chars(36),
+                true
+            )]
+        );
+    }
+
+    #[test]
+    fn context_breakdown_restarts_at_compact_boundary() {
+        // Real compactions log `type:"system"` / `subtype:"compact_boundary"`
+        // and continue in the same file; only content after the boundary
+        // (including the compact summary, itself a user record) is in the
+        // window.
+        let transcript = concat!(
+            r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":"0123456789"}}"#,
+            "\n",
+            r#"{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","compactMetadata":{"trigger":"auto"}}"#,
+            "\n",
+            r#"{"type":"user","isSidechain":false,"isCompactSummary":true,"message":{"role":"user","content":"abc"}}"#,
+            "\n",
+        );
+        assert_eq!(claude_transcript_content_chars(transcript), 3);
+    }
+
+    #[test]
+    fn context_breakdown_gate_suppresses_identical_reports() {
+        let transcript =
+            r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":"hello"}}"#;
+        let mut gate = BreakdownGate::default();
+        assert!(gate.changed(&claude_breakdown_segments(transcript)));
+        // Re-scanning an unchanged transcript must not re-emit.
+        assert!(!gate.changed(&claude_breakdown_segments(transcript)));
+        let grown = format!(
+            "{transcript}\n{}",
+            r#"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"a much longer reply that moves the estimate"}]}}"#
+        );
+        assert!(gate.changed(&claude_breakdown_segments(&grown)));
     }
 }

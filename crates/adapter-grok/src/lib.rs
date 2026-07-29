@@ -12,14 +12,17 @@
 //! `CONSTRUCT_GROK_MODE=interactive|headless`. Honors `CONSTRUCT_GROK_CMD` for a
 //! full command prefix, falling back to `CONSTRUCT_GROK_BIN` for a binary path.
 
-use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
-use construct_protocol::adapter::{run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter};
-use construct_protocol::{
-    Capabilities, InitializeResult, MessageRole, PtySize, SessionEvent, SessionStartParams,
-    SessionState,
-};
 use construct_adapter_common::{
+    context_breakdown::{estimate_tokens_from_chars, BreakdownGate},
     drive_turn, grok_transcript_path, next_native_seq, spawn_stderr_log, TurnOutcome,
+};
+use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
+use construct_protocol::adapter::{
+    run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
+};
+use construct_protocol::{
+    Capabilities, ContextSegment, InitializeResult, MessageRole, PtySize, SessionEvent,
+    SessionStartParams, SessionState,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -146,10 +149,7 @@ fn find_session_id_excluding(cwd: &Path, excluded: &HashSet<String>) -> Option<S
     find_session_id_excluding_in(&sessions_dir, excluded)
 }
 
-fn find_session_id_excluding_in(
-    sessions_dir: &Path,
-    excluded: &HashSet<String>,
-) -> Option<String> {
+fn find_session_id_excluding_in(sessions_dir: &Path, excluded: &HashSet<String>) -> Option<String> {
     if !sessions_dir.exists() {
         return None;
     }
@@ -313,6 +313,110 @@ fn grok_context_usage(cwd: &Path, session_id: &str) -> Option<(u64, Option<u64>)
         .and_then(Value::as_u64)
         .filter(|w| *w > 0);
     Some((used, window))
+}
+
+/// Context-breakdown segments (spec 0156) from the same session dir as the
+/// gauge: grok writes the exact system prompt it sends to
+/// `system_prompt.txt` and the full conversation to `chat_history.jsonl`,
+/// so both components are derivable via the char heuristic. Ordered
+/// fixed-prefix first (system prompt, then messages), both estimated.
+fn grok_context_breakdown(cwd: &Path, session_id: &str) -> Vec<ContextSegment> {
+    grok_session_dir(cwd, session_id)
+        .map(|dir| grok_context_breakdown_in(&dir))
+        .unwrap_or_default()
+}
+
+fn grok_context_breakdown_in(session_dir: &Path) -> Vec<ContextSegment> {
+    let mut segments = Vec::new();
+    let prompt_chars = std::fs::read_to_string(session_dir.join("system_prompt.txt"))
+        .map(|s| s.chars().count())
+        .unwrap_or(0);
+    if prompt_chars > 0 {
+        segments.push(ContextSegment::new(
+            "system prompt",
+            estimate_tokens_from_chars(prompt_chars),
+            true,
+        ));
+    }
+    let message_chars = std::fs::read_to_string(session_dir.join("chat_history.jsonl"))
+        .map(|text| grok_chat_history_chars(&text))
+        .unwrap_or(0);
+    if message_chars > 0 {
+        segments.push(ContextSegment::new(
+            "messages",
+            estimate_tokens_from_chars(message_chars),
+            true,
+        ));
+    }
+    segments
+}
+
+/// Conversation chars across a full `chat_history.jsonl` scan — deliberately
+/// a full re-scan each time so resume, `/clear` rebinds, and grok's own file
+/// rewrites all self-correct without incremental bookkeeping.
+fn grok_chat_history_chars(text: &str) -> usize {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|v| grok_record_chars(&v))
+        .sum()
+}
+
+/// Conversation chars of one `chat_history.jsonl` record. Shapes verified
+/// against real sessions on this machine (2026-07-28): `user` content is a
+/// list of `{type:"text",text}` items in root transcripts (a JSON-encoded
+/// string of the same list in child ones); `assistant` carries a
+/// plain-string `content` plus `tool_calls` whose `arguments` is a JSON
+/// string; `tool_result` carries a plain-string `content`. `system` records
+/// duplicate `system_prompt.txt` verbatim (they have their own segment, so
+/// counting them here would double-count); `reasoning` holds only encrypted
+/// content plus display summaries and `backend_tool_call` is a server-side
+/// action record — neither has countable conversation chars, so the
+/// client's "unaccounted" row absorbs whatever they occupy.
+fn grok_record_chars(v: &Value) -> usize {
+    match v.get("type").and_then(Value::as_str).unwrap_or("") {
+        "user" => match v.get("content") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .map(|t| t.chars().count())
+                .sum(),
+            Some(Value::String(_)) => grok_content_text(v).map(|t| t.chars().count()).unwrap_or(0),
+            _ => 0,
+        },
+        "assistant" => {
+            let content = v
+                .get("content")
+                .and_then(Value::as_str)
+                .map(|t| t.chars().count())
+                .unwrap_or(0);
+            let calls: usize = v
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .map(|calls| calls.iter().map(grok_tool_call_chars).sum())
+                .unwrap_or(0);
+            content + calls
+        }
+        "tool_result" => v
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|t| t.chars().count())
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn grok_tool_call_chars(call: &Value) -> usize {
+    let name = call
+        .get("name")
+        .and_then(Value::as_str)
+        .map(|n| n.chars().count())
+        .unwrap_or(0);
+    let args = match call.get("arguments") {
+        Some(Value::String(s)) => s.chars().count(),
+        Some(Value::Null) | None => 0,
+        Some(other) => other.to_string().chars().count(),
+    };
+    name + args
 }
 
 fn count_jsonl_lines(path: &Path) -> usize {
@@ -717,6 +821,9 @@ fn spawn_interactive_transcript_watcher(
         // Last context gauge reported (spec 0104) — poll `signals.json`
         // each tick but only emit when the numbers actually move.
         let mut last_context: Option<(u64, Option<u64>)> = None;
+        // Breakdown (spec 0156): recomputed from the session dir on the
+        // same poll as the gauge, reported only when it changes.
+        let mut breakdown_gate = BreakdownGate::default();
         loop {
             tick.tick().await;
             ticks_since_sibling_refresh += 1;
@@ -752,6 +859,10 @@ fn spawn_interactive_transcript_watcher(
                             window_tokens: window,
                         });
                     }
+                }
+                let segments = grok_context_breakdown(&cwd, root_id);
+                if !segments.is_empty() && breakdown_gate.changed(&segments) {
+                    emit.emit(SessionEvent::ContextBreakdown { segments });
                 }
             }
             for (id, child) in &mut children {
@@ -807,6 +918,7 @@ fn spawn_interactive_transcript_watcher(
                         next_line = 0;
                         next_update_line = 0;
                         last_context = None;
+                        breakdown_gate = BreakdownGate::default();
                     }
                 }
             }
@@ -1358,6 +1470,91 @@ mod tests {
         assert_eq!(url_encode_path(path), "%2FUsers%2Fmoon%2Fagentd");
     }
 
+    /// Record shapes verified against real `chat_history.jsonl` files on
+    /// this machine (2026-07-28): root `user` content is a real JSON list,
+    /// `assistant` a plain string plus `tool_calls` with JSON-string
+    /// `arguments`, `tool_result` a plain string; `system` duplicates
+    /// `system_prompt.txt` verbatim and `reasoning` carries encrypted
+    /// content only — both must not count toward the messages estimate.
+    fn breakdown_fixture() -> String {
+        concat!(
+            r#"{"type":"system","content":"You are Grok."}"#,
+            "\n",
+            r#"{"type":"user","content":[{"type":"text","text":"fix the bug"}]}"#,
+            "\n",
+            r#"{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"display only"}],"encrypted_content":"AAAA","status":"completed"}"#,
+            "\n",
+            r#"{"type":"assistant","content":"Looking.","tool_calls":[{"id":"call-1","name":"Write","arguments":"{\"path\":\"hello.txt\"}"}],"model_id":"grok-4.5","reasoning_effort":"high"}"#,
+            "\n",
+            r#"{"type":"tool_result","tool_call_id":"call-1","content":"file written"}"#,
+            "\n",
+            r#"{"type":"backend_tool_call","kind":{"tool_type":"web_search"}}"#,
+            "\n",
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn chat_history_chars_count_conversation_content_only() {
+        // user 11 ("fix the bug") + assistant 8 ("Looking.") + tool call
+        // 5 ("Write") + 20 (arguments JSON string) + tool result 12
+        // ("file written") = 56; system/reasoning/backend_tool_call add 0.
+        assert_eq!(grok_chat_history_chars(&breakdown_fixture()), 56);
+
+        // Child transcripts JSON-encode the user item list into a string
+        // (same shape `grok_events_from_json` already parses).
+        let child = serde_json::json!({
+            "type": "user",
+            "content": r#"[{"type":"text","text":"Print hello world"}]"#
+        });
+        assert_eq!(
+            grok_record_chars(&child),
+            "Print hello world".chars().count()
+        );
+    }
+
+    #[test]
+    fn breakdown_orders_system_prompt_before_messages_and_gates_repeats() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentd-grok-breakdown-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 35 chars -> ~10 tokens at the shared chars/3.5 heuristic.
+        std::fs::write(
+            dir.join("system_prompt.txt"),
+            "You are Grok, a CLI coding agent!!!",
+        )
+        .unwrap();
+        std::fs::write(dir.join("chat_history.jsonl"), breakdown_fixture()).unwrap();
+
+        let segments = grok_context_breakdown_in(&dir);
+        assert_eq!(
+            segments,
+            vec![
+                ContextSegment::new("system prompt", 10, true),
+                ContextSegment::new("messages", 16, true), // 56 chars / 3.5
+            ]
+        );
+
+        // Report-on-change: an unchanged recompute must be suppressed.
+        let mut gate = BreakdownGate::default();
+        assert!(gate.changed(&segments));
+        assert!(!gate.changed(&grok_context_breakdown_in(&dir)));
+
+        // No system_prompt.txt -> the segment is skipped, not zeroed.
+        std::fs::remove_file(dir.join("system_prompt.txt")).unwrap();
+        let segments = grok_context_breakdown_in(&dir);
+        assert_eq!(segments, vec![ContextSegment::new("messages", 16, true)]);
+        assert!(gate.changed(&segments));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn find_session_id_prefers_newest_mtime() {
         // Simulate /clear: two UUID session dirs under the same project
@@ -1545,10 +1742,7 @@ mod tests {
     #[test]
     fn model_change_silent_when_unchanged() {
         let v: Value = serde_json::json!({"type": "assistant", "model_id": "grok-4.5"});
-        assert_eq!(
-            grok_model_change(&v, &Some("grok-4.5".to_string())),
-            None
-        );
+        assert_eq!(grok_model_change(&v, &Some("grok-4.5".to_string())), None);
     }
 
     #[test]
@@ -1581,10 +1775,7 @@ mod tests {
     #[test]
     fn effort_change_silent_when_unchanged() {
         let v: Value = serde_json::json!({"type": "assistant", "reasoning_effort": "high"});
-        assert_eq!(
-            grok_effort_change(&v, &Some("high".to_string())),
-            None
-        );
+        assert_eq!(grok_effort_change(&v, &Some("high".to_string())), None);
     }
 
     #[test]

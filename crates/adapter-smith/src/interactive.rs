@@ -10,14 +10,14 @@
 //! The TUI's `vt100`-backed terminal pane parses these bytes the same
 //! way it parses any other PTY-backed adapter's output.
 
-use crate::agent::{push_msg, system_prompt_for_env, ResolvedModel};
+use crate::agent::{push_msg, ResolvedModel};
 use crate::context;
 use crate::persist::{self, Persist};
 use crate::provider::{self, Content, Message, Role, StopReason, TextSink, ToolCall};
 use crate::tools::{truncate_for_model, ToolCtx, ToolOutcome, ToolRegistry};
+use anyhow::Result;
 use construct_protocol::adapter::{AdapterContext, AdapterInboxMsg, EventEmitter};
 use construct_protocol::{ApprovalMode, SessionEvent, SessionStartParams, SessionState, ToolRisk};
-use anyhow::Result;
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -1549,9 +1549,9 @@ mod tests {
     #[tokio::test]
     async fn wait_for_approval_maps_prompt_keys_to_new_modes() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        tx.send(construct_protocol::adapter::AdapterInboxMsg::PtyInput(vec![
-            b'a',
-        ]))
+        tx.send(construct_protocol::adapter::AdapterInboxMsg::PtyInput(
+            vec![b'a'],
+        ))
         .await
         .unwrap();
         let mut mode = ApprovalMode::Manual;
@@ -1563,9 +1563,9 @@ mod tests {
         assert_eq!(mode, ApprovalMode::AutoReview);
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        tx.send(construct_protocol::adapter::AdapterInboxMsg::PtyInput(vec![
-            b'f',
-        ]))
+        tx.send(construct_protocol::adapter::AdapterInboxMsg::PtyInput(
+            vec![b'f'],
+        ))
         .await
         .unwrap();
         let mut mode = ApprovalMode::Manual;
@@ -2133,19 +2133,10 @@ pub async fn run(
 
     // Session-local prompt sections are built once here, then reused
     // across every provider.complete call. Resume re-enters this
-    // function and refreshes them.
-    let system_prompt: String = {
-        let mut prompt = crate::agent::system_prompt_for_env().to_string();
-        if let Some(section) = crate::project_guide::format_section(&cwd) {
-            prompt.push_str("\n\n");
-            prompt.push_str(&section);
-        }
-        if let Some(section) = crate::skills::format_section(&cwd) {
-            prompt.push_str("\n\n");
-            prompt.push_str(&section);
-        }
-        prompt
-    };
+    // function and refreshes them. Per-section sizes are retained for the
+    // context breakdown (spec 0156).
+    let prompt_sections = context::PromptSections::assemble(&cwd);
+    let system_prompt: String = prompt_sections.prompt.clone();
 
     let term = Terminal::new(&emit);
     let resuming = persist::is_resume();
@@ -3017,6 +3008,11 @@ pub async fn run(
                 emit.emit(SessionEvent::ContextUsage {
                     used_tokens: turn.usage.input_tokens,
                     window_tokens: Some(effective_cap),
+                });
+                // Per-component detail behind the gauge (spec 0156) — all
+                // char-heuristic, hence marked estimated.
+                emit.emit(SessionEvent::ContextBreakdown {
+                    segments: prompt_sections.breakdown(&specs, &messages),
                 });
             }
 

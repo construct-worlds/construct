@@ -107,6 +107,7 @@ impl SessionManager {
             tokens: Default::default(),
             context_used: None,
             context_window: None,
+            context_segments: Vec::new(),
             merge: None,
         };
         self.storage.save_summary(&summary)?;

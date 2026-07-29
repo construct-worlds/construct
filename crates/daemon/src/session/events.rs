@@ -66,6 +66,7 @@ impl SessionManager {
                 s.tokens = Default::default();
                 s.context_used = None;
                 s.context_window = None;
+                s.context_segments.clear();
                 s.last_pty_at_ms = None;
                 crate::session::set_state_tracked(
                     &mut s,
@@ -108,7 +109,8 @@ impl SessionManager {
                     construct_protocol::osc11::scan_and_strip_queries(&mut tail, &bytes)
                 };
                 if count > 0 {
-                    let response = construct_protocol::osc11::response_bytes((rgb[0], rgb[1], rgb[2]));
+                    let response =
+                        construct_protocol::osc11::response_bytes((rgb[0], rgb[1], rgb[2]));
                     // Boxed: pty_input can re-enter handle_event (captured
                     // input echo), which would otherwise make this future's
                     // type infinitely recursive.
@@ -408,8 +410,11 @@ impl SessionManager {
         // particular, a stale native Grok id exits immediately with
         // `Done { exit_code: 1 }`; treating that as unseen activity would
         // manufacture an attention dot on every daemon restart. See spec 0054.
-        let terminal_resume_event =
-            settling && matches!(&event, SessionEvent::Done { .. } | SessionEvent::Error { .. });
+        let terminal_resume_event = settling
+            && matches!(
+                &event,
+                SessionEvent::Done { .. } | SessionEvent::Error { .. }
+            );
         if !is_focused && !terminal_resume_event && event_is_unseen_activity(&event) {
             entry.unseen_activity.store(true, Ordering::Relaxed);
         }
@@ -459,6 +464,11 @@ impl SessionManager {
                     if window_tokens.is_some() {
                         s.context_window = *window_tokens;
                     }
+                }
+                SessionEvent::ContextBreakdown { segments } => {
+                    // Same gauge semantics as ContextUsage (spec 0156):
+                    // latest report replaces the previous one.
+                    s.context_segments = segments.clone();
                 }
                 SessionEvent::Done { exit_code } => {
                     let terminal = if *exit_code == 0 {
@@ -702,6 +712,7 @@ impl SessionManager {
                 tokens: Default::default(),
                 context_used: None,
                 context_window: None,
+                context_segments: Vec::new(),
                 approval_mode: owner_summary.approval_mode,
                 kind: construct_protocol::SessionKind::Subagent,
                 archived: false,

@@ -662,6 +662,7 @@ name = "construct-adapter-kimi"
 version = "0.16.2"
 dependencies = [
  "anyhow",
+ "construct-adapter-common",
  "construct-protocol",
  "serde_json",
  "tempfile",

@@ -7,9 +7,9 @@ use crate::context;
 use crate::persist::{self, Persist};
 use crate::provider::{self, Content, LlmProvider, Message, Role, StopReason, TextSink, ToolCall};
 use crate::tools::{truncate_for_model, ToolCtx, ToolOutcome, ToolRegistry};
+use anyhow::{anyhow, Context, Result};
 use construct_protocol::adapter::{AdapterContext, AdapterInboxMsg, EventEmitter};
 use construct_protocol::{MessageRole, SessionEvent, SessionStartParams, SessionState, ToolRisk};
-use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -129,11 +129,11 @@ pub async fn auto_review_for_adapter(
     // auto-approved deterministically via the auto-approve policy; this covers
     // the residual cases that still reach the reviewer (e.g. shell reads or
     // removals of widget files).
-    let widgets_hint = match std::env::var(construct_protocol::agent_context::ENV_SESSION_WIDGETS_DIR)
-    {
-        Ok(dir) if !dir.is_empty() => format!("\n\nSession widget directory:\n{dir}"),
-        _ => String::new(),
-    };
+    let widgets_hint =
+        match std::env::var(construct_protocol::agent_context::ENV_SESSION_WIDGETS_DIR) {
+            Ok(dir) if !dir.is_empty() => format!("\n\nSession widget directory:\n{dir}"),
+            _ => String::new(),
+        };
     let user = format!(
         "{}{widgets_hint}\n\nPending tool:\nTool: {tool}\nArgs summary:\n{args_summary}",
         ctx.format_for_prompt()
@@ -588,19 +588,10 @@ pub async fn run(
     let specs = registry.specs();
 
     // Session-local prompt sections are built once at session start;
-    // resume re-enters this function and refreshes them.
-    let system_prompt: String = {
-        let mut prompt = system_prompt_for_env().to_string();
-        if let Some(section) = crate::project_guide::format_section(&cwd) {
-            prompt.push_str("\n\n");
-            prompt.push_str(&section);
-        }
-        if let Some(section) = crate::skills::format_section(&cwd) {
-            prompt.push_str("\n\n");
-            prompt.push_str(&section);
-        }
-        prompt
-    };
+    // resume re-enters this function and refreshes them. Per-section sizes
+    // are retained for the context breakdown (spec 0156).
+    let prompt_sections = context::PromptSections::assemble(&cwd);
+    let system_prompt: String = prompt_sections.prompt.clone();
 
     let provider_name = spec.provider_name();
     // User-facing label (`@profile` when from config, else the wire name);
@@ -983,6 +974,11 @@ pub async fn run(
                 emit.emit(SessionEvent::ContextUsage {
                     used_tokens: turn.usage.input_tokens,
                     window_tokens: Some(effective_cap),
+                });
+                // Per-component detail behind the gauge (spec 0156) — all
+                // char-heuristic, hence marked estimated.
+                emit.emit(SessionEvent::ContextBreakdown {
+                    segments: prompt_sections.breakdown(&specs, &messages),
                 });
             }
 

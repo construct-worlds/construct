@@ -2772,6 +2772,7 @@ mod search_tests {
             tokens: Default::default(),
             context_used: None,
             context_window: None,
+            context_segments: Vec::new(),
             approval_mode: ApprovalMode::Manual,
             kind: SessionKind::User,
             archived: false,

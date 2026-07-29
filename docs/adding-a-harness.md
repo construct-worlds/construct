@@ -158,6 +158,37 @@ only when the harness itself states the window (codex's
 per poll. Never guess the window from a model-name table outside the
 harness's own report.
 
+### 2.6b Context breakdown segments (spec 0156)
+
+Where the harness's own data surface makes it derivable, emit
+`SessionEvent::ContextBreakdown` alongside each context-gauge report: an
+ordered list of labeled segments (fixed prefix first — system prompt,
+guides, tools — then `messages`) describing what occupies the used
+context. This is the one sanctioned exception to the never-estimate rule:
+segment counts MAY come from a char-length heuristic
+(`adapter-common::context_breakdown::estimate_tokens_from_chars`, the same
+`chars / 3.5` rule smith budgets with), but every such segment sets
+`estimated: true` — clients render those with a `~` prefix, and the gauge's
+own used/window numbers stay harness-reported only.
+
+Patterns:
+
+- **Own the prompt** (smith): report each assembled section (system
+  prompt, project guide, skills, tool schemas) plus the live message list.
+- **Native transcript on disk** (claude, codex, kimi, pi): full-scan the
+  bound transcript at emit time and report a `messages` estimate from its
+  conversation content. Full scans at turn cadence are deliberate — they
+  self-correct across resume and native-id rebinds, where incremental
+  accumulators silently drift.
+- **Harness writes its prompt to disk** (grok): report a real
+  `system prompt` segment from that file, then `messages`.
+- **Nothing visible** (shell, and harnesses with no usable logs): report
+  nothing; clients keep the plain gauge tooltip.
+
+Report only derivable components — clients synthesize the `unaccounted`
+remainder and `free space` rows themselves. Gate re-emission on change
+(`adapter-common::context_breakdown::BreakdownGate`), like the gauge.
+
 ### 2.7 Dollar cost
 
 `Cost.usd` when the harness prices calls itself (smith; opencode stores
@@ -210,7 +241,7 @@ daemon once the events above are emitted.
 
 ## 3. Capability matrix
 
-Snapshot of where each harness stands (2026-07-24). Re-audit by checking the
+Snapshot of where each harness stands (2026-07-28). Re-audit by checking the
 listed data surface, not by trusting this table — upstream CLIs grow
 surfaces between releases (codex's token splits and grok's context figures
 both existed for months before we consumed them).
@@ -223,6 +254,7 @@ both existed for months before we consumed them).
 | EffortChanged | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
 | Token split (0103) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | gap² | none³ | n/a |
 | Context gauge (0104) | ✓ | ✓ | ✓ | ✓ | ✓ | gap | ✓⁶ | ✓ | none³ | n/a |
+| Context breakdown (0156) | ✓ | ✓ | ✓ | gap⁸ | ✓ | gap⁹ | ✓ | ✓ | none³ | n/a |
 | USD cost | ✓ | headless only | — | gap⁴ | — | ✓ | ✓ | — | — | n/a |
 | Native resume | ✓ (own state) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | fresh shell |
 | Reset detection (0085) | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
@@ -249,6 +281,13 @@ bare usage without a denominator (its model catalog knows window sizes, but
 that is a model-name table, not a per-session report).
 ⁷ pi has a JS extension system that could host construct's unified tools
 (the opencode pattern); unwired today.
+⁸ opencode's injected plugin sees only usage numbers (`message.updated`
+carries no content; content-bearing part events aren't captured), so no
+breakdown component is derivable without an active harness-side query —
+which spec 0156's non-goals rule out.
+⁹ hermes's `state.db` stores full structured messages — a `messages`
+estimate is derivable, but hermes reports no context gauge at all yet
+(the row above); wire the gauge first, then the breakdown rides along.
 
 ## 4. Where each harness's data lives
 
