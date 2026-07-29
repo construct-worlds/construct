@@ -414,14 +414,6 @@ impl Storage {
         }
     }
 
-    pub fn groups_root(&self) -> PathBuf {
-        self.data_dir.join("groups")
-    }
-
-    pub fn group_path(&self, id: &str) -> PathBuf {
-        self.groups_root().join(format!("{id}.json"))
-    }
-
     pub fn save_group(&self, g: &GroupSummary) -> Result<()> {
         std::fs::create_dir_all(self.project_dir(&g.id))?;
         let path = self.project_meta_path(&g.id);
@@ -456,35 +448,6 @@ impl Storage {
             }
         }
 
-        // Compatibility migration from the pre-project layout:
-        // `<data>/groups/<id>.json` -> `<data>/projects/<id>/meta.json`.
-        let legacy_root = self.groups_root();
-        if legacy_root.exists() {
-            for entry in std::fs::read_dir(&legacy_root)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                    continue;
-                }
-                match std::fs::read(&path)
-                    .and_then(|b| serde_json::from_slice::<GroupSummary>(&b).map_err(Into::into))
-                {
-                    Ok(g) => {
-                        if !out.iter().any(|existing| existing.id == g.id) {
-                            if let Err(e) = self.save_group(&g) {
-                                tracing::warn!(project = %g.id, error = ?e, "project migration save failed");
-                            } else if let Err(e) = std::fs::remove_file(&path) {
-                                tracing::warn!(path = %path.display(), error = ?e, "legacy group cleanup failed");
-                            }
-                            out.push(g);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(path = %path.display(), error = %e, "skip unreadable legacy group")
-                    }
-                }
-            }
-        }
         out.sort_by_key(|g| g.position);
         Ok(out)
     }
@@ -493,11 +456,6 @@ impl Storage {
         let p = self.project_meta_path(id);
         if p.exists() {
             std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
-        }
-        let legacy = self.group_path(id);
-        if legacy.exists() {
-            std::fs::remove_file(&legacy)
-                .with_context(|| format!("remove {}", legacy.display()))?;
         }
         Ok(())
     }
@@ -2681,31 +2639,6 @@ mod memory_tests {
         );
     }
 
-    #[test]
-    fn group_metadata_migrates_to_project_meta() {
-        let tmp = tempfile::tempdir().unwrap();
-        let storage = Storage::new(tmp.path().join("data")).unwrap();
-        std::fs::create_dir_all(storage.groups_root()).unwrap();
-        let group = GroupSummary {
-            id: "g123".into(),
-            name: "Agentd".into(),
-            created_at: chrono::Utc::now(),
-            position: 7,
-            collapsed: true,
-        };
-        std::fs::write(
-            storage.group_path(&group.id),
-            serde_json::to_string_pretty(&group).unwrap(),
-        )
-        .unwrap();
-
-        let loaded = storage.load_groups().unwrap();
-
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, "g123");
-        assert!(storage.project_meta_path("g123").exists());
-        assert!(!storage.group_path("g123").exists());
-    }
 
     #[test]
     fn removing_project_metadata_preserves_memory_file() {

@@ -31,9 +31,6 @@ projects/<project-id>/
     memory.md          # project-specific memory
 ```
 
-Legacy `groups/<project-id>.json` files are migrated to
-`projects/<project-id>/meta.json` when loaded.
-
 ## Upgrade Checks
 
 Interactive client commands check GitHub for newer releases before running. If
