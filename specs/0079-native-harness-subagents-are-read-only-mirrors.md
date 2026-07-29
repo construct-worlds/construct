@@ -22,6 +22,14 @@ Native parent links are recursive. A native subagent created by another native
 subagent appears beneath that native parent rather than being flattened under
 the owning Construct session.
 
+Claude Code background commands are native child work too: once Claude reports
+the stable background-task identifier, Construct projects the command as a
+running native mirror using the agent-provided tool description as its stable
+title. The eventual task notification updates lifecycle state without replacing
+that concise title with completion prose. Construct does not synthesize a child
+from the earlier tool request alone because its tool-use identifier is not the
+stable task identifier reported by later lifecycle notifications.
+
 A native child's FULL transcript history is projected, not just lines that
 arrive while a watcher happens to be attached: adapters re-scan child
 transcript files from the top on every (re)start, and each file-derived
@@ -74,6 +82,8 @@ child that is already owned by its parent.
   rows, preserving their transcripts without implying they still exist.
 - Native children are archived when they reach any terminal state, regardless
   of whether the harness also publishes an explicit removal signal.
+- Claude background commands become visible as soon as their stable task
+  identifier is reported, rather than appearing only after completion.
 - Clients visibly label native children and must support recursive child
   traversal.
 - Client bulk lifecycle actions exclude native mirrors. If an archived
@@ -97,6 +107,9 @@ child that is already owned by its parent.
 - A Claude Code session launches an Agent task. A `(native) claude` child row
   appears under it, streams the child's semantic transcript, and is archived
   when Claude reports task completion or failure.
+- A Claude Code session starts a long-running background Bash command. Its
+  agent-provided description appears immediately as a running `(native) claude`
+  child title and remains the title after the command's exit status arrives.
 - A Codex rollout declares a parent thread. A `(native) codex` child row appears
   under the Construct session associated with that parent rollout.
 - A native Codex child launches another child. The grandchild appears beneath
