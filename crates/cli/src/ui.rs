@@ -4949,7 +4949,7 @@ fn focused_session_pane(app: &App) -> Option<WindowPaneHit> {
             // Zoomed/full-screen views do not materialize the split-window
             // tree, but their view area is still the focused session pane.
             // Treat the screen edge as its border so the affordance keeps the
-            // same bottom-right border placement.
+            // same one-cell-inset bottom-right placement.
             if app.zoom != ZoomMode::View {
                 return None;
             }
@@ -4964,7 +4964,7 @@ fn focused_session_pane(app: &App) -> Option<WindowPaneHit> {
 
 /// Persistent suggestion-deck affordance (specs 0109/0155). It belongs to
 /// the focused session terminal rather than the global modeline:
-/// right-aligned on the pane's bottom border.
+/// right-aligned on the final interior row, one cell clear of the right border.
 fn render_suggest_affordance(f: &mut Frame, app: &mut App) -> Option<Rect> {
     let Some(session) = app.selected_session() else {
         return None;
@@ -4990,7 +4990,7 @@ fn render_suggest_affordance(f: &mut Frame, app: &mut App) -> Option<Rect> {
         "◇ C-x .".to_string()
     };
     let width = UnicodeWidthStr::width(label.as_str())
-        .min(pane.area.width.saturating_sub(2) as usize) as u16;
+        .min(pane.area.width.saturating_sub(3) as usize) as u16;
     if width == 0 {
         return None;
     }
@@ -5000,14 +5000,14 @@ fn render_suggest_affordance(f: &mut Frame, app: &mut App) -> Option<Rect> {
             .x
             .saturating_add(pane.area.width)
             .saturating_sub(width)
-            .saturating_sub(1),
-        // Replace the right end of the bottom border while preserving its
-        // corner cell. In a zoomed view the screen edge acts as the border.
+            .saturating_sub(2),
+        // The final interior row sits immediately above the bottom border.
+        // In a zoomed view the screen edge acts as that border.
         y: pane
             .area
             .y
             .saturating_add(pane.area.height)
-            .saturating_sub(1),
+            .saturating_sub(2),
         width,
         height: 1,
     };
@@ -5116,7 +5116,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         .area
         .y
         .saturating_add(pane.area.height)
-        .saturating_sub(1);
+        .saturating_sub(2);
     let available_h = hint_y.saturating_sub(bounds.y).max(3);
     let height = wanted_h.min(available_h);
     if height < 6 {

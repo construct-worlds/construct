@@ -68,8 +68,9 @@ from burning tokens.
 
 - Clients render the hand however fits their surface but must preserve
   invalidation, staging, and typing-always-wins. The TUI advertises the
-  chord on the focused terminal pane's bottom border with an animated pending
-  indicator. This terminal-local chrome is composited above harness
+  chord on the focused terminal pane's final interior row, one cell clear
+  of its right border, with an animated pending indicator. This
+  terminal-local chrome is composited above harness
   output in both split and zoomed/full-screen layouts, so a harness
   repaint cannot erase it; hovering the chord explains the action, and
   clicking it performs the same toggle as the chord. The TUI keeps categories
