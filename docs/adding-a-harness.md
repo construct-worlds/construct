@@ -182,6 +182,9 @@ Patterns:
   accumulators silently drift.
 - **Harness writes its prompt to disk** (grok): report a real
   `system prompt` segment from that file, then `messages`.
+- **Usage buried in an internal db** (antigravity): the same poll that
+  scrapes the db for model/usage also triggers a `messages` estimate from
+  the brain transcript, restarting at truncation checkpoints.
 - **Nothing visible** (shell, and harnesses with no usable logs): report
   nothing; clients keep the plain gauge tooltip.
 
@@ -252,9 +255,9 @@ both existed for months before we consumed them).
 | Structured chat events | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
 | ModelChanged | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓¹ | ✓ | n/a |
 | EffortChanged | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
-| Token split (0103) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | gap² | none³ | n/a |
-| Context gauge (0104) | ✓ | ✓ | ✓ | ✓ | ✓ | gap | ✓⁶ | ✓ | none³ | n/a |
-| Context breakdown (0156) | ✓ | ✓ | ✓ | gap⁸ | ✓ | gap⁹ | ✓ | ✓ | none³ | n/a |
+| Token split (0103) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | gap² | ✓³ | n/a |
+| Context gauge (0104) | ✓ | ✓ | ✓ | ✓ | ✓ | gap | ✓⁶ | ✓ | ✓³ | n/a |
+| Context breakdown (0156) | ✓ | ✓ | ✓ | gap⁸ | ✓ | gap⁹ | ✓ | ✓ | ✓ | n/a |
 | USD cost | ✓ | headless only | — | gap⁴ | — | ✓ | ✓ | — | — | n/a |
 | Native resume | ✓ (own state) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | fresh shell |
 | Reset detection (0085) | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
@@ -271,8 +274,13 @@ adapter-codex's `codex_model_change` doc).
 gauge (spec 0104), but its only per-session consumption figure is a
 cumulative unsplit `totalTokens` — real data a token-split delta could
 consume, still unwired.
-³ antigravity exposes no token/cost data in print mode or its logs
-(checked; documented in the adapter).
+³ antigravity exposes no token/cost data in print mode or its logs, but
+its per-conversation sqlite db's `gen_metadata` blobs embed a full
+per-generation split (fresh input, cached prefix, output incl. thoughts)
+as schema-less protobuf varints — decoded best-effort like the model
+scrape, field mapping validated against 2,184 real generation rows across
+58 conversation dbs. Agy states no context window anywhere, so the gauge
+is used-only (same posture as pi⁶).
 ⁴ opencode stores exact per-message USD `cost` in the same event the plugin
 already reads — a one-line add.
 ⁵ smith subagents are real construct sessions (spec 0014), not mirrors.
@@ -302,7 +310,7 @@ short real session:
 | opencode | `~/.local/share/opencode/opencode.db` (sqlite `message`) — reachable live via the plugin's `message.updated` events | `tokens` (input/output/reasoning/cache r+w), exact `cost` USD, provider/model, per-message timestamps |
 | grok | `~/.grok/sessions/<cwd-enc>/<session>/` (`signals.json`, `updates.jsonl`, `chat_history.jsonl`) | `contextTokensUsed`/`contextWindowTokens`, `totalTokens` (unsplit), turn/tool counters, session summary |
 | hermes | `$HERMES_HOME/state.db` (`sessions`, `messages`) | source-tagged native id, model/reasoning config, full structured messages/tool calls, token split, estimated/actual USD cost |
-| antigravity | — | nothing usable found in print mode or logs |
+| antigravity | `~/.gemini/antigravity-cli/conversations/<id>.db` (`gen_metadata` blobs), `brain/<id>/.system_generated/logs/transcript.jsonl` | per-generation usage varints at blob path `1.4` (`2` fresh input, `3` output incl. thoughts, `5` cached prefix, `9` thoughts), model display label (ASCII scrape); transcript carries conversation content (`USER_INPUT`/`PLANNER_RESPONSE`/tool records, `CHECKPOINT` = truncation summary) but no usage |
 | pi | `<CONSTRUCT_SESSION_DATA_DIR>/pi-sessions/<ts>_<uuid>.jsonl` (private store the adapter selects via `--session-dir`; pi's global default is `~/.pi/agent/sessions/<cwd-slug>/`) | per-assistant-message `usage` (input/output/cacheRead/cacheWrite/reasoning + exact USD `cost.total`; `input` EXCLUDES cache reads), `model_change` / `thinking_level_change` records, `thinking`/`text`/`toolCall` content blocks, `toolResult` messages |
 
 ## 5. Verification checklist
