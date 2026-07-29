@@ -28,6 +28,10 @@ use super::{translate, ArmedRoute, Dialect, Router, SessionRouting, TargetAuth, 
 /// Cap on a request head. Anthropic-dialect requests carry large bodies
 /// but small heads; this only bounds the header block.
 const MAX_HEAD: usize = 64 * 1024;
+const MAX_ERROR_BODY: usize = 64 * 1024;
+const MAX_RESPONSE_BODY: usize = 100 * 1024 * 1024;
+const MAX_SSE_FRAME: usize = 100 * 1024 * 1024;
+const ERROR_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Serve one client connection.
 ///
@@ -594,15 +598,25 @@ where
         ctx.mark_observed();
         let streaming = wants_stream(&body);
         return match forward_translated(body, &route, client_dialect).await {
-            Ok(response) => {
-                write_translated_response(stream, response, &route, client_dialect, streaming)
-                    .await
+            Ok(forwarded) => {
+                write_translated_response(
+                    stream,
+                    forwarded.response,
+                    &route,
+                    client_dialect,
+                    streaming,
+                    &forwarded.context,
+                )
+                .await
             }
             Err(e) => {
-                let payload = serde_json::json!({
-                    "type": "error",
-                    "error": {"type": "api_error", "message": format!("construct router: {e:#}")},
-                })
+                // Keep transport diagnostics in the daemon error chain. URLs
+                // and lower-level client errors are not safe to reflect into
+                // a harness transcript.
+                let payload = translate::error_body(
+                    client_dialect,
+                    "construct router: upstream request failed",
+                )
                 .to_string();
                 write_simple(stream, 502, &payload).await.ok();
                 Err(e)
@@ -782,7 +796,9 @@ fn is_hop_header(name: &str) -> bool {
 fn is_dropped_header(name: &str) -> bool {
     is_hop_header(name)
         || name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("api-key")
         || name.eq_ignore_ascii_case("x-api-key")
+        || name.eq_ignore_ascii_case("x-goog-api-key")
 }
 
 /// Substitute the route's model into an Anthropic-dialect request body.
@@ -848,7 +864,12 @@ async fn forward(
     body: Vec<u8>,
     route: &ArmedRoute,
 ) -> Result<reqwest::Response> {
-    let url = target_url(&route.base_url, &req.path);
+    // Same JSON dialect does not imply the same path: a Responses-speaking
+    // harness may call ChatGPT's `/backend-api/codex/responses` while an
+    // Azure target expects `/openai/v1/responses`. The armed endpoint is
+    // the target's path; carrying the client's path across providers is a
+    // protocol bug even when the body can remain byte-for-byte.
+    let url = route.endpoint.clone();
     let method = reqwest::Method::from_bytes(req.method.as_bytes()).context("method")?;
     let mut out = route.client.request(method, &url);
     for (name, value) in &req.headers {
@@ -860,6 +881,8 @@ async fn forward(
     if !route.api_key.is_empty() {
         out = match route.auth {
             TargetAuth::ApiKeyHeader => out.header("x-api-key", &route.api_key),
+            TargetAuth::GoogleApiKey => out.header("x-goog-api-key", &route.api_key),
+            TargetAuth::AzureApiKey => out.header("api-key", &route.api_key),
             TargetAuth::Bearer => out.header("authorization", format!("Bearer {}", route.api_key)),
         };
     }
@@ -876,7 +899,7 @@ async fn forward_translated(
     body: Vec<u8>,
     route: &ArmedRoute,
     client_dialect: Dialect,
-) -> Result<reqwest::Response> {
+) -> Result<TranslatedResponse> {
     let source: serde_json::Value =
         serde_json::from_slice(&body).context("parse intercepted request body")?;
     let mut canon = translate::parse_request(client_dialect, &source);
@@ -890,7 +913,8 @@ async fn forward_translated(
             None => prefix.to_string(),
         });
     }
-    let mut translated = translate::emit_request(route.target_dialect, &canon, &route.model);
+    let emitted = translate::emit_request_with_context(route.target_dialect, &canon, &route.model);
+    let mut translated = emitted.body;
     // A target can refuse a parameter its own dialect defines — the Codex
     // backend 400s on `max_output_tokens`. Strip rather than refuse the
     // turn; the alternative is a request the target will never accept.
@@ -901,7 +925,16 @@ async fn forward_translated(
             }
         }
     }
-    let url = route.endpoint.clone();
+    let url = if route.target_dialect == Dialect::GoogleGemini {
+        translate::target_url(
+            &route.base_url,
+            route.target_dialect,
+            &route.model,
+            canon.stream,
+        )
+    } else {
+        route.endpoint.clone()
+    };
     let mut out = route
         .client
         .post(&url)
@@ -914,16 +947,28 @@ async fn forward_translated(
             TargetAuth::ApiKeyHeader => out
                 .header("x-api-key", &route.api_key)
                 .header("anthropic-version", "2023-06-01"),
+            TargetAuth::GoogleApiKey => out.header("x-goog-api-key", &route.api_key),
+            TargetAuth::AzureApiKey => out.header("api-key", &route.api_key),
             TargetAuth::Bearer => out.header("authorization", format!("Bearer {}", route.api_key)),
         };
     }
     for (name, value) in &route.extra_headers {
         out = out.header(name, value);
     }
-    out.json(&translated)
+    let response = out
+        .json(&translated)
         .send()
         .await
-        .with_context(|| format!("forward to {url}"))
+        .with_context(|| format!("forward to {url}"))?;
+    Ok(TranslatedResponse {
+        response,
+        context: emitted.context,
+    })
+}
+
+struct TranslatedResponse {
+    response: reqwest::Response,
+    context: translate::TranslationContext,
 }
 
 /// Does this request want a streamed response?
@@ -949,6 +994,7 @@ async fn write_translated_response<S>(
     route: &ArmedRoute,
     client_dialect: Dialect,
     streaming: bool,
+    context: &translate::TranslationContext,
 ) -> Result<()>
 where
     S: tokio::io::AsyncWrite + Unpin,
@@ -957,22 +1003,58 @@ where
 
     let status = response.status();
     if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        let body = serde_json::json!({
-            "type": "error",
-            "error": {"type": "api_error", "message": text},
-        })
-        .to_string();
+        let bytes = tokio::time::timeout(
+            ERROR_BODY_TIMEOUT,
+            read_bounded_response(response, MAX_ERROR_BODY),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+        let parsed = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+        let message = parsed
+            .as_ref()
+            .and_then(translate::upstream_error_message)
+            .unwrap_or_else(|| format!("upstream HTTP {}", status.as_u16()));
+        let body = translate::error_body(client_dialect, &message).to_string();
         return write_simple(stream, status.as_u16(), &body).await;
     }
 
     if !streaming {
-        let parsed: serde_json::Value = response.json().await.context("decode upstream json")?;
-        let body = translate::encode_response(
+        let bytes = match read_bounded_response(response, MAX_RESPONSE_BODY).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                let body = translate::error_body(
+                    client_dialect,
+                    "failed to read bounded upstream response",
+                )
+                .to_string();
+                return write_simple(stream, 502, &body).await;
+            }
+        };
+        let parsed: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                let body =
+                    translate::error_body(client_dialect, "upstream response was not valid JSON")
+                        .to_string();
+                return write_simple(stream, 502, &body).await;
+            }
+        };
+        if let Some(message) = translate::upstream_error_message(&parsed) {
+            let body = translate::error_body(client_dialect, &message).to_string();
+            return write_simple(stream, 502, &body).await;
+        }
+        if let Some(message) = translate::invalid_response_message(route.target_dialect, &parsed) {
+            let body = translate::error_body(client_dialect, message).to_string();
+            return write_simple(stream, 502, &body).await;
+        }
+        let body = translate::encode_response_with_context(
             client_dialect,
             route.target_dialect,
             &parsed,
             &route.model,
+            context,
         )
         .to_string();
         return write_simple(stream, 200, &body).await;
@@ -988,7 +1070,10 @@ where
     let mut encoder = translate::ClientEncoder::new(client_dialect, &route.model);
     let mut upstream = response.bytes_stream();
     let mut pending = Vec::<u8>::new();
-    while let Some(chunk) = upstream.next().await {
+    let mut saw_frame = false;
+    let mut saw_terminal = false;
+    let mut failed = false;
+    'upstream: while let Some(chunk) = upstream.next().await {
         let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {
@@ -997,10 +1082,17 @@ where
                 // turn still terminates.
                 let msg = encoder.error(&format!("upstream stream failed: {e}"));
                 write_chunk(stream, msg.as_bytes()).await?;
+                failed = true;
                 break;
             }
         };
         pending.extend_from_slice(&chunk);
+        if pending.len() > MAX_SSE_FRAME {
+            let msg = encoder.error("upstream SSE data frame exceeded the size limit");
+            write_chunk(stream, msg.as_bytes()).await?;
+            failed = true;
+            break;
+        }
         // SSE frames are newline-delimited; hold partial lines back.
         while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = pending.drain(..=pos).collect();
@@ -1008,27 +1100,142 @@ where
             let Some(data) = line.trim().strip_prefix("data:") else {
                 continue;
             };
-            let data = data.trim();
-            if data.is_empty() || translate::is_done_sentinel(data) {
-                continue;
-            }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-                continue;
-            };
-            for event in translate::decode_target_event(route.target_dialect, &value) {
-                let out = encoder.push(&event);
-                if !out.is_empty() {
-                    write_chunk(stream, out.as_bytes()).await?;
+            match process_target_sse_data(
+                stream,
+                &mut encoder,
+                route.target_dialect,
+                data.trim(),
+                context,
+            )
+            .await?
+            {
+                SseOutcome::Continue => {}
+                SseOutcome::Frame { terminal } => {
+                    saw_frame = true;
+                    saw_terminal |= terminal;
+                }
+                SseOutcome::Failed => {
+                    failed = true;
+                    break 'upstream;
                 }
             }
         }
     }
-    let tail = encoder.finish();
-    write_chunk(stream, tail.as_bytes()).await?;
+
+    if !failed && !pending.iter().all(u8::is_ascii_whitespace) {
+        let residual = String::from_utf8_lossy(&pending);
+        if let Some(data) = residual.trim().strip_prefix("data:") {
+            match process_target_sse_data(
+                stream,
+                &mut encoder,
+                route.target_dialect,
+                data.trim(),
+                context,
+            )
+            .await?
+            {
+                SseOutcome::Continue => {}
+                SseOutcome::Frame { terminal } => {
+                    saw_frame = true;
+                    saw_terminal |= terminal;
+                }
+                SseOutcome::Failed => failed = true,
+            }
+        } else {
+            let msg = encoder
+                .error("upstream stream ended with an incomplete SSE frame — possible truncation");
+            write_chunk(stream, msg.as_bytes()).await?;
+            failed = true;
+        }
+    }
+
+    if !failed && (!saw_frame || !saw_terminal) {
+        let msg =
+            encoder.error("upstream stream ended without a terminal signal — possible truncation");
+        write_chunk(stream, msg.as_bytes()).await?;
+        failed = true;
+    }
+    if !failed {
+        let tail = encoder.finish();
+        write_chunk(stream, tail.as_bytes()).await?;
+    }
     stream.write_all(b"0\r\n\r\n").await?;
     stream.flush().await?;
     stream.shutdown().await.ok();
     Ok(())
+}
+
+enum SseOutcome {
+    Continue,
+    Frame { terminal: bool },
+    Failed,
+}
+
+async fn process_target_sse_data<S>(
+    stream: &mut S,
+    encoder: &mut translate::ClientEncoder,
+    dialect: Dialect,
+    data: &str,
+    context: &translate::TranslationContext,
+) -> Result<SseOutcome>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    if data.is_empty() {
+        return Ok(SseOutcome::Continue);
+    }
+    if translate::is_done_sentinel(data) {
+        return Ok(SseOutcome::Frame { terminal: true });
+    }
+    if data.len() > MAX_SSE_FRAME {
+        let msg = encoder.error("upstream SSE data frame exceeded the size limit");
+        write_chunk(stream, msg.as_bytes()).await?;
+        return Ok(SseOutcome::Failed);
+    }
+    let value = match serde_json::from_str::<serde_json::Value>(data) {
+        Ok(value) => value,
+        Err(_) => {
+            let msg = encoder.error("malformed upstream SSE data frame");
+            write_chunk(stream, msg.as_bytes()).await?;
+            return Ok(SseOutcome::Failed);
+        }
+    };
+    if let Some(message) = translate::upstream_error_message(&value) {
+        let msg = encoder.error(&message);
+        write_chunk(stream, msg.as_bytes()).await?;
+        return Ok(SseOutcome::Failed);
+    }
+    let events = translate::decode_target_event_with_context(dialect, &value, context);
+    let terminal = events.iter().any(|event| {
+        matches!(event, translate::CanonEvent::Stop { .. })
+            || (dialect == Dialect::GoogleGemini
+                && matches!(event, translate::CanonEvent::Usage { .. }))
+    });
+    for event in events {
+        let out = encoder.push(&event);
+        if !out.is_empty() {
+            write_chunk(stream, out.as_bytes()).await?;
+        }
+    }
+    Ok(SseOutcome::Frame { terminal })
+}
+
+async fn read_bounded_response(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    use futures::StreamExt;
+
+    if response.content_length().is_some_and(|n| n > max_bytes as u64) {
+        bail!("upstream response exceeded {max_bytes} bytes");
+    }
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.context("read upstream response")?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            bail!("upstream response exceeded {max_bytes} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 async fn write_chunk<S>(stream: &mut S, data: &[u8]) -> Result<()>
@@ -1169,18 +1376,6 @@ mod tests {
         assert_eq!(
             rewrite_body(br#"{"beta":true}"#, "x"),
             br#"{"beta":true}"#.to_vec()
-        );
-    }
-
-    #[test]
-    fn joins_base_url_and_path_without_doubling_slashes() {
-        assert_eq!(
-            target_url("https://api.moonshot.ai/anthropic/", "/v1/messages"),
-            "https://api.moonshot.ai/anthropic/v1/messages"
-        );
-        assert_eq!(
-            target_url("https://api.moonshot.ai/anthropic", "v1/messages"),
-            "https://api.moonshot.ai/anthropic/v1/messages"
         );
     }
 
@@ -1368,6 +1563,8 @@ mod tests {
     #[test]
     fn drops_client_credentials_and_hop_headers() {
         assert!(is_dropped_header("x-api-key"));
+        assert!(is_dropped_header("x-goog-api-key"));
+        assert!(is_dropped_header("api-key"));
         assert!(is_dropped_header("Authorization"));
         assert!(is_dropped_header("Host"));
         assert!(is_dropped_header("content-length"));
@@ -1386,6 +1583,39 @@ mod tests {
         assert!(is_hop_header("proxy-authorization"));
         assert!(is_hop_header("connection"));
         assert!(is_hop_header("content-length"));
+    }
+
+    #[tokio::test]
+    async fn malformed_and_inline_error_frames_fail_closed() {
+        use tokio::io::AsyncReadExt;
+
+        for (payload, expected) in [
+            ("{not-json", "malformed upstream SSE data frame"),
+            (
+                r#"{"error":{"message":"Authorization: Bearer secret-token"}}"#,
+                "Authorization: Bearer [REDACTED]",
+            ),
+        ] {
+            let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+            let mut encoder =
+                translate::ClientEncoder::new(Dialect::AnthropicMessages, "routed-model");
+            let outcome = process_target_sse_data(
+                &mut server,
+                &mut encoder,
+                Dialect::GoogleGemini,
+                payload,
+                &translate::TranslationContext::default(),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(outcome, SseOutcome::Failed));
+            drop(server);
+            let mut bytes = Vec::new();
+            client.read_to_end(&mut bytes).await.unwrap();
+            let response = String::from_utf8_lossy(&bytes);
+            assert!(response.contains(expected), "{response}");
+            assert!(!response.contains("secret-token"), "{response}");
+        }
     }
 
     /// The drain rule in isolation: direction decides safety, not just

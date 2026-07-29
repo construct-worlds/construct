@@ -3,8 +3,8 @@
 //! This is the dialect four harnesses speak — codex and pi to
 //! `chatgpt.com/backend-api/codex/responses`, grok and opencode to
 //! `/v1/responses` on their own hosts — so it is a *client* dialect here.
-//! No configurable route target speaks it, which is why there is no
-//! request emitter.
+//! Configurable `openai-responses` and `azure-openai` profiles can also
+//! speak it as a target.
 //!
 //! The event vocabulary below was captured from a real harness turn rather
 //! than written from memory: names and payload shapes come from an

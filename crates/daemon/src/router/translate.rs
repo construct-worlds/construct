@@ -1,10 +1,10 @@
 //! Dialect translation (spec 0116).
 //!
 //! Every translation goes through a canonical form rather than being
-//! written pairwise. With three dialects in play, pairwise would mean six
-//! converters that drift apart; parse-to-canonical plus emit-from-canonical
-//! means one parser and one emitter per dialect, and a new dialect costs
-//! two pieces instead of 2N.
+//! written pairwise. With four dialects in play, pairwise would already
+//! mean twelve converters that drift apart; parse-to-canonical plus
+//! emit-from-canonical means one parser and one emitter per dialect, and a
+//! new dialect costs two pieces instead of 2N.
 //!
 //! Two directions, and they are not symmetric:
 //!
@@ -20,8 +20,11 @@
 //! declaration would be wrong for them by construction.
 
 pub mod anthropic;
+pub mod google;
 pub mod openai_chat;
 pub mod responses;
+
+use std::collections::BTreeMap;
 
 use serde_json::Value;
 
@@ -84,6 +87,25 @@ pub struct CanonTool {
     pub schema: Value,
 }
 
+/// Request-scoped state needed to reverse a target's wire restrictions.
+///
+/// Most dialects need no state. Gemini, however, restricts function names
+/// to 64 ASCII characters. Invalid or colliding names are encoded on the
+/// request and restored from this map when the response calls the tool.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TranslationContext {
+    pub(crate) tool_names: BTreeMap<String, String>,
+}
+
+/// A translated body plus the request-scoped state its response decoder
+/// needs. Keeping the state beside the body prevents global cross-session
+/// name maps and their collision/leakage failure modes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmittedRequest {
+    pub body: Value,
+    pub context: TranslationContext,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonToolChoice {
     Auto,
@@ -95,12 +117,26 @@ pub enum CanonToolChoice {
 /// One step of a response stream, dialect-neutral.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CanonEvent {
-    Start { id: String },
+    Start {
+        id: String,
+    },
     TextDelta(String),
-    ToolStart { index: usize, id: String, name: String },
-    ToolArgsDelta { index: usize, json: String },
-    Usage { input: u64, output: u64 },
-    Stop { reason: CanonStop },
+    ToolStart {
+        index: usize,
+        id: String,
+        name: String,
+    },
+    ToolArgsDelta {
+        index: usize,
+        json: String,
+    },
+    Usage {
+        input: u64,
+        output: u64,
+    },
+    Stop {
+        reason: CanonStop,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +160,7 @@ impl CanonStop {
 
 /// Recognize the dialect of an intercepted request from its body.
 ///
-/// The three shapes are unambiguous on their own keys — `input` belongs
+/// The shapes are unambiguous on their own keys — `input` belongs
 /// only to Responses, a top-level `system` beside `messages` only to
 /// Anthropic — so this needs no help from the URL path and works for a
 /// harness whose endpoint moves with its configured provider.
@@ -135,6 +171,12 @@ pub fn detect_dialect(body: &Value) -> Option<Dialect> {
         || obj.contains_key("max_output_tokens")
     {
         return Some(Dialect::OpenAiResponses);
+    }
+    if obj.contains_key("contents")
+        || obj.contains_key("systemInstruction")
+        || obj.contains_key("generationConfig")
+    {
+        return Some(Dialect::GoogleGemini);
     }
     if obj.contains_key("messages") {
         // Anthropic requires max_tokens and carries the system prompt
@@ -151,33 +193,118 @@ pub fn detect_dialect(body: &Value) -> Option<Dialect> {
 pub fn parse_request(dialect: Dialect, body: &Value) -> CanonRequest {
     match dialect {
         Dialect::AnthropicMessages => anthropic::parse_request(body),
+        Dialect::GoogleGemini => google::parse_request(body),
         Dialect::OpenAiChat => openai_chat::parse_request(body),
         Dialect::OpenAiResponses => responses::parse_request(body),
     }
 }
 
 /// Emit a canonical request in `dialect`, substituting `model`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn emit_request(dialect: Dialect, req: &CanonRequest, model: &str) -> Value {
+    emit_request_with_context(dialect, req, model).body
+}
+
+/// Emit a canonical request and retain any request-scoped decoder state.
+pub fn emit_request_with_context(
+    dialect: Dialect,
+    req: &CanonRequest,
+    model: &str,
+) -> EmittedRequest {
+    let (body, context) = match dialect {
+        Dialect::GoogleGemini => google::emit_request(req, model),
+        Dialect::AnthropicMessages => (
+            anthropic::emit_request(req, model),
+            TranslationContext::default(),
+        ),
+        Dialect::OpenAiChat => (
+            openai_chat::emit_request(req, model),
+            TranslationContext::default(),
+        ),
+        Dialect::OpenAiResponses => (
+            responses::emit_request(req, model),
+            TranslationContext::default(),
+        ),
+    };
+    EmittedRequest { body, context }
+}
+
+/// Full target URL for a dialect. Gemini selects its RPC method from
+/// streaming mode and carries the model in the path; the other APIs have a
+/// stable path independent of the request body.
+pub fn target_url(base_url: &str, dialect: Dialect, model: &str, stream: bool) -> String {
     match dialect {
-        Dialect::AnthropicMessages => anthropic::emit_request(req, model),
-        Dialect::OpenAiChat => openai_chat::emit_request(req, model),
-        Dialect::OpenAiResponses => responses::emit_request(req, model),
+        Dialect::GoogleGemini => {
+            let method = if stream {
+                "streamGenerateContent"
+            } else {
+                "generateContent"
+            };
+            let suffix = if stream { "?alt=sse" } else { "" };
+            // AI Studio's native API root is commonly configured either as
+            // the bare host (OpenCodex convention) or with `/v1beta`
+            // already present (Construct's historical example). Accept
+            // both, and preserve an explicit Google API version.
+            let base = base_url.trim_end_matches('/');
+            let last_segment = base.rsplit('/').next().unwrap_or_default();
+            let versioned_base = if matches!(last_segment, "v1" | "v1beta" | "v1alpha") {
+                base.to_string()
+            } else {
+                format!("{base}/v1beta")
+            };
+            format!(
+                "{}/models/{}:{method}{suffix}",
+                versioned_base,
+                encode_path_segment(model)
+            )
+        }
+        Dialect::OpenAiResponses => {
+            let base = base_url.trim_end_matches('/');
+            if base.ends_with("/responses") {
+                base.to_string()
+            } else if base.ends_with("/v1") {
+                format!("{base}/responses")
+            } else {
+                format!("{base}/v1/responses")
+            }
+        }
+        _ => format!("{}{}", base_url.trim_end_matches('/'), target_path(dialect)),
     }
+}
+
+fn encode_path_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
 }
 
 /// Path suffix to append to a profile's base URL for `dialect`.
 pub fn target_path(dialect: Dialect) -> &'static str {
     match dialect {
         Dialect::AnthropicMessages => "/messages",
+        // Gemini has no fixed path: see target_url.
+        Dialect::GoogleGemini => "/models",
         Dialect::OpenAiChat => "/chat/completions",
         Dialect::OpenAiResponses => "/responses",
     }
 }
 
 /// Decode one SSE `data:` payload from a target speaking `dialect`.
-pub fn decode_target_event(dialect: Dialect, data: &Value) -> Vec<CanonEvent> {
+pub fn decode_target_event_with_context(
+    dialect: Dialect,
+    data: &Value,
+    context: &TranslationContext,
+) -> Vec<CanonEvent> {
     match dialect {
         Dialect::AnthropicMessages => anthropic::decode_event(data),
+        Dialect::GoogleGemini => google::decode_event(data, context),
         Dialect::OpenAiChat => openai_chat::decode_event(data),
         Dialect::OpenAiResponses => responses::decode_event(data),
     }
@@ -188,20 +315,116 @@ pub fn is_done_sentinel(data: &str) -> bool {
     data.trim() == "[DONE]"
 }
 
+/// Pull a client-safe message from a provider error envelope.
+///
+/// Raw non-JSON bodies are intentionally not reflected: upstream proxies
+/// sometimes include credentials, request paths, or HTML diagnostics.
+pub fn upstream_error_message(data: &Value) -> Option<String> {
+    fn message(value: &Value) -> Option<&str> {
+        value
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| value.as_str())
+    }
+
+    let raw = data
+        .get("error")
+        .and_then(message)
+        .or_else(|| data.get("last_error").and_then(message))
+        .or_else(|| data.get("detail").and_then(message))
+        .or_else(|| {
+            data.get("response")
+                .and_then(|r| r.get("error"))
+                .and_then(message)
+        })?;
+    Some(sanitize_error_message(raw))
+}
+
+fn sanitize_error_message(raw: &str) -> String {
+    let mut out = Vec::new();
+    let mut redact_next = false;
+    for token in raw.split_whitespace().take(100) {
+        if redact_next {
+            out.push("[REDACTED]");
+            redact_next = false;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("bearer")
+            || token.eq_ignore_ascii_case("x-api-key:")
+            || token.eq_ignore_ascii_case("api-key:")
+        {
+            out.push(token);
+            redact_next = true;
+            continue;
+        }
+        if token.starts_with("sk-")
+            || token.starts_with("AIza")
+            || token.starts_with("ghp_")
+            || token.starts_with("/Users/")
+            || token.starts_with("/home/")
+            || token.starts_with("/root/")
+            || token.to_ascii_lowercase().contains(":\\users\\")
+        {
+            out.push("[REDACTED]");
+        } else {
+            out.push(token);
+        }
+    }
+    let message = out.join(" ");
+    if message.is_empty() {
+        "upstream error".to_string()
+    } else {
+        message
+    }
+}
+
+/// Reject response shapes that otherwise decode into a bogus empty turn.
+pub fn invalid_response_message(dialect: Dialect, data: &Value) -> Option<&'static str> {
+    match dialect {
+        Dialect::GoogleGemini
+            if !data
+                .get("candidates")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty()) =>
+        {
+            Some("google response contained no candidates")
+        }
+        _ => None,
+    }
+}
+
+/// A non-streaming error envelope in the dialect the harness expects.
+pub fn error_body(dialect: Dialect, message: &str) -> Value {
+    match dialect {
+        Dialect::AnthropicMessages => serde_json::json!({
+            "type":"error",
+            "error":{"type":"api_error","message":message}
+        }),
+        Dialect::GoogleGemini => serde_json::json!({
+            "error":{"code":502,"message":message,"status":"INTERNAL"}
+        }),
+        Dialect::OpenAiChat | Dialect::OpenAiResponses => serde_json::json!({
+            "error":{"type":"api_error","message":message}
+        }),
+    }
+}
+
 /// Re-encodes canonical events into the dialect the harness speaks.
 pub enum ClientEncoder {
     Anthropic(anthropic::StreamEncoder),
+    Chat(openai_chat::StreamEncoder),
     Responses(responses::StreamEncoder),
 }
 
 impl ClientEncoder {
     pub fn new(dialect: Dialect, model: &str) -> Self {
         match dialect {
+            Dialect::OpenAiChat => ClientEncoder::Chat(openai_chat::StreamEncoder::new(model)),
             Dialect::OpenAiResponses => {
                 ClientEncoder::Responses(responses::StreamEncoder::new(model))
             }
-            // Chat Completions is not spoken by any route-capable harness;
-            // Anthropic framing is the safe default for the remaining case.
+            // No route-capable harness currently speaks Gemini. Anthropic
+            // remains the established client framing for Claude.
             _ => ClientEncoder::Anthropic(anthropic::StreamEncoder::new(model)),
         }
     }
@@ -209,6 +432,7 @@ impl ClientEncoder {
     pub fn push(&mut self, event: &CanonEvent) -> String {
         match self {
             ClientEncoder::Anthropic(e) => e.push(event),
+            ClientEncoder::Chat(e) => e.push(event),
             ClientEncoder::Responses(e) => e.push(event),
         }
     }
@@ -219,6 +443,7 @@ impl ClientEncoder {
     pub fn finish(&mut self) -> String {
         match self {
             ClientEncoder::Anthropic(e) => e.finish(),
+            ClientEncoder::Chat(e) => e.finish(),
             ClientEncoder::Responses(e) => e.finish(),
         }
     }
@@ -227,24 +452,28 @@ impl ClientEncoder {
     pub fn error(&self, message: &str) -> String {
         match self {
             ClientEncoder::Anthropic(_) => anthropic::error_event(message),
+            ClientEncoder::Chat(_) => openai_chat::error_event(message),
             ClientEncoder::Responses(_) => responses::error_event(message),
         }
     }
 }
 
 /// Non-streaming response body in the client's dialect.
-pub fn encode_response(
+pub fn encode_response_with_context(
     dialect: Dialect,
     target: Dialect,
     body: &Value,
     model: &str,
+    context: &TranslationContext,
 ) -> Value {
     let events = match target {
         Dialect::AnthropicMessages => anthropic::decode_full_response(body),
+        Dialect::GoogleGemini => google::decode_full_response(body, context),
         Dialect::OpenAiResponses => responses::decode_full_response(body),
         Dialect::OpenAiChat => openai_chat::decode_full_response(body),
     };
     match dialect {
+        Dialect::OpenAiChat => openai_chat::encode_full(&events, model),
         Dialect::OpenAiResponses => responses::encode_full(&events, model),
         _ => anthropic::encode_full(&events, model),
     }
@@ -339,6 +568,67 @@ mod tests {
         assert_eq!(detect_dialect(&json!({"unrelated": true})), None);
     }
 
+    #[test]
+    fn recognizes_gemini_by_its_own_keys() {
+        assert_eq!(
+            detect_dialect(&json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]})),
+            Some(Dialect::GoogleGemini)
+        );
+    }
+
+    #[test]
+    fn gemini_target_url_selects_rpc_and_escapes_model() {
+        assert_eq!(
+            target_url(
+                "https://generativelanguage.googleapis.com/v1beta/",
+                Dialect::GoogleGemini,
+                "publishers/acme model",
+                true,
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models/publishers%2Facme%20model:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            target_url(
+                "https://generativelanguage.googleapis.com",
+                Dialect::GoogleGemini,
+                "gemini-2.5-pro",
+                false,
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+        );
+    }
+
+    #[test]
+    fn responses_target_url_normalizes_the_v1_segment() {
+        assert_eq!(
+            target_url(
+                "https://resource.openai.azure.com/openai",
+                Dialect::OpenAiResponses,
+                "deployment",
+                true,
+            ),
+            "https://resource.openai.azure.com/openai/v1/responses"
+        );
+        assert_eq!(
+            target_url(
+                "https://api.openai.com/v1/",
+                Dialect::OpenAiResponses,
+                "gpt",
+                false,
+            ),
+            "https://api.openai.com/v1/responses"
+        );
+        assert_eq!(
+            target_url(
+                "https://gateway.example/v1/responses",
+                Dialect::OpenAiResponses,
+                "gpt",
+                false,
+            ),
+            "https://gateway.example/v1/responses"
+        );
+    }
+
     /// The captured shapes from the real harnesses must classify
     /// correctly — this is the check that keeps detection honest against
     /// what was actually observed on the wire.
@@ -385,6 +675,18 @@ mod tests {
         let body = json!({"messages": [{"role": "user", "content": "12345678"}]});
         assert_eq!(estimate_tokens(&body), 3);
         assert_eq!(estimate_tokens(&json!({})), 1, "never zero");
+    }
+
+    #[test]
+    fn extracts_and_redacts_structured_upstream_errors() {
+        assert_eq!(
+            upstream_error_message(&json!({
+                "error":{"message":"Authorization: Bearer secret-token at /Users/me/key.json"}
+            }))
+            .as_deref(),
+            Some("Authorization: Bearer [REDACTED] at [REDACTED]")
+        );
+        assert_eq!(upstream_error_message(&json!("raw secret")), None);
     }
 
     /// A canonical request must survive a round trip through the dialect

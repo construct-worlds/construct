@@ -207,7 +207,8 @@ enabled = true
 # `/model @<name>` (or `--model @<name>`). Lets multiple endpoints of the
 # same wire protocol coexist — unlike the single OPENAI_BASE_URL env var.
 #
-# `provider` is the wire protocol: openai | anthropic | gemini | meta | grok | ollama
+# `provider` is the wire protocol: openai | openai-responses | azure-openai |
+# anthropic | gemini | meta | grok | ollama
 #
 # OAuth-backed providers (claude-oauth / codex-oauth / grok-oauth) are not
 # configurable here — they have no base-URL/key surface.
@@ -216,7 +217,7 @@ enabled = true
 # routing enabled, each one appears in the TUI's route picker for any
 # route-capable session. `openai` / `grok` / `anthropic` profiles are
 # selectable from a `claude` session (the first two via translation);
-# `gemini` / `meta` / `ollama` are shown with the reason they are not.
+# `meta` / `ollama` are shown with the reason they are not.
 
 # OpenAI-compatible example (DeepSeek):
 # [smith.models.deepseek]
@@ -250,6 +251,13 @@ enabled = true
 # provider    = "gemini"
 # api_key_env = "GEMINI_API_KEY"
 # model       = "gemini-2.5-pro"
+
+# Azure OpenAI Responses API (the resource/deployment URL is account-specific):
+# [smith.models.azure]
+# provider    = "azure-openai"
+# base_url    = "https://RESOURCE.openai.azure.com/openai"
+# api_key_env = "AZURE_OPENAI_API_KEY"
+# model       = "DEPLOYMENT_NAME"
 
 # Meta Model API:
 # [smith.models.meta]
@@ -355,11 +363,11 @@ enabled = true
 # Route targets are the [smith.models.*] profiles below — declare an
 # endpoint once and it is reachable from both smith and a routed session.
 # When the target's dialect differs from the harness's, the router
-# translates (currently Anthropic Messages -> OpenAI Chat Completions, so a
-# `claude` session can be routed to any `provider = "openai"` or
-# `provider = "grok"` profile). Providers with no translator — gemini,
-# meta, ollama — are listed in the picker with that reason and cannot be
-# selected. An OpenAI-compatible server (including Ollama's own /v1
+# translates through a canonical form. Anthropic Messages, OpenAI Chat
+# Completions, OpenAI Responses (including Azure), and Google Gemini are
+# supported. Providers with no translator — meta and Ollama's native API —
+# are listed in the picker with that reason and cannot be selected. An
+# OpenAI-compatible server (including Ollama's own /v1
 # endpoint) can be reached by declaring it as `provider = "openai"` with
 # its base_url.
 #
@@ -586,8 +594,8 @@ pub struct SmithConfig {
 /// One `[smith.models.<name>]` entry (spec 0030).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelProfile {
-    /// Wire protocol: `openai` | `anthropic` | `gemini` | `meta` |
-    /// `ollama` | `grok`.
+    /// Wire protocol: `openai` | `openai-responses` | `azure-openai` |
+    /// `anthropic` | `gemini` | `meta` | `ollama` | `grok`.
     pub provider: String,
     #[serde(default)]
     pub base_url: Option<String>,
@@ -608,10 +616,10 @@ impl ModelProfile {
             return Some(url.trim_end_matches('/').to_string());
         }
         let default = match self.provider.to_ascii_lowercase().as_str() {
-            "openai" => "https://api.openai.com/v1",
+            "openai" | "openai-responses" => "https://api.openai.com/v1",
             "anthropic" => "https://api.anthropic.com/v1",
             "grok" => "https://api.x.ai/v1",
-            "gemini" => "https://generativelanguage.googleapis.com/v1beta",
+            "gemini" | "google" => "https://generativelanguage.googleapis.com/v1beta",
             "meta" => "https://api.meta.ai/v1",
             "ollama" => "http://localhost:11434",
             _ => return None,
@@ -623,9 +631,10 @@ impl ModelProfile {
     /// smith's per-provider fallbacks.
     fn default_key_envs(&self) -> &'static [&'static str] {
         match self.provider.to_ascii_lowercase().as_str() {
-            "openai" => &["OPENAI_API_KEY"],
+            "openai" | "openai-responses" => &["OPENAI_API_KEY"],
+            "azure" | "azure-openai" => &["AZURE_OPENAI_API_KEY"],
             "anthropic" => &["ANTHROPIC_API_KEY"],
-            "gemini" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            "gemini" | "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             "meta" => &["META_API_KEY", "MODEL_API_KEY"],
             "grok" => &["GROK_API_KEY", "XAI_API_KEY"],
             _ => &[],

@@ -1,8 +1,9 @@
-//! OpenAI Chat Completions dialect: parse, emit, decode.
+//! OpenAI Chat Completions dialect: parse, emit, decode, and encode.
 //!
-//! No route-capable harness speaks Chat Completions, so this is primarily
-//! a *target* dialect. The parser exists so a canonical round trip is
-//! testable and so a Chat-speaking harness would need nothing new here.
+//! Hermes is probe-confirmed to speak this dialect, so both request and
+//! response directions are part of the router contract.
+
+use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
@@ -422,6 +423,222 @@ pub fn decode_full_response(body: &Value) -> Vec<CanonEvent> {
     events
 }
 
+/// Re-encode canonical events as a Chat Completions SSE stream.
+pub struct StreamEncoder {
+    model: String,
+    id: String,
+    started: bool,
+    tool_args: BTreeMap<usize, String>,
+    usage: Option<(u64, u64)>,
+    stop: CanonStop,
+}
+
+impl StreamEncoder {
+    pub fn new(model: &str) -> Self {
+        Self {
+            model: model.to_string(),
+            id: "chatcmpl_construct_router".to_string(),
+            started: false,
+            tool_args: BTreeMap::new(),
+            usage: None,
+            stop: CanonStop::EndTurn,
+        }
+    }
+
+    fn chunk(&self, delta: Value, finish_reason: Value, usage: Value) -> String {
+        sse(&json!({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": self.model,
+            "choices": [{
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }],
+            "usage": usage,
+        }))
+    }
+
+    fn start(&mut self) -> String {
+        self.started = true;
+        self.chunk(
+            json!({"role":"assistant","content":""}),
+            Value::Null,
+            Value::Null,
+        )
+    }
+
+    pub fn push(&mut self, event: &CanonEvent) -> String {
+        let mut out = String::new();
+        if !self.started {
+            out.push_str(&self.start());
+        }
+        match event {
+            CanonEvent::Start { id } => {
+                if !id.is_empty() {
+                    self.id = id.clone();
+                }
+            }
+            CanonEvent::TextDelta(text) => {
+                out.push_str(&self.chunk(json!({"content":text}), Value::Null, Value::Null));
+            }
+            CanonEvent::ToolStart { index, id, name } => {
+                if self.tool_args.contains_key(index) {
+                    return out;
+                }
+                self.tool_args.insert(*index, String::new());
+                out.push_str(&self.chunk(
+                    json!({"tool_calls":[{
+                        "index":index,
+                        "id":id,
+                        "type":"function",
+                        "function":{"name":name,"arguments":""},
+                    }]}),
+                    Value::Null,
+                    Value::Null,
+                ));
+            }
+            CanonEvent::ToolArgsDelta { index, json: args } => {
+                let Some(buffer) = self.tool_args.get_mut(index) else {
+                    return out;
+                };
+                buffer.push_str(args);
+                out.push_str(&self.chunk(
+                    json!({"tool_calls":[{
+                        "index":index,
+                        "function":{"arguments":args},
+                    }]}),
+                    Value::Null,
+                    Value::Null,
+                ));
+            }
+            CanonEvent::Usage { input, output } => self.usage = Some((*input, *output)),
+            CanonEvent::Stop { reason } => self.stop = reason.clone(),
+        }
+        out
+    }
+
+    pub fn finish(&mut self) -> String {
+        let mut out = String::new();
+        if !self.started {
+            out.push_str(&self.start());
+        }
+        let usage = self
+            .usage
+            .map(|(input, output)| {
+                json!({
+                    "prompt_tokens":input,
+                    "completion_tokens":output,
+                    "total_tokens":input.saturating_add(output),
+                })
+            })
+            .unwrap_or(Value::Null);
+        out.push_str(&self.chunk(json!({}), json!(chat_stop_reason(&self.stop)), usage));
+        out.push_str("data: [DONE]\n\n");
+        out
+    }
+}
+
+fn chat_stop_reason(stop: &CanonStop) -> &str {
+    match stop {
+        CanonStop::EndTurn => "stop",
+        CanonStop::MaxTokens => "length",
+        CanonStop::ToolUse => "tool_calls",
+        CanonStop::Other(reason) => reason,
+    }
+}
+
+fn sse(value: &Value) -> String {
+    format!(
+        "data: {}\n\n",
+        serde_json::to_string(value).unwrap_or_else(|_| "{}".into())
+    )
+}
+
+pub fn error_event(message: &str) -> String {
+    sse(&json!({
+        "error":{
+            "message":message,
+            "type":"server_error",
+            "code":"upstream_error",
+        }
+    }))
+}
+
+/// Build a non-streaming Chat Completions response from canonical events.
+pub fn encode_full(events: &[CanonEvent], model: &str) -> Value {
+    let mut id = "chatcmpl_construct_router".to_string();
+    let mut text = String::new();
+    let mut tools: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+    let mut usage = None;
+    let mut stop = CanonStop::EndTurn;
+    for event in events {
+        match event {
+            CanonEvent::Start { id: event_id } if !event_id.is_empty() => id = event_id.clone(),
+            CanonEvent::Start { .. } => {}
+            CanonEvent::TextDelta(delta) => text.push_str(delta),
+            CanonEvent::ToolStart { index, id, name } => {
+                tools
+                    .entry(*index)
+                    .or_insert_with(|| (id.clone(), name.clone(), String::new()));
+            }
+            CanonEvent::ToolArgsDelta { index, json } => {
+                if let Some((_, _, args)) = tools.get_mut(index) {
+                    args.push_str(json);
+                }
+            }
+            CanonEvent::Usage { input, output } => usage = Some((*input, *output)),
+            CanonEvent::Stop { reason } => stop = reason.clone(),
+        }
+    }
+
+    let tool_calls: Vec<Value> = tools
+        .into_iter()
+        .map(|(index, (id, name, arguments))| {
+            json!({
+                "index":index,
+                "id":id,
+                "type":"function",
+                "function":{"name":name,"arguments":arguments},
+            })
+        })
+        .collect();
+    let mut message = Map::new();
+    message.insert("role".into(), json!("assistant"));
+    message.insert(
+        "content".into(),
+        if text.is_empty() {
+            Value::Null
+        } else {
+            json!(text)
+        },
+    );
+    if !tool_calls.is_empty() {
+        message.insert("tool_calls".into(), json!(tool_calls));
+    }
+
+    json!({
+        "id":id,
+        "object":"chat.completion",
+        "created":0,
+        "model":model,
+        "choices":[{
+            "index":0,
+            "message":message,
+            "finish_reason":chat_stop_reason(&stop),
+        }],
+        "usage":match usage {
+            Some((input, output)) => json!({
+                "prompt_tokens":input,
+                "completion_tokens":output,
+                "total_tokens":input.saturating_add(output),
+            }),
+            None => Value::Null,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +706,59 @@ mod tests {
             Some(CanonStop::MaxTokens)
         );
         assert_eq!(CanonStop::from_openai_finish(None), None);
+    }
+
+    #[test]
+    fn encodes_chat_stream_with_tools_usage_and_terminal_sentinel() {
+        let mut encoder = StreamEncoder::new("hermes-model");
+        let events = [
+            CanonEvent::TextDelta("checking".into()),
+            CanonEvent::ToolStart {
+                index: 0,
+                id: "call_1".into(),
+                name: "read".into(),
+            },
+            CanonEvent::ToolArgsDelta {
+                index: 0,
+                json: "{\"path\":\"/tmp\"}".into(),
+            },
+            CanonEvent::Usage {
+                input: 7,
+                output: 3,
+            },
+            CanonEvent::Stop {
+                reason: CanonStop::ToolUse,
+            },
+        ];
+        let mut wire = String::new();
+        for event in &events {
+            wire.push_str(&encoder.push(event));
+        }
+        wire.push_str(&encoder.finish());
+        assert!(wire.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(wire.contains("\"name\":\"read\""));
+        assert!(wire.contains("\"finish_reason\":\"tool_calls\""));
+        assert!(wire.contains("\"total_tokens\":10"));
+        assert!(wire.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[test]
+    fn encodes_nonstreaming_chat_completion() {
+        let body = encode_full(
+            &[
+                CanonEvent::TextDelta("done".into()),
+                CanonEvent::Usage {
+                    input: 2,
+                    output: 1,
+                },
+                CanonEvent::Stop {
+                    reason: CanonStop::EndTurn,
+                },
+            ],
+            "hermes-model",
+        );
+        assert_eq!(body["choices"][0]["message"]["content"], "done");
+        assert_eq!(body["choices"][0]["finish_reason"], "stop");
+        assert_eq!(body["usage"]["total_tokens"], 3);
     }
 }
