@@ -32274,8 +32274,8 @@ mod tests {
             let pane = app.layout.view_area.expect("zoomed view area");
             assert_eq!(
                 hit.y,
-                pane.bottom().saturating_sub(4),
-                "affordance stays three rows above the edge"
+                pane.bottom().saturating_sub(1),
+                "affordance stays on the bottom edge"
             );
             assert!(
                 rendered_text(terminal.backend().buffer()).contains("◇ C-x ."),
