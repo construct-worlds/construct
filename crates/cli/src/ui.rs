@@ -19181,6 +19181,10 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
         }
     };
 
+    // Modal shell: 2 border cells + Padding::new(2, 2, 1, 1) on each axis.
+    // The body is sized to content; these extras keep text off the frame —
+    // important for no-QR steps (tunnel.zarvis.ai name entry / OAuth wait)
+    // where the side-by-side QR layout is not there to create breathing room.
     let want_w = body_w + 6;
     let want_h = body_h + 4;
     let w = want_w.min(total.width.saturating_sub(4)).max(40);
@@ -19201,6 +19205,7 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border_focused))
+        .padding(ratatui::widgets::Padding::new(2, 2, 1, 1))
         .title(Line::from(Span::styled(
             title,
             Style::default()

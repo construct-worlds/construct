@@ -34266,6 +34266,69 @@ mod tests {
         server.abort();
     }
 
+    /// The tunnel.zarvis.ai name step has no QR, so the modal shell's
+    /// padding is the only breathing room between text and border. Without
+    /// it the body sits flush on the frame and is hard to read.
+    #[tokio::test]
+    async fn remote_name_dialog_body_is_inset_from_border() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.remote_control_popup = Some(RemoteControlPopup::Name(RemoteControlName {
+            choose: RemoteControlChoose {
+                base: remote_ok_fixture(false),
+                options: vec![],
+                selected: 0,
+                active: None,
+            },
+            name: "quiet-river".into(),
+            pristine: true,
+        }));
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw name dialog");
+
+        let modal = app
+            .layout
+            .modal_area
+            .expect("name dialog should set modal_area");
+        let buf = terminal.backend().buffer();
+
+        // One cell inside the border, still in the padding gutter — must not
+        // be body text (lan:/local:/name prompt). Body starts after the
+        // Padding::new(2, 2, 1, 1) inset: content origin is (x+1+2, y+1+1).
+        let gutter = buf
+            .cell((modal.x + 1, modal.y + 1))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default();
+        assert!(
+            gutter.trim().is_empty(),
+            "cell just inside the border should be padding, not body text, got {gutter:?}"
+        );
+
+        // Body text itself is present further in (label column of address block).
+        let body = buf
+            .cell((modal.x + 3, modal.y + 2))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            body, "l",
+            "body content should start after left+top padding (first address label is 'lan:')"
+        );
+
+        // Clickable Enter/Esc hints still register despite no QR offset.
+        assert!(
+            app.layout.remote_control_hits.iter().any(|h| matches!(
+                h.action,
+                RemoteControlHitAction::Key(crossterm::event::KeyCode::Enter)
+            )),
+            "Enter hint should remain clickable on the name step"
+        );
+
+        server.abort();
+    }
+
     /// Closing the dialog clears the click zones, so a stale zone can never
     /// dispatch against whatever renders next frame.
     #[tokio::test]
