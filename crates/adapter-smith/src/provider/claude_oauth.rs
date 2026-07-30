@@ -90,13 +90,11 @@ fn needs_refresh(expires_at_ms: u64, now: u64) -> bool {
 
 /// Map the short aliases the `/model claude-oauth:<x>` completer offers onto
 /// concrete model ids the API accepts; pass through anything already concrete.
+///
+/// Shared with the daemon router via [`construct_protocol::slash::resolve_claude_oauth_model`]
+/// so a catalog alias cannot be added on one side and forgotten on the other.
 fn resolve_model(model: &str) -> String {
-    match model.trim() {
-        "opus" => "claude-opus-4-8".to_string(),
-        "sonnet" => "claude-sonnet-4-6".to_string(),
-        "haiku" => "claude-haiku-4-5".to_string(),
-        other => other.to_string(),
-    }
+    construct_protocol::slash::resolve_claude_oauth_model(model)
 }
 
 /// Build the `system` field: the required Claude Code identity block first,
@@ -394,6 +392,7 @@ mod tests {
         assert_eq!(resolve_model("opus"), "claude-opus-4-8");
         assert_eq!(resolve_model("sonnet"), "claude-sonnet-4-6");
         assert_eq!(resolve_model("haiku"), "claude-haiku-4-5");
+        assert_eq!(resolve_model("fable"), "claude-fable-5");
         // Concrete ids pass through untouched.
         assert_eq!(resolve_model("claude-sonnet-4-6"), "claude-sonnet-4-6");
         assert_eq!(resolve_model("claude-opus-4-8"), "claude-opus-4-8");

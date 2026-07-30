@@ -445,6 +445,23 @@ pub fn models_for_provider(provider: &str) -> Vec<String> {
         .collect()
 }
 
+/// Expand short Claude-subscription aliases to concrete Anthropic model ids.
+///
+/// The shared catalog (`claude-oauth:sonnet`, `:opus`, `:fable`) intentionally
+/// uses short picker labels. Anthropic's Messages API rejects those labels
+/// with `404 model: <alias>`, so every request path that hits the API must
+/// expand them first. Smith and the daemon router both call this so a new
+/// alias cannot be wired on one side and forgotten on the other.
+pub fn resolve_claude_oauth_model(model: &str) -> String {
+    match model.trim() {
+        "opus" => "claude-opus-4-8".to_string(),
+        "sonnet" => "claude-sonnet-4-6".to_string(),
+        "haiku" => "claude-haiku-4-5".to_string(),
+        "fable" => "claude-fable-5".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Completion rows for the current `/model` input buffer.
 pub fn model_completion_matches(buf: &str) -> Vec<String> {
     let Some(rest) = buf.strip_prefix("/model") else {
@@ -565,6 +582,19 @@ mod tests {
         assert!(matches.contains(&"/model claude-oauth:sonnet".to_string()));
         assert!(matches.contains(&"/model claude-oauth:opus".to_string()));
         assert!(matches.contains(&"/model claude-oauth:fable".to_string()));
+    }
+
+    #[test]
+    fn claude_oauth_aliases_expand_to_concrete_anthropic_ids() {
+        assert_eq!(resolve_claude_oauth_model("sonnet"), "claude-sonnet-4-6");
+        assert_eq!(resolve_claude_oauth_model("opus"), "claude-opus-4-8");
+        assert_eq!(resolve_claude_oauth_model("haiku"), "claude-haiku-4-5");
+        assert_eq!(resolve_claude_oauth_model("fable"), "claude-fable-5");
+        assert_eq!(
+            resolve_claude_oauth_model("claude-sonnet-4-6"),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(resolve_claude_oauth_model("  sonnet  "), "claude-sonnet-4-6");
     }
 
     /// The leak fix in action: a `/zoom` ClientCommand event is hidden from
