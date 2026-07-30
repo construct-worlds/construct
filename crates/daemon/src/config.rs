@@ -105,6 +105,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # # CONSTRUCT_SMITH_MODEL = "openai:gpt-5.5"                  # direct API via OPENAI_API_KEY
 # # CONSTRUCT_SMITH_MODEL = "codex-oauth:gpt-5.5"             # via OpenAI subscription
 # # CONSTRUCT_SMITH_MODEL = "grok-oauth:grok-2-latest"        # via Grok subscription
+# # CONSTRUCT_SMITH_MODEL = "kimi-oauth:k3"                    # via Kimi subscription
 # # CONSTRUCT_SMITH_MODEL = "gemini:gemini-2.5-pro"           # via GEMINI_API_KEY
 # # CONSTRUCT_SMITH_MODEL = "meta:muse-spark-1.1"             # via META_API_KEY / MODEL_API_KEY
 # # CONSTRUCT_SMITH_MODEL = "ollama:llama3.1"                 # local Ollama server
@@ -210,8 +211,8 @@ enabled = true
 # `provider` is the wire protocol: openai | openai-responses | azure-openai |
 # anthropic | gemini | meta | grok | ollama
 #
-# OAuth-backed providers (claude-oauth / codex-oauth / grok-oauth) are not
-# configurable here — they have no base-URL/key surface.
+# OAuth-backed providers (claude-oauth / codex-oauth / grok-oauth /
+# kimi-oauth) are not configurable here — they have no base-URL/key surface.
 #
 # These profiles are ALSO the route targets used by [router] below: with
 # routing enabled, each one appears in the TUI's route picker for any
@@ -406,6 +407,7 @@ enabled = true
 # claude-oauth = ["opus", "sonnet"]
 # codex-oauth  = ["gpt-5.6-sol", "gpt-5.5"]
 # grok-oauth   = "grok-4.5"
+# kimi-oauth   = "k3"
 "#;
 
 /// Kept for backwards-compat: `construct daemon default-config` and any
@@ -561,7 +563,8 @@ pub struct RouterConfig {
     #[serde(default = "default_router_port")]
     pub port: u16,
     /// `[router.oauth]` — model each subscription login sends, keyed by
-    /// provider name (`claude-oauth`, `codex-oauth`, `grok-oauth`).
+    /// provider name (`claude-oauth`, `codex-oauth`, `grok-oauth`,
+    /// `kimi-oauth`).
     /// Optional: each provider has a built-in default, which may lag a
     /// vendor release. A subscription login has no base URL or key to
     /// declare, so this is the only thing there is to configure.

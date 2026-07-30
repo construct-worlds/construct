@@ -1575,6 +1575,7 @@ impl ResolvedModel {
             provider::routing::Provider::GrokOauth => "grok-oauth",
             provider::routing::Provider::CodexOauth => "codex-oauth",
             provider::routing::Provider::ClaudeOauth => "claude-oauth",
+            provider::routing::Provider::KimiOauth => "kimi-oauth",
         }
     }
 
@@ -1691,6 +1692,9 @@ pub fn resolve_model_from_spec(spec_str: &str) -> Result<ResolvedModel> {
         provider::routing::Provider::ClaudeOauth => {
             Box::new(provider::claude_oauth::ClaudeOauth::from_env()?)
         }
+        provider::routing::Provider::KimiOauth => {
+            Box::new(provider::kimi_oauth::KimiOauth::from_env()?)
+        }
     };
     Ok(ResolvedModel {
         model: spec.model,
@@ -1736,7 +1740,7 @@ fn build_profile_model(
         "meta" => provider::routing::Provider::Meta,
         "ollama" => provider::routing::Provider::Ollama,
         "grok" => provider::routing::Provider::Grok,
-        "codex-oauth" | "claude-oauth" | "claude-code-oauth" | "grok-oauth" => anyhow::bail!(
+        "codex-oauth" | "claude-oauth" | "claude-code-oauth" | "grok-oauth" | "kimi-oauth" => anyhow::bail!(
             "profile `{name}`: provider `{}` is OAuth-backed and has no \
              configurable endpoint — use the `{}:` model prefix directly",
             profile.provider,

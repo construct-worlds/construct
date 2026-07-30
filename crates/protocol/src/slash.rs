@@ -421,6 +421,11 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "grok-oauth:grok-4.5",
     "grok-oauth:grok-4.3",
     "grok-oauth:grok-build-0.1",
+    // Kimi Code subscription OAuth path.
+    "kimi-oauth:k3",
+    "kimi-oauth:k3-256k",
+    "kimi-oauth:kimi-for-coding",
+    "kimi-oauth:kimi-for-coding-highspeed",
 ];
 
 /// The models [`MODEL_COMPLETIONS`] lists for one provider prefix, with the

@@ -201,6 +201,14 @@ fn grok_auth_file() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".grok").join("auth.json"))
 }
 
+fn kimi_auth_file() -> Option<PathBuf> {
+    let base = match std::env::var("KIMI_CODE_HOME") {
+        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+        _ => PathBuf::from(std::env::var("HOME").ok()?).join(".kimi-code"),
+    };
+    Some(base.join("credentials").join("kimi-code.json"))
+}
+
 async fn ollama_reachable(cache: &std::sync::Mutex<AvailabilityCache>) -> bool {
     if let Some(v) = cached(cache.lock().unwrap().ollama) {
         return v;
@@ -361,6 +369,19 @@ pub async fn smith_auth_methods(
             "no ~/.grok/auth.json found".to_string()
         },
     };
+    let kimi_sub_present = kimi_auth_file().map(|p| p.exists()).unwrap_or(false);
+    let kimi_sub = SmithAuthMethod {
+        id: "kimi_subscription",
+        label: "Kimi subscription",
+        model_prefix: "kimi-oauth",
+        default_model: "k3",
+        available: kimi_sub_present,
+        detail: if kimi_sub_present {
+            "~/.kimi-code/credentials/kimi-code.json found".to_string()
+        } else {
+            "no ~/.kimi-code/credentials/kimi-code.json found".to_string()
+        },
+    };
     let ollama_present = ollama_reachable(cache).await;
     let ollama = SmithAuthMethod {
         id: "ollama",
@@ -399,7 +420,8 @@ pub async fn smith_auth_methods(
         },
     };
     vec![
-        anthropic, openai, gemini, meta, grok_key, claude_sub, codex_sub, grok_sub, ollama, auto,
+        anthropic, openai, gemini, meta, grok_key, claude_sub, codex_sub, grok_sub, kimi_sub,
+        ollama, auto,
     ]
 }
 

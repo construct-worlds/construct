@@ -121,6 +121,10 @@ pub fn smith_method_guidance(id: &str) -> &'static str {
         "grok_subscription" => {
             "run `grok login` (creates ~/.grok/auth.json), then restart the daemon"
         }
+        "kimi_subscription" => {
+            "run `kimi login` (creates ~/.kimi-code/credentials/kimi-code.json), then \
+             restart the daemon"
+        }
         "ollama" => {
             "install Ollama and run `ollama serve` so it's reachable at localhost:11434 (or \
              set OLLAMA_HOST), then restart the daemon"

@@ -49,6 +49,9 @@ pub fn context_window_tokens(provider: &str, model: &str) -> usize {
         // Claude Code OAuth hits the Anthropic API directly with the
         // subscription token; same 200k context as the `anthropic:` path.
         ("claude-oauth", _) => 200_000,
+        // Kimi Code subscription backend: every model it serves advertises
+        // a 262144-token window (from the backend's own models endpoint).
+        ("kimi-oauth", _) => 262_144,
         _ => 8_000,
     }
 }
