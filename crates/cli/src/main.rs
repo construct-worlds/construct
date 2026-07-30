@@ -213,7 +213,19 @@ enum Command {
         clear: bool,
     },
     /// Show session detail + transcript.
-    Show { session_id: String },
+    ///
+    /// Default output truncates each event to a single short line. Pass
+    /// `--full` / `-v` for untruncated message bodies, tool args/results, and
+    /// diffs, or `--json` for the full session detail as JSON.
+    Show {
+        session_id: String,
+        /// Print untruncated event bodies (messages, tool args/results, diffs).
+        #[arg(long, short = 'v')]
+        full: bool,
+        /// Print the full session detail as JSON (untruncated).
+        #[arg(long)]
+        json: bool,
+    },
     /// Download and install the latest release (or `--version TAG`),
     /// atomically replacing the installed binaries in place.
     Upgrade {
@@ -695,9 +707,17 @@ async fn main() -> Result<()> {
             c.set_title(&session_id, new_title).await?;
             Ok(())
         }
-        Command::Show { session_id } => {
+        Command::Show {
+            session_id,
+            full,
+            json,
+        } => {
             let c = connect(&socket).await?;
             let d = c.get(&session_id).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&d)?);
+                return Ok(());
+            }
             println!(
                 "{id}  {harness}  {state}  {cwd}",
                 id = d.summary.id,
@@ -706,12 +726,19 @@ async fn main() -> Result<()> {
                 cwd = d.summary.cwd
             );
             for ev in &d.events {
-                println!(
-                    "  [{ts}] #{seq} {evt}",
-                    ts = ev.at.format("%H:%M:%S"),
-                    seq = ev.seq,
-                    evt = ui::short_event_label(&ev.event)
-                );
+                let label = ui::show_event_label(&ev.event, full);
+                let ts = ev.at.format("%H:%M:%S");
+                let mut lines = label.lines();
+                match lines.next() {
+                    None => println!("  [{ts}] #{}", ev.seq),
+                    Some(first) => {
+                        println!("  [{ts}] #{} {first}", ev.seq);
+                        for line in lines {
+                            // Indent continuation lines of multi-line bodies.
+                            println!("    {line}");
+                        }
+                    }
+                }
             }
             Ok(())
         }
