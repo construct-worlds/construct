@@ -70,6 +70,14 @@ pub const ENV_CODEX_MODEL_CATALOG: &str = "CONSTRUCT_CODEX_MODEL_CATALOG";
 /// Anthropic API origin. A user-configured gateway is never displaced.
 pub const ENV_CLAUDE_MODEL_CATALOG: &str = "CONSTRUCT_CLAUDE_MODEL_CATALOG";
 
+/// Session capability used by the Claude adapter when calling Construct's
+/// shared loopback gateway URL.
+pub const ENV_CLAUDE_MODEL_CATALOG_TOKEN: &str = "CONSTRUCT_CLAUDE_MODEL_CATALOG_TOKEN";
+
+/// JSON model-list response used by the Claude adapter to prime Claude
+/// Code's native gateway-model cache without installing an API credential.
+pub const ENV_CLAUDE_MODEL_CATALOG_DATA: &str = "CONSTRUCT_CLAUDE_MODEL_CATALOG_DATA";
+
 /// A command prefix supplied through an adapter's `CONSTRUCT_*_CMD` override.
 ///
 /// The first token is the executable to spawn; remaining tokens are prepended

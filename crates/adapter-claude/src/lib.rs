@@ -90,11 +90,13 @@ fn resolve_mode(params: &SessionStartParams) -> Mode {
 
 const GATEWAY_DISCOVERY_ENV: &str = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
 const GATEWAY_ALLOW_LOOPBACK_ENV: &str = "CLAUDE_GATEWAY_ALLOW_LOOPBACK";
+const ANTHROPIC_CUSTOM_HEADERS_ENV: &str = "ANTHROPIC_CUSTOM_HEADERS";
+const CONSTRUCT_SESSION_HEADER: &str = "x-construct-session";
 
 /// Activate Claude Code's native multi-model gateway picker without
 /// displacing a user-configured gateway.
 ///
-/// The router-provided URL is loopback and session-scoped. It answers
+/// The router-provided URL is loopback and process-scoped. It answers
 /// `/v1/models`, routes Construct ids, and reconstructs native selections
 /// onto Claude's default API origin. A user-provided base URL is left
 /// entirely alone.
@@ -116,12 +118,36 @@ fn activate_model_catalog_with(
     if env.contains_key("ANTHROPIC_BASE_URL") || inherited("ANTHROPIC_BASE_URL").is_some() {
         return;
     }
-    let session_token = catalog_url
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
+    let Some(session_token) = env
+        .get(construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG_TOKEN)
         .filter(|token| !token.is_empty())
-        .map(str::to_string);
+        .cloned()
+    else {
+        return;
+    };
+    let Some(catalog_data) = env
+        .get(construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG_DATA)
+        .cloned()
+    else {
+        return;
+    };
+    let claude_config_dir = env
+        .get("CLAUDE_CONFIG_DIR")
+        .cloned()
+        .or_else(|| inherited("CLAUDE_CONFIG_DIR"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            env.get("HOME")
+                .cloned()
+                .or_else(|| inherited("HOME"))
+                .map(|home| PathBuf::from(home).join(".claude"))
+        });
+    if let Err(error) =
+        prime_gateway_model_cache(&catalog_url, &catalog_data, claude_config_dir.as_deref())
+    {
+        tracing::warn!(error = %error, "could not prime Claude's gateway model cache");
+        return;
+    }
     env.insert("ANTHROPIC_BASE_URL".to_string(), catalog_url);
     env.entry(GATEWAY_DISCOVERY_ENV.to_string())
         .or_insert_with(|| "1".to_string());
@@ -131,19 +157,30 @@ fn activate_model_catalog_with(
     env.entry(GATEWAY_ALLOW_LOOPBACK_ENV.to_string())
         .or_insert_with(|| "1".to_string());
 
-    // Gateway discovery requires an API credential even though Construct's
-    // `/v1/models` response contains no secrets. Reuse a user's API credential
-    // when one exists; subscription sessions use the path capability as a
-    // gateway credential, which the daemon exchanges for the existing Claude
-    // OAuth route on native model requests.
-    let has_api_credential = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]
-        .into_iter()
-        .any(|key| env.contains_key(key) || inherited(key).is_some());
-    if !has_api_credential {
-        if let Some(token) = session_token {
-            env.insert("ANTHROPIC_AUTH_TOKEN".to_string(), token);
-        }
-    }
+    // Claude Code requires an API-shaped credential to fetch a gateway model
+    // catalog, but making that credential active disables claude.ai
+    // connectors. The cache above supplies the same native picker data while
+    // this non-auth capability header attributes loopback requests to their
+    // Construct session. The gateway strips it before forwarding upstream.
+    let inherited_headers = env
+        .get(ANTHROPIC_CUSTOM_HEADERS_ENV)
+        .cloned()
+        .or_else(|| inherited(ANTHROPIC_CUSTOM_HEADERS_ENV))
+        .unwrap_or_default();
+    let headers: Vec<&str> = inherited_headers
+        .lines()
+        .filter(|line| {
+            line.split_once(':')
+                .is_none_or(|(name, _)| !name.trim().eq_ignore_ascii_case(CONSTRUCT_SESSION_HEADER))
+        })
+        .collect();
+    let construct_header = format!("{CONSTRUCT_SESSION_HEADER}: {session_token}");
+    let custom_headers = if headers.is_empty() {
+        construct_header
+    } else {
+        format!("{}\n{construct_header}", headers.join("\n"))
+    };
+    env.insert(ANTHROPIC_CUSTOM_HEADERS_ENV.to_string(), custom_headers);
 
     // The local gateway and the HTTPS interception proxy share a listener.
     // Bypass the proxy for loopback so Claude does not send its gateway
@@ -166,6 +203,48 @@ fn activate_model_catalog_with(
         }
         env.insert(key.to_string(), entries.join(","));
     }
+}
+
+fn prime_gateway_model_cache(
+    catalog_url: &str,
+    catalog_data: &str,
+    config_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    let response: Value = serde_json::from_str(catalog_data)?;
+    let models = response
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("catalog response has no model array"))?;
+    if models.iter().any(|model| {
+        model.get("id").and_then(Value::as_str).is_none()
+            || model.get("display_name").and_then(Value::as_str).is_none()
+    }) {
+        anyhow::bail!("catalog response contains an invalid model");
+    }
+    let config_dir = config_dir
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("Claude config directory is unavailable"))?;
+    let cache_dir = config_dir.join("cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_path = cache_dir.join("gateway-models.json");
+    let temp_path = cache_dir.join(format!(
+        ".gateway-models.construct-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let fetched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    let cache = serde_json::json!({
+        "baseUrl": catalog_url,
+        "fetchedAt": fetched_at,
+        "models": models,
+    });
+    std::fs::write(&temp_path, serde_json::to_vec(&cache)?)?;
+    if let Err(error) = std::fs::rename(&temp_path, &cache_path) {
+        std::fs::remove_file(&temp_path).ok();
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 /// Generate a minimal Claude `--settings` file for adapter bookkeeping hooks
@@ -1518,16 +1597,44 @@ fn tool_results_from_message(msg: Option<&Value>) -> Vec<SessionEvent> {
 mod tests {
     use super::*;
 
+    fn catalog_env(config_dir: &Path) -> HashMap<String, String> {
+        HashMap::from([
+            (
+                construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG.to_string(),
+                "http://127.0.0.1:8917/__construct/claude".to_string(),
+            ),
+            (
+                construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG_TOKEN.to_string(),
+                "session-token".to_string(),
+            ),
+            (
+                construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG_DATA.to_string(),
+                serde_json::json!({
+                    "data": [{
+                        "id": "claude-construct-fast/model-one",
+                        "display_name": "model-one · fast · Construct"
+                    }]
+                })
+                .to_string(),
+            ),
+            (
+                "CLAUDE_CONFIG_DIR".to_string(),
+                config_dir.to_string_lossy().to_string(),
+            ),
+        ])
+    }
+
     #[test]
-    fn construct_catalog_activates_the_session_local_native_gateway() {
-        let mut env = HashMap::from([(
-            construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG.to_string(),
-            "http://127.0.0.1:8917/__construct/session-token".to_string(),
-        )]);
+    fn construct_catalog_activates_the_native_gateway_without_overriding_oauth() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "construct-claude-catalog-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut env = catalog_env(&config_dir);
         activate_model_catalog_with(&mut env, |_| None);
         assert_eq!(
             env.get("ANTHROPIC_BASE_URL").map(String::as_str),
-            Some("http://127.0.0.1:8917/__construct/session-token")
+            Some("http://127.0.0.1:8917/__construct/claude")
         );
         assert_eq!(
             env.get(GATEWAY_DISCOVERY_ENV).map(String::as_str),
@@ -1537,9 +1644,11 @@ mod tests {
             env.get(GATEWAY_ALLOW_LOOPBACK_ENV).map(String::as_str),
             Some("1")
         );
+        assert!(!env.contains_key("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
         assert_eq!(
-            env.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
-            Some("session-token")
+            env.get(ANTHROPIC_CUSTOM_HEADERS_ENV).map(String::as_str),
+            Some("x-construct-session: session-token")
         );
         assert_eq!(
             env.get("NO_PROXY").map(String::as_str),
@@ -1549,6 +1658,13 @@ mod tests {
             env.get("no_proxy").map(String::as_str),
             Some("127.0.0.1,localhost")
         );
+        let cache: Value = serde_json::from_slice(
+            &std::fs::read(config_dir.join("cache/gateway-models.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cache["baseUrl"], "http://127.0.0.1:8917/__construct/claude");
+        assert_eq!(cache["models"][0]["id"], "claude-construct-fast/model-one");
+        std::fs::remove_dir_all(config_dir).unwrap();
     }
 
     #[test]
@@ -1556,7 +1672,7 @@ mod tests {
         let mut env = HashMap::from([
             (
                 construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG.to_string(),
-                "http://127.0.0.1:8917/__construct/session-token".to_string(),
+                "http://127.0.0.1:8917/__construct/claude".to_string(),
             ),
             (
                 "ANTHROPIC_BASE_URL".to_string(),
@@ -1572,14 +1688,20 @@ mod tests {
     }
 
     #[test]
-    fn construct_catalog_preserves_api_credentials_and_no_proxy_entries() {
-        let mut env = HashMap::from([
-            (
-                construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG.to_string(),
-                "http://127.0.0.1:8917/__construct/session-token".to_string(),
-            ),
-            ("NO_PROXY".to_string(), "example.test,localhost".to_string()),
-        ]);
+    fn construct_catalog_preserves_user_headers_credentials_and_no_proxy_entries() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "construct-claude-catalog-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut env = catalog_env(&config_dir);
+        env.insert(
+            "NO_PROXY".to_string(),
+            "example.test,localhost".to_string(),
+        );
+        env.insert(
+            ANTHROPIC_CUSTOM_HEADERS_ENV.to_string(),
+            "X-User-Header: keep\nX-Construct-Session: stale".to_string(),
+        );
         activate_model_catalog_with(&mut env, |key| {
             (key == "ANTHROPIC_API_KEY").then(|| "user-key".to_string())
         });
@@ -1588,6 +1710,11 @@ mod tests {
             env.get("NO_PROXY").map(String::as_str),
             Some("example.test,localhost,127.0.0.1")
         );
+        assert_eq!(
+            env.get(ANTHROPIC_CUSTOM_HEADERS_ENV).map(String::as_str),
+            Some("X-User-Header: keep\nx-construct-session: session-token")
+        );
+        std::fs::remove_dir_all(config_dir).unwrap();
     }
 
     #[test]

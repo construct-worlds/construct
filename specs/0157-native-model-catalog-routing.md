@@ -37,7 +37,10 @@ The Claude adapter enables loopback discovery only for that child process
 and does not displace a user-configured `ANTHROPIC_BASE_URL`. Native catalog
 entries remain present alongside Construct entries. Claude's gateway source
 subtitle is harness-owned and may be generic, so each published display name
-also identifies Construct explicitly.
+also identifies Construct explicitly. Construct primes Claude's native
+gateway-model cache and uses a non-auth session capability for loopback
+requests; it does not install an API key or auth token, so a claude.ai login
+remains authoritative and its organization connectors remain available.
 
 ## Reason
 
