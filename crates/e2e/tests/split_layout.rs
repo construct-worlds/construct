@@ -138,7 +138,8 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
 
     // The title bar carries the two split buttons, each with a hover tooltip
     // (icon-only controls whose meaning isn't guessable), and NO close × —
-    // closing a pane lives in the session menu as "close split".
+    // closing a pane lives in the session menu as "close split". Icons are
+    // distinct SVGs (side-by-side vs stacked), not near-identical box glyphs.
     let split_tips: String = page
         .evaluate(
             "JSON.stringify(Array.from(
@@ -152,6 +153,65 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
     assert!(
         split_tips.contains("split horizontal") && split_tips.contains("split vertical"),
         "both split buttons need hover tooltips, got {split_tips}"
+    );
+    let split_icons: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const btns = Array.from(
+                document.querySelectorAll(
+                  '#paneGrid .pane.is-focused .pane-head button.pane-split-btn'
+                )
+              );
+              return {
+                count: btns.length,
+                directions: btns.map((b) => b.dataset.split),
+                hasSvg: btns.every((b) => !!b.querySelector('svg')),
+                hasHalf: btns.every((b) => !!b.querySelector('.split-half')),
+                // Side-by-side uses a vertical divider (x1 === x2);
+                // stacked uses a horizontal one (y1 === y2).
+                axes: btns.map((b) => {
+                  const line = b.querySelector('.split-divider');
+                  if (!line) return null;
+                  const x1 = line.getAttribute('x1');
+                  const x2 = line.getAttribute('x2');
+                  const y1 = line.getAttribute('y1');
+                  const y2 = line.getAttribute('y2');
+                  if (x1 === x2) return 'vertical-divider';
+                  if (y1 === y2) return 'horizontal-divider';
+                  return 'other';
+                }),
+              };
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate split icons")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        split_icons["count"].as_u64(),
+        Some(2),
+        "focused pane head needs both split buttons: {split_icons:?}"
+    );
+    assert_eq!(
+        split_icons["hasSvg"], true,
+        "split buttons should use SVG diagrams, not glyph text: {split_icons:?}"
+    );
+    assert_eq!(
+        split_icons["hasHalf"], true,
+        "split icons should shade one half so the axis is obvious: {split_icons:?}"
+    );
+    let axes = split_icons["axes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        axes.iter().any(|a| a.as_str() == Some("vertical-divider"))
+            && axes
+                .iter()
+                .any(|a| a.as_str() == Some("horizontal-divider")),
+        "horizontal vs vertical split must use opposite divider axes: {split_icons:?}"
     );
 
     let close_x: f64 = eval_number(
