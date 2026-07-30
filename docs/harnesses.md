@@ -23,6 +23,7 @@ developer-facing integration checklist lives in
 | `codex` | The Codex CLI | You already use Codex and want it inside the same construct UI and session fleet. |
 | `opencode` | The OpenCode CLI | You already use OpenCode and want its native TUI inside the same construct session fleet. |
 | `antigravity` | The Antigravity CLI | You want Antigravity sessions inside the same UI and daemon. |
+| `grok` | The Grok CLI | You already use Grok and want it inside the same construct UI and session fleet. |
 | `kimi` | The Kimi Code CLI | You already use Kimi Code and want its native TUI inside the same construct session fleet. |
 | `hermes` | The Hermes Agent CLI | You use Hermes for coding and want its native UI, persisted sessions, and usage data in the same construct fleet. |
 | `pi` | The pi coding agent CLI | You already use pi and want it inside the same construct UI and session fleet. |
@@ -71,7 +72,7 @@ translate that model into the underlying agent or shell.
 | Session identity and lifecycle | Every harness has the same id, title, state, cwd, mode, transcript, and lifecycle. | All harnesses. |
 | Transcript and scrollback | You can inspect session history from the TUI, Web UI, and remote APIs, even after restart. | All harnesses; fidelity depends on what the harness emits. |
 | Shared UI | Different CLIs appear in one session list instead of separate terminals. | All harnesses. |
-| Approval flow | Risky actions can use construct's approval UI instead of each session inventing its own workflow. | Native in `smith`; translated where CLI-backed harnesses expose enough control. |
+| Approval flow | Risky actions can use construct's approval UI instead of each session inventing its own workflow. | Native in `smith` only; CLI-backed harnesses keep their own upstream gate. Defaults differ per harness — see [Write access and approvals](#write-access-and-approvals). |
 | Widgets | Agents can publish Markdown status/action panels once and every client can render them. | All harnesses can write widgets via `CONSTRUCT_SESSION_WIDGETS_DIR`; see [Generative widgets](generative-widgets.md). |
 | Session context | Sessions receive shared cwd, environment, data dirs, widget dirs, memory pointers, and resume flags. | All harnesses receive the context; each upstream CLI decides what to do with it. |
 | Context gauge and breakdown | The status bar shows how full the model's context window is; hovering it details what fills the window (system prompt, tools, messages, free space) — estimated components are marked with `~`. | Gauge where the harness reports usage; breakdown where the adapter can derive components from the harness's own data (exact sections in `smith`; message/system-prompt estimates for CLI-backed harnesses with readable transcripts). |
@@ -154,11 +155,82 @@ construct new --no-tui claude
 construct new --mode headless --prompt "summarize the last run" smith
 ```
 
-`smith`, `claude`, `codex`, `antigravity`, `hermes`, and `pi` support both modes.
-`opencode` and `kimi` are interactive-only and always run their native TUIs.
-`shell` always
+`smith`, `claude`, `codex`, `antigravity`, `grok`, `hermes`, and `pi` support
+both modes. `opencode` and `kimi` are interactive-only and always run their
+native TUIs. `shell` always
 owns a PTY (there is no structured "headless" shell), so it presents a terminal
 regardless of the mode label.
+
+## Write access and approvals
+
+Harnesses do **not** share one write/approval policy. Construct owns the
+approval gate for `smith` only; every CLI-backed harness keeps whatever gate its
+upstream CLI implements. That means the same prompt — "edit this file" — can
+prompt you, write silently, or be refused outright, depending on which harness
+the session runs.
+
+This matters most when orchestrating a fleet, where one prompt fans out to
+several harnesses at once. Check this table before assuming a session will stop
+and ask you.
+
+| Harness | Modes | Who gates a risky write | Honors construct's approval mode | Auto-approve paths | Unified tools |
+| --- | --- | --- | --- | --- | --- |
+| `smith` | interactive, headless | **construct** — its own gate, in both modes | Yes | Checked natively | Native |
+| `shell` | always a PTY | Nobody — it is your shell, running your commands | n/a | n/a | n/a |
+| `claude` | interactive, headless | Claude Code's own permission system | No | `--allowed-tools` | Injected |
+| `codex` | interactive, headless | Codex's own sandbox and approval policy | No | Not translated | Injected |
+| `opencode` | interactive only | OpenCode's native TUI | No | Not translated | Injected |
+| `antigravity` | interactive, headless | Interactive: the `agy` TUI. **Headless: nothing** | No | Not translated | Not injected |
+| `grok` | interactive, headless | The Grok CLI's own permission system | No | `--allow` | Not injected |
+| `kimi` | interactive only | Kimi Code's native TUI | No | Not translated | Not injected |
+| `hermes` | interactive, headless | Hermes' own defaults | No | Not translated | Not injected |
+| `pi` | interactive, headless | pi's own defaults | No | Not translated | Not injected |
+
+### Reading the table
+
+**"Honors construct's approval mode"** means the session reacts to construct
+changing its approval mode at runtime (`manual` / `auto-review` /
+`always-approve`, see [Approval modes](../specs/0015-approval-modes.md)). Only
+`smith` does. Other adapters receive the message and drop it: construct does not
+sit inside their tool-call loop, so it has nothing to gate. Where clients show
+an approval mode, it is meaningful for tool-gating sessions; for the rest, the
+authority is the upstream CLI's own setting.
+
+**"Auto-approve paths"** is the `CONSTRUCT_AUTO_APPROVE_PATHS` allow-list. The
+daemon sets it to the session's widget directory so agents can publish widgets
+without prompting; it is not a general-purpose permission knob. Adapters
+translate it only where the upstream CLI has a matching flag. Where the column
+says *Not translated*, the upstream CLI exposes no path-scoped allow-list, so
+the policy is passed in the environment but has no effect.
+
+**"Unified tools"** is MCP injection (see
+[Unified tool layer](unified-tool-layer.md)). It is independent of the approval
+columns: sharing a fleet-control tool surface says nothing about who gates that
+harness's file writes.
+
+### Defaults worth knowing
+
+- **`smith` prompts by default.** Read-only tools run silently; anything that
+  mutates the filesystem or other sessions pauses for approval. Set
+  `CONSTRUCT_SMITH_AUTOMODE=1` to start unattended runs in always-approve
+  instead. See [smith](smith.md).
+- **`claude` follows Claude Code's own defaults.** Construct does not force a
+  `--permission-mode`; pass one yourself after the harness name if you want a
+  specific behavior, e.g. `construct new claude --permission-mode acceptEdits`.
+- **`codex` follows Codex's own sandbox.** In headless mode each turn is a
+  non-interactive `codex exec`, so there is no prompt to answer: a write that
+  Codex's sandbox refuses fails the turn instead of asking. If a codex session
+  reports blocked writes, adjust Codex's own sandbox configuration.
+- **`antigravity` headless approves everything.** The adapter passes
+  `--dangerously-skip-permissions` because a headless turn has no TUI to approve
+  in. Interactive antigravity sessions still approve normally in the `agy` TUI.
+- **Interactive CLI-backed sessions approve in their own TUI.** The prompt
+  appears inside the session pane, not in construct's minibuffer. Answer it
+  there.
+
+Aligning these defaults would require either upstream CLI support or construct
+intercepting each harness's tool calls; today the difference is intentional and
+each harness keeps its native behavior.
 
 ## Resume after restart
 
@@ -185,7 +257,7 @@ You normally do not need these, but they are useful for scripting and debugging:
 | `CONSTRUCT_CLAUDE_BIN`, `CONSTRUCT_CODEX_BIN`, `CONSTRUCT_OPENCODE_BIN`, `CONSTRUCT_ANTIGRAVITY_BIN`, `CONSTRUCT_KIMI_BIN`, `CONSTRUCT_HERMES_BIN`, `CONSTRUCT_SHELL_BIN` | Override just the binary path when no full command override is set. |
 | `CONSTRUCT_HERMES_HOME` | Override the Hermes home whose `state.db` the adapter follows. |
 | `CONSTRUCT_SMITH_MODEL` | Default model for the built-in smith harness. |
-| `CONSTRUCT_AUTO_APPROVE_PATHS` | Path allow-list injected into adapters that can translate it. |
+| `CONSTRUCT_AUTO_APPROVE_PATHS` | Path allow-list injected into adapters that can translate it. Set by the daemon to the session's widget directory; see [Write access and approvals](#write-access-and-approvals). |
 | `CONSTRUCT_SESSION_WIDGETS_DIR` | Directory where a session writes Markdown widgets. |
 | `CONSTRUCT_INJECT_MCP=0` | Disable automatic MCP tool injection for MCP-capable harnesses. |
 

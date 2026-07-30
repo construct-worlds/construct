@@ -16,6 +16,12 @@ Smith uses these tools natively. MCP-capable harnesses receive the same tools
 through the construct MCP server (`construct __mcp`), so they can coordinate the
 fleet without shelling out to ad-hoc `construct` CLI commands.
 
+> **Shared tools are not shared write semantics.** Two harnesses with the same
+> injected tool set can still differ on who approves a file write and whether it
+> is allowed at all — construct gates tool calls natively in smith only, and
+> every CLI-backed harness keeps its upstream CLI's own approval behavior. See
+> [Write access and approvals](harnesses.md#write-access-and-approvals).
+
 ## Using unified tools
 
 There is usually nothing to configure. smith sees these tools natively. Claude
@@ -34,8 +40,10 @@ sessions; it should be able to use `agentd_list_sessions` without running the
 | Smith | Built in. | Uses the same tool set without an external MCP process. |
 | Claude Code | Enabled by default. | Adapter writes a config under `CONSTRUCT_STATE_DIR` and passes `--mcp-config <path>` pointing to `construct __mcp`. |
 | Codex | Enabled by default. | Adapter passes Codex a `-c mcp_servers.construct=...` TOML override pointing to `construct __mcp`. |
+| OpenCode | Enabled by default. | Adapter merges a `construct` entry into the config content it hands the session, pointing at `construct __mcp`. |
 | Antigravity | Not injected yet. | Receives `CONSTRUCT_SESSION_ID`; browser/tools can be injected once `agy` exposes an MCP config flag. |
 | Hermes | Not injected yet. | Hermes supports MCP in persistent config, but the adapter does not mutate user configuration; injection waits for a per-invocation config surface. |
+| Grok, Kimi, pi | Not injected yet. | These adapters receive `CONSTRUCT_SESSION_ID` but do not inject an MCP entry today. |
 
 ## Fleet-control tools
 
