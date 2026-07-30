@@ -10258,7 +10258,7 @@ impl App {
                 .find(|hit| hit.contains(col, row))
                 .map(|hit| hit.hit)
             {
-                self.hit_suggest_deck(hit);
+                self.hit_suggest_deck(hit).await;
                 return;
             }
             if self
@@ -32579,6 +32579,34 @@ mod tests {
         ))
         .await;
         assert!(app.suggest_deck.is_none(), "C-g closes keyword input and deck");
+        server.abort();
+    }
+
+    /// Like History: highlighting Generate (without →/Enter) lets printable
+    /// keys auto-enter the right-column keyword field.
+    #[tokio::test]
+    async fn suggest_deck_generate_typeahead_without_activate() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.prompt_history = vec![deck_history_entry("cargo build")];
+        // Categories: top, verb, history, Regenerate — highlight Generate
+        // while focus stays on the left column.
+        let mut deck = crate::app::suggest_deck::SuggestDeck::open("s1".into());
+        deck.category_selected = 3;
+        deck.focus = crate::app::suggest_deck::DeckFocus::Categories;
+        app.suggest_deck = Some(deck);
+
+        for c in "docs".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
+        }
+        let deck = app.suggest_deck.as_ref().expect("typing keeps deck open");
+        assert_eq!(
+            deck.focus,
+            crate::app::suggest_deck::DeckFocus::Cards,
+            "printable keys move focus into the keyword surface"
+        );
+        assert_eq!(deck.regenerate_query.as_deref(), Some("docs"));
         server.abort();
     }
 

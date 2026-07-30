@@ -5106,7 +5106,23 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         return;
     };
     let categories = app.suggest_categories(&deck);
-    let cards = if deck.regenerate_query.is_some() {
+    let history_selected = matches!(
+        categories.get(deck.category_selected),
+        Some(DeckRow::History { .. })
+    );
+    let generate_selected = matches!(
+        categories.get(deck.category_selected),
+        Some(DeckRow::Generate { .. })
+    );
+    let generate_is_regen = matches!(
+        categories.get(deck.category_selected),
+        Some(DeckRow::Generate {
+            regenerate: true
+        })
+    );
+    // Generate owns the right column (keyword field + action button); do not
+    // paint verb/history cards underneath it.
+    let cards = if generate_selected {
         Vec::new()
     } else {
         app.suggest_cards(&deck)
@@ -5156,24 +5172,10 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    let history_selected = matches!(
-        categories.get(deck.category_selected),
-        Some(DeckRow::History { .. })
-    );
-    let generate_selected = matches!(
-        categories.get(deck.category_selected),
-        Some(DeckRow::Generate { .. })
-    );
-    let generate_is_regen = matches!(
-        categories.get(deck.category_selected),
-        Some(DeckRow::Generate {
-            regenerate: true
-        })
-    );
-    // History (when highlighted) and the open keyword field each show a
-    // dedicated underlined input row. Height always reserves that strip when
-    // History/Generate exist, so selecting them does not grow the popup.
-    let show_text_input = history_selected || deck.regenerate_query.is_some();
+    // History and Generate both reserve the underlined input strip as soon as
+    // their left-column row is highlighted — highlight and fully-focused
+    // states share the same right-column chrome so the deck does not jump.
+    let show_text_input = history_selected || generate_selected;
     use crate::app::suggest_deck::{suggest_reserves_input_row, SUGGEST_DECK_MAX_BODY};
     let reserve_input: u16 = u16::from(suggest_reserves_input_row(&categories));
     let max_right = app.suggest_max_right_rows(&deck);
@@ -5231,14 +5233,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     let visible_rows = footer_y.saturating_sub(body_y) as usize;
     let mut hit_zones = Vec::new();
 
-    let right_header = if deck.regenerate_query.is_some() {
-        if generate_is_regen {
-            "regenerate"
-        } else {
-            "generate"
-        }
-        .to_string()
-    } else if history_selected {
+    let right_header = if history_selected {
         "history".to_string()
     } else if generate_selected {
         if generate_is_regen {
@@ -5290,16 +5285,22 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
 
     // Underlined text field for History search / Generate keywords — the
     // visual cue that typing stays in the deck instead of dismissing it.
+    // Generate shows this as soon as its left-column row is highlighted,
+    // matching History (no separate "open the field" visual state).
     if show_text_input {
-        let (value, placeholder, active) = if let Some(query) = deck.regenerate_query.as_ref() {
+        let (value, placeholder, active) = if generate_selected {
             (
-                query.as_str(),
+                deck.regenerate_query.as_deref().unwrap_or(""),
                 if generate_is_regen {
                     "optional keywords to guide regeneration…"
                 } else {
                     "optional keywords to guide generation…"
                 },
-                true,
+                deck.focus == DeckFocus::Cards
+                    || deck
+                        .regenerate_query
+                        .as_ref()
+                        .is_some_and(|q| !q.is_empty()),
             )
         } else {
             (
@@ -5438,40 +5439,85 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         }
     }
 
-    if deck.regenerate_query.is_some() {
-        f.render_widget(
-            Paragraph::new(Line::styled(
-                if generate_is_regen {
-                    "Enter to regenerate · ← back"
-                } else {
-                    "Enter to generate · ← back"
+    if generate_selected {
+        // Same right-column chrome whether the left row is only highlighted
+        // or the keyword surface is focused:
+        //   regenerate
+        //   __optional keywords…__
+        //   --------------------
+        //   |   Regenerate     |
+        //   --------------------
+        let label = if generate_is_regen {
+            "Regenerate"
+        } else {
+            "Generate"
+        };
+        let cw = card_w as usize;
+        // Prefer a blank spacer above the button when the body has room.
+        let btn_h = 3usize;
+        let start = if visible_rows > btn_h { 1usize } else { 0 };
+        if visible_rows >= btn_h && cw >= 4 {
+            let rule = "─".repeat(cw);
+            let inner = cw.saturating_sub(2);
+            let centered = {
+                let text = truncate_to_width(label, inner);
+                let tw = UnicodeWidthStr::width(text.as_str());
+                let pad = inner.saturating_sub(tw);
+                let left = pad / 2;
+                let right = pad.saturating_sub(left);
+                format!(
+                    "│{}{}{}│",
+                    " ".repeat(left),
+                    text,
+                    " ".repeat(right)
+                )
+            };
+            let lines = [rule.as_str(), centered.as_str(), rule.as_str()];
+            let btn_focused = deck.focus == DeckFocus::Cards;
+            let btn_hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+                mx >= cards_x
+                    && mx < cards_x.saturating_add(card_w)
+                    && my >= body_y.saturating_add(start as u16)
+                    && my < body_y.saturating_add((start + btn_h) as u16)
+            });
+            let border_style = Style::default().fg(if btn_focused || btn_hovered {
+                app.theme.accent
+            } else {
+                app.theme.border
+            });
+            let label_style = if btn_focused || btn_hovered {
+                Style::default()
+                    .fg(app.theme.text)
+                    .bg(app.theme.inactive_highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            };
+            for (i, line) in lines.iter().enumerate() {
+                let y = body_y.saturating_add((start + i) as u16);
+                let style = if i == 1 { label_style } else { border_style };
+                f.render_widget(
+                    Paragraph::new(Line::styled((*line).to_string(), style)),
+                    Rect {
+                        x: cards_x,
+                        y,
+                        width: card_w,
+                        height: 1,
+                    },
+                );
+            }
+            hit_zones.push(SuggestDeckHitZone {
+                area: Rect {
+                    x: cards_x,
+                    y: body_y.saturating_add(start as u16),
+                    width: card_w,
+                    height: btn_h as u16,
                 },
-                Style::default()
-                    .fg(app.theme.muted)
-                    .add_modifier(Modifier::DIM),
-            )),
-            Rect {
-                x: cards_x,
-                y: body_y,
-                width: card_w,
-                height: 1,
-            },
-        );
-    } else if generate_selected {
-        f.render_widget(
-            Paragraph::new(Line::styled(
-                "Enter for optional keywords, then generate",
-                Style::default()
-                    .fg(app.theme.muted)
-                    .add_modifier(Modifier::DIM),
-            )),
-            Rect {
-                x: cards_x,
-                y: body_y,
-                width: card_w,
-                height: 1,
-            },
-        );
+                hit: SuggestDeckHit::GenerateAction,
+            });
+        }
     } else if cards.is_empty() && history_selected && !deck.history_query.is_empty() {
         f.render_widget(
             Paragraph::new(Line::styled(
@@ -5554,12 +5600,10 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         }
     }
 
-    let hint = if deck.regenerate_query.is_some() {
+    let hint = if generate_selected {
         "type keywords · Enter generate · ← back · Esc/C-g close"
     } else if history_selected {
         "type to search · ←/→ columns · ↑/↓ move · Enter stage · Esc/C-g close"
-    } else if generate_selected {
-        "Enter keywords · g/r shortcut · ↑/↓ move · Esc/C-g close"
     } else {
         "g/r generate · ←/→ columns · ↑/↓ move · Enter stage · Esc/C-g close"
     };
