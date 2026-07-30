@@ -1249,6 +1249,11 @@ pub mod ipc_method {
     /// Enumerate the routes configured on this daemon, plus whether the
     /// named session can currently be routed and why not (spec 0115).
     pub const ROUTER_LIST_ROUTES: &str = "router.list_routes";
+    /// Start a sign-in for a subscription route: spawns a shell session
+    /// running the owning CLI's login command, then watches for the
+    /// credential to land and archives the session automatically
+    /// (spec 0117).
+    pub const ROUTER_LOGIN: &str = "router.login";
     pub const SESSION_TOOL_DECISION: &str = "session.tool_decision";
     pub const SESSION_TOOL_ACTION: &str = "session.tool_action";
     pub const SESSION_LIST_TASKS: &str = "session.list_tasks";
@@ -2859,6 +2864,21 @@ pub struct SessionSetRouteParams {
     pub model: Option<String>,
 }
 
+/// Params for `router.login`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouterLoginParams {
+    /// Name of the subscription route to sign in to (a route whose
+    /// [`RouteOption::login_command`] was present).
+    pub route: String,
+    /// Where the login session runs. Defaults to the daemon's `$HOME` —
+    /// login flows do not care, and a project directory would only leak
+    /// into the session title's context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pty_size: Option<PtySize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterListRoutesParams {
     /// Session the routes would be applied to. Determines
@@ -2887,6 +2907,13 @@ pub struct RouteOption {
     /// (spec 0115).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
+    /// When the blocker is a missing or expired subscription login, the
+    /// owning CLI's command that renews it. The user fixes it by running
+    /// this command themselves — clients may offer to run it in a new
+    /// session, but the owning tool stays the credential's only writer
+    /// (spec 0117).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

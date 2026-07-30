@@ -964,6 +964,31 @@ impl Client {
         )
         .await
     }
+    /// Start a sign-in for a subscription route (spec 0117): the daemon
+    /// spawns a shell session running the owning CLI's login command and
+    /// archives it automatically once the credential lands. Returns the
+    /// login session's id.
+    pub async fn router_login(
+        &self,
+        route: &str,
+        pty_size: Option<construct_protocol::PtySize>,
+    ) -> Result<String> {
+        #[derive(serde::Deserialize)]
+        struct R {
+            session_id: String,
+        }
+        let r: R = self
+            .request(
+                ipc_method::ROUTER_LOGIN,
+                &construct_protocol::RouterLoginParams {
+                    route: route.to_string(),
+                    cwd: None,
+                    pty_size,
+                },
+            )
+            .await?;
+        Ok(r.session_id)
+    }
     pub async fn emit_event(&self, id: &str, event: construct_protocol::SessionEvent) -> Result<()> {
         let _: serde_json::Value = self
             .request(

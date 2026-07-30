@@ -199,8 +199,13 @@ grok-oauth   = "grok-4.5"
   routing was enabled, or its harness has no routing probe. New sessions
   on route-capable harnesses will work.
 - **A target is listed but not selectable** — the reason is shown in
-  place of its models: a missing API key, an expired login (renew with the
-  owning CLI), or a dialect with no translator.
+  place of its models: a missing API key, an expired login, or a dialect
+  with no translator. When the fix is signing in, the menu offers it
+  directly: press Enter (or click the reason) and Construct opens a new
+  shell session running the owning CLI's login command — sign in there
+  (the CLI opens its own browser page). Construct detects the credential
+  landing and closes and archives the login session automatically; a
+  login that fails stays open so you can read what went wrong.
 - **A redirect is armed but reported unproven** — the harness resolved
   its endpoint through a channel that ignores the proxy environment. The
   session keeps working exactly as before; Construct reports what it

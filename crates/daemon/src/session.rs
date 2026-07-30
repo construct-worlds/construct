@@ -5830,6 +5830,79 @@ impl SessionManager {
         ))
     }
 
+    /// Start a sign-in for a subscription route: a shell session running
+    /// the owning CLI's login command (spec 0117 — the owning tool is the
+    /// only credential writer; this only reaches for it). A watcher polls
+    /// for the credential to land and archives the session the moment it
+    /// does — most of these CLIs stay open after sign-in, so the watched
+    /// fact is the credential, not the process exiting. A session that
+    /// ends without a credential stays visible so its output can explain
+    /// what went wrong.
+    pub async fn start_login_session(
+        self: &Arc<Self>,
+        p: construct_protocol::RouterLoginParams,
+    ) -> Result<String> {
+        let provider = crate::router::oauth::OauthProvider::ALL
+            .iter()
+            .copied()
+            .find(|prov| prov.name() == p.route)
+            .ok_or_else(|| anyhow!("no subscription login named \"{}\"", p.route))?;
+        let command = provider.login_command();
+        let cwd = p
+            .cwd
+            .filter(|c| !c.trim().is_empty())
+            .or_else(|| std::env::var("HOME").ok())
+            .unwrap_or_else(|| ".".to_string());
+        let id = self
+            .create(construct_protocol::CreateSessionParams {
+                harness: "shell".into(),
+                cwd,
+                prompt: Some(command),
+                model: None,
+                title: Some(format!("{} login", provider.name())),
+                mode: None,
+                pty_size: p.pty_size,
+                worktree: false,
+                env: std::collections::HashMap::new(),
+                args: Vec::new(),
+                kind: construct_protocol::SessionKind::User,
+                parent_session_id: None,
+                group_id: None,
+                position_after_session_id: None,
+                forked_from: None,
+            })
+            .await?;
+        let manager = Arc::clone(self);
+        let session_id = id.clone();
+        tokio::spawn(async move {
+            // ~10 minutes of patience; a login the user abandons should
+            // not leave a poller running forever.
+            for _ in 0..200 {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let login_ok = crate::router::oauth::check_login(provider).is_ok();
+                let state = match manager.get_entry(&session_id).await {
+                    Some(entry) => Some(entry.summary.read().await.state),
+                    None => None,
+                };
+                match login_watch_step(login_ok, state) {
+                    LoginWatch::Archive => {
+                        if let Err(e) = manager.archive(&session_id).await {
+                            tracing::warn!(
+                                session = %session_id,
+                                error = ?e,
+                                "archive completed login session failed"
+                            );
+                        }
+                        return;
+                    }
+                    LoginWatch::Abandon => return,
+                    LoginWatch::Continue => {}
+                }
+            }
+        });
+        Ok(id)
+    }
+
     /// Record the session's active model after an adapter `/model` switch.
     /// Updates the summary (so the UI label tracks the change) and persists
     /// it, so `respawn` re-injects the model into the adapter's start params
@@ -6686,8 +6759,74 @@ fn builtin_harness_capabilities(name: &str) -> construct_protocol::Capabilities 
     }
 }
 
+/// One tick of the login-session watcher (spec 0117).
+enum LoginWatch {
+    /// The credential landed: the login did its job, stop the session and
+    /// archive it out of the list (transcript kept).
+    Archive,
+    /// The session is gone or ended without a credential landing: leave
+    /// whatever remains visible — its output is the explanation — and
+    /// stop watching.
+    Abandon,
+    Continue,
+}
+
+/// The credential is checked before the session's state so a login CLI
+/// that exits the instant the credential is written (`codex login`) still
+/// archives instead of being abandoned as "ended without a credential".
+fn login_watch_step(
+    login_ok: bool,
+    state: Option<construct_protocol::SessionState>,
+) -> LoginWatch {
+    use construct_protocol::SessionState;
+    if login_ok {
+        return LoginWatch::Archive;
+    }
+    match state {
+        None | Some(SessionState::Done) | Some(SessionState::Errored) => LoginWatch::Abandon,
+        Some(_) => LoginWatch::Continue,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// The watcher archives on the credential, waits while the session
+    /// lives without one, and abandons a session that ended (or vanished)
+    /// without one — in that order, so a login CLI that exits as it
+    /// writes the credential still archives.
+    #[test]
+    fn login_watcher_archives_on_credential_and_abandons_on_dead_ends() {
+        use construct_protocol::SessionState;
+        assert!(matches!(
+            super::login_watch_step(true, Some(SessionState::Running)),
+            super::LoginWatch::Archive
+        ));
+        assert!(matches!(
+            super::login_watch_step(true, Some(SessionState::Done)),
+            super::LoginWatch::Archive
+        ));
+        assert!(matches!(
+            super::login_watch_step(false, Some(SessionState::Running)),
+            super::LoginWatch::Continue
+        ));
+        assert!(matches!(
+            super::login_watch_step(false, Some(SessionState::AwaitingInput)),
+            super::LoginWatch::Continue
+        ));
+        assert!(matches!(
+            super::login_watch_step(false, Some(SessionState::Done)),
+            super::LoginWatch::Abandon
+        ));
+        assert!(matches!(
+            super::login_watch_step(false, Some(SessionState::Errored)),
+            super::LoginWatch::Abandon
+        ));
+        assert!(matches!(
+            super::login_watch_step(false, None),
+            super::LoginWatch::Abandon
+        ));
+    }
+
     #[test]
     fn suggestion_regeneration_keywords_are_bounded_and_labeled_as_guidance() {
         let rendered =

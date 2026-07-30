@@ -71,6 +71,22 @@ failure than a corrupted credential store.
   maintains. Sessions must expect a route to become unavailable between
   turns, and the reason shown must distinguish *expired* (use the tool
   again) from *absent* (sign in), because the user's next action differs.
+- When the blocker is a missing or expired login, the reason travels with
+  the owning CLI's exact sign-in command, and a client may offer to run
+  that command for the user — in a session of its own, where the CLI runs
+  its normal login flow (including opening its browser page). This is an
+  affordance over the existing remedy, not a new credential path: the
+  owning tool remains the only writer, and Construct never conducts the
+  OAuth exchange itself. Blockers that signing in would not fix carry no
+  command.
+- A sign-in session started this way is watched for the *credential*
+  landing, not for the process exiting — most of these CLIs stay open
+  after login. The moment the credential is readable, the session has
+  done its job and is stopped and archived automatically (transcript
+  kept). A session that ends or fails without a credential stays
+  visible, because its output is the explanation of what went wrong. The
+  watch is time-bounded: an abandoned login must not leave a poller
+  running indefinitely.
 - Parameters a target refuses are dropped rather than passed through, and
   dropping is lossy: a harness that asked for a token cap does not get one
   enforced at the target. That is accepted because the alternative is a

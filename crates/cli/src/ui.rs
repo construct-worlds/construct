@@ -5847,9 +5847,35 @@ fn render_route_menu(f: &mut Frame, app: &App) {
                 x: model_x,
                 y: body_start,
                 width: model_w,
-                height: last_row.saturating_sub(body_start).max(1),
+                height: 1,
             },
         );
+        // A login blocker is one keypress from fixed, so the action gets
+        // its own line in the accent color rather than hiding in the
+        // muted prose (spec 0117: the command is the owning CLI's).
+        if let Some(cmd) = menu.focused_login_command() {
+            let row = body_start.saturating_add(1);
+            if row < last_row {
+                f.render_widget(
+                    Paragraph::new(Line::styled(
+                        format!(
+                            " {}",
+                            truncate(
+                                &format!("Enter: run `{cmd}` in a new session"),
+                                model_w.saturating_sub(1) as usize
+                            )
+                        ),
+                        Style::default().fg(app.theme.accent),
+                    )),
+                    Rect {
+                        x: model_x,
+                        y: row,
+                        width: model_w,
+                        height: 1,
+                    },
+                );
+            }
+        }
     } else {
         let models = menu.models();
         for (paint_i, index) in (menu.model_scroll..)

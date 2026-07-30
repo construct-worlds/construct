@@ -16247,6 +16247,11 @@ mod tests {
                                 "unavailable_reason": unavailable_reason,
                                 "active": Value::Null,
                             }),
+                            // Enough of router.login for the login-action
+                            // flow to complete against this mock.
+                            ipc_method::ROUTER_LOGIN => serde_json::json!({
+                                "session_id": "s-login",
+                            }),
                             _ => Value::Null,
                         };
                         let reply = serde_json::json!({
@@ -16458,6 +16463,44 @@ mod tests {
         let menu = app.route_menu.as_ref().unwrap();
         assert_eq!(menu.selected, 2, "the target no longer moves");
         assert_ne!(menu.model_selected, before, "the model does");
+    }
+
+    /// Enter on a target blocked by a missing login starts the sign-in in
+    /// a new shell session instead of dead-ending on a disabled row
+    /// (spec 0117: the owning CLI runs; Construct only reaches for it).
+    #[tokio::test]
+    async fn enter_on_a_login_blocked_target_starts_the_sign_in() {
+        let mut blocked = route_json(
+            "kimi",
+            "kimi-k2.5",
+            Some("not logged in to kimi; run `kimi` and sign in"),
+        );
+        blocked["login_command"] = serde_json::json!("kimi");
+        let (client, _dir, _server) = route_mock_daemon(vec![blocked], None).await;
+        let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
+        summary.harness = "claude".into();
+        summary.route_capable = true;
+        let mut app = test_app(client, vec![summary]);
+        app.select_session("s1".into());
+        app.open_route_menu("s1".into(), 40, 29).await;
+
+        // The blocked target renders its sign-in action line.
+        app.move_route_menu_selection(1);
+        let frame = rendered(&mut app, 120, 30);
+        assert!(frame.contains("run `kimi` in a new session"), "{frame}");
+
+        app.activate_route_menu().await;
+        assert!(app.route_menu.is_none(), "the menu closes into the login");
+        let status = app.status.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+        assert!(
+            status.contains("running `kimi`"),
+            "status announces the login session: {status}"
+        );
+        assert_eq!(
+            app.selection,
+            Selection::Session("s-login".into()),
+            "the login session is selected so the user lands in the flow"
+        );
     }
 
     /// A session that cannot be routed still gets an explanation rather

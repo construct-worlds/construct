@@ -130,6 +130,16 @@ impl OauthProvider {
             OauthProvider::Kimi => "kimi",
         }
     }
+
+    /// The exact command that signs in. Most CLIs run their login flow on
+    /// launch when the credential is missing or expired; Codex has a
+    /// dedicated subcommand that exits once the login lands.
+    pub fn login_command(self) -> String {
+        match self {
+            OauthProvider::Codex => "codex login".to_string(),
+            _ => self.owning_cli().to_string(),
+        }
+    }
 }
 
 /// A usable subscription credential.
@@ -140,9 +150,24 @@ pub struct OauthCredential {
     pub account_id: Option<String>,
 }
 
+/// Why a login cannot serve as a route right now: the message fit for a
+/// route's `unavailable_reason`, plus — when the fix is signing in with
+/// the owning CLI — the exact command that does it, so a client can offer
+/// to run it (in a session of its own; the owning tool remains the only
+/// writer of the credential, spec 0117).
+pub struct LoginBlocker {
+    pub reason: String,
+    pub login_command: Option<String>,
+}
+
 /// Read the login for `provider`. `Err` carries a message fit to show as a
 /// route's `unavailable_reason`.
 pub fn read_credential(provider: OauthProvider) -> Result<OauthCredential, String> {
+    check_login(provider).map_err(|blocker| blocker.reason)
+}
+
+/// Like [`read_credential`], keeping the blocker structured.
+pub fn check_login(provider: OauthProvider) -> Result<OauthCredential, LoginBlocker> {
     match provider {
         OauthProvider::Claude => read_claude(),
         OauthProvider::Codex => read_codex(),
@@ -152,18 +177,27 @@ pub fn read_credential(provider: OauthProvider) -> Result<OauthCredential, Strin
     .map_err(|e| match e {
         // Expiry is the one failure a user can fix in one step, so it says
         // exactly how.
-        ReadError::Expired => format!(
-            "{} login has expired; run `{}` once to renew it (the router never \
-             refreshes another tool's credential)",
-            provider.name(),
-            provider.owning_cli()
-        ),
-        ReadError::Missing => format!(
-            "not logged in to {}; run `{}` and sign in",
-            provider.name(),
-            provider.owning_cli()
-        ),
-        ReadError::Other(msg) => msg,
+        ReadError::Expired => LoginBlocker {
+            reason: format!(
+                "{} login has expired; run `{}` once to renew it (the router never \
+                 refreshes another tool's credential)",
+                provider.name(),
+                provider.owning_cli()
+            ),
+            login_command: Some(provider.login_command()),
+        },
+        ReadError::Missing => LoginBlocker {
+            reason: format!(
+                "not logged in to {}; run `{}` and sign in",
+                provider.name(),
+                provider.owning_cli()
+            ),
+            login_command: Some(provider.login_command()),
+        },
+        ReadError::Other(msg) => LoginBlocker {
+            reason: msg,
+            login_command: None,
+        },
     })
 }
 
@@ -698,6 +732,30 @@ mod tests {
         assert!(err.contains("not logged in"), "{err}");
         assert!(err.contains("kimi"), "{err}");
         std::env::remove_var("KIMI_CODE_HOME");
+    }
+
+    /// Missing/expired logins carry the owning CLI's sign-in command so a
+    /// client can offer to run it; other blockers must not, because they
+    /// are not fixed by signing in.
+    #[test]
+    fn login_blockers_carry_the_sign_in_command() {
+        let _env = test_env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("KIMI_CODE_HOME", dir.path());
+        let blocker = check_login(OauthProvider::Kimi).unwrap_err();
+        assert_eq!(blocker.login_command.as_deref(), Some("kimi"));
+        assert_eq!(blocker.reason, read_credential(OauthProvider::Kimi).unwrap_err());
+        std::env::remove_var("KIMI_CODE_HOME");
+    }
+
+    /// Codex is the one CLI with a dedicated login subcommand that exits
+    /// once the login lands; the others run their flow on plain launch.
+    #[test]
+    fn the_sign_in_command_is_the_owning_clis() {
+        assert_eq!(OauthProvider::Codex.login_command(), "codex login");
+        assert_eq!(OauthProvider::Claude.login_command(), "claude");
+        assert_eq!(OauthProvider::Grok.login_command(), "grok");
+        assert_eq!(OauthProvider::Kimi.login_command(), "kimi");
     }
 
     /// The kimi backend was probed with the full Anthropic parameter

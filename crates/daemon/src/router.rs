@@ -810,8 +810,8 @@ impl Router {
     ) -> Result<ArmedRoute> {
         let routing = harness_routing(harness)
             .ok_or_else(|| anyhow!("harness {harness} is not route-capable"))?;
-        if let Some(reason) = self.oauth_blocker(provider, harness) {
-            return Err(anyhow!("route \"{}\": {reason}", provider.name()));
+        if let Some(blocker) = self.oauth_blocker(provider, harness) {
+            return Err(anyhow!("route \"{}\": {}", provider.name(), blocker.reason));
         }
         let cred = oauth::read_credential(provider).map_err(|e| anyhow!(e))?;
         Ok(ArmedRoute {
@@ -880,19 +880,28 @@ impl Router {
     }
 
     /// Why a subscription login cannot serve as a route for `harness`.
-    fn oauth_blocker(&self, provider: OauthProvider, harness: &str) -> Option<String> {
+    /// Login problems keep the owning CLI's sign-in command attached so a
+    /// client can offer to run it (spec 0117: the fix is always the owning
+    /// tool; Construct only makes reaching for it cheaper).
+    fn oauth_blocker(&self, provider: OauthProvider, harness: &str) -> Option<oauth::LoginBlocker> {
         let routing = harness_routing(harness)?;
         if routing.ca_env.is_empty() {
-            return Some(format!("{harness} cannot trust the router CA"));
+            return Some(oauth::LoginBlocker {
+                reason: format!("{harness} cannot trust the router CA"),
+                login_command: None,
+            });
         }
         let needs_bundle = routing.ca_env.iter().all(|c| c.mode == CaMode::Replacing);
         if needs_bundle && self.ca().ok().and_then(|ca| ca.bundle_path()).is_none() {
-            return Some(format!(
-                "{harness} needs the system trust store composed with the router CA, \
-                 and the platform trust store could not be read"
-            ));
+            return Some(oauth::LoginBlocker {
+                reason: format!(
+                    "{harness} needs the system trust store composed with the router CA, \
+                     and the platform trust store could not be read"
+                ),
+                login_command: None,
+            });
         }
-        oauth::read_credential(provider).err()
+        oauth::check_login(provider).err()
     }
 
     fn resolve(&self, name: &str, harness: &str, model: Option<&str>) -> Result<ArmedRoute> {
@@ -1024,13 +1033,21 @@ impl Router {
         // machine with a login and no profiles still has something to pick.
         let mut routes: Vec<RouteOption> = OauthProvider::ALL
             .iter()
-            .map(|p| RouteOption {
-                name: p.name().to_string(),
-                dialect: p.dialect().label().to_string(),
-                model: self.oauth_model(*p),
-                models: self.oauth_model_list(*p),
-                base_url: p.endpoint().to_string(),
-                unavailable_reason: routing.and_then(|_| self.oauth_blocker(*p, harness)),
+            .map(|p| {
+                let blocker = routing.and_then(|_| self.oauth_blocker(*p, harness));
+                let (unavailable_reason, login_command) = match blocker {
+                    Some(b) => (Some(b.reason), b.login_command),
+                    None => (None, None),
+                };
+                RouteOption {
+                    name: p.name().to_string(),
+                    dialect: p.dialect().label().to_string(),
+                    model: self.oauth_model(*p),
+                    models: self.oauth_model_list(*p),
+                    base_url: p.endpoint().to_string(),
+                    unavailable_reason,
+                    login_command,
+                }
             })
             .collect();
         routes.extend(self
@@ -1046,6 +1063,9 @@ impl Router {
                 base_url: profile.resolved_base_url().unwrap_or_default(),
                 unavailable_reason: routing
                     .and_then(|_| self.profile_blocker(profile, harness)),
+                // A profile's blocker is a missing key or dialect, never a
+                // login someone can click through.
+                login_command: None,
             }));
 
         RouterListRoutesResult {
