@@ -52,11 +52,12 @@ impl Router {
                 continue;
             }
             for model in self.oauth_model_list(*provider) {
+                let effort = oauth::effort_support(*provider, &model);
                 out.push(PublishedModel {
                     id: published_model_id_for_harness(harness, provider.name(), &model),
                     route: provider.name().to_string(),
                     model,
-                    effort: oauth::effort_support(*provider),
+                    effort,
                 });
             }
         }
@@ -320,6 +321,16 @@ pub fn build_codex_catalog(
                 {"effort": "medium", "description": "Extended thinking, 12k token budget"},
                 {"effort": "high", "description": "Extended thinking, 24k token budget"}
             ])),
+            EffortSupport::Grok => ("high", json!([
+                {"effort": "low", "description": "Quick, fast implementation"},
+                {"effort": "medium", "description": "Balanced implementation and testing"},
+                {"effort": "high", "description": "Highest quality with extensive reasoning"}
+            ])),
+            EffortSupport::Kimi => ("high", json!([
+                {"effort": "low", "description": "Lower Kimi thinking effort"},
+                {"effort": "high", "description": "High Kimi thinking effort"},
+                {"effort": "xhigh", "description": "Maximum Kimi thinking effort"}
+            ])),
             EffortSupport::Unsupported => ("medium", json!([{
                 "effort": "medium",
                 "description": "Provider-default reasoning through Construct"
@@ -446,6 +457,35 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(levels, vec!["minimal", "low", "medium", "high"]);
         assert_eq!(catalog["models"][1]["default_reasoning_level"], "minimal");
+    }
+
+    #[test]
+    fn grok_and_kimi_advertise_their_native_scales() {
+        let grok = PublishedModel {
+            id: published_model_id("grok-oauth", "grok-4.5"),
+            route: "grok-oauth".into(),
+            model: "grok-4.5".into(),
+            effort: EffortSupport::Grok,
+        };
+        let kimi = PublishedModel {
+            id: published_model_id("kimi-oauth", "k3"),
+            route: "kimi-oauth".into(),
+            model: "k3".into(),
+            effort: EffortSupport::Kimi,
+        };
+        let catalog = build_codex_catalog(baseline(), &[grok, kimi], &[]).unwrap();
+        let efforts = |index: usize| {
+            catalog["models"][index]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|level| level["effort"].as_str().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(efforts(1), vec!["low", "medium", "high"]);
+        assert_eq!(catalog["models"][1]["default_reasoning_level"], "high");
+        assert_eq!(efforts(2), vec!["low", "high", "xhigh"]);
+        assert_eq!(catalog["models"][2]["default_reasoning_level"], "high");
     }
 
     #[test]

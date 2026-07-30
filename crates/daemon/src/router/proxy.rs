@@ -963,11 +963,22 @@ async fn forward_translated(
     let source: serde_json::Value =
         serde_json::from_slice(&body).context("parse intercepted request body")?;
     let mut canon = translate::parse_request(client_dialect, &source);
-    // Never send an unverified effort knob: Codex includes its default on
-    // every request, so guessing here could reject every routed turn.
-    if route.effort == super::EffortSupport::Unsupported {
-        canon.reasoning_effort = None;
-    }
+    let kimi_effort = match route.effort {
+        // Kimi K3 is always-thinking and accepts its scale separately from
+        // the Anthropic `thinking` object. Remove the canonical value so the
+        // generic Anthropic emitter does not turn it into a Claude budget.
+        super::EffortSupport::Kimi => canon
+            .reasoning_effort
+            .take()
+            .map(|effort| kimi_effort(&effort).to_string()),
+        // Never send an unverified effort knob: Codex includes its default
+        // on every request, so guessing could reject every routed turn.
+        super::EffortSupport::Unsupported => {
+            canon.reasoning_effort = None;
+            None
+        }
+        _ => None,
+    };
     // Some backends refuse a request whose system prompt does not open with
     // a specific line. Prepending rather than replacing keeps the harness's
     // own instructions intact.
@@ -980,6 +991,9 @@ async fn forward_translated(
     }
     let emitted = translate::emit_request_with_context(route.target_dialect, &canon, &route.model);
     let mut translated = emitted.body;
+    if let Some(effort) = kimi_effort {
+        apply_kimi_effort(&mut translated, &effort);
+    }
     // A target can refuse a parameter its own dialect defines — the Codex
     // backend 400s on `max_output_tokens`. Strip rather than refuse the
     // turn; the alternative is a request the target will never accept.
@@ -1029,6 +1043,27 @@ async fn forward_translated(
         response,
         context: emitted.context,
     })
+}
+
+/// Map Codex's effort vocabulary onto the K3 scale.
+fn kimi_effort(effort: &str) -> &'static str {
+    match effort {
+        "low" | "minimal" => "low",
+        "xhigh" | "max" => "max",
+        // Codex can carry a global `medium` even though the K3 catalog does
+        // not advertise it; K3's nearest valid level is its default `high`.
+        _ => "high",
+    }
+}
+
+fn apply_kimi_effort(body: &mut serde_json::Value, effort: &str) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("thinking".into(), serde_json::json!({"type":"enabled"}));
+        obj.insert(
+            "output_config".into(),
+            serde_json::json!({"effort":effort}),
+        );
+    }
 }
 
 struct TranslatedResponse {
@@ -1404,6 +1439,21 @@ fn is_dropped_response_header(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_effort_maps_onto_kimi_k3_vocabulary() {
+        assert_eq!(kimi_effort("minimal"), "low");
+        assert_eq!(kimi_effort("low"), "low");
+        assert_eq!(kimi_effort("medium"), "high");
+        assert_eq!(kimi_effort("high"), "high");
+        assert_eq!(kimi_effort("xhigh"), "max");
+
+        let mut body = serde_json::json!({"model":"k3","messages":[]});
+        apply_kimi_effort(&mut body, kimi_effort("xhigh"));
+        assert_eq!(body["thinking"], serde_json::json!({"type":"enabled"}));
+        assert_eq!(body["output_config"], serde_json::json!({"effort":"max"}));
+        assert!(body["thinking"].get("budget_tokens").is_none());
+    }
 
     #[test]
     fn parses_a_connect_authority() {

@@ -504,12 +504,18 @@ pub fn unsupported_params(provider: OauthProvider) -> &'static [&'static str] {
     }
 }
 
-/// Effort support per subscription login (spec 0160).
-pub fn effort_support(provider: OauthProvider) -> super::EffortSupport {
+/// Effort support per subscription login and model (spec 0160).
+pub fn effort_support(provider: OauthProvider, model: &str) -> super::EffortSupport {
     match provider {
         OauthProvider::Codex => super::EffortSupport::Verbatim,
         OauthProvider::Claude => super::EffortSupport::Thinking,
-        OauthProvider::Grok | OauthProvider::Kimi => super::EffortSupport::Unsupported,
+        OauthProvider::Grok => super::EffortSupport::Grok,
+        // K3 publishes low/high/max and encodes it as output_config.effort.
+        // K2.7 is always-thinking but publishes no selectable effort scale.
+        OauthProvider::Kimi if model == "k3" || model == "k3-256k" => {
+            super::EffortSupport::Kimi
+        }
+        OauthProvider::Kimi => super::EffortSupport::Unsupported,
     }
 }
 
@@ -554,6 +560,26 @@ mod tests {
             assert!(!p.default_model().is_empty(), "{}", p.name());
             assert!(!p.name().is_empty());
         }
+    }
+
+    #[test]
+    fn effort_support_matches_subscription_model_capabilities() {
+        assert_eq!(
+            effort_support(OauthProvider::Grok, "grok-4.5"),
+            super::super::EffortSupport::Grok
+        );
+        assert_eq!(
+            effort_support(OauthProvider::Kimi, "k3"),
+            super::super::EffortSupport::Kimi
+        );
+        assert_eq!(
+            effort_support(OauthProvider::Kimi, "k3-256k"),
+            super::super::EffortSupport::Kimi
+        );
+        assert_eq!(
+            effort_support(OauthProvider::Kimi, "kimi-for-coding"),
+            super::super::EffortSupport::Unsupported
+        );
     }
 
     /// The seed list must come from the shared completion catalog, so the
