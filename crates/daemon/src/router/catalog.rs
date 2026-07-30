@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
-use super::{oauth::OauthProvider, ArmedRoute, Router};
+use super::{oauth::OauthProvider, provider_dialect, ArmedRoute, Dialect, Router};
 
 // The id codec is a wire contract shared with clients (they decode ids for
 // display, spec 0158), so it lives in the protocol crate. Re-exported here
@@ -27,6 +27,13 @@ pub struct PublishedModel {
     pub id: String,
     pub route: String,
     pub model: String,
+    /// Whether a reasoning-effort choice made in the harness's native
+    /// picker actually reaches this route's target. True only when the
+    /// target speaks a dialect that accepts the effort knob verbatim
+    /// (OpenAI Responses today); targets whose reasoning controls are a
+    /// different shape advertise a single provider-default level instead
+    /// of a selector that would silently do nothing.
+    pub effort_selectable: bool,
 }
 
 impl Router {
@@ -49,6 +56,7 @@ impl Router {
                     id: published_model_id_for_harness(harness, provider.name(), &model),
                     route: provider.name().to_string(),
                     model,
+                    effort_selectable: provider.dialect() == Dialect::OpenAiResponses,
                 });
             }
         }
@@ -61,6 +69,8 @@ impl Router {
                     id: published_model_id_for_harness(harness, route, &model),
                     route: route.clone(),
                     model,
+                    effort_selectable: provider_dialect(&profile.provider)
+                        == Some(Dialect::OpenAiResponses),
                 });
             }
         }
@@ -300,10 +310,26 @@ pub fn build_codex_catalog(
                 .unwrap_or(100 + ranks.len() + index)
         });
         entry["default_reasoning_level"] = Value::String("medium".to_string());
-        entry["supported_reasoning_levels"] = json!([{
-            "effort": "medium",
-            "description": "Provider-default reasoning through Construct"
-        }]);
+        entry["supported_reasoning_levels"] = if model.effort_selectable {
+            // The target accepts the effort knob verbatim, so the picker
+            // choice is real: Codex sends it as `reasoning.effort` and the
+            // router forwards or re-emits it unchanged. The set is the
+            // conservative intersection every OpenAI reasoning model
+            // accepts; per-model refinement needs capability metadata the
+            // route registry does not carry yet.
+            json!([
+                {"effort": "low", "description": "Fastest, minimal reasoning"},
+                {"effort": "medium", "description": "Balanced reasoning"},
+                {"effort": "high", "description": "Deepest reasoning, slower"}
+            ])
+        } else {
+            // Advertising a selector the route cannot honor would let the
+            // user pick levels that silently do nothing.
+            json!([{
+                "effort": "medium",
+                "description": "Provider-default reasoning through Construct"
+            }])
+        };
         // Route profiles currently carry no capability metadata. Advertise a
         // conservative text/tool surface until the shared registry grows
         // explicit per-model capabilities.
@@ -360,6 +386,7 @@ mod tests {
             id: published_model_id("claude-oauth", "opus"),
             route: "claude-oauth".into(),
             model: "opus".into(),
+            effort_selectable: false,
         };
         let catalog = build_codex_catalog(baseline(), &[route.clone()], &[]).unwrap();
         let models = catalog["models"].as_array().unwrap();
@@ -375,6 +402,34 @@ mod tests {
             .unwrap()
             .contains("based on GPT-5"));
         assert!(models[1].get("service_tiers").is_none());
+        // An effort choice cannot reach an Anthropic-dialect target yet, so
+        // the picker must not offer one.
+        assert_eq!(
+            models[1]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn effort_selectable_route_advertises_real_levels() {
+        let route = PublishedModel {
+            id: published_model_id("codex-oauth", "gpt-5.2-codex"),
+            route: "codex-oauth".into(),
+            model: "gpt-5.2-codex".into(),
+            effort_selectable: true,
+        };
+        let catalog = build_codex_catalog(baseline(), &[route], &[]).unwrap();
+        let levels = catalog["models"][1]["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|level| level["effort"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(levels, vec!["low", "medium", "high"]);
+        assert_eq!(catalog["models"][1]["default_reasoning_level"], "medium");
     }
 
     #[test]
@@ -383,11 +438,13 @@ mod tests {
             id: published_model_id("a", "one"),
             route: "a".into(),
             model: "one".into(),
+            effort_selectable: true,
         };
         let b = PublishedModel {
             id: published_model_id("b", "two"),
             route: "b".into(),
             model: "two".into(),
+            effort_selectable: false,
         };
         let catalog =
             build_codex_catalog(baseline(), &[a, b], &["b/two".into(), "a/one".into()]).unwrap();

@@ -99,6 +99,9 @@ pub fn parse_request(body: &Value) -> CanonRequest {
                     .collect()
             })
             .unwrap_or_default(),
+        // Anthropic carries no request-level effort knob; its `thinking`
+        // budget is a different control and is not mapped here.
+        reasoning_effort: None,
     }
 }
 

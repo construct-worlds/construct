@@ -173,6 +173,10 @@ pub fn parse_request(body: &Value) -> CanonRequest {
                     .collect()
             })
             .unwrap_or_default(),
+        reasoning_effort: body
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
 }
 
