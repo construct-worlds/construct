@@ -5657,12 +5657,13 @@ fn render_route_menu(f: &mut Frame, app: &App) {
     let model_w = inner_w.saturating_sub(target_w).saturating_sub(1);
 
     let targets_focused = menu.focus == crate::app::route_menu::RouteFocus::Targets;
+    // Highlight wins over "disabled": a login-blocked target is still a
+    // navigable row (arrow / hover / Enter-to-sign-in), so selection and
+    // mouse hover must light it the same way as a healthy row. Unselected
+    // blocked targets stay muted — readable, not border+DIM (that was so
+    // dark expired OAuth rows looked invisible).
     let row_style = |enabled: bool, highlighted: bool, focused: bool| {
-        if !enabled {
-            Style::default()
-                .fg(app.theme.border)
-                .add_modifier(Modifier::DIM)
-        } else if highlighted && focused {
+        if highlighted && focused {
             Style::default()
                 .fg(app.theme.text)
                 .bg(app.theme.inactive_highlight_bg)
@@ -5673,6 +5674,8 @@ fn render_route_menu(f: &mut Frame, app: &App) {
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD)
+        } else if !enabled {
+            Style::default().fg(app.theme.muted)
         } else {
             Style::default().fg(app.theme.text)
         }
@@ -5832,49 +5835,69 @@ fn render_route_menu(f: &mut Frame, app: &App) {
 
     // Model column, or why this target cannot be used.
     if let Some(reason) = menu.focused_blocker() {
-        f.render_widget(
-            Paragraph::new(Line::styled(
-                format!(" {}", truncate(reason, model_w.saturating_sub(1) as usize)),
-                // Also `muted`: an explanation nobody can read is no
-                // explanation. The row it belongs to already carries the
-                // disabled styling.
+        if menu.focused_login_command().is_some() {
+            // Login blockers get one short line with a clickable `login`
+            // word — the long daemon reason ("…run `claude` once to renew…")
+            // was both too long for the column and hid the action.
+            let prefix = crate::app::route_menu::login_blocker_prefix(reason);
+            let login_label = "login";
+            // Leading space matches every other body row's left pad.
+            let prefix_cells = 1 + UnicodeWidthStr::width(prefix);
+            let login_cells = UnicodeWidthStr::width(login_label);
+            let login_hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+                my == body_start
+                    && mx >= model_x.saturating_add(prefix_cells as u16)
+                    && mx < model_x
+                        .saturating_add(prefix_cells as u16)
+                        .saturating_add(login_cells as u16)
+            });
+            // Whole right-column body is the hit target (see hit_at); the
+            // word itself is the visual affordance.
+            let login_style = if login_hovered {
                 Style::default()
-                    .fg(app.theme.muted)
-                    .add_modifier(Modifier::ITALIC),
-            ))
-            .wrap(ratatui::widgets::Wrap { trim: true }),
-            Rect {
-                x: model_x,
-                y: body_start,
-                width: model_w,
-                height: 1,
-            },
-        );
-        // A login blocker is one keypress from fixed, so the action gets
-        // its own line in the accent color rather than hiding in the
-        // muted prose (spec 0117: the command is the owning CLI's).
-        if let Some(cmd) = menu.focused_login_command() {
-            let row = body_start.saturating_add(1);
-            if row < last_row {
-                f.render_widget(
-                    Paragraph::new(Line::styled(
-                        format!(
-                            " {}",
-                            truncate(
-                                &format!("Enter: run `{cmd}` in a new session"),
-                                model_w.saturating_sub(1) as usize
-                            )
-                        ),
-                        Style::default().fg(app.theme.accent),
-                    )),
-                    Rect {
-                        x: model_x,
-                        y: row,
-                        width: model_w,
-                        height: 1,
-                    },
-                );
-            }
+                    .fg(app.theme.text)
+                    .bg(app.theme.inactive_highlight_bg)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::UNDERLINED)
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {prefix}"),
+                    Style::default().fg(app.theme.muted),
+                ),
+                Span::styled(login_label.to_string(), login_style),
+            ]);
+            f.render_widget(
+                Paragraph::new(line),
+                Rect {
+                    x: model_x,
+                    y: body_start,
+                    width: model_w,
+                    height: 1,
+                },
+            );
+        } else {
+            f.render_widget(
+                Paragraph::new(Line::styled(
+                    format!(" {}", truncate(reason, model_w.saturating_sub(1) as usize)),
+                    // Also `muted`: an explanation nobody can read is no
+                    // explanation. The row it belongs to already carries the
+                    // disabled styling.
+                    Style::default()
+                        .fg(app.theme.muted)
+                        .add_modifier(Modifier::ITALIC),
+                ))
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+                Rect {
+                    x: model_x,
+                    y: body_start,
+                    width: model_w,
+                    height: 1,
+                },
+            );
         }
     } else {
         let models = menu.models();

@@ -16484,10 +16484,17 @@ mod tests {
         app.select_session("s1".into());
         app.open_route_menu("s1".into(), 40, 29).await;
 
-        // The blocked target renders its sign-in action line.
+        // The blocked target renders a short state + clickable "login".
         app.move_route_menu_selection(1);
         let frame = rendered(&mut app, 120, 30);
-        assert!(frame.contains("run `kimi` in a new session"), "{frame}");
+        assert!(
+            frame.contains("not logged in. click here to login"),
+            "login blocker uses the short action line: {frame}"
+        );
+        assert!(
+            !frame.contains("run `kimi` in a new session"),
+            "the long Enter: run … line is gone: {frame}"
+        );
 
         app.activate_route_menu().await;
         assert!(app.route_menu.is_none(), "the menu closes into the login");

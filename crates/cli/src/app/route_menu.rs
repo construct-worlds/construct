@@ -292,6 +292,17 @@ pub fn native_selection(model: Option<&str>) -> Option<(String, String)> {
         .flatten()
 }
 
+/// Leading text for a login blocker's model-column row — the clickable
+/// word `login` is appended by the renderer. Expiry is the common case
+/// that used to bury the action in a multi-clause reason string.
+pub fn login_blocker_prefix(reason: &str) -> &'static str {
+    if reason.to_ascii_lowercase().contains("expired") {
+        "token expired. click here to "
+    } else {
+        "not logged in. click here to "
+    }
+}
+
 /// One line on what a redirect does, shown once between "No redirect" and
 /// the targets it contrasts with. Short on purpose: the picker is a menu,
 /// not documentation, and the sentence has to earn its two rows — it must
@@ -406,16 +417,17 @@ impl RouteMenu {
     }
 
     /// Rows in the two-column body — tall enough for every target, for
-    /// the largest model list any target offers, and for a blocker plus
-    /// its sign-in action line, so switching the left column does not
-    /// resize the popup.
+    /// the largest model list any target offers, and for a login-blocker
+    /// action line, so switching the left column does not resize the
+    /// popup.
     pub fn body_rows(&self) -> usize {
         let blocker_rows = if self
             .routes
             .iter()
             .any(|r| r.unavailable_reason.is_some() && r.login_command.is_some())
         {
-            2
+            // One short line: "token expired. click here to login".
+            1
         } else {
             0
         };
@@ -550,6 +562,15 @@ impl RouteMenu {
         route.login_command.clone()
     }
 
+    /// Short prose that precedes the clickable `login` word in the model
+    /// column for a login blocker. The daemon's full reason is kept for
+    /// status messages; the menu only needs a one-line state + action.
+    pub fn focused_login_blocker_prefix(&self) -> Option<&'static str> {
+        let reason = self.focused_blocker()?;
+        self.focused_login_command()?;
+        Some(login_blocker_prefix(reason))
+    }
+
     /// Place the menu above its anchor when there isn't room below — the
     /// modeline sits at the bottom of the frame, so downward is almost
     /// never available.
@@ -562,6 +583,14 @@ impl RouteMenu {
             .saturating_add(6) as u16;
         // The model column is sized for the widest model any target
         // offers, so the layout does not jump as the highlight moves.
+        let blocker_w = self
+            .focused_login_blocker_prefix()
+            .map(|p| p.chars().count() + "login".len())
+            .or_else(|| {
+                self.focused_blocker()
+                    .map(|b| b.chars().count().min(40))
+            })
+            .unwrap_or(0);
         let models_w = self
             .routes
             .iter()
@@ -569,7 +598,7 @@ impl RouteMenu {
             .chain(self.routes.iter().map(|r| r.model.chars().count()))
             .max()
             .unwrap_or(0)
-            .max(self.focused_blocker().map(|b| b.chars().count()).unwrap_or(0).min(40))
+            .max(blocker_w)
             .saturating_add(4) as u16;
 
         let max_w = size.width.saturating_sub(2).max(12);
@@ -906,9 +935,44 @@ mod tests {
         assert_eq!(m.focused_login_command(), None, "usable targets offer models, not sign-in");
     }
 
-    /// The model column of a blocked target is one big action: the reason
-    /// and its sign-in line both activate it, including rows past the
-    /// single pseudo-model entry.
+    /// The model column condenses the daemon's long reason into a short
+    /// state + "login" action. Expiry vs absence use different lead-ins so
+    /// the user sees which case they are in without reading a multi-clause
+    /// sentence.
+    #[test]
+    fn login_blocker_prefix_distinguishes_expiry_from_absence() {
+        assert_eq!(
+            login_blocker_prefix("claude login has expired; run `claude` once to renew it"),
+            "token expired. click here to "
+        );
+        assert_eq!(
+            login_blocker_prefix("not logged in to kimi; run `kimi` and sign in"),
+            "not logged in. click here to "
+        );
+        let mut expired = option(
+            "claude-oauth",
+            &["sonnet"],
+            Some("claude login has expired; run `claude` once to renew it"),
+        );
+        expired.login_command = Some("claude".into());
+        let mut m = menu(vec![expired], None);
+        m.selected = 1;
+        assert_eq!(
+            m.focused_login_blocker_prefix(),
+            Some("token expired. click here to ")
+        );
+        // Key/dialect blockers keep the full reason and offer no prefix.
+        m = menu(
+            vec![option("glm", &["glm-5"], Some("GLM_API_KEY is not set"))],
+            None,
+        );
+        m.selected = 1;
+        assert_eq!(m.focused_login_blocker_prefix(), None);
+    }
+
+    /// The model column of a blocked target is one big action: any click
+    /// there activates the sign-in (the underlined `login` word is the
+    /// visual affordance; the whole right body remains the hit target).
     #[test]
     fn clicks_on_a_blocker_activate_it_anywhere_in_the_column() {
         let mut blocked = option("kimi", &["kimi-k2.5"], Some("not logged in"));
@@ -920,11 +984,14 @@ mod tests {
         let body = first + m.header_rows();
         let divider = m.area.x + 1 + m.target_col_w;
         assert_eq!(m.hit_at(divider + 2, body), Some(RouteHit::Model(0)));
-        assert_eq!(
-            m.hit_at(divider + 2, body + 1),
-            Some(RouteHit::Model(0)),
-            "the action line is clickable too"
-        );
+        // Extra body rows (taller left column) still fire the same action.
+        if m.visible_body_rows > 1 {
+            assert_eq!(
+                m.hit_at(divider + 2, body + 1),
+                Some(RouteHit::Model(0)),
+                "the rest of the right column is still the action"
+            );
+        }
     }
 
     /// A target that cannot be used shows why, in place of models.
