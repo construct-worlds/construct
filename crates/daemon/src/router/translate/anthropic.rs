@@ -167,12 +167,38 @@ fn parse_block(block: &Value) -> Option<CanonBlock> {
     }
 }
 
+fn thinking_budget(effort: &str) -> Option<u64> {
+    match effort {
+        "low" => Some(4_096),
+        "medium" => Some(12_288),
+        "high" | "xhigh" => Some(24_576),
+        _ => None,
+    }
+}
+
 pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
     let mut out = Map::new();
     out.insert("model".into(), json!(model));
+    let forces_tool = !req.tools.is_empty()
+        && matches!(
+            req.tool_choice,
+            Some(CanonToolChoice::Required) | Some(CanonToolChoice::Named(_))
+        );
+    let budget = req.reasoning_effort.as_deref()
+        .and_then(thinking_budget)
+        .filter(|_| !forces_tool);
     // Anthropic requires max_tokens; a canonical request that lost it
-    // (Responses makes it optional) still has to carry one.
-    out.insert("max_tokens".into(), json!(req.max_tokens.unwrap_or(4096)));
+    // (Responses makes it optional) still has to carry one. Thinking
+    // requires max_tokens to exceed its budget.
+    let mut max_tokens = req.max_tokens.unwrap_or(4096);
+    if let Some(budget) = budget {
+        max_tokens = max_tokens.max(budget + 8_192);
+        out.insert("thinking".into(), json!({
+            "type": "enabled",
+            "budget_tokens": budget
+        }));
+    }
+    out.insert("max_tokens".into(), json!(max_tokens));
     if let Some(system) = &req.system {
         out.insert("system".into(), json!(system));
     }
@@ -241,11 +267,14 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
         };
         out.insert("tool_choice".into(), v);
     }
-    if let Some(t) = req.temperature {
-        out.insert("temperature".into(), json!(t));
-    }
-    if let Some(p) = req.top_p {
-        out.insert("top_p".into(), json!(p));
+    // Extended thinking is incompatible with custom sampling controls.
+    if budget.is_none() {
+        if let Some(t) = req.temperature {
+            out.insert("temperature".into(), json!(t));
+        }
+        if let Some(p) = req.top_p {
+            out.insert("top_p".into(), json!(p));
+        }
     }
     if !req.stop.is_empty() {
         out.insert("stop_sequences".into(), json!(req.stop));
@@ -660,6 +689,33 @@ mod tests {
         };
         let out = emit_request(&req, "claude-opus-5");
         assert_eq!(out["max_tokens"], 4096, "Anthropic rejects a missing max_tokens");
+    }
+
+    #[test]
+    fn reasoning_effort_maps_to_extended_thinking_budget() {
+        let req = CanonRequest {
+            reasoning_effort: Some("medium".into()),
+            max_tokens: Some(1024),
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+            ..Default::default()
+        };
+        let out = emit_request(&req, "claude-opus-5");
+        assert_eq!(out["thinking"], serde_json::json!({
+            "type":"enabled","budget_tokens":12_288
+        }));
+        assert_eq!(out["max_tokens"], 20_480);
+        assert!(out.get("temperature").is_none());
+        assert!(out.get("top_p").is_none());
+    }
+
+    #[test]
+    fn minimal_effort_leaves_thinking_off() {
+        let out = emit_request(&CanonRequest {
+            reasoning_effort: Some("minimal".into()),
+            ..Default::default()
+        }, "claude-opus-5");
+        assert!(out.get("thinking").is_none());
     }
 
     #[test]

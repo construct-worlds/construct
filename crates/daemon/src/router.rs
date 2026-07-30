@@ -99,6 +99,22 @@ pub fn provider_dialect(provider: &str) -> Option<Dialect> {
     }
 }
 
+/// How a route's target consumes a requested reasoning effort (spec 0160).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffortSupport {
+    Unsupported,
+    Verbatim,
+    Thinking,
+}
+
+pub fn profile_effort_support(provider: &str) -> EffortSupport {
+    match provider.to_ascii_lowercase().as_str() {
+        "anthropic" => EffortSupport::Thinking,
+        "openai" | "openai-responses" | "azure" | "azure-openai" => EffortSupport::Verbatim,
+        _ => EffortSupport::Unsupported,
+    }
+}
+
 /// How a harness can be routed.
 ///
 /// Per spec 0115 each entry is an empirical claim about a specific
@@ -309,6 +325,8 @@ pub struct ArmedRoute {
     pub target_dialect: Dialect,
     /// Dialect the harness speaks, i.e. what the response must look like.
     pub client_dialect: Dialect,
+    /// Whether and how the target honors a requested reasoning effort.
+    pub effort: EffortSupport,
     pub client: reqwest::Client,
 }
 
@@ -833,6 +851,7 @@ impl Router {
                 .collect(),
             target_dialect: provider.dialect(),
             client_dialect: routing.dialect,
+            effort: oauth::effort_support(provider),
             client: reqwest::Client::new(),
         })
     }
@@ -958,6 +977,7 @@ impl Router {
             drop_params: &[],
             target_dialect,
             client_dialect: routing.dialect,
+            effort: profile_effort_support(&profile.provider),
             client: reqwest::Client::new(),
         })
     }

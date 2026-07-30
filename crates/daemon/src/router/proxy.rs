@@ -963,6 +963,11 @@ async fn forward_translated(
     let source: serde_json::Value =
         serde_json::from_slice(&body).context("parse intercepted request body")?;
     let mut canon = translate::parse_request(client_dialect, &source);
+    // Never send an unverified effort knob: Codex includes its default on
+    // every request, so guessing here could reject every routed turn.
+    if route.effort == super::EffortSupport::Unsupported {
+        canon.reasoning_effort = None;
+    }
     // Some backends refuse a request whose system prompt does not open with
     // a specific line. Prepending rather than replacing keeps the harness's
     // own instructions intact.

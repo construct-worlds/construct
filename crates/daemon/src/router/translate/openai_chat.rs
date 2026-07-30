@@ -276,6 +276,9 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
             },
         );
     }
+    if let Some(effort) = &req.reasoning_effort {
+        out.insert("reasoning_effort".into(), json!(effort));
+    }
     out.insert("stream".into(), json!(req.stream));
     Value::Object(out)
 }

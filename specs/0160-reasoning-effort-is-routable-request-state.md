@@ -10,15 +10,17 @@ Scope: how a harness's reasoning-effort choice travels through routed requests a
 Reasoning effort is per-request state carried in the request body, not part
 of the published model id. The routed model catalog advertises a real set of
 selectable effort levels for a published model only when the route's target
-accepts the effort knob verbatim (today: targets speaking OpenAI Responses).
-For every other target the catalog advertises a single provider-default
-level, so the picker never offers a choice the route cannot honor.
+has a verified way to honor them. A target may accept the effort knob
+verbatim or map it onto a semantically similar native control. For every
+unsupported target the catalog advertises a single provider-default level,
+so the picker never offers a choice the route cannot honor.
 
 The router's canonical request form carries the effort value so it survives
 the rebuild/translation path, and the byte-forwarding path preserves it
-implicitly. Dialects whose reasoning controls have a different shape
-(Anthropic thinking budgets, Gemini) drop the value rather than guess a
-mapping; mapping effort onto unlike knobs is a separate, future decision.
+implicitly. Anthropic targets map selected levels onto extended-thinking
+budgets, with `minimal` as an explicit off position and default. Targets
+without a verified mapping (including Gemini) drop the value rather than
+guess.
 
 ## Reason
 
@@ -34,16 +36,21 @@ silently ignores would misrepresent what the user selected.
 
 - The published-id codec stays `(route, model)`; effort never enters it.
 - Catalog generation must know, per route, whether the target accepts the
-  effort knob verbatim, and must default to the single-level advertisement
-  when it does not.
+  effort knob verbatim, maps it onto a native control, or does not support
+  it, and must default to the single-level advertisement for unsupported
+  targets.
 - The canonical request form preserves effort end-to-end for accepting
-  targets; adding a new dialect requires deciding whether it carries the
-  knob verbatim, drops it, or (future) maps it.
+  targets; adding a new dialect or target requires deciding whether it
+  carries the knob verbatim, maps it, or drops it.
 - The advertised level set is a conservative intersection until routes carry
   per-model capability metadata.
+- Anthropic `low`, `medium`, and `high` map to 4,096, 12,288, and 24,576
+  thinking tokens. The router raises `max_tokens` above that budget and
+  omits incompatible sampling controls. Forced-tool turns leave thinking
+  off because Anthropic rejects that combination.
 
 ## Non-Goals
 
-- Mapping effort onto Anthropic thinking budgets or other unlike controls.
+- Mapping effort onto Gemini or other unverified provider controls.
 - Surfacing effort in Claude Code's gateway model list, which has no effort
   dimension.

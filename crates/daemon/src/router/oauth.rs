@@ -504,6 +504,15 @@ pub fn unsupported_params(provider: OauthProvider) -> &'static [&'static str] {
     }
 }
 
+/// Effort support per subscription login (spec 0160).
+pub fn effort_support(provider: OauthProvider) -> super::EffortSupport {
+    match provider {
+        OauthProvider::Codex => super::EffortSupport::Verbatim,
+        OauthProvider::Claude => super::EffortSupport::Thinking,
+        OauthProvider::Grok | OauthProvider::Kimi => super::EffortSupport::Unsupported,
+    }
+}
+
 /// System-prompt text a login's backend requires the request to open with.
 ///
 /// The Claude subscription backend expects the Claude Code identity line;
