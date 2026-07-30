@@ -138,7 +138,8 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
 
     // The title bar carries the two split buttons, each with a hover tooltip
     // (icon-only controls whose meaning isn't guessable), and NO close × —
-    // closing a pane lives in the session menu as "close split".
+    // closing a pane lives in the session menu as "close split". Icons are
+    // distinct SVGs (side-by-side vs stacked), not near-identical box glyphs.
     let split_tips: String = page
         .evaluate(
             "JSON.stringify(Array.from(
@@ -153,6 +154,65 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         split_tips.contains("split horizontal") && split_tips.contains("split vertical"),
         "both split buttons need hover tooltips, got {split_tips}"
     );
+    let split_icons: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const btns = Array.from(
+                document.querySelectorAll(
+                  '#paneGrid .pane.is-focused .pane-head button.pane-split-btn'
+                )
+              );
+              return {
+                count: btns.length,
+                directions: btns.map((b) => b.dataset.split),
+                hasSvg: btns.every((b) => !!b.querySelector('svg')),
+                hasHalf: btns.every((b) => !!b.querySelector('.split-half')),
+                // Side-by-side uses a vertical divider (x1 === x2);
+                // stacked uses a horizontal one (y1 === y2).
+                axes: btns.map((b) => {
+                  const line = b.querySelector('.split-divider');
+                  if (!line) return null;
+                  const x1 = line.getAttribute('x1');
+                  const x2 = line.getAttribute('x2');
+                  const y1 = line.getAttribute('y1');
+                  const y2 = line.getAttribute('y2');
+                  if (x1 === x2) return 'vertical-divider';
+                  if (y1 === y2) return 'horizontal-divider';
+                  return 'other';
+                }),
+              };
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate split icons")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        split_icons["count"].as_u64(),
+        Some(2),
+        "focused pane head needs both split buttons: {split_icons:?}"
+    );
+    assert_eq!(
+        split_icons["hasSvg"], true,
+        "split buttons should use SVG diagrams, not glyph text: {split_icons:?}"
+    );
+    assert_eq!(
+        split_icons["hasHalf"], true,
+        "split icons should shade one half so the axis is obvious: {split_icons:?}"
+    );
+    let axes = split_icons["axes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        axes.iter().any(|a| a.as_str() == Some("vertical-divider"))
+            && axes
+                .iter()
+                .any(|a| a.as_str() == Some("horizontal-divider")),
+        "horizontal vs vertical split must use opposite divider axes: {split_icons:?}"
+    );
 
     let close_x: f64 = eval_number(
         &page,
@@ -165,10 +225,49 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         "the title bar carries no × — 'close split' in the session menu replaces it"
     );
 
-    // Focus must not move anything. The focused pane carries an extra
-    // control (the menu pill) that the others don't, so its title bar has to
-    // be sized independently of what it contains — otherwise focusing a pane
-    // nudges its title bar and every pixel below it.
+    // Every pane head carries a menu pill (real overlay on the focused
+    // pane, same-size placeholder on the others) so focusing a pane never
+    // removes "menu" or reflows the title. Title bars stay equal height.
+    let menu_slots: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const heads = Array.from(document.querySelectorAll('#paneGrid .pane-head'));
+              return {
+                count: heads.length,
+                withMenu: heads.filter((h) =>
+                  h.querySelector('.session-menu-overlay, .pane-menu-placeholder')
+                ).length,
+                labels: heads.map((h) => {
+                  const b = h.querySelector(
+                    '.session-menu-overlay button, .pane-menu-placeholder button'
+                  );
+                  return b ? b.textContent.trim() : null;
+                }),
+              };
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate menu slots")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    let head_count = menu_slots["count"].as_u64().unwrap_or(0);
+    assert!(head_count >= 2, "expected two pane heads: {menu_slots:?}");
+    assert_eq!(
+        menu_slots["withMenu"].as_u64(),
+        Some(head_count),
+        "every pane head must keep a menu pill: {menu_slots:?}"
+    );
+    let labels = menu_slots["labels"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        labels.iter().all(|l| l.as_str() == Some("menu")),
+        "menu pills should read 'menu' on every head: {menu_slots:?}"
+    );
+
     let head_geometry: String = page
         .evaluate(
             "JSON.stringify(Array.from(document.querySelectorAll('#paneGrid .pane-head'))

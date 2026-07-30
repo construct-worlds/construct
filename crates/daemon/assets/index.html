@@ -807,10 +807,9 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    /* Fixed height, not content height. The focused pane carries a control
-       the others don't (the session-menu pill), and letting that size the
-       bar would make focusing a pane nudge its title and everything below
-       it — a visible jump every time focus moves. */
+    /* Fixed height, not content height, so a focused-pane-only control can
+       never resize the bar and nudge content below it. (Every head now
+       carries a menu pill — real or placeholder — for the same reason.) */
     height: 26px;
     box-sizing: border-box;
     padding: 0 6px;
@@ -834,19 +833,60 @@
     appearance: none;
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     height: 18px;
     box-sizing: border-box;
     border: 0;
     border-radius: 5px;
     padding: 0 6px;
     background: transparent;
-    color: var(--fg-faint);
+    color: var(--fg-dim);
     font: inherit;
     font-size: 11px;
     line-height: 1;
     cursor: pointer;
   }
   .pane-head button:hover { background: var(--bg-elev-2); color: var(--fg); }
+  /* Split controls: SVG diagrams (not near-identical box glyphs). The
+     frame + divider use currentColor so contrast tracks the head, and
+     the "active half" fill is stronger so the split axis is obvious at
+     a glance — side-by-side vs stacked. */
+  .pane-head button.pane-split-btn {
+    width: 22px;
+    height: 20px;
+    padding: 0;
+    color: var(--fg-dim);
+  }
+  .pane-head button.pane-split-btn svg {
+    display: block;
+    width: 14px;
+    height: 12px;
+  }
+  .pane-head button.pane-split-btn .split-frame {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+  .pane-head button.pane-split-btn .split-divider {
+    stroke: currentColor;
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+  .pane-head button.pane-split-btn .split-half {
+    fill: currentColor;
+    opacity: 0.38;
+  }
+  .pane.is-focused .pane-head button.pane-split-btn {
+    color: var(--fg);
+  }
+  .pane-head button.pane-split-btn:hover {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev-2));
+  }
+  .pane-head button.pane-split-btn:hover .split-half {
+    opacity: 0.55;
+  }
   /* Hover tooltip. The native `title` popup takes about a second to appear
      and can't be styled, which is too slow for icon-only controls whose
      meaning isn't guessable. `aria-label` carries the same text for
@@ -882,15 +922,20 @@
     .has-tip::after { display: none; }
   }
   /* The menu pill, once it lives in a pane head, is a head control like the
-     split buttons rather than a floating overlay. */
-  .pane-head .session-menu-overlay {
+     split buttons rather than a floating overlay. Every pane head carries
+     one — the real overlay on the focused pane, a same-size placeholder on
+     the others — so focusing a pane never shifts title width. */
+  .pane-head .session-menu-overlay,
+  .pane-head .pane-menu-placeholder {
     position: static;
     flex: 0 0 auto;
     top: auto;
     right: auto;
     pointer-events: auto;
+    display: flex;
   }
-  .pane-head .session-menu-overlay button {
+  .pane-head .session-menu-overlay button,
+  .pane-head .pane-menu-placeholder button {
     display: inline-flex;
     align-items: center;
     height: 18px;
@@ -905,7 +950,8 @@
     line-height: 1;
   }
   .pane-head .session-menu-overlay button:hover,
-  .pane-head .session-menu-overlay button[aria-expanded="true"] {
+  .pane-head .session-menu-overlay button[aria-expanded="true"],
+  .pane-head .pane-menu-placeholder button:hover {
     background: var(--bg-elev-2);
     color: var(--fg);
   }
@@ -10443,6 +10489,77 @@ function paneHeadButton(glyph, tip, onClick) {
   return btn;
 }
 
+/**
+ * Same-looking "menu" pill for unfocused pane heads. The real session-menu
+ * overlay is a single DOM node and can only live on the focused pane; this
+ * placeholder keeps title-bar width stable and, on click, focuses the pane
+ * then opens the real menu.
+ */
+function paneMenuPlaceholder(leaf) {
+  const wrap = document.createElement("div");
+  wrap.className = "pane-menu-placeholder";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "menu";
+  btn.title = "Session menu";
+  btn.setAttribute("aria-label", "Session menu");
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    focusPane(leaf.id);
+    // focusPane re-renders the grid and reparents the real overlay onto
+    // this head; open the dropdown on the next frame once that settles.
+    requestAnimationFrame(() => {
+      const menu = $("sessionMenu");
+      const realBtn = $("sessionMenuBtn");
+      if (!menu || !realBtn || sessionMenuOverlayEl.hidden) return;
+      refreshSessionActions();
+      menu.hidden = false;
+      realBtn.setAttribute("aria-expanded", "true");
+    });
+  });
+  wrap.appendChild(btn);
+  return wrap;
+}
+
+/**
+ * Icon-only split control for the pane title bar.
+ *
+ * Naming matches the TUI menu: "horizontal" = side-by-side, "vertical" =
+ * stacked. The SVGs draw a pane frame with a divider on the split axis and a
+ * filled half so the two buttons read as different shapes at small size —
+ * the old ▥/▤ pair looked like two identical squares at low contrast.
+ */
+function paneSplitButton(direction, tip, onClick) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "has-tip pane-split-btn";
+  btn.dataset.tip = tip;
+  btn.dataset.split = direction;
+  btn.setAttribute("aria-label", tip);
+  // viewBox 0 0 14 12 — slightly wider than tall so the side-by-side icon
+  // has room for two readable halves. Strokes use non-scaling-stroke so
+  // the frame stays crisp at the 14×12 render size.
+  btn.innerHTML =
+    direction === "horizontal"
+      ? // Side-by-side: vertical divider, right half filled.
+        `<svg viewBox="0 0 14 12" aria-hidden="true" focusable="false">` +
+        `<rect class="split-frame" x="1" y="1" width="12" height="10" rx="1.5"/>` +
+        `<line class="split-divider" x1="7" y1="1.5" x2="7" y2="10.5"/>` +
+        `<rect class="split-half" x="7.5" y="2" width="4.5" height="8" rx="0.5"/>` +
+        `</svg>`
+      : // Stacked: horizontal divider, bottom half filled.
+        `<svg viewBox="0 0 14 12" aria-hidden="true" focusable="false">` +
+        `<rect class="split-frame" x="1" y="1" width="12" height="10" rx="1.5"/>` +
+        `<line class="split-divider" x1="1.5" y1="6" x2="12.5" y2="6"/>` +
+        `<rect class="split-half" x="2" y="6.5" width="10" height="3.5" rx="0.5"/>` +
+        `</svg>`;
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    onClick();
+  });
+  return btn;
+}
+
 function renderPaneGrid() {
   if (!splitLayoutActive()) {
     // Single-session mode — the pre-split layout, verbatim. Any mirrored
@@ -10524,19 +10641,27 @@ function renderPaneGrid() {
     head.appendChild(title);
 
     // Naming follows the TUI's menu: "horizontal" puts the panes side by
-    // side, "vertical" stacks them.
-    const splitH = paneHeadButton("▥", "split horizontal", () => {
+    // side, "vertical" stacks them. SVG icons (not ▥/▤) so the split axis
+    // is obvious at title-bar size.
+    const splitH = paneSplitButton("horizontal", "split horizontal", () => {
       focusPane(leaf.id);
       splitFocusedPane("right");
     });
-    const splitV = paneHeadButton("▤", "split vertical", () => {
+    const splitV = paneSplitButton("vertical", "split vertical", () => {
       focusPane(leaf.id);
       splitFocusedPane("below");
     });
     head.append(splitH, splitV);
     // No × here: closing a pane lives in the session menu ("close split"),
-    // which hangs off the right end of this same bar.
-    if (leaf.id === focusedId) head.appendChild(sessionMenuOverlayEl);
+    // which hangs off the right end of this same bar. Every head gets a
+    // menu pill — the real overlay on the focused pane, a lookalike
+    // placeholder on the rest — so losing focus never removes "menu" or
+    // reflows the title.
+    if (leaf.id === focusedId) {
+      head.appendChild(sessionMenuOverlayEl);
+    } else {
+      head.appendChild(paneMenuPlaceholder(leaf));
+    }
     pane.appendChild(head);
 
     const body = document.createElement("div");
