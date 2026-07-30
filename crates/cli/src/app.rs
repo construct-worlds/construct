@@ -34266,11 +34266,11 @@ mod tests {
         server.abort();
     }
 
-    /// The tunnel.zarvis.ai name step has no QR, so the modal shell's
-    /// padding is the only breathing room between text and border. Without
-    /// it the body sits flush on the frame and is hard to read.
+    /// Name step on a tall terminal: LAN QR stays for the side-by-side
+    /// layout (same breathing room as the chooser), form text is inset
+    /// from the border, and Enter remains clickable.
     #[tokio::test]
-    async fn remote_name_dialog_body_is_inset_from_border() {
+    async fn remote_name_dialog_keeps_qr_layout_and_padding() {
         let (mut app, _dir, server) = empty_app().await;
         app.remote_control_popup = Some(RemoteControlPopup::Name(RemoteControlName {
             choose: RemoteControlChoose {
@@ -34294,10 +34294,9 @@ mod tests {
             .modal_area
             .expect("name dialog should set modal_area");
         let buf = terminal.backend().buffer();
+        let screen = rendered_text(buf);
 
-        // One cell inside the border, still in the padding gutter — must not
-        // be body text (lan:/local:/name prompt). Body starts after the
-        // Padding::new(2, 2, 1, 1) inset: content origin is (x+1+2, y+1+1).
+        // Shell padding gutter just inside the border.
         let gutter = buf
             .cell((modal.x + 1, modal.y + 1))
             .map(|c| c.symbol().to_string())
@@ -34307,17 +34306,27 @@ mod tests {
             "cell just inside the border should be padding, not body text, got {gutter:?}"
         );
 
-        // Body text itself is present further in (label column of address block).
-        let body = buf
-            .cell((modal.x + 3, modal.y + 2))
-            .map(|c| c.symbol().to_string())
-            .unwrap_or_default();
-        assert_eq!(
-            body, "l",
-            "body content should start after left+top padding (first address label is 'lan:')"
+        // Focused form copy — no re-listed lan:/password: block.
+        assert!(
+            screen.contains("Choose your tunnel name:"),
+            "name prompt should render:\n{screen}"
+        );
+        assert!(
+            screen.contains("quiet-river"),
+            "suggested name should render:\n{screen}"
+        );
+        assert!(
+            !screen.contains("password:"),
+            "name step should not re-list LAN credentials:\n{screen}"
         );
 
-        // Clickable Enter/Esc hints still register despite no QR offset.
+        // Side-by-side QR makes the dialog roughly QR-tall (fixture is 10 rows).
+        assert!(
+            modal.height >= 12,
+            "with QR the name dialog should be at least QR-tall, got height {}",
+            modal.height
+        );
+
         assert!(
             app.layout.remote_control_hits.iter().any(|h| matches!(
                 h.action,
@@ -34325,6 +34334,61 @@ mod tests {
             )),
             "Enter hint should remain clickable on the name step"
         );
+
+        server.abort();
+    }
+
+    /// On a short terminal the name step drops the QR (same threshold as
+    /// the chooser) but still keeps shell padding + a no-QR text indent so
+    /// the form does not sit flush on the frame.
+    #[tokio::test]
+    async fn remote_name_dialog_short_terminal_still_pads_without_qr() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.remote_control_popup = Some(RemoteControlPopup::Name(RemoteControlName {
+            choose: RemoteControlChoose {
+                base: remote_ok_fixture(false),
+                options: vec![],
+                selected: 0,
+                active: None,
+            },
+            name: "quiet-river".into(),
+            pristine: true,
+        }));
+
+        // Height 24 < 30 → no QR. Width still wide enough for the form.
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw name dialog");
+
+        let modal = app
+            .layout
+            .modal_area
+            .expect("name dialog should set modal_area");
+        let buf = terminal.backend().buffer();
+
+        // Content origin after border(1) + pad_left(3) + no_qr_indent(2).
+        let first = buf
+            .cell((modal.x + 1 + 3 + 2, modal.y + 1 + 1))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            first, "C",
+            "no-QR form should start after shell pad + indent ('Choose…')"
+        );
+
+        // Cells inside the left padding gutter stay blank.
+        for dx in 1..=3 {
+            let cell = buf
+                .cell((modal.x + dx, modal.y + 2))
+                .map(|c| c.symbol().to_string())
+                .unwrap_or_default();
+            assert!(
+                cell.trim().is_empty(),
+                "left padding gutter col +{dx} should be blank, got {cell:?}"
+            );
+        }
 
         server.abort();
     }

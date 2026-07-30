@@ -19171,7 +19171,9 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
         crate::app::RemoteControlPopup::Choose(c) => {
             render_remote_choose(app, c, total.width, total.height)
         }
-        crate::app::RemoteControlPopup::Name(n) => render_remote_name(app, n, total.width),
+        crate::app::RemoteControlPopup::Name(n) => {
+            render_remote_name(app, n, total.width, total.height)
+        }
         crate::app::RemoteControlPopup::Starting(p) => render_remote_starting(app, p, total.width),
         crate::app::RemoteControlPopup::Ok { ok, focus } => {
             render_remote_ok(app, ok, *focus, total.width)
@@ -19181,12 +19183,18 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
         }
     };
 
-    // Modal shell: 2 border cells + Padding::new(2, 2, 1, 1) on each axis.
-    // The body is sized to content; these extras keep text off the frame —
-    // important for no-QR steps (tunnel.zarvis.ai name entry / OAuth wait)
-    // where the side-by-side QR layout is not there to create breathing room.
-    let want_w = body_w + 6;
-    let want_h = body_h + 4;
+    // Modal shell: 2 border cells + REMOTE_PAD_* on each axis. The body is
+    // sized to content; these extras keep text off the frame — load-bearing
+    // for steps that drop the QR (short terminals, OAuth wait) where the
+    // side-by-side layout is not there to create breathing room.
+    let want_w = body_w
+        .saturating_add(2)
+        .saturating_add(REMOTE_PAD_LEFT)
+        .saturating_add(REMOTE_PAD_RIGHT);
+    let want_h = body_h
+        .saturating_add(2)
+        .saturating_add(REMOTE_PAD_TOP)
+        .saturating_add(REMOTE_PAD_BOTTOM);
     let w = want_w.min(total.width.saturating_sub(4)).max(40);
     let h = want_h.min(total.height.saturating_sub(2)).max(8);
     if w < 30 || h < 6 {
@@ -19205,7 +19213,12 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border_focused))
-        .padding(ratatui::widgets::Padding::new(2, 2, 1, 1))
+        .padding(ratatui::widgets::Padding::new(
+            REMOTE_PAD_LEFT,
+            REMOTE_PAD_RIGHT,
+            REMOTE_PAD_TOP,
+            REMOTE_PAD_BOTTOM,
+        ))
         .title(Line::from(Span::styled(
             title,
             Style::default()
@@ -19383,6 +19396,20 @@ fn remote_info_lines<'a>(
 /// Blank column between the QR and the text beside it.
 const REMOTE_QR_GAP: u16 = 3;
 
+/// Inset from the dialog border to the body content. Matches the size
+/// budget in [`render_remote_control_popup`] (`body + borders + pad`).
+/// Generous enough that no-QR steps (name entry on a short terminal,
+/// OAuth wait) still read comfortably without the QR column's air.
+const REMOTE_PAD_LEFT: u16 = 3;
+const REMOTE_PAD_RIGHT: u16 = 3;
+const REMOTE_PAD_TOP: u16 = 1;
+const REMOTE_PAD_BOTTOM: u16 = 1;
+
+/// Horizontal indent applied to no-QR body lines so stacked layouts do
+/// not sit on the left edge of the padded content area. Side-by-side
+/// layouts already indent the prose by the QR width + gap.
+const REMOTE_NO_QR_INDENT: u16 = 2;
+
 /// Column at which the dialog's prose wraps.
 ///
 /// The provider explanations are full sentences by design ("cloudflared
@@ -19474,11 +19501,11 @@ fn compose_qr_and_info_z<'a>(
         .unwrap_or(0);
     let info_w = info.iter().map(|l| l.width() as u16).max().unwrap_or(0);
 
-    // `+ 6` mirrors the border/padding budget the caller adds when it
-    // sizes the modal, so we only commit to the wide layout if the wide
-    // layout will actually fit.
+    // Border (2) + left/right pad — mirrors the modal shell budget so we
+    // only commit to the wide layout if the wide layout will actually fit.
+    let shell_w = 2 + REMOTE_PAD_LEFT + REMOTE_PAD_RIGHT;
     let side_w = qr_w + REMOTE_QR_GAP + info_w;
-    if qr_w > 0 && side_w + 6 <= area_w {
+    if qr_w > 0 && side_w + shell_w <= area_w {
         // Centre the text against the QR rather than top-aligning it —
         // the QR is much taller, and a text block pinned to its top
         // edge reads as if it fell off.
@@ -19522,24 +19549,36 @@ fn compose_qr_and_info_z<'a>(
         .iter()
         .map(|r| Line::from(Span::raw(r.clone())))
         .collect();
-    // Stacked: the QR (when present) sits above a blank spacer, then the info
-    // block. Zones keep their columns and shift down past that prefix.
+    // Stacked / no-QR: indent the prose so it does not hug the content
+    // area's left edge. Zones shift by the same indent. A blank spacer
+    // still separates a stacked QR from the text below.
+    let indent = REMOTE_NO_QR_INDENT as usize;
+    let indent_pad = " ".repeat(indent);
     let row_shift = out.len() + usize::from(!out.is_empty());
     let zones = info_zones
         .into_iter()
         .map(|z| RemoteBodyZone {
             row: (row_shift + z.line) as u16,
-            x_start: z.x_start,
-            x_end: z.x_end,
+            x_start: z.x_start + REMOTE_NO_QR_INDENT,
+            x_end: z.x_end + REMOTE_NO_QR_INDENT,
             action: z.action,
         })
         .collect();
     if !out.is_empty() {
         out.push(Line::raw(""));
     }
-    out.extend(info);
+    for line in info {
+        let mut spans = vec![Span::raw(indent_pad.clone())];
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
     let height = out.len() as u16;
-    (out, qr_w.max(info_w), height, zones)
+    let width = if qr_w > 0 {
+        qr_w.max(info_w + REMOTE_NO_QR_INDENT)
+    } else {
+        info_w + REMOTE_NO_QR_INDENT
+    };
+    (out, width, height, zones)
 }
 
 /// The dialog's resting state: reachable on the LAN, published nowhere,
@@ -19723,15 +19762,21 @@ fn render_remote_name<'a>(
     app: &App,
     state: &crate::app::RemoteControlName,
     area_w: u16,
+    area_h: u16,
 ) -> RemotePopupBody<'a> {
-    let mut info = remote_info_lines(app, &state.choose.base, true);
-    info.push(Line::raw(""));
+    // Focused form: do not re-list LAN addresses/credentials here. The
+    // chooser already showed them; packing them above the name field is
+    // what made this step feel flush and hard to read once the QR was
+    // gone. Keep a short, padded form, and (on a tall enough terminal)
+    // keep the LAN QR so the side-by-side layout still supplies the same
+    // breathing room as the chooser.
+    let mut info: Vec<Line> = Vec::new();
     info.push(Line::from(Span::styled(
         "Choose your tunnel name:",
         Style::default().fg(app.theme.text),
     )));
+    info.push(Line::raw(""));
     info.push(Line::from(vec![
-        Span::styled("  ", Style::default()),
         Span::styled(
             format!(" {} ", state.name),
             Style::default()
@@ -19753,6 +19798,7 @@ fn render_remote_name<'a>(
         "Lowercase letters, numbers, hyphens"
     };
     info.extend(wrapped_lines(guidance, Style::default().fg(app.theme.dim)));
+    info.push(Line::raw(""));
     let hint_line = info.len();
     let (line, hint_zones) = remote_hint_line(
         app,
@@ -19788,7 +19834,15 @@ fn render_remote_name<'a>(
         .collect();
     info.push(line);
 
-    let (lines, width, height, body_zones) = compose_qr_and_info_z("", info, area_w, zones);
+    // Same height threshold as the chooser: a local-network QR that would
+    // push the form off a short terminal is dropped; the shell padding +
+    // no-QR indent still keep the form readable.
+    let qr = if area_h >= 30 {
+        &state.choose.base.qr
+    } else {
+        ""
+    };
+    let (lines, width, height, body_zones) = compose_qr_and_info_z(qr, info, area_w, zones);
     (
         " /remote-connect — tunnel.zarvis.ai — name your tunnel ".to_string(),
         app.theme.info,
@@ -20180,13 +20234,24 @@ mod remote_popup_tests {
 
     /// A terminal too narrow for both columns still shows everything —
     /// stacked, and clipped by the modal if it must be, but never
-    /// silently dropped.
+    /// silently dropped. Prose is indented when stacked so it does not
+    /// hug the left edge of the content area.
     #[test]
     fn narrow_terminal_falls_back_to_stacking() {
         let (lines, width, height) = compose_qr_and_info(&qr(), info(5, 44), 50);
-        assert!(width <= 44.max(37), "stacked width is the wider column");
+        assert_eq!(
+            width,
+            44 + REMOTE_NO_QR_INDENT,
+            "stacked width is the wider column (info + indent)"
+        );
         assert!(height >= 19 + 5, "stacked height is QR + blank + info");
         assert_eq!(lines[0].width(), 37, "first row is QR only when stacked");
+        // First info row (after QR + blank) starts with the no-QR indent.
+        let info_row = &lines[20];
+        assert!(
+            info_row.width() as u16 >= 44 + REMOTE_NO_QR_INDENT,
+            "stacked info lines carry the no-QR indent"
+        );
     }
 
     /// Wrapping must not lose a word, however awkward the input.
