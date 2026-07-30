@@ -216,6 +216,10 @@ pub fn parse_request(body: &Value) -> CanonRequest {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         stop: Vec::new(),
+        reasoning_effort: body
+            .pointer("/reasoning/effort")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
 }
 
@@ -308,6 +312,9 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
                 CanonToolChoice::Named(n) => json!({"type":"function","name":n}),
             },
         );
+    }
+    if let Some(effort) = &req.reasoning_effort {
+        out.insert("reasoning".into(), json!({"effort": effort}));
     }
     out.insert("stream".into(), json!(req.stream));
     // The router keeps no server-side conversation state: every turn is
@@ -1001,6 +1008,27 @@ mod tests {
             ]
         }));
         assert_eq!(req.messages.len(), 1);
+    }
+
+    #[test]
+    fn reasoning_effort_survives_parse_and_emit() {
+        let req = parse_request(&json!({
+            "input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+            "reasoning": {"effort": "high", "summary": "auto"}
+        }));
+        assert_eq!(req.reasoning_effort.as_deref(), Some("high"));
+        let emitted = emit_request(&req, "target-model");
+        assert_eq!(emitted["reasoning"], json!({"effort": "high"}));
+    }
+
+    #[test]
+    fn absent_reasoning_effort_emits_no_reasoning_field() {
+        let req = parse_request(&json!({
+            "input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]
+        }));
+        assert_eq!(req.reasoning_effort, None);
+        let emitted = emit_request(&req, "target-model");
+        assert!(emitted.get("reasoning").is_none());
     }
 
     #[test]

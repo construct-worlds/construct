@@ -43,6 +43,12 @@ pub struct CanonRequest {
     pub top_p: Option<f64>,
     pub stream: bool,
     pub stop: Vec<String>,
+    /// Requested reasoning effort (`low` / `medium` / `high` / ...).
+    /// Parsed from dialects that carry it as a request knob and emitted
+    /// only by dialects whose targets accept it verbatim; mapping it onto
+    /// unlike knobs (e.g. Anthropic thinking budgets) is deliberately not
+    /// done here.
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
