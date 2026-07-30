@@ -22,6 +22,13 @@ budgets, with `minimal` as an explicit off position and default. Targets
 without a verified mapping (including Gemini) drop the value rather than
 guess.
 
+Subscription targets may expose a provider-specific scale when their native
+client publishes one. Grok accepts `low`, `medium`, and `high` verbatim and
+defaults to `high`. Kimi K3 accepts `low`, `high`, and `max` through
+`output_config.effort` while thinking remains enabled; Codex presents Kimi
+`max` as its native `xhigh` level. Kimi models that publish no selectable
+effort scale do not advertise one.
+
 ## Reason
 
 Encoding effort into model ids would multiply picker entries, complicate the
@@ -48,6 +55,11 @@ silently ignores would misrepresent what the user selected.
   thinking tokens. The router raises `max_tokens` above that budget and
   omits incompatible sampling controls. Forced-tool turns leave thinking
   off because Anthropic rejects that combination.
+- Grok's scale is forwarded as `reasoning_effort`, with `high` as the
+  catalog default.
+- Kimi K3 requests carry `thinking: {type: enabled}` and map Codex
+  `low/high/xhigh` onto Kimi `low/high/max`. K3 is always-thinking, so its
+  picker does not offer an off position.
 
 ## Non-Goals
 

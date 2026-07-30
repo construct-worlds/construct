@@ -105,6 +105,10 @@ pub enum EffortSupport {
     Unsupported,
     Verbatim,
     Thinking,
+    /// Grok's native `reasoning_effort`, with `high` as its default.
+    Grok,
+    /// Kimi K3's always-on thinking plus `output_config.effort`.
+    Kimi,
 }
 
 pub fn profile_effort_support(provider: &str) -> EffortSupport {
@@ -848,7 +852,7 @@ impl Router {
             name: provider.name().to_string(),
             endpoint: provider.endpoint().to_string(),
             base_url: provider.endpoint().to_string(),
-            model,
+            model: model.clone(),
             api_key: cred.access_token.clone(),
             // Every subscription backend here takes a bearer; none accepts
             // the Anthropic key header, even the Anthropic one.
@@ -861,7 +865,7 @@ impl Router {
                 .collect(),
             target_dialect: provider.dialect(),
             client_dialect: routing.dialect,
-            effort: oauth::effort_support(provider),
+            effort: oauth::effort_support(provider, &model),
             client: reqwest::Client::new(),
         })
     }
