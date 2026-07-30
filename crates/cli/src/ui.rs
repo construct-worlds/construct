@@ -5594,7 +5594,9 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " model redirect ",
+            // Titled for the component (the router), while rows and
+            // descriptions keep the effect language ("No redirect", …).
+            " model router ",
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
