@@ -82,8 +82,14 @@ from burning tokens.
   prompt. History and Generate each surface an underlined text field with
   placeholder copy so typing is visibly an input surface (fuzzy
   type-ahead for history; optional keywords for guided generation).
-  Left arrow leaves the keyword field back to the category list; both
-  Escape and `C-g` close the deck. Web may differ.
+  Highlighting either left-column row is enough: printable keys move
+  focus into the right column and type into that field without requiring
+  →/Enter first. Generate's right column is the same whether the row is
+  merely highlighted or fully focused — header, keyword field, and a
+  highlighted `[ generate ]` / `[ regenerate ]` action chip. Left arrow
+  leaves the keyword
+  field back to the category list; both Escape and `C-g` close the deck.
+  Web may differ.
 - Hidden generation sessions must be torn down after use and must never
   appear in user-facing session lists.
 - A generation result must be discarded if a newer turn started while

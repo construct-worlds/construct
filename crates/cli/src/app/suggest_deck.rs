@@ -3,11 +3,16 @@
 //! `C-x .` on an awaiting-input session opens a two-column popup inside
 //! the focused session pane. Generation is **not** kicked off on open —
 //! the left column starts with History and Generate (or Regenerate once a
-//! hand is cached); the user must activate Generate to request a hand via
-//! `session.suggest`. Categories stay visible on the left while the
-//! selected category's concrete prompts appear on the right. History gains
-//! fuzzy type-ahead when selected; Generate/Regenerate opens an explicit
-//! keyword field for optional guided (re)generation.
+//! hand is cached); the user must request a hand via `session.suggest`.
+//! Categories stay visible on the left while the selected category's
+//! concrete prompts appear on the right. History and Generate/Regenerate
+//! share the same interaction rule: once the left-column row is
+//! highlighted, printable keys move focus to the right column and type
+//! into its field (fuzzy history search, or optional guided-generation
+//! keywords) without requiring →/Enter first. The Generate right column
+//! always shows the same surface — header, underlined keyword field, and
+//! a highlighted `[ generate ]` / `[ regenerate ]` action chip — whether
+//! the row is merely highlighted or fully focused.
 //!
 //! The popup is otherwise never modal: outside the explicitly selected
 //! history-search / keyword surfaces, printable input closes it and takes
@@ -35,6 +40,8 @@ pub enum DeckFocus {
 pub enum SuggestDeckHit {
     Category(usize),
     Card(usize),
+    /// Right-column (re)generate action button.
+    GenerateAction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,8 +317,9 @@ impl App {
                 DeckRow::History { count } => (*count)
                     .min(SUGGEST_HISTORY_DISPLAY_CAP)
                     .max(1),
-                // Help line under the keyword field.
-                DeckRow::Generate { .. } | DeckRow::Generating => 1,
+                // Single-line `[ generate ]` action chip under the keyword field.
+                DeckRow::Generate { .. } => 1,
+                DeckRow::Generating => 1,
                 DeckRow::Card(_) => 1,
             };
             max = max.max(n);
@@ -375,50 +383,17 @@ impl App {
             return true;
         }
 
-        // Guided (re)generation is the deck's second explicit text surface.
-        // Enter submits a request steered by the optional keywords; Left
-        // (or Backspace on an empty field) returns to the category list
-        // without closing the deck; Esc/C-g still close entirely above.
-        if let Some(query) = deck.regenerate_query.as_ref() {
-            match key.code {
-                KeyCode::Char(c) if !ctrl && !alt => {
-                    if let Some(d) = self.suggest_deck.as_mut() {
-                        if let Some(q) = d.regenerate_query.as_mut() {
-                            q.push(c);
-                        }
-                    }
-                }
-                KeyCode::Backspace if !query.is_empty() => {
-                    if let Some(d) = self.suggest_deck.as_mut() {
-                        if let Some(q) = d.regenerate_query.as_mut() {
-                            q.pop();
-                        }
-                    }
-                }
-                KeyCode::Left | KeyCode::Backspace => {
-                    if let Some(d) = self.suggest_deck.as_mut() {
-                        d.regenerate_query = None;
-                        d.focus = DeckFocus::Categories;
-                    }
-                }
-                KeyCode::Enter => {
-                    let keywords = query.clone();
-                    self.regenerate_suggestions(keywords).await;
-                }
-                // Swallow other keys so they don't fall through to "typing
-                // always wins" and dismiss the deck while the field is open.
-                _ => {}
-            }
-            return true;
-        }
-
         let history_selected = matches!(
             categories.get(deck.category_selected),
             Some(DeckRow::History { .. })
         );
-        // History is the deck's one explicit text-search surface. Once
-        // highlighted, printable input stays here instead of dismissing the
-        // popup; all other categories retain "typing always wins".
+        let generate_selected = matches!(
+            categories.get(deck.category_selected),
+            Some(DeckRow::Generate { .. })
+        );
+        // History is an explicit text-search surface. Once highlighted,
+        // printable input stays here instead of dismissing the popup; all
+        // other non-text categories retain "typing always wins".
         if history_selected && !ctrl && !alt {
             match key.code {
                 KeyCode::Char(c) => {
@@ -442,10 +417,53 @@ impl App {
             }
         }
 
-        // Outside History (where `g`/`r` remain ordinary fuzzy-search text),
-        // open the explicit guided-generation keyword field. Prefer the
-        // Generate/Regenerate row when present so the highlight tracks.
+        // Generate/Regenerate mirrors History: highlight the left-column
+        // row and printable keys auto-enter the right-column keyword field
+        // (no →/Enter required). Enter while the right column is focused
+        // submits guided (re)generation; Left / empty Backspace returns to
+        // the category list without closing the deck.
+        if generate_selected && !ctrl && !alt {
+            match key.code {
+                KeyCode::Char(c) => {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        d.regenerate_query
+                            .get_or_insert_with(String::new)
+                            .push(c);
+                        d.focus = DeckFocus::Cards;
+                    }
+                    return true;
+                }
+                KeyCode::Backspace => {
+                    let non_empty = deck
+                        .regenerate_query
+                        .as_ref()
+                        .is_some_and(|q| !q.is_empty());
+                    if non_empty {
+                        if let Some(d) = self.suggest_deck.as_mut() {
+                            if let Some(q) = d.regenerate_query.as_mut() {
+                                q.pop();
+                            }
+                        }
+                        return true;
+                    }
+                    // Empty field (or never opened): fall through so Left /
+                    // Backspace can leave the surface or close the deck.
+                }
+                KeyCode::Enter if deck.focus == DeckFocus::Cards => {
+                    let keywords = deck.regenerate_query.clone().unwrap_or_default();
+                    self.regenerate_suggestions(keywords).await;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        // Outside History (where `g`/`r` remain ordinary fuzzy-search text)
+        // and outside an already-highlighted Generate row (where they type
+        // into the keyword field), jump to Generate/Regenerate and open its
+        // keyword surface so the highlight tracks.
         if !history_selected
+            && !generate_selected
             && !ctrl
             && !alt
             && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('r'))
@@ -518,12 +536,16 @@ impl App {
                 }
             }
             // Left/Backspace hand focus back to categories; from categories
-            // they close. History Backspace edits a non-empty query above.
+            // they close. History / Generate Backspace edits a non-empty
+            // query above. Leaving the Generate keyword surface clears it.
             KeyCode::Left | KeyCode::Backspace => match deck.focus {
                 DeckFocus::Categories => self.suggest_deck = None,
                 DeckFocus::Cards => {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.focus = DeckFocus::Categories;
+                        if generate_selected {
+                            d.regenerate_query = None;
+                        }
                     }
                 }
             },
@@ -715,7 +737,7 @@ impl App {
         }
     }
 
-    pub(super) fn hit_suggest_deck(&mut self, hit: SuggestDeckHit) {
+    pub(super) async fn hit_suggest_deck(&mut self, hit: SuggestDeckHit) {
         let Some(deck) = self.suggest_deck.clone() else {
             return;
         };
@@ -733,6 +755,12 @@ impl App {
                     d.card_selected = 0;
                     d.card_scroll = 0;
                     d.focus = DeckFocus::Categories;
+                    // Leaving another category for Generate keeps the shared
+                    // right-column surface; clear any stale keyword field so
+                    // a fresh highlight matches a fresh open.
+                    if !matches!(row, DeckRow::Generate { .. }) {
+                        d.regenerate_query = None;
+                    }
                 }
                 self.ensure_suggest_selection_visible();
                 if matches!(row, DeckRow::Generate { .. }) {
@@ -750,6 +778,24 @@ impl App {
                 }
                 self.ensure_suggest_selection_visible();
                 self.activate_suggest_selection();
+            }
+            SuggestDeckHit::GenerateAction => {
+                let keywords = deck.regenerate_query.clone().unwrap_or_default();
+                // Ensure the Generate row is focused so a button click after
+                // browsing still targets the right session surface.
+                if let Some(index) = self
+                    .suggest_categories(&deck)
+                    .iter()
+                    .position(|row| matches!(row, DeckRow::Generate { .. }))
+                {
+                    if let Some(d) = self.suggest_deck.as_mut() {
+                        d.category_selected = index;
+                        d.focus = DeckFocus::Cards;
+                        d.regenerate_query
+                            .get_or_insert_with(|| keywords.clone());
+                    }
+                }
+                self.regenerate_suggestions(keywords).await;
             }
         }
     }
@@ -949,7 +995,8 @@ mod tests {
                 DeckRow::Top(_) => 1,
                 DeckRow::Verb { count, .. } => (*count).max(1),
                 DeckRow::History { count } => (*count).min(SUGGEST_HISTORY_DISPLAY_CAP).max(1),
-                DeckRow::Generate { .. } | DeckRow::Generating | DeckRow::Card(_) => 1,
+                DeckRow::Generate { .. } => 1,
+                DeckRow::Generating | DeckRow::Card(_) => 1,
             })
             .max()
             .unwrap_or(1);
