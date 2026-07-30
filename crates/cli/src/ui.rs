@@ -12424,6 +12424,16 @@ fn shorten(s: &str, max: usize) -> String {
     }
 }
 
+/// Label for `construct show`: compact one-liner by default, untruncated
+/// multi-line body when `full` is set (`--full` / `-v`).
+pub fn show_event_label(ev: &SessionEvent, full: bool) -> String {
+    if full {
+        full_event_label(ev)
+    } else {
+        short_event_label(ev)
+    }
+}
+
 pub fn short_event_label(ev: &SessionEvent) -> String {
     match ev {
         SessionEvent::Suggestions(hand) => format!("suggestions {}", 1 + hand.verbs.len()),
@@ -12522,6 +12532,116 @@ pub fn short_event_label(ev: &SessionEvent) -> String {
             "compact: {} turns ~{}→{} tok",
             dropped_turns, tokens_before, tokens_after
         ),
+    }
+}
+
+/// Untruncated event text for `construct show --full` / `-v`. May be multi-line;
+/// the CLI indents continuation lines under the timestamp/seq header.
+pub fn full_event_label(ev: &SessionEvent) -> String {
+    match ev {
+        SessionEvent::Message { role, text } => format!("msg:{role:?}\n{text}"),
+        SessionEvent::Reasoning { text } => format!("reasoning\n{text}"),
+        SessionEvent::ToolUse {
+            tool,
+            args,
+            call_id,
+        } => {
+            let id = call_id
+                .as_deref()
+                .map(|c| format!(" id={c}"))
+                .unwrap_or_default();
+            if args.is_null()
+                || args.as_object().is_some_and(|o| o.is_empty())
+                || args.as_array().is_some_and(|a| a.is_empty())
+            {
+                format!("tool {tool}{id}")
+            } else {
+                let args_s = serde_json::to_string_pretty(args)
+                    .unwrap_or_else(|_| args.to_string());
+                format!("tool {tool}{id}\n{args_s}")
+            }
+        }
+        SessionEvent::ToolResult {
+            tool,
+            ok,
+            output,
+            call_id,
+        } => {
+            let id = call_id
+                .as_deref()
+                .map(|c| format!(" id={c}"))
+                .unwrap_or_default();
+            if output.is_empty() {
+                format!("tool-result {tool}{id} ok={ok}")
+            } else {
+                format!("tool-result {tool}{id} ok={ok}\n{output}")
+            }
+        }
+        SessionEvent::AwaitingInput { prompt } => match prompt {
+            Some(p) if !p.is_empty() => format!("awaiting input\n{p}"),
+            _ => "awaiting input".to_string(),
+        },
+        SessionEvent::Status { state, detail } => match detail {
+            Some(d) if !d.is_empty() => format!("status {}\n{d}", state.label()),
+            _ => format!("status {}", state.label()),
+        },
+        SessionEvent::Diff { patch } => {
+            if patch.is_empty() {
+                "diff".to_string()
+            } else {
+                format!("diff\n{patch}")
+            }
+        }
+        SessionEvent::Error { message } => format!("error:\n{message}"),
+        SessionEvent::ToolApprovalRequest {
+            call_id,
+            tool,
+            args_summary,
+            risk,
+            ..
+        } => {
+            let mut out = format!("approve? {tool} id={call_id} risk={risk:?}");
+            if !args_summary.is_empty() {
+                out.push('\n');
+                out.push_str(args_summary);
+            }
+            out
+        }
+        SessionEvent::TaskStart {
+            tool,
+            call_id,
+            args_summary,
+        } => {
+            let mut out = format!("task-start {tool} {call_id}");
+            if !args_summary.is_empty() {
+                out.push('\n');
+                out.push_str(args_summary);
+            }
+            out
+        }
+        SessionEvent::TaskEnd {
+            call_id,
+            ok,
+            output_preview,
+        } => {
+            let mut out = format!("task-end {call_id} ok={ok}");
+            if !output_preview.is_empty() {
+                out.push('\n');
+                out.push_str(output_preview);
+            }
+            out
+        }
+        SessionEvent::NativeSubagent {
+            id,
+            state,
+            event: Some(inner),
+            ..
+        } => {
+            let inner_label = full_event_label(inner);
+            format!("native-subagent {id} {state:?}\n{inner_label}")
+        }
+        // Everything else already has no truncated payload in the short form.
+        other => short_event_label(other),
     }
 }
 
@@ -19759,6 +19879,57 @@ mod remote_popup_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use construct_protocol::MessageRole;
+
+    #[test]
+    fn short_event_label_truncates_long_messages() {
+        let body = format!("{}\nsecond line of the assistant reply", "x".repeat(80));
+        let ev = SessionEvent::Message {
+            role: MessageRole::Assistant,
+            text: body.clone(),
+        };
+        let short = short_event_label(&ev);
+        assert!(short.starts_with("msg:Assistant "));
+        assert!(short.contains("..."), "expected truncation marker: {short}");
+        assert!(
+            !short.contains("second line"),
+            "newlines should collapse in short form: {short}"
+        );
+        assert!(short.chars().count() < body.chars().count());
+    }
+
+    #[test]
+    fn full_event_label_keeps_message_and_tool_bodies() {
+        let body = format!("{}\nsecond line of the assistant reply", "x".repeat(80));
+        let msg = SessionEvent::Message {
+            role: MessageRole::Assistant,
+            text: body.clone(),
+        };
+        let full = full_event_label(&msg);
+        assert_eq!(full, format!("msg:Assistant\n{body}"));
+        assert_eq!(show_event_label(&msg, true), full);
+        assert_eq!(show_event_label(&msg, false), short_event_label(&msg));
+
+        let tool = SessionEvent::ToolResult {
+            tool: "shell".into(),
+            ok: true,
+            output: "line1\nline2\n".into(),
+            call_id: Some("c1".into()),
+        };
+        assert_eq!(
+            full_event_label(&tool),
+            "tool-result shell id=c1 ok=true\nline1\nline2\n"
+        );
+
+        let use_ev = SessionEvent::ToolUse {
+            tool: "read_file".into(),
+            args: serde_json::json!({"path": "/tmp/a"}),
+            call_id: None,
+        };
+        let use_full = full_event_label(&use_ev);
+        assert!(use_full.starts_with("tool read_file\n"));
+        assert!(use_full.contains("\"path\": \"/tmp/a\""));
+    }
 
     #[test]
     fn program_md_link_parses_local_image_links() {
