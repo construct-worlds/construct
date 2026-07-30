@@ -68,28 +68,32 @@ from burning tokens.
 
 - Clients render the hand however fits their surface but must preserve
   invalidation, staging, and typing-always-wins. The TUI advertises the
-  chord on the focused terminal pane's final interior row, flush against
-  the right edge, with an animated pending indicator while a request is
-  in flight. This terminal-local chrome is composited above harness
-  output in both split and zoomed/full-screen layouts, so a harness
-  repaint cannot erase it; hovering the chord explains the action, and
-  clicking it performs the same toggle as the chord. Opening the deck
-  does **not** start generation — the left column always offers History
-  and Generate (labeled Regenerate once a hand is cached); the user must
-  activate Generate to request a hand. The TUI keeps categories beside
-  their concrete prompts in a two-column deck; its rows highlight on
-  hover, category clicks select a preview, and prompt clicks stage that
-  prompt. History and Generate each surface an underlined text field with
-  placeholder copy so typing is visibly an input surface (fuzzy
-  type-ahead for history; optional keywords for guided generation).
-  Highlighting either left-column row is enough: printable keys move
-  focus into the right column and type into that field without requiring
-  →/Enter first. Generate's right column is the same whether the row is
-  merely highlighted or fully focused — header, keyword field, and a
-  highlighted `[ generate ]` / `[ regenerate ]` action chip. Left arrow
-  leaves the keyword
-  field back to the category list; both Escape and `C-g` close the deck.
-  Web may differ.
+  chord on each eligible session terminal pane's final interior row,
+  flush against that pane's right edge, with an animated pending
+  indicator while a request is in flight for **that** session. Hand
+  cache, pending spinner, and open-deck state are all keyed by session
+  id — generating or dealing a hand for one session never changes
+  another session's affordance. This terminal-local chrome is composited
+  above harness output in both split and zoomed/full-screen layouts, so
+  a harness repaint cannot erase it; hovering the chord explains the
+  action, and clicking it toggles the deck for the pane's own session
+  (focusing that session if needed). Switching the selected session
+  closes any open deck that belonged to the previous one. Opening the
+  deck does **not** start generation — the left column always offers
+  History and Generate (labeled Regenerate once a hand is cached); the
+  user must activate Generate to request a hand. The TUI keeps
+  categories beside their concrete prompts in a two-column deck; its
+  rows highlight on hover, category clicks select a preview, and prompt
+  clicks stage that prompt. History and Generate each surface an
+  underlined text field with placeholder copy so typing is visibly an
+  input surface (fuzzy type-ahead for history; optional keywords for
+  guided generation). Highlighting either left-column row is enough:
+  printable keys move focus into the right column and type into that
+  field without requiring →/Enter first. Generate's right column is the
+  same whether the row is merely highlighted or fully focused — header,
+  keyword field, and a highlighted `[ generate ]` / `[ regenerate ]`
+  action chip. Left arrow leaves the keyword field back to the category
+  list; both Escape and `C-g` close the deck. Web may differ.
 - Hidden generation sessions must be torn down after use and must never
   appear in user-facing session lists.
 - A generation result must be discarded if a newer turn started while

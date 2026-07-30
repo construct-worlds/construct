@@ -59,6 +59,24 @@ impl SuggestDeckHitZone {
     }
 }
 
+/// Per-session `C-x .` affordance chip painted on that session's pane.
+/// State (idle / pending / dealt hand) is always looked up by `session_id`,
+/// never shared across sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestAffordanceHit {
+    pub session_id: String,
+    pub area: Rect,
+}
+
+impl SuggestAffordanceHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        col >= self.area.x
+            && col < self.area.x.saturating_add(self.area.width)
+            && row >= self.area.y
+            && row < self.area.y.saturating_add(self.area.height)
+    }
+}
+
 /// Open-popup state. The hand and history live on `App`; this is only
 /// the two cursors plus the history type-ahead query and per-column
 /// scroll offsets (when the body is taller than the height cap).
@@ -329,19 +347,40 @@ impl App {
 
 
 
-    /// `C-x .`: toggle the deck. Opening refreshes the global prompt
-    /// history but does **not** start generation — the user picks History
-    /// to recall prior prompts, or Generate/Regenerate to request a hand
-    /// (spec 0109: on demand only).
+    /// `C-x .` / affordance click: toggle the deck for a specific session.
+    /// Opening refreshes the global prompt history but does **not** start
+    /// generation — the user picks History to recall prior prompts, or
+    /// Generate/Regenerate to request a hand (spec 0109: on demand only).
+    ///
+    /// When `session_id` is `None`, uses the currently selected session
+    /// (keyboard chord). Affordance clicks pass the pane's own session so
+    /// an unfocused split can open its own deck without borrowing another's
+    /// hand / pending state.
     pub(super) async fn toggle_suggest_deck(&mut self) {
-        if self.suggest_deck.is_some() {
-            self.suggest_deck = None;
-            return;
-        }
-        let Some(id) = self.selected_id() else {
+        self.toggle_suggest_deck_for(None).await;
+    }
+
+    pub(super) async fn toggle_suggest_deck_for(&mut self, session_id: Option<String>) {
+        let target = session_id.or_else(|| self.selected_id());
+        let Some(id) = target else {
             self.set_status("no session selected".to_string());
             return;
         };
+        // Toggle closes only when the open deck already belongs to this
+        // session; opening for a different session replaces the previous.
+        if self
+            .suggest_deck
+            .as_ref()
+            .is_some_and(|d| d.session_id == id)
+        {
+            self.suggest_deck = None;
+            return;
+        }
+        // Affordance on an unfocused pane: focus that session so keyboard
+        // routing and deck key ownership stay aligned with the painted UI.
+        if self.selected_id().as_deref() != Some(id.as_str()) {
+            self.select_session(id.clone());
+        }
         if let Ok(r) = self.client.prompt_history_list(Some(50)).await {
             self.prompt_history = r.entries;
         }
@@ -353,6 +392,18 @@ impl App {
             return;
         }
         self.suggest_deck = Some(deck);
+    }
+
+    /// Drop a deck that no longer belongs to the selected session (e.g. the
+    /// user navigated the list while it was open). Called from selection
+    /// changes so chrome never shows another session's deck on the new pane.
+    pub(crate) fn close_suggest_deck_if_session_changed(&mut self) {
+        let Some(deck) = self.suggest_deck.as_ref() else {
+            return;
+        };
+        if self.selected_id().as_deref() != Some(deck.session_id.as_str()) {
+            self.suggest_deck = None;
+        }
     }
 
     /// Deck key routing: returns true when the key was consumed. An

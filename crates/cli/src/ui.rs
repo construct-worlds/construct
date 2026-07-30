@@ -298,7 +298,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.modeline_model_hit = None;
     app.layout.modeline_context_gauge_hit = None;
     app.layout.modeline_theme_hit = None;
-    app.layout.suggest_affordance_hit = None;
+    app.layout.suggest_affordance_hits.clear();
     app.layout.suggest_deck_area = None;
     app.layout.suggest_deck_hits.clear();
     app.layout.suggest_deck_visible_rows = 0;
@@ -505,9 +505,9 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     // take a separate early-return render path), so suggestion chrome must be
     // composited in the shared top-overlay pass after either base layout has
     // finished. Session-picker/configure remain above it as true modals.
-    let suggest_affordance = render_suggest_affordance(f, app);
+    render_suggest_affordances(f, app);
     render_suggest_deck(f, app);
-    render_suggest_affordance_tooltip(f, app, suggest_affordance);
+    render_suggest_affordance_tooltip(f, app);
 
     // The session-picker dialog and the `/configure` dialog are the topmost
     // modals — drawn last so they sit over every base view (including
@@ -4975,9 +4975,11 @@ fn focused_session_pane(app: &App) -> Option<WindowPaneHit> {
         })
 }
 
-/// Persistent suggestion-deck affordance (specs 0109/0155). It belongs to
-/// the focused session terminal rather than the global modeline: right-aligned
-/// flush against the right edge, one row above the bottom border.
+/// Persistent suggestion-deck affordance (specs 0109/0155). One chip per
+/// eligible session pane — not a single global control. Right-aligned flush
+/// against that pane's right edge, one row above its bottom border. Visual
+/// state (idle ◇ / pending spinner / dealt ✦N) is looked up by that pane's
+/// `session_id` so generating for session A never paints on session B.
 ///
 /// Layout (one row, left → right):
 ///   `[transparent][ bg " " ][ bg "◇ C-x ." ][ bg " " ][transparent]`
@@ -4988,101 +4990,115 @@ fn focused_session_pane(app: &App) -> Option<WindowPaneHit> {
 /// - **Exterior cells** stay transparent (untouched) so session content — and
 ///   the scrollbar that shares the rightmost column — shows through, matching
 ///   the terminal scrollbar's see-through treatment.
-fn render_suggest_affordance(f: &mut Frame, app: &mut App) -> Option<Rect> {
-    let Some(session) = app.selected_session() else {
-        return None;
-    };
-    if session.state != SessionState::AwaitingInput
-        || !session.has_pty
-        || session.mode.as_deref() == Some("headless")
-        || app.view_for_window(Some(app.active_window_id)) != ViewMode::Terminal
-    {
-        return None;
-    }
-    let Some(pane) = focused_session_pane(app) else {
-        return None;
-    };
-    if pane.area.width < 12 || pane.area.height < 5 {
-        return None;
-    }
-    // Core label; wrapped in one filled space on each side for interior pad.
-    let core = if let Some(hand) = app.suggestion_hands.get(&session.id) {
-        format!("✦{} C-x .", 1 + hand.verbs.len())
-    } else if app.suggest_pending_active(&session.id) {
-        format!("{} C-x . suggesting…", app.spinner_frame())
+fn render_suggest_affordances(f: &mut Frame, app: &mut App) {
+    use crate::app::suggest_deck::SuggestAffordanceHit;
+
+    // Collect (session_id, window_id, pane area) for every paint target.
+    let mut targets: Vec<(String, Option<u64>, Rect)> = Vec::new();
+    if app.zoom == ZoomMode::View {
+        if let Some(area) = app.layout.view_area {
+            if let Some(session) = app.selected_session() {
+                targets.push((session.id.clone(), Some(app.active_window_id), area));
+            }
+        }
     } else {
-        "◇ C-x .".to_string()
-    };
-    let label = format!(" {core} ");
-    // +4 = 2 exterior transparent cells + room for the two interior spaces
-    // already counted in `label` width when not truncated.
-    let width = UnicodeWidthStr::width(label.as_str())
-        .min(pane.area.width.saturating_sub(2) as usize) as u16;
-    if width == 0 {
-        return None;
+        for pane in &app.layout.main_window_areas {
+            let Some(crate::app::Selection::Session(session_id)) =
+                app.selection_for_window(pane.id)
+            else {
+                continue;
+            };
+            targets.push((session_id, Some(pane.id), pane.area));
+        }
     }
-    // Hit/paint rect spans the chip plus one transparent padding cell per
-    // side, flush against the pane's right edge.
-    let area = Rect {
-        x: pane
-            .area
-            .x
-            .saturating_add(pane.area.width)
-            .saturating_sub(width + 2),
-        // One row above the bottom border (the last interior row). In a
-        // zoomed view the screen edge acts as that border.
-        y: pane
-            .area
-            .y
-            .saturating_add(pane.area.height)
-            .saturating_sub(2),
-        width: width + 2,
-        height: 1,
-    };
-    let label_area = Rect {
-        x: area.x + 1,
-        width,
-        ..area
-    };
-    // Filled-but-translucent background on the chip (including interior
-    // spaces); exterior padding cells keep whatever the session painted.
+
+    let spinner = app.spinner_frame().to_string();
     let bg = blend_color(Color::Black, app.theme.text, 0.30);
-    f.render_widget(Clear, label_area);
-    let mut text = truncate_to_width(&label, width as usize);
-    while UnicodeWidthStr::width(text.as_str()) < width as usize {
-        text.push(' ');
+    let mut hits = Vec::new();
+
+    for (session_id, window_id, pane_area) in targets {
+        let Some(session) = app.sessions.iter().find(|s| s.id == session_id) else {
+            continue;
+        };
+        // View mode is per-window so a Chat-mode split does not pick up the
+        // Terminal-mode affordance from its sibling.
+        if session.state != SessionState::AwaitingInput
+            || !session.has_pty
+            || session.mode.as_deref() == Some("headless")
+            || app.view_for_window(window_id) != ViewMode::Terminal
+        {
+            continue;
+        }
+        if pane_area.width < 12 || pane_area.height < 5 {
+            continue;
+        }
+        // Core label is strictly this session's hand / pending, never another's.
+        let core = if let Some(hand) = app.suggestion_hands.get(&session_id) {
+            format!("✦{} C-x .", 1 + hand.verbs.len())
+        } else if app.suggest_pending_active(&session_id) {
+            format!("{spinner} C-x . suggesting…")
+        } else {
+            "◇ C-x .".to_string()
+        };
+        let label = format!(" {core} ");
+        let width = UnicodeWidthStr::width(label.as_str())
+            .min(pane_area.width.saturating_sub(2) as usize) as u16;
+        if width == 0 {
+            continue;
+        }
+        let area = Rect {
+            x: pane_area
+                .x
+                .saturating_add(pane_area.width)
+                .saturating_sub(width + 2),
+            y: pane_area
+                .y
+                .saturating_add(pane_area.height)
+                .saturating_sub(2),
+            width: width + 2,
+            height: 1,
+        };
+        let label_area = Rect {
+            x: area.x + 1,
+            width,
+            ..area
+        };
+        f.render_widget(Clear, label_area);
+        let mut text = truncate_to_width(&label, width as usize);
+        while UnicodeWidthStr::width(text.as_str()) < width as usize {
+            text.push(' ');
+        }
+        // Same dim chip treatment on every pane so a non-focused split still
+        // advertises its own suggestion state without competing with the
+        // pane border's focus cue.
+        let style = Style::default()
+            .fg(app.theme.accent)
+            .bg(bg)
+            .add_modifier(Modifier::DIM);
+        f.render_widget(Paragraph::new(Line::styled(text, style)), label_area);
+        hits.push(SuggestAffordanceHit { session_id, area });
     }
-    f.render_widget(
-        Paragraph::new(Line::styled(
-            text,
-            Style::default()
-                .fg(app.theme.accent)
-                .bg(bg)
-                .add_modifier(Modifier::DIM),
-        )),
-        label_area,
-    );
-    app.layout.suggest_affordance_hit = Some(area);
-    Some(area)
+    app.layout.suggest_affordance_hits = hits;
 }
 
-fn render_suggest_affordance_tooltip(
-    f: &mut Frame,
-    app: &App,
-    affordance: Option<Rect>,
-) {
-    let (Some(area), Some((mx, my))) = (affordance, app.mouse_pos) else {
+fn render_suggest_affordance_tooltip(f: &mut Frame, app: &App) {
+    let Some((mx, my)) = app.mouse_pos else {
         return;
     };
-    if mx < area.x || mx >= area.x + area.width || my < area.y || my >= area.y + area.height {
+    let Some(hit) = app
+        .layout
+        .suggest_affordance_hits
+        .iter()
+        .find(|hit| hit.contains(mx, my))
+    else {
         return;
-    }
+    };
     render_tooltip_at(
         f,
         &app.theme,
         " Open prompt suggestions · C-x . ",
-        area.x,
-        area.y,
+        hit.area.x,
+        hit.area.y,
         0,
         -3,
     );
@@ -5094,6 +5110,24 @@ fn render_suggest_affordance_tooltip(
 /// popup's inspect-then-choose rhythm. History search and guided
 /// generation are explicit text surfaces with an underlined input field;
 /// printable input elsewhere still dismisses and re-routes.
+/// Pane that owns a session's suggestion chrome (affordance + open deck).
+/// Prefer the window whose selection is that session; fall back to the
+/// focused pane only when the session is the selected one under zoom.
+fn suggest_pane_for_session(app: &App, session_id: &str) -> Option<WindowPaneHit> {
+    if let Some(pane) = app.layout.main_window_areas.iter().find(|pane| {
+        matches!(
+            app.selection_for_window(pane.id),
+            Some(crate::app::Selection::Session(id)) if id == session_id
+        )
+    }) {
+        return Some(*pane);
+    }
+    if app.selected_id().as_deref() == Some(session_id) {
+        return focused_session_pane(app);
+    }
+    None
+}
+
 fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     use crate::app::suggest_deck::{
         DeckFocus, DeckRow, SuggestDeck, SuggestDeckHit, SuggestDeckHitZone,
@@ -5102,7 +5136,9 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     let Some(deck) = app.suggest_deck.clone() else {
         return;
     };
-    let Some(pane) = focused_session_pane(app) else {
+    // Anchor the deck to the session it was opened for — never the focused
+    // pane if that pane is a different session (split views).
+    let Some(pane) = suggest_pane_for_session(app, &deck.session_id) else {
         return;
     };
     let categories = app.suggest_categories(&deck);
