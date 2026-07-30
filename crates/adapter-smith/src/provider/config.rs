@@ -11,9 +11,9 @@
 //! Profiles are always referenced with the explicit `@` prefix and never
 //! win bare-name routing — consistent with spec 0028, switching the
 //! endpoint/billing path is an explicit act. OAuth-backed providers
-//! (`codex-oauth` / `claude-oauth` / `grok-oauth`) are intentionally not
-//! configurable here; they have no base-URL/key surface and keep their own
-//! prefixes.
+//! (`codex-oauth` / `claude-oauth` / `grok-oauth` / `kimi-oauth`) are
+//! intentionally not configurable here; they have no base-URL/key surface
+//! and keep their own prefixes.
 //!
 //! Example `config.toml`:
 //!

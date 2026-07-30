@@ -19,6 +19,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # or  codex login, then use --model codex-oauth:gpt-5.4-mini
 # or  claude login, then use --model claude-oauth:sonnet
 # or  grok login, then use --model grok-oauth:grok-4.3
+# or  kimi login, then use --model kimi-oauth:k3
 # or  run a local ollama (default http://localhost:11434)
 
 construct new --prompt "list the rust files in this repo and summarize what each crate does" smith
@@ -37,6 +38,7 @@ The spec is one of:
   `MODEL_API_KEY`
 - `grok:<name>` — e.g. `grok:grok-4.3` using `GROK_API_KEY` or `XAI_API_KEY`
 - `grok-oauth:<name>` — e.g. `grok-oauth:grok-4.3` using the Grok CLI auth file
+- `kimi-oauth:<name>` — e.g. `kimi-oauth:k3` using the Kimi Code CLI login
 - `ollama:<name>` — e.g. `ollama:llama3.1`
 - `codex-oauth:<name>` — e.g. `codex-oauth:gpt-5.4-mini`
 - `@<name>` — a named endpoint profile (see [Model profiles](#model-profiles)),
@@ -65,6 +67,15 @@ loads a bearer token from the Grok CLI auth file instead of `GROK_API_KEY` /
 `$GROK_HOME/.grok/auth.json` when `GROK_HOME` is set, otherwise
 `~/.grok/auth.json`, and chooses the newest unexpired `key` entry.
 
+`kimi-oauth:` uses your Kimi Code subscription login: run `kimi login` once,
+and smith reads `$KIMI_CODE_HOME/credentials/kimi-code.json` (default
+`~/.kimi-code/credentials/kimi-code.json`) and calls Moonshot's
+Anthropic-compatible coding backend directly with the OAuth bearer token.
+Kimi access tokens are short-lived, so smith refreshes them through Kimi's
+own token endpoint and writes the rotated tokens back to the same file the
+CLI uses. Models: `k3`, `k3-256k`, `kimi-for-coding`,
+`kimi-for-coding-highspeed`.
+
 If you don't pass a model and `CONSTRUCT_SMITH_MODEL` isn't set, smith
 picks: `ANTHROPIC_API_KEY` → `claude-opus-4-8`, else `OPENAI_API_KEY`
 → `gpt-5`, else `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) →
@@ -76,8 +87,8 @@ so you can verify.
 Earlier versions fell through to `ollama:llama3.1` here unconditionally, so a
 machine with no Ollama server running got a session that looked healthy and
 then died mid-turn with a raw transport error instead of failing loudly at
-start. OAuth subscriptions (`claude-oauth:`, `codex-oauth:`, `grok-oauth:`)
-and Ollama are still fully supported — pass one of the explicit prefixes
+start. OAuth subscriptions (`claude-oauth:`, `codex-oauth:`, `grok-oauth:`,
+`kimi-oauth:`) and Ollama are still fully supported — pass one of the explicit prefixes
 above (or `CONSTRUCT_SMITH_MODEL`) rather than relying on auto-detect to
 guess them. In the construct TUI, run `/configure` (or `M-x configure`) to
 see every auth method smith supports, its live-detected status, and — when
@@ -225,6 +236,9 @@ notice in the status bar that opens `/configure`.
   accepted).
 - `GROK_HOME` — override the base directory used by `grok-oauth:` token lookup;
   Smith reads `$GROK_HOME/.grok/auth.json` instead of `~/.grok/auth.json`.
+- `KIMI_CODE_HOME` — override the base directory used by `kimi-oauth:`
+  credential lookup (default `~/.kimi-code`);
+  `CONSTRUCT_KIMI_OAUTH_CREDENTIALS` points at an exact credentials file.
 - `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` / `GEMINI_BASE_URL` /
   `META_BASE_URL` / `OLLAMA_HOST` — point at alternate endpoints. Pointing
   `OPENAI_BASE_URL` at an OpenAI-compatible vendor (OpenRouter, DeepSeek, Groq, xAI,

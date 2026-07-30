@@ -35,9 +35,9 @@ endpoint's URL and credential declared in one place.
 - A profile's underlying wire protocol remains the key for context-window
   heuristics and learned token limits; the `@name` is only a user-facing label.
   Internal keying must not switch to the label.
-- OAuth-backed providers (`codex-oauth`, `claude-oauth`, `grok-oauth`) are not
-  expressible as profiles: they have no base-URL/credential surface and keep
-  their explicit prefixes.
+- OAuth-backed providers (`codex-oauth`, `claude-oauth`, `grok-oauth`,
+  `kimi-oauth`) are not expressible as profiles: they have no
+  base-URL/credential surface and keep their explicit prefixes.
   Declaring one in a profile is a configuration error.
 - Credentials should be referenced indirectly (an env var name) rather than
   written inline, though inline is accepted. When neither is given, the wire

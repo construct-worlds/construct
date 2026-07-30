@@ -87,6 +87,9 @@ pub(crate) fn provider_for(p: Provider) -> Result<Box<dyn LlmProvider>> {
         Provider::GrokOauth => {
             return Err(anyhow!("title-gen does not support grok-oauth provider"));
         }
+        Provider::KimiOauth => {
+            return Err(anyhow!("title-gen does not support kimi-oauth provider"));
+        }
     })
 }
 

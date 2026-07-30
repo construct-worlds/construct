@@ -35,6 +35,9 @@ pub enum OauthProvider {
     Codex,
     /// Grok subscription: xAI's OpenAI-compatible endpoint.
     Grok,
+    /// Kimi Code subscription: Moonshot's Anthropic-compatible coding
+    /// backend.
+    Kimi,
 }
 
 impl OauthProvider {
@@ -44,8 +47,12 @@ impl OauthProvider {
     /// Gemini-shaped protocol the router has no parser or emitter for, and
     /// offering a target it would mistranslate is worse than not offering
     /// it (spec 0116).
-    pub const ALL: &'static [OauthProvider] =
-        &[OauthProvider::Claude, OauthProvider::Codex, OauthProvider::Grok];
+    pub const ALL: &'static [OauthProvider] = &[
+        OauthProvider::Claude,
+        OauthProvider::Codex,
+        OauthProvider::Grok,
+        OauthProvider::Kimi,
+    ];
 
     /// Route name, matching the model-spec prefix smith uses for the same
     /// login so one vocabulary covers both.
@@ -54,12 +61,13 @@ impl OauthProvider {
             OauthProvider::Claude => "claude-oauth",
             OauthProvider::Codex => "codex-oauth",
             OauthProvider::Grok => "grok-oauth",
+            OauthProvider::Kimi => "kimi-oauth",
         }
     }
 
     pub fn dialect(self) -> Dialect {
         match self {
-            OauthProvider::Claude => Dialect::AnthropicMessages,
+            OauthProvider::Claude | OauthProvider::Kimi => Dialect::AnthropicMessages,
             OauthProvider::Codex => Dialect::OpenAiResponses,
             OauthProvider::Grok => Dialect::OpenAiChat,
         }
@@ -73,6 +81,11 @@ impl OauthProvider {
             OauthProvider::Claude => "https://api.anthropic.com/v1/messages",
             OauthProvider::Codex => "https://chatgpt.com/backend-api/codex/responses",
             OauthProvider::Grok => "https://api.x.ai/v1/chat/completions",
+            // Established by probe (2026-07-29): the Kimi Code CLI bundles
+            // the Anthropic SDK pointed at this base, and a real Messages
+            // request with only the bearer returned a real Messages
+            // response.
+            OauthProvider::Kimi => "https://api.kimi.com/coding/v1/messages",
         }
     }
 
@@ -101,9 +114,9 @@ impl OauthProvider {
     /// by decision: their backends are private and neither was observed to
     /// serve a models endpoint, so there is nothing to discover from and
     /// nothing to fall back to. Do not add live discovery for them on the
-    /// assumption that an endpoint exists — the grok subscription backend
-    /// does serve one, and that difference was established by interception,
-    /// not by symmetry.
+    /// assumption that an endpoint exists — the grok and kimi subscription
+    /// backends do serve one, and that difference was established by
+    /// interception, not by symmetry.
     pub fn seed_models(self) -> Vec<String> {
         construct_protocol::slash::models_for_provider(self.name())
     }
@@ -114,6 +127,7 @@ impl OauthProvider {
             OauthProvider::Claude => "claude",
             OauthProvider::Codex => "codex",
             OauthProvider::Grok => "grok",
+            OauthProvider::Kimi => "kimi",
         }
     }
 }
@@ -133,6 +147,7 @@ pub fn read_credential(provider: OauthProvider) -> Result<OauthCredential, Strin
         OauthProvider::Claude => read_claude(),
         OauthProvider::Codex => read_codex(),
         OauthProvider::Grok => read_grok(),
+        OauthProvider::Kimi => read_kimi(),
     }
     .map_err(|e| match e {
         // Expiry is the one failure a user can fix in one step, so it says
@@ -364,6 +379,46 @@ fn read_grok() -> Result<OauthCredential, ReadError> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Kimi: ~/.kimi-code/credentials/kimi-code.json
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+struct KimiAuth {
+    #[serde(default)]
+    access_token: String,
+    /// Unix seconds. The Kimi CLI issues short-lived access tokens
+    /// (`expires_in: 900` observed), so this route goes stale within
+    /// minutes of the CLI's last refresh — expected under the read-only
+    /// rule; the expired message names `kimi` as the renewing tool.
+    #[serde(default)]
+    expires_at: Option<i64>,
+}
+
+fn read_kimi() -> Result<OauthCredential, ReadError> {
+    let path = match std::env::var("KIMI_CODE_HOME") {
+        Ok(h) if !h.trim().is_empty() => PathBuf::from(h),
+        _ => home()?.join(".kimi-code"),
+    }
+    .join("credentials")
+    .join("kimi-code.json");
+    let bytes = std::fs::read(&path).map_err(|_| ReadError::Missing)?;
+    let auth: KimiAuth = serde_json::from_slice(&bytes)
+        .map_err(|e| ReadError::Other(format!("parse {}: {e}", path.display())))?;
+    if auth.access_token.trim().is_empty() {
+        return Err(ReadError::Missing);
+    }
+    if let Some(exp) = auth.expires_at.filter(|e| *e > 0) {
+        if exp - EXPIRY_LEEWAY_SECS <= now_secs() {
+            return Err(ReadError::Expired);
+        }
+    }
+    Ok(OauthCredential {
+        access_token: auth.access_token,
+        account_id: None,
+    })
+}
+
 /// Extra request headers the login's backend requires beyond the bearer.
 ///
 /// These are not optional decoration: each backend rejects requests that
@@ -385,6 +440,9 @@ pub fn extra_headers(provider: OauthProvider, cred: &OauthCredential) -> Vec<(&'
             h
         }
         OauthProvider::Grok => Vec::new(),
+        // Probed: a bare-bearer request succeeds; `anthropic-version` is
+        // accepted but not required, so nothing is mandatory here.
+        OauthProvider::Kimi => Vec::new(),
     }
 }
 
@@ -406,7 +464,9 @@ pub fn unsupported_params(provider: OauthProvider) -> &'static [&'static str] {
         // parallel_tool_calls, prompt_cache_key, reasoning, store, stream,
         // text, tool_choice, tools. Anything else is a 400.
         OauthProvider::Codex => &["max_output_tokens", "temperature", "top_p"],
-        OauthProvider::Claude | OauthProvider::Grok => &[],
+        // Kimi probed with the full Anthropic parameter surface (system,
+        // temperature, top_p, stop_sequences, metadata) — all accepted.
+        OauthProvider::Claude | OauthProvider::Grok | OauthProvider::Kimi => &[],
     }
 }
 
@@ -483,7 +543,7 @@ mod tests {
         assert!(!OauthProvider::ALL
             .iter()
             .any(|p| p.name().contains("antigravity")));
-        assert_eq!(OauthProvider::ALL.len(), 3);
+        assert_eq!(OauthProvider::ALL.len(), 4);
     }
 
     #[test]
@@ -591,6 +651,67 @@ mod tests {
         let err = read_credential(OauthProvider::Grok).unwrap_err();
         assert!(err.contains("expired"), "{err}");
         std::env::remove_var("GROK_HOME");
+    }
+
+    #[test]
+    fn kimi_reads_its_credentials_file_and_checks_expiry() {
+        let _env = test_env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("credentials");
+        std::fs::create_dir_all(&creds).unwrap();
+        let future = chrono::Utc::now().timestamp() + 3600;
+        std::fs::write(
+            creds.join("kimi-code.json"),
+            serde_json::json!({
+                "access_token":"kimi-live","refresh_token":"kimi-rt",
+                "expires_at":future,"scope":"kimi-code","token_type":"Bearer","expires_in":900
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("KIMI_CODE_HOME", dir.path());
+        let cred = read_credential(OauthProvider::Kimi).expect("usable");
+        assert_eq!(cred.access_token, "kimi-live");
+        assert!(cred.account_id.is_none());
+
+        // Kimi's 15-minute tokens make expiry the common state; the message
+        // must name `kimi` as the renewing tool and say we never refresh.
+        let past = chrono::Utc::now().timestamp() - 60;
+        std::fs::write(
+            creds.join("kimi-code.json"),
+            serde_json::json!({"access_token":"kimi-old","expires_at":past}).to_string(),
+        )
+        .unwrap();
+        let err = read_credential(OauthProvider::Kimi).unwrap_err();
+        assert!(err.contains("expired"), "{err}");
+        assert!(err.contains("`kimi`"), "{err}");
+        assert!(err.contains("never"), "must say we do not refresh: {err}");
+        std::env::remove_var("KIMI_CODE_HOME");
+    }
+
+    #[test]
+    fn kimi_missing_login_says_how_to_sign_in() {
+        let _env = test_env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("KIMI_CODE_HOME", dir.path());
+        let err = read_credential(OauthProvider::Kimi).unwrap_err();
+        assert!(err.contains("not logged in"), "{err}");
+        assert!(err.contains("kimi"), "{err}");
+        std::env::remove_var("KIMI_CODE_HOME");
+    }
+
+    /// The kimi backend was probed with the full Anthropic parameter
+    /// surface and a bare-bearer request; nothing is dropped and nothing
+    /// extra is required.
+    #[test]
+    fn the_kimi_backend_needs_no_decoration() {
+        assert!(unsupported_params(OauthProvider::Kimi).is_empty());
+        assert!(required_system_prefix(OauthProvider::Kimi).is_none());
+        let cred = OauthCredential {
+            access_token: "t".into(),
+            account_id: None,
+        };
+        assert!(extra_headers(OauthProvider::Kimi, &cred).is_empty());
     }
 
     /// REGRESSION: claude routed to codex-oauth failed with

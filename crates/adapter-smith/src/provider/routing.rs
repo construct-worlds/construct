@@ -39,6 +39,9 @@ pub enum Provider {
     /// Claude Code subscription path; reads the Claude Code OAuth
     /// credentials and calls the Anthropic API directly (spec 0125).
     ClaudeOauth,
+    /// Kimi Code subscription path; reads the Kimi Code OAuth credentials
+    /// and calls Moonshot's Anthropic-compatible coding backend directly.
+    KimiOauth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +112,12 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
             model: rest.to_string(),
         });
     }
+    if let Some(rest) = s.strip_prefix("kimi-oauth:") {
+        return Ok(ModelSpec {
+            provider: Provider::KimiOauth,
+            model: rest.to_string(),
+        });
+    }
     if let Some(prefix) = s.split(':').next() {
         // Reject unknown explicit prefixes so typos don't silently fall through.
         if s.contains(':')
@@ -124,11 +133,12 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
                     | "codex-oauth"
                     | "claude-oauth"
                     | "claude-code-oauth"
+                    | "kimi-oauth"
             )
         {
             return Err(format!(
                 "unknown provider prefix `{prefix}:` (expected one of \
-                 openai:, anthropic:, gemini:, meta:, ollama:, grok:, grok-oauth:, codex-oauth:, claude-oauth:)"
+                 openai:, anthropic:, gemini:, meta:, ollama:, grok:, grok-oauth:, codex-oauth:, claude-oauth:, kimi-oauth:)"
             ));
         }
     }
@@ -314,5 +324,12 @@ mod tests {
     #[test]
     fn claude_bare_still_routes_to_anthropic_api() {
         assert_eq!(parse("claude-sonnet-4-6").provider, Provider::Anthropic);
+    }
+
+    #[test]
+    fn kimi_oauth_prefix_is_recognized() {
+        let s = parse("kimi-oauth:k3");
+        assert_eq!(s.provider, Provider::KimiOauth);
+        assert_eq!(s.model, "k3");
     }
 }
