@@ -29,6 +29,7 @@ use super::{translate, ArmedRoute, Dialect, Router, SessionRouting, TargetAuth, 
 /// but small heads; this only bounds the header block.
 const MAX_HEAD: usize = 64 * 1024;
 const MAX_ERROR_BODY: usize = 64 * 1024;
+const MAX_REQUEST_BODY: usize = 100 * 1024 * 1024;
 const MAX_RESPONSE_BODY: usize = 100 * 1024 * 1024;
 const MAX_SSE_FRAME: usize = 100 * 1024 * 1024;
 const ERROR_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -463,13 +464,15 @@ async fn handle_intercepted_request<S>(
     pinned_route: Option<ArmedRoute>,
     ctx: Arc<SessionRouting>,
     router: Arc<Router>,
-    request: ParsedRequest,
+    mut request: ParsedRequest,
     body: Vec<u8>,
     construct_gateway_auth: bool,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let body = decode_request_body(&mut request, body)?;
+
     // Claude Code's native gateway integration discovers picker entries
     // from this endpoint. The session-local gateway answers the model-list
     // request here; inference then follows the ordinary native-or-route
@@ -742,12 +745,49 @@ where
             .context("parse content-length")?,
         None => return Ok(Vec::new()),
     };
+    if len > MAX_REQUEST_BODY {
+        bail!("request body exceeded {MAX_REQUEST_BODY} bytes");
+    }
     let mut body = vec![0u8; len];
     stream
         .read_exact(&mut body)
         .await
         .context("read request body")?;
     Ok(body)
+}
+
+/// Decode request compression before inspecting or translating JSON.
+///
+/// Current Codex clients zstd-compress Responses requests by default. A
+/// catalog alias is inside that body, so treating the compressed bytes as
+/// opaque would leak the synthetic model id to ChatGPT. Native requests are
+/// also decoded and forwarded semantically unchanged; removing the encoding
+/// header lets the HTTP client recalculate framing for the decoded bytes.
+fn decode_request_body(request: &mut ParsedRequest, body: Vec<u8>) -> Result<Vec<u8>> {
+    let Some(encoding) = request.header("content-encoding") else {
+        return Ok(body);
+    };
+    if !String::from_utf8_lossy(encoding)
+        .trim()
+        .eq_ignore_ascii_case("zstd")
+    {
+        return Ok(body);
+    }
+
+    use std::io::Read;
+    let decoder = zstd::stream::Decoder::new(body.as_slice()).context("open zstd request body")?;
+    let mut decoded = Vec::new();
+    decoder
+        .take((MAX_REQUEST_BODY + 1) as u64)
+        .read_to_end(&mut decoded)
+        .context("decode zstd request body")?;
+    if decoded.len() > MAX_REQUEST_BODY {
+        bail!("decoded request body exceeded {MAX_REQUEST_BODY} bytes");
+    }
+    request
+        .headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case("content-encoding"));
+    Ok(decoded)
 }
 
 async fn read_chunked<S>(stream: &mut S) -> Result<Vec<u8>>
@@ -1397,6 +1437,27 @@ mod tests {
             rewrite_body(br#"{"beta":true}"#, "x"),
             br#"{"beta":true}"#.to_vec()
         );
+    }
+
+    #[test]
+    fn decodes_codex_zstd_requests_before_model_inspection() {
+        let body = br#"{"model":"construct-grok-oauth/grok-4.5","input":"ping"}"#;
+        let compressed = zstd::stream::encode_all(body.as_slice(), 0).unwrap();
+        let mut request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/codex/responses".to_string(),
+            headers: vec![
+                ("content-encoding".to_string(), b"zstd".to_vec()),
+                (
+                    "content-length".to_string(),
+                    compressed.len().to_string().into_bytes(),
+                ),
+            ],
+        };
+
+        let decoded = decode_request_body(&mut request, compressed).unwrap();
+        assert_eq!(decoded, body);
+        assert!(request.header("content-encoding").is_none());
     }
 
     /// The client's own credential must never ride along to a different

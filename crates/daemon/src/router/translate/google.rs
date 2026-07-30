@@ -297,7 +297,7 @@ pub fn emit_request(req: &CanonRequest, _model: &str) -> (Value, TranslationCont
         body.insert("generationConfig".into(), Value::Object(generation));
     }
 
-    if let Some(choice) = &req.tool_choice {
+    if let Some(choice) = req.tool_choice.as_ref().filter(|_| !req.tools.is_empty()) {
         let mut function = Map::new();
         match choice {
             CanonToolChoice::Auto => {

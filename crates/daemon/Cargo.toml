@@ -35,6 +35,7 @@ base64.workspace = true
 tokio-tungstenite.workspace = true
 qrcode.workspace = true
 httparse.workspace = true
+zstd.workspace = true
 reqwest.workspace = true
 wstunnel.workspace = true
 # Router TLS interception (spec 0113). Pinned to the `ring` backend to
