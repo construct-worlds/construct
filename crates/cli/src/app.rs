@@ -32503,6 +32503,191 @@ mod tests {
         server.abort();
     }
 
+    /// Left-column category rows must keep the same Y positions when
+    /// switching between top pick / verbs and History / Generate. The
+    /// input strip is reserved for height stability, and the body must
+    /// start under that reserved slot even when the field is empty —
+    /// otherwise selecting History shoves every category row down one.
+    #[tokio::test]
+    async fn suggest_deck_category_rows_stay_put_across_input_strip() {
+        use crate::app::suggest_deck::{DeckFocus, SuggestDeckHit};
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].state = construct_protocol::SessionState::AwaitingInput;
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("top-pick draw");
+        let top_pick_ys: Vec<(usize, u16)> = app
+            .layout
+            .suggest_deck_hits
+            .iter()
+            .filter_map(|zone| match zone.hit {
+                SuggestDeckHit::Category(i) => Some((i, zone.area.y)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            top_pick_ys.len() >= 3,
+            "expected top pick + verb + history at least: {top_pick_ys:?}"
+        );
+
+        // Move selection to History (shows the type-ahead field).
+        let history_index = app
+            .suggest_categories(app.suggest_deck.as_ref().unwrap())
+            .iter()
+            .position(|row| matches!(row, crate::app::suggest_deck::DeckRow::History { .. }))
+            .expect("history row");
+        if let Some(d) = app.suggest_deck.as_mut() {
+            d.category_selected = history_index;
+            d.focus = DeckFocus::Categories;
+        }
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("history draw");
+        let history_ys: Vec<(usize, u16)> = app
+            .layout
+            .suggest_deck_hits
+            .iter()
+            .filter_map(|zone| match zone.hit {
+                SuggestDeckHit::Category(i) => Some((i, zone.area.y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            top_pick_ys, history_ys,
+            "selecting History must not shift left-column row Y positions"
+        );
+
+        // Generate also paints the input field — same pin.
+        let generate_index = app
+            .suggest_categories(app.suggest_deck.as_ref().unwrap())
+            .iter()
+            .position(|row| matches!(row, crate::app::suggest_deck::DeckRow::Generate { .. }))
+            .expect("generate row");
+        if let Some(d) = app.suggest_deck.as_mut() {
+            d.category_selected = generate_index;
+        }
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("generate draw");
+        let generate_ys: Vec<(usize, u16)> = app
+            .layout
+            .suggest_deck_hits
+            .iter()
+            .filter_map(|zone| match zone.hit {
+                SuggestDeckHit::Category(i) => Some((i, zone.area.y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            top_pick_ys, generate_ys,
+            "selecting Generate must not shift left-column row Y positions"
+        );
+        server.abort();
+    }
+
+    /// Spec 0109: truncated right-column prompts reveal full text on
+    /// mouse hover or keyboard selection (cards column focused).
+    #[tokio::test]
+    async fn suggest_deck_reveals_full_text_on_hover_and_selection() {
+        use crate::app::suggest_deck::{DeckFocus, SuggestDeckHit};
+
+        // Tail of the fixture only appears once the full-text preview is
+        // painted (the ellipsized row keeps only the leading prefix).
+        let long = "please run cargo test --workspace --all-features and then open a PR with the green CI status attached";
+        let tail = "green CI status attached";
+        assert!(
+            long.len() > 60 && long.ends_with(tail),
+            "fixture must be long enough to ellipsize in the card column"
+        );
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.sessions[0].state = construct_protocol::SessionState::AwaitingInput;
+        app.suggestion_hands.insert(
+            "s1".into(),
+            construct_protocol::SuggestionHand {
+                top: construct_protocol::SuggestionCard {
+                    text: long.into(),
+                },
+                verbs: vec![],
+            },
+        );
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        // Categories focused, no hover: full text stays hidden (only the
+        // ellipsized row paints inside the deck).
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let frame = rendered_text(terminal.backend().buffer());
+        assert!(
+            !frame.contains(tail),
+            "categories focus without hover must not float the full prompt tail"
+        );
+        assert!(
+            frame.contains('…') || frame.contains("please run cargo"),
+            "truncated row should still show a prefix of the prompt"
+        );
+
+        let card = app
+            .layout
+            .suggest_deck_hits
+            .iter()
+            .find(|zone| zone.hit == SuggestDeckHit::Card(0))
+            .copied()
+            .expect("top-pick card hit");
+
+        // Mouse hover reveals the full prompt (may wrap across rows).
+        app.mouse_pos = Some((card.area.x, card.area.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover draw");
+        assert!(
+            rendered_text(terminal.backend().buffer()).contains(tail),
+            "hovering a truncated card should reveal the full prompt text"
+        );
+
+        // Pointer elsewhere in the deck suppresses the sticky keyboard
+        // preview so it does not fight category hover.
+        let category = app
+            .layout
+            .suggest_deck_hits
+            .iter()
+            .find(|zone| zone.hit == SuggestDeckHit::Category(0))
+            .copied()
+            .expect("top-pick category hit");
+        if let Some(d) = app.suggest_deck.as_mut() {
+            d.focus = DeckFocus::Cards;
+            d.card_selected = 0;
+        }
+        app.mouse_pos = Some((category.area.x, category.area.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("category hover draw");
+        assert!(
+            !rendered_text(terminal.backend().buffer()).contains(tail),
+            "pointer on categories should suppress the card full-text preview"
+        );
+
+        // Keyboard selection with the cards column focused reveals it.
+        app.mouse_pos = None;
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("selection draw");
+        assert!(
+            rendered_text(terminal.backend().buffer()).contains(tail),
+            "keyboard-selected card with cards focus should reveal full text"
+        );
+        server.abort();
+    }
+
     /// Specs 0109/0155: with the deck open, accepting the top pick on a
     /// non-PTY session stages the text into the send-input minibuffer —
     /// prefilled, not sent — and keeps the hand cached for a re-open.

@@ -507,6 +507,10 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     // finished. Session-picker/configure remain above it as true modals.
     render_suggest_affordances(f, app);
     render_suggest_deck(f, app);
+    // Full-text card preview sits above the deck chrome but under true
+    // modals (session picker / configure). Affordance tooltip is short
+    // and only appears when the deck is closed, so either order is fine.
+    render_suggest_deck_card_preview(f, app);
     render_suggest_affordance_tooltip(f, app);
 
     // The session-picker dialog and the `/configure` dialog are the topmost
@@ -5208,9 +5212,11 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    // History and Generate both reserve the underlined input strip as soon as
-    // their left-column row is highlighted — highlight and fully-focused
-    // states share the same right-column chrome so the deck does not jump.
+    // History and Generate both reserve a permanent input-strip row in the
+    // deck height so switching categories never resizes the popup. The body
+    // always starts under that reserved slot too — otherwise selecting
+    // History/Generate would shove the left-column rows down by one when the
+    // field appears (and lift them again on top pick / verbs).
     let show_text_input = history_selected || generate_selected;
     use crate::app::suggest_deck::{suggest_reserves_input_row, SUGGEST_DECK_MAX_BODY};
     let reserve_input: u16 = u16::from(suggest_reserves_input_row(&categories));
@@ -5257,11 +5263,11 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     let cards_x = divider_x.saturating_add(1);
     let header_y = area.y.saturating_add(1);
     let input_y = header_y.saturating_add(1);
-    // When the input strip is reserved but not shown (e.g. top pick), body
-    // starts immediately under the header and leftover rows sit empty above
-    // the footer — keeping height stable without a blank "ghost" field.
-    let body_y = if show_text_input {
-        header_y.saturating_add(1).saturating_add(1)
+    // Keep body_y fixed whenever the input strip is reserved, even when the
+    // strip is empty (top pick / verb selected). Only the field contents
+    // change — not the left-column row positions.
+    let body_y = if reserve_input > 0 {
+        input_y.saturating_add(1)
     } else {
         header_y.saturating_add(1)
     };
@@ -5325,6 +5331,8 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     // visual cue that typing stays in the deck instead of dismissing it.
     // Generate shows this as soon as its left-column row is highlighted,
     // matching History (no separate "open the field" visual state).
+    // When the strip is reserved but another category is selected, paint
+    // only the column divider so the vertical rule stays continuous.
     if show_text_input {
         let (value, placeholder) = if generate_selected {
             (
@@ -5365,6 +5373,20 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                 ),
                 Span::styled("│", Style::default().fg(app.theme.border)),
                 Span::styled(field, field_style),
+            ])),
+            Rect {
+                x: inner_x,
+                y: input_y,
+                width: inner_w,
+                height: 1,
+            },
+        );
+    } else if reserve_input > 0 {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(fit_cell("", category_w as usize), Style::default()),
+                Span::styled("│", Style::default().fg(app.theme.border)),
+                Span::styled(fit_cell("", card_w as usize), Style::default()),
             ])),
             Rect {
                 x: inner_x,
@@ -5623,6 +5645,212 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     app.layout.suggest_deck_area = Some(area);
     app.layout.suggest_deck_hits = hit_zones;
     app.layout.suggest_deck_divider_x = Some(divider_x);
+}
+
+/// Floating full-text preview for a truncated suggestion-deck prompt row.
+///
+/// Right-column cards are single-line and ellipsized to the column width.
+/// When a card is mouse-hovered, or keyboard-selected with the cards column
+/// focused, and its text does not fit the row, show the full prompt in a
+/// multi-line tooltip anchored to that row (spec 0109).
+fn render_suggest_deck_card_preview(f: &mut Frame, app: &App) {
+    use crate::app::suggest_deck::{DeckFocus, DeckRow, SuggestDeckHit};
+
+    let Some(deck) = app.suggest_deck.as_ref() else {
+        return;
+    };
+    let Some(deck_area) = app.layout.suggest_deck_area else {
+        return;
+    };
+    let cards = app.suggest_cards(deck);
+    if cards.is_empty() {
+        return;
+    }
+
+    // Prefer the card under the pointer. When the pointer is elsewhere in
+    // the deck (categories / chrome), suppress the keyboard preview so the
+    // popup does not fight the hover highlight. Outside the deck, arrow-key
+    // selection still reveals the focused card.
+    let hovered_card = app.mouse_pos.and_then(|(mx, my)| {
+        app.layout.suggest_deck_hits.iter().find_map(|zone| {
+            if !zone.contains(mx, my) {
+                return None;
+            }
+            match zone.hit {
+                SuggestDeckHit::Card(index) => Some(index),
+                _ => None,
+            }
+        })
+    });
+    let mouse_in_deck = app.mouse_pos.is_some_and(|(mx, my)| {
+        mx >= deck_area.x
+            && mx < deck_area.x.saturating_add(deck_area.width)
+            && my >= deck_area.y
+            && my < deck_area.y.saturating_add(deck_area.height)
+    });
+    let preview_index = match hovered_card {
+        Some(index) => Some(index),
+        None if mouse_in_deck => None,
+        None if deck.focus == DeckFocus::Cards => Some(deck.card_selected),
+        None => None,
+    };
+    let Some(index) = preview_index else {
+        return;
+    };
+    let Some(DeckRow::Card(full_text)) = cards.get(index) else {
+        return;
+    };
+    let Some(zone) = app
+        .layout
+        .suggest_deck_hits
+        .iter()
+        .find(|z| z.hit == SuggestDeckHit::Card(index))
+    else {
+        // Selected card scrolled out of the body — nothing to anchor to.
+        return;
+    };
+
+    let col_w = zone.area.width as usize;
+    if col_w == 0 {
+        return;
+    }
+    let prefix = if index < 9 {
+        format!("{} ", index + 1)
+    } else {
+        "  ".to_string()
+    };
+    let prefix_w = UnicodeWidthStr::width(prefix.as_str());
+    let display_budget = col_w.saturating_sub(prefix_w);
+    if !suggest_card_text_needs_reveal(full_text, display_budget) {
+        return;
+    }
+
+    let total = f.area();
+    let max_inner_w = (total.width.saturating_sub(4) as usize)
+        .min(56)
+        .max(20);
+    let mut lines: Vec<String> = split_preserve_empty_lines(full_text)
+        .into_iter()
+        .flat_map(|line| {
+            wrap_text(line, max_inner_w)
+                .into_iter()
+                .map(|w| w.text)
+        })
+        .collect();
+    if lines.is_empty() {
+        return;
+    }
+    const MAX_PREVIEW_LINES: usize = 12;
+    let overflow = lines.len() > MAX_PREVIEW_LINES;
+    lines.truncate(MAX_PREVIEW_LINES);
+    if overflow {
+        if let Some(last) = lines.last_mut() {
+            *last = truncate_to_width(last, max_inner_w.saturating_sub(1));
+            // Ensure the ellipsis is visible even on a full-width last line.
+            if !last.ends_with('…') {
+                last.push('…');
+            }
+        }
+    }
+
+    let content_w = lines
+        .iter()
+        .map(|l| UnicodeWidthStr::width(l.as_str()))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let width = (content_w as u16)
+        .saturating_add(2)
+        .min(total.width.max(1));
+    let height = (lines.len() as u16)
+        .saturating_add(2)
+        .min(total.height.max(1));
+    if width < 4 || height < 3 {
+        return;
+    }
+
+    let Some(rect) = suggest_card_preview_rect(total, deck_area, zone.area, width, height) else {
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.accent_alt));
+    let body: Vec<Line> = lines
+        .into_iter()
+        .map(|line| {
+            Line::from(Span::styled(
+                line,
+                Style::default().fg(app.theme.text),
+            ))
+        })
+        .collect();
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(body)
+            .block(block)
+            .style(Style::default().fg(app.theme.text)),
+        rect,
+    );
+}
+
+/// True when a single-line right-column slot of `display_budget` columns
+/// cannot show `text` in full (too wide, or multi-line).
+fn suggest_card_text_needs_reveal(text: &str, display_budget: usize) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    if text.contains('\n') || text.contains('\r') {
+        return true;
+    }
+    UnicodeWidthStr::width(text) > display_budget
+}
+
+/// Place the full-text card preview near its row without covering it when
+/// possible. Prefer below the row; flip above when the frame bottom would
+/// clip. Horizontally prefer left of the deck (deck is right-anchored) so
+/// long prompts have room, then fall back to clamping inside the frame.
+fn suggest_card_preview_rect(
+    total: Rect,
+    deck_area: Rect,
+    row_area: Rect,
+    width: u16,
+    height: u16,
+) -> Option<Rect> {
+    if total.width < width || total.height < height {
+        return None;
+    }
+    let total_bottom = total.y.saturating_add(total.height);
+    let total_right = total.x.saturating_add(total.width);
+
+    let below = row_area.y.saturating_add(1);
+    let y = if below.saturating_add(height) <= total_bottom {
+        below
+    } else {
+        row_area.y.saturating_sub(height)
+    };
+    let y = y.clamp(total.y, total_bottom.saturating_sub(height));
+
+    // Prefer sitting just left of the deck so the popup uses free pane space
+    // rather than stacking on top of the truncated row itself.
+    let left_of_deck = deck_area.x.saturating_sub(width);
+    let x = if left_of_deck >= total.x && deck_area.x >= width {
+        left_of_deck
+    } else {
+        // Fall back to left-aligning with the card row, then clamp.
+        row_area
+            .x
+            .min(total_right.saturating_sub(width))
+            .max(total.x)
+    };
+    let x = x.clamp(total.x, total_right.saturating_sub(width));
+
+    Some(Rect {
+        x,
+        y,
+        width,
+        height,
+    })
 }
 
 fn render_route_menu(f: &mut Frame, app: &App) {
@@ -20910,6 +21138,41 @@ mod tests {
         assert!(
             rect.x.saturating_add(rect.width) <= view.x.saturating_add(view.width),
             "tooltip should fit within the session view when there is room: {rect:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_card_text_needs_reveal_only_when_truncated() {
+        assert!(!suggest_card_text_needs_reveal("short", 40));
+        assert!(!suggest_card_text_needs_reveal("exactly ten", 11));
+        assert!(suggest_card_text_needs_reveal("longer than budget", 5));
+        assert!(suggest_card_text_needs_reveal("line one\nline two", 80));
+        assert!(!suggest_card_text_needs_reveal("", 10));
+    }
+
+    #[test]
+    fn suggest_card_preview_rect_prefers_left_of_deck_and_stays_on_screen() {
+        let total = Rect::new(0, 0, 100, 40);
+        let deck = Rect::new(50, 10, 40, 20);
+        let row = Rect::new(70, 15, 18, 1);
+        let rect = suggest_card_preview_rect(total, deck, row, 30, 5).expect("fits");
+        assert_eq!(rect.x, 20, "prefer sitting just left of the deck");
+        assert_eq!(rect.y, 16, "prefer the row below the card");
+        assert_eq!(rect.width, 30);
+        assert_eq!(rect.height, 5);
+
+        // Near the bottom edge: flip above the row.
+        let row_bottom = Rect::new(70, 37, 18, 1);
+        let rect = suggest_card_preview_rect(total, deck, row_bottom, 30, 5).expect("fits");
+        assert_eq!(rect.y, 32, "flip above when below would clip");
+
+        // Deck already flush left: clamp inside the frame.
+        let left_deck = Rect::new(0, 10, 40, 20);
+        let left_row = Rect::new(20, 15, 18, 1);
+        let rect = suggest_card_preview_rect(total, left_deck, left_row, 30, 5).expect("fits");
+        assert!(
+            rect.x + rect.width <= total.width,
+            "must stay inside the frame: {rect:?}"
         );
     }
 
