@@ -37,7 +37,9 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use construct_adapter_common::context_breakdown::{estimate_tokens_from_chars, BreakdownGate};
+use construct_adapter_common::context_breakdown::{
+    estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin,
+};
 use construct_adapter_common::{drive_turn, spawn_stderr_log, TurnOutcome};
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use construct_protocol::adapter::{
@@ -316,34 +318,63 @@ fn message_content_chars(message: &Value) -> usize {
     chars
 }
 
-/// Char sum over every `message` record in a session file. Deliberately a
-/// full scan at gauge cadence (not an incremental tally): the figure
-/// self-corrects across resume, rebinds, and anything pi rewrites behind us.
-fn conversation_chars(path: &Path) -> usize {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return 0;
-    };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|v| v.get("type").and_then(Value::as_str) == Some("message"))
-        .filter_map(|v| v.get("message").map(message_content_chars))
-        .sum()
+/// One walk over the session file: the char sum over every `message`
+/// record, plus the differential fixed-overhead pin (spec 0156) landed on
+/// the file's first assistant usage. The pin observes *before* the
+/// record's own chars are counted — its usage's prompt side is what the
+/// model was sent, which excludes that record's output. Deliberately a
+/// full scan at gauge cadence (not an incremental tally): the figures
+/// self-correct across resume, rebinds, and anything pi rewrites behind us.
+fn session_file_scan(text: &str) -> (usize, FixedOverheadPin) {
+    let mut chars = 0usize;
+    let mut pin = FixedOverheadPin::default();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(message) = v.get("message") else {
+            continue;
+        };
+        if let Some(prompt_side) = pi_prompt_side(message) {
+            pin.observe(prompt_side, estimate_tokens_from_chars(chars));
+        }
+        chars += message_content_chars(message);
+    }
+    (chars, pin)
+}
+
+/// Prompt side of a message record's `usage` — the same arithmetic
+/// `usage_events` feeds the gauge (input + cacheRead + cacheWrite), minus
+/// the event plumbing. `None` when absent or all-zero.
+fn pi_prompt_side(message: &Value) -> Option<u64> {
+    let usage = message.get("usage")?;
+    let field = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let prompt_side = field("input")
+        .saturating_add(field("cacheRead"))
+        .saturating_add(field("cacheWrite"));
+    (prompt_side > 0).then_some(prompt_side)
 }
 
 /// Context breakdown behind the gauge (spec 0156): the session file IS the
 /// conversation pi resends on the next call, so a char-heuristic sum over
-/// its content is a usable `messages` estimate. One segment only — the fixed
-/// prefix (system prompt, tools) never appears on pi's data surface, so it
-/// lands in the client's synthetic `unaccounted` row. `None` while the file
-/// has no conversation content yet.
+/// its content is a usable `messages` estimate, and the differential
+/// `fixed overhead` residual pinned on the first assistant usage measures
+/// the prefix (system prompt, tools) that never appears on pi's data
+/// surface. `None` while the file has no conversation content yet.
 fn breakdown_segments(path: &Path) -> Option<Vec<ContextSegment>> {
-    let chars = conversation_chars(path);
+    let text = std::fs::read_to_string(path).ok()?;
+    let (chars, pin) = session_file_scan(&text);
     (chars > 0).then(|| {
-        vec![ContextSegment::new(
+        let mut segments: Vec<ContextSegment> = pin.segment().into_iter().collect();
+        segments.push(ContextSegment::new(
             "messages",
             estimate_tokens_from_chars(chars),
             true,
-        )]
+        ));
+        segments
     })
 }
 
@@ -1266,28 +1297,37 @@ mod tests {
             .path()
             .join("2026-07-26T00-13-13-240Z_019f9bc4-ca98-7527-9f5d-7ffa067500e2.jsonl");
         let expected = write_breakdown_fixture(&path);
-        assert_eq!(conversation_chars(&path), expected);
-        assert_eq!(conversation_chars(&tmp.path().join("missing.jsonl")), 0);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(session_file_scan(&text).0, expected);
+        assert_eq!(breakdown_segments(&tmp.path().join("missing.jsonl")), None);
     }
 
     #[test]
-    fn breakdown_reports_single_estimated_segment_and_gates_repeats() {
+    fn breakdown_reports_estimated_segments_and_gates_repeats() {
+        use construct_adapter_common::context_breakdown::FIXED_OVERHEAD_LABEL;
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("s.jsonl");
         let chars = write_breakdown_fixture(&path);
 
+        // The fixture's first assistant usage (input 100) lands after 8
+        // user chars (~2 tokens), pinning the fixed-overhead residual at
+        // 98; the messages segment covers the whole conversation sum.
         let segments = breakdown_segments(&path).expect("content present");
         match segments.as_slice() {
-            [ContextSegment {
+            [overhead, ContextSegment {
                 label,
                 tokens,
                 estimated,
             }] => {
+                assert_eq!(
+                    *overhead,
+                    ContextSegment::new(FIXED_OVERHEAD_LABEL, 98, true)
+                );
                 assert_eq!(label, "messages");
                 assert_eq!(*tokens, estimate_tokens_from_chars(chars));
                 assert!(*estimated, "char heuristic must be marked estimated");
             }
-            other => panic!("expected one messages segment: {other:?}"),
+            other => panic!("expected fixed overhead + messages: {other:?}"),
         }
 
         // Report-on-change: an identical rescan stays quiet; growth reports.

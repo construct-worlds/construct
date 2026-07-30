@@ -15,7 +15,9 @@
 //! `CONSTRUCT_CODEX_MODE=interactive|headless`. Honors `CONSTRUCT_CODEX_CMD` for a
 //! full command prefix, falling back to `CONSTRUCT_CODEX_BIN` for a binary path.
 
-use construct_adapter_common::context_breakdown::{estimate_tokens_from_chars, BreakdownGate};
+use construct_adapter_common::context_breakdown::{
+    estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin,
+};
 use construct_adapter_common::{
     codex_sessions_root, drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
 };
@@ -749,9 +751,11 @@ fn last_rollout_usage_totals(path: &Path) -> UsageTotals {
 
 /// Context breakdown behind the gauge (spec 0156): a full scan of the
 /// currently-bound rollout, estimating what occupies the window. Codex's
-/// rollout exposes the base instructions (`session_meta`) and the whole
-/// conversation (`response_item` records), so up to two estimated segments
-/// are derivable — `system prompt` then `messages`, fixed-prefix first.
+/// rollout exposes the base instructions (`session_meta`), the whole
+/// conversation (`response_item` records), and the harness-reported gauge
+/// (`token_count` records), so up to three estimated segments are
+/// derivable — `system prompt`, the differential `fixed overhead`
+/// residual, then `messages`, fixed-prefix first.
 /// Gated so identical reports aren't re-emitted (report on change, spec
 /// 0104's rule applied to the breakdown).
 fn emit_codex_context_breakdown(path: &Path, gate: &mut BreakdownGate, emit: &EventEmitter) {
@@ -774,6 +778,11 @@ fn emit_codex_context_breakdown(path: &Path, gate: &mut BreakdownGate, emit: &Ev
 fn codex_breakdown_segments(text: &str) -> Vec<ContextSegment> {
     let mut system_chars: Option<usize> = None;
     let mut convo_chars = 0usize;
+    // Differential fixed-overhead pin (spec 0156): lands on the current
+    // epoch's first `token_count`, where the conversation estimate (and so
+    // its error) is smallest. What it measures for codex is everything the
+    // rollout can't itemize — tool schemas, per-turn formatting overhead.
+    let mut pin = FixedOverheadPin::default();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -794,10 +803,24 @@ fn codex_breakdown_segments(text: &str) -> Vec<ContextSegment> {
                     .and_then(Value::as_array)
                     .map(|items| items.iter().map(codex_item_content_chars).sum())
                     .unwrap_or(0);
+                pin.reset();
             }
             Some("response_item") => {
                 if let Some(payload) = v.get("payload") {
                     convo_chars += codex_item_content_chars(payload);
+                }
+            }
+            Some("event_msg") => {
+                let last_input = v
+                    .pointer("/payload/info/last_token_usage/input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if v.pointer("/payload/type").and_then(Value::as_str) == Some("token_count")
+                    && last_input > 0
+                {
+                    let estimated = estimate_tokens_from_chars(system_chars.unwrap_or(0))
+                        .saturating_add(estimate_tokens_from_chars(convo_chars));
+                    pin.observe(last_input, estimated);
                 }
             }
             _ => {}
@@ -811,6 +834,7 @@ fn codex_breakdown_segments(text: &str) -> Vec<ContextSegment> {
             true,
         ));
     }
+    segments.extend(pin.segment());
     segments.push(ContextSegment::new(
         "messages",
         estimate_tokens_from_chars(convo_chars),
@@ -2000,6 +2024,51 @@ mod tests {
                 estimate_tokens_from_chars(5),
                 true
             )]
+        );
+    }
+
+    #[test]
+    fn context_breakdown_pins_fixed_overhead_on_epoch_first_token_count() {
+        use construct_adapter_common::context_breakdown::FIXED_OVERHEAD_LABEL;
+        // At the first token_count: system 14 chars (~4 tokens) + convo
+        // 8 chars (~2 tokens) against a 500-token prompt side → 494 pinned.
+        // The later 900-token snapshot must not move the pin.
+        let rollout = concat!(
+            r#"{"type":"session_meta","payload":{"id":"019f-1","base_instructions":{"text":"You are Codex."}}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi there"}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"output_tokens":5,"cached_input_tokens":0},"last_token_usage":{"input_tokens":500}}}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":900,"output_tokens":9,"cached_input_tokens":0},"last_token_usage":{"input_tokens":900}}}}"#,
+            "\n",
+        );
+        let segments = codex_breakdown_segments(rollout);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].label, "system prompt");
+        assert_eq!(
+            segments[1],
+            ContextSegment::new(FIXED_OVERHEAD_LABEL, 494, true)
+        );
+        assert_eq!(segments[2].label, "messages");
+
+        // Compaction starts a new epoch: replacement "sum" (3 chars, ~0
+        // tokens) + system (~4) against the next 600-token prompt → 596.
+        let compacted = format!(
+            "{rollout}{}",
+            concat!(
+                r#"{"type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"sum"}]}]}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"output_tokens":9,"cached_input_tokens":0},"last_token_usage":{"input_tokens":600}}}}"#,
+                "\n",
+            )
+        );
+        let segments = codex_breakdown_segments(&compacted);
+        assert_eq!(
+            segments[1],
+            ContextSegment::new(FIXED_OVERHEAD_LABEL, 596, true)
         );
     }
 
