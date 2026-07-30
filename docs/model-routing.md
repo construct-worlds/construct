@@ -173,8 +173,12 @@ Everything lives under `[router]` in `config.toml` (see
 [router]
 enabled        = true    # default; false opts out of routing and publication
 publish_models = true    # default; false keeps redirects, stops augmenting pickers
-port           = 8917    # fixed: harness processes outlive the daemon and
-                         # keep dialing the port they were given at spawn
+# port         = 8917    # optional pin. When omitted the daemon reclaims the
+                         # port last bound by this home (runtime_dir/router.port),
+                         # falling back to 8917 and then a free port if busy.
+                         # Harness processes outlive the daemon and keep dialing
+                         # the port they were given at spawn, so the persisted
+                         # file is what makes restart safe without config.
 
 # Optional picker/subagent ordering, `<route>/<model>` selectors.
 # Codex exposes only its five lowest-priority catalog entries to

@@ -6,10 +6,13 @@
 //! restarted, never signalled, and never learns of the change.
 //!
 //! Connections are attributed to sessions by the proxy credential the
-//! harness presents, not by which port it dialed. One fixed port is far
-//! easier to reclaim after a daemon restart than a port per session, and
-//! reclaiming it is mandatory: harness processes outlive the daemon and
-//! keep dialing the port they were given at spawn.
+//! harness presents, not by which port it dialed. One listener per home
+//! is far easier to reclaim after a daemon restart than a port per
+//! session, and reclaiming it is mandatory: harness processes outlive
+//! the daemon and keep dialing the port they were given at spawn. The
+//! bound port is persisted under `runtime_dir/router.port` so the same
+//! home comes back on the same port; a second home auto-picks a free
+//! one when the preferred port is busy.
 //!
 //! With `[router] enabled = false` (the default) nothing here runs: no
 //! listener is bound, no CA is generated, and no session's environment is
@@ -435,18 +438,24 @@ pub struct Router {
     /// blind unarmed path.
     publish_models: bool,
     featured_models: Vec<String>,
-    port: u16,
+    /// Preferred port before bind. `0` asks the OS (tests / fallback).
+    preferred_port: u16,
+    /// When true the operator pinned `[router] port` — do not auto-fallback
+    /// on EADDRINUSE and do not overwrite the persisted port file.
+    port_pinned: bool,
     /// Route targets: the `[smith.models.*]` profiles, so an endpoint is
     /// declared once and reachable from both smith and a routed session.
     profiles: BTreeMap<String, ModelProfile>,
     /// `[router.oauth]` model overrides, keyed by provider name.
     oauth_models: BTreeMap<String, crate::config::OauthModels>,
     state_dir: PathBuf,
+    /// Runtime dir of this home — owns `router.port` so the bound port
+    /// is reclaimed on the next start of the same home.
+    runtime_dir: PathBuf,
     ca: RwLock<Option<Arc<RouterCa>>>,
     upstream_proxy: Option<UpstreamProxy>,
     listening: AtomicBool,
-    /// The port actually bound. Equals `port` in every real configuration;
-    /// differs only when `port = 0` asks the OS to choose (tests).
+    /// The port actually bound after [`Self::start`].
     bound_port: std::sync::atomic::AtomicU16,
     observed_tx: tokio::sync::mpsc::UnboundedSender<String>,
     observed_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
@@ -460,6 +469,7 @@ pub struct Router {
 impl Router {
     pub fn new(
         state_dir: PathBuf,
+        runtime_dir: PathBuf,
         cfg: &RouterConfig,
         profiles: BTreeMap<String, ModelProfile>,
     ) -> Arc<Self> {
@@ -469,14 +479,23 @@ impl Router {
             .as_deref()
             .and_then(UpstreamProxy::from_env_value);
         let (observed_tx, observed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let paths = construct_protocol::paths::Paths {
+            config_dir: runtime_dir.clone(),
+            state_dir: state_dir.clone(),
+            data_dir: state_dir.clone(),
+            runtime_dir: runtime_dir.clone(),
+        };
+        let preferred_port = construct_protocol::paths::preferred_router_port(&paths, cfg.port);
         Arc::new(Self {
             enabled: cfg.enabled,
             publish_models: cfg.publish_models,
             featured_models: cfg.featured_models.clone(),
-            port: cfg.port,
+            preferred_port,
+            port_pinned: cfg.port.is_some(),
             profiles,
             oauth_models: cfg.oauth.clone(),
             state_dir,
+            runtime_dir,
             ca: RwLock::new(None),
             upstream_proxy,
             listening: AtomicBool::new(false),
@@ -491,9 +510,13 @@ impl Router {
     /// The port harness processes are told to use.
     pub fn port(&self) -> u16 {
         match self.bound_port.load(Ordering::SeqCst) {
-            0 => self.port,
+            0 => self.preferred_port,
             p => p,
         }
+    }
+
+    fn router_port_file(&self) -> PathBuf {
+        self.runtime_dir.join("router.port")
     }
 
     /// Bind the router's single loopback listener. Idempotent.
@@ -506,22 +529,30 @@ impl Router {
         if !self.enabled || self.listening.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, self.port));
-        let listener = match TcpListener::bind(addr).await {
+        let listener = match self.bind_listener().await {
             Ok(l) => l,
             Err(e) => {
                 self.listening.store(false, Ordering::SeqCst);
-                return Err(e).with_context(|| {
-                    format!(
-                        "bind router listener on 127.0.0.1:{}; sessions spawned by a \
-                         previous daemon can only reach the router on that port",
-                        self.port
-                    )
-                });
+                return Err(e);
             }
         };
-        self.bound_port
-            .store(listener.local_addr()?.port(), Ordering::SeqCst);
+        let bound = listener.local_addr()?.port();
+        self.bound_port.store(bound, Ordering::SeqCst);
+        // Persist only when the port was auto-selected for this home. A
+        // pinned `[router] port = N` is operator intent and must not be
+        // overwritten by whatever happened to bind; `port = 0` is the
+        // test "ask the OS" path and has no reclaim story.
+        if !self.port_pinned && bound != 0 {
+            if let Err(e) =
+                construct_protocol::paths::write_persisted_port(&self.router_port_file(), bound)
+            {
+                tracing::warn!(
+                    path = %self.router_port_file().display(),
+                    error = %e,
+                    "could not persist router port; next restart may pick a different one"
+                );
+            }
+        }
         // Generate the CA up front: a harness reads its trust env once, at
         // spawn, so the file has to exist before the first session starts.
         self.ca()?;
@@ -549,6 +580,34 @@ impl Router {
         });
         tracing::info!(port = self.port(), "router listening");
         Ok(())
+    }
+
+    /// Prefer the configured / persisted port; on `EADDRINUSE` with no pin,
+    /// fall back to an OS-assigned free port so a second home still boots.
+    async fn bind_listener(&self) -> Result<TcpListener> {
+        let preferred = self.preferred_port;
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, preferred));
+        match TcpListener::bind(addr).await {
+            Ok(l) => Ok(l),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && !self.port_pinned => {
+                tracing::warn!(
+                    preferred,
+                    "router port busy; binding an ephemeral free port for this home"
+                );
+                let fallback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+                TcpListener::bind(fallback).await.with_context(|| {
+                    format!(
+                        "bind router listener on 127.0.0.1:0 after 127.0.0.1:{preferred} was busy"
+                    )
+                })
+            }
+            Err(e) => Err(e).with_context(|| {
+                format!(
+                    "bind router listener on 127.0.0.1:{preferred}; sessions spawned by a \
+                     previous daemon can only reach the router on that port"
+                )
+            }),
+        }
     }
 
     /// Take the stream of sessions whose route has just been proven to be
@@ -1123,7 +1182,7 @@ mod tests {
             enabled,
             publish_models: false,
             featured_models: Vec::new(),
-            port: 0,
+            port: Some(0),
             oauth: BTreeMap::new(),
         }
     }
@@ -1157,7 +1216,12 @@ mod tests {
         cfg: RouterConfig,
         profiles: BTreeMap<String, ModelProfile>,
     ) -> Arc<Router> {
-        let r = Router::new(dir.path().to_path_buf(), &cfg, profiles);
+        let r = Router::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            &cfg,
+            profiles,
+        );
         r.start().await.unwrap();
         r
     }
@@ -1177,6 +1241,68 @@ mod tests {
 
     async fn started(dir: &tempfile::TempDir, cfg: RouterConfig) -> Arc<Router> {
         started_with(dir, cfg, BTreeMap::new()).await
+    }
+
+    /// Auto path: preferred port busy → bind free port and persist it for
+    /// the next start of this home. Reclaim-on-restart is covered by the
+    /// `preferred_router_port` unit test (the live listener task outlives
+    /// the `Router` handle, so same-process restart isn't observable).
+    #[tokio::test]
+    async fn auto_port_falls_back_and_persists_when_preferred_is_busy() {
+        let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let busy = holder.local_addr().unwrap().port();
+
+        let dir = tempfile::tempdir().unwrap();
+        // Seed the preferred port so start() tries the busy one first.
+        std::fs::write(dir.path().join("router.port"), format!("{busy}\n")).unwrap();
+
+        let cfg = RouterConfig {
+            enabled: true,
+            publish_models: false,
+            featured_models: Vec::new(),
+            port: None, // auto
+            oauth: BTreeMap::new(),
+        };
+        let r = started(&dir, cfg).await;
+        let bound = r.port();
+        assert_ne!(bound, busy, "must not steal the held port");
+        assert_ne!(bound, 0);
+        let persisted = std::fs::read_to_string(dir.path().join("router.port")).unwrap();
+        assert_eq!(persisted.trim().parse::<u16>().unwrap(), bound);
+        // Keep `r` and `holder` alive so nothing else steals the ports mid-assert.
+        let _keep = (r, holder);
+    }
+
+    /// A pinned `[router] port = N` must not auto-fallback or rewrite the
+    /// port file when N is busy.
+    #[tokio::test]
+    async fn pinned_port_does_not_fallback_or_persist() {
+        let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let busy = holder.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("router.port"), "12345\n").unwrap();
+
+        let cfg = RouterConfig {
+            enabled: true,
+            publish_models: false,
+            featured_models: Vec::new(),
+            port: Some(busy),
+            oauth: BTreeMap::new(),
+        };
+        let r = Router::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            &cfg,
+            BTreeMap::new(),
+        );
+        let err = r.start().await.expect_err("pinned busy port must fail");
+        assert!(
+            format!("{err:#}").contains(&format!("127.0.0.1:{busy}")),
+            "{err:#}"
+        );
+        // Prior persisted value left alone.
+        let persisted = std::fs::read_to_string(dir.path().join("router.port")).unwrap();
+        assert_eq!(persisted.trim(), "12345");
     }
 
     /// A disabled router must be inert: no listener, no CA, no env.

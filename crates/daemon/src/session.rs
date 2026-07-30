@@ -1659,6 +1659,7 @@ impl SessionManager {
     )> {
         let router = crate::router::Router::new(
             storage.data_dir().to_path_buf(),
+            runtime_dir.clone(),
             &config.router,
             config.smith.models.clone(),
         );

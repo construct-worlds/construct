@@ -68,7 +68,13 @@ pub fn print_paths() {
     println!("data:    {}", p.data_dir.display());
     println!("runtime: {}", p.runtime_dir.display());
     println!("socket:  {}", p.socket().display());
-    println!("webui:   {}", construct_protocol::paths::local_webui_url());
+    println!(
+        "webui:   {}",
+        construct_protocol::paths::local_webui_url_for(&p)
+    );
+    if let Some(port) = construct_protocol::paths::read_persisted_port(&p.router_port_file()) {
+        println!("router:  http://127.0.0.1:{port}/  (persisted)");
+    }
 }
 
 /// Run the daemon in the foreground until a shutdown signal, a fatal server
@@ -242,20 +248,25 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     // listener has no auth at all. The remote-control listener is the
     // one that binds every interface, and it can only afford to
     // because everything through it passes a throttled Basic-auth gate.
-    let local_webui_port = construct_protocol::paths::local_webui_port();
+    //
+    // Port selection mirrors the router: prefer env pin → persisted
+    // runtime_dir/webui.port → default 5746; on EADDRINUSE without a pin,
+    // fall back to a free port and persist it so `construct paths` and the
+    // next restart of this home stay consistent.
     {
         let mgr = manager.clone();
+        let webui_paths = paths.clone();
         tokio::spawn(async move {
-            let addr = format!("127.0.0.1:{local_webui_port}");
-            match tokio::net::TcpListener::bind(&addr).await {
-                Ok(listener) => {
-                    tracing::info!(url = %format!("http://{addr}/"), "local webui ready (localhost-only, no auth)");
+            match bind_local_webui(&webui_paths).await {
+                Ok((listener, bound, persisted)) => {
+                    let url = format!("http://127.0.0.1:{bound}/");
+                    tracing::info!(%url, persisted, "local webui ready (localhost-only, no auth)");
                     if let Err(e) = server::serve_local_webui_on(mgr, listener).await {
                         tracing::error!(error = %e, "local webui listener failed");
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(addr = %addr, error = %e, "local webui disabled; bind failed");
+                    tracing::warn!(error = %format!("{e:#}"), "local webui disabled; bind failed");
                 }
             }
         });
@@ -537,6 +548,57 @@ pub fn spawn_detached_daemon(socket: Option<&std::path::Path>) -> std::io::Resul
 
     cmd.spawn()?;
     Ok(())
+}
+
+/// Bind the localhost web UI, reclaiming this home's last port when
+/// possible and auto-falling back when that port is taken by another
+/// daemon. Returns `(listener, bound_port, wrote_persist_file)`.
+async fn bind_local_webui(paths: &Paths) -> anyhow::Result<(tokio::net::TcpListener, u16, bool)> {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use tokio::net::TcpListener;
+
+    let preferred = construct_protocol::paths::local_webui_port_for(paths);
+    let pinned = construct_protocol::paths::local_webui_port_explicit();
+    let preferred_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, preferred));
+
+    let listener = match TcpListener::bind(preferred_addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && !pinned => {
+            tracing::warn!(
+                preferred,
+                "webui port busy; binding an ephemeral free port for this home"
+            );
+            let fallback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+            TcpListener::bind(fallback).await.map_err(|err| {
+                anyhow::anyhow!(
+                    "bind local webui on 127.0.0.1:0 after 127.0.0.1:{preferred} was busy: {err}"
+                )
+            })?
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "bind local webui on 127.0.0.1:{preferred}: {e}"
+            ));
+        }
+    };
+
+    let bound = listener.local_addr()?.port();
+    let mut persisted = false;
+    // Persist only for the auto-selected path. An env pin is operator
+    // intent and must not clobber a previous home's recorded port; the
+    // next unpinned start of this home should still reclaim whatever it
+    // last auto-bound.
+    if !pinned && bound != 0 {
+        match construct_protocol::paths::write_persisted_port(&paths.webui_port_file(), bound) {
+            Ok(()) => persisted = true,
+            Err(e) => tracing::warn!(
+                path = %paths.webui_port_file().display(),
+                error = %e,
+                "could not persist webui port; construct paths may report the default"
+            ),
+        }
+    }
+    Ok((listener, bound, persisted))
 }
 
 fn warn_legacy_paths(current: &Paths) {
