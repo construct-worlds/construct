@@ -37,7 +37,9 @@ whose whole point is unattended remote access.
 - Re-registration reuses the in-memory owner credential. If it has expired,
   the existing re-authentication path (which may open a browser) takes over;
   that is the pre-existing refresh behavior, not something the health check
-  introduces.
+  introduces. That fallback is unreachable for a user who is away from the
+  host machine, which is the gap spec 0162 proposes to close by giving
+  re-registration a credential of its own.
 
 ## Non-Goals
 
