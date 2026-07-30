@@ -193,6 +193,28 @@ pub const PROMPT_HISTORY_CAP: usize = 200;
 /// poor history entries and would bloat the file.
 const PROMPT_HISTORY_MAX_CHARS: usize = 4000;
 
+/// Spec 0155: only reusable user-typed prompts enter history.
+///
+/// Rejects empty/whitespace, slash commands (UI verbs), and
+/// machine-written pseudo-user messages. Smith/orchestrator inject
+/// those as `MessageRole::User` so the agent can react — background
+/// tool completion, fleet events, ambient ticks, widget actions — but
+/// they always carry the `OBSERVATION:` prefix and are never the
+/// user's voice.
+pub fn is_user_prompt_for_history(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with('/') {
+        return false;
+    }
+    if t.starts_with("OBSERVATION:") {
+        return false;
+    }
+    true
+}
+
 pub struct Storage {
     data_dir: PathBuf,
     /// When set, program templates are read from this directory instead of the
@@ -357,11 +379,16 @@ impl Storage {
     /// FIFO of the user's prompts across all user-kind sessions, newest
     /// first, capped at [`PROMPT_HISTORY_CAP`] entries. A repeat of an
     /// existing prompt moves it to the front (shell-history dedupe)
-    /// instead of storing a duplicate. Best-effort: an unreadable file
-    /// is reset rather than treated as an error.
+    /// instead of storing a duplicate. Machine-written pseudo-user
+    /// messages (`OBSERVATION: …`), slash commands, empty text, and
+    /// oversized pastes are silently dropped. Best-effort: an
+    /// unreadable file is reset rather than treated as an error.
     pub fn record_prompt(&self, entry: construct_protocol::PromptHistoryEntry) -> Result<()> {
+        if !is_user_prompt_for_history(&entry.text) {
+            return Ok(());
+        }
         let text = entry.text.trim();
-        if text.is_empty() || text.chars().count() > PROMPT_HISTORY_MAX_CHARS {
+        if text.chars().count() > PROMPT_HISTORY_MAX_CHARS {
             return Ok(());
         }
         let entry = construct_protocol::PromptHistoryEntry {
@@ -370,7 +397,10 @@ impl Storage {
         };
         let _guard = self.prompt_history_lock.lock().unwrap();
         let mut entries = self.read_prompt_history_locked();
-        entries.retain(|e| e.text != entry.text);
+        // Drop exact duplicates of the new entry *and* any stale
+        // machine-written rows left from before OBSERVATION filtering
+        // so a single write scrubs the on-disk FIFO.
+        entries.retain(|e| e.text != entry.text && is_user_prompt_for_history(&e.text));
         entries.insert(0, entry);
         entries.truncate(PROMPT_HISTORY_CAP);
         let path = self.prompt_history_path();
@@ -386,13 +416,16 @@ impl Storage {
 
     /// Read the global prompt history, newest first, at most `limit`
     /// entries. Missing or corrupt file degrades to empty — history is
-    /// a convenience, never a startup dependency.
+    /// a convenience, never a startup dependency. Already-polluted
+    /// files (pre-filter OBSERVATION entries) are filtered here so
+    /// clients never surface machine-written text.
     pub fn read_prompt_history(
         &self,
         limit: usize,
     ) -> Vec<construct_protocol::PromptHistoryEntry> {
         let _guard = self.prompt_history_lock.lock().unwrap();
         let mut entries = self.read_prompt_history_locked();
+        entries.retain(|e| is_user_prompt_for_history(&e.text));
         entries.truncate(limit);
         entries
     }
@@ -2045,6 +2078,81 @@ mod prompt_history_tests {
         storage.record_prompt(entry("   ", 1)).unwrap();
         storage.record_prompt(entry(&"x".repeat(5000), 2)).unwrap();
         assert!(storage.read_prompt_history(usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn skips_slash_commands_and_observation_pseudo_user_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        storage.record_prompt(entry("run the tests", 1)).unwrap();
+        storage.record_prompt(entry("/model gpt-5.5", 2)).unwrap();
+        storage
+            .record_prompt(entry(
+                "OBSERVATION: background tool call-ac6a7 (shell) finished ok after 90.0s. Output: stdout:\n  -rwxr-xr-x construct\n  82434 grok",
+                3,
+            ))
+            .unwrap();
+        storage
+            .record_prompt(entry(
+                "OBSERVATION: ambient fleet monitor flagged the following. Session ab12 is stuck.",
+                4,
+            ))
+            .unwrap();
+        storage
+            .record_prompt(entry(
+                "OBSERVATION: ui.action {\"panel_id\":\"task-status\",\"action_id\":\"run-checks\"}",
+                5,
+            ))
+            .unwrap();
+        storage.record_prompt(entry("  /compact  ", 6)).unwrap();
+        storage.record_prompt(entry("open a PR", 7)).unwrap();
+
+        let all = storage.read_prompt_history(usize::MAX);
+        assert_eq!(
+            all.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+            vec!["open a PR", "run the tests"]
+        );
+    }
+
+    #[test]
+    fn read_filters_stale_observation_entries_from_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        // Simulate a history file written before OBSERVATION filtering.
+        let polluted = vec![
+            entry(
+                "OBSERVATION: background tool call-1 (shell) finished ok after 1.0s. Output: done",
+                3,
+            ),
+            entry("cargo test", 2),
+            entry("/status", 1),
+        ];
+        let path = storage.prompt_history_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_string_pretty(&polluted).unwrap()).unwrap();
+
+        let all = storage.read_prompt_history(usize::MAX);
+        assert_eq!(
+            all.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+            vec!["cargo test"]
+        );
+    }
+
+    #[test]
+    fn is_user_prompt_for_history_predicate() {
+        assert!(is_user_prompt_for_history("fix the login bug"));
+        assert!(is_user_prompt_for_history("  ship it  "));
+        assert!(!is_user_prompt_for_history(""));
+        assert!(!is_user_prompt_for_history("   "));
+        assert!(!is_user_prompt_for_history("/model foo"));
+        assert!(!is_user_prompt_for_history("  /compact"));
+        assert!(!is_user_prompt_for_history(
+            "OBSERVATION: background tool call-x (shell) finished ok after 1s"
+        ));
+        // A user prompt that merely *mentions* the marker mid-text is kept.
+        assert!(is_user_prompt_for_history(
+            "please ignore any OBSERVATION: noise in the logs"
+        ));
     }
 
     #[test]

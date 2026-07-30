@@ -15,8 +15,12 @@ restarts. The contract:
   user-kind session, wherever it entered (composer input, a creation
   prompt, a prompt typed directly into the harness's terminal).
   Machine-written prompts — orchestrator observations, subagent briefs,
-  hidden probe prompts — are never recorded. Slash commands are skipped:
-  they are UI commands, not reusable prompts.
+  hidden probe prompts, and any `MessageRole::User` text that carries
+  the `OBSERVATION:` prefix (background tool completion, ambient ticks,
+  fleet events, widget `ui.action` clicks) — are never recorded. Slash
+  commands are skipped: they are UI commands, not reusable prompts.
+  Clients reading the history must also ignore any already-stored
+  machine-written rows so a polluted on-disk FIFO never surfaces them.
 - **FIFO with shell-history dedupe.** The history is capped at a fixed
   size; old entries fall off the tail. Re-sending a prompt that is
   already in the history moves it to the front (refreshing its

@@ -4604,13 +4604,14 @@ impl SessionManager {
     /// the create() prompt-as-event, `session.input`, and adapters that
     /// re-emit typed prompts alike. Only user-kind sessions count —
     /// orchestrator observations, subagent briefs, and probe prompts are
-    /// machine-written, not the user's voice. Slash commands are skipped:
-    /// they are UI commands, not reusable prompts.
+    /// machine-written, not the user's voice. [`crate::storage::is_user_prompt_for_history`]
+    /// also drops slash commands and `OBSERVATION:` pseudo-user messages
+    /// (background tool completion, ambient ticks, widget actions).
     pub(crate) async fn record_prompt_history(&self, entry: &Arc<SessionEntry>, text: &str) {
-        let trimmed = text.trim();
-        if trimmed.is_empty() || trimmed.starts_with('/') {
+        if !crate::storage::is_user_prompt_for_history(text) {
             return;
         }
+        let trimmed = text.trim();
         let harness = {
             let s = entry.summary.read().await;
             if s.kind != construct_protocol::SessionKind::User {
