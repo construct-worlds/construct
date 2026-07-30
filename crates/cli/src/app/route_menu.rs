@@ -99,6 +99,14 @@ impl App {
             return;
         };
         if let Some(reason) = route.unavailable_reason.as_deref() {
+            // A login blocker is fixable in one step, so activating the
+            // blocked target starts that step instead of restating it.
+            if let Some(cmd) = route.login_command.clone() {
+                let name = route.name.clone();
+                self.route_menu = None;
+                self.start_route_login(name, cmd).await;
+                return;
+            }
             self.set_status(format!("{}: {reason}", route.name));
             return;
         }
@@ -120,6 +128,15 @@ impl App {
             RouteFocus::Targets => {
                 if menu.selected == 0 {
                     self.select_route_target(0).await;
+                } else if let Some(cmd) = menu.focused_login_command() {
+                    // Enter on a target blocked only by a login starts the
+                    // sign-in instead of dead-ending on a disabled row.
+                    let name = menu
+                        .focused_target()
+                        .map(|r| r.name.clone())
+                        .unwrap_or_default();
+                    self.route_menu = None;
+                    self.start_route_login(name, cmd).await;
                 } else {
                     self.route_menu_focus_models();
                 }
@@ -192,6 +209,53 @@ impl App {
         }
         self.replace_route_menu(menu);
         true
+    }
+
+    /// Sign in to a blocked subscription target by running the owning
+    /// CLI's login command in a new shell session (spec 0117: the owning
+    /// tool stays the credential's only writer — Construct just makes
+    /// reaching for it one keypress). The session is selected so the
+    /// user lands in the login flow; the CLI opens its own browser page.
+    async fn start_route_login(&mut self, route: String, command: String) {
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        let (cols, rows) = self.active_pane_size();
+        let params = construct_protocol::CreateSessionParams {
+            harness: "shell".into(),
+            cwd,
+            prompt: Some(command.clone()),
+            model: None,
+            title: Some(format!("{route} login")),
+            mode: None,
+            pty_size: Some(construct_protocol::PtySize {
+                cols: cols.max(20),
+                rows: rows.max(5),
+            }),
+            worktree: false,
+            env: std::collections::HashMap::new(),
+            args: Vec::new(),
+            kind: construct_protocol::SessionKind::User,
+            parent_session_id: None,
+            group_id: None,
+            position_after_session_id: None,
+            forked_from: None,
+        };
+        match self.client.create(params).await {
+            Ok(id) => {
+                if !self.histories.contains_key(&id) {
+                    self.histories
+                        .insert(id.clone(), crate::pty_render::ItemHistory::new());
+                }
+                self.select_created_session(id);
+                self.sync_active_window_selection();
+                self.focus = PaneFocus::View;
+                self.set_status(format!(
+                    "running `{command}` — sign in there, then reopen the model router"
+                ));
+            }
+            Err(e) => self.set_status(format!("could not start `{command}`: {e}")),
+        }
     }
 
     /// The route/model the session's harness itself picked from a
@@ -358,11 +422,24 @@ impl RouteMenu {
             .unwrap_or(0)
     }
 
-    /// Rows in the two-column body — tall enough for every target and for
-    /// the largest model list any target offers, so switching the left
-    /// column does not resize the popup.
+    /// Rows in the two-column body — tall enough for every target, for
+    /// the largest model list any target offers, and for a blocker plus
+    /// its sign-in action line, so switching the left column does not
+    /// resize the popup.
     pub fn body_rows(&self) -> usize {
-        self.routes.len().max(self.max_models_len())
+        let blocker_rows = if self
+            .routes
+            .iter()
+            .any(|r| r.unavailable_reason.is_some() && r.login_command.is_some())
+        {
+            2
+        } else {
+            0
+        };
+        self.routes
+            .len()
+            .max(self.max_models_len())
+            .max(blocker_rows)
     }
 
     pub fn rows(&self) -> usize {
@@ -479,6 +556,15 @@ impl RouteMenu {
     /// column where its models would otherwise be.
     pub fn focused_blocker(&self) -> Option<&str> {
         self.focused_target()?.unavailable_reason.as_deref()
+    }
+
+    /// The sign-in command to offer for the highlighted target — present
+    /// only when the target is blocked *and* the blocker is a login the
+    /// user can complete (spec 0117), never for key/dialect blockers.
+    pub fn focused_login_command(&self) -> Option<String> {
+        let route = self.focused_target()?;
+        route.unavailable_reason.as_ref()?;
+        route.login_command.clone()
     }
 
     /// Place the menu above its anchor when there isn't room below — the
@@ -691,6 +777,13 @@ impl RouteMenu {
             let index = visible + self.target_scroll;
             (index < self.routes.len()).then_some(RouteHit::Target(index + 1))
         } else {
+            // A blocked focused target fills the model column with its
+            // reason and action line instead of model rows: any click
+            // there activates the blocker action (sign-in when the
+            // blocker is a login, restating the reason otherwise).
+            if self.focused_blocker().is_some() {
+                return Some(RouteHit::Model(0));
+            }
             let index = visible + self.model_scroll;
             (index < self.models().len()).then_some(RouteHit::Model(index))
         }
@@ -709,6 +802,7 @@ mod tests {
             models: models.iter().map(|m| m.to_string()).collect(),
             base_url: "https://example.invalid".to_string(),
             unavailable_reason: reason.map(str::to_string),
+            login_command: None,
         }
     }
 
@@ -808,6 +902,46 @@ mod tests {
 
         assert_eq!(h_default, h_short);
         assert_eq!(h_short, h_long);
+    }
+
+    /// The sign-in offer follows the blocker: present for a blocked login
+    /// target, absent for usable targets even if the field is set.
+    #[test]
+    fn a_login_blocker_offers_its_command_only_while_blocked() {
+        let mut blocked = option(
+            "kimi",
+            &["kimi-k2.5"],
+            Some("not logged in to kimi; run `kimi` and sign in"),
+        );
+        blocked.login_command = Some("kimi".into());
+        let mut healthy = option("codex-oauth", &["gpt-5.6-sol"], None);
+        healthy.login_command = Some("codex login".into());
+        let mut m = menu(vec![blocked, healthy], None);
+        m.selected = 1;
+        assert_eq!(m.focused_login_command().as_deref(), Some("kimi"));
+        m.selected = 2;
+        assert_eq!(m.focused_login_command(), None, "usable targets offer models, not sign-in");
+    }
+
+    /// The model column of a blocked target is one big action: the reason
+    /// and its sign-in line both activate it, including rows past the
+    /// single pseudo-model entry.
+    #[test]
+    fn clicks_on_a_blocker_activate_it_anywhere_in_the_column() {
+        let mut blocked = option("kimi", &["kimi-k2.5"], Some("not logged in"));
+        blocked.login_command = Some("kimi".into());
+        let mut m = menu(vec![blocked], None);
+        m.selected = 1;
+        let m = m.anchored(ratatui::layout::Rect::new(0, 0, 120, 30));
+        let first = m.area.y + 1;
+        let body = first + m.header_rows();
+        let divider = m.area.x + 1 + m.target_col_w;
+        assert_eq!(m.hit_at(divider + 2, body), Some(RouteHit::Model(0)));
+        assert_eq!(
+            m.hit_at(divider + 2, body + 1),
+            Some(RouteHit::Model(0)),
+            "the action line is clickable too"
+        );
     }
 
     /// A target that cannot be used shows why, in place of models.

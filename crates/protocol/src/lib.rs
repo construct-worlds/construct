@@ -2887,6 +2887,13 @@ pub struct RouteOption {
     /// (spec 0115).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
+    /// When the blocker is a missing or expired subscription login, the
+    /// owning CLI's command that renews it. The user fixes it by running
+    /// this command themselves — clients may offer to run it in a new
+    /// session, but the owning tool stays the credential's only writer
+    /// (spec 0117).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
