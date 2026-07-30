@@ -3524,8 +3524,10 @@ pub struct LayoutSnapshot {
     pub modeline_context_gauge_hit: Option<ModelineContextGaugeHit>,
     /// Clickable model indicator in the modeline for the selected session.
     pub modeline_model_hit: Option<ModelineModelHit>,
-    /// Hoverable and clickable in-terminal `C-x .` suggestion affordance.
-    pub suggest_affordance_hit: Option<ratatui::layout::Rect>,
+    /// Per-session `C-x .` suggestion affordances painted on each eligible
+    /// session pane. Hit lookup and visual state (idle / pending / hand)
+    /// are always keyed by `session_id`.
+    pub suggest_affordance_hits: Vec<suggest_deck::SuggestAffordanceHit>,
     /// Bounds and row hitboxes for the open two-column suggestion deck.
     pub suggest_deck_area: Option<ratatui::layout::Rect>,
     pub suggest_deck_hits: Vec<suggest_deck::SuggestDeckHitZone>,
@@ -3998,7 +4000,7 @@ impl LayoutSnapshot {
             modeline_context_gauge_hit: _,
             modeline_model_hit: _,
             modeline_theme_hit: _,
-            suggest_affordance_hit: _,
+            suggest_affordance_hits: _,
             suggest_deck_area: _,
             suggest_deck_hits: _,
             suggest_deck_visible_rows: _,
@@ -6572,6 +6574,9 @@ impl App {
             // `false` because it intentionally leaves the main pane alone.
             self.sync_active_window_selection();
         }
+        // Suggestion deck chrome is per-session; leave it behind when the
+        // selected session changes so another session never inherits it.
+        self.close_suggest_deck_if_session_changed();
         self.restore_lineage_scroll_for_selected_session();
         self.report_focused_sessions();
         self.transcript.clear();
@@ -8084,6 +8089,9 @@ impl App {
                     .get(&id)
                     .copied()
                     .unwrap_or_else(|| self.natural_view_for_window(id));
+                // Suggestion deck belongs to one session; close it when the
+                // focused pane's session no longer matches.
+                self.close_suggest_deck_if_session_changed();
             }
             // Keep the program attached to the focused pane's session (stash
             // the outgoing one, reveal the incoming). A no-op when the
@@ -9724,8 +9732,9 @@ impl App {
         // overlays above.
         let suggest_owns_event = self
             .layout
-            .suggest_affordance_hit
-            .is_some_and(|hit| Self::rect_contains(hit, ev.column, ev.row));
+            .suggest_affordance_hits
+            .iter()
+            .any(|hit| hit.contains(ev.column, ev.row));
         let suggest_deck_owns_event = self
             .layout
             .suggest_deck_area
@@ -10242,12 +10251,14 @@ impl App {
             }
             self.route_menu = None;
         }
-        if self
+        if let Some(session_id) = self
             .layout
-            .suggest_affordance_hit
-            .is_some_and(|hit| contains(hit, col, row))
+            .suggest_affordance_hits
+            .iter()
+            .find(|hit| hit.contains(col, row))
+            .map(|hit| hit.session_id.clone())
         {
-            self.toggle_suggest_deck().await;
+            self.toggle_suggest_deck_for(Some(session_id)).await;
             return;
         }
         if self.suggest_deck.is_some() {
@@ -14789,7 +14800,7 @@ mod tests {
             last_chat_areas: std::collections::HashMap::new(),
             modeline_approval_mode_hit: None,
             modeline_model_hit: None,
-            suggest_affordance_hit: None,
+            suggest_affordance_hits: Vec::new(),
             suggest_deck_area: None,
             suggest_deck_hits: Vec::new(),
             suggest_deck_visible_rows: 0,
@@ -32237,9 +32248,12 @@ mod tests {
             .expect("draw");
         let hit = app
             .layout
-            .suggest_affordance_hit
+            .suggest_affordance_hits
+            .iter()
+            .find(|h| h.session_id == "s1")
+            .cloned()
             .expect("awaiting PTY advertises suggestions");
-        app.mouse_pos = Some((hit.x, hit.y));
+        app.mouse_pos = Some((hit.area.x, hit.area.y));
         terminal
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("hover draw");
@@ -32251,8 +32265,8 @@ mod tests {
 
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: hit.x,
-            row: hit.y,
+            column: hit.area.x,
+            row: hit.area.y,
             modifiers: KeyModifiers::NONE,
         })
         .await;
@@ -32262,8 +32276,8 @@ mod tests {
         );
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
-            column: hit.x,
-            row: hit.y,
+            column: hit.area.x,
+            row: hit.area.y,
             modifiers: KeyModifiers::NONE,
         })
         .await;
@@ -32291,16 +32305,19 @@ mod tests {
                 .expect("full-screen draw");
             let hit = app
                 .layout
-                .suggest_affordance_hit
+                .suggest_affordance_hits
+                .iter()
+                .find(|h| h.session_id == "s1")
+                .cloned()
                 .expect("zoomed PTY advertises suggestions");
             let pane = app.layout.view_area.expect("zoomed view area");
             assert_eq!(
-                hit.y,
+                hit.area.y,
                 pane.bottom().saturating_sub(2),
                 "affordance sits one row above the bottom border"
             );
             assert_eq!(
-                hit.right(),
+                hit.area.right(),
                 pane.right(),
                 "affordance is right-aligned flush against the pane edge"
             );
@@ -32312,29 +32329,33 @@ mod tests {
                 "full-screen PTY repaint must not cover suggestion chrome"
             );
             let buffer = terminal.backend().buffer();
-            let chip_start = hit.x + 1;
+            let chip_start = hit.area.x + 1;
             let chip_width = chip.chars().count() as u16;
             assert_eq!(
-                hit.width,
+                hit.area.width,
                 chip_width + 2,
                 "hit spans exterior transparent cells + filled chip"
             );
             for x in chip_start..chip_start + chip_width {
-                let cell = buffer.cell((x, hit.y)).expect("chip cell");
+                let cell = buffer.cell((x, hit.area.y)).expect("chip cell");
                 assert!(
                     cell.style().bg.is_some_and(|bg| bg != ratatui::style::Color::Reset),
                     "chip cell {x} (incl. interior spaces) must have a filled background"
                 );
             }
             // Interior pad spaces: first and last cells of the chip.
-            let left_space = buffer.cell((chip_start, hit.y)).expect("left interior space");
+            let left_space = buffer
+                .cell((chip_start, hit.area.y))
+                .expect("left interior space");
             let right_space = buffer
-                .cell((chip_start + chip_width - 1, hit.y))
+                .cell((chip_start + chip_width - 1, hit.area.y))
                 .expect("right interior space");
             assert_eq!(left_space.symbol(), " ", "space before glyph");
             assert_eq!(right_space.symbol(), " ", "space after trailing '.'");
-            for x in [hit.x, hit.right().saturating_sub(1)] {
-                let cell = buffer.cell((x, hit.y)).expect("exterior padding cell");
+            for x in [hit.area.x, hit.area.right().saturating_sub(1)] {
+                let cell = buffer
+                    .cell((x, hit.area.y))
+                    .expect("exterior padding cell");
                 assert!(
                     cell.style().bg.is_none_or(|bg| bg == ratatui::style::Color::Reset),
                     "exterior padding cell {x} stays transparent"
@@ -32643,6 +32664,69 @@ mod tests {
         );
         assert!(!app.suggestion_hands.contains_key("s1"));
         assert!(app.suggest_deck.is_none(), "new turn closes the deck");
+        server.abort();
+    }
+
+    /// Affordance state (idle / hand) is keyed by session_id: a dealt hand
+    /// on s1 must not paint as a dealt hand on s2, and selecting s2 closes
+    /// s1's open deck so chrome never leaks across sessions.
+    #[tokio::test]
+    async fn suggest_affordance_state_is_session_local() {
+        let (mut app, _dir, server) = two_session_app().await;
+        for session in &mut app.sessions {
+            session.state = construct_protocol::SessionState::AwaitingInput;
+            session.has_pty = true;
+        }
+        app.suggestion_hands.insert("s1".into(), deck_hand());
+        // s2 stays hand-less and not pending.
+        app.select_session("s1".into());
+        app.set_active_view(ViewMode::Terminal);
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw s1");
+        let text = rendered_text(terminal.backend().buffer());
+        assert!(
+            text.contains("✦"),
+            "s1's affordance shows the dealt-hand glyph: {text}"
+        );
+        assert!(
+            app.layout
+                .suggest_affordance_hits
+                .iter()
+                .any(|h| h.session_id == "s1"),
+            "s1 owns an affordance hit"
+        );
+
+        app.suggest_deck = Some(crate::app::suggest_deck::SuggestDeck::open("s1".into()));
+        app.select_session("s2".into());
+        app.set_active_view(ViewMode::Terminal);
+        assert!(
+            app.suggest_deck.is_none(),
+            "switching sessions closes the previous session's deck"
+        );
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw s2");
+        let text = rendered_text(terminal.backend().buffer());
+        assert!(
+            text.contains("◇ C-x ."),
+            "s2's affordance is idle (no hand/pending): {text}"
+        );
+        assert!(
+            !text.contains("✦"),
+            "s1's dealt hand must not appear while s2 is selected: {text}"
+        );
+        assert!(
+            app.layout
+                .suggest_affordance_hits
+                .iter()
+                .any(|h| h.session_id == "s2"),
+            "s2 owns an affordance hit"
+        );
         server.abort();
     }
 
