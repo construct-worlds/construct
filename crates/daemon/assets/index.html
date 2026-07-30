@@ -1336,16 +1336,27 @@
     color: var(--accent-fg, #fff);
     background: var(--accent);
   }
-  .orb-count[hidden] { display: none !important; }
+  /* Same rule as the deck: never display-detach suggestion chrome.
+     `hidden`/display:none on these nodes has been observed to drop the
+     active terminal caret in some browsers even when focus is outside. */
+  .orb-count.is-concealed {
+    visibility: hidden;
+    pointer-events: none;
+  }
   /* Verb fan: chips placed along a quarter arc around the orb center,
      right edges anchored to the arc. Positions set inline by JS. */
   .suggest-fan {
     position: absolute;
     right: 26px;
     bottom: 26px;
+    visibility: hidden;
     pointer-events: none;
   }
-  .suggest-fan[hidden], .suggest-stack[hidden] { display: none !important; }
+  .suggest-fan.is-open {
+    visibility: visible;
+    /* chips opt back into hit-testing individually */
+    pointer-events: none;
+  }
   .suggest-chip {
     position: absolute;
     pointer-events: auto;
@@ -1362,6 +1373,11 @@
     cursor: pointer;
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
     transform-origin: bottom right;
+  }
+  /* Pop-in only on a fresh open — re-deals while the fan stays open
+     (history arriving mid-spin, hand replacing history-only chips) must
+     not re-run the entrance animation. */
+  .suggest-fan.is-entering .suggest-chip {
     animation: suggest-pop 0.26s cubic-bezier(0.2, 0.9, 0.3, 1.2) backwards;
   }
   .suggest-chip.top {
@@ -1387,6 +1403,14 @@
     border-radius: 12px;
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
     overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .suggest-stack.is-open {
+    visibility: visible;
+    pointer-events: auto;
+  }
+  .suggest-stack.is-entering {
     animation: suggest-pop 0.2s ease-out backwards;
   }
   .suggest-stack-head {
@@ -1415,6 +1439,11 @@
   }
   .suggest-cards { overflow-y: auto; display: flex; flex-direction: column; }
   .suggest-card {
+    /* Block, not the UA button flex layout — keeps multi-line history
+       previews at a real 1.45 line-height instead of collapsing. */
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
     text-align: left;
     padding: 10px 14px;
     font: 400 13.5px var(--font-ui);
@@ -1424,19 +1453,28 @@
     border: none;
     border-bottom: 1px solid var(--border-faint);
     cursor: pointer;
+    white-space: normal;
+    word-break: break-word;
   }
   .suggest-card:last-child { border-bottom: none; }
   .suggest-card:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   /* History cards recall verbatim past prompts, which can run long —
-     clamp the preview; the full text still sends on tap. */
-  .suggest-card.history-card {
+     clamp the preview on an inner span. Applying -webkit-box line-clamp
+     directly to the <button> collapses its line box (~0.5lh) so rows
+     overlap; the clamp lives on the span instead. */
+  .suggest-card-clamp {
     display: -webkit-box;
-    -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
     overflow: hidden;
+    line-height: 1.45;
+    white-space: normal;
+    word-break: break-word;
   }
   @media (prefers-reduced-motion: reduce) {
-    .suggest-chip, .suggest-stack { animation: none; }
+    .suggest-fan.is-entering .suggest-chip,
+    .suggest-stack.is-entering { animation: none; }
     .suggest-orb.generating .orb-icon { animation: none; }
   }
   .browser-preview img {
@@ -3206,19 +3244,25 @@
         sends directly through `session.input`. Never modal: it hides
         while the session runs and closes on any outside tap.
       -->
-      <div id="suggestDeck" class="suggest-deck" aria-hidden="true" inert>
-        <div id="suggestFan" class="suggest-fan" hidden></div>
-        <div id="suggestStack" class="suggest-stack" hidden>
+      <!--
+        Never use the HTML `inert` attribute here. Assigning `element.inert`
+        has been observed to drop an unrelated xterm/composer caret when the
+        orb appears or disappears with session state, even though focus is
+        outside the deck. Visibility + pointer-events + tabindex isolate it.
+      -->
+      <div id="suggestDeck" class="suggest-deck" aria-hidden="true">
+        <div id="suggestFan" class="suggest-fan" aria-hidden="true"></div>
+        <div id="suggestStack" class="suggest-stack" aria-hidden="true">
           <div class="suggest-stack-head">
-            <button id="suggestBack" class="suggest-back" type="button">‹ back</button>
+            <button id="suggestBack" class="suggest-back" type="button" tabindex="-1">‹ back</button>
             <span id="suggestStackTitle" class="suggest-stack-title"></span>
           </div>
           <div id="suggestCards" class="suggest-cards"></div>
         </div>
-        <button id="suggestOrb" class="suggest-orb" type="button"
+        <button id="suggestOrb" class="suggest-orb" type="button" tabindex="-1"
                 title="Suggest next prompts (generated by this session's harness)">
           <span class="orb-icon" id="suggestOrbIcon">◇</span>
-          <span class="orb-count" id="suggestOrbCount" hidden></span>
+          <span class="orb-count is-concealed" id="suggestOrbCount" aria-hidden="true"></span>
         </button>
       </div>
       </div><!-- /#viewStack -->
@@ -11289,46 +11333,219 @@ function suggestPendingActive(id) {
   const at = state.suggestPendingById.get(id);
   return typeof at === "number" && Date.now() - at < SUGGEST_PENDING_STALE_MS;
 }
+function suggestFanIsOpen() {
+  return suggestFanEl.classList.contains("is-open");
+}
+function suggestStackIsOpen() {
+  return suggestStackEl.classList.contains("is-open");
+}
 function suggestDeckIsOpen() {
-  return !suggestFanEl.hidden || !suggestStackEl.hidden;
+  return suggestFanIsOpen() || suggestStackIsOpen();
 }
 function suggestDeckIsAvailable() {
   return suggestDeckEl.classList.contains("is-available");
 }
+/**
+ * Snapshot of wherever the user is typing. Used to put the caret back
+ * after suggestion chrome mutates — xterm in particular does not always
+ * recover from a bare `textarea.focus()` after overlay DOM/style churn;
+ * it needs `Terminal.focus()`.
+ */
+function captureTypingFocus() {
+  const active = document.activeElement;
+  if (active === inputEl) return { kind: "composer" };
+  if (programInputEl && (active === programInputEl || programInputEl.contains(active))) {
+    return { kind: "program" };
+  }
+  if (terminalEl && active && terminalEl.contains(active)) {
+    const term =
+      (state.term && state.term.textarea === active && state.term) ||
+      (state.currentId &&
+        state.terminalById.get(state.currentId) &&
+        state.terminalById.get(state.currentId).term) ||
+      state.term ||
+      null;
+    return { kind: "terminal", term, el: active };
+  }
+  return null;
+}
+function typingFocusStillHeld(snap) {
+  if (!snap) return true;
+  const active = document.activeElement;
+  if (snap.kind === "composer") return active === inputEl;
+  if (snap.kind === "program") {
+    return !!(programInputEl && (active === programInputEl || programInputEl.contains(active)));
+  }
+  if (snap.kind === "terminal") {
+    return !!(terminalEl && active && terminalEl.contains(active));
+  }
+  return true;
+}
+function restoreTypingFocus(snap) {
+  if (!snap || typingFocusStillHeld(snap)) return;
+  try {
+    if (snap.kind === "composer") {
+      inputEl.focus({ preventScroll: true });
+      return;
+    }
+    if (snap.kind === "program" && programInputEl) {
+      programInputEl.focus({ preventScroll: true });
+      return;
+    }
+    if (snap.kind === "terminal") {
+      // Prefer the xterm API: it re-attaches the helper textarea and
+      // restores IME/keyboard state. Falling back to the raw element
+      // covers the rare case where the Terminal handle is gone.
+      if (snap.term && typeof snap.term.focus === "function") {
+        snap.term.focus();
+      } else if (snap.el && typeof snap.el.focus === "function") {
+        snap.el.focus({ preventScroll: true });
+      } else if (state.term && typeof state.term.focus === "function") {
+        state.term.focus();
+      }
+    }
+  } catch (_) {
+    /* focus is best-effort */
+  }
+}
+/**
+ * Run `fn` and keep the typing caret where it was. Restores synchronously
+ * and again on the next animation frame(s): session/state also schedules
+ * `renderSessions` on rAF, which can steal focus *after* the orb update.
+ */
+function withPreservedTypingFocus(fn) {
+  const snap = captureTypingFocus();
+  let result;
+  try {
+    result = fn();
+  } finally {
+    restoreTypingFocus(snap);
+    if (snap) {
+      requestAnimationFrame(() => {
+        restoreTypingFocus(snap);
+        requestAnimationFrame(() => restoreTypingFocus(snap));
+      });
+    }
+  }
+  return result;
+}
+/**
+ * Show/hide the orb without display-detaching it and without touching
+ * `inert`. Visibility + pointer-events already block interaction; the orb
+ * stays out of the tab order via tabindex while hidden.
+ */
 function setSuggestDeckAvailable(available) {
-  suggestDeckEl.classList.toggle("is-available", available);
-  suggestDeckEl.setAttribute("aria-hidden", available ? "false" : "true");
-  // Keep the hidden deck out of sequential focus and accessibility trees
-  // without detaching it from rendering. Its controls become interactive
-  // again atomically with the visibility class.
-  suggestDeckEl.inert = !available;
+  const next = !!available;
+  if (suggestDeckIsAvailable() === next) return;
+  withPreservedTypingFocus(() => {
+    suggestDeckEl.classList.toggle("is-available", next);
+    suggestDeckEl.setAttribute("aria-hidden", next ? "false" : "true");
+    // Drop any stale inert flag from older builds / hot reloads so a
+    // leftover assignment cannot keep stealing the caret. Prefer the
+    // content attribute only — never assign `.inert` (that write is what
+    // some browsers use to blur an unrelated caret).
+    if (suggestDeckEl.hasAttribute("inert")) suggestDeckEl.removeAttribute("inert");
+    // Tab order: only the visible orb is reachable; chips/cards get
+    // tabindex when created. Keep the button in the tree the whole time.
+    if (suggestOrbEl) suggestOrbEl.tabIndex = next ? 0 : -1;
+    if (suggestBackEl) suggestBackEl.tabIndex = next ? 0 : -1;
+  });
 }
-function closeSuggestDeck() {
-  suggestFanEl.hidden = true;
-  suggestStackEl.hidden = true;
-  if (suggestOrbCountEl) suggestOrbCountEl.hidden = !state.suggestionsById.get(state.currentId);
+function setSuggestOrbCountVisible(visible) {
+  if (!suggestOrbCountEl) return;
+  const conceal = !visible;
+  if (suggestOrbCountEl.classList.contains("is-concealed") === conceal) return;
+  withPreservedTypingFocus(() => {
+    suggestOrbCountEl.classList.toggle("is-concealed", conceal);
+    suggestOrbCountEl.setAttribute("aria-hidden", conceal ? "true" : "false");
+  });
 }
-function updateSuggestOrb() {
-  const s = state.sessions.find((x) => x.id === state.currentId) || null;
-  const awaiting = !!s && sessionStatusLabel(s) === "awaiting_input";
-  setSuggestDeckAvailable(awaiting);
-  if (!awaiting) {
-    closeSuggestDeck();
+function setSuggestFanOpen(open) {
+  const next = !!open;
+  if (suggestFanIsOpen() === next) {
+    if (!next) {
+      suggestFanEl.classList.remove("is-entering");
+      delete suggestFanEl.dataset.signature;
+    }
     return;
   }
-  const hand = state.suggestionsById.get(state.currentId);
-  const pending = suggestPendingActive(state.currentId);
-  suggestOrbEl.classList.toggle("generating", !hand && pending);
-  if (hand) {
-    suggestOrbIconEl.textContent = "✦";
-    suggestOrbCountEl.textContent = String(1 + (hand.verbs || []).length);
-    suggestOrbCountEl.hidden = suggestDeckIsOpen();
-  } else {
-    suggestOrbIconEl.textContent = pending ? "◈" : "◇";
-    suggestOrbCountEl.hidden = true;
-  }
+  withPreservedTypingFocus(() => {
+    suggestFanEl.classList.toggle("is-open", next);
+    suggestFanEl.setAttribute("aria-hidden", next ? "false" : "true");
+    if (!next) {
+      suggestFanEl.classList.remove("is-entering");
+      delete suggestFanEl.dataset.signature;
+    }
+  });
 }
-function renderSuggestFan() {
+function setSuggestStackOpen(open, { animate = false } = {}) {
+  const next = !!open;
+  const wasOpen = suggestStackIsOpen();
+  if (wasOpen === next && !(animate && next && !wasOpen)) {
+    if (!next) suggestStackEl.classList.remove("is-entering");
+    return;
+  }
+  withPreservedTypingFocus(() => {
+    suggestStackEl.classList.toggle("is-open", next);
+    suggestStackEl.setAttribute("aria-hidden", next ? "false" : "true");
+    if (!next) {
+      suggestStackEl.classList.remove("is-entering");
+      return;
+    }
+    // Entrance animation only when the stack newly opens — reopening the
+    // same surface (or swapping cards while already visible) must not
+    // re-play the pop-in several times.
+    if (animate && !wasOpen) {
+      suggestStackEl.classList.remove("is-entering");
+      // Force a style flush so re-adding the class restarts the animation once.
+      void suggestStackEl.offsetWidth;
+      suggestStackEl.classList.add("is-entering");
+      const clear = () => suggestStackEl.classList.remove("is-entering");
+      suggestStackEl.addEventListener("animationend", clear, { once: true });
+      setTimeout(clear, 400);
+    } else if (wasOpen) {
+      suggestStackEl.classList.remove("is-entering");
+    }
+  });
+}
+/** Keep mouse activation from moving focus off the terminal/composer. */
+function suggestKeepFocusOnPress(el) {
+  if (!el) return;
+  el.addEventListener("mousedown", (e) => e.preventDefault());
+}
+function closeSuggestDeck() {
+  withPreservedTypingFocus(() => {
+    setSuggestFanOpen(false);
+    setSuggestStackOpen(false);
+    setSuggestOrbCountVisible(!!state.suggestionsById.get(state.currentId));
+  });
+}
+function updateSuggestOrb() {
+  withPreservedTypingFocus(() => {
+    const s = state.sessions.find((x) => x.id === state.currentId) || null;
+    const awaiting = !!s && sessionStatusLabel(s) === "awaiting_input";
+    setSuggestDeckAvailable(awaiting);
+    if (!awaiting) {
+      closeSuggestDeck();
+      return;
+    }
+    const hand = state.suggestionsById.get(state.currentId);
+    const pending = suggestPendingActive(state.currentId);
+    suggestOrbEl.classList.toggle("generating", !hand && pending);
+    if (hand) {
+      const icon = "✦";
+      if (suggestOrbIconEl.textContent !== icon) suggestOrbIconEl.textContent = icon;
+      const count = String(1 + (hand.verbs || []).length);
+      if (suggestOrbCountEl.textContent !== count) suggestOrbCountEl.textContent = count;
+      setSuggestOrbCountVisible(!suggestDeckIsOpen());
+    } else {
+      const icon = pending ? "◈" : "◇";
+      if (suggestOrbIconEl.textContent !== icon) suggestOrbIconEl.textContent = icon;
+      setSuggestOrbCountVisible(false);
+    }
+  });
+}
+function suggestFanItems() {
   // A fan can open before the hand arrives (generation in flight): it
   // then holds just the prompt-history chip, so past prompts are
   // reachable while the spinner runs (spec 0155).
@@ -11336,95 +11553,151 @@ function renderSuggestFan() {
   const items = [];
   if (hand && hand.top) {
     const verbs = hand.verbs || [];
-    items.push({ label: `▶ ${hand.top.text}`, cls: "suggest-chip top", act: () => sendSuggestion(hand.top.text) });
+    items.push({
+      label: `▶ ${hand.top.text}`,
+      cls: "suggest-chip top",
+      act: () => sendSuggestion(hand.top.text),
+    });
     for (let i = 0; i < verbs.length; i++) {
       const v = verbs[i];
-      items.push({ label: `${v.label} ›`, cls: "suggest-chip", act: () => openSuggestStack(i) });
+      items.push({
+        label: `${v.label} ›`,
+        cls: "suggest-chip",
+        act: () => openSuggestStack(i),
+      });
     }
   }
   if ((state.promptHistory || []).length) {
-    items.push({ label: "history ›", cls: "suggest-chip", act: () => openHistoryStack() });
+    items.push({
+      label: "history ›",
+      cls: "suggest-chip",
+      act: () => openHistoryStack(),
+    });
   }
-  if (!items.length) return;
-  suggestStackEl.hidden = true;
-  suggestFanEl.innerHTML = "";
-  const total = items.length;
-  // Chips sweep a quarter arc around the orb center: the top pick sits
-  // at the smallest angle (just above the orb), verbs fan out toward
-  // horizontal-left. Right edges anchor to the arc; the pop-in stagger
-  // reveals outward from the orb.
-  const radius = Math.min(185, Math.max(120, window.innerWidth * 0.32));
-  // Arc positions first, then a de-conflict pass: chips near the top of
-  // the arc compress vertically, so walk outward from the orb keeping a
-  // minimum vertical gap between neighbors.
-  const pos = items.map((_, k) => {
-    const th = ((8 + (total === 1 ? 40 : k * (84 / (total - 1)))) * Math.PI) / 180;
-    return {
-      right: Math.round(radius * Math.sin(th)) - 20,
-      bottom: Math.round(radius * Math.cos(th) * 0.72),
-    };
+  return items;
+}
+function renderSuggestFan() {
+  withPreservedTypingFocus(() => {
+    const items = suggestFanItems();
+    if (!items.length) return;
+    const signature = items.map((it) => it.label).join("\0");
+    const wasOpen = suggestFanIsOpen();
+    // Close any card stack — the fan is the parent surface — without a
+    // second entrance animation on the way out.
+    setSuggestStackOpen(false);
+    // Mid-generation re-deals (history → hand) refresh labels in place.
+    // Skip a full rebuild when nothing changed so the pop-in does not
+    // re-fire 2–4 times as events arrive.
+    if (wasOpen && suggestFanEl.dataset.signature === signature) {
+      updateSuggestOrb();
+      return;
+    }
+    suggestFanEl.innerHTML = "";
+    const total = items.length;
+    // Chips sweep a quarter arc around the orb center: the top pick sits
+    // at the smallest angle (just above the orb), verbs fan out toward
+    // horizontal-left. Right edges anchor to the arc; the pop-in stagger
+    // reveals outward from the orb.
+    const radius = Math.min(185, Math.max(120, window.innerWidth * 0.32));
+    // Arc positions first, then a de-conflict pass: chips near the top of
+    // the arc compress vertically, so walk outward from the orb keeping a
+    // minimum vertical gap between neighbors.
+    const pos = items.map((_, k) => {
+      const th = ((8 + (total === 1 ? 40 : k * (84 / (total - 1)))) * Math.PI) / 180;
+      return {
+        right: Math.round(radius * Math.sin(th)) - 20,
+        bottom: Math.round(radius * Math.cos(th) * 0.72),
+      };
+    });
+    for (let k = pos.length - 2; k >= 0; k--) {
+      if (pos[k].bottom - pos[k + 1].bottom < 40) pos[k].bottom = pos[k + 1].bottom + 40;
+    }
+    const animate = !wasOpen;
+    items.forEach((it, k) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = it.cls;
+      chip.tabIndex = -1; // mouse/tap only — never steal keyboard focus
+      chip.textContent = it.label;
+      chip.style.right = `${pos[k].right}px`;
+      chip.style.bottom = `${pos[k].bottom}px`;
+      if (animate) chip.style.animationDelay = `${k * 45}ms`;
+      // Clicking a chip must not move the caret out of the terminal/composer.
+      suggestKeepFocusOnPress(chip);
+      chip.addEventListener("click", it.act);
+      suggestFanEl.appendChild(chip);
+    });
+    suggestFanEl.dataset.signature = signature;
+    if (animate) {
+      suggestFanEl.classList.add("is-entering");
+      const clear = () => suggestFanEl.classList.remove("is-entering");
+      suggestFanEl.addEventListener("animationend", clear, { once: true });
+      setTimeout(clear, 500);
+    } else {
+      suggestFanEl.classList.remove("is-entering");
+    }
+    setSuggestFanOpen(true);
+    updateSuggestOrb();
   });
-  for (let k = pos.length - 2; k >= 0; k--) {
-    if (pos[k].bottom - pos[k + 1].bottom < 40) pos[k].bottom = pos[k + 1].bottom + 40;
+}
+function appendSuggestCard(text, { history = false } = {}) {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.className = history ? "suggest-card history-card" : "suggest-card";
+  el.tabIndex = -1; // mouse/tap only — never steal keyboard focus
+  if (history) {
+    const clamp = document.createElement("span");
+    clamp.className = "suggest-card-clamp";
+    clamp.textContent = text;
+    el.appendChild(clamp);
+    el.title = text;
+  } else {
+    el.textContent = text;
   }
-  items.forEach((it, k) => {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = it.cls;
-    chip.textContent = it.label;
-    chip.style.right = `${pos[k].right}px`;
-    chip.style.bottom = `${pos[k].bottom}px`;
-    chip.style.animationDelay = `${k * 45}ms`;
-    chip.addEventListener("click", it.act);
-    suggestFanEl.appendChild(chip);
-  });
-  suggestFanEl.hidden = false;
-  updateSuggestOrb();
+  suggestKeepFocusOnPress(el);
+  el.addEventListener("click", () => sendSuggestion(text));
+  suggestCardsEl.appendChild(el);
 }
 function openSuggestStack(i) {
   const hand = state.suggestionsById.get(state.currentId);
   const verb = hand && (hand.verbs || [])[i];
   if (!verb) return;
-  suggestFanEl.hidden = true;
-  suggestStackTitleEl.textContent = verb.label;
-  suggestCardsEl.innerHTML = "";
-  for (const card of verb.cards || []) {
-    const el = document.createElement("button");
-    el.type = "button";
-    el.className = "suggest-card";
-    el.textContent = card.text;
-    el.addEventListener("click", () => sendSuggestion(card.text));
-    suggestCardsEl.appendChild(el);
-  }
-  suggestStackEl.hidden = false;
+  withPreservedTypingFocus(() => {
+    setSuggestFanOpen(false);
+    suggestStackTitleEl.textContent = verb.label;
+    suggestCardsEl.innerHTML = "";
+    for (const card of verb.cards || []) {
+      appendSuggestCard(card.text);
+    }
+    setSuggestStackOpen(true, { animate: true });
+    updateSuggestOrb();
+  });
 }
 // Global prompt history stack (spec 0155): verbatim past prompts,
 // newest first, selectable exactly like generated cards.
 function openHistoryStack() {
   const history = state.promptHistory || [];
   if (!history.length) return;
-  suggestFanEl.hidden = true;
-  suggestStackTitleEl.textContent = "history";
-  suggestCardsEl.innerHTML = "";
-  for (const e of history) {
-    const el = document.createElement("button");
-    el.type = "button";
-    el.className = "suggest-card history-card";
-    el.textContent = e.text;
-    el.title = e.text;
-    el.addEventListener("click", () => sendSuggestion(e.text));
-    suggestCardsEl.appendChild(el);
-  }
-  suggestStackEl.hidden = false;
+  withPreservedTypingFocus(() => {
+    setSuggestFanOpen(false);
+    suggestStackTitleEl.textContent = "history";
+    suggestCardsEl.innerHTML = "";
+    for (const e of history) {
+      appendSuggestCard(e.text || "", { history: true });
+    }
+    setSuggestStackOpen(true, { animate: true });
+    updateSuggestOrb();
+  });
 }
 // Refresh the cached global prompt history; if the fan is open (and
 // not covered by a card stack) re-deal it so the history chip appears
-// as soon as the entries arrive.
+// as soon as the entries arrive. Signature short-circuit inside
+// renderSuggestFan keeps this from re-playing the entrance animation.
 function refreshPromptHistory() {
   return rpc("prompt_history.list", { limit: 50 })
     .then((r) => {
       state.promptHistory = (r && r.entries) || [];
-      if (!suggestFanEl.hidden) renderSuggestFan();
+      if (suggestFanIsOpen()) renderSuggestFan();
     })
     .catch((e) => console.debug("prompt_history.list failed", e));
 }
@@ -11491,6 +11764,8 @@ async function suggestOrbClick() {
     console.error("session.suggest failed", e);
   }
 }
+suggestKeepFocusOnPress(suggestOrbEl);
+suggestKeepFocusOnPress(suggestBackEl);
 suggestOrbEl.addEventListener("click", suggestOrbClick);
 suggestBackEl.addEventListener("click", () => renderSuggestFan());
 // Outside tap closes; Escape closes. Never modal — the composer and
@@ -11624,7 +11899,7 @@ function handleNotification(method, params) {
         // The user explicitly asked via the orb — open on arrival,
         // unless they're mid-read in a card stack (e.g. the prompt
         // history): re-dealing the fan would stomp their view.
-        if (suggestStackEl.hidden) renderSuggestFan();
+        if (!suggestStackIsOpen()) renderSuggestFan();
       }
       return;
     }
