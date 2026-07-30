@@ -13591,9 +13591,36 @@ function formatAgeMs(ms) {
   return `${Math.floor(secs / 86_400)}d`;
 }
 
+/** A Construct-published native-catalog model id decoded back to its
+ *  `{route, model}` pair (spec 0157/0158), or null for native model ids
+ *  and malformed ids (those display raw rather than lie). Mirrors the
+ *  protocol crate's codec: `construct-<route>/<model>` with both parts
+ *  percent-encoded, and a `claude-` prefix variant for Claude's gateway
+ *  id filter. */
+function decodePublishedModelId(id) {
+  let encoded = null;
+  if (id.startsWith("claude-construct-")) encoded = id.slice(17);
+  else if (id.startsWith("construct-")) encoded = id.slice(10);
+  else return null;
+  const cut = encoded.indexOf("/");
+  if (cut <= 0) return null;
+  const route = encoded.slice(0, cut);
+  const model = encoded.slice(cut + 1);
+  if (!model || model.includes("/")) return null;
+  try {
+    return { route: decodeURIComponent(route), model: decodeURIComponent(model) };
+  } catch {
+    return null;
+  }
+}
+
 /** `claude-haiku-4-5-20251001` → `haiku-4-5` — drops the vendor prefix
- *  and a trailing 8-digit date stamp, like the TUI's short model label. */
+ *  and a trailing 8-digit date stamp, like the TUI's short model label.
+ *  A Construct catalog id renders decoded as `model·route`: the raw
+ *  encoded id is routing data, not a label (spec 0158). */
 function shortModelLabel(model) {
+  const picked = decodePublishedModelId(model);
+  if (picked) return `${shortModelLabel(picked.model)}·${picked.route}`;
   let base = model.startsWith("claude-") ? model.slice(7) : model;
   const cut = base.lastIndexOf("-");
   if (cut > 0 && /^\d{8}$/.test(base.slice(cut + 1))) base = base.slice(0, cut);

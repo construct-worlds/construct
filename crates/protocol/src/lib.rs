@@ -13,6 +13,7 @@ pub mod dialect;
 pub mod jsonrpc;
 pub mod osc11;
 pub mod paths;
+pub mod published_model;
 pub mod slash;
 pub mod transport;
 
@@ -2901,6 +2902,14 @@ pub struct RouterListRoutesResult {
     /// The route currently armed on the session, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<String>,
+    /// True when this session was launched with Construct's routes
+    /// published into the harness's own model picker (spec 0157). The
+    /// harness may then be carrying a Construct model id per request,
+    /// which selects its own route and makes an armed pin inert until the
+    /// harness returns to a native model — pickers surface that state
+    /// rather than presenting the pin as the whole truth (spec 0158).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_catalog: bool,
 }
 
 /// Params for `session.tool_action` — the client asks the adapter
