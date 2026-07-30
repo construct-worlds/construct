@@ -166,11 +166,13 @@ pub fn harness_routing(harness: &str) -> Option<HarnessRouting> {
         }),
         // Rust. Honors SSL_CERT_FILE, which REPLACES the system roots —
         // verified by pointing it at a bundle without them and watching
-        // every TLS connection fail. It therefore gets the composed
-        // bundle, and is unroutable if that bundle cannot be built.
+        // every TLS connection fail. It therefore gets the composed bundle,
+        // and is unroutable if that bundle cannot be built. ChatGPT auth
+        // uses chatgpt.com; API-key auth uses api.openai.com. Catalog-enabled
+        // sessions can carry Construct ids through either native origin.
         "codex" => Some(HarnessRouting {
             dialect: Dialect::OpenAiResponses,
-            intercept_hosts: &["chatgpt.com"],
+            intercept_hosts: &["chatgpt.com", "api.openai.com"],
             ca_env: &[CaChannel {
                 var: "SSL_CERT_FILE",
                 mode: CaMode::Replacing,
@@ -1087,6 +1089,13 @@ mod tests {
             api_key: None,
             model: Some("kimi-k2.5".to_string()),
         }
+    }
+
+    #[test]
+    fn codex_catalog_routes_both_native_openai_origins() {
+        let routing = harness_routing("codex").expect("Codex routing");
+        assert!(routing.intercept_hosts.contains(&"chatgpt.com"));
+        assert!(routing.intercept_hosts.contains(&"api.openai.com"));
     }
 
     async fn started_with(

@@ -95,6 +95,22 @@ fn inject_model_catalog_arg(
     let quoted = serde_json::to_string(path).unwrap_or_else(|_| format!("{path:?}"));
     args.push("-c".into());
     args.push(format!("model_catalog_json={quoted}"));
+    // Codex's built-in OpenAI provider enables Responses-over-WebSocket.
+    // Construct's routing proxy currently speaks HTTP/SSE, so a published
+    // model selected from the native picker would first try the fixed
+    // ChatGPT WebSocket endpoint and surface a 405 before falling back.
+    //
+    // Keep the override session-local and let Codex choose the normal
+    // ChatGPT or API endpoint from its active auth mode. Requiring OpenAI
+    // auth preserves the user's native credential for pass-through models;
+    // routed requests still have that credential replaced by the proxy.
+    args.push("-c".into());
+    args.push("model_provider=\"construct_router\"".into());
+    args.push("-c".into());
+    args.push(
+        "model_providers.construct_router={name=\"Construct router\",wire_api=\"responses\",requires_openai_auth=true,supports_websockets=false}"
+            .into(),
+    );
 }
 
 async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
@@ -2002,7 +2018,7 @@ mod tests {
     }
 
     #[test]
-    fn model_catalog_is_injected_as_a_codex_config_override() {
+    fn model_catalog_uses_an_https_only_session_provider() {
         let mut args = vec!["exec".to_string()];
         let env = std::collections::HashMap::from([(
             construct_protocol::adapter::ENV_CODEX_MODEL_CATALOG.to_string(),
@@ -2014,7 +2030,11 @@ mod tests {
             vec![
                 "exec",
                 "-c",
-                "model_catalog_json=\"/tmp/construct catalog.json\""
+                "model_catalog_json=\"/tmp/construct catalog.json\"",
+                "-c",
+                "model_provider=\"construct_router\"",
+                "-c",
+                "model_providers.construct_router={name=\"Construct router\",wire_api=\"responses\",requires_openai_auth=true,supports_websockets=false}"
             ]
         );
     }
