@@ -832,13 +832,23 @@ impl Router {
             return Err(anyhow!("route \"{}\": {}", provider.name(), blocker.reason));
         }
         let cred = oauth::read_credential(provider).map_err(|e| anyhow!(e))?;
+        let model = model
+            .map(str::to_string)
+            .unwrap_or_else(|| self.oauth_model(provider));
+        // Claude's catalog uses short aliases (`sonnet`, `opus`, `fable`) for
+        // the picker; Anthropic rejects those labels. Expand before arming so
+        // a native Codex/Claude pick of `construct-claude-oauth/sonnet` does
+        // not 404 with `model: sonnet` against the Messages API.
+        let model = if provider == OauthProvider::Claude {
+            construct_protocol::slash::resolve_claude_oauth_model(&model)
+        } else {
+            model
+        };
         Ok(ArmedRoute {
             name: provider.name().to_string(),
             endpoint: provider.endpoint().to_string(),
             base_url: provider.endpoint().to_string(),
-            model: model
-                .map(str::to_string)
-                .unwrap_or_else(|| self.oauth_model(provider)),
+            model,
             api_key: cred.access_token.clone(),
             // Every subscription backend here takes a bearer; none accepts
             // the Anthropic key header, even the Anthropic one.
@@ -2693,6 +2703,63 @@ mod tests {
             claude.models
         );
         assert_eq!(claude.model, claude.models[0]);
+    }
+
+    /// Catalog entries keep the short alias (`sonnet`) for display, but the
+    /// armed route must expand it before the request leaves Construct —
+    /// Anthropic returns `404 model: sonnet` for the label itself.
+    #[tokio::test]
+    async fn claude_oauth_published_aliases_expand_to_concrete_models() {
+        let _env = oauth::test_env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let future = (chrono::Utc::now().timestamp() + 3600) * 1000;
+        std::fs::write(
+            &creds,
+            serde_json::json!({"claudeAiOauth":{"accessToken":"sub-token","expiresAt":future}})
+                .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("CONSTRUCT_CLAUDE_CREDENTIALS_FILE", &creds);
+
+        let mut cfg = cfg_with(true);
+        cfg.publish_models = true;
+        let r = started(&dir, cfg).await;
+        r.attach_session("s1", "codex", None).unwrap();
+
+        let cases = [
+            ("sonnet", "claude-sonnet-4-6"),
+            ("opus", "claude-opus-4-8"),
+            ("fable", "claude-fable-5"),
+        ];
+        for (alias, concrete) in cases {
+            let published = r
+                .published_models("codex")
+                .into_iter()
+                .find(|model| model.route == "claude-oauth" && model.model == alias)
+                .unwrap_or_else(|| panic!("missing published claude-oauth/{alias}"));
+            assert_eq!(
+                published.model, alias,
+                "picker label stays short; expansion is resolve-time only"
+            );
+            let resolved = r
+                .resolve_published_model("codex", &published.id)
+                .unwrap()
+                .expect("published id must resolve");
+            assert_eq!(resolved.name, "claude-oauth");
+            assert_eq!(
+                resolved.model, concrete,
+                "alias {alias} must expand before the Messages request"
+            );
+        }
+
+        // Concrete ids already in the catalog pass through untouched.
+        let concrete = r
+            .resolve("claude-oauth", "codex", Some("claude-sonnet-4-6"))
+            .unwrap();
+        assert_eq!(concrete.model, "claude-sonnet-4-6");
+
+        std::env::remove_var("CONSTRUCT_CLAUDE_CREDENTIALS_FILE");
     }
 
     /// Minimal PEM → DER, so the test trusts exactly the CA the router
