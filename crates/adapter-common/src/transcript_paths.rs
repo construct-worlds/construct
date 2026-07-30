@@ -38,10 +38,12 @@ fn env_lookup(env: &HashMap<String, String>, key: &str) -> Option<String> {
         .or_else(|| std::env::var(key).ok().filter(|s| !s.is_empty()))
 }
 
-/// Claude's per-project transcript slug: cwd with every non-alphanumeric
-/// ASCII byte replaced by `-`.
+/// Claude's per-project transcript slug: cwd (canonicalized if possible to match
+/// Claude Code's path resolution) with every non-alphanumeric ASCII byte replaced by `-`.
 pub fn claude_project_slug(cwd: &Path) -> String {
-    cwd.to_string_lossy()
+    let canonical = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    canonical
+        .to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
@@ -342,5 +344,23 @@ mod tests {
         let transcript = antigravity_transcript_path("conv-1", &env).expect("path");
         assert!(transcript.starts_with(&dir));
         assert_eq!(dir, PathBuf::from("/sess/agy/brain/conv-1"));
+    }
+
+    #[test]
+    fn claude_project_slug_canonicalizes_symlinks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_dir = tmp.path().join("real");
+        std::fs::create_dir(&real_dir).expect("create_dir");
+        let symlink_dir = tmp.path().join("symlink");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_dir, &symlink_dir).expect("symlink");
+
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                claude_project_slug(&symlink_dir),
+                claude_project_slug(&real_dir)
+            );
+        }
     }
 }
