@@ -5444,9 +5444,10 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         // or the keyword surface is focused:
         //   regenerate
         //   __optional keywords…__
-        //   --------------------
-        //   |   Regenerate     |
-        //   --------------------
+        //
+        //      ┌──────────┐
+        //      │ Generate │   ← label-sized, centered in the column
+        //      └──────────┘
         let label = if generate_is_regen {
             "Regenerate"
         } else {
@@ -5456,13 +5457,20 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         // Prefer a blank spacer above the button when the body has room.
         let btn_h = 3usize;
         let start = if visible_rows > btn_h { 1usize } else { 0 };
-        if visible_rows >= btn_h && cw >= 4 {
-            let rule = "─".repeat(cw);
-            let inner = cw.saturating_sub(2);
-            let centered = {
-                let text = truncate_to_width(label, inner);
+        // Button width hugs the label (+ one space of padding each side +
+        // the two vertical border glyphs), then the whole control is
+        // centered in the right column.
+        let label_w = UnicodeWidthStr::width(label);
+        let btn_inner = label_w.saturating_add(2); // " label "
+        let btn_w = (btn_inner.saturating_add(2)).min(cw).max(4);
+        let btn_inner = btn_w.saturating_sub(2);
+        let btn_x_off = cw.saturating_sub(btn_w) / 2;
+        if visible_rows >= btn_h && btn_w >= 4 {
+            let rule = format!("┌{}┐", "─".repeat(btn_inner));
+            let mid = {
+                let text = truncate_to_width(label, btn_inner);
                 let tw = UnicodeWidthStr::width(text.as_str());
-                let pad = inner.saturating_sub(tw);
+                let pad = btn_inner.saturating_sub(tw);
                 let left = pad / 2;
                 let right = pad.saturating_sub(left);
                 format!(
@@ -5472,11 +5480,14 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                     " ".repeat(right)
                 )
             };
-            let lines = [rule.as_str(), centered.as_str(), rule.as_str()];
+            let bottom = format!("└{}┘", "─".repeat(btn_inner));
+            let lines = [rule.as_str(), mid.as_str(), bottom.as_str()];
+            let btn_x = cards_x.saturating_add(btn_x_off as u16);
+            let btn_w_u16 = btn_w as u16;
             let btn_focused = deck.focus == DeckFocus::Cards;
             let btn_hovered = app.mouse_pos.is_some_and(|(mx, my)| {
-                mx >= cards_x
-                    && mx < cards_x.saturating_add(card_w)
+                mx >= btn_x
+                    && mx < btn_x.saturating_add(btn_w_u16)
                     && my >= body_y.saturating_add(start as u16)
                     && my < body_y.saturating_add((start + btn_h) as u16)
             });
@@ -5501,18 +5512,18 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                 f.render_widget(
                     Paragraph::new(Line::styled((*line).to_string(), style)),
                     Rect {
-                        x: cards_x,
+                        x: btn_x,
                         y,
-                        width: card_w,
+                        width: btn_w_u16,
                         height: 1,
                     },
                 );
             }
             hit_zones.push(SuggestDeckHitZone {
                 area: Rect {
-                    x: cards_x,
+                    x: btn_x,
                     y: body_y.saturating_add(start as u16),
-                    width: card_w,
+                    width: btn_w_u16,
                     height: btn_h as u16,
                 },
                 hit: SuggestDeckHit::GenerateAction,
@@ -5564,14 +5575,9 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                 .is_some_and(|(mx, my)| mx >= row_area.x
                     && mx < row_area.x + row_area.width
                     && my == row_area.y);
-            let prefix = if history_selected {
-                if index == deck.card_selected {
-                    "› "
-                } else {
-                    "  "
-                }
-                .to_string()
-            } else if index < 9 {
+            // History entries use the same digit prefixes as verb cards so
+            // 1–9 accelerators stay discoverable in both right-column lists.
+            let prefix = if index < 9 {
                 format!("{} ", index + 1)
             } else {
                 "  ".to_string()
