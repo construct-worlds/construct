@@ -1282,7 +1282,8 @@ async fn web_client_loads_and_websocket_connects() {
     // Suggestion availability follows live session state while the user may
     // already be typing. Keep the overlay mounted and change only its
     // visibility: display-detaching the button via `hidden` has caused some
-    // browsers to discard an unrelated composer/xterm caret.
+    // browsers to discard an unrelated composer/xterm caret. The fan, stack,
+    // and count badge must follow the same rule.
     let suggestion_focus: serde_json::Value = page
         .evaluate(
             r#"
@@ -1297,6 +1298,10 @@ async fn web_client_loads_and_websocket_connects() {
                 deckAriaHidden: suggestDeckEl.getAttribute('aria-hidden'),
                 deckInert: suggestDeckEl.inert,
                 deckHiddenAttribute: suggestDeckEl.hasAttribute('hidden'),
+                fanClass: suggestFanEl.className,
+                stackClass: suggestStackEl.className,
+                promptHistory: state.promptHistory,
+                suggestionsById: new Map(state.suggestionsById),
               };
               let detachedThroughHidden = false;
               try {
@@ -1307,6 +1312,14 @@ async fn web_client_loads_and_websocket_connects() {
                   kind: 'user',
                 }];
                 state.mode = 'chat';
+                state.promptHistory = [
+                  { text: 'first long prompt that should clamp over multiple lines of preview text without collapsing the row height' },
+                  { text: 'second history entry for overlap regression' },
+                ];
+                state.suggestionsById.set('s-suggestion-focus', {
+                  top: { text: 'top pick' },
+                  verbs: [{ label: 'refine', cards: [{ text: 'card a' }, { text: 'card b' }] }],
+                });
                 composerEl.hidden = false;
                 inputEl.value = 'typing must continue';
                 inputEl.focus();
@@ -1327,6 +1340,43 @@ async fn web_client_loads_and_websocket_connects() {
                 const focusedWhileShown = document.activeElement === inputEl;
                 const shownVisibility = getComputedStyle(suggestDeckEl).visibility;
 
+                // Open the fan while the caret is still in the composer: the
+                // pop-in must run once, and opening must not steal focus.
+                renderSuggestFan();
+                const focusedAfterFanOpen = document.activeElement === inputEl;
+                const fanDisplay = getComputedStyle(suggestFanEl).display;
+                const fanVisibility = getComputedStyle(suggestFanEl).visibility;
+                const fanEnteringFirst = suggestFanEl.classList.contains('is-entering');
+                // Simulate the entrance animation finishing, then re-deal the
+                // same content (history refresh / second event): signature
+                // short-circuit must not re-add is-entering.
+                suggestFanEl.classList.remove('is-entering');
+                renderSuggestFan();
+                const fanEnteringSecond = suggestFanEl.classList.contains('is-entering');
+                // Simulated hand upgrade changes labels — rebuild without
+                // re-entering (fan already open).
+                state.suggestionsById.set('s-suggestion-focus', {
+                  top: { text: 'upgraded top' },
+                  verbs: [{ label: 'refine', cards: [{ text: 'card a' }] }],
+                });
+                renderSuggestFan();
+                const fanEnteringAfterUpgrade = suggestFanEl.classList.contains('is-entering');
+                const focusedAfterRedeal = document.activeElement === inputEl;
+
+                openHistoryStack();
+                const focusedAfterHistory = document.activeElement === inputEl;
+                const stackDisplay = getComputedStyle(suggestStackEl).display;
+                const stackVisibility = getComputedStyle(suggestStackEl).visibility;
+                const historyCard = suggestCardsEl.querySelector('.history-card');
+                const clamp = historyCard && historyCard.querySelector('.suggest-card-clamp');
+                const historyLineHeight = historyCard
+                  ? parseFloat(getComputedStyle(clamp || historyCard).lineHeight)
+                  : 0;
+                const historyFontSize = historyCard
+                  ? parseFloat(getComputedStyle(clamp || historyCard).fontSize)
+                  : 0;
+                const historyCardHeight = historyCard ? historyCard.getBoundingClientRect().height : 0;
+
                 state.sessions[0].state = 'running';
                 updateSuggestOrb();
                 const focusedWhileHidden = document.activeElement === inputEl;
@@ -1335,18 +1385,36 @@ async fn web_client_loads_and_websocket_connects() {
                 return {
                   focusedWhileShown,
                   focusedWhileHidden,
+                  focusedAfterFanOpen,
+                  focusedAfterRedeal,
+                  focusedAfterHistory,
                   shownVisibility,
                   hiddenVisibility: hiddenStyle.visibility,
                   hiddenDisplay: hiddenStyle.display,
                   detachedThroughHidden,
                   ariaHidden: suggestDeckEl.getAttribute('aria-hidden'),
                   inert: suggestDeckEl.inert,
+                  fanDisplay,
+                  fanVisibility,
+                  fanHasHiddenAttr: suggestFanEl.hasAttribute('hidden'),
+                  fanEnteringFirst,
+                  fanEnteringSecond,
+                  fanEnteringAfterUpgrade,
+                  stackDisplay,
+                  stackVisibility,
+                  stackHasHiddenAttr: suggestStackEl.hasAttribute('hidden'),
+                  historyLineHeight,
+                  historyFontSize,
+                  historyCardHeight,
+                  historyHasClamp: !!clamp,
                 };
               } finally {
                 delete suggestDeckEl.hidden;
                 state.currentId = saved.currentId;
                 state.sessions = saved.sessions;
                 state.mode = saved.mode;
+                state.promptHistory = saved.promptHistory;
+                state.suggestionsById = saved.suggestionsById;
                 composerEl.hidden = saved.composerHidden;
                 inputEl.value = saved.inputValue;
                 suggestDeckEl.className = saved.deckClass;
@@ -1354,6 +1422,12 @@ async fn web_client_loads_and_websocket_connects() {
                 else suggestDeckEl.setAttribute('aria-hidden', saved.deckAriaHidden);
                 suggestDeckEl.inert = saved.deckInert;
                 suggestDeckEl.toggleAttribute('hidden', saved.deckHiddenAttribute);
+                suggestFanEl.className = saved.fanClass;
+                suggestStackEl.className = saved.stackClass;
+                suggestFanEl.innerHTML = '';
+                suggestCardsEl.innerHTML = '';
+                closeSuggestDeck();
+                updateSuggestOrb();
               }
             })()
             "#,
@@ -1369,6 +1443,18 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(
         suggestion_focus["focusedWhileHidden"], true,
         "hiding the suggestion button must preserve the typing caret: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["focusedAfterFanOpen"], true,
+        "opening the fan must preserve the typing caret: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["focusedAfterRedeal"], true,
+        "re-dealing the fan must preserve the typing caret: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["focusedAfterHistory"], true,
+        "opening history must preserve the typing caret: {suggestion_focus:?}"
     );
     assert_eq!(
         suggestion_focus["shownVisibility"], "visible",
@@ -1388,6 +1474,57 @@ async fn web_client_loads_and_websocket_connects() {
     );
     assert_eq!(suggestion_focus["ariaHidden"], "true");
     assert_eq!(suggestion_focus["inert"], true);
+    assert_ne!(
+        suggestion_focus["fanDisplay"], "none",
+        "fan open/close must not display-detach: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["fanVisibility"], "visible",
+        "open fan should be visible: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["fanHasHiddenAttr"], false,
+        "fan must not use the HTML hidden attribute: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["fanEnteringFirst"], true,
+        "first fan open should run the entrance animation: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["fanEnteringSecond"], false,
+        "identical re-deal must not re-run entrance animation: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["fanEnteringAfterUpgrade"], false,
+        "content upgrade while open must not re-run entrance animation: {suggestion_focus:?}"
+    );
+    assert_ne!(
+        suggestion_focus["stackDisplay"], "none",
+        "stack open/close must not display-detach: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["stackVisibility"], "visible",
+        "open history stack should be visible: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["stackHasHiddenAttr"], false,
+        "stack must not use the HTML hidden attribute: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["historyHasClamp"], true,
+        "history cards clamp via an inner span: {suggestion_focus:?}"
+    );
+    let history_lh = suggestion_focus["historyLineHeight"].as_f64().unwrap_or(0.0);
+    let history_fs = suggestion_focus["historyFontSize"].as_f64().unwrap_or(0.0);
+    let history_h = suggestion_focus["historyCardHeight"].as_f64().unwrap_or(0.0);
+    assert!(
+        history_fs > 0.0 && history_lh >= history_fs * 1.2,
+        "history line-height must be a full line, not collapsed: {suggestion_focus:?}"
+    );
+    assert!(
+        history_h >= history_lh * 1.5,
+        "history card must be tall enough for multi-line text, not half-line overlap: {suggestion_focus:?}"
+    );
 
     // A deliberate click in a split is a geometry claim even if local focus
     // was already on that pane. The old early return in focusPane made title
