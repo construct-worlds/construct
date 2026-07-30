@@ -225,10 +225,49 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         "the title bar carries no × — 'close split' in the session menu replaces it"
     );
 
-    // Focus must not move anything. The focused pane carries an extra
-    // control (the menu pill) that the others don't, so its title bar has to
-    // be sized independently of what it contains — otherwise focusing a pane
-    // nudges its title bar and every pixel below it.
+    // Every pane head carries a menu pill (real overlay on the focused
+    // pane, same-size placeholder on the others) so focusing a pane never
+    // removes "menu" or reflows the title. Title bars stay equal height.
+    let menu_slots: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const heads = Array.from(document.querySelectorAll('#paneGrid .pane-head'));
+              return {
+                count: heads.length,
+                withMenu: heads.filter((h) =>
+                  h.querySelector('.session-menu-overlay, .pane-menu-placeholder')
+                ).length,
+                labels: heads.map((h) => {
+                  const b = h.querySelector(
+                    '.session-menu-overlay button, .pane-menu-placeholder button'
+                  );
+                  return b ? b.textContent.trim() : null;
+                }),
+              };
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate menu slots")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    let head_count = menu_slots["count"].as_u64().unwrap_or(0);
+    assert!(head_count >= 2, "expected two pane heads: {menu_slots:?}");
+    assert_eq!(
+        menu_slots["withMenu"].as_u64(),
+        Some(head_count),
+        "every pane head must keep a menu pill: {menu_slots:?}"
+    );
+    let labels = menu_slots["labels"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        labels.iter().all(|l| l.as_str() == Some("menu")),
+        "menu pills should read 'menu' on every head: {menu_slots:?}"
+    );
+
     let head_geometry: String = page
         .evaluate(
             "JSON.stringify(Array.from(document.querySelectorAll('#paneGrid .pane-head'))

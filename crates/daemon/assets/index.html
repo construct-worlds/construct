@@ -807,10 +807,9 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    /* Fixed height, not content height. The focused pane carries a control
-       the others don't (the session-menu pill), and letting that size the
-       bar would make focusing a pane nudge its title and everything below
-       it — a visible jump every time focus moves. */
+    /* Fixed height, not content height, so a focused-pane-only control can
+       never resize the bar and nudge content below it. (Every head now
+       carries a menu pill — real or placeholder — for the same reason.) */
     height: 26px;
     box-sizing: border-box;
     padding: 0 6px;
@@ -866,12 +865,12 @@
   .pane-head button.pane-split-btn .split-frame {
     fill: none;
     stroke: currentColor;
-    stroke-width: 1.5;
+    stroke-width: 1;
     vector-effect: non-scaling-stroke;
   }
   .pane-head button.pane-split-btn .split-divider {
     stroke: currentColor;
-    stroke-width: 1.5;
+    stroke-width: 1;
     vector-effect: non-scaling-stroke;
   }
   .pane-head button.pane-split-btn .split-half {
@@ -923,15 +922,20 @@
     .has-tip::after { display: none; }
   }
   /* The menu pill, once it lives in a pane head, is a head control like the
-     split buttons rather than a floating overlay. */
-  .pane-head .session-menu-overlay {
+     split buttons rather than a floating overlay. Every pane head carries
+     one — the real overlay on the focused pane, a same-size placeholder on
+     the others — so focusing a pane never shifts title width. */
+  .pane-head .session-menu-overlay,
+  .pane-head .pane-menu-placeholder {
     position: static;
     flex: 0 0 auto;
     top: auto;
     right: auto;
     pointer-events: auto;
+    display: flex;
   }
-  .pane-head .session-menu-overlay button {
+  .pane-head .session-menu-overlay button,
+  .pane-head .pane-menu-placeholder button {
     display: inline-flex;
     align-items: center;
     height: 18px;
@@ -946,7 +950,8 @@
     line-height: 1;
   }
   .pane-head .session-menu-overlay button:hover,
-  .pane-head .session-menu-overlay button[aria-expanded="true"] {
+  .pane-head .session-menu-overlay button[aria-expanded="true"],
+  .pane-head .pane-menu-placeholder button:hover {
     background: var(--bg-elev-2);
     color: var(--fg);
   }
@@ -10485,6 +10490,38 @@ function paneHeadButton(glyph, tip, onClick) {
 }
 
 /**
+ * Same-looking "menu" pill for unfocused pane heads. The real session-menu
+ * overlay is a single DOM node and can only live on the focused pane; this
+ * placeholder keeps title-bar width stable and, on click, focuses the pane
+ * then opens the real menu.
+ */
+function paneMenuPlaceholder(leaf) {
+  const wrap = document.createElement("div");
+  wrap.className = "pane-menu-placeholder";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "menu";
+  btn.title = "Session menu";
+  btn.setAttribute("aria-label", "Session menu");
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    focusPane(leaf.id);
+    // focusPane re-renders the grid and reparents the real overlay onto
+    // this head; open the dropdown on the next frame once that settles.
+    requestAnimationFrame(() => {
+      const menu = $("sessionMenu");
+      const realBtn = $("sessionMenuBtn");
+      if (!menu || !realBtn || sessionMenuOverlayEl.hidden) return;
+      refreshSessionActions();
+      menu.hidden = false;
+      realBtn.setAttribute("aria-expanded", "true");
+    });
+  });
+  wrap.appendChild(btn);
+  return wrap;
+}
+
+/**
  * Icon-only split control for the pane title bar.
  *
  * Naming matches the TUI menu: "horizontal" = side-by-side, "vertical" =
@@ -10616,8 +10653,15 @@ function renderPaneGrid() {
     });
     head.append(splitH, splitV);
     // No × here: closing a pane lives in the session menu ("close split"),
-    // which hangs off the right end of this same bar.
-    if (leaf.id === focusedId) head.appendChild(sessionMenuOverlayEl);
+    // which hangs off the right end of this same bar. Every head gets a
+    // menu pill — the real overlay on the focused pane, a lookalike
+    // placeholder on the rest — so losing focus never removes "menu" or
+    // reflows the title.
+    if (leaf.id === focusedId) {
+      head.appendChild(sessionMenuOverlayEl);
+    } else {
+      head.appendChild(paneMenuPlaceholder(leaf));
+    }
     pane.appendChild(head);
 
     const body = document.createElement("div");
