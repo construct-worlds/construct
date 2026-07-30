@@ -79,18 +79,18 @@ async fn tui_remote_control_popup_via_palette() {
 
     tui.send(b"remote-control\r").expect("send command");
 
-    // Header + auth labels rendered by
+    // Header + LAN auth labels rendered by
     // `render_remote_control_popup`. Use substrings that don't
     // depend on the popup's internal alignment (the labels are
-    // padded with spaces so a `user: remote` literal would
+    // padded with spaces so a `lan user: remote` literal would
     // mismatch). The popup title is itself a useful needle.
     tui.wait_for("/remote-connect", Duration::from_secs(15))
         .await
         .expect("popup title never appeared");
-    tui.wait_for("user:", Duration::from_secs(5))
+    tui.wait_for("lan user:", Duration::from_secs(5))
         .await
         .expect("popup user label never appeared");
-    tui.wait_for("password:", Duration::from_secs(5))
+    tui.wait_for("lan pass:", Duration::from_secs(5))
         .await
         .expect("popup password label never appeared");
     // The dialog offers a way out of the local network — the Cloudflare

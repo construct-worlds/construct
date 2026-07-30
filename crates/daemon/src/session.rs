@@ -2344,8 +2344,8 @@ impl SessionManager {
     ///
     /// Without a provider, this reports what is reachable right now
     /// with no tunnel: the LAN address when the machine has one,
-    /// loopback otherwise, returned immediately. With a provider, it
-    /// polls for that provider's URL and either returns it
+    /// the no-auth local web UI otherwise, returned immediately. With a
+    /// provider, it polls for that provider's URL and either returns it
     /// (`tunnel_ready = true`) or fails with a diagnostic — it never
     /// silently degrades to the local URL, because a user who asked to
     /// be reachable from outside must not be shown a green light and a
@@ -2365,7 +2365,10 @@ impl SessionManager {
         // the `http(s)` → `ws(s)` swap itself. A `ws://` URL cannot be
         // opened in a browser or scanned from a QR at all, which is
         // what bit us in the first phone test.
-        let local_url = format!("http://127.0.0.1:{port}/");
+        // Local access uses the daemon's separate loopback-only web UI,
+        // which deliberately needs no login. The wildcard-bound remote
+        // listener remains fully Basic-auth-gated for LAN and tunnel use.
+        let local_url = construct_protocol::paths::local_webui_url();
         let lan_url = crate::remote::lan_ipv4().map(|ip| format!("http://{ip}:{port}/"));
         let password = state.password().to_string();
 

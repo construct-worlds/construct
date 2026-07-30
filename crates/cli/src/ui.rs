@@ -19381,13 +19381,17 @@ fn remote_info_lines<'a>(
         .map(|(label, value, accent)| remote_kv(app, label, value, accent).0)
         .collect();
 
-    if include_credentials {
-        // Direct LAN and Cloudflare visitors see the browser's Basic-auth
-        // prompt. The daemon pins its username to "remote", so neither row
-        // is decorative. tunnel.zarvis.ai instead authenticates socially and
-        // supplies these upstream credentials inside its gateway.
-        lines.push(remote_kv(app, "user:", "remote", true).0);
-        lines.push(remote_kv(app, "password:", &p.password, true).0);
+    if include_credentials && (p.lan_url.is_some() || p.tunnel_ready) {
+        // `local:` opens without a login. Label chooser credentials as LAN
+        // credentials; once Cloudflare is ready they apply to the tunnel URL.
+        // tunnel.zarvis.ai authenticates socially and supplies these upstream.
+        let (user_label, pass_label) = if p.tunnel_ready {
+            ("user:", "password:")
+        } else {
+            ("lan user:", "lan pass:")
+        };
+        lines.push(remote_kv(app, user_label, "remote", true).0);
+        lines.push(remote_kv(app, pass_label, &p.password, true).0);
     }
 
     lines

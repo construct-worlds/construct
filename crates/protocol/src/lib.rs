@@ -3394,8 +3394,8 @@ pub struct DevAssetsResult {
 /// coffee shop must not be told "ready" when they are not.
 ///
 /// With `provider: None`, the reply is immediate and describes what
-/// is reachable without any tunnel: the loopback URL always, plus
-/// the LAN URL when this machine has one.
+/// is reachable without any tunnel: the no-auth loopback web UI
+/// always, plus the authenticated LAN URL when this machine has one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteStartResult {
     /// The URL to show most prominently and encode in `qr`. The
@@ -3410,10 +3410,11 @@ pub struct RemoteStartResult {
     /// True iff `url` is a provider URL reachable beyond this
     /// network. False whenever `url` is the LAN or loopback address.
     pub tunnel_ready: bool,
-    /// HTTP Basic auth password required to load the URL. Either
-    /// the caller's override (from `RemoteStartParams.password`)
-    /// or the daemon's auto-generated 3-token string. The username
-    /// is fixed (see `REMOTE_USERNAME` in the daemon).
+    /// HTTP Basic auth password for LAN and applicable tunnel access.
+    /// The loopback-only `local_url` does not require it. Either the
+    /// caller's override (from `RemoteStartParams.password`) or the
+    /// daemon's auto-generated 3-token string. The username is fixed
+    /// (see `REMOTE_USERNAME` in the daemon).
     pub password: String,
     /// Optional user-readable hint. Reserved for unusual states —
     /// e.g. "no LAN address found", or "starting tunnel…" on the
@@ -3424,9 +3425,8 @@ pub struct RemoteStartResult {
     /// listener is only reachable from this machine + the LAN.
     #[serde(default)]
     pub provider: TunnelProvider,
-    /// Loopback URL for this listener. Always populated, whatever the
-    /// provider — it is the one address guaranteed to work, and the
-    /// dialog shows it as a fallback the user can type by hand.
+    /// The daemon's loopback-only web UI URL. Always populated, whatever
+    /// the provider, and does not require Basic auth.
     #[serde(default)]
     pub local_url: String,
     /// LAN URL (`http://<private-ip>:<port>/`), when this machine has

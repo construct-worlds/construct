@@ -9,7 +9,7 @@ Scope: Opening the remote-control dialog must never expose the daemon; exposure 
 
 Opening the remote-control dialog binds the listener and shows how to reach it, and does nothing else. No tunnel process is started, and nothing is published beyond the local network, until the user picks a provider from the dialog.
 
-The listener binds every interface, not loopback, so the resting state of the dialog is genuinely useful: a phone on the same network can scan the QR and connect with no tunnel at all. Everything the listener serves is gated by HTTP Basic auth with a per-listener password, and failed attempts are throttled daemon-wide so that a short, phone-typeable password can stand as the only credential.
+The remote listener binds every interface, not loopback, so the resting state of the dialog is genuinely useful: a phone on the same network can scan the QR and connect with no tunnel at all. The displayed local address uses a separate loopback-only listener and needs no login. The wildcard-bound remote listener remains gated by HTTP Basic auth with a per-listener password for LAN and tunnel access, and failed attempts are throttled daemon-wide so that a short, phone-typeable password can stand as the only LAN credential.
 
 Reaching the daemon from beyond the LAN goes through a tunnel provider. A provider is a child process the daemon spawns in the foreground, holds a PID for, and kills on stop. The provider set sits behind a seam so that adding one is a backend plus an enum variant, not a reshape; today the set is a single provider that reaches the **public internet** with an unguessable, rotating URL.
 
@@ -29,6 +29,7 @@ Exposure past the LAN is a distinct decision from being reachable on the LAN, an
 
 - **Opening the dialog must stay free of side effects beyond binding.** Any future work that starts a tunnel, registers a name, or contacts a third party on dialog-open is a regression, whatever the convenience.
 - **The listener's auth is load-bearing.** It binds every interface, so the password gate and its failure throttle are the only things between the local network and full control of the machine. Weakening either — a lockout-free retry path, an unauthenticated route, a shorter password — must be treated as a security change, not a UX change.
+- **No auth bypass exists on the remote listener.** The displayed local address belongs to a separate loopback-only listener. LAN destinations and tunnel hostnames remain behind their provider-appropriate authentication even when a local tunnel process reaches the remote listener from loopback.
 - **The separate always-on local web UI has no auth and must remain loopback-only.** It must not inherit this listener's reasoning.
 - **Providers must publish only when serving.** A URL shown before the tunnel is live sends the user to a dead address, which reads as "the feature is broken" rather than "wait a moment".
 - **Foreground children, not background registration.** A provider that registers itself with a persistent local service and exits would outlive a crashed daemon, leaving the machine exposed with nothing left to withdraw it. Providers must die with the process the daemon holds a PID for.
