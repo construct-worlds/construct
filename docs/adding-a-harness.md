@@ -107,10 +107,17 @@ assistant prose.
   `<CONSTRUCT_SESSION_DATA_DIR>/<name>_session_id.txt` and register that
   filename in the daemon's `native_id_file_name()`. Capture must track the
   *live* id across `/clear`, `/new`, compact — via hooks (claude's
-  SessionStart hook), plugins (opencode), or file discovery (codex, grok).
+  SessionStart hook), plugins (opencode), originator-tagged rollouts (codex),
+  or pre-mint + file discovery (grok: `--session-id` at first spawn, then
+  newest-mtime discovery only for mid-session `/clear` — see spec 0159).
+  Do **not** rely on "newest session dir under the cwd" for the *initial*
+  bind when the harness has no originator tag: orphans in a shared cwd will
+  steal the id and poison later same-harness forks (which skip the portable
+  seed).
 - **Resume**: on `CONSTRUCT_RESUME=1`, relaunch with the harness's resume
   flag (`--resume <id>`, `--session <id>`, …) and skip already-seen
-  transcript history.
+  transcript history. `skip_existing` must be resume-only — a native fork is
+  a new construct session and must project inherited parent history.
 - **Reset detection** (specs 0138/0085): when the native id changes
   mid-session, emit `SessionEvent::NativeIdChanged` — the daemon synthesizes
   the archived reset-snapshot fork and lineage edge. Suppress the one
