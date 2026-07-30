@@ -29,7 +29,11 @@ This durable route is the session's manually pinned default. A model id
 published into a harness's native picker may select a different route for
 one request as defined by
 [0157](0157-native-model-catalog-routing.md); that request-scoped choice
-does not replace or mutate the durable pin.
+does not replace or mutate the durable pin. How clients surface the
+coexistence — decoded display of published ids, distinct marking in the
+route picker, and the notice that a pin armed under a live native
+selection is waiting — is defined in
+[0158](0158-native-catalog-selection-is-visible-state.md).
 
 ## Reason
 

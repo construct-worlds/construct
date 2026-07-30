@@ -732,6 +732,17 @@ impl Router {
         self.sessions.read().unwrap().contains_key(session_id)
     }
 
+    /// Whether this session was launched with routes published into its
+    /// harness's native model picker (spec 0157). Clients use this to show
+    /// that a pin and a native selection can coexist (spec 0158).
+    pub fn session_native_catalog(&self, session_id: &str) -> bool {
+        self.sessions
+            .read()
+            .unwrap()
+            .get(session_id)
+            .is_some_and(|ctx| ctx.catalog_enabled())
+    }
+
     /// Whether the router has actually served an intercepted request for
     /// this session — the difference between a route that is armed and one
     /// that is working (spec 0115).
@@ -989,6 +1000,7 @@ impl Router {
         harness: &str,
         attached: bool,
         active: Option<String>,
+        native_catalog: bool,
     ) -> RouterListRoutesResult {
         let routing = harness_routing(harness);
         let unavailable_reason = if !self.enabled {
@@ -1038,6 +1050,7 @@ impl Router {
             routes,
             unavailable_reason,
             active,
+            native_catalog,
         }
     }
 }
@@ -1354,7 +1367,7 @@ mod tests {
         // `shell` runs commands and makes no model calls at all; it is
         // the permanent example of a harness with nothing to route.
         assert!(r.attach_session("s1", "shell", None).is_err());
-        let listed = r.list_routes("shell", false, None);
+        let listed = r.list_routes("shell", false, None, false);
         assert!(listed
             .unavailable_reason
             .unwrap()
@@ -1415,7 +1428,7 @@ mod tests {
         )
         .await;
         r.attach_session("s1", "claude", None).unwrap();
-        let listed = r.list_routes("claude", true, None);
+        let listed = r.list_routes("claude", true, None, false);
         assert!(listed.unavailable_reason.is_none());
         let reason = route_named(&listed, "meta-model")
             .unavailable_reason
@@ -1445,7 +1458,7 @@ mod tests {
         .await;
         r.attach_session("s1", "claude", None).unwrap();
 
-        let listed = r.list_routes("claude", true, None);
+        let listed = r.list_routes("claude", true, None, false);
         let gemini = route_named(&listed, "gemini-pro");
         assert_eq!(gemini.unavailable_reason, None);
         assert_eq!(gemini.dialect, "google-gemini");
@@ -1517,7 +1530,7 @@ mod tests {
         .await;
         r.attach_session("s1", "claude", None).unwrap();
 
-        let listed = r.list_routes("claude", true, None);
+        let listed = r.list_routes("claude", true, None, false);
         let gpt = route_named(&listed, "gpt");
         assert_eq!(gpt.unavailable_reason, None);
         assert_eq!(gpt.dialect, "openai-chat");
@@ -1561,7 +1574,7 @@ mod tests {
         )
         .await;
         r.attach_session("s1", "claude", None).unwrap();
-        let listed = r.list_routes("claude", true, None);
+        let listed = r.list_routes("claude", true, None, false);
         assert!(route_named(&listed, "bare")
             .unavailable_reason
             .as_deref()
@@ -2382,7 +2395,7 @@ mod tests {
         std::env::set_var("CONSTRUCT_CLAUDE_CREDENTIALS_FILE", &creds);
 
         let r = started(&dir, cfg_with(true)).await;
-        let listed = r.list_routes("pi", true, None);
+        let listed = r.list_routes("pi", true, None, false);
         let option = route_named(&listed, "claude-oauth");
         assert_eq!(
             option.unavailable_reason, None,
@@ -2597,7 +2610,7 @@ mod tests {
         )
         .await;
         r.attach_session("s1", "claude", None).unwrap();
-        let listed = r.list_routes("claude", true, None);
+        let listed = r.list_routes("claude", true, None, false);
         let gpt = route_named(&listed, "gpt");
         assert_eq!(
             gpt.models.first().map(String::as_str),
@@ -2623,7 +2636,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r = started(&dir, cfg_with(true)).await;
         r.attach_session("s1", "claude", None).unwrap();
-        let listed = r.list_routes("claude", true, None);
+        let listed = r.list_routes("claude", true, None, false);
         let claude = route_named(&listed, "claude-oauth");
         assert!(
             claude.models.iter().any(|m| m == "sonnet"),

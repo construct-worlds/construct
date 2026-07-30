@@ -18,12 +18,17 @@ impl App {
             }
         };
         let active = listed.active.clone();
+        let native = self.session_native_selection(&session_id);
         // Open on the armed target so the current state is where the eye
-        // already is.
+        // already is; with no pin, a live native pick is the current state.
         let selected = listed
             .routes
             .iter()
             .position(|r| Some(&r.name) == active.as_ref())
+            .or_else(|| {
+                let (route, _) = native.as_ref()?;
+                listed.routes.iter().position(|r| &r.name == route)
+            })
             .map(|i| i + 1)
             .unwrap_or(0);
         let mut menu = RouteMenu {
@@ -32,6 +37,7 @@ impl App {
             routes: listed.routes,
             unavailable_reason: listed.unavailable_reason,
             active,
+            native,
             focus: RouteFocus::Targets,
             selected,
             model_selected: 0,
@@ -188,6 +194,14 @@ impl App {
         true
     }
 
+    /// The route/model the session's harness itself picked from a
+    /// Construct-published native catalog entry, decoded from the model it
+    /// reports (spec 0157/0158). `None` when it is on a native model.
+    pub(super) fn session_native_selection(&self, session_id: &str) -> Option<(String, String)> {
+        let session = self.sessions.iter().find(|s| s.id == session_id)?;
+        native_selection(session.model.as_deref())
+    }
+
     async fn apply_route(
         &mut self,
         session_id: String,
@@ -199,11 +213,31 @@ impl App {
             (Some(r), None) => r.clone(),
             (None, _) => "default".to_string(),
         };
+        // A pin only applies to requests carrying a native model id. While
+        // the harness is on a Construct catalog entry, every request names
+        // its own route, so an armed pin would otherwise appear to do
+        // nothing (spec 0158): say so instead of reporting a silent no-op.
+        let inert = route.is_some().then(|| self.session_native_selection(&session_id)).flatten();
         match self.client.set_route(&session_id, route, model).await {
-            Ok(()) => self.set_status(format!("route: {label}")),
+            Ok(()) => match inert {
+                Some((native_route, native_model)) => self.set_status(format!(
+                    "route: {label} — waits: harness picked {native_model} · {native_route} in its own picker"
+                )),
+                None => self.set_status(format!("route: {label}")),
+            },
             Err(e) => self.set_status(format!("route failed: {e}")),
         }
     }
+}
+
+/// Decode a harness-reported model that is a Construct-published catalog
+/// id into its `(route, model)` pair (spec 0157). `None` for native model
+/// ids and for malformed ids — display falls back to the raw value; the
+/// proxy is where malformed ids fail closed.
+pub fn native_selection(model: Option<&str>) -> Option<(String, String)> {
+    construct_protocol::published_model::decode_published_model_id(model?)
+        .ok()
+        .flatten()
 }
 
 /// One line on what routing does, shown once between Default and the
@@ -237,6 +271,11 @@ pub struct RouteMenu {
     /// the user with no explanation (spec 0115).
     pub unavailable_reason: Option<String>,
     pub active: Option<String>,
+    /// The `(route, model)` the harness itself is on right now via a
+    /// Construct-published native catalog entry (spec 0157), decoded from
+    /// the model it reports. Requests carrying that id select their own
+    /// route, so while this is `Some` an armed pin is inert (spec 0158).
+    pub native: Option<(String, String)>,
     pub focus: RouteFocus,
     /// Highlighted target row; row 0 is Default.
     pub selected: usize,
@@ -371,8 +410,39 @@ impl RouteMenu {
     pub fn target_is_active(&self, index: usize) -> bool {
         match self.target_at(index) {
             Some(r) => Some(&r.name) == self.active.as_ref(),
-            None => index == 0 && self.active.is_none(),
+            // Default is only truthfully "current" when nothing overrides
+            // pass-through: neither a pin nor a live native pick.
+            None => index == 0 && self.active.is_none() && self.native.is_none(),
         }
+    }
+
+    /// Whether this target is the harness's own live pick from the native
+    /// catalog — marked distinctly from the pin, because it is per-request
+    /// state the harness owns rather than a pin this menu arms.
+    pub fn target_is_native(&self, index: usize) -> bool {
+        match (self.target_at(index), &self.native) {
+            (Some(r), Some((route, _))) => &r.name == route,
+            _ => false,
+        }
+    }
+
+    pub fn model_is_native(&self, index: usize) -> bool {
+        let Some((_, model)) = &self.native else {
+            return false;
+        };
+        self.target_is_native(self.selected)
+            && self.models().get(index).is_some_and(|m| m == model)
+    }
+
+    /// One line explaining the native marker, shown under the body while
+    /// the harness is on a Construct catalog entry. Carries the decoded
+    /// pair so the state is legible even when its route is not in the
+    /// target list anymore.
+    pub fn native_note(&self) -> Option<String> {
+        let (route, model) = self.native.as_ref()?;
+        Some(format!(
+            "» {model} · {route} — picked in the harness's own model picker"
+        ))
     }
 
     /// Whether this target has a model column to move into.
@@ -435,12 +505,20 @@ impl RouteMenu {
             .as_deref()
             .map(|r| r.chars().count() + 3)
             .unwrap_or(0) as u16;
+        // The native-pick note spans both columns too, but a long decoded
+        // id must not balloon the popup: it argues up to a cap and then
+        // truncates like any other row.
+        let native_w = self
+            .native_note()
+            .map(|n| n.chars().count().min(56) + 3)
+            .unwrap_or(0) as u16;
         // The description spans both columns, so it argues for width too —
         // two cramped lines read worse than one clear one.
         let mut width = targets_w
             .saturating_add(models_w)
             .saturating_add(3)
             .max(reason_w)
+            .max(native_w)
             .max(46);
         if width > max_w {
             // Give the target column its share first: the model column can
@@ -452,12 +530,14 @@ impl RouteMenu {
 
         self.desc_lines = self.description(width.saturating_sub(2)).len() as u16;
         let reason_rows = if self.unavailable_reason.is_some() { 1 } else { 0 };
+        let native_rows = if self.native.is_some() { 1 } else { 0 };
         // Cap popup height independently of content so a huge model catalog
         // cannot cover the whole frame; content still sizes up to this.
         const ROUTE_MENU_MAX_HEIGHT: u16 = 18;
         let height = (self.rows() as u16)
             .saturating_add(2)
             .saturating_add(reason_rows)
+            .saturating_add(native_rows)
             .min(ROUTE_MENU_MAX_HEIGHT)
             .min(size.height.max(3));
         let (col, row) = self.anchor;
@@ -471,8 +551,12 @@ impl RouteMenu {
             width,
             height,
         };
-        // Visible body = total height minus borders, header, optional reason.
-        let chrome = 2u16.saturating_add(self.header_rows()).saturating_add(reason_rows);
+        // Visible body = total height minus borders, header, optional
+        // reason and native-pick rows.
+        let chrome = 2u16
+            .saturating_add(self.header_rows())
+            .saturating_add(reason_rows)
+            .saturating_add(native_rows);
         self.visible_body_rows = height.saturating_sub(chrome) as usize;
         // Clamp scroll so a shrink (frame resize, re-anchor) does not leave
         // the viewport past the end of either list.
@@ -627,6 +711,7 @@ mod tests {
             routes,
             unavailable_reason: None,
             active: active.map(str::to_string),
+            native: None,
             focus: RouteFocus::Targets,
             selected: 0,
             model_selected: 0,
@@ -815,6 +900,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A live native catalog pick (spec 0157) is current state the menu
+    /// must show: its rows are marked, Default stops claiming to be
+    /// current, and one note row explains the marker.
+    #[test]
+    fn a_native_catalog_pick_is_marked_and_default_stops_claiming_current() {
+        let mut m = menu(
+            vec![option("codex-oauth", &["gpt-5.6-sol", "gpt-5.5"], None)],
+            None,
+        );
+        m.native = Some(("codex-oauth".into(), "gpt-5.5".into()));
+        let frame = ratatui::layout::Rect::new(0, 0, 120, 30);
+        let m2 = m.clone().anchored(frame);
+        assert!(!m2.target_is_active(0), "Default is not the live state");
+        assert!(m2.target_is_native(1));
+        assert!(!m2.target_is_active(1), "native pick is not the pin");
+        let note = m2.native_note().unwrap();
+        assert!(note.contains("gpt-5.5") && note.contains("codex-oauth"), "{note}");
+        // The note occupies a real row: same menu without it is one shorter.
+        let mut bare = m2.clone();
+        bare.native = None;
+        assert_eq!(bare.anchored(frame).area.height + 1, m2.area.height);
+    }
+
+    #[test]
+    fn the_native_model_row_is_marked_under_its_own_target() {
+        let mut m = menu(
+            vec![
+                option("codex-oauth", &["gpt-5.6-sol", "gpt-5.5"], None),
+                option("kimi", &["kimi-k2.5"], None),
+            ],
+            None,
+        );
+        m.native = Some(("codex-oauth".into(), "gpt-5.5".into()));
+        m.selected = 1;
+        assert!(m.model_is_native(1));
+        assert!(!m.model_is_native(0));
+        // Under a different target the marker must not appear.
+        m.selected = 2;
+        assert!(!m.model_is_native(0));
+    }
+
+    /// With no pin armed, the menu opens on the native pick so the eye
+    /// lands on the live state (mirrors opening on the armed target).
+    #[test]
+    fn a_pin_still_outranks_the_native_pick_for_the_opening_row() {
+        let mut m = menu(
+            vec![
+                option("codex-oauth", &["gpt-5.6-sol"], None),
+                option("kimi", &["kimi-k2.5"], None),
+            ],
+            Some("kimi"),
+        );
+        m.native = Some(("codex-oauth".into(), "gpt-5.6-sol".into()));
+        // Both markers render truthfully at once.
+        assert!(m.target_is_native(1));
+        assert!(m.target_is_active(2));
     }
 
     #[test]

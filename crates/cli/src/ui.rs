@@ -1578,7 +1578,12 @@ fn render_harness_hover_tooltip(f: &mut Frame, app: &App) {
     let Some(s) = app.sessions.iter().find(|s| s.id == hit.session_id) else {
         return;
     };
-    let model = s.model.as_deref().unwrap_or("unknown");
+    // Decoded like every other display of a Construct catalog id
+    // (spec 0158) — the tooltip has room for the full pair.
+    let model = match crate::app::route_menu::native_selection(s.model.as_deref()) {
+        Some((route, model)) => format!("{model} · {route}"),
+        None => s.model.clone().unwrap_or_else(|| "unknown".into()),
+    };
     let model_label = match s.effort.as_deref() {
         Some(effort) => format!(" model: {model} ({effort}) "),
         None => format!(" model: {model} "),
@@ -2270,7 +2275,13 @@ fn context_gauge_fill(used: u64, window: u64) -> (usize, u64) {
 fn session_detail_cells(s: &SessionSummary, now_ms: i64) -> DetailCells {
     let model = match s.model.as_deref() {
         Some(model) => {
-            let mut label = short_model_label(model);
+            // A Construct catalog id decodes to the target the harness
+            // picked natively — the raw encoded id is routing data, not a
+            // label (spec 0158).
+            let mut label = match crate::app::route_menu::native_selection(Some(model)) {
+                Some((route, model)) => format!("{}\u{00b7}{route}", short_model_label(&model)),
+                None => short_model_label(model),
+            };
             if let Some(effort) = s.effort.as_deref() {
                 label = format!("{label}\u{00b7}{effort}");
             }
@@ -5725,6 +5736,11 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         );
         let marker = if menu.target_is_active(index) {
             "*"
+        } else if menu.target_is_native(index) {
+            // The harness's own live pick from the native catalog — not the
+            // pin this menu arms, so not `*` (spec 0158). The footer note
+            // below the body explains the marker.
+            "»"
         } else {
             " "
         };
@@ -5812,6 +5828,8 @@ fn render_route_menu(f: &mut Frame, app: &App) {
             );
             let marker = if menu.model_is_active(index) {
                 "*"
+            } else if menu.model_is_native(index) {
+                "»"
             } else {
                 " "
             };
@@ -5832,25 +5850,36 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         }
     }
 
-    // Why routing is impossible for this session as a whole, when it is.
-    if let Some(reason) = menu.unavailable_reason.as_deref() {
-        let row = body_start.saturating_add(menu.body_rows() as u16);
-        if row < last_row {
-            f.render_widget(
-                Paragraph::new(Line::styled(
-                    format!(" {}", truncate(reason, inner_w.saturating_sub(1) as usize)),
-                    Style::default()
-                        .fg(app.theme.muted)
-                        .add_modifier(Modifier::ITALIC),
-                )),
-                Rect {
-                    x: inner_x,
-                    y: row,
-                    width: inner_w,
-                    height: 1,
-                },
-            );
+    // Footer rows directly under the visible body: what the harness picked
+    // in its own catalog (legend for the `»` marker, spec 0158), then why
+    // routing is impossible for this session as a whole, when either
+    // applies.
+    let mut footer_row = body_start.saturating_add(visible_body as u16);
+    let mut footer = |f: &mut Frame, text: &str| {
+        if footer_row >= last_row {
+            return;
         }
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                format!(" {}", truncate(text, inner_w.saturating_sub(1) as usize)),
+                Style::default()
+                    .fg(app.theme.muted)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+            Rect {
+                x: inner_x,
+                y: footer_row,
+                width: inner_w,
+                height: 1,
+            },
+        );
+        footer_row = footer_row.saturating_add(1);
+    };
+    if let Some(note) = menu.native_note() {
+        footer(f, &note);
+    }
+    if let Some(reason) = menu.unavailable_reason.as_deref() {
+        footer(f, reason);
     }
 }
 
@@ -9504,6 +9533,17 @@ fn modeline_model_route_text(
     effort: Option<&str>,
     route: Option<&construct_protocol::SessionRoute>,
 ) -> String {
+    // A Construct-published catalog id reported as the model means the
+    // harness itself picked that entry in its own picker (spec 0157):
+    // show the decoded target instead of the raw encoded id. It is the
+    // request-level truth, so it also outranks the pin arrow — requests
+    // carrying the id never consult the pin (spec 0158).
+    if let Some((route_name, model_name)) = crate::app::route_menu::native_selection(model) {
+        return format!(
+            "{} · {route_name}",
+            modeline_model_text(Some(&model_name), effort)
+        );
+    }
     let base = modeline_model_text(model, effort);
     match route {
         None => base,
@@ -21028,6 +21068,46 @@ mod tests {
             modeline_model_route_text(None, None, Some(&route("kimi", "kimi-k2.5", None))),
             "- -> kimi-k2.5"
         );
+    }
+
+    /// A harness-reported Construct catalog id renders decoded — the raw
+    /// encoded id is routing data, not a label (spec 0157/0158) — and it
+    /// outranks the pin arrow: requests carrying the id never consult the
+    /// pin, so an arrow would describe traffic that is not happening.
+    #[test]
+    fn modeline_model_route_text_decodes_a_native_catalog_pick() {
+        assert_eq!(
+            modeline_model_route_text(
+                Some("claude-construct-codex-oauth/gpt-5.6-sol"),
+                Some("high"),
+                None
+            ),
+            "gpt-5.6-sol (high) · codex-oauth"
+        );
+        assert_eq!(
+            modeline_model_route_text(
+                Some("construct-kimi/kimi-k2.5"),
+                None,
+                Some(&route("glm", "glm-5", Some("gpt-5.5")))
+            ),
+            "kimi-k2.5 · kimi"
+        );
+        // Malformed ids in the namespace fall back to the raw value: lying
+        // about them would hide the very thing that needs debugging.
+        assert_eq!(
+            modeline_model_route_text(Some("construct-broken"), None, None),
+            "construct-broken"
+        );
+    }
+
+    /// The session list's compact cell decodes the same way.
+    #[test]
+    fn session_detail_cells_decode_a_native_catalog_pick() {
+        let mut s = lineage_test_summary("s1");
+        s.model = Some("claude-construct-codex-oauth/gpt-5.6-sol".into());
+        s.effort = Some("high".into());
+        let cells = session_detail_cells(&s, 0);
+        assert_eq!(cells.model, "gpt-5.6-sol\u{00b7}codex-oauth\u{00b7}high");
     }
 
     #[test]

@@ -5812,7 +5812,7 @@ impl SessionManager {
         session_id: Option<&str>,
     ) -> Result<construct_protocol::RouterListRoutesResult> {
         let Some(session_id) = session_id else {
-            return Ok(self.router.list_routes("", false, None));
+            return Ok(self.router.list_routes("", false, None, false));
         };
         let entry = self
             .get_entry(session_id)
@@ -5822,9 +5822,12 @@ impl SessionManager {
             let s = entry.summary.read().await;
             (s.harness.clone(), s.route.as_ref().map(|r| r.name.clone()))
         };
-        Ok(self
-            .router
-            .list_routes(&harness, self.router.is_attached(session_id), active))
+        Ok(self.router.list_routes(
+            &harness,
+            self.router.is_attached(session_id),
+            active,
+            self.router.session_native_catalog(session_id),
+        ))
     }
 
     /// Record the session's active model after an adapter `/model` switch.

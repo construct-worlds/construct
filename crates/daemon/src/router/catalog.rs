@@ -13,88 +13,20 @@ use serde_json::{json, Value};
 
 use super::{oauth::OauthProvider, ArmedRoute, Router};
 
-pub const PUBLISHED_MODEL_PREFIX: &str = "construct-";
-pub const CLAUDE_PUBLISHED_MODEL_PREFIX: &str = "claude-construct-";
+// The id codec is a wire contract shared with clients (they decode ids for
+// display, spec 0158), so it lives in the protocol crate. Re-exported here
+// for the router's existing use sites.
+pub use construct_protocol::published_model::{
+    decode_published_model_id, published_model_id_for_harness, PUBLISHED_MODEL_PREFIX,
+};
+#[cfg(test)]
+use construct_protocol::published_model::published_model_id;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedModel {
     pub id: String,
     pub route: String,
     pub model: String,
-}
-
-fn encode_part(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(*byte as char);
-        } else {
-            encoded.push('%');
-            encoded.push_str(&format!("{byte:02X}"));
-        }
-    }
-    encoded
-}
-
-fn decode_part(value: &str) -> Result<String> {
-    let input = value.as_bytes();
-    let mut bytes = Vec::with_capacity(input.len());
-    let mut index = 0;
-    while index < input.len() {
-        if input[index] != b'%' {
-            bytes.push(input[index]);
-            index += 1;
-            continue;
-        }
-        let hex = input
-            .get(index + 1..index + 3)
-            .ok_or_else(|| anyhow!("truncated percent escape"))?;
-        let hex = std::str::from_utf8(hex).context("percent escape")?;
-        bytes.push(u8::from_str_radix(hex, 16).context("percent escape")?);
-        index += 3;
-    }
-    String::from_utf8(bytes).context("utf-8")
-}
-
-/// Stable, human-readable, one-slash id accepted by Codex's catalog and
-/// model override surfaces. Typical ids remain readable
-/// (`construct-review/kimi-k2.5`); separators and other unsafe bytes are
-/// percent-encoded so the mapping remains reversible and collision-safe.
-#[cfg(test)]
-fn published_model_id(route: &str, model: &str) -> String {
-    published_model_id_with_prefix(PUBLISHED_MODEL_PREFIX, route, model)
-}
-
-fn published_model_id_with_prefix(prefix: &str, route: &str, model: &str) -> String {
-    format!("{prefix}{}/{}", encode_part(route), encode_part(model))
-}
-
-fn published_model_id_for_harness(harness: &str, route: &str, model: &str) -> String {
-    let prefix = if harness == "claude" {
-        // Claude Code filters gateway-discovered model ids to values that
-        // begin with `claude` or `anthropic`.
-        CLAUDE_PUBLISHED_MODEL_PREFIX
-    } else {
-        PUBLISHED_MODEL_PREFIX
-    };
-    published_model_id_with_prefix(prefix, route, model)
-}
-
-pub fn decode_published_model_id(id: &str) -> Result<Option<(String, String)>> {
-    let encoded = if let Some(encoded) = id.strip_prefix(CLAUDE_PUBLISHED_MODEL_PREFIX) {
-        encoded
-    } else if let Some(encoded) = id.strip_prefix(PUBLISHED_MODEL_PREFIX) {
-        encoded
-    } else {
-        return Ok(None);
-    };
-    let (route, model) = encoded
-        .split_once('/')
-        .ok_or_else(|| anyhow!("published model id has no route/model separator"))?;
-    if route.is_empty() || model.is_empty() || model.contains('/') {
-        bail!("published model id has an empty route or model");
-    }
-    Ok(Some((decode_part(route)?, decode_part(model)?)))
 }
 
 impl Router {
@@ -423,27 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn published_ids_round_trip_arbitrary_parts() {
-        let id = published_model_id("route/with space", "vendor/model--1");
-        assert_eq!(id, "construct-route%2Fwith%20space/vendor%2Fmodel--1");
-        assert_eq!(
-            decode_published_model_id(&id).unwrap(),
-            Some(("route/with space".into(), "vendor/model--1".into()))
-        );
-        assert_eq!(decode_published_model_id("gpt-native").unwrap(), None);
-    }
-
-    #[test]
-    fn claude_ids_pass_gateway_filter_and_round_trip() {
-        let id = published_model_id_for_harness("claude", "review", "vendor/model");
-        assert_eq!(id, "claude-construct-review/vendor%2Fmodel");
-        assert_eq!(
-            decode_published_model_id(&id).unwrap(),
-            Some(("review".into(), "vendor/model".into()))
-        );
-    }
-
-    #[test]
     fn generated_catalog_keeps_native_and_adds_routed_entries() {
         let route = PublishedModel {
             id: published_model_id("claude-oauth", "opus"),
@@ -484,10 +395,5 @@ mod tests {
         assert_eq!(models[0]["priority"], 102);
         assert_eq!(models[1]["priority"], 1);
         assert_eq!(models[2]["priority"], 0);
-    }
-
-    #[test]
-    fn malformed_construct_ids_fail_closed() {
-        assert!(decode_published_model_id("construct-route/not%XXvalid").is_err());
     }
 }
