@@ -86,7 +86,8 @@ from burning tokens.
   focus into the right column and type into that field without requiring
   →/Enter first. Generate's right column is the same whether the row is
   merely highlighted or fully focused — header, keyword field, and a
-  bordered (re)generate action button. Left arrow leaves the keyword
+  highlighted `[ generate ]` / `[ regenerate ]` action chip. Left arrow
+  leaves the keyword
   field back to the category list; both Escape and `C-g` close the deck.
   Web may differ.
 - Hidden generation sessions must be torn down after use and must never

@@ -11,8 +11,8 @@
 //! into its field (fuzzy history search, or optional guided-generation
 //! keywords) without requiring →/Enter first. The Generate right column
 //! always shows the same surface — header, underlined keyword field, and
-//! a (re)generate action button — whether the row is merely highlighted
-//! or fully focused.
+//! a highlighted `[ generate ]` / `[ regenerate ]` action chip — whether
+//! the row is merely highlighted or fully focused.
 //!
 //! The popup is otherwise never modal: outside the explicitly selected
 //! history-search / keyword surfaces, printable input closes it and takes
@@ -317,8 +317,8 @@ impl App {
                 DeckRow::History { count } => (*count)
                     .min(SUGGEST_HISTORY_DISPLAY_CAP)
                     .max(1),
-                // Bordered (re)generate button: top rule + label + bottom rule.
-                DeckRow::Generate { .. } => 3,
+                // Single-line `[ generate ]` action chip under the keyword field.
+                DeckRow::Generate { .. } => 1,
                 DeckRow::Generating => 1,
                 DeckRow::Card(_) => 1,
             };
@@ -995,12 +995,12 @@ mod tests {
                 DeckRow::Top(_) => 1,
                 DeckRow::Verb { count, .. } => (*count).max(1),
                 DeckRow::History { count } => (*count).min(SUGGEST_HISTORY_DISPLAY_CAP).max(1),
-                DeckRow::Generate { .. } => 3,
+                DeckRow::Generate { .. } => 1,
                 DeckRow::Generating | DeckRow::Card(_) => 1,
             })
             .max()
             .unwrap_or(1);
-        assert_eq!(max, 3, "history count 3 ties the generate button chrome");
+        assert_eq!(max, 3, "history count 3 beats verb cards 2");
         assert!(suggest_reserves_input_row(&rows));
     }
 

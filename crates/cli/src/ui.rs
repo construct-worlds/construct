@@ -5445,58 +5445,33 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         //   regenerate
         //   __optional keywords…__
         //
-        //      ┌──────────┐
-        //      │ Generate │   ← label-sized, centered in the column
-        //      └──────────┘
+        //         [ generate ]   ← label-sized chip, centered + highlighted
         let label = if generate_is_regen {
-            "Regenerate"
+            "regenerate"
         } else {
-            "Generate"
+            "generate"
         };
+        let chip = format!("[ {label} ]");
         let cw = card_w as usize;
-        // Prefer a blank spacer above the button when the body has room.
-        let btn_h = 3usize;
-        let start = if visible_rows > btn_h { 1usize } else { 0 };
-        // Button width hugs the label (+ one space of padding each side +
-        // the two vertical border glyphs), then the whole control is
-        // centered in the right column.
-        let label_w = UnicodeWidthStr::width(label);
-        let btn_inner = label_w.saturating_add(2); // " label "
-        let btn_w = (btn_inner.saturating_add(2)).min(cw).max(4);
-        let btn_inner = btn_w.saturating_sub(2);
-        let btn_x_off = cw.saturating_sub(btn_w) / 2;
-        if visible_rows >= btn_h && btn_w >= 4 {
-            let rule = format!("┌{}┐", "─".repeat(btn_inner));
-            let mid = {
-                let text = truncate_to_width(label, btn_inner);
-                let tw = UnicodeWidthStr::width(text.as_str());
-                let pad = btn_inner.saturating_sub(tw);
-                let left = pad / 2;
-                let right = pad.saturating_sub(left);
-                format!(
-                    "│{}{}{}│",
-                    " ".repeat(left),
-                    text,
-                    " ".repeat(right)
-                )
-            };
-            let bottom = format!("└{}┘", "─".repeat(btn_inner));
-            let lines = [rule.as_str(), mid.as_str(), bottom.as_str()];
-            let btn_x = cards_x.saturating_add(btn_x_off as u16);
-            let btn_w_u16 = btn_w as u16;
-            let btn_focused = deck.focus == DeckFocus::Cards;
-            let btn_hovered = app.mouse_pos.is_some_and(|(mx, my)| {
-                mx >= btn_x
-                    && mx < btn_x.saturating_add(btn_w_u16)
-                    && my >= body_y.saturating_add(start as u16)
-                    && my < body_y.saturating_add((start + btn_h) as u16)
+        // Prefer a blank spacer above the chip when the body has room.
+        let start = if visible_rows > 1 { 1usize } else { 0 };
+        let chip_w = UnicodeWidthStr::width(chip.as_str()).min(cw).max(1);
+        let chip_text = truncate_to_width(&chip, chip_w);
+        let chip_w = UnicodeWidthStr::width(chip_text.as_str()).max(1);
+        let chip_x_off = cw.saturating_sub(chip_w) / 2;
+        if visible_rows >= 1 {
+            let chip_x = cards_x.saturating_add(chip_x_off as u16);
+            let chip_w_u16 = chip_w as u16;
+            let y = body_y.saturating_add(start as u16);
+            let chip_focused = deck.focus == DeckFocus::Cards;
+            let chip_hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+                mx >= chip_x
+                    && mx < chip_x.saturating_add(chip_w_u16)
+                    && my == y
             });
-            let border_style = Style::default().fg(if btn_focused || btn_hovered {
-                app.theme.accent
-            } else {
-                app.theme.border
-            });
-            let label_style = if btn_focused || btn_hovered {
+            // Always paint as a highlighted action chip; deepen when the
+            // right column (or pointer) owns focus so activation reads clearly.
+            let style = if chip_focused || chip_hovered {
                 Style::default()
                     .fg(app.theme.text)
                     .bg(app.theme.inactive_highlight_bg)
@@ -5504,27 +5479,24 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
             } else {
                 Style::default()
                     .fg(app.theme.accent)
+                    .bg(app.theme.inactive_highlight_bg)
                     .add_modifier(Modifier::BOLD)
             };
-            for (i, line) in lines.iter().enumerate() {
-                let y = body_y.saturating_add((start + i) as u16);
-                let style = if i == 1 { label_style } else { border_style };
-                f.render_widget(
-                    Paragraph::new(Line::styled((*line).to_string(), style)),
-                    Rect {
-                        x: btn_x,
-                        y,
-                        width: btn_w_u16,
-                        height: 1,
-                    },
-                );
-            }
+            f.render_widget(
+                Paragraph::new(Line::styled(chip_text, style)),
+                Rect {
+                    x: chip_x,
+                    y,
+                    width: chip_w_u16,
+                    height: 1,
+                },
+            );
             hit_zones.push(SuggestDeckHitZone {
                 area: Rect {
-                    x: btn_x,
-                    y: body_y.saturating_add(start as u16),
-                    width: btn_w_u16,
-                    height: btn_h as u16,
+                    x: chip_x,
+                    y,
+                    width: chip_w_u16,
+                    height: 1,
                 },
                 hit: SuggestDeckHit::GenerateAction,
             });
