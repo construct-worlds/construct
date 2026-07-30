@@ -76,6 +76,11 @@ origin-safety rule in [0113](0113-model-routing-is-proxy-transported.md).
   Other destinations remain blind tunnels.
 - Request compression is decoded before model-id inspection and translation,
   then forwarded with framing that matches the decoded body.
+- Codex catalog sessions use a session-local OpenAI-compatible provider that
+  keeps Codex's active native authentication and corresponding HTTPS origin
+  while disabling Responses-over-WebSocket. Construct's proxy supports the
+  HTTPS/SSE transport; it must not let a routed picker selection first escape
+  to the harness's fixed WebSocket endpoint and fail before fallback.
 - After inspecting a native request with no pin, Construct normally
   reconstructs it to the observed origin and preserves end-to-end credentials
   while removing proxy and hop-by-hop headers. Claude subscription sessions
