@@ -84,7 +84,17 @@ from burning tokens.
   user must activate Generate to request a hand. The TUI keeps
   categories beside their concrete prompts in a two-column deck; its
   rows highlight on hover, category clicks select a preview, and prompt
-  clicks stage that prompt. History and Generate each surface an
+  clicks stage that prompt. When a right-column prompt is ellipsized to
+  the column width, hovering that row — or keyboard-selecting it with
+  the prompts column focused — reveals the full text in a multi-line
+  tooltip anchored beside the row (suppressed while the pointer rests
+  elsewhere inside the deck so it does not fight the hover highlight).
+  The TUI pins left-column category row positions across category
+  changes: History/Generate reserve a permanent input-strip slot in the
+  deck layout, and the body starts under that slot even when the field
+  is empty (top pick / verbs), so selecting History or Generate never
+  shifts the category list down by one row. History and Generate each
+  surface an
   underlined text field with placeholder copy so typing is visibly an
   input surface (fuzzy type-ahead for history; optional keywords for
   guided generation). Highlighting either left-column row is enough:
